@@ -1,16 +1,30 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { Check, CircleAlert, ExternalLink, Loader2, RefreshCw } from "lucide-react";
+import { getVersion } from "@tauri-apps/api/app";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
+import { AgentMark } from "@/components/AgentMark";
+import { Markdown } from "@/components/chat/Markdown";
 import { cn } from "@/lib/cn";
 import { THEMES, hasLightMode, setMode, setTheme, useTheme, type Mode, type ThemeId } from "@/lib/theme";
 import { setPrefs, usePrefs } from "@/lib/prefs";
+import { keycaps } from "@/lib/hotkeys";
+import { SHORTCUTS } from "@/lib/shortcuts";
+import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
+import { errorMessage } from "@/lib/api";
+import changelog from "../../../CHANGELOG.md?raw";
 
-const TABS = ["general", "appearance", "agents", "about"] as const;
+const TABS = ["general", "appearance", "agents", "shortcuts", "about"] as const;
 type Tab = (typeof TABS)[number];
 const TAB_LABEL: Record<Tab, string> = {
   general: "General",
   appearance: "Appearance",
   agents: "Agents",
+  shortcuts: "Shortcuts",
   about: "About",
 };
 
@@ -18,8 +32,8 @@ export function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
   const [tab, setTab] = useState<Tab>("general");
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent width="max-w-[40rem]" className="p-0" onCloseAutoFocus={() => setTab("general")}>
-        <div className="flex h-[32rem] max-h-[70vh]">
+      <DialogContent width="max-w-[42rem]" className="p-0" onCloseAutoFocus={() => setTab("general")}>
+        <div className="flex h-[34rem] max-h-[72vh]">
           <nav className="flex w-40 shrink-0 flex-col gap-0.5 border-r border-hairline p-3 pt-4">
             <DialogTitle className="mb-2 px-2 text-xs font-medium uppercase tracking-wide text-faint">
               Settings
@@ -43,6 +57,7 @@ export function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
             {tab === "general" && <GeneralTab />}
             {tab === "appearance" && <AppearanceTab />}
             {tab === "agents" && <AgentsTab />}
+            {tab === "shortcuts" && <ShortcutsTab />}
             {tab === "about" && <AboutTab />}
           </div>
         </div>
@@ -181,23 +196,181 @@ function AppearanceTab() {
   );
 }
 
+/** What is installed, where, and how to get the rest. Nothing is installed by the app. */
 function AgentsTab() {
+  const store = useSessionStore();
+  const [busy, setBusy] = useState(false);
   return (
-    <div className="text-sm text-muted-foreground">
-      Installed agent CLIs appear here once the agent layer lands. Raccoon installs nothing; it runs the
-      commands you already have.
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-muted-foreground">Raccoon runs the agent CLIs you already have. Log in to each one in a terminal first.</p>
+        <Button
+          size="xs"
+          variant="ghost"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await refreshHarnesses();
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? <Loader2 className="animate-spin" /> : <RefreshCw />} Re-check
+        </Button>
+      </div>
+      <ul className="flex flex-col divide-y divide-hairline rounded-lg bg-well">
+        {store.harnesses.map((h) => (
+          <li key={h.id} className="flex items-start gap-3 px-3 py-2.5">
+            <AgentMark id={h.id} className="mt-0.5 size-4" />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 text-sm">
+                <span className="font-medium">{h.name}</span>
+                {h.available ? (
+                  <span className="flex items-center gap-1 text-[11px] text-add">
+                    <Check className="size-3" /> installed
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 text-[11px] text-faint">
+                    <CircleAlert className="size-3" /> not found
+                  </span>
+                )}
+              </div>
+              <div className="truncate font-mono text-[11px] text-faint">{h.available ? h.path : h.installHint}</div>
+              <div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-muted-foreground">
+                {h.caps.images && <span>images</span>}
+                {h.caps.permissionModes && <span>permission modes</span>}
+                {h.caps.effort && <span>effort</span>}
+                {h.caps.slashCommands && <span>slash commands</span>}
+                {h.caps.resume && <span>resume</span>}
+                {h.caps.fork && <span>fork</span>}
+              </div>
+            </div>
+            {!h.available && (
+              <Button size="xs" variant="ghost" onClick={() => void openUrl(h.installUrl)}>
+                Get it <ExternalLink />
+              </Button>
+            )}
+          </li>
+        ))}
+        {!store.harnesses.length && <li className="px-3 py-3 text-xs text-faint">Looking for agents…</li>}
+      </ul>
     </div>
   );
 }
 
-function AboutTab() {
+function ShortcutsTab() {
+  const groups = [...new Set(SHORTCUTS.map((s) => s.group))];
   return (
-    <div className="flex flex-col gap-2 text-sm">
-      <div className="text-base font-semibold">Raccoon</div>
-      <div className="text-muted-foreground">Version 0.1.0</div>
-      <p className="text-muted-foreground">
-        A workbench for coding agents. Every session is a git worktree; every tab is an agent.
-      </p>
+    <div className="flex flex-col gap-4">
+      {groups.map((g) => (
+        <div key={g}>
+          <div className="mb-1 text-xs font-medium uppercase tracking-wide text-faint">{g}</div>
+          <ul className="flex flex-col">
+            {SHORTCUTS.filter((s) => s.group === g).map((s) => (
+              <li key={s.chord} className="flex items-center justify-between py-1 text-[13px]">
+                <span>{s.label}</span>
+                <span className="flex gap-0.5">
+                  {keycaps(s.chord).map((k, i) => (
+                    <kbd key={i} className="rounded-md bg-veil-raised px-1.5 py-0.5 font-sans text-[11px] text-muted-foreground hairline">
+                      {k}
+                    </kbd>
+                  ))}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+type UpdateState = { kind: "idle" } | { kind: "checking" } | { kind: "none" } | { kind: "available"; update: Update } | { kind: "installing"; pct: number } | { kind: "error"; message: string };
+
+function AboutTab() {
+  const prefs = usePrefs();
+  const [version, setVersion] = useState("");
+  const [state, setState] = useState<UpdateState>({ kind: "idle" });
+  useEffect(() => {
+    getVersion().then(setVersion).catch(() => setVersion("dev"));
+  }, []);
+
+  const checkNow = async () => {
+    setState({ kind: "checking" });
+    try {
+      const u = await check({ headers: { "X-Raccoon-Channel": prefs.updateChannel } });
+      setState(u ? { kind: "available", update: u } : { kind: "none" });
+    } catch (e) {
+      setState({ kind: "error", message: errorMessage(e) });
+    }
+  };
+
+  const install = async (u: Update) => {
+    setState({ kind: "installing", pct: 0 });
+    try {
+      let total = 0;
+      let got = 0;
+      await u.downloadAndInstall((ev) => {
+        if (ev.event === "Started") total = ev.data.contentLength ?? 0;
+        else if (ev.event === "Progress") {
+          got += ev.data.chunkLength;
+          if (total) setState({ kind: "installing", pct: Math.round((got / total) * 100) });
+        }
+      });
+      await relaunch();
+    } catch (e) {
+      setState({ kind: "error", message: errorMessage(e) });
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-4 text-sm">
+      <div>
+        <div className="text-base font-semibold">Raccoon</div>
+        <div className="text-muted-foreground">Version {version || "…"}</div>
+        <p className="mt-1 text-muted-foreground">A workbench for coding agents. Every session is a git worktree; every tab is an agent.</p>
+      </div>
+
+      <SettingRow
+        label="Updates"
+        description="Beta gets builds earlier. Either way nothing installs without your say-so."
+        control={
+          <Segmented
+            aria-label="Update channel"
+            value={prefs.updateChannel}
+            onChange={(v) => setPrefs({ updateChannel: v })}
+            options={[
+              { value: "stable", label: "Stable" },
+              { value: "beta", label: "Beta" },
+            ]}
+          />
+        }
+      />
+      <div className="flex items-center gap-2">
+        <Button size="sm" variant="outline" onClick={() => void checkNow()} disabled={state.kind === "checking" || state.kind === "installing"}>
+          {state.kind === "checking" ? <Loader2 className="animate-spin" /> : <RefreshCw />} Check for updates
+        </Button>
+        {state.kind === "none" && <span className="text-xs text-muted-foreground">You have the latest version.</span>}
+        {state.kind === "error" && <span className="text-xs text-destructive">{state.message}</span>}
+        {state.kind === "available" && (
+          <>
+            <span className="text-xs text-foreground">Version {state.update.version} is available.</span>
+            <Button size="sm" onClick={() => void install(state.update)}>
+              Install and relaunch
+            </Button>
+          </>
+        )}
+        {state.kind === "installing" && <span className="text-xs text-muted-foreground">Installing… {state.pct}%</span>}
+      </div>
+
+      <div>
+        <div className="mb-1 text-xs font-medium uppercase tracking-wide text-faint">What's new</div>
+        <div className="prose-chat rounded-lg bg-well px-3 py-2 text-[13px]">
+          <Markdown text={changelog.replace(/^# Changelog\s*/m, "")} />
+        </div>
+      </div>
     </div>
   );
 }

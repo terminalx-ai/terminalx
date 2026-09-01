@@ -114,6 +114,8 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
           }}
           contextUsed={transcript.contextUsed ?? tab.contextUsed ?? undefined}
           contextMax={transcript.contextMax ?? tab.contextMax ?? undefined}
+          usageWindows={transcript.usageWindows}
+          codexUsage={transcript.codexUsage}
           disabledReason={error}
           autoFocus={active}
         />

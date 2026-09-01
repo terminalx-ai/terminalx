@@ -139,9 +139,13 @@ function refreshBadge() {
   const n = getSessions().sessions.filter((s) => !s.archived && ["waiting", "completed"].includes(sessionStatus(s))).length;
   if (n === lastBadge) return;
   lastBadge = n;
-  getCurrentWindow()
-    .setBadgeCount(n > 0 ? n : undefined)
-    .catch(() => {});
+  try {
+    getCurrentWindow()
+      .setBadgeCount(n > 0 ? n : undefined)
+      .catch(() => {});
+  } catch {
+    /* not inside a webview */
+  }
 }
 
 let started = false;

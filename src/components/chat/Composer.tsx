@@ -50,6 +50,8 @@ export function Composer({
   onSetMode,
   contextUsed,
   contextMax,
+  usageWindows,
+  codexUsage,
   disabledReason,
   autoFocus,
 }: {
@@ -65,6 +67,9 @@ export function Composer({
   onSetMode: (m: string) => void;
   contextUsed?: number;
   contextMax?: number;
+  /** Claude's rolling limits, keyed by window (five_hour, seven_day…). */
+  usageWindows?: Record<string, { utilization: number; resetsAt: number }>;
+  codexUsage?: { usedPercent: number; resetsAt: number; windowMins: number; plan?: string };
   disabledReason?: string | null;
   autoFocus?: boolean;
 }) {
@@ -425,6 +430,7 @@ export function Composer({
           </DropdownMenu>
 
           <div className="ml-auto flex items-center gap-1.5">
+            <UsageBadge windows={usageWindows} codex={codexUsage} />
             {pct != null && (
               <WithTooltip label={`Context ${pct}% used (${Math.round((contextUsed ?? 0) / 1000)}k of ${Math.round((contextMax ?? 0) / 1000)}k)`}>
                 <div className="relative size-4" aria-label={`Context ${pct}%`}>
@@ -466,5 +472,61 @@ export function Composer({
         </div>
       </div>
     </div>
+  );
+}
+
+
+function resetsIn(epochSeconds: number): string {
+  const ms = epochSeconds * 1000 - Date.now();
+  if (ms <= 0) return "now";
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.round((ms % 3_600_000) / 60_000);
+  if (h >= 24) return `${Math.round(h / 24)}d`;
+  return h ? `${h}h ${m}m` : `${m}m`;
+}
+
+/** Plan usage as the harness reports it: how full each rolling window is. */
+function UsageBadge({
+  windows,
+  codex,
+}: {
+  windows?: Record<string, { utilization: number; resetsAt: number }>;
+  codex?: { usedPercent: number; resetsAt: number; windowMins: number; plan?: string };
+}) {
+  const parts: { label: string; pct: number; resetsAt: number }[] = [];
+  if (windows) {
+    const order: [string, string][] = [
+      ["five_hour", "5h"],
+      ["seven_day", "7d"],
+      ["seven_day_sonnet", "7d Sonnet"],
+      ["seven_day_opus", "7d Opus"],
+    ];
+    for (const [key, label] of order) {
+      const w = windows[key];
+      if (w) parts.push({ label, pct: Math.round(w.utilization * 100), resetsAt: w.resetsAt });
+    }
+  }
+  if (codex) {
+    const label = codex.windowMins >= 1440 ? `${Math.round(codex.windowMins / 1440)}d` : `${Math.round(codex.windowMins / 60)}h`;
+    parts.push({ label, pct: Math.round(codex.usedPercent), resetsAt: codex.resetsAt });
+  }
+  if (!parts.length) return null;
+  const worst = Math.max(...parts.map((p) => p.pct));
+  return (
+    <WithTooltip label={parts.map((p) => `${p.label} window ${p.pct}% used, resets in ${resetsIn(p.resetsAt)}`).join(" · ")}>
+      <span
+        className={cn(
+          "flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10.5px] tabular-nums",
+          worst >= 90 ? "bg-destructive/15 text-destructive" : worst >= 70 ? "bg-warning/15 text-warning" : "text-faint",
+        )}
+        aria-label="Plan usage"
+      >
+        {parts.slice(0, 2).map((p) => (
+          <span key={p.label}>
+            {p.label} {p.pct}%
+          </span>
+        ))}
+      </span>
+    </WithTooltip>
   );
 }

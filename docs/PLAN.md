@@ -142,9 +142,9 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Availability probe; disabled rows with install hints.
 
 ### C15 — Settings, updater, usage
-- [ ] Settings tabs: General, Appearance, Agents, Shortcuts, About.
-- [ ] Updater plugin with channel; changelog surface.
-- [ ] Claude/Codex usage windows in footer.
+- [x] Settings tabs: General, Appearance, Agents (installed CLIs, paths, capabilities, re-check), Shortcuts, About.
+- [x] Updater plugin with channel; changelog surface (CHANGELOG.md rendered in About). Signing key at `~/.tauri/raccoon.key`; the endpoint in tauri.conf.json is a placeholder until a release feed exists.
+- [x] Claude/Codex usage windows in footer.
 
 ### C16 — Audit and hardening
 - [ ] Side-by-side screenshots vs reference apps at 1360×860 and 1000×700.

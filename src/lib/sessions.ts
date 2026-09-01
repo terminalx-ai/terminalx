@@ -94,6 +94,11 @@ export function selectSession(id: string | null) {
   set({ selectedSessionId: id });
 }
 
+export async function refreshHarnesses() {
+  const harnesses = await api.listHarnesses();
+  set({ harnesses });
+}
+
 export function getSessions(): State {
   return state;
 }
