@@ -184,3 +184,12 @@ export const gh = {
   merge: (cwd: string, number: number, method: "merge" | "squash" | "rebase") => invoke<void>("pr_merge", { cwd, number, method }),
   ready: (cwd: string, number: number) => invoke<void>("pr_ready", { cwd, number }),
 };
+
+// ---- terminals
+export const pty = {
+  spawn: (id: string, cwd: string, cols: number, rows: number) => invoke<void>("pty_spawn", { id, cwd, cols, rows }),
+  write: (id: string, data: string) => invoke<void>("pty_write", { id, data }),
+  resize: (id: string, cols: number, rows: number) => invoke<void>("pty_resize", { id, cols, rows }),
+  kill: (id: string) => invoke<void>("pty_kill", { id }),
+  isLive: (id: string) => invoke<boolean>("pty_is_live", { id }),
+};

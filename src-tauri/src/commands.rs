@@ -596,3 +596,30 @@ pub async fn pr_ready(cwd: String, number: u64) -> CmdResult<()> {
 pub fn gh_available() -> bool {
     crate::github::available()
 }
+
+// ------------------------------------------------------------------ terminals
+
+#[tauri::command]
+pub fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, cwd: String, cols: u16, rows: u16) -> CmdResult<()> {
+    state.terminals.spawn(app, &id, &cwd, cols.max(2), rows.max(1)).map_err(err)
+}
+
+#[tauri::command]
+pub fn pty_write(state: State<'_, AppState>, id: String, data: String) -> CmdResult<()> {
+    state.terminals.write(&id, data.as_bytes()).map_err(err)
+}
+
+#[tauri::command]
+pub fn pty_resize(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> CmdResult<()> {
+    state.terminals.resize(&id, cols.max(2), rows.max(1)).map_err(err)
+}
+
+#[tauri::command]
+pub fn pty_kill(state: State<'_, AppState>, id: String) {
+    state.terminals.kill(&id);
+}
+
+#[tauri::command]
+pub fn pty_is_live(state: State<'_, AppState>, id: String) -> bool {
+    state.terminals.is_live(&id)
+}

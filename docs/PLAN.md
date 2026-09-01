@@ -115,8 +115,8 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] PR panel via `gh` (status, checks, merge, create, mark ready).
 
 ### C9 — Terminal
-- [ ] PTY with coalesced output, xterm with fit + webgl, theme sync, OSC colour queries.
-- [ ] Terminal tabs inside a session; project terminal dock (⌘J).
+- [x] PTY with coalesced output, xterm with fit + webgl, theme sync, OSC colour queries.
+- [x] Terminal tabs inside a session; session terminal dock (⌘J), panes survive session switches.
 
 ### C10 — Files and editor
 - [ ] File tree in sidebar, fuzzy file search (⌘P), project text search (⌘⇧F).

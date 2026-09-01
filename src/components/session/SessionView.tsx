@@ -1,4 +1,4 @@
-import { GitBranch, PanelLeft, PanelRight } from "lucide-react";
+import { GitBranch, PanelLeft, PanelRight, TerminalSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { TITLEBAR_INSET } from "@/components/layout/AppShell";
@@ -9,6 +9,8 @@ import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
 import { TabView } from "./TabView";
 import { TabStrip } from "./TabStrip";
+import { TerminalDock } from "@/components/terminal/TerminalDock";
+import { toggleDock } from "@/lib/terminal";
 import { RightPanel } from "@/components/layout/RightPanel";
 import { useTabLog } from "@/lib/agentEvents";
 import type { TabEntry } from "@/types/session";
@@ -69,6 +71,16 @@ export function SessionView({
 
           <div className="ml-auto flex min-w-0 items-center gap-0.5">
             <TabStrip session={session} activeTab={activeTab} />
+            <WithTooltip label="Terminal" keys={keycaps("mod+j")}>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Terminal"
+                onClick={() => void toggleDock(session.id, session.cwd)}
+              >
+                <TerminalSquare />
+              </Button>
+            </WithTooltip>
             <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} keys={keycaps("mod+e")}>
               <Button
                 variant="ghost"
@@ -91,6 +103,7 @@ export function SessionView({
           {!session.tabs.length && (
             <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">No tabs.</div>
           )}
+          <TerminalDock sessionId={session.id} cwd={session.cwd} active />
         </section>
       </div>
 

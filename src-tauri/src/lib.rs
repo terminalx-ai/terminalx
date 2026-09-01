@@ -8,6 +8,7 @@ mod github;
 mod harness;
 mod models;
 mod names;
+mod pty;
 mod session;
 mod store;
 
@@ -16,6 +17,7 @@ use tauri::Manager;
 
 pub struct AppState {
     pub host: Arc<harness::host::Host>,
+    pub terminals: Arc<pty::Terminals>,
     manager: std::sync::Mutex<Option<session::SessionManager>>,
 }
 
@@ -29,7 +31,7 @@ impl AppState {
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let host = Arc::new(harness::host::Host::new());
-    let state = AppState { host: host.clone(), manager: std::sync::Mutex::new(None) };
+    let state = AppState { host: host.clone(), terminals: Arc::new(pty::Terminals::new()), manager: std::sync::Mutex::new(None) };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -109,11 +111,17 @@ pub fn run() {
             commands::pr_merge,
             commands::pr_ready,
             commands::gh_available,
+            commands::pty_spawn,
+            commands::pty_write,
+            commands::pty_resize,
+            commands::pty_kill,
+            commands::pty_is_live,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(state) = window.try_state::<AppState>() {
                     state.host.kill_all();
+                    state.terminals.kill_all();
                 }
             }
         })

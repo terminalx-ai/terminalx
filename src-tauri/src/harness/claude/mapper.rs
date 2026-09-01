@@ -24,6 +24,9 @@ pub struct Mapper {
     pub last_suggestions: Vec<Value>,
     /// Input of the last ask, so an answer can be written back into it.
     pub last_ask_input: Value,
+    /// Set when the reader stops a turn; the failing `result` that follows is
+    /// then reported as stopped, not failed.
+    pub interrupt_requested: bool,
 }
 
 /// What a line turned into: zero or more payloads, plus whether the line was
@@ -144,12 +147,16 @@ impl Mapper {
                 }
             }
             Line::Result(r) => {
-                let status = if r.is_error {
-                    TurnStatus::Error
-                } else if r.subtype == "success" {
-                    TurnStatus::Ok
+                let interrupted = std::mem::take(&mut self.interrupt_requested)
+                    || r.result.as_deref().map(|t| t.contains("interrupted")).unwrap_or(false);
+                let status = if r.is_error || r.subtype != "success" {
+                    if interrupted {
+                        TurnStatus::Aborted
+                    } else {
+                        TurnStatus::Error
+                    }
                 } else {
-                    TurnStatus::Error
+                    TurnStatus::Ok
                 };
                 let (used, max) = self.occupancy_from_result(&r);
                 let usage = Some(Usage {

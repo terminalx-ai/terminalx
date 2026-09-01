@@ -10,6 +10,7 @@ export interface Prefs {
   sidebarWidth: number;
   panelOpen: boolean;
   panelWidth: number;
+  terminalHeight: number;
   sounds: boolean;
   animations: boolean;
   fontScale: "sm" | "md" | "lg";
@@ -28,6 +29,7 @@ const DEFAULTS: Prefs = {
   sidebarWidth: 268,
   panelOpen: false,
   panelWidth: 400,
+  terminalHeight: 260,
   sounds: true,
   animations: true,
   fontScale: "md",

@@ -322,3 +322,17 @@
   background: transparent !important;
   padding: 10px 12px;
 }
+
+/* Terminal: the dock supplies the ground, xterm's own viewport stays clear. */
+.terminal-host .xterm,
+.terminal-host .xterm .xterm-viewport,
+.terminal-host .xterm .xterm-screen {
+  background: transparent !important;
+}
+.terminal-host .xterm .xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+}
+.terminal-host .xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--veil-strong);
+  border-radius: 4px;
+}

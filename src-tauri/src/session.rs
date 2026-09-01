@@ -362,7 +362,8 @@ impl SessionManager {
             return Ok(());
         }
         match &mut rt.engine {
-            Engine::Claude(_) => {
+            Engine::Claude(m) => {
+                m.interrupt_requested = true;
                 let line = claude::interrupt_line(&uuid::Uuid::now_v7().to_string());
                 self.write(&rt, &line)?;
             }
