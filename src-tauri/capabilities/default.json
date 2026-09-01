@@ -23,6 +23,7 @@
     "shell:allow-open",
     "core:webview:default",
     "core:window:default",
-    "core:event:default"
+    "core:event:default",
+    "notification:default"
   ]
 }

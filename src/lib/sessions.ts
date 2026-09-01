@@ -94,6 +94,15 @@ export function selectSession(id: string | null) {
   set({ selectedSessionId: id });
 }
 
+export function getSessions(): State {
+  return state;
+}
+
+export function subscribeSessions(cb: () => void) {
+  listeners.add(cb);
+  return () => listeners.delete(cb);
+}
+
 export function debug(message: string) {
   void invoke("frontend_log", { level: "info", message }).catch(() => {});
 }

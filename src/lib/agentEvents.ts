@@ -1,7 +1,8 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { agent } from "@/lib/api";
-import { patchTab } from "@/lib/sessions";
+import { getSessions, patchTab } from "@/lib/sessions";
+import { noteStatusChange } from "@/lib/notify";
 import type { AgentEvent, BlockRef } from "@/types/events";
 import type { TabStatus } from "@/types/session";
 
@@ -160,8 +161,12 @@ export function setTabStatus(sessionId: string, tabId: string, status: TabStatus
   const k = key(sessionId, tabId);
   const log = getLog(k);
   log.status = status;
+  const session = getSessions().sessions.find((s) => s.id === sessionId);
+  const tab = session?.tabs.find((t) => t.id === tabId);
+  const prev = tab?.status ?? "idle";
   patchTab(sessionId, tabId, { status });
   touch(k, true);
+  if (session && tab && prev !== status) noteStatusChange(session, { ...tab, status }, prev, status);
 }
 
 export function useTabLog(sessionId: string, tabId: string): TabLog {

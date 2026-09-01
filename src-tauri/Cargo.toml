@@ -39,6 +39,7 @@ which = "7"
 regex = "1"
 ignore = "0.4"
 nucleo-matcher = "0.3"
+tauri-plugin-notification = "2.4.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

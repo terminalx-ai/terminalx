@@ -123,8 +123,8 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] CodeMirror editor tab with git gutter, save, external-change detection, unsaved-close guard.
 
 ### C11 — Notifications and attention
-- [ ] Desktop banner when unfocused, in-app notice when focused elsewhere, nothing when on screen.
-- [ ] Rail marks: green unread, amber waiting; dock badge; sounds (toggle).
+- [x] Desktop banner when unfocused, in-app notice when focused elsewhere, nothing when on screen.
+- [x] Rail marks: green unread, amber waiting; dock badge; sounds (toggle).
 
 ### C12 — Raccoon animation
 - [ ] Pixel raccoon sprite; idle scene in an empty session (forages, peeks, washes paws).
