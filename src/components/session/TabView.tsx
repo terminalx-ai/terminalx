@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { agent, errorMessage, type ImageInput } from "@/lib/api";
 import { applyEvent, loadTab, useTabLog } from "@/lib/agentEvents";
-import { buildTranscript } from "@/lib/transcript";
+import { buildTranscript, type Transcript } from "@/lib/transcript";
 import { getDraft, setDraft, useDraft } from "@/lib/drafts";
 import { patchTab } from "@/lib/sessions";
 import { useHotkey } from "@/lib/hotkeys";
@@ -12,6 +12,22 @@ import type { SessionEntry, TabEntry } from "@/types/session";
 /**
  * One tab: its event log, the transcript built from it, and the composer.
  */
+/**
+ * After a turn that touched files, the obvious next steps as one-click
+ * prompts. They only fill the composer; the reader still sends.
+ */
+function handoffsFor(t: Transcript): { label: string; prompt: string }[] | undefined {
+  const last = t.turns[t.turns.length - 1];
+  if (!last?.completed || last.completed.status !== "ok") return undefined;
+  const edited = t.turns.some((x) => x.editedFiles > 0);
+  if (!edited) return undefined;
+  return [
+    { label: "Commit", prompt: "Commit the current changes with a clear, conventional message. Do not push." },
+    { label: "Create PR", prompt: "Push this branch and open a pull request with a title and a short description of the changes." },
+    { label: "Run it", prompt: "Run the project's dev server or test suite in the background and report the first errors, if any." },
+  ];
+}
+
 export function TabView({ session, tab, active }: { session: SessionEntry; tab: TabEntry; active: boolean }) {
   const log = useTabLog(session.id, tab.id);
   const draft = useDraft(tab.id);
@@ -116,6 +132,7 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
           contextMax={transcript.contextMax ?? tab.contextMax ?? undefined}
           usageWindows={transcript.usageWindows}
           codexUsage={transcript.codexUsage}
+          handoffs={handoffsFor(transcript)}
           disabledReason={error}
           autoFocus={active}
         />

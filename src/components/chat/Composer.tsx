@@ -52,6 +52,7 @@ export function Composer({
   contextMax,
   usageWindows,
   codexUsage,
+  handoffs,
   disabledReason,
   autoFocus,
 }: {
@@ -70,6 +71,8 @@ export function Composer({
   /** Claude's rolling limits, keyed by window (five_hour, seven_day…). */
   usageWindows?: Record<string, { utilization: number; resetsAt: number }>;
   codexUsage?: { usedPercent: number; resetsAt: number; windowMins: number; plan?: string };
+  /** Next-step prompts offered after a turn lands (commit, PR, run). */
+  handoffs?: { label: string; prompt: string }[];
   disabledReason?: string | null;
   autoFocus?: boolean;
 }) {
@@ -305,6 +308,23 @@ export function Composer({
         {dragging && (
           <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-2xl bg-composer/80 text-sm text-muted-foreground">
             Drop images to attach, other files to mention
+          </div>
+        )}
+        {!busy && !draft && handoffs && handoffs.length > 0 && (
+          <div className="mb-1.5 flex flex-wrap gap-1.5 px-1" aria-label="Next steps">
+            {handoffs.map((h) => (
+              <button
+                key={h.label}
+                type="button"
+                onClick={() => {
+                  onDraftChange(h.prompt);
+                  requestAnimationFrame(() => ref.current?.focus());
+                }}
+                className="rounded-full bg-veil-raised px-2.5 py-0.5 text-[11.5px] text-muted-foreground transition-colors hover:bg-veil-strong hover:text-foreground"
+              >
+                {h.label}
+              </button>
+            ))}
           </div>
         )}
         {attachments.length > 0 && (

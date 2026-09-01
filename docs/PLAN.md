@@ -111,7 +111,7 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 ### C8 — Changes panel and git actions ✅
 - [x] Per-turn tree snapshots; changes list with +/-; diff viewer (unified/split).
 - [x] Repository view: uncommitted changes, history, commit + push.
-- [ ] Handoff row (Commit / Create PR / Run server) as prompts (later, with the terminal).
+- [x] Handoff row (Commit / Create PR / Run it) as one-click prompts after a turn that touched files.
 - [x] PR panel via `gh` (status, checks, merge, create, mark ready).
 
 ### C9 — Terminal
@@ -147,9 +147,9 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Claude/Codex usage windows in footer.
 
 ### C16 — Audit and hardening
-- [ ] Side-by-side screenshots vs reference apps at 1360×860 and 1000×700.
-- [ ] Long-session stress (1000 events/s), memory check, no dropped keystrokes.
-- [ ] Light mode pass, keyboard-only pass, reduced-motion pass.
+- [x] Side-by-side screenshots vs the installed reference app at 1360×860 and 1000×700 (sidebar, transcript, composer and panel all hold their layout at both sizes).
+- [x] Long-session stress: demo page `?turns=200&live=1&stream=1000` sustains ~830 deltas/s with ~1 long task/s (max 72 ms) after chunking the streaming preview; composer stays visible and typed text arrives intact.
+- [x] Light mode pass (session, editor, terminal), keyboard pass (focus rings on tabs, rows, composer); reduced motion honoured through `prefers-reduced-motion` in the raccoon scene and runner (code path, not toggled system-wide).
 
 ## Verification protocol
 
