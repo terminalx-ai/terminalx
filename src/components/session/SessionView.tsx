@@ -1,14 +1,14 @@
-import { GitBranch, PanelLeft, PanelRight, Plus } from "lucide-react";
+import { GitBranch, PanelLeft, PanelRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { AgentMark } from "@/components/AgentMark";
 import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { keycaps } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
-import { setActiveTab, useSessionStore } from "@/lib/sessions";
+import { useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
 import { TabView } from "./TabView";
+import { TabStrip } from "./TabStrip";
 
 /**
  * One session: a header naming the place, a tab strip (one tab per agent
@@ -58,29 +58,7 @@ export function SessionView({
           </div>
 
           <div className="ml-auto flex min-w-0 items-center gap-0.5">
-            <div className="flex items-center gap-0.5 rounded-md bg-well p-0.5">
-              {session.tabs.map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => setActiveTab(session.id, t.id)}
-                  className={cn(
-                    "flex h-6 items-center gap-1.5 rounded-[5px] px-2 text-xs transition-colors",
-                    t.id === activeTab?.id
-                      ? "bg-(--surface-thumb) text-foreground shadow-button"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  <AgentMark id={t.harness} className="size-3.5" />
-                  {t.title ?? store.harnesses.find((h) => h.id === t.harness)?.name ?? t.harness}
-                </button>
-              ))}
-              <WithTooltip label="New tab" keys={keycaps("mod+t")}>
-                <Button variant="ghost" size="icon-xs" aria-label="New tab">
-                  <Plus />
-                </Button>
-              </WithTooltip>
-            </div>
+            <TabStrip session={session} activeTab={activeTab} />
             <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} keys={keycaps("mod+e")}>
               <Button
                 variant="ghost"

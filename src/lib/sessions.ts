@@ -145,6 +145,23 @@ export async function deleteSession(id: string, removeWorktree: boolean) {
   });
 }
 
+export async function addTab(sessionId: string, harness: string, model: string, effort: string | null, permissionMode: string) {
+  const tab = await api.addTab(sessionId, { harness, model, effort, permissionMode });
+  const s = state.sessions.find((x) => x.id === sessionId);
+  if (s) patchSession(sessionId, { tabs: [...s.tabs, tab], activeTab: tab.id });
+  return tab;
+}
+
+export async function removeTab(sessionId: string, tabId: string) {
+  const s = state.sessions.find((x) => x.id === sessionId);
+  if (!s || s.tabs.length <= 1) return;
+  await api.removeTab(sessionId, tabId);
+  const tabs = s.tabs.filter((t) => t.id !== tabId);
+  const idx = s.tabs.findIndex((t) => t.id === tabId);
+  const next = s.activeTab === tabId ? (tabs[Math.min(idx, tabs.length - 1)]?.id ?? null) : s.activeTab;
+  patchSession(sessionId, { tabs, activeTab: next });
+}
+
 export async function setActiveTab(sessionId: string, tabId: string) {
   patchSession(sessionId, { activeTab: tabId });
   await api.setActiveTab(sessionId, tabId);
