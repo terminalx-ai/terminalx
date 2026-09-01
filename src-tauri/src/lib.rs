@@ -116,6 +116,11 @@ pub fn run() {
             commands::pty_resize,
             commands::pty_kill,
             commands::pty_is_live,
+            commands::list_dir,
+            commands::read_text_file,
+            commands::write_text_file,
+            commands::file_mtime,
+            commands::search_text,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

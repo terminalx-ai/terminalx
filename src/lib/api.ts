@@ -193,3 +193,36 @@ export const pty = {
   kill: (id: string) => invoke<void>("pty_kill", { id }),
   isLive: (id: string) => invoke<boolean>("pty_is_live", { id }),
 };
+
+// ---- tree, text files, project search
+export interface DirEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+}
+export interface TextFile {
+  content: string;
+  mtimeMs: number;
+  size: number;
+  binary: boolean;
+  truncated: boolean;
+}
+export interface TextHit {
+  path: string;
+  line: number;
+  col: number;
+  text: string;
+}
+export interface TextSearch {
+  hits: TextHit[];
+  files: number;
+  capped: boolean;
+}
+export const fs = {
+  listDir: (root: string, rel: string) => invoke<DirEntry[]>("list_dir", { root, rel }),
+  readText: (path: string) => invoke<TextFile>("read_text_file", { path }),
+  writeText: (path: string, content: string) => invoke<number>("write_text_file", { path, content }),
+  mtime: (path: string) => invoke<number | null>("file_mtime", { path }),
+  searchText: (root: string, query: string, regex: boolean, caseSensitive: boolean, limit = 500) =>
+    invoke<TextSearch>("search_text", { root, query, regex, caseSensitive, limit }),
+};

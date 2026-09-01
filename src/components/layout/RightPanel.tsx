@@ -8,14 +8,16 @@ import { setPrefs, usePrefs } from "@/lib/prefs";
 import { ChangesPanel } from "@/components/changes/ChangesPanel";
 import { RepoPanel } from "@/components/changes/RepoPanel";
 import { PrPanel } from "@/components/changes/PrPanel";
+import { FileTree } from "@/components/files/FileTree";
 import type { AgentEvent } from "@/types/events";
 import type { SessionEntry } from "@/types/session";
 
-export type PanelTab = "changes" | "repo" | "pr";
+export type PanelTab = "changes" | "repo" | "pr" | "files";
 const TABS: { id: PanelTab; label: string; chord: string }[] = [
   { id: "changes", label: "Changes", chord: "mod+alt+1" },
   { id: "repo", label: "Repo", chord: "mod+alt+2" },
   { id: "pr", label: "PR", chord: "mod+alt+3" },
+  { id: "files", label: "Files", chord: "mod+alt+4" },
 ];
 
 /**
@@ -32,6 +34,7 @@ export function RightPanel({ session, events, live }: { session: SessionEntry; e
   useHotkey(TABS[0].chord, () => setTab("changes"));
   useHotkey(TABS[1].chord, () => setTab("repo"));
   useHotkey(TABS[2].chord, () => setTab("pr"));
+  useHotkey(TABS[3].chord, () => setTab("files"));
 
   const onDown = useCallback(
     (e: React.PointerEvent) => {
@@ -97,6 +100,9 @@ export function RightPanel({ session, events, live }: { session: SessionEntry; e
         </div>
         <div className={cn("h-full", tab !== "pr" && "hidden")}>
           <PrPanel key={refreshTick} cwd={session.cwd} branch={session.branch ?? null} active={tab === "pr"} busy={live} />
+        </div>
+        <div className={cn("h-full", tab !== "files" && "hidden")}>
+          <FileTree key={refreshTick} sessionId={session.id} root={session.cwd} active={tab === "files"} />
         </div>
       </div>
     </aside>

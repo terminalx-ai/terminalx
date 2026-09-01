@@ -623,3 +623,33 @@ pub fn pty_kill(state: State<'_, AppState>, id: String) {
 pub fn pty_is_live(state: State<'_, AppState>, id: String) -> bool {
     state.terminals.is_live(&id)
 }
+
+// ------------------------------------------------------------------ files & editor
+
+#[tauri::command]
+pub async fn list_dir(root: String, rel: String) -> CmdResult<Vec<crate::files::DirEntry>> {
+    tauri::async_runtime::spawn_blocking(move || crate::files::list_dir(Path::new(&root), &rel)).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
+pub async fn read_text_file(path: String) -> CmdResult<crate::files::TextFile> {
+    tauri::async_runtime::spawn_blocking(move || crate::files::read_text(Path::new(&path))).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
+pub async fn write_text_file(path: String, content: String) -> CmdResult<u64> {
+    tauri::async_runtime::spawn_blocking(move || crate::files::write_text(Path::new(&path), &content)).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
+pub fn file_mtime(path: String) -> Option<u64> {
+    crate::files::stat_mtime(Path::new(&path))
+}
+
+#[tauri::command]
+pub async fn search_text(root: String, query: String, regex: bool, case_sensitive: bool, limit: Option<usize>) -> CmdResult<crate::files::TextSearch> {
+    tauri::async_runtime::spawn_blocking(move || crate::files::search_text(Path::new(&root), &query, regex, case_sensitive, limit.unwrap_or(500)))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}

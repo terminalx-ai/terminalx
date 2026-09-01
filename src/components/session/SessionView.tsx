@@ -11,6 +11,10 @@ import { TabView } from "./TabView";
 import { TabStrip } from "./TabStrip";
 import { TerminalDock } from "@/components/terminal/TerminalDock";
 import { toggleDock } from "@/lib/terminal";
+import { useEditors } from "@/lib/editors";
+import { EditorPane } from "@/components/editor/EditorPane";
+import { QuickOpen } from "@/components/editor/QuickOpen";
+import { ProjectSearch } from "@/components/editor/ProjectSearch";
 import { RightPanel } from "@/components/layout/RightPanel";
 import { useTabLog } from "@/lib/agentEvents";
 import type { TabEntry } from "@/types/session";
@@ -39,6 +43,9 @@ export function SessionView({
   const store = useSessionStore();
   const project = store.projects.find((p) => p.path === session.projectPath);
   const activeTab = session.tabs.find((t) => t.id === session.activeTab) ?? session.tabs[0];
+  const ed = useEditors();
+  const editors = ed.editors.filter((e) => e.sessionId === session.id);
+  const activeEditor = ed.active[session.id] ?? null;
 
   return (
     <div className="flex h-full min-w-0 flex-1">
@@ -55,7 +62,7 @@ export function SessionView({
               </Button>
             </WithTooltip>
           )}
-          <div className="flex min-w-0 items-center gap-1.5 px-1 text-sm">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm">
             <span className="shrink-0 text-muted-foreground">{project?.name ?? "project"}</span>
             <span className="text-faint">/</span>
             <span className="truncate text-foreground" title={session.title}>
@@ -69,7 +76,7 @@ export function SessionView({
             )}
           </div>
 
-          <div className="ml-auto flex min-w-0 items-center gap-0.5">
+          <div className="ml-auto flex max-w-[70%] shrink-0 items-center gap-0.5">
             <TabStrip session={session} activeTab={activeTab} />
             <WithTooltip label="Terminal" keys={keycaps("mod+j")}>
               <Button
@@ -96,8 +103,13 @@ export function SessionView({
 
         <section className="flex min-h-0 flex-1 flex-col">
           {session.tabs.map((t) => (
-            <div key={t.id} className={cn("flex min-h-0 flex-1 flex-col", t.id !== activeTab?.id && "hidden")}>
-              <TabView session={session} tab={t} active={t.id === activeTab?.id} />
+            <div key={t.id} className={cn("flex min-h-0 flex-1 flex-col", (t.id !== activeTab?.id || activeEditor) && "hidden")}>
+              <TabView session={session} tab={t} active={t.id === activeTab?.id && !activeEditor} />
+            </div>
+          ))}
+          {editors.map((e) => (
+            <div key={e.id} className={cn("flex min-h-0 flex-1 flex-col", e.id !== activeEditor && "hidden")}>
+              <EditorPane entry={e} visible={e.id === activeEditor} />
             </div>
           ))}
           {!session.tabs.length && (
@@ -108,6 +120,8 @@ export function SessionView({
       </div>
 
       {prefs.panelOpen && activeTab && <PanelHost session={session} tab={activeTab} />}
+      <QuickOpen sessionId={session.id} root={session.cwd} />
+      <ProjectSearch sessionId={session.id} root={session.cwd} />
     </div>
   );
 }

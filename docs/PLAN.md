@@ -119,8 +119,8 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Terminal tabs inside a session; session terminal dock (⌘J), panes survive session switches.
 
 ### C10 — Files and editor
-- [ ] File tree in sidebar, fuzzy file search (⌘P), project text search (⌘⇧F).
-- [ ] CodeMirror editor tab with git gutter, save, external-change detection.
+- [x] File tree in the right panel (Files, ⌘⌥4), fuzzy file search (⌘P), project text search (⌘⇧F).
+- [x] CodeMirror editor tab with git gutter, save, external-change detection, unsaved-close guard.
 
 ### C11 — Notifications and attention
 - [ ] Desktop banner when unfocused, in-app notice when focused elsewhere, nothing when on screen.

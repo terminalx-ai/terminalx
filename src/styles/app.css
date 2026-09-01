@@ -336,3 +336,27 @@
   background: var(--veil-strong);
   border-radius: 4px;
 }
+
+/* Editor: a 3px bar beside the line numbers for lines that differ from HEAD. */
+.editor-pane .cm-git-gutter {
+  width: 5px;
+}
+.editor-pane .cm-git-mark {
+  width: 3px;
+  height: 100%;
+  border-radius: 1px;
+}
+.editor-pane .cm-git-added {
+  background: var(--accent-add);
+}
+.editor-pane .cm-git-modified {
+  background: var(--warning);
+}
+.editor-pane .cm-git-deleted {
+  height: 3px;
+  margin-top: -1px;
+  background: var(--destructive);
+}
+.editor-pane .cm-editor {
+  height: 100%;
+}
