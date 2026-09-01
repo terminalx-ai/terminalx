@@ -22,7 +22,7 @@ use tauri::{AppHandle, Emitter};
 use crate::events::*;
 use crate::harness::codex::{self, Action};
 use crate::harness::host::{Host, LiveChild, Sink, SpawnSpec};
-use crate::harness::{claude, HarnessId};
+use crate::harness::{acp, claude, opencode, HarnessId};
 use crate::store::index::{self, TabEntry, TabStatus};
 use crate::{git, store};
 
@@ -45,6 +45,8 @@ pub struct QueuedMessage {
 pub enum Engine {
     Claude(claude::mapper::Mapper),
     Codex(codex::Codex),
+    Acp(acp::Acp),
+    OpenCode(opencode::OpenCode),
     None,
 }
 
@@ -63,6 +65,8 @@ pub struct TabRuntime {
     pub turn_started_at: Option<Instant>,
     pub last_activity: Instant,
     pub log_path: std::path::PathBuf,
+    /// Back-reference so work finished off-thread (an HTTP reply) can re-enter.
+    pub me: std::sync::Weak<Mutex<TabRuntime>>,
 }
 
 impl TabRuntime {
@@ -141,7 +145,9 @@ impl SessionManager {
             turn_started_at: None,
             last_activity: Instant::now(),
             log_path,
+            me: std::sync::Weak::new(),
         }));
+        rt.lock().unwrap().me = Arc::downgrade(&rt);
         self.tabs.lock().unwrap().insert(key, rt.clone());
         Ok(rt)
     }
@@ -275,6 +281,8 @@ impl SessionManager {
             match HarnessId::parse(&tab.harness) {
                 HarnessId::Claude => self.start_claude(&mut rt, &rt_arc, session_id, tab_id, &tab, &entry.cwd)?,
                 HarnessId::Codex => self.start_codex(&mut rt, &rt_arc, &tab, &entry.cwd)?,
+                HarnessId::Acp(binary) => self.start_acp(&mut rt, &rt_arc, &tab, &entry.cwd, &binary)?,
+                HarnessId::OpenCode => self.start_opencode(&mut rt, &rt_arc, &tab, &entry.cwd)?,
                 HarnessId::Other(name) => bail!("The {name} agent is not wired up yet."),
             }
         }
@@ -291,6 +299,14 @@ impl SessionManager {
             }
             Engine::Codex(c) => {
                 let actions = if c.ready { c.prompt(text.clone(), wire_images) } else { c.start(text.clone(), wire_images) };
+                self.apply_actions(&mut rt, actions);
+            }
+            Engine::Acp(a) => {
+                let actions = if a.ready { a.prompt(text.clone(), wire_images) } else { a.start(text.clone(), wire_images) };
+                self.apply_actions(&mut rt, actions);
+            }
+            Engine::OpenCode(o) => {
+                let actions = if o.ready { o.prompt(text.clone(), wire_images) } else { o.start(text.clone(), wire_images) };
                 self.apply_actions(&mut rt, actions);
             }
             Engine::None => bail!("no engine"),
@@ -334,9 +350,49 @@ impl SessionManager {
         Ok(())
     }
 
+    fn start_acp(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str, binary: &str) -> Result<()> {
+        let plan = acp::spawn_plan(binary).ok_or_else(|| anyhow!("{binary} is not installed. Install it and log in, then try again."))?;
+        rt.engine = Engine::Acp(acp::Acp::new(cwd, tab.provider_session_id.clone(), Some(tab.model.clone()).filter(|m| !m.is_empty()), &tab.permission_mode));
+        self.spawn_child(rt, rt_arc, &plan.program, &plan.args, cwd).with_context(|| format!("start {binary}"))?;
+        Ok(())
+    }
+
+    fn start_opencode(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str) -> Result<()> {
+        let plan = opencode::spawn_plan().ok_or_else(|| anyhow!("OpenCode is not installed. Install it and log in, then try again."))?;
+        rt.engine = Engine::OpenCode(opencode::OpenCode::new(plan.port, cwd, tab.provider_session_id.clone(), Some(tab.model.clone()).filter(|m| !m.is_empty()), &tab.permission_mode));
+        self.spawn_child(rt, rt_arc, &plan.program, &plan.args, cwd).context("start OpenCode")?;
+        let pid = rt.child_pid;
+        let base = format!("http://127.0.0.1:{}", plan.port);
+        let manager = self.clone();
+        let rt_weak = Arc::downgrade(rt_arc);
+        std::thread::Builder::new()
+            .name("opencode-events".into())
+            .spawn(move || {
+                let alive = || rt_weak.upgrade().map(|r| r.lock().map(|g| g.child_pid == pid).unwrap_or(false)).unwrap_or(false);
+                let emit = |line: String| {
+                    if let Some(r) = rt_weak.upgrade() {
+                        manager.on_line(&r, &line);
+                    }
+                };
+                opencode::pump_events(&base, alive, emit);
+            })
+            .context("event pump")?;
+        Ok(())
+    }
+
     fn apply_actions(&self, rt: &mut TabRuntime, actions: Vec<Action>) {
         for a in actions {
             match a {
+                Action::Http { tag, method, url, body } => {
+                    let manager = self.clone();
+                    let me = rt.me.clone();
+                    std::thread::spawn(move || {
+                        let line = opencode::perform(&tag, &method, &url, body);
+                        if let Some(r) = me.upgrade() {
+                            manager.on_line(&r, &line);
+                        }
+                    });
+                }
                 Action::Write(line) => {
                     if let Err(e) = self.write(rt, &line) {
                         log::error!("[{}] write: {e:#}", rt.key());
@@ -371,6 +427,14 @@ impl SessionManager {
             }
             Engine::Codex(c) => {
                 let actions = c.interrupt();
+                self.apply_actions(&mut rt, actions);
+            }
+            Engine::Acp(a) => {
+                let actions = a.interrupt();
+                self.apply_actions(&mut rt, actions);
+            }
+            Engine::OpenCode(o) => {
+                let actions = o.interrupt();
                 self.apply_actions(&mut rt, actions);
             }
             Engine::None => {}
@@ -427,6 +491,18 @@ impl SessionManager {
                 self.apply_actions(&mut rt, actions);
                 (allow, if allow { "Allowed".to_string() } else { "Denied".to_string() })
             }
+            Engine::Acp(a) => {
+                let actions = a.answer(request_id, option_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
+                let allow = !(option_id.contains("cancel") || option_id.contains("reject") || option_id.contains("deny"));
+                self.apply_actions(&mut rt, actions);
+                (allow, if allow { "Allowed".to_string() } else { "Denied".to_string() })
+            }
+            Engine::OpenCode(o) => {
+                let actions = o.answer(request_id, option_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
+                let allow = option_id != "reject";
+                self.apply_actions(&mut rt, actions);
+                (allow, if allow { "Allowed".to_string() } else { "Denied".to_string() })
+            }
             Engine::None => bail!("no engine"),
         };
         self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: allow, label, automatic: false }, None);
@@ -466,6 +542,11 @@ impl SessionManager {
                 self.write(&rt, &line)?;
             }
             Engine::Codex(c) => c.model = Some(model.into()),
+            Engine::Acp(a) => {
+                let actions = a.set_model(model);
+                self.apply_actions(&mut rt, actions);
+            }
+            Engine::OpenCode(o) => o.model = Some(model.into()),
             _ => {}
         }
         self.publish(&mut rt, Payload::SettingsChanged { model: Some(model.into()), effort: None, permission_mode: None }, None);
@@ -492,6 +573,11 @@ impl SessionManager {
                 c.mode = mode.into();
                 respawn = !turn_open;
             }
+            Engine::Acp(a) => {
+                let actions = a.set_mode(mode);
+                self.apply_actions(&mut rt, actions);
+            }
+            Engine::OpenCode(o) => o.mode = mode.into(),
             _ => {}
         }
         if respawn {
@@ -516,6 +602,7 @@ impl SessionManager {
         let mut respawn = false;
         match &mut rt.engine {
             Engine::Codex(c) => c.effort = effort.map(String::from),
+            Engine::Acp(_) | Engine::OpenCode(_) => {}
             _ => respawn = !turn_open,
         }
         if respawn {
@@ -562,6 +649,8 @@ impl SessionManager {
                 claude_out = Some((mapped.payloads, mapped.subagent, mapper.last_suggestions.clone(), mapper.last_ask_input.clone()));
             }
             Engine::Codex(c) => codex_out = Some(c.handle(line)),
+            Engine::Acp(a) => codex_out = Some(a.handle(line)),
+            Engine::OpenCode(o) => codex_out = Some(o.handle(line)),
             Engine::None => {}
         }
         if let Some((payloads, subagent, suggestions, ask_input)) = claude_out {
@@ -646,6 +735,8 @@ impl SessionManager {
                         line_to_write = Some(claude::user_line(&pid, &q.text, &q.images));
                     }
                     Engine::Codex(c) => codex_actions = Some(c.prompt(q.text.clone(), q.images.clone())),
+                    Engine::Acp(a) => codex_actions = Some(a.prompt(q.text.clone(), q.images.clone())),
+                    Engine::OpenCode(o) => codex_actions = Some(o.prompt(q.text.clone(), q.images.clone())),
                     Engine::None => {}
                 }
                 let sent = if let Some(line) = line_to_write {

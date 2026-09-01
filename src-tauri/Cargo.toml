@@ -40,6 +40,7 @@ regex = "1"
 ignore = "0.4"
 nucleo-matcher = "0.3"
 tauri-plugin-notification = "2.4.0"
+ureq = { version = "2", features = ["json"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

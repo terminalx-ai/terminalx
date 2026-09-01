@@ -46,6 +46,9 @@ pub enum Action {
     /// The thread id the server minted; the manager records it as the
     /// tab's provider session id so resume works.
     ThreadReady(String),
+    /// An HTTP request for a server-backed harness; the reply comes back
+    /// to the engine as a line tagged `raccoon_http`.
+    Http { tag: String, method: String, url: String, body: Option<Value> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -524,7 +527,7 @@ mod tests {
                 match a {
                     Action::Emit(p) => payloads.push(p),
                     Action::Write(w) => writes.push(w),
-                    Action::ThreadReady(_) => {}
+                    Action::ThreadReady(_) | Action::Http { .. } => {}
                 }
             }
         }

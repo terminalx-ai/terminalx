@@ -40,7 +40,14 @@ pub fn catalog() -> Vec<Model> {
         m("codex", "gpt-5.6-codex", "GPT-5.6 Codex", &codex_efforts, Some("medium"), false),
         m("codex", "gpt-5.5", "GPT-5.5", &codex_efforts, Some("medium"), false),
         m("cursor", "auto", "Auto", &[], None, true),
+        m("cursor", "sonnet-4.5", "Sonnet 4.5", &[], None, false),
+        m("cursor", "sonnet-4.5-thinking", "Sonnet 4.5 Thinking", &[], None, false),
+        m("cursor", "opus-4.5", "Opus 4.5", &[], None, false),
+        m("cursor", "gpt-5", "GPT-5", &[], None, false),
         m("opencode", "", "Default", &[], None, true),
+        m("opencode", "anthropic/claude-sonnet-4-5", "Claude Sonnet 4.5", &[], None, false),
+        m("opencode", "anthropic/claude-opus-4-5", "Claude Opus 4.5", &[], None, false),
+        m("opencode", "openai/gpt-5", "GPT-5", &[], None, false),
     ]
 }
 

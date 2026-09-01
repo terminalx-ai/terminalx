@@ -137,9 +137,9 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Fork session (new worktree at the branch tip, copied log, Claude conversation forked on first send).
 
 ### C14 — More harnesses
-- [ ] Generic ACP adapter (cursor-agent, and any `acp` speaker).
-- [ ] OpenCode over local HTTP+SSE.
-- [ ] Availability probe; disabled rows with install hints.
+- [x] Generic ACP adapter (cursor-agent, and any `acp` speaker): handshake, authenticate, new/load session, prompt, updates, permission and fs requests. Live check reached the sign-in step (machine not logged in to Cursor).
+- [x] OpenCode over local HTTP+SSE: server as the tab's child, event pump, HTTP actions. Built against the documented API and unit-tested on fixtures; the installed 0.1.150 server never finished starting here, so not yet exercised live.
+- [x] Availability probe; disabled rows with install hints.
 
 ### C15 — Settings, updater, usage
 - [ ] Settings tabs: General, Appearance, Agents, Shortcuts, About.

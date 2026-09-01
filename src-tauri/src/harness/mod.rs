@@ -2,9 +2,11 @@
 //! typed) and a `mapper` (typed → `AgentEvent`), and is driven through the
 //! shared child host.
 
+pub mod acp;
 pub mod claude;
 pub mod codex;
 pub mod host;
+pub mod opencode;
 
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +14,9 @@ use serde::{Deserialize, Serialize};
 pub enum HarnessId {
     Claude,
     Codex,
+    /// An ACP speaker, by the binary that speaks it.
+    Acp(String),
+    OpenCode,
     Other(String),
 }
 
@@ -20,6 +25,8 @@ impl HarnessId {
         match s {
             "claude" => Self::Claude,
             "codex" => Self::Codex,
+            "cursor" => Self::Acp("cursor-agent".into()),
+            "opencode" => Self::OpenCode,
             other => Self::Other(other.to_string()),
         }
     }
