@@ -468,3 +468,62 @@ pub fn frontend_log(level: String, message: String) {
         log::info!("[webview] {message}");
     }
 }
+
+// ------------------------------------------------------------------ files & commands
+
+#[tauri::command]
+pub async fn search_files(cwd: String, query: String, limit: Option<usize>) -> CmdResult<Vec<crate::files::FileHit>> {
+    tauri::async_runtime::spawn_blocking(move || crate::files::search(Path::new(&cwd), &query, limit.unwrap_or(40)).map_err(err))
+        .await
+        .map_err(err)?
+}
+
+#[tauri::command]
+pub fn invalidate_file_index(cwd: String) {
+    crate::files::invalidate(Path::new(&cwd));
+}
+
+#[tauri::command]
+pub async fn list_slash_commands(cwd: String, harness: String) -> CmdResult<Vec<harness::claude::commands::SlashCommand>> {
+    if harness != "claude" {
+        return Ok(Vec::new());
+    }
+    tauri::async_runtime::spawn_blocking(move || harness::claude::commands::list(Path::new(&cwd)).map_err(err)).await.map_err(err)?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageFile {
+    pub media_type: String,
+    pub data: String,
+    pub name: String,
+}
+
+/// Read an image the reader dropped or picked, as base64 for the wire.
+#[tauri::command]
+pub async fn read_image_file(path: String) -> CmdResult<Option<ImageFile>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = Path::new(&path);
+        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        let media = match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            _ => return Ok(None),
+        };
+        let meta = std::fs::metadata(p).map_err(err)?;
+        if meta.len() > 5 * 1024 * 1024 {
+            return Ok(None);
+        }
+        use base64::Engine as _;
+        let bytes = std::fs::read(p).map_err(err)?;
+        Ok(Some(ImageFile {
+            media_type: media.into(),
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            name: p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        }))
+    })
+    .await
+    .map_err(err)?
+}

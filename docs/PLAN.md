@@ -102,11 +102,11 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Approval card from server-provided decisions; sandbox/approval mode pairs.
 - [x] Subagent thread filtering; token usage ring from `last`.
 
-### C7 — Composer extras
-- [ ] Slash-command picker (from harness), `@file` mentions from the file index, `#issue` later.
-- [ ] Attachments: images (base64 block), files (mention), drag-drop, paste.
-- [ ] Queue while busy, send-as-steer where supported, Stop.
-- [ ] Context ring, dictation placeholder off.
+### C7 — Composer extras ✅
+- [x] Slash-command picker (from harness), `@file` mentions from the file index, `#issue` later.
+- [x] Attachments: images (base64 block), files (mention), drag-drop, paste.
+- [x] Queue while busy, send-as-steer where supported, Stop.
+- [x] Context ring.
 
 ### C8 — Changes panel and git actions
 - [ ] Per-turn tree snapshots; changes list with +/-; diff viewer (unified/split).

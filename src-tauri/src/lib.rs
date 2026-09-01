@@ -2,6 +2,7 @@ mod binpath;
 mod commands;
 #[allow(dead_code)] // consumed once the harness mappers land
 mod events;
+mod files;
 mod git;
 mod harness;
 mod models;
@@ -92,6 +93,10 @@ pub fn run() {
             commands::tab_status,
             commands::list_models,
             commands::frontend_log,
+            commands::search_files,
+            commands::list_slash_commands,
+            commands::read_image_file,
+            commands::invalidate_file_index,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

@@ -94,6 +94,7 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
       footer={
         <Composer
           tab={tab}
+          cwd={session.cwd}
           busy={live}
           draft={draft}
           onDraftChange={(v) => setDraft(tab.id, v)}

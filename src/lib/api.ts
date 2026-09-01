@@ -121,3 +121,24 @@ export const agent = {
   markRead: (sessionId: string, tabId: string) => invoke<void>("mark_tab_read", { sessionId, tabId }),
   listModels: () => invoke<ModelInfo[]>("list_models"),
 };
+
+// ---- files & commands
+export interface FileHit {
+  path: string;
+  name: string;
+  score: number;
+}
+
+export interface SlashCommand {
+  name: string;
+  description: string;
+  argumentHint?: string;
+  source: "builtin" | "plugin" | "user";
+}
+
+export const files = {
+  search: (cwd: string, query: string, limit = 40) => invoke<FileHit[]>("search_files", { cwd, query, limit }),
+  invalidate: (cwd: string) => invoke<void>("invalidate_file_index", { cwd }),
+  readImage: (path: string) => invoke<{ mediaType: string; data: string; name: string } | null>("read_image_file", { path }),
+  slashCommands: (cwd: string, harness: string) => invoke<SlashCommand[]>("list_slash_commands", { cwd, harness }),
+};

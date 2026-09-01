@@ -1,5 +1,6 @@
 //! Claude Code: a pipe. Spawn it, write JSON lines, read JSON lines back.
 
+pub mod commands;
 pub mod mapper;
 pub mod parser;
 
@@ -102,7 +103,6 @@ pub fn set_mode_line(request_id: &str, mode: &str) -> String {
     control_line(request_id, json!({"subtype": "set_permission_mode", "mode": normalize_mode(mode)}))
 }
 
-#[allow(dead_code)]
 pub fn initialize_line(request_id: &str) -> String {
     control_line(request_id, json!({"subtype": "initialize"}))
 }

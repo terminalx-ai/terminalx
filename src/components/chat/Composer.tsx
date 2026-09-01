@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowUp, ChevronDown, ImagePlus, Square, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowUp, AtSign, ChevronDown, FileText, ImagePlus, SlashSquare, Square, X } from "lucide-react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import {
@@ -15,8 +16,10 @@ import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
 import { keycaps } from "@/lib/hotkeys";
 import { EFFORT_LABEL, PERMISSION_MODES, modeLabel, useModels } from "@/lib/models";
+import { files as filesApi, type FileHit, type ImageInput, type SlashCommand } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
-import type { ImageInput } from "@/lib/api";
+import { PickerMenu, type PickerItem } from "./PickerMenu";
+import { tokenAtCaret } from "@/lib/pickers";
 
 export interface Attachment {
   id: string;
@@ -26,12 +29,17 @@ export interface Attachment {
   previewUrl: string;
 }
 
+const commandCache = new Map<string, SlashCommand[]>();
+
 /**
  * The composer inside a session. Enter sends, Shift+Enter breaks a line.
  * While a turn runs the send button becomes Stop and a new prompt queues.
+ * `/` at the start opens the command list; `@` anywhere opens the file list.
+ * Images attach as blocks; any other dropped file becomes an `@path` mention.
  */
 export function Composer({
   tab,
+  cwd,
   busy,
   draft,
   onDraftChange,
@@ -46,6 +54,7 @@ export function Composer({
   autoFocus,
 }: {
   tab: TabEntry;
+  cwd?: string;
   busy: boolean;
   draft: string;
   onDraftChange: (v: string) => void;
@@ -62,6 +71,12 @@ export function Composer({
   const models = useModels(tab.harness);
   const model = models.find((m) => m.id === tab.model) ?? models.find((m) => m.isDefault);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [caret, setCaret] = useState(0);
+  const [commands, setCommands] = useState<SlashCommand[]>(() => commandCache.get(`${cwd}|${tab.harness}`) ?? []);
+  const [fileHits, setFileHits] = useState<FileHit[]>([]);
+  const [highlighted, setHighlighted] = useState(0);
+  const [dismissedToken, setDismissedToken] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -77,6 +92,82 @@ export function Composer({
     if (autoFocus) ref.current?.focus();
   }, [autoFocus, tab.id]);
 
+  // Slash commands come from the harness once per directory.
+  useEffect(() => {
+    if (!cwd) return;
+    const key = `${cwd}|${tab.harness}`;
+    if (commandCache.has(key)) {
+      setCommands(commandCache.get(key)!);
+      return;
+    }
+    let cancelled = false;
+    filesApi
+      .slashCommands(cwd, tab.harness)
+      .then((c) => {
+        commandCache.set(key, c);
+        if (!cancelled) setCommands(c);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, tab.harness]);
+
+  const token = useMemo(() => tokenAtCaret(draft, caret), [draft, caret]);
+  const tokenKey = token ? `${token.kind}:${token.start}` : null;
+  const pickerOpen = !!token && dismissedToken !== tokenKey && (token.kind === "mention" ? !!cwd : commands.length > 0);
+
+  // File hits follow the query, lightly debounced.
+  useEffect(() => {
+    if (!token || token.kind !== "mention" || !cwd) return;
+    let cancelled = false;
+    const id = window.setTimeout(() => {
+      filesApi
+        .search(cwd, token.query, 30)
+        .then((h) => !cancelled && setFileHits(h))
+        .catch(() => {});
+    }, 60);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(id);
+    };
+  }, [token?.kind, token?.query, cwd]);
+
+  const items: PickerItem[] = useMemo(() => {
+    if (!token) return [];
+    if (token.kind === "slash") {
+      const q = token.query.toLowerCase();
+      return commands
+        .filter((c) => c.name.toLowerCase().includes(q))
+        .slice(0, 30)
+        .map((c) => ({ id: c.name, label: `/${c.name}`, detail: c.description, hint: c.argumentHint ?? (c.source !== "builtin" ? c.source : undefined), icon: <SlashSquare className="size-3.5" /> }));
+    }
+    return fileHits.map((h) => ({ id: h.path, label: h.name, detail: h.path, icon: <FileText className="size-3.5" /> }));
+  }, [token, commands, fileHits]);
+
+  useEffect(() => setHighlighted(0), [items.length, tokenKey]);
+
+  const complete = useCallback(
+    (item: PickerItem) => {
+      if (!token) return;
+      const replacement = token.kind === "slash" ? `/${item.id} ` : `@${item.id} `;
+      const before = draft.slice(0, token.start);
+      const after = draft.slice(caret);
+      const next = before + replacement + after;
+      onDraftChange(next);
+      const pos = before.length + replacement.length;
+      requestAnimationFrame(() => {
+        const el = ref.current;
+        if (el) {
+          el.focus();
+          el.setSelectionRange(pos, pos);
+          setCaret(pos);
+        }
+      });
+    },
+    [token, draft, caret, onDraftChange],
+  );
+
   const send = useCallback(async () => {
     const text = draft.trim();
     if (!text && !attachments.length) return;
@@ -87,11 +178,10 @@ export function Composer({
     ref.current?.focus();
   }, [draft, attachments, onSend, onDraftChange]);
 
-  const addFiles = useCallback(async (files: FileList | File[]) => {
-    const list = [...files].filter((f) => f.type.startsWith("image/"));
+  const addFiles = useCallback(async (list: File[]) => {
     const out: Attachment[] = [];
     for (const f of list) {
-      if (f.size > 5 * 1024 * 1024) continue;
+      if (!f.type.startsWith("image/") || f.size > 5 * 1024 * 1024) continue;
       const data = await new Promise<string>((res) => {
         const r = new FileReader();
         r.onload = () => res(String(r.result).split(",")[1] ?? "");
@@ -102,24 +192,110 @@ export function Composer({
     if (out.length) setAttachments((a) => [...a, ...out]);
   }, []);
 
+  // Dropped paths arrive from the window, not the DOM: images attach, the
+  // rest become mentions the harness reads itself.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    (async () => {
+      try {
+        const off = await getCurrentWebview().onDragDropEvent(async (e) => {
+          const p = e.payload;
+          if (p.type === "enter" || p.type === "over") setDragging(true);
+          else if (p.type === "leave") setDragging(false);
+          else if (p.type === "drop") {
+            setDragging(false);
+            const mentions: string[] = [];
+            for (const path of p.paths) {
+              const img = await filesApi.readImage(path).catch(() => null);
+              if (img) {
+                setAttachments((a) => [...a, { id: crypto.randomUUID(), name: img.name, mediaType: img.mediaType, data: img.data, previewUrl: `data:${img.mediaType};base64,${img.data}` }]);
+              } else {
+                mentions.push(`@${path}`);
+              }
+            }
+            if (mentions.length) {
+              const sep = draft && !/\s$/.test(draft) ? " " : "";
+              onDraftChange(draft + sep + mentions.join(" ") + " ");
+            }
+            ref.current?.focus();
+          }
+        });
+        if (disposed) off();
+        else unlisten = off;
+      } catch {
+        /* outside a webview */
+      }
+    })();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [draft, onDraftChange]);
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (pickerOpen && items.length) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setHighlighted((h) => (h + 1) % items.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setHighlighted((h) => (h - 1 + items.length) % items.length);
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        complete(items[highlighted]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setDismissedToken(tokenKey);
+        return;
+      }
+    }
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      void send();
+    }
+  };
+
   const placeholder = busy ? "Send a follow-up (it queues until the agent pauses)" : "Ask, build, or describe the next step";
   const pct = contextUsed && contextMax ? Math.min(100, Math.round((contextUsed / contextMax) * 100)) : null;
 
   return (
     <div className="mx-auto w-full max-w-3xl px-4 pb-4 pt-2">
-      {disabledReason && (
-        <div className="mb-2 rounded-md bg-warning/10 px-3 py-2 text-xs text-warning">{disabledReason}</div>
-      )}
+      {disabledReason && <div className="mb-2 rounded-md bg-warning/10 px-3 py-2 text-xs text-warning">{disabledReason}</div>}
       <div
-        className="rounded-2xl bg-composer glass p-2.5 shadow-surface hairline focus-within:ring-1 focus-within:ring-ring/40"
+        className={cn(
+          "relative rounded-2xl bg-composer glass p-2.5 shadow-surface hairline focus-within:ring-1 focus-within:ring-ring/40",
+          dragging && "ring-2 ring-accent/60",
+        )}
         onPaste={(e) => {
-          const files = [...e.clipboardData.files];
-          if (files.length) {
+          const list = [...e.clipboardData.files];
+          if (list.length) {
             e.preventDefault();
-            void addFiles(files);
+            void addFiles(list);
           }
         }}
       >
+        {pickerOpen && (
+          <PickerMenu
+            items={items}
+            highlighted={highlighted}
+            onPick={complete}
+            onHover={setHighlighted}
+            title={token?.kind === "slash" ? "Commands" : "Files"}
+            empty={token?.kind === "slash" ? "No matching command" : "No matching file"}
+          />
+        )}
+        {dragging && (
+          <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-2xl bg-composer/80 text-sm text-muted-foreground">
+            Drop images to attach, other files to mention
+          </div>
+        )}
         {attachments.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-2 px-1">
             {attachments.map((a) => (
@@ -141,31 +317,46 @@ export function Composer({
           ref={ref}
           data-composer
           value={draft}
-          onChange={(e) => onDraftChange(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              void send();
-            }
+          onChange={(e) => {
+            onDraftChange(e.target.value);
+            setCaret(e.target.selectionStart ?? e.target.value.length);
+            setDismissedToken(null);
           }}
+          onSelect={(e) => setCaret((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
+          onKeyDown={onKeyDown}
           rows={1}
           placeholder={placeholder}
           className="max-h-60 w-full resize-none bg-transparent px-1.5 py-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
         />
         <div className="mt-1 flex items-center gap-1">
-          <input
-            ref={fileRef}
-            type="file"
-            accept="image/*"
-            multiple
-            hidden
-            onChange={(e) => e.target.files && void addFiles(e.target.files)}
-          />
-          <WithTooltip label="Attach image" keys={keycaps("alt+o")}>
+          <input ref={fileRef} type="file" accept="image/*" multiple hidden onChange={(e) => e.target.files && void addFiles([...e.target.files])} />
+          <WithTooltip label="Attach image">
             <Button variant="ghost" size="icon-sm" aria-label="Attach image" onClick={() => fileRef.current?.click()}>
               <ImagePlus />
             </Button>
           </WithTooltip>
+          {cwd && (
+            <WithTooltip label="Mention a file">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Mention a file"
+                onClick={() => {
+                  const sep = draft && !/\s$/.test(draft) ? " " : "";
+                  const next = draft + sep + "@";
+                  onDraftChange(next);
+                  setDismissedToken(null);
+                  requestAnimationFrame(() => {
+                    ref.current?.focus();
+                    ref.current?.setSelectionRange(next.length, next.length);
+                    setCaret(next.length);
+                  });
+                }}
+              >
+                <AtSign />
+              </Button>
+            </WithTooltip>
+          )}
 
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -254,7 +445,7 @@ export function Composer({
                 </Button>
               </WithTooltip>
             ) : null}
-            <WithTooltip label={busy ? "Queue" : "Send"} keys={["⏎"]}>
+            <WithTooltip label={busy ? "Queue" : "Send"} keys={keycaps("enter")}>
               <Button
                 size="icon-sm"
                 variant={draft.trim() || attachments.length ? "accent" : "secondary"}

@@ -2,7 +2,9 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capabilities for the main Raccoon window",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
@@ -18,6 +20,9 @@
     "opener:default",
     "dialog:default",
     "process:default",
-    "shell:allow-open"
+    "shell:allow-open",
+    "core:webview:default",
+    "core:window:default",
+    "core:event:default"
   ]
 }
