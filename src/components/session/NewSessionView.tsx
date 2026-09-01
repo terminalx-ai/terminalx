@@ -23,7 +23,7 @@ import type { WorkStatus } from "@/types/session";
  * the settings, then the box they apply to — so the toolbar sits above the
  * textarea here, unlike the composer inside a session.
  */
-export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, firstPrompt: string) => void }) {
+export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, tabId: string, firstPrompt: string) => void }) {
   const store = useSessionStore();
   const prefs = usePrefs();
   const [text, setText] = useState("");
@@ -82,9 +82,9 @@ export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, 
         },
       });
       upsertSession(s);
-      selectSession(s.id);
-      onCreated?.(s.id, text);
       setText("");
+      selectSession(s.id);
+      onCreated?.(s.id, s.tabs[0].id, text);
     } catch (e) {
       setError(errorMessage(e));
     } finally {

@@ -4,7 +4,9 @@ mod commands;
 mod events;
 mod git;
 mod harness;
+mod models;
 mod names;
+mod session;
 mod store;
 
 use std::sync::Arc;
@@ -12,12 +14,20 @@ use tauri::Manager;
 
 pub struct AppState {
     pub host: Arc<harness::host::Host>,
+    manager: std::sync::Mutex<Option<session::SessionManager>>,
+}
+
+impl AppState {
+    pub fn manager(&self) -> Option<session::SessionManager> {
+        self.manager.lock().unwrap().clone()
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let state = AppState { host: Arc::new(harness::host::Host::new()) };
+    let host = Arc::new(harness::host::Host::new());
+    let state = AppState { host: host.clone(), manager: std::sync::Mutex::new(None) };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -26,6 +36,11 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(state)
+        .setup(move |app| {
+            let manager = session::SessionManager::new(app.handle().clone(), host.clone());
+            *app.state::<AppState>().manager.lock().unwrap() = Some(manager);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::list_projects,
             commands::add_project,
@@ -50,6 +65,21 @@ pub fn run() {
             commands::changes_between,
             commands::file_contents_at,
             commands::log_commits,
+            commands::load_tab_events,
+            commands::send_message,
+            commands::interrupt_turn,
+            commands::stop_tab,
+            commands::cancel_queued,
+            commands::list_queued,
+            commands::respond_permission,
+            commands::answer_questions,
+            commands::set_tab_model,
+            commands::set_tab_permission_mode,
+            commands::set_tab_effort,
+            commands::mark_tab_read,
+            commands::tab_status,
+            commands::list_models,
+            commands::frontend_log,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

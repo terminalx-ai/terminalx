@@ -69,3 +69,55 @@ export function errorMessage(e: unknown): string {
   if (e && typeof e === "object" && "message" in e) return String((e as { message: unknown }).message);
   return String(e);
 }
+
+// ---- agent tabs
+import type { AgentEvent } from "@/types/events";
+
+export interface ImageInput {
+  mediaType: string;
+  data: string;
+  name?: string;
+}
+
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  images: [string, string][];
+}
+
+export interface SendOutcome {
+  queued: boolean;
+  events: AgentEvent[];
+}
+
+export interface ModelInfo {
+  id: string;
+  label: string;
+  harness: string;
+  efforts: string[];
+  defaultEffort: string | null;
+  acceptsImages: boolean;
+  isDefault: boolean;
+}
+
+export const agent = {
+  loadEvents: (sessionId: string, tabId: string) => invoke<AgentEvent[]>("load_tab_events", { sessionId, tabId }),
+  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[]) =>
+    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null }),
+  interrupt: (sessionId: string, tabId: string) => invoke<void>("interrupt_turn", { sessionId, tabId }),
+  stop: (sessionId: string, tabId: string) => invoke<void>("stop_tab", { sessionId, tabId }),
+  cancelQueued: (sessionId: string, tabId: string, messageId: string) =>
+    invoke<QueuedMessage | null>("cancel_queued", { sessionId, tabId, messageId }),
+  listQueued: (sessionId: string, tabId: string) => invoke<QueuedMessage[]>("list_queued", { sessionId, tabId }),
+  respondPermission: (sessionId: string, tabId: string, requestId: string, optionId: string) =>
+    invoke<void>("respond_permission", { sessionId, tabId, requestId, optionId }),
+  answerQuestions: (sessionId: string, tabId: string, requestId: string, answers: Record<string, string>) =>
+    invoke<void>("answer_questions", { sessionId, tabId, requestId, answers }),
+  setModel: (sessionId: string, tabId: string, model: string) => invoke<void>("set_tab_model", { sessionId, tabId, model }),
+  setPermissionMode: (sessionId: string, tabId: string, mode: string) =>
+    invoke<void>("set_tab_permission_mode", { sessionId, tabId, mode }),
+  setEffort: (sessionId: string, tabId: string, effort: string | null) =>
+    invoke<void>("set_tab_effort", { sessionId, tabId, effort }),
+  markRead: (sessionId: string, tabId: string) => invoke<void>("mark_tab_read", { sessionId, tabId }),
+  listModels: () => invoke<ModelInfo[]>("list_models"),
+};

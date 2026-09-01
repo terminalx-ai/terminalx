@@ -2,6 +2,7 @@
 //! typed) and a `mapper` (typed → `AgentEvent`), and is driven through the
 //! shared child host.
 
+pub mod claude;
 pub mod host;
 
 use serde::{Deserialize, Serialize};

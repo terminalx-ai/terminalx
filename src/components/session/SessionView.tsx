@@ -8,6 +8,7 @@ import { setPrefs, usePrefs } from "@/lib/prefs";
 import { setActiveTab, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
+import { TabView } from "./TabView";
 
 /**
  * One session: a header naming the place, a tab strip (one tab per agent
@@ -94,9 +95,14 @@ export function SessionView({
         </header>
 
         <section className="flex min-h-0 flex-1 flex-col">
-          <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-            {activeTab ? `Tab ${activeTab.harness} — transcript lands in the next checkpoint.` : "No tabs."}
-          </div>
+          {session.tabs.map((t) => (
+            <div key={t.id} className={cn("flex min-h-0 flex-1 flex-col", t.id !== activeTab?.id && "hidden")}>
+              <TabView session={session} tab={t} active={t.id === activeTab?.id} />
+            </div>
+          ))}
+          {!session.tabs.length && (
+            <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">No tabs.</div>
+          )}
         </section>
       </div>
 

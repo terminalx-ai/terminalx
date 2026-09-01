@@ -95,3 +95,6 @@ export function usePref<K extends keyof Prefs>(key: K): [Prefs[K], (v: Prefs[K])
   const prefs = usePrefs();
   return [prefs[key], (v) => setPrefs({ [key]: v } as Partial<Prefs>)];
 }
+
+// Module state lives here; a hot update would lose it, so edits reload the page.
+if (import.meta.hot) import.meta.hot.accept(() => window.location.reload());

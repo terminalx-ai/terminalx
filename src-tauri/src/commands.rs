@@ -367,3 +367,104 @@ pub async fn log_commits(cwd: String, range: Option<String>, limit: Option<u32>)
         .await
         .map_err(err)?
 }
+
+// ------------------------------------------------------------------ agents (tabs)
+
+use crate::session::{ImageInput, QueuedMessage, SendOutcome};
+use crate::AppState;
+use tauri::State;
+
+#[tauri::command]
+pub async fn load_tab_events(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<Vec<crate::events::AgentEvent>> {
+    let m = state.manager().ok_or("not ready")?;
+    tauri::async_runtime::spawn_blocking(move || m.load_events(&session_id, &tab_id).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn send_message(
+    state: State<'_, AppState>,
+    session_id: String,
+    tab_id: String,
+    text: String,
+    images: Option<Vec<ImageInput>>,
+) -> CmdResult<SendOutcome> {
+    let m = state.manager().ok_or("not ready")?;
+    tauri::async_runtime::spawn_blocking(move || m.send(&session_id, &tab_id, text, images.unwrap_or_default()).map_err(err))
+        .await
+        .map_err(err)?
+}
+
+#[tauri::command]
+pub fn interrupt_turn(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
+    state.manager().ok_or("not ready")?.interrupt(&session_id, &tab_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn stop_tab(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
+    state.manager().ok_or("not ready")?.stop(&session_id, &tab_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn cancel_queued(state: State<'_, AppState>, session_id: String, tab_id: String, message_id: String) -> CmdResult<Option<QueuedMessage>> {
+    state.manager().ok_or("not ready")?.cancel_queued(&session_id, &tab_id, &message_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn list_queued(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<Vec<QueuedMessage>> {
+    Ok(state.manager().ok_or("not ready")?.queued(&session_id, &tab_id))
+}
+
+#[tauri::command]
+pub fn respond_permission(state: State<'_, AppState>, session_id: String, tab_id: String, request_id: String, option_id: String) -> CmdResult<()> {
+    state.manager().ok_or("not ready")?.respond_permission(&session_id, &tab_id, &request_id, &option_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn answer_questions(
+    state: State<'_, AppState>,
+    session_id: String,
+    tab_id: String,
+    request_id: String,
+    answers: std::collections::HashMap<String, String>,
+) -> CmdResult<()> {
+    state.manager().ok_or("not ready")?.answer_questions(&session_id, &tab_id, &request_id, answers).map_err(err)
+}
+
+#[tauri::command]
+pub fn set_tab_model(state: State<'_, AppState>, session_id: String, tab_id: String, model: String) -> CmdResult<()> {
+    state.manager().ok_or("not ready")?.set_model(&session_id, &tab_id, &model).map_err(err)
+}
+
+#[tauri::command]
+pub fn set_tab_permission_mode(state: State<'_, AppState>, session_id: String, tab_id: String, mode: String) -> CmdResult<()> {
+    state.manager().ok_or("not ready")?.set_permission_mode(&session_id, &tab_id, &mode).map_err(err)
+}
+
+#[tauri::command]
+pub fn set_tab_effort(state: State<'_, AppState>, session_id: String, tab_id: String, effort: Option<String>) -> CmdResult<()> {
+    state.manager().ok_or("not ready")?.set_effort(&session_id, &tab_id, effort.as_deref()).map_err(err)
+}
+
+#[tauri::command]
+pub fn mark_tab_read(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
+    state.manager().ok_or("not ready")?.mark_read(&session_id, &tab_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn tab_status(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<TabStatus> {
+    Ok(state.manager().ok_or("not ready")?.status_of(&session_id, &tab_id))
+}
+
+#[tauri::command]
+pub fn list_models() -> Vec<crate::models::Model> {
+    crate::models::catalog()
+}
+
+#[tauri::command]
+pub fn frontend_log(level: String, message: String) {
+    if level == "error" {
+        log::error!("[webview] {message}");
+    } else {
+        log::info!("[webview] {message}");
+    }
+}

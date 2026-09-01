@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { api } from "@/lib/api";
 import type { HarnessInfo, Project, SessionEntry, TabEntry } from "@/types/session";
 
@@ -100,6 +101,10 @@ export function selectSession(id: string | null) {
   set({ selectedSessionId: id });
 }
 
+export function debug(message: string) {
+  void invoke("frontend_log", { level: "info", message }).catch(() => {});
+}
+
 export function setShowArchived(v: boolean) {
   set({ showArchived: v });
 }
@@ -159,3 +164,6 @@ export function sortSessions(sessions: SessionEntry[]): SessionEntry[] {
     return b.modified.localeCompare(a.modified);
   });
 }
+
+// Module state lives here; a hot update would lose it, so edits reload the page.
+if (import.meta.hot) import.meta.hot.accept(() => window.location.reload());

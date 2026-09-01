@@ -6,9 +6,13 @@ import { SettingsDialog } from "@/components/settings/SettingsDialog";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { NewSessionView } from "@/components/session/NewSessionView";
 import { SessionView } from "@/components/session/SessionView";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { bootSessions, selectSession, useSessionStore } from "@/lib/sessions";
+import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
+import { agent } from "@/lib/api";
+import { loadModels } from "@/lib/models";
 
 export const TITLEBAR_INSET = 78; // traffic-light clearance, px
 
@@ -23,7 +27,17 @@ export function AppShell() {
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
+    void subscribeAgentEvents();
     void bootSessions();
+    void loadModels();
+  }, []);
+
+  // The first prompt of a new session is sent right after the worktree exists.
+  const onCreated = useCallback((sessionId: string, tabId: string, text: string) => {
+    void agent
+      .send(sessionId, tabId, text)
+      .then((out) => out.events.forEach(applyEvent))
+      .catch((e) => console.error("first send failed", e));
   }, []);
 
   const toggleSidebar = useCallback(() => setPrefs({ sidebarOpen: !prefs.sidebarOpen }), [prefs.sidebarOpen]);
@@ -45,7 +59,9 @@ export function AppShell() {
 
       <main className="flex h-full min-w-0 flex-1 flex-col">
         {selected ? (
-          <SessionView key={selected.id} session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+          <ErrorBoundary key={selected.id} label="the session">
+            <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+          </ErrorBoundary>
         ) : (
           <>
             <header
@@ -68,7 +84,7 @@ export function AppShell() {
               </WithTooltip>
             </header>
             <section className="flex min-h-0 flex-1 flex-col">
-              <NewSessionView />
+              <NewSessionView onCreated={onCreated} />
             </section>
           </>
         )}

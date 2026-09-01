@@ -141,3 +141,6 @@ export function useTheme(): ThemeState {
     () => state,
   );
 }
+
+// Module state lives here; a hot update would lose it, so edits reload the page.
+if (import.meta.hot) import.meta.hot.accept(() => window.location.reload());

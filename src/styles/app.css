@@ -189,3 +189,108 @@
   color: transparent;
   animation: shimmer 1.8s linear infinite;
 }
+
+/* ---------- Transcript prose ---------- */
+.prose-chat {
+  font-size: 14px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.prose-chat > :first-child {
+  margin-top: 0;
+}
+.prose-chat > :last-child {
+  margin-bottom: 0;
+}
+.prose-chat p,
+.prose-chat ul,
+.prose-chat ol,
+.prose-chat blockquote,
+.prose-chat table {
+  margin: 0.6em 0;
+}
+.prose-chat h1,
+.prose-chat h2,
+.prose-chat h3,
+.prose-chat h4 {
+  font-size: 1em;
+  font-weight: 600;
+  margin: 1.1em 0 0.4em;
+}
+.prose-chat ul {
+  list-style: disc;
+  padding-left: 1.4em;
+}
+.prose-chat ol {
+  list-style: decimal;
+  padding-left: 1.4em;
+}
+.prose-chat li {
+  margin: 0.2em 0;
+}
+.prose-chat li > p {
+  margin: 0;
+}
+.prose-chat a {
+  color: var(--accent-mention);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, var(--accent-mention) 40%, transparent);
+  text-underline-offset: 2px;
+}
+.prose-chat code:not(pre code) {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: var(--code-bg);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+.prose-chat pre {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.prose-chat blockquote {
+  border-left: 2px solid var(--hairline-strong);
+  padding-left: 0.9em;
+  color: var(--ink-muted);
+}
+.prose-chat hr {
+  border: 0;
+  border-top: 1px solid var(--hairline);
+  margin: 1em 0;
+}
+.prose-chat table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+.prose-chat th,
+.prose-chat td {
+  border: 1px solid var(--hairline-strong);
+  padding: 0.35em 0.6em;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.prose-chat th {
+  background: var(--veil-raised);
+  font-weight: 600;
+}
+/* Streamdown chrome: keep code blocks on the app's surfaces. */
+.prose-chat [data-streamdown="code-block"],
+.prose-chat [data-streamdown="code-block-container"] {
+  background: var(--code-bg) !important;
+  border: 1px solid var(--hairline) !important;
+  border-radius: var(--radius-md) !important;
+}
+.prose-chat [data-streamdown="code-block-header"] {
+  background: transparent !important;
+  border-bottom: 1px solid var(--hairline) !important;
+  color: var(--ink-muted) !important;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.prose-chat [data-streamdown="code-block-body"] pre,
+.prose-chat [data-streamdown="code-block"] pre {
+  background: transparent !important;
+}
