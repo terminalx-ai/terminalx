@@ -9,6 +9,7 @@ import { ChangesPanel } from "@/components/changes/ChangesPanel";
 import { RepoPanel } from "@/components/changes/RepoPanel";
 import { PrPanel } from "@/components/changes/PrPanel";
 import { FileTree } from "@/components/files/FileTree";
+import { openSettle } from "@/lib/dialogs";
 import type { AgentEvent } from "@/types/events";
 import type { SessionEntry } from "@/types/session";
 
@@ -99,7 +100,14 @@ export function RightPanel({ session, events, live }: { session: SessionEntry; e
           <RepoPanel key={refreshTick} cwd={session.cwd} active={tab === "repo"} />
         </div>
         <div className={cn("h-full", tab !== "pr" && "hidden")}>
-          <PrPanel key={refreshTick} cwd={session.cwd} branch={session.branch ?? null} active={tab === "pr"} busy={live} />
+          <PrPanel
+            key={refreshTick}
+            cwd={session.cwd}
+            branch={session.branch ?? null}
+            active={tab === "pr"}
+            busy={live}
+            onSettle={session.worktreeName && !session.worktreeRemoved ? () => openSettle(session.id) : undefined}
+          />
         </div>
         <div className={cn("h-full", tab !== "files" && "hidden")}>
           <FileTree key={refreshTick} sessionId={session.id} root={session.cwd} active={tab === "files"} />

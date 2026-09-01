@@ -50,6 +50,9 @@ pub struct TabEntry {
     pub context_used: Option<u64>,
     #[serde(default)]
     pub context_max: Option<u64>,
+    /// Provider conversation this tab was forked from; consumed on first start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_from: Option<String>,
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, serde_json::Value>,
 }
@@ -228,6 +231,7 @@ mod tests {
             modified: now(),
             context_used: None,
             context_max: None,
+            fork_from: None,
             unknown: BTreeMap::new(),
         });
         assert_eq!(s.status(), TabStatus::Completed);

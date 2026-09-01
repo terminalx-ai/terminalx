@@ -132,9 +132,9 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Toggle in settings; respects reduced motion.
 
 ### C13 — Worktree lifecycle
-- [ ] Settle dialog after a session's PR merges or on request: delete worktree (with unpushed warning), keep, relocate session to project root.
-- [ ] Archive / delete session (removes log, attachments, tree best effort).
-- [ ] Fork session (copy log, lazy fork on first send).
+- [x] Settle dialog after a session's PR merges or on request: delete worktree (with unpushed warning), keep, relocate session to project root.
+- [x] Archive / delete session (confirm names what is lost; removes log, attachments, tree best effort).
+- [x] Fork session (new worktree at the branch tip, copied log, Claude conversation forked on first send).
 
 ### C14 — More harnesses
 - [ ] Generic ACP adapter (cursor-agent, and any `acp` speaker).

@@ -122,6 +122,8 @@ pub fn run() {
             commands::write_text_file,
             commands::file_mtime,
             commands::search_text,
+            commands::settle_session,
+            commands::fork_session,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

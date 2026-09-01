@@ -26,7 +26,20 @@ export function mergeReadiness(pr: PullRequest): { ok: boolean; label: string } 
   return { ok: true, label: "Ready to merge" };
 }
 
-export function PrPanel({ cwd, branch, active, busy }: { cwd: string; branch: string | null; active: boolean; busy: boolean }) {
+export function PrPanel({
+  cwd,
+  branch,
+  active,
+  busy,
+  onSettle,
+}: {
+  cwd: string;
+  branch: string | null;
+  active: boolean;
+  busy: boolean;
+  /** Offered when a PR from this branch has merged and a worktree remains. */
+  onSettle?: () => void;
+}) {
   const [available, setAvailable] = useState<boolean | null>(null);
   const [prs, setPrs] = useState<PullRequest[]>([]);
   const [status, setStatus] = useState<WorkStatus | null>(null);
@@ -96,6 +109,15 @@ export function PrPanel({ cwd, branch, active, busy }: { cwd: string; branch: st
   return (
     <div className="flex h-full min-h-0 flex-col overflow-y-auto scrollbar-thin">
       {error && <div className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
+      {onSettle && prs.some((p) => p.state === "MERGED") && !prs.some((p) => p.state === "OPEN") && (
+        <div className="mx-3 mt-2 flex items-center gap-2 rounded-md bg-merged/10 px-2 py-1.5 text-xs">
+          <GitMerge className="size-3.5 shrink-0 text-merged" />
+          <span className="flex-1 text-foreground">This branch has been merged.</span>
+          <Button size="xs" variant="outline" onClick={onSettle}>
+            Settle worktree
+          </Button>
+        </div>
+      )}
       {loading && prs.length === 0 && <div className="px-3 py-3 text-xs text-faint">Loading…</div>}
       {prs.map((pr) => {
         const ready = mergeReadiness(pr);

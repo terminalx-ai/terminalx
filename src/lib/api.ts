@@ -47,6 +47,8 @@ export const api = {
     invoke<void>("delete_session", { sessionId, removeWorktree }),
   worktreeDisposition: (sessionId: string) => invoke<WorktreeDisposition>("worktree_disposition", { sessionId }),
   removeSessionWorktree: (sessionId: string) => invoke<SessionEntry>("remove_session_worktree", { sessionId }),
+  settleSession: (sessionId: string, action: "delete" | "relocate") => invoke<SessionEntry>("settle_session", { sessionId, action }),
+  forkSession: (sessionId: string, tabId: string) => invoke<SessionEntry>("fork_session", { sessionId, tabId }),
 
   // harnesses
   listHarnesses: () => invoke<HarnessInfo[]>("list_harnesses"),

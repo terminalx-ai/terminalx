@@ -305,10 +305,11 @@ impl SessionManager {
     fn start_claude(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, session_id: &str, tab_id: &str, tab: &TabEntry, cwd: &str) -> Result<()> {
         let provider_id = tab.provider_session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let resume = tab.provider_session_id.is_some();
+        let fork_from = if resume { None } else { tab.fork_from.clone() };
         let plan = claude::spawn_plan(claude::SpawnOptions {
             provider_session_id: &provider_id,
             resume,
-            fork_from: None,
+            fork_from: fork_from.as_deref(),
             model: Some(&tab.model),
             effort: tab.effort.as_deref(),
             permission_mode: &tab.permission_mode,
@@ -319,6 +320,7 @@ impl SessionManager {
         if !resume {
             index::update_tab(session_id, tab_id, |t| {
                 t.provider_session_id = Some(provider_id.clone());
+                t.fork_from = None;
                 Ok(())
             })?;
         }

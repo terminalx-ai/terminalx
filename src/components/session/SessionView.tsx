@@ -72,6 +72,7 @@ export function SessionView({
               <span className="ml-1 flex shrink-0 items-center gap-1 rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground" title={session.cwd}>
                 <GitBranch className="size-3" />
                 {session.branch}
+                {session.worktreeRemoved && <span className="text-faint">· in project</span>}
               </span>
             )}
           </div>

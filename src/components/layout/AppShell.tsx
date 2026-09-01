@@ -15,6 +15,7 @@ import { agent } from "@/lib/api";
 import { loadModels } from "@/lib/models";
 import { startNotifications } from "@/lib/notify";
 import { Toasts } from "@/components/ui/Toasts";
+import { SettleDialog } from "@/components/session/SettleDialog";
 
 export const TITLEBAR_INSET = 78; // traffic-light clearance, px
 
@@ -59,6 +60,7 @@ export function AppShell() {
   return (
     <div className="flex h-full w-full">
       <Toasts />
+      <SettleDialog />
       {sidebarOpen && <Sidebar onToggle={toggleSidebar} onOpenSettings={openSettings} onNewSession={newSession} />}
 
       <main className="flex h-full min-w-0 flex-1 flex-col">

@@ -154,6 +154,19 @@ export async function deleteSession(id: string, removeWorktree: boolean) {
   });
 }
 
+export async function settleSession(id: string, action: "delete" | "relocate") {
+  const s = await api.settleSession(id, action);
+  upsertSession(s);
+  return s;
+}
+
+export async function forkSession(id: string, tabId: string) {
+  const s = await api.forkSession(id, tabId);
+  upsertSession(s);
+  set({ selectedSessionId: s.id });
+  return s;
+}
+
 export async function addTab(sessionId: string, harness: string, model: string, effort: string | null, permissionMode: string) {
   const tab = await api.addTab(sessionId, { harness, model, effort, permissionMode });
   const s = state.sessions.find((x) => x.id === sessionId);

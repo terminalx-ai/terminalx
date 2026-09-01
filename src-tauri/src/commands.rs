@@ -94,6 +94,7 @@ fn new_tab_entry(t: &NewTab) -> TabEntry {
         modified: index::now(),
         context_used: None,
         context_max: None,
+        fork_from: None,
         unknown: BTreeMap::new(),
     }
 }
@@ -312,6 +313,143 @@ pub async fn remove_session_worktree(app: AppHandle, session_id: String) -> CmdR
     })
     .await
     .map_err(err)?
+}
+
+/// Settle a worktree session once its work has landed: `delete` removes the
+/// worktree and branch, `relocate` leaves them on disk; both move the session
+/// to the project root, stopping any agent first.
+#[tauri::command]
+pub async fn settle_session(app: AppHandle, session_id: String, action: String) -> CmdResult<SessionEntry> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<crate::AppState>();
+        let s = index::get(&session_id).map_err(err)?;
+        let name = s.worktree_name.clone().ok_or("session has no worktree")?;
+        for t in &s.tabs {
+            state.host.kill(&format!("{}/{}", s.id, t.id));
+        }
+        let deleted = match action.as_str() {
+            "delete" => {
+                git::remove_worktree(Path::new(&s.project_path), &name).map_err(err)?;
+                true
+            }
+            "relocate" => false,
+            other => return Err(format!("unknown settle action {other}")),
+        };
+        let branch = git::current_branch(Path::new(&s.project_path));
+        let out = index::update_session(&session_id, |s| {
+            s.cwd = s.project_path.clone();
+            s.worktree_name = None;
+            s.worktree_removed = deleted;
+            s.branch = branch.clone();
+            s.base_ref = None;
+            for t in &mut s.tabs {
+                t.status = TabStatus::Idle;
+            }
+            Ok(s.clone())
+        })
+        .map_err(err)?;
+        let _ = app.emit("session_updated", &out);
+        Ok(out)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Fork a tab into a new session: a fresh worktree at the source branch's
+/// tip, the tab's log copied over so the history reads the same, and the
+/// provider conversation forked on the first send.
+#[tauri::command]
+pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) -> CmdResult<SessionEntry> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let src = index::get(&session_id).map_err(err)?;
+        let tab = src.tab(&tab_id).cloned().ok_or("no such tab")?;
+        let project_path = Path::new(&src.project_path);
+        let id = uuid::Uuid::now_v7().to_string();
+        let now = index::now();
+        let mut new_tab = tab.clone();
+        new_tab.id = uuid::Uuid::now_v7().to_string();
+        new_tab.status = TabStatus::Idle;
+        new_tab.created = now.clone();
+        new_tab.modified = now.clone();
+        // Claude can fork a conversation; Codex starts a new thread over the copied log.
+        new_tab.fork_from = if tab.harness == "claude" { tab.provider_session_id.clone() } else { None };
+        new_tab.provider_session_id = None;
+        let mut entry = SessionEntry {
+            id: id.clone(),
+            project_path: src.project_path.clone(),
+            cwd: src.cwd.clone(),
+            worktree_name: None,
+            branch: src.branch.clone(),
+            base_ref: None,
+            worktree_removed: false,
+            title: format!("{} (fork)", src.title),
+            created: now.clone(),
+            modified: now,
+            archived: false,
+            pinned: false,
+            tabs: vec![new_tab.clone()],
+            active_tab: Some(new_tab.id.clone()),
+            unknown: BTreeMap::new(),
+        };
+        if src.worktree_name.is_some() && !src.worktree_removed {
+            let taken = index::load().map(|s| index::claimed_worktree_names(&s)).unwrap_or_default();
+            let taken = git::taken_worktree_names(project_path, &taken);
+            let name = names::unclaimed(&taken);
+            let wt = git::create_worktree(project_path, &name, src.branch.as_deref()).map_err(err)?;
+            entry.cwd = wt.path;
+            entry.worktree_name = Some(wt.name);
+            entry.branch = Some(wt.branch);
+            entry.base_ref = Some(wt.base_tree);
+        }
+        // Copy the log, re-stamping envelopes so the new tab owns them.
+        if let Ok(dir) = store::sessions_dir() {
+            let from = dir.join(&src.id).join(format!("{}.jsonl", tab.id));
+            if let Ok(text) = std::fs::read_to_string(&from) {
+                let to_dir = dir.join(&id);
+                let _ = std::fs::create_dir_all(&to_dir);
+                let mut out = String::with_capacity(text.len());
+                for line in text.lines() {
+                    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line) {
+                        v["sessionId"] = serde_json::Value::String(id.clone());
+                        v["tabId"] = serde_json::Value::String(new_tab.id.clone());
+                        out.push_str(&v.to_string());
+                        out.push('\n');
+                    }
+                }
+                let _ = std::fs::write(to_dir.join(format!("{}.jsonl", new_tab.id)), out);
+            }
+        }
+        if let Ok(root) = store::root() {
+            let from = root.join("attachments").join(&src.id);
+            if from.is_dir() {
+                let to = root.join("attachments").join(&id);
+                let _ = copy_dir(&from, &to);
+            }
+        }
+        index::update(|sessions| {
+            sessions.push(entry.clone());
+            Ok(())
+        })
+        .map_err(err)?;
+        let _ = app.emit("session_created", &entry);
+        Ok(entry)
+    })
+    .await
+    .map_err(err)?
+}
+
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let dest = to.join(e.file_name());
+        if e.file_type()?.is_dir() {
+            copy_dir(&e.path(), &dest)?;
+        } else {
+            std::fs::copy(e.path(), dest)?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]

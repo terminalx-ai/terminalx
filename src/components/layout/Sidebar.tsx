@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
-import { Archive, ChevronDown, FolderPlus, PanelLeft, Pin, Plus, Search, Settings, X } from "lucide-react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { Archive, ChevronDown, FolderPlus, GitFork, PanelLeft, Pin, Plus, Search, Settings, Trash2, X } from "lucide-react";
+import { ask, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { AgentMark } from "@/components/AgentMark";
@@ -10,17 +10,39 @@ import {
   addProject,
   archiveSession,
   deleteSession,
+  forkSession,
   pinSession,
   selectSession,
   setShowArchived,
   sortSessions,
   useSessionStore,
 } from "@/lib/sessions";
-import { errorMessage } from "@/lib/api";
+import { api, errorMessage } from "@/lib/api";
+import { openSettle } from "@/lib/dialogs";
 import { sessionStatus, type SessionEntry } from "@/types/session";
 import { TITLEBAR_INSET } from "./AppShell";
 import { relativeTime } from "@/lib/time";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
+
+/** Deleting asks first, naming what would be lost with the worktree. */
+async function confirmDelete(session: SessionEntry) {
+  let detail = "Its transcript and attachments are removed.";
+  if (session.worktreeName && !session.worktreeRemoved) {
+    try {
+      const d = await api.worktreeDisposition(session.id);
+      const parts = [];
+      if (d.unpushed > 0) parts.push(`${d.unpushed} unpushed commit${d.unpushed === 1 ? "" : "s"}`);
+      if (d.uncommitted > 0) parts.push(`${d.uncommitted} uncommitted file${d.uncommitted === 1 ? "" : "s"}`);
+      detail = parts.length
+        ? `Its worktree has ${parts.join(" and ")}; deleting loses them along with the transcript.`
+        : "Its worktree, transcript and attachments are removed.";
+    } catch {
+      /* ask anyway */
+    }
+  }
+  const yes = await ask(`Delete "${session.title}"? ${detail}`, { title: "Delete session", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" }).catch(() => false);
+  if (yes) await deleteSession(session.id, true);
+}
 
 export function Sidebar({
   onToggle,
@@ -226,13 +248,13 @@ function SessionRow({ session, selected }: { session: SessionEntry; selected: bo
             {session.tabs.length > 1 ? ` · ${session.tabs.length} tabs` : ""}
           </div>
         </div>
-        <span className="text-[11px] text-faint tabular-nums group-hover:hidden">{relativeTime(session.modified)}</span>
+        <span className="text-[11px] text-faint tabular-nums group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0">{relativeTime(session.modified)}</span>
         <DropdownMenuTrigger asChild>
           <Button
             variant="ghost"
             size="icon-xs"
             aria-label="Session menu"
-            className="hidden group-hover:inline-flex"
+            className="absolute right-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
             onClick={(e) => e.stopPropagation()}
           >
             <ChevronDown />
@@ -246,8 +268,17 @@ function SessionRow({ session, selected }: { session: SessionEntry; selected: bo
         <DropdownMenuItem onSelect={() => archiveSession(session.id, !session.archived)}>
           <Archive /> {session.archived ? "Unarchive" : "Archive"}
         </DropdownMenuItem>
-        <DropdownMenuItem destructive onSelect={() => deleteSession(session.id, true)}>
-          <X /> Delete session and worktree
+        <DropdownMenuItem onSelect={() => void forkSession(session.id, session.activeTab ?? session.tabs[0]?.id ?? "")} disabled={!session.tabs.length}>
+          <GitFork /> Fork session
+        </DropdownMenuItem>
+        {session.worktreeName && !session.worktreeRemoved && (
+          <DropdownMenuItem onSelect={() => openSettle(session.id)}>
+            <X /> Settle worktree…
+          </DropdownMenuItem>
+        )}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem destructive onSelect={() => void confirmDelete(session)}>
+          <Trash2 /> Delete session…
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
