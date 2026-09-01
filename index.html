@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/raccoon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Raccoon</title>
+    <script>
+      // Stamp theme + mode before first paint so the window never flashes.
+      (function () {
+        try {
+          var t = localStorage.getItem("raccoon.theme") || "den";
+          var m = localStorage.getItem("raccoon.mode") || "system";
+          var dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+          var resolved = m === "system" ? (dark ? "dark" : "light") : m;
+          var root = document.documentElement;
+          root.setAttribute("data-theme", t);
+          root.setAttribute("data-mode", resolved);
+          if (navigator.platform.indexOf("Mac") === 0) root.setAttribute("data-glass", "");
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

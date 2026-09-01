@@ -1,0 +1,63 @@
+[package]
+name = "raccoon"
+version = "0.1.0"
+description = "Raccoon — a desktop workbench for coding agents"
+authors = ["Paresh Dudhat"]
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "raccoon_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset", "macos-private-api", "tray-icon"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-process = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-window-state = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+anyhow = "1"
+dirs = "6"
+portable-pty = "0.9"
+notify = "8"
+notify-debouncer-mini = "0.6"
+base64 = "0.22"
+parking_lot = "0.12"
+log = "0.4"
+env_logger = "0.11"
+which = "7"
+regex = "1"
+ignore = "0.4"
+nucleo-matcher = "0.3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSWindow", "NSResponder", "NSView", "NSColor"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry"] }
+
+[profile.dev]
+incremental = true
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

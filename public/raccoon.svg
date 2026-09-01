@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2b2d35"/>
+      <stop offset="1" stop-color="#15161b"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="256" height="256" rx="58" fill="url(#bg)"/>
+  <!-- ears -->
+  <path d="M60 96 L48 44 L100 74 Z" fill="#8d92a1"/>
+  <path d="M196 96 L208 44 L156 74 Z" fill="#8d92a1"/>
+  <path d="M66 90 L60 58 L92 78 Z" fill="#3a3d48"/>
+  <path d="M190 90 L196 58 L164 78 Z" fill="#3a3d48"/>
+  <!-- head -->
+  <ellipse cx="128" cy="140" rx="86" ry="74" fill="#a7abb8"/>
+  <!-- mask -->
+  <path d="M46 132 C60 104 96 104 112 124 C120 134 136 134 144 124 C160 104 196 104 210 132 C206 158 184 172 160 166 C146 162 136 170 128 170 C120 170 110 162 96 166 C72 172 50 158 46 132 Z" fill="#2a2c34"/>
+  <!-- eyes -->
+  <circle cx="98" cy="136" r="9" fill="#f5f6f8"/>
+  <circle cx="158" cy="136" r="9" fill="#f5f6f8"/>
+  <circle cx="100" cy="137" r="4.5" fill="#15161b"/>
+  <circle cx="160" cy="137" r="4.5" fill="#15161b"/>
+  <!-- snout -->
+  <ellipse cx="128" cy="176" rx="30" ry="22" fill="#e9eaee"/>
+  <ellipse cx="128" cy="170" rx="11" ry="8" fill="#15161b"/>
+  <!-- accent stripe -->
+  <path d="M96 208 Q128 226 160 208" stroke="#f0b35a" stroke-width="6" fill="none" stroke-linecap="round"/>
+</svg>
