@@ -4,6 +4,7 @@ mod commands;
 mod events;
 mod files;
 mod git;
+mod github;
 mod harness;
 mod models;
 mod names;
@@ -97,6 +98,17 @@ pub fn run() {
             commands::list_slash_commands,
             commands::read_image_file,
             commands::invalidate_file_index,
+            commands::git_commit,
+            commands::git_push,
+            commands::git_pull,
+            commands::git_discard,
+            commands::git_checkout,
+            commands::working_changes,
+            commands::pr_list,
+            commands::pr_create,
+            commands::pr_merge,
+            commands::pr_ready,
+            commands::gh_available,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

@@ -1,4 +1,5 @@
 import { Component, type ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 /**
  * A render crash inside one pane must not blank the window. The boundary
@@ -13,6 +14,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode; label?: stri
 
   componentDidCatch(error: Error, info: { componentStack?: string }) {
     console.error(`[${this.props.label ?? "pane"}] render failed`, error, info.componentStack);
+    void invoke("frontend_log", { level: "error", message: `render failed in ${this.props.label}: ${error.message} ${String(error.stack ?? "").split("\n").slice(0, 3).join(" | ")}` }).catch(() => {});
   }
 
   render() {

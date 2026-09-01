@@ -229,7 +229,13 @@ export function Composer({
     })();
     return () => {
       disposed = true;
-      unlisten?.();
+      const off = unlisten;
+      unlisten = null;
+      try {
+        off?.();
+      } catch {
+        /* already gone */
+      }
     };
   }, [draft, onDraftChange]);
 

@@ -527,3 +527,72 @@ pub async fn read_image_file(path: String) -> CmdResult<Option<ImageFile>> {
     .await
     .map_err(err)?
 }
+
+// ------------------------------------------------------------------ git actions & PRs
+
+#[tauri::command]
+pub async fn git_commit(cwd: String, message: String, paths: Option<Vec<String>>) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || git::commit_all(Path::new(&cwd), &message, paths.as_deref()).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_push(cwd: String) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || git::push(Path::new(&cwd)).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_pull(cwd: String) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || git::pull(Path::new(&cwd)).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_discard(cwd: String, path: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || git::discard_file(Path::new(&cwd), &path).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_checkout(cwd: String, name: String, create: bool) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || git::checkout_branch(Path::new(&cwd), &name, create).map_err(err)).await.map_err(err)?
+}
+
+/// Uncommitted changes: HEAD's tree against a snapshot of the checkout. The
+/// snapshot (not `git diff <tree>`) is what makes untracked files count.
+#[tauri::command]
+pub async fn working_changes(cwd: String) -> CmdResult<(String, Vec<git::ChangedFile>)> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = Path::new(&cwd);
+        let head = git::head_tree(p).map_err(err)?;
+        let snapshot = git::snapshot_tree(p).map_err(err)?;
+        let files = if head == snapshot { Vec::new() } else { git::changes_between(p, &head, Some(&snapshot)).map_err(err)? };
+        Ok((head, files))
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_list(cwd: String, branch: String) -> CmdResult<Vec<crate::github::PullRequest>> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::prs_for_branch(Path::new(&cwd), &branch).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_create(cwd: String, title: String, body: String, base: Option<String>, draft: bool) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::create_pr(Path::new(&cwd), &title, &body, base.as_deref(), draft).map_err(err))
+        .await
+        .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_merge(cwd: String, number: u64, method: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::merge_pr(Path::new(&cwd), number, &method).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_ready(cwd: String, number: u64) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::mark_ready(Path::new(&cwd), number).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub fn gh_available() -> bool {
+    crate::github::available()
+}

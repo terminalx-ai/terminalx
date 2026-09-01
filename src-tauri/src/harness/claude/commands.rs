@@ -31,8 +31,10 @@ pub struct SlashCommand {
 /// retitle a session behind the app's back.
 const WITHHELD: &[&str] = &["clear", "exit", "quit", "model", "rename", "fast", "resume", "login", "logout"];
 
-fn cache() -> &'static Mutex<HashMap<String, (Instant, Vec<SlashCommand>)>> {
-    static C: OnceLock<Mutex<HashMap<String, (Instant, Vec<SlashCommand>)>>> = OnceLock::new();
+type CommandCache = Mutex<HashMap<String, (Instant, Vec<SlashCommand>)>>;
+
+fn cache() -> &'static CommandCache {
+    static C: OnceLock<CommandCache> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

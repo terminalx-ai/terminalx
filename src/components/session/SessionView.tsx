@@ -9,6 +9,16 @@ import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
 import { TabView } from "./TabView";
 import { TabStrip } from "./TabStrip";
+import { RightPanel } from "@/components/layout/RightPanel";
+import { useTabLog } from "@/lib/agentEvents";
+import type { TabEntry } from "@/types/session";
+
+/** The right panel reads the active tab's log for the changes range. */
+function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
+  const log = useTabLog(session.id, tab.id);
+  const live = tab.status === "in_progress" || tab.status === "waiting";
+  return <RightPanel session={session} events={log.events} live={live} />;
+}
 
 /**
  * One session: a header naming the place, a tab strip (one tab per agent
@@ -84,14 +94,7 @@ export function SessionView({
         </section>
       </div>
 
-      {prefs.panelOpen && (
-        <aside className="flex h-full w-(--panel-w) shrink-0 flex-col border-l border-hairline">
-          <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-1 px-2">
-            <span className="px-1 text-xs font-medium text-muted-foreground">Changes</span>
-          </div>
-          <div className="flex-1 p-4 text-xs text-muted-foreground">Nothing to show yet.</div>
-        </aside>
-      )}
+      {prefs.panelOpen && activeTab && <PanelHost session={session} tab={activeTab} />}
     </div>
   );
 }

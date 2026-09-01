@@ -142,3 +142,45 @@ export const files = {
   readImage: (path: string) => invoke<{ mediaType: string; data: string; name: string } | null>("read_image_file", { path }),
   slashCommands: (cwd: string, harness: string) => invoke<SlashCommand[]>("list_slash_commands", { cwd, harness }),
 };
+
+// ---- git actions & pull requests
+export interface PrCheck {
+  name: string;
+  state: string;
+  url?: string | null;
+}
+
+export interface PullRequest {
+  number: number;
+  title: string;
+  url: string;
+  state: "OPEN" | "MERGED" | "CLOSED";
+  isDraft: boolean;
+  base: string;
+  head: string;
+  additions: number;
+  deletions: number;
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  reviewDecision: string | null;
+  checks: PrCheck[];
+  body: string;
+  author: string;
+}
+
+export const git = {
+  commit: (cwd: string, message: string, paths?: string[]) => invoke<string>("git_commit", { cwd, message, paths: paths ?? null }),
+  push: (cwd: string) => invoke<string>("git_push", { cwd }),
+  pull: (cwd: string) => invoke<string>("git_pull", { cwd }),
+  discard: (cwd: string, path: string) => invoke<void>("git_discard", { cwd, path }),
+  checkout: (cwd: string, name: string, create: boolean) => invoke<void>("git_checkout", { cwd, name, create }),
+  workingChanges: (cwd: string) => invoke<[string, ChangedFile[]]>("working_changes", { cwd }),
+};
+
+export const gh = {
+  available: () => invoke<boolean>("gh_available"),
+  list: (cwd: string, branch: string) => invoke<PullRequest[]>("pr_list", { cwd, branch }),
+  create: (cwd: string, title: string, body: string, base: string | null, draft: boolean) =>
+    invoke<string>("pr_create", { cwd, title, body, base, draft }),
+  merge: (cwd: string, number: number, method: "merge" | "squash" | "rebase") => invoke<void>("pr_merge", { cwd, number, method }),
+  ready: (cwd: string, number: number) => invoke<void>("pr_ready", { cwd, number }),
+};

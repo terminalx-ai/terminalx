@@ -95,7 +95,7 @@ export function Segmented<T extends string>({
           disabled={disabled}
           onClick={() => onChange(o.value)}
           className={cn(
-            "relative z-10 rounded-[5px] px-2.5 font-medium transition-colors",
+            "relative z-10 whitespace-nowrap rounded-[5px] px-2.5 font-medium transition-colors",
             o.value === value ? "text-foreground" : "text-muted-foreground hover:text-foreground",
           )}
         >

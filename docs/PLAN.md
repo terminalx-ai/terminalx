@@ -108,11 +108,11 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Queue while busy, send-as-steer where supported, Stop.
 - [x] Context ring.
 
-### C8 — Changes panel and git actions
-- [ ] Per-turn tree snapshots; changes list with +/-; diff viewer (unified/split).
-- [ ] Repository view: uncommitted changes, history, commit + push.
-- [ ] Handoff row (Commit / Create PR / Run server) as prompts.
-- [ ] PR panel via `gh` (status, checks, merge).
+### C8 — Changes panel and git actions ✅
+- [x] Per-turn tree snapshots; changes list with +/-; diff viewer (unified/split).
+- [x] Repository view: uncommitted changes, history, commit + push.
+- [ ] Handoff row (Commit / Create PR / Run server) as prompts (later, with the terminal).
+- [x] PR panel via `gh` (status, checks, merge, create, mark ready).
 
 ### C9 — Terminal
 - [ ] PTY with coalesced output, xterm with fit + webgl, theme sync, OSC colour queries.
