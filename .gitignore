@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# per-project worktrees created by Raccoon itself
+/.raccoon/
