@@ -4,6 +4,10 @@
 //! Status follows the turn alone: send → in_progress, `turn_completed` →
 //! completed (meaning finished and unread), child exit → idle. A pending
 //! permission or question marks the tab waiting until it is answered.
+//!
+//! Two engines: Claude Code is a pipe (parse → map per line); Codex is a peer
+//! (a state machine answering each line with actions). The manager owns the
+//! parts they share — the child, the seq counter, the log, the queue.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -16,9 +20,10 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 
 use crate::events::*;
-use crate::harness::claude;
+use crate::harness::codex::{self, Action};
 use crate::harness::host::{Host, LiveChild, Sink, SpawnSpec};
-use crate::store::index::{self, TabStatus};
+use crate::harness::{claude, HarnessId};
+use crate::store::index::{self, TabEntry, TabStatus};
 use crate::{git, store};
 
 pub struct PendingAsk {
@@ -37,6 +42,12 @@ pub struct QueuedMessage {
     pub images: Vec<(String, String)>,
 }
 
+pub enum Engine {
+    Claude(claude::mapper::Mapper),
+    Codex(codex::Codex),
+    None,
+}
+
 pub struct TabRuntime {
     pub session_id: String,
     pub tab_id: String,
@@ -45,12 +56,11 @@ pub struct TabRuntime {
     pub status: TabStatus,
     pub child: Option<Arc<LiveChild>>,
     pub child_pid: Option<u32>,
-    pub mapper: claude::mapper::Mapper,
+    pub engine: Engine,
     pub pending: HashMap<String, PendingAsk>,
     pub queued: Vec<QueuedMessage>,
     pub turn_open: bool,
     pub turn_started_at: Option<Instant>,
-    pub open_tool_calls: usize,
     pub last_activity: Instant,
     pub log_path: std::path::PathBuf,
 }
@@ -92,6 +102,12 @@ pub struct ImageInput {
     pub name: Option<String>,
 }
 
+/// Archived image refs for the log, and (media type, base64) pairs for the wire.
+type ArchivedImages = (Vec<ImageRef>, Vec<(String, String)>);
+/// What one Claude line mapped to: payloads, the subagent stamp, and the
+/// suggestion payloads plus ask input the mapper saw last.
+type ClaudeLine = (Vec<Payload>, Option<SubagentRef>, Vec<Value>, Value);
+
 fn key_of(session_id: &str, tab_id: &str) -> String {
     format!("{session_id}/{tab_id}")
 }
@@ -118,12 +134,11 @@ impl SessionManager {
             status: TabStatus::Idle,
             child: None,
             child_pid: None,
-            mapper: claude::mapper::Mapper::new(),
+            engine: Engine::None,
             pending: HashMap::new(),
             queued: Vec::new(),
             turn_open: false,
             turn_started_at: None,
-            open_tool_calls: 0,
             last_activity: Instant::now(),
             log_path,
         }));
@@ -200,33 +215,16 @@ impl SessionManager {
     }
 
     pub fn status_of(&self, session_id: &str, tab_id: &str) -> TabStatus {
-        self.tabs
-            .lock()
-            .unwrap()
-            .get(&key_of(session_id, tab_id))
-            .map(|r| r.lock().unwrap().status)
-            .unwrap_or(TabStatus::Idle)
+        self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).map(|r| r.lock().unwrap().status).unwrap_or(TabStatus::Idle)
     }
 
     pub fn queued(&self, session_id: &str, tab_id: &str) -> Vec<QueuedMessage> {
-        self.tabs
-            .lock()
-            .unwrap()
-            .get(&key_of(session_id, tab_id))
-            .map(|r| r.lock().unwrap().queued.clone())
-            .unwrap_or_default()
+        self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).map(|r| r.lock().unwrap().queued.clone()).unwrap_or_default()
     }
 
-    /// Send a prompt. A tab mid-turn queues it for the next boundary.
-    pub fn send(&self, session_id: &str, tab_id: &str, text: String, images: Vec<ImageInput>) -> Result<SendOutcome> {
-        let rt_arc = self.runtime(session_id, tab_id)?;
-        let entry = index::get(session_id)?;
-        let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
-        let mut rt = rt_arc.lock().unwrap();
-
-        // Archive images beside the log so the transcript can draw them later.
+    fn archive_images(session_id: &str, images: &[ImageInput]) -> Result<ArchivedImages> {
         let mut refs = Vec::new();
-        let mut wire_images = Vec::new();
+        let mut wire = Vec::new();
         for (i, img) in images.iter().enumerate() {
             let ext = match img.media_type.as_str() {
                 "image/jpeg" => "jpg",
@@ -235,14 +233,36 @@ impl SessionManager {
                 _ => "png",
             };
             let dir = store::attachments_dir(session_id)?;
-            let name = format!("{}-{i}.{ext}", uuid::Uuid::now_v7());
-            let path = dir.join(&name);
-            use base64::Engine;
+            let path = dir.join(format!("{}-{i}.{ext}", uuid::Uuid::now_v7()));
+            use base64::Engine as _;
             let bytes = base64::engine::general_purpose::STANDARD.decode(&img.data).context("bad image base64")?;
             std::fs::write(&path, bytes)?;
             refs.push(ImageRef { url: path.to_string_lossy().into_owned(), media_type: Some(img.media_type.clone()), name: img.name.clone() });
-            wire_images.push((img.media_type.clone(), img.data.clone()));
+            wire.push((img.media_type.clone(), img.data.clone()));
         }
+        Ok((refs, wire))
+    }
+
+    fn spawn_child(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, program: &Path, args: &[String], cwd: &str) -> Result<()> {
+        let sink = Arc::new(TabSink { manager: self.clone(), rt: rt_arc.clone() });
+        let env = vec![("RACCOON_SESSION_ID".to_string(), rt.session_id.clone()), ("RACCOON_TAB_ID".to_string(), rt.tab_id.clone())];
+        let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env }, sink)?;
+        rt.child_pid = Some(child.pid);
+        rt.child = Some(child);
+        Ok(())
+    }
+
+    fn write(&self, rt: &TabRuntime, line: &str) -> Result<()> {
+        rt.child.as_ref().context("the agent is not running")?.write_line(line)
+    }
+
+    /// Send a prompt. A tab mid-turn queues it for the next boundary.
+    pub fn send(&self, session_id: &str, tab_id: &str, text: String, images: Vec<ImageInput>) -> Result<SendOutcome> {
+        let rt_arc = self.runtime(session_id, tab_id)?;
+        let entry = index::get(session_id)?;
+        let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
+        let mut rt = rt_arc.lock().unwrap();
+        let (refs, wire_images) = Self::archive_images(session_id, &images)?;
 
         if rt.turn_open && rt.child.is_some() {
             let q = QueuedMessage { id: uuid::Uuid::now_v7().to_string(), text: text.clone(), images: wire_images };
@@ -252,59 +272,105 @@ impl SessionManager {
         }
 
         if rt.child.is_none() {
-            let provider_id = tab.provider_session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            let resume = tab.provider_session_id.is_some();
-            match tab.harness.as_str() {
-                "claude" => {
-                    let plan = claude::spawn_plan(claude::SpawnOptions {
-                        provider_session_id: &provider_id,
-                        resume,
-                        fork_from: None,
-                        model: Some(&tab.model),
-                        effort: tab.effort.as_deref(),
-                        permission_mode: &tab.permission_mode,
-                    })
-                    .ok_or_else(|| anyhow!("Claude Code is not installed. Install it and log in, then try again."))?;
-                    let sink = Arc::new(TabSink { manager: self.clone(), rt: rt_arc.clone() });
-                    let env = vec![("RACCOON_SESSION_ID".to_string(), session_id.to_string()), ("RACCOON_TAB_ID".to_string(), tab_id.to_string())];
-                    let child = self
-                        .host
-                        .spawn(&rt.key(), SpawnSpec { program: &plan.program, args: &plan.args, cwd: Path::new(&entry.cwd), env: &env }, sink)
-                        .context("start Claude Code")?;
-                    rt.child_pid = Some(child.pid);
-                    rt.child = Some(child);
-                }
-                other => bail!("The {other} agent is not wired up yet."),
-            }
-            if !resume {
-                index::update_tab(session_id, tab_id, |t| {
-                    t.provider_session_id = Some(provider_id.clone());
-                    Ok(())
-                })?;
+            match HarnessId::parse(&tab.harness) {
+                HarnessId::Claude => self.start_claude(&mut rt, &rt_arc, session_id, tab_id, &tab, &entry.cwd)?,
+                HarnessId::Codex => self.start_codex(&mut rt, &rt_arc, &tab, &entry.cwd)?,
+                HarnessId::Other(name) => bail!("The {name} agent is not wired up yet."),
             }
         }
 
         let baseline = git::snapshot_tree(Path::new(&entry.cwd)).ok();
         let events = vec![self.publish(&mut rt, Payload::UserMessage { text: text.clone(), images: refs, baseline, queued: false, cwd: Some(entry.cwd.clone()) }, None)];
 
-        let provider_id = index::get(session_id).ok().and_then(|e| e.tab(tab_id).and_then(|t| t.provider_session_id.clone())).unwrap_or_default();
-        let line = claude::user_line(&provider_id, &text, &wire_images);
-        rt.child.as_ref().unwrap().write_line(&line)?;
+        match &mut rt.engine {
+            Engine::Claude(m) => {
+                let provider_id = index::get(session_id).ok().and_then(|e| e.tab(tab_id).and_then(|t| t.provider_session_id.clone())).unwrap_or_default();
+                let line = claude::user_line(&provider_id, &text, &wire_images);
+                m.begin_turn();
+                self.write(&rt, &line)?;
+            }
+            Engine::Codex(c) => {
+                let actions = if c.ready { c.prompt(text.clone(), wire_images) } else { c.start(text.clone(), wire_images) };
+                self.apply_actions(&mut rt, actions);
+            }
+            Engine::None => bail!("no engine"),
+        }
         rt.turn_open = true;
         rt.turn_started_at = Some(Instant::now());
-        rt.mapper.begin_turn();
         rt.last_activity = Instant::now();
         self.set_status(&mut rt, TabStatus::InProgress);
         Ok(SendOutcome { queued: false, events })
+    }
+
+    fn start_claude(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, session_id: &str, tab_id: &str, tab: &TabEntry, cwd: &str) -> Result<()> {
+        let provider_id = tab.provider_session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let resume = tab.provider_session_id.is_some();
+        let plan = claude::spawn_plan(claude::SpawnOptions {
+            provider_session_id: &provider_id,
+            resume,
+            fork_from: None,
+            model: Some(&tab.model),
+            effort: tab.effort.as_deref(),
+            permission_mode: &tab.permission_mode,
+        })
+        .ok_or_else(|| anyhow!("Claude Code is not installed. Install it and log in, then try again."))?;
+        rt.engine = Engine::Claude(claude::mapper::Mapper::new());
+        self.spawn_child(rt, rt_arc, &plan.program, &plan.args, cwd).context("start Claude Code")?;
+        if !resume {
+            index::update_tab(session_id, tab_id, |t| {
+                t.provider_session_id = Some(provider_id.clone());
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
+    fn start_codex(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str) -> Result<()> {
+        let plan = codex::spawn_plan().ok_or_else(|| anyhow!("Codex is not installed. Install it and log in, then try again."))?;
+        rt.engine = Engine::Codex(codex::Codex::new(cwd, tab.provider_session_id.clone(), Some(tab.model.clone()), tab.effort.clone(), &tab.permission_mode));
+        self.spawn_child(rt, rt_arc, &plan.program, &plan.args, cwd).context("start Codex")?;
+        Ok(())
+    }
+
+    fn apply_actions(&self, rt: &mut TabRuntime, actions: Vec<Action>) {
+        for a in actions {
+            match a {
+                Action::Write(line) => {
+                    if let Err(e) = self.write(rt, &line) {
+                        log::error!("[{}] write: {e:#}", rt.key());
+                    }
+                }
+                Action::Emit(p) => self.apply(rt, p, None),
+                Action::ThreadReady(id) => {
+                    let (s, t) = (rt.session_id.clone(), rt.tab_id.clone());
+                    std::thread::spawn(move || {
+                        let _ = index::update_tab(&s, &t, |tab| {
+                            tab.provider_session_id = Some(id);
+                            Ok(())
+                        });
+                    });
+                }
+            }
+        }
     }
 
     pub fn interrupt(&self, session_id: &str, tab_id: &str) -> Result<()> {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         rt.queued.clear();
-        if let Some(child) = rt.child.clone() {
-            let id = uuid::Uuid::now_v7().to_string();
-            child.write_line(&claude::interrupt_line(&id))?;
+        if rt.child.is_none() {
+            return Ok(());
+        }
+        match &mut rt.engine {
+            Engine::Claude(_) => {
+                let line = claude::interrupt_line(&uuid::Uuid::now_v7().to_string());
+                self.write(&rt, &line)?;
+            }
+            Engine::Codex(c) => {
+                let actions = c.interrupt();
+                self.apply_actions(&mut rt, actions);
+            }
+            Engine::None => {}
         }
         Ok(())
     }
@@ -331,20 +397,35 @@ impl SessionManager {
     pub fn respond_permission(&self, session_id: &str, tab_id: &str, request_id: &str, option_id: &str) -> Result<()> {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
+        if rt.child.is_none() {
+            rt.pending.remove(request_id);
+            bail!("the agent is no longer running; the request lapsed");
+        }
         let ask = rt.pending.remove(request_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
-        let child = rt.child.clone().ok_or_else(|| anyhow!("the agent is no longer running; the request lapsed"))?;
-        let (allow, label, perms) = match option_id {
-            "deny" => (false, "Denied".to_string(), Vec::new()),
-            "allow" => (true, "Allowed".to_string(), Vec::new()),
-            s if s.starts_with("suggest:") => {
-                let i: usize = s[8..].parse().unwrap_or(usize::MAX);
-                let sugg = ask.suggestions.get(i).cloned().ok_or_else(|| anyhow!("unknown option"))?;
-                (true, "Allowed always".to_string(), vec![sugg])
+        let (allow, label) = match &mut rt.engine {
+            Engine::Claude(_) => {
+                let (allow, label, perms) = match option_id {
+                    "deny" => (false, "Denied".to_string(), Vec::new()),
+                    "allow" => (true, "Allowed".to_string(), Vec::new()),
+                    s if s.starts_with("suggest:") => {
+                        let i: usize = s[8..].parse().unwrap_or(usize::MAX);
+                        let sugg = ask.suggestions.get(i).cloned().ok_or_else(|| anyhow!("unknown option"))?;
+                        (true, "Allowed always".to_string(), vec![sugg])
+                    }
+                    _ => bail!("unknown option"),
+                };
+                let line = claude::permission_response(request_id, allow, Some(ask.input.clone()), perms, None);
+                self.write(&rt, &line)?;
+                (allow, label)
             }
-            _ => bail!("unknown option"),
+            Engine::Codex(c) => {
+                let actions = c.answer(request_id, option_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
+                let allow = !option_id.contains("cancel");
+                self.apply_actions(&mut rt, actions);
+                (allow, if allow { "Allowed".to_string() } else { "Denied".to_string() })
+            }
+            Engine::None => bail!("no engine"),
         };
-        let line = claude::permission_response(request_id, allow, Some(ask.input.clone()), perms, None);
-        child.write_line(&line)?;
         self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: allow, label, automatic: false }, None);
         if rt.pending.is_empty() {
             self.set_status(&mut rt, TabStatus::InProgress);
@@ -357,11 +438,10 @@ impl SessionManager {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         let ask = rt.pending.remove(request_id).ok_or_else(|| anyhow!("that question is no longer open"))?;
-        let child = rt.child.clone().ok_or_else(|| anyhow!("the agent is no longer running"))?;
         let mut input = ask.input.clone();
         input["answers"] = serde_json::to_value(&answers)?;
         let line = claude::permission_response(request_id, true, Some(input), Vec::new(), None);
-        child.write_line(&line)?;
+        self.write(&rt, &line)?;
         self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: true, label: "Answered".into(), automatic: false }, None);
         if rt.pending.is_empty() {
             self.set_status(&mut rt, TabStatus::InProgress);
@@ -376,8 +456,14 @@ impl SessionManager {
         })?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
-        if let Some(child) = rt.child.clone() {
-            child.write_line(&claude::set_model_line(&uuid::Uuid::now_v7().to_string(), model))?;
+        let has_child = rt.child.is_some();
+        match &mut rt.engine {
+            Engine::Claude(_) if has_child => {
+                let line = claude::set_model_line(&uuid::Uuid::now_v7().to_string(), model);
+                self.write(&rt, &line)?;
+            }
+            Engine::Codex(c) => c.model = Some(model.into()),
+            _ => {}
         }
         self.publish(&mut rt, Payload::SettingsChanged { model: Some(model.into()), effort: None, permission_mode: None }, None);
         Ok(())
@@ -390,14 +476,32 @@ impl SessionManager {
         })?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
-        if let Some(child) = rt.child.clone() {
-            child.write_line(&claude::set_mode_line(&uuid::Uuid::now_v7().to_string(), mode))?;
+        let has_child = rt.child.is_some();
+        let turn_open = rt.turn_open;
+        let mut respawn = false;
+        match &mut rt.engine {
+            Engine::Claude(_) if has_child => {
+                let line = claude::set_mode_line(&uuid::Uuid::now_v7().to_string(), mode);
+                self.write(&rt, &line)?;
+            }
+            Engine::Codex(c) => {
+                // The sandbox half only applies at thread start; a respawn lands it.
+                c.mode = mode.into();
+                respawn = !turn_open;
+            }
+            _ => {}
+        }
+        if respawn {
+            self.host.kill(&rt.key());
+            rt.child = None;
+            rt.child_pid = None;
+            rt.engine = Engine::None;
         }
         self.publish(&mut rt, Payload::SettingsChanged { model: None, effort: None, permission_mode: Some(mode.into()) }, None);
         Ok(())
     }
 
-    /// Effort has no in-place control; the change lands on the next spawn.
+    /// Claude has no in-place effort control; the change lands on the next spawn.
     pub fn set_effort(&self, session_id: &str, tab_id: &str, effort: Option<&str>) -> Result<()> {
         index::update_tab(session_id, tab_id, |t| {
             t.effort = effort.map(String::from);
@@ -405,11 +509,17 @@ impl SessionManager {
         })?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
-        if !rt.turn_open {
-            // Replace the child so the new effort applies immediately.
+        let turn_open = rt.turn_open;
+        let mut respawn = false;
+        match &mut rt.engine {
+            Engine::Codex(c) => c.effort = effort.map(String::from),
+            _ => respawn = !turn_open,
+        }
+        if respawn {
             self.host.kill(&rt.key());
             rt.child = None;
             rt.child_pid = None;
+            rt.engine = Engine::None;
         }
         self.publish(&mut rt, Payload::SettingsChanged { model: None, effort: effort.map(String::from), permission_mode: None }, None);
         Ok(())
@@ -431,56 +541,60 @@ impl SessionManager {
     // ---- inbound from the child
 
     fn on_line(&self, rt_arc: &Arc<Mutex<TabRuntime>>, line: &str) {
-        let parsed = match claude::parser::parse_line(line) {
-            Ok(p) => p,
-            Err(e) => {
-                log::warn!("unparsed line: {e}: {}", &line[..line.len().min(200)]);
-                let _ = store::root().map(|r| store::append_line(&r.join("parse_failures.jsonl"), line));
-                return;
-            }
-        };
         let mut rt = rt_arc.lock().unwrap();
         rt.last_activity = Instant::now();
-        let mapped = rt.mapper.map(parsed);
-        for payload in mapped.payloads {
-            self.apply(&mut rt, payload, mapped.subagent.clone());
+        let mut claude_out: Option<ClaudeLine> = None;
+        let mut codex_out: Option<Vec<Action>> = None;
+        match &mut rt.engine {
+            Engine::Claude(mapper) => {
+                let parsed = match claude::parser::parse_line(line) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        log::warn!("unparsed line: {e}: {}", &line[..line.len().min(200)]);
+                        let _ = store::root().map(|r| store::append_line(&r.join("parse_failures.jsonl"), line));
+                        return;
+                    }
+                };
+                let mapped = mapper.map(parsed);
+                claude_out = Some((mapped.payloads, mapped.subagent, mapper.last_suggestions.clone(), mapper.last_ask_input.clone()));
+            }
+            Engine::Codex(c) => codex_out = Some(c.handle(line)),
+            Engine::None => {}
+        }
+        if let Some((payloads, subagent, suggestions, ask_input)) = claude_out {
+            for payload in payloads {
+                if let Payload::PermissionRequested { request_id, tool_use_id, input, .. } = &payload {
+                    rt.pending.insert(request_id.clone(), PendingAsk { tool_use_id: tool_use_id.clone(), input: input.clone(), suggestions: suggestions.clone() });
+                }
+                if let Payload::QuestionsAsked { request_id, tool_use_id, .. } = &payload {
+                    rt.pending.insert(request_id.clone(), PendingAsk { tool_use_id: tool_use_id.clone(), input: ask_input.clone(), suggestions: Vec::new() });
+                }
+                self.apply(&mut rt, payload, subagent.clone());
+            }
+        }
+        if let Some(actions) = codex_out {
+            self.apply_actions(&mut rt, actions);
         }
     }
 
     fn apply(&self, rt: &mut TabRuntime, payload: Payload, subagent: Option<SubagentRef>) {
         match &payload {
-            Payload::TurnStarted { provider_session_id, .. } => {
-                if let Some(pid) = provider_session_id.clone() {
-                    let (s, t) = (rt.session_id.clone(), rt.tab_id.clone());
-                    std::thread::spawn(move || {
-                        let _ = index::update_tab(&s, &t, |tab| {
-                            if tab.provider_session_id.as_deref() != Some(&pid) {
-                                tab.provider_session_id = Some(pid);
-                            }
-                            Ok(())
-                        });
+            Payload::TurnStarted { provider_session_id: Some(pid), .. } => {
+                let (s, t, pid) = (rt.session_id.clone(), rt.tab_id.clone(), pid.clone());
+                std::thread::spawn(move || {
+                    let _ = index::update_tab(&s, &t, |tab| {
+                        if tab.provider_session_id.as_deref() != Some(&pid) {
+                            tab.provider_session_id = Some(pid);
+                        }
+                        Ok(())
                     });
-                }
+                });
             }
-            Payload::ToolCallStarted { .. } if subagent.is_none() => rt.open_tool_calls += 1,
-            Payload::ToolCallCompleted { .. } if subagent.is_none() => rt.open_tool_calls = rt.open_tool_calls.saturating_sub(1),
             Payload::PermissionRequested { request_id, tool_use_id, input, .. } => {
-                // Suggestions are re-read off the raw options the mapper built from;
-                // keep the raw payloads here so the rule never crosses to the UI.
-                let suggestions = rt.mapper_last_suggestions();
-                rt.pending.insert(
-                    request_id.clone(),
-                    PendingAsk { tool_use_id: tool_use_id.clone(), input: input.clone(), suggestions },
-                );
+                rt.pending.entry(request_id.clone()).or_insert_with(|| PendingAsk { tool_use_id: tool_use_id.clone(), input: input.clone(), suggestions: Vec::new() });
                 self.set_status(rt, TabStatus::Waiting);
             }
-            Payload::QuestionsAsked { request_id, tool_use_id, .. } => {
-                rt.pending.insert(
-                    request_id.clone(),
-                    PendingAsk { tool_use_id: tool_use_id.clone(), input: rt.mapper_last_input(), suggestions: Vec::new() },
-                );
-                self.set_status(rt, TabStatus::Waiting);
-            }
+            Payload::QuestionsAsked { .. } => self.set_status(rt, TabStatus::Waiting),
             Payload::PermissionDecided { request_id, automatic: true, .. } => {
                 rt.pending.remove(request_id);
                 if rt.pending.is_empty() && rt.status == TabStatus::Waiting {
@@ -493,7 +607,7 @@ impl SessionManager {
         let is_boundary = payload.is_turn_boundary();
         let payload = match payload {
             Payload::TurnCompleted { status, final_text, usage, duration_ms, auth_failed, .. } => {
-                let head = git::snapshot_tree(Path::new(&index::get(&rt.session_id).map(|e| e.cwd).unwrap_or_default())).ok();
+                let head = index::get(&rt.session_id).ok().and_then(|e| git::snapshot_tree(Path::new(&e.cwd)).ok());
                 if let Some(u) = &usage {
                     let (s, t) = (rt.session_id.clone(), rt.tab_id.clone());
                     let (cu, cm) = (u.context_used, u.context_max);
@@ -509,6 +623,7 @@ impl SessionManager {
                         });
                     });
                 }
+                let duration_ms = duration_ms.or_else(|| rt.turn_started_at.map(|t| t.elapsed().as_millis() as u64));
                 Payload::TurnCompleted { status, final_text, usage, duration_ms, head, auth_failed }
             }
             other => other,
@@ -517,19 +632,32 @@ impl SessionManager {
 
         if is_boundary {
             rt.turn_open = false;
-            rt.open_tool_calls = 0;
-            if let Some(q) = (!rt.queued.is_empty()).then(|| rt.queued.remove(0)) {
-                // Flush the next queued prompt into the same child.
-                let tab = index::get(&rt.session_id).ok().and_then(|e| e.tab(&rt.tab_id).cloned());
-                let pid = tab.and_then(|t| t.provider_session_id).unwrap_or_default();
-                if let Some(child) = rt.child.clone() {
-                    let line = claude::user_line(&pid, &q.text, &q.images);
-                    if child.write_line(&line).is_ok() {
-                        rt.turn_open = true;
-                        rt.turn_started_at = Some(Instant::now());
-                        rt.mapper.begin_turn();
-                        return;
+            if !rt.queued.is_empty() {
+                let q = rt.queued.remove(0);
+                let mut line_to_write: Option<String> = None;
+                let mut codex_actions: Option<Vec<Action>> = None;
+                match &mut rt.engine {
+                    Engine::Claude(m) => {
+                        let pid = index::get(&rt.session_id).ok().and_then(|e| e.tab(&rt.tab_id).and_then(|t| t.provider_session_id.clone())).unwrap_or_default();
+                        m.begin_turn();
+                        line_to_write = Some(claude::user_line(&pid, &q.text, &q.images));
                     }
+                    Engine::Codex(c) => codex_actions = Some(c.prompt(q.text.clone(), q.images.clone())),
+                    Engine::None => {}
+                }
+                let sent = if let Some(line) = line_to_write {
+                    self.write(rt, &line).is_ok()
+                } else if let Some(actions) = codex_actions {
+                    let ok = !actions.is_empty();
+                    self.apply_actions(rt, actions);
+                    ok
+                } else {
+                    false
+                };
+                if sent {
+                    rt.turn_open = true;
+                    rt.turn_started_at = Some(Instant::now());
+                    return;
                 }
             }
             self.set_status(rt, TabStatus::Completed);
@@ -543,6 +671,7 @@ impl SessionManager {
         }
         rt.child = None;
         rt.child_pid = None;
+        rt.engine = Engine::None;
         let pending: Vec<String> = rt.pending.drain().map(|(k, _)| k).collect();
         for request_id in pending {
             self.publish(&mut rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true }, None);
@@ -556,15 +685,6 @@ impl SessionManager {
         }
         rt.queued.clear();
         self.set_status(&mut rt, TabStatus::Idle);
-    }
-}
-
-impl TabRuntime {
-    fn mapper_last_suggestions(&self) -> Vec<Value> {
-        self.mapper.last_suggestions.clone()
-    }
-    fn mapper_last_input(&self) -> Value {
-        self.mapper.last_ask_input.clone()
     }
 }
 

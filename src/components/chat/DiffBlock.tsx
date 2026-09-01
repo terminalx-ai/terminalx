@@ -65,3 +65,25 @@ function DiffRow({ line }: { line: DiffLine }) {
     </div>
   );
 }
+
+/** A diff the harness already produced in unified form. */
+export function UnifiedBlock({ path, unified, kind, cwd, maxLines = 60 }: { path: string; unified: string; kind?: string; cwd?: string; maxLines?: number }) {
+  const lines = unified.split("\n").filter((l) => !l.startsWith("---") && !l.startsWith("+++") && !l.startsWith("diff ") && !l.startsWith("index "));
+  const shown = lines.slice(0, maxLines);
+  return (
+    <div className="overflow-hidden rounded-md border border-hairline bg-well">
+      <div className="flex items-center gap-2 border-b border-hairline px-2.5 py-1 font-mono text-[11px] text-muted-foreground">
+        <span className="truncate">{shortPath(path, cwd)}</span>
+        {kind === "create" && <span className="text-add">new file</span>}
+        {kind === "delete" && <span className="text-destructive">deleted</span>}
+      </div>
+      <div className="overflow-x-auto scrollbar-thin font-mono text-[12px] leading-[1.45]">
+        {shown.map((l, i) => {
+          const k = l.startsWith("+") ? "add" : l.startsWith("-") ? "del" : "ctx";
+          return <DiffRow key={i} line={{ kind: k, text: l.startsWith("@@") ? l : l.slice(1) }} />;
+        })}
+        {lines.length > shown.length && <div className="px-2.5 py-1 text-[11px] text-faint">… {lines.length - shown.length} more lines</div>}
+      </div>
+    </div>
+  );
+}

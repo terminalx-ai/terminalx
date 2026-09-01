@@ -276,21 +276,49 @@
   background: var(--veil-raised);
   font-weight: 600;
 }
-/* Streamdown chrome: keep code blocks on the app's surfaces. */
-.prose-chat [data-streamdown="code-block"],
-.prose-chat [data-streamdown="code-block-container"] {
+/* Streamdown chrome: one compact header holding the language and the buttons. */
+.prose-chat [data-streamdown="code-block"] {
+  margin: 0.75em 0;
+  padding: 0 !important;
+  gap: 0 !important;
   background: var(--code-bg) !important;
   border: 1px solid var(--hairline) !important;
   border-radius: var(--radius-md) !important;
+  overflow: hidden;
 }
 .prose-chat [data-streamdown="code-block-header"] {
-  background: transparent !important;
-  border-bottom: 1px solid var(--hairline) !important;
+  height: 28px !important;
+  padding: 0 10px;
+  background: var(--veil-raised) !important;
+  border-bottom: 1px solid var(--hairline);
   color: var(--ink-muted) !important;
   font-family: var(--font-mono);
   font-size: 11px;
 }
-.prose-chat [data-streamdown="code-block-body"] pre,
-.prose-chat [data-streamdown="code-block"] pre {
+.prose-chat [data-streamdown="code-block"] > div:not([data-streamdown]) {
+  margin-top: -28px !important;
+  height: 28px !important;
+  padding-right: 4px;
+  top: 0 !important;
+}
+.prose-chat [data-streamdown="code-block-actions"] {
+  border: 0 !important;
   background: transparent !important;
+  gap: 0 !important;
+}
+.prose-chat [data-streamdown="code-block-actions"] button {
+  padding: 4px !important;
+}
+.prose-chat [data-streamdown="code-block-actions"] svg {
+  width: 13px;
+  height: 13px;
+}
+.prose-chat [data-streamdown="code-block-body"] {
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+}
+.prose-chat [data-streamdown="code-block-body"] pre {
+  background: transparent !important;
+  padding: 10px 12px;
 }

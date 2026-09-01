@@ -64,7 +64,10 @@ export function PermissionCard({ ask, onAnswer, busy }: { ask: PendingAsk; onAns
 function verbFor(tool: string): string {
   switch (tool) {
     case "Bash":
+    case "shell":
       return "run a command";
+    case "apply_patch":
+      return "edit files";
     case "Edit":
     case "MultiEdit":
       return "edit a file";
@@ -85,7 +88,12 @@ function detailFor(tool: string, input: Record<string, unknown>): string | null 
   const s = (k: string) => (typeof input[k] === "string" ? (input[k] as string) : undefined);
   switch (tool) {
     case "Bash":
+    case "shell":
       return s("command") ?? null;
+    case "apply_patch": {
+      const changes = input["changes"];
+      return Array.isArray(changes) ? changes.map((c) => `${(c as { kind?: string }).kind ?? "update"} ${(c as { path?: string }).path ?? ""}`).join("\n") : null;
+    }
     case "Edit":
       return `${shortPath(s("file_path") ?? "")}\n- ${s("old_string") ?? ""}\n+ ${s("new_string") ?? ""}`;
     case "Write":

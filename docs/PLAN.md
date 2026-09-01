@@ -60,47 +60,47 @@ src
 ### C0 — Scaffold ✅
 Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 
-### C1 — App shell and theme system
-- [ ] Three-layer token system (`:root` aliases, `[data-mode]` ramp, `[data-theme][data-mode]` palette), four palettes, glass on macOS.
-- [ ] Title bar strip in every column with deep drag region; traffic-light inset.
-- [ ] Sidebar (collapsible, ⌘B), main column, right panel frame (⌘E).
-- [ ] Settings dialog (⌘,) with theme swatches and System/Light/Dark segmented control.
-- [ ] Hotkey registry with tooltips carrying keycaps.
+### C1 — App shell and theme system ✅
+- [x] Three-layer token system (`:root` aliases, `[data-mode]` ramp, `[data-theme][data-mode]` palette), four palettes, glass on macOS.
+- [x] Title bar strip in every column with deep drag region; traffic-light inset.
+- [x] Sidebar (collapsible, ⌘B), main column, right panel frame (⌘E).
+- [x] Settings dialog (⌘,) with theme swatches and System/Light/Dark segmented control.
+- [x] Hotkey registry with tooltips carrying keycaps.
 - Verification: screenshot in dark + light; window drag works; no flash on launch.
 
-### C2 — Rust core: store, projects, worktrees, event model
-- [ ] `~/.raccoon` layout, atomic index writes, append-only JSONL logs.
-- [ ] Projects: add (folder picker), list, remove; canonicalized paths.
-- [ ] Worktree create/list/remove with lock handling and unpushed-commit check.
-- [ ] `AgentEvent` enum + TS types; `seq` ordering.
-- [ ] Child host with epoch/kill-gen guards, process-group kill escalation.
+### C2 — Rust core: store, projects, worktrees, event model ✅
+- [x] `~/.raccoon` layout, atomic index writes, append-only JSONL logs.
+- [x] Projects: add (folder picker), list, remove; canonicalized paths.
+- [x] Worktree create/list/remove with lock handling and unpushed-commit check.
+- [x] `AgentEvent` enum + TS types; `seq` ordering.
+- [x] Child host with epoch/kill-gen guards, process-group kill escalation.
 - Verification: `cargo test` covers store round-trips, worktree naming, event serde.
 
-### C3 — Claude Code harness, end to end
-- [ ] Spawn with stream-json in/out, `--permission-prompt-tool stdio`, session id minted by app, resume, worktree via app-created tree.
-- [ ] Parser + mapper with fixtures; deltas as previews, committed events win.
-- [ ] Permission requests → card → control_response; AskUserQuestion form.
-- [ ] Interrupt; model/permission switch in place; effort by respawn.
-- [ ] Sidebar session rows with status rail; new-session composer (project, agent, model, effort, mode).
-- [ ] Transcript v1: markdown, tool rows, thinking, working indicator.
+### C3 — Claude Code harness, end to end ✅
+- [x] Spawn with stream-json in/out, `--permission-prompt-tool stdio`, session id minted by app, resume, worktree via app-created tree.
+- [x] Parser + mapper with fixtures; deltas as previews, committed events win.
+- [x] Permission requests → card → control_response; AskUserQuestion form.
+- [x] Interrupt; model/permission switch in place; effort by respawn.
+- [x] Sidebar session rows with status rail; new-session composer (project, agent, model, effort, mode).
+- [x] Transcript v1: markdown, tool rows, thinking, working indicator.
 - Verification: real session round-trip in the app; screenshots.
 
-### C4 — Transcript polish and scroll guarantees
-- [ ] Turn grouping, "Worked for Ns", collapsed tool groups, streaming tool preview.
-- [ ] Diff rendering for Edit/Write, code view for ranged Read, shell output.
-- [ ] Scroll pinning: wheel-up unpins, jump-to-bottom, ResizeObserver re-pin, `overflow-anchor: none`.
-- [ ] Windowed mount for long logs (newest N turns first, backfill above with anchored scrollTop).
-- [ ] Test: 300-turn transcript keeps composer visible and input focused.
+### C4 — Transcript polish and scroll guarantees ✅
+- [x] Turn grouping, "Worked for Ns", collapsed tool groups, streaming tool preview.
+- [x] Diff rendering for Edit/Write, code view for ranged Read, shell output.
+- [x] Scroll pinning: wheel-up unpins, jump-to-bottom, ResizeObserver re-pin, `overflow-anchor: none`.
+- [x] Windowed mount for long logs (newest N turns first, backfill above with anchored scrollTop).
+- [x] Test: 300-turn transcript keeps composer visible and input focused (demo page, measured in Chromium).
 
-### C5 — Tabs inside a session
-- [ ] Session = worktree + tab list; tab = conversation bound to one harness.
-- [ ] Tab strip in main header, ⌘T new tab (agent picker), ⌘W close, ⌘⇧[ ] step, drag reorder.
-- [ ] Per-tab drafts and attachments; per-tab status; session status = fold of tabs.
+### C5 — Tabs inside a session ✅
+- [x] Session = worktree + tab list; tab = conversation bound to one harness.
+- [x] Tab strip in main header, ⌘T new tab (agent picker), ⌘W close, ⌘⇧[ ] step, drag reorder.
+- [x] Per-tab drafts and attachments; per-tab status; session status = fold of tabs.
 
-### C6 — Codex harness
-- [ ] `codex app-server` JSON-RPC client, handshake, thread/turn lifecycle, steering, interrupt with turn id.
-- [ ] Approval card from server-provided decisions; sandbox/approval mode pairs.
-- [ ] Subagent thread filtering; token usage ring from `last`.
+### C6 — Codex harness ✅
+- [x] `codex app-server` JSON-RPC client, handshake, thread/turn lifecycle, steering, interrupt with turn id.
+- [x] Approval card from server-provided decisions; sandbox/approval mode pairs.
+- [x] Subagent thread filtering; token usage ring from `last`.
 
 ### C7 — Composer extras
 - [ ] Slash-command picker (from harness), `@file` mentions from the file index, `#issue` later.

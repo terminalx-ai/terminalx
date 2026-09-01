@@ -74,9 +74,10 @@ export interface Transcript {
   authFailed: boolean;
   rateLimit?: { status?: string; resetsAt?: number };
   usageWindows?: Record<string, { utilization: number; resetsAt: number }>;
+  codexUsage?: { usedPercent: number; resetsAt: number; windowMins: number; plan?: string };
 }
 
-const GROUPABLE = new Set(["Read", "Glob", "Grep", "LS", "Edit", "Write", "MultiEdit", "Bash"]);
+const GROUPABLE = new Set(["Read", "Glob", "Grep", "LS", "Edit", "Write", "MultiEdit", "Bash", "shell", "apply_patch"]);
 
 export function buildTranscript(events: AgentEvent[], live: boolean): Transcript {
   const turns: Turn[] = [];
@@ -91,6 +92,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
   let authFailed = false;
   let rateLimit: Transcript["rateLimit"];
   let usageWindows: Transcript["usageWindows"];
+  let codexUsage: Transcript["codexUsage"];
   let workingSince: number | undefined;
 
   let current: Turn | null = null;
@@ -266,6 +268,16 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
           } catch {
             /* ignore */
           }
+        } else if (p.text.startsWith("codex_rate_limit:")) {
+          try {
+            const parsed = JSON.parse(p.text.slice("codex_rate_limit:".length));
+            const primary = parsed?.primary;
+            if (primary && typeof primary.usedPercent === "number") {
+              codexUsage = { usedPercent: primary.usedPercent, resetsAt: primary.resetsAt, windowMins: primary.windowDurationMins, plan: parsed.planType };
+            }
+          } catch {
+            /* ignore */
+          }
         } else if (p.text.startsWith("tool_pending:")) {
           // handled by streaming previews
         } else {
@@ -310,6 +322,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
     authFailed,
     rateLimit,
     usageWindows,
+    codexUsage,
   };
 }
 

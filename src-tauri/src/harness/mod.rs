@@ -3,9 +3,27 @@
 //! shared child host.
 
 pub mod claude;
+pub mod codex;
 pub mod host;
 
 use serde::{Deserialize, Serialize};
+
+/// The harness a tab runs on. Unknown names are carried verbatim.
+pub enum HarnessId {
+    Claude,
+    Codex,
+    Other(String),
+}
+
+impl HarnessId {
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "claude" => Self::Claude,
+            "codex" => Self::Codex,
+            other => Self::Other(other.to_string()),
+        }
+    }
+}
 
 /// Which agents this build knows how to drive, and what each can do.
 #[derive(Debug, Clone, Serialize, Deserialize)]

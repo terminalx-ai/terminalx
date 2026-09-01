@@ -3,7 +3,7 @@ import { ChevronRight, FileCode2, FilePen, FolderSearch, Globe, Loader2, Puzzle,
 import { cn } from "@/lib/cn";
 import { callTarget, groupTargets, type ToolCall } from "@/lib/transcript";
 import { fileName, shortPath } from "@/lib/paths";
-import { DiffBlock } from "./DiffBlock";
+import { DiffBlock, UnifiedBlock } from "./DiffBlock";
 
 function iconFor(toolType: string) {
   switch (toolType) {
@@ -48,6 +48,9 @@ export function toolVerb(name: string, done: boolean): string {
     ExitPlanMode: ["Proposing plan", "Proposed plan"],
     AskUserQuestion: ["Asking", "Asked"],
     NotebookEdit: ["Editing", "Edited"],
+    shell: ["Running", "Ran"],
+    apply_patch: ["Editing", "Edited"],
+    web_search: ["Searching", "Searched"],
   };
   const t = table[name];
   if (t) return done ? t[1] : t[0];
@@ -61,7 +64,7 @@ export function toolVerb(name: string, done: boolean): string {
 function targetOf(call: ToolCall, cwd?: string): string {
   const t = callTarget(call);
   if (!t) return "";
-  if (call.name === "Bash") return t.split("\n")[0];
+  if (call.name === "Bash" || call.name === "shell") return t.split("\n")[0];
   if (call.toolType === "file_read" || call.toolType === "file_edit" || call.toolType === "file_write") return shortPath(t, cwd);
   return t;
 }
@@ -72,7 +75,7 @@ export function ToolCallRow({ call, cwd, defaultOpen }: { call: ToolCall; cwd?: 
   const pending = !done;
   const failed = call.result?.isError;
   const Icon = iconFor(call.toolType);
-  const hasBody = !!call.result?.text || !!call.edits?.length || (call.name === "Bash" && !!callTarget(call));
+  const hasBody = !!call.result?.text || !!call.edits?.length || ((call.name === "Bash" || call.name === "shell") && !!callTarget(call));
   const target = targetOf(call, cwd);
   const isWholeRead = call.name === "Read" && !(call.input as { offset?: number })?.offset && !failed;
 
@@ -109,19 +112,23 @@ export function ToolCallRow({ call, cwd, defaultOpen }: { call: ToolCall; cwd?: 
         <div className="mb-1 ml-6 mr-1">
           {call.edits?.length ? (
             <div className="space-y-2">
-              {call.edits.map((e, i) => (
-                <DiffBlock key={i} path={e.path} oldText={e.oldText ?? ""} newText={e.newText ?? ""} kind={e.kind} cwd={cwd} />
-              ))}
+              {call.edits.map((e, i) =>
+                e.unified && e.oldText == null && e.newText == null ? (
+                  <UnifiedBlock key={i} path={e.path} unified={e.unified} kind={e.kind} cwd={cwd} />
+                ) : (
+                  <DiffBlock key={i} path={e.path} oldText={e.oldText ?? ""} newText={e.newText ?? ""} kind={e.kind} cwd={cwd} />
+                ),
+              )}
             </div>
           ) : null}
-          {call.name === "Bash" && (
+          {(call.name === "Bash" || call.name === "shell") && (
             <pre className="mt-1 max-h-72 overflow-auto scrollbar-thin rounded-md bg-well px-2.5 py-2 font-mono text-[12px] leading-relaxed whitespace-pre-wrap select-text">
               <span className="text-faint">$ </span>
               {callTarget(call)}
               {call.result?.text ? `\n${call.result.text}` : ""}
             </pre>
           )}
-          {call.name !== "Bash" && call.result?.text && (
+          {call.name !== "Bash" && call.name !== "shell" && call.result?.text && (
             <pre
               className={cn(
                 "mt-1 max-h-72 overflow-auto scrollbar-thin rounded-md bg-well px-2.5 py-2 font-mono text-[12px] leading-relaxed whitespace-pre-wrap select-text",
