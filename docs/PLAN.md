@@ -127,9 +127,9 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Rail marks: green unread, amber waiting; dock badge; sounds (toggle).
 
 ### C12 — Raccoon animation
-- [ ] Pixel raccoon sprite; idle scene in an empty session (forages, peeks, washes paws).
-- [ ] Busy runner along the composer while a turn is in flight; stunned on the jump chevron.
-- [ ] Toggle in settings; respects reduced motion.
+- [x] Pixel raccoon sprite; idle scene in an empty session (walks, sits, washes paws, glances, peeks).
+- [x] Busy runner along the composer while a turn is in flight; stunned on the jump chevron.
+- [x] Toggle in settings; respects reduced motion.
 
 ### C13 — Worktree lifecycle
 - [ ] Settle dialog after a session's PR merges or on request: delete worktree (with unpushed warning), keep, relocate session to project root.

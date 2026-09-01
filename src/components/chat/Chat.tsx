@@ -6,6 +6,7 @@ import type { Transcript } from "@/lib/transcript";
 import type { StreamBlock } from "@/lib/agentEvents";
 import { TurnBlock } from "./TurnBlock";
 import { PermissionCard, QuestionCard } from "./AskCards";
+import { RaccoonRunner, RaccoonScene } from "@/components/raccoon/Raccoon";
 
 const NEAR_BOTTOM_PX = 40;
 const FIRST_MOUNT = 12;
@@ -134,6 +135,12 @@ export function Chat({
           {oldestMounted > 0 && (
             <div className="mb-4 text-center text-xs text-faint">Loading earlier turns…</div>
           )}
+          {!turns.length && !live && (
+            <div className="flex h-[40vh] min-h-[160px] flex-col justify-end">
+              <RaccoonScene />
+              <p className="mt-3 text-center text-xs text-faint">Nothing here yet. Ask for something below.</p>
+            </div>
+          )}
           {turns.slice(oldestMounted).map((t, i, arr) => {
             const isLast = i === arr.length - 1;
             return (
@@ -186,7 +193,10 @@ export function Chat({
           <ArrowDown /> Latest
         </Button>
       </div>
-      <div className="shrink-0">{footer}</div>
+      <div className="relative shrink-0">
+        <RaccoonRunner active={live} obstacle={!atBottom} />
+        {footer}
+      </div>
     </div>
   );
 }
