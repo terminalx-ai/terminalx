@@ -23,11 +23,9 @@ use crate::{git, store};
 
 pub struct PendingAsk {
     pub tool_use_id: String,
-    pub tool_name: String,
     pub input: Value,
     /// Suggestion payloads keyed by option id ("suggest:N").
     pub suggestions: Vec<Value>,
-    pub is_question: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,9 +171,32 @@ impl SessionManager {
         });
     }
 
+    /// The log, with any ask the running child is not actually waiting on
+    /// retired as lapsed — only the child that asked can answer, and no child
+    /// survives a restart, so a replayed card would have dead buttons.
     pub fn load_events(&self, session_id: &str, tab_id: &str) -> Result<Vec<AgentEvent>> {
         let path = store::log_path(session_id, tab_id)?;
-        store::read_lines(&path)
+        let mut events: Vec<AgentEvent> = store::read_lines(&path)?;
+        let mut open: Vec<(String, Option<String>)> = Vec::new();
+        for ev in &events {
+            match &ev.payload {
+                Payload::PermissionRequested { request_id, tool_use_id, .. } | Payload::QuestionsAsked { request_id, tool_use_id, .. } => {
+                    open.push((request_id.clone(), Some(tool_use_id.clone())));
+                }
+                Payload::PermissionDecided { request_id, .. } => open.retain(|(r, _)| r != request_id),
+                _ => {}
+            }
+        }
+        if !open.is_empty() {
+            let rt_arc = self.runtime(session_id, tab_id)?;
+            let mut rt = rt_arc.lock().unwrap();
+            let lapsed: Vec<_> = open.into_iter().filter(|(r, _)| !rt.pending.contains_key(r)).collect();
+            for (request_id, tool_use_id) in lapsed {
+                let ev = self.publish(&mut rt, Payload::PermissionDecided { request_id, tool_use_id, allowed: false, label: "Lapsed".into(), automatic: true }, None);
+                events.push(ev);
+            }
+        }
+        Ok(events)
     }
 
     pub fn status_of(&self, session_id: &str, tab_id: &str) -> TabStatus {
@@ -264,8 +285,7 @@ impl SessionManager {
         }
 
         let baseline = git::snapshot_tree(Path::new(&entry.cwd)).ok();
-        let mut events = Vec::new();
-        events.push(self.publish(&mut rt, Payload::UserMessage { text: text.clone(), images: refs, baseline, queued: false, cwd: Some(entry.cwd.clone()) }, None));
+        let events = vec![self.publish(&mut rt, Payload::UserMessage { text: text.clone(), images: refs, baseline, queued: false, cwd: Some(entry.cwd.clone()) }, None)];
 
         let provider_id = index::get(session_id).ok().and_then(|e| e.tab(tab_id).and_then(|t| t.provider_session_id.clone())).unwrap_or_default();
         let line = claude::user_line(&provider_id, &text, &wire_images);
@@ -444,20 +464,20 @@ impl SessionManager {
             }
             Payload::ToolCallStarted { .. } if subagent.is_none() => rt.open_tool_calls += 1,
             Payload::ToolCallCompleted { .. } if subagent.is_none() => rt.open_tool_calls = rt.open_tool_calls.saturating_sub(1),
-            Payload::PermissionRequested { request_id, tool_use_id, tool_name, input, .. } => {
+            Payload::PermissionRequested { request_id, tool_use_id, input, .. } => {
                 // Suggestions are re-read off the raw options the mapper built from;
                 // keep the raw payloads here so the rule never crosses to the UI.
                 let suggestions = rt.mapper_last_suggestions();
                 rt.pending.insert(
                     request_id.clone(),
-                    PendingAsk { tool_use_id: tool_use_id.clone(), tool_name: tool_name.clone(), input: input.clone(), suggestions, is_question: false },
+                    PendingAsk { tool_use_id: tool_use_id.clone(), input: input.clone(), suggestions },
                 );
                 self.set_status(rt, TabStatus::Waiting);
             }
             Payload::QuestionsAsked { request_id, tool_use_id, .. } => {
                 rt.pending.insert(
                     request_id.clone(),
-                    PendingAsk { tool_use_id: tool_use_id.clone(), tool_name: "AskUserQuestion".into(), input: rt.mapper_last_input(), suggestions: Vec::new(), is_question: true },
+                    PendingAsk { tool_use_id: tool_use_id.clone(), input: rt.mapper_last_input(), suggestions: Vec::new() },
                 );
                 self.set_status(rt, TabStatus::Waiting);
             }

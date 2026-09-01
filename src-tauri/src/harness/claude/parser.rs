@@ -289,7 +289,7 @@ pub struct ControlRequestLine {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "subtype", rename_all = "snake_case")]
 pub enum ControlRequest {
-    CanUseTool(CanUseTool),
+    CanUseTool(Box<CanUseTool>),
     #[serde(other)]
     Unknown,
 }

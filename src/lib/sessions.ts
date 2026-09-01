@@ -54,18 +54,11 @@ let booted = false;
 export async function bootSessions() {
   if (booted) return;
   booted = true;
-  const [projects, sessions, harnesses] = await Promise.all([
-    api.listProjects(),
-    api.listSessions(),
-    api.listHarnesses(),
-  ]);
-  set({
-    loaded: true,
-    projects: projects.projects,
-    lastProject: projects.lastSelected,
-    sessions,
-    harnesses,
-  });
+  // Projects and sessions are two file reads; the harness probe may shell out
+  // to a login shell and take seconds, so it lands on its own.
+  const [projects, sessions] = await Promise.all([api.listProjects(), api.listSessions()]);
+  set({ loaded: true, projects: projects.projects, lastProject: projects.lastSelected, sessions });
+  void api.listHarnesses().then((harnesses) => set({ harnesses })).catch(() => {});
   try {
     await listen<SessionEntry>("session_created", (e) => upsertSession(e.payload));
     await listen<SessionEntry>("session_updated", (e) => upsertSession(e.payload));

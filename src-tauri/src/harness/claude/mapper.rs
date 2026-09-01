@@ -171,6 +171,7 @@ impl Mapper {
             }
             Line::ControlRequest(req) => match req.request {
                 ControlRequest::CanUseTool(c) => {
+                    let c = *c;
                     let tool_use_id = c.tool_use_id.clone().unwrap_or_default();
                     self.last_suggestions = c.permission_suggestions.clone();
                     self.last_ask_input = c.input.clone();
@@ -498,7 +499,12 @@ pub fn build_options(suggestions: &[Value]) -> Vec<PermissionOption> {
                     .and_then(|r| r.as_array())
                     .map(|rs| rs.iter().filter_map(|r| opt_str(r, "ruleContent").or_else(|| opt_str(r, "toolName"))).collect())
                     .unwrap_or_default();
-                let label = if rules.is_empty() { "Always allow".to_string() } else { format!("Always allow {}", rules.join(", ")) };
+                let label = match rules.as_slice() {
+                    [] => "Always allow".to_string(),
+                    [one] if one.chars().count() <= 48 => format!("Always allow {one}"),
+                    [one] => format!("Always allow {}…", one.chars().take(40).collect::<String>().trim_end()),
+                    many => format!("Always allow {} rules", many.len()),
+                };
                 out.push(PermissionOption { id, label, kind: PermissionOptionKind::AllowAlways });
             }
             Some("addDirectories") => {

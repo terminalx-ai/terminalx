@@ -39,6 +39,18 @@ pub fn run() {
         .setup(move |app| {
             let manager = session::SessionManager::new(app.handle().clone(), host.clone());
             *app.state::<AppState>().manager.lock().unwrap() = Some(manager);
+            // No child survives a restart: a tab persisted mid-turn or waiting
+            // is idle now, whatever the index says.
+            let _ = store::index::update(|sessions| {
+                for s in sessions.iter_mut() {
+                    for t in s.tabs.iter_mut() {
+                        if matches!(t.status, store::index::TabStatus::InProgress | store::index::TabStatus::Waiting) {
+                            t.status = store::index::TabStatus::Idle;
+                        }
+                    }
+                }
+                Ok(())
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -44,6 +44,7 @@ pub fn catalog() -> Vec<Model> {
     ]
 }
 
+#[allow(dead_code)]
 pub fn default_for(harness: &str) -> Option<Model> {
     catalog().into_iter().find(|x| x.harness == harness && x.is_default)
 }
