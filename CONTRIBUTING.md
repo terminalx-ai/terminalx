@@ -135,7 +135,8 @@ version, and what the tab was doing — attach the relevant part of
 `~/.raccoon/sessions/<id>.jsonl` if you can share it.
 
 For anything with a security impact, do **not** open a public issue. Email
-dudhatparesh@gmail.com and give it a few days before disclosing.
+dudhatparesh@gmail.com — the full policy, including scope and the disclosure
+window, is in [SECURITY.md](SECURITY.md).
 
 ## Code of conduct
 
