@@ -11,6 +11,73 @@
   at wherever `latest.json` (below) will be hosted. For GitHub Releases:
   `https://github.com/<owner>/raccoon/releases/latest/download/latest.json`.
 
+## Run the dev build
+
+```sh
+pnpm tauri:dev
+```
+
+That is `tauri dev --config src-tauri/tauri.dev.conf.json`. The extra config is
+a merge patch over `tauri.conf.json` — it changes three things and nothing else:
+
+| Key | Dev value | What it moves |
+| --- | --- | --- |
+| `productName` | `Raccoon Dev` | The Dock label, the app menu, ⌘-Tab |
+| `identifier` | `dev.raccoon.desktop.dev` | macOS permission grants and per-app state |
+| `bundle.icon` | `icons-dev/*` | The Dock icon: the app icon with an amber "D" badge |
+
+So a dev build and an installed release can sit in the Dock together and stay
+apart at a glance.
+
+The separate identifier is what keeps the two from stepping on each other in
+macOS itself. TCC keys microphone and speech-recognition consent by bundle
+identifier, so `Raccoon Dev` gets its own rows under Privacy & Security:
+revoking or re-prompting dev leaves the installed release alone, and vice
+versa. Anything else macOS scopes per identifier (saved window state, launch
+services registration) is likewise separate.
+
+What the identifier does *not* move is Raccoon's own data. The store still
+lives in `~/.raccoon` for both builds, and `RACCOON_HOME` is still the only
+thing that points it elsewhere:
+
+```sh
+RACCOON_HOME=~/.raccoon-dev pnpm tauri:dev
+```
+
+Two notes on the mechanics:
+
+- The Dock icon comes from the config alone, no Rust involved. In a dev build
+  Tauri embeds the `.icns` named in `bundle.icon` and hands it to
+  `setApplicationIconImage` once the app is ready, which is why `tauri dev`
+  shows a real icon even though it runs a bare binary with no `.app` around it.
+- Cargo re-runs the Tauri build script when `TAURI_CONFIG` changes, and the
+  `--config` flag sets it. Alternating `pnpm tauri:dev` and `pnpm tauri build`
+  in the same target directory therefore rebuilds the crate each time; give
+  the release build its own `CARGO_TARGET_DIR` (below) to avoid that.
+
+`pnpm tauri build` is untouched: it reads only `tauri.conf.json`, so the
+shipped bundle keeps the plain icons, the `Raccoon` name, and the
+`dev.raccoon.desktop` identifier.
+
+### Regenerating the badged icons
+
+`src-tauri/icons-dev/` is generated, and committed so a fresh clone runs
+`pnpm tauri:dev` without extra steps. To rebuild it (after the app icon
+changes, say):
+
+```sh
+python3 scripts/badge-dev-icon.py
+pnpm tauri icon src-tauri/icons-dev/app-icon-dev.png --output src-tauri/icons-dev
+rm -rf src-tauri/icons-dev/android src-tauri/icons-dev/ios \
+       src-tauri/icons-dev/Square*Logo.png src-tauri/icons-dev/StoreLogo.png
+```
+
+The script needs Pillow (`pip install pillow`). It reads the 1024px master out
+of `src-tauri/icons/icon.icns`, composites the badge in the app's own amber
+accent, and writes `src-tauri/icons-dev/app-icon-dev.png`; same input, same
+bytes out. The third command drops the mobile and Windows Store output, which
+a macOS dev build never loads.
+
 ## Build
 
 ```sh
@@ -29,7 +96,7 @@ release mode, and writes to `src-tauri/target/release/bundle/`:
 | `macos/Raccoon.app.tar.gz` | Updater artifact |
 | `macos/Raccoon.app.tar.gz.sig` | Its signature, made with the private key |
 
-Building into a separate target directory keeps a running `pnpm tauri dev`
+Building into a separate target directory keeps a running `pnpm tauri:dev`
 undisturbed: prefix the command with
 `CARGO_TARGET_DIR=$PWD/src-tauri/target/release-build`.
 
