@@ -3,12 +3,19 @@
 //! it delivers is folded down to what every recogniser here expects. Capture
 //! runs on its own thread because the stream handle is not shared across
 //! threads on every platform; the thread lives until told to stop.
+//!
+//! Everything that talks to the audio backend — picking the device, reading
+//! its format, opening the stream — happens on that thread. Enumerating audio
+//! devices on macOS can block for a second or more while Bluetooth endpoints
+//! are probed, and none of it belongs on the thread that services the
+//! webview's IPC.
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 
 use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{FromSample, SizedSample};
 use serde::Serialize;
 
 use super::engine::TARGET_RATE;
@@ -21,15 +28,25 @@ pub struct InputDevice {
     pub is_default: bool,
 }
 
-/// Input devices by name; cpal has no stable id, and names are what the
-/// reader recognises anyway.
+/// The device's display name. cpal's own `id()` is stable across reboots but
+/// opaque; the name is what the reader picked in Settings and what older
+/// settings files already hold, so that is what is matched on.
+fn device_name(device: &cpal::Device) -> Option<String> {
+    device.description().ok().map(|d| d.name().to_string())
+}
+
+/// Input devices by name; the name is what the reader recognises and what
+/// settings store.
+///
+/// Blocking: this walks every audio device the system knows about. Call it off
+/// the main thread.
 pub fn list_inputs() -> Vec<InputDevice> {
     let host = cpal::default_host();
-    let default_name = host.default_input_device().and_then(|d| d.name().ok());
+    let default_name = host.default_input_device().as_ref().and_then(device_name);
     let mut out = Vec::new();
     if let Ok(devices) = host.input_devices() {
         for d in devices {
-            if let Ok(name) = d.name() {
+            if let Some(name) = device_name(&d) {
                 let is_default = default_name.as_deref() == Some(name.as_str());
                 out.push(InputDevice { id: name.clone(), name, is_default });
             }
@@ -43,7 +60,7 @@ fn pick_device(name: Option<&str>) -> Result<cpal::Device> {
     if let Some(n) = name.filter(|n| !n.is_empty()) {
         if let Ok(devices) = host.input_devices() {
             for d in devices {
-                if d.name().map(|dn| dn == n).unwrap_or(false) {
+                if device_name(&d).as_deref() == Some(n) {
                     return Ok(d);
                 }
             }
@@ -78,10 +95,13 @@ impl Resampler {
                 s.iter().sum::<f32>() / self.channels as f32
             })
             .collect();
-        if (self.src_rate - TARGET_RATE as f64).abs() < 1.0 {
+        let step = self.src_rate / TARGET_RATE as f64;
+        // A device that reports a nonsensical rate (zero, or a NaN out of a
+        // half-initialised format) would otherwise spin here forever building
+        // an unbounded output buffer. Hand the frames through untouched.
+        if !step.is_finite() || step <= 0.0 || (self.src_rate - TARGET_RATE as f64).abs() < 1.0 {
             return mono;
         }
-        let step = self.src_rate / TARGET_RATE as f64;
         let mut out = Vec::with_capacity((frames as f64 / step) as usize + 2);
         // Prepend the carried frame so interpolation at the seam is continuous.
         let mut src: Vec<f32> = Vec::with_capacity(mono.len() + 1);
@@ -104,23 +124,30 @@ impl Resampler {
     }
 }
 
+/// A live microphone. Dropping it stops the stream and joins the thread.
 pub struct Capture {
     stop: Sender<()>,
     thread: Option<JoinHandle<()>>,
 }
 
+/// How opening the microphone went. `Ok` once frames are flowing, `Err` with a
+/// message meant for the reader if the device could not be opened.
+pub type Opening = Receiver<Result<(), String>>;
+
 impl Capture {
     /// Open the device and stream 16 kHz mono chunks to `out` until dropped.
-    pub fn start(device_name: Option<&str>, out: Sender<Vec<f32>>) -> Result<Capture> {
-        let device = pick_device(device_name)?;
+    ///
+    /// Returns as soon as the capture thread exists: opening the device is the
+    /// slow, permission-prompting part and it happens on that thread. Watch
+    /// the returned channel for the outcome.
+    pub fn start(device_name: Option<String>, out: Sender<Vec<f32>>) -> Result<(Capture, Opening)> {
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<()>>();
+        let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
         let thread = std::thread::Builder::new()
             .name("mic-capture".into())
-            .spawn(move || run(device, out, stop_rx, ready_tx))
+            .spawn(move || run(device_name, out, stop_rx, ready_tx))
             .context("capture thread")?;
-        ready_rx.recv().context("capture thread ended early")??;
-        Ok(Capture { stop: stop_tx, thread: Some(thread) })
+        Ok((Capture { stop: stop_tx, thread: Some(thread) }, ready_rx))
     }
 }
 
@@ -133,62 +160,80 @@ impl Drop for Capture {
     }
 }
 
-fn run(device: cpal::Device, out: Sender<Vec<f32>>, stop: Receiver<()>, ready: Sender<Result<()>>) {
+/// Build an input stream for one sample format, converting every sample to
+/// `f32` on the way through. CoreAudio hands back `f32` or `i16` today, but the
+/// format is the device's to choose and the list grows with every cpal release.
+fn build_stream<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    mut resampler: Resampler,
+    out: Sender<Vec<f32>>,
+) -> Result<cpal::Stream, cpal::BuildStreamError>
+where
+    T: SizedSample,
+    f32: FromSample<T>,
+{
+    device.build_input_stream(
+        config,
+        move |data: &[T], _: &cpal::InputCallbackInfo| {
+            let frames: Vec<f32> = data.iter().map(|s| s.to_sample::<f32>()).collect();
+            let _ = out.send(resampler.push(&frames));
+        },
+        |e: cpal::StreamError| log::warn!("microphone stream: {e}"),
+        None,
+    )
+}
+
+/// Everything the capture thread does: pick the device, read its format, open
+/// the stream, then sit until told to stop. Every failure is reported through
+/// `ready` as a sentence the reader can act on.
+fn run(device_name: Option<String>, out: Sender<Vec<f32>>, stop: Receiver<()>, ready: Sender<Result<(), String>>) {
+    macro_rules! fail {
+        ($($arg:tt)*) => {{
+            let _ = ready.send(Err(format!($($arg)*)));
+            return;
+        }};
+    }
+
+    let device = match pick_device(device_name.as_deref()) {
+        Ok(d) => d,
+        Err(e) => fail!("{e:#}"),
+    };
     let config = match device.default_input_config() {
         Ok(c) => c,
-        Err(e) => {
-            let _ = ready.send(Err(anyhow!("microphone has no usable format: {e}")));
-            return;
-        }
+        // This is also what a denied microphone permission looks like: the
+        // device is listed but its format cannot be read.
+        Err(e) => fail!("The microphone could not be opened ({e}). Check that Raccoon is allowed to use it under System Settings → Privacy & Security → Microphone."),
     };
-    let rate = config.sample_rate().0;
+    let rate = config.sample_rate();
     let channels = config.channels();
     let format = config.sample_format();
+    if rate == 0 || channels == 0 {
+        fail!("The microphone reported an unusable format ({rate} Hz, {channels} channels). Pick a different input under Settings → Transcription.");
+    }
     let stream_config: cpal::StreamConfig = config.into();
-    let mut resampler = Resampler::new(rate, channels);
-    let err_cb = |e: cpal::StreamError| log::warn!("microphone stream: {e}");
+    let resampler = Resampler::new(rate, channels);
+
+    use cpal::SampleFormat as F;
     let stream = match format {
-        cpal::SampleFormat::F32 => device.build_input_stream(
-            &stream_config,
-            move |data: &[f32], _| {
-                let _ = out.send(resampler.push(data));
-            },
-            err_cb,
-            None,
-        ),
-        cpal::SampleFormat::I16 => device.build_input_stream(
-            &stream_config,
-            move |data: &[i16], _| {
-                let f: Vec<f32> = data.iter().map(|s| *s as f32 / i16::MAX as f32).collect();
-                let _ = out.send(resampler.push(&f));
-            },
-            err_cb,
-            None,
-        ),
-        cpal::SampleFormat::U16 => device.build_input_stream(
-            &stream_config,
-            move |data: &[u16], _| {
-                let f: Vec<f32> = data.iter().map(|s| (*s as f32 - 32768.0) / 32768.0).collect();
-                let _ = out.send(resampler.push(&f));
-            },
-            err_cb,
-            None,
-        ),
-        other => {
-            let _ = ready.send(Err(anyhow!("unsupported microphone sample format {other:?}")));
-            return;
-        }
+        F::F32 => build_stream::<f32>(&device, &stream_config, resampler, out),
+        F::F64 => build_stream::<f64>(&device, &stream_config, resampler, out),
+        F::I8 => build_stream::<i8>(&device, &stream_config, resampler, out),
+        F::I16 => build_stream::<i16>(&device, &stream_config, resampler, out),
+        F::I32 => build_stream::<i32>(&device, &stream_config, resampler, out),
+        F::I64 => build_stream::<i64>(&device, &stream_config, resampler, out),
+        F::U8 => build_stream::<u8>(&device, &stream_config, resampler, out),
+        F::U16 => build_stream::<u16>(&device, &stream_config, resampler, out),
+        F::U32 => build_stream::<u32>(&device, &stream_config, resampler, out),
+        F::U64 => build_stream::<u64>(&device, &stream_config, resampler, out),
+        other => fail!("The microphone uses a sample format Raccoon cannot read ({other}). Pick a different input under Settings → Transcription."),
     };
     let stream = match stream {
         Ok(s) => s,
-        Err(e) => {
-            let _ = ready.send(Err(anyhow!("could not open the microphone: {e}")));
-            return;
-        }
+        Err(e) => fail!("The microphone could not be opened ({e}). Check that Raccoon is allowed to use it under System Settings → Privacy & Security → Microphone."),
     };
     if let Err(e) = stream.play() {
-        let _ = ready.send(Err(anyhow!("could not start the microphone: {e}")));
-        return;
+        fail!("The microphone would not start ({e}).");
     }
     let _ = ready.send(Ok(()));
     let _ = stop.recv();
@@ -216,5 +261,54 @@ mod tests {
         let mut r = Resampler::new(16_000, 1);
         let out = r.push(&[0.1, 0.2, 0.3]);
         assert_eq!(out, vec![0.1, 0.2, 0.3]);
+    }
+
+    /// A device that reports nothing usable must not divide by zero, index out
+    /// of bounds, or loop forever growing the output buffer.
+    #[test]
+    fn resampler_survives_a_degenerate_config() {
+        let mut zero = Resampler::new(0, 0);
+        assert!(zero.push(&[]).is_empty());
+        // Zero source rate: pass the frames through rather than spin.
+        assert_eq!(zero.push(&[0.5, -0.5]), vec![0.5, -0.5]);
+
+        let mut empty = Resampler::new(48_000, 2);
+        assert!(empty.push(&[]).is_empty());
+        // A partial frame at the end of a chunk is dropped, not read past.
+        assert_eq!(empty.push(&[1.0]).len(), 0);
+    }
+
+    /// Walks the same CoreAudio property calls the mic button walks. A release
+    /// build of cpal 0.16 segfaulted here (see the notes on the cpal 0.17
+    /// upgrade); run this with `--release` to exercise that path.
+    ///
+    /// Passes on a machine with no input device: it only asserts that whatever
+    /// comes back is coherent.
+    #[test]
+    fn enumerates_inputs_and_reads_the_default_config() {
+        let inputs = list_inputs();
+        assert!(inputs.iter().filter(|d| d.is_default).count() <= 1, "more than one default input");
+        for d in &inputs {
+            assert!(!d.name.is_empty(), "input device with no name");
+            assert_eq!(d.id, d.name);
+        }
+
+        let host = cpal::default_host();
+        let Some(device) = host.default_input_device() else {
+            return; // No microphone on this machine; nothing more to check.
+        };
+        assert!(pick_device(None).is_ok());
+        // A name that matches nothing must fall back to the default, not fail.
+        assert!(pick_device(Some("no such microphone")).is_ok());
+        if let Some(name) = device_name(&device) {
+            assert!(pick_device(Some(&name)).is_ok());
+        }
+
+        // Reading the format must not start a stream, and must not panic when
+        // the device refuses (an unauthorised microphone reports an error).
+        if let Ok(config) = device.default_input_config() {
+            assert!(config.sample_rate() > 0, "default input config has no sample rate");
+            assert!(config.channels() > 0, "default input config has no channels");
+        }
     }
 }

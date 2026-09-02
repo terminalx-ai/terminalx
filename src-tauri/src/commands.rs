@@ -855,14 +855,21 @@ pub fn dictation_available() -> bool {
     crate::dictation::Dictation::available()
 }
 
+// Opening a microphone means talking to CoreAudio, which walks every audio
+// device on the system and can block for a second or more. A synchronous
+// command runs on the thread that services the webview's IPC — the main thread
+// — so these hop onto the blocking pool and return as soon as the work is
+// handed over.
 #[tauri::command]
-pub fn dictation_start(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
-    state.dictation.start(app, state.transcription.clone())
+pub async fn dictation_start(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    let (dictation, transcription) = (state.dictation.clone(), state.transcription.clone());
+    tauri::async_runtime::spawn_blocking(move || dictation.start(app, transcription)).await.map_err(err)?
 }
 
 #[tauri::command]
-pub fn dictation_stop(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
-    state.dictation.stop(app, state.transcription.clone())
+pub async fn dictation_stop(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    let (dictation, transcription) = (state.dictation.clone(), state.transcription.clone());
+    tauri::async_runtime::spawn_blocking(move || dictation.stop(app, transcription)).await.map_err(err)?
 }
 
 // ------------------------------------------------------------------ transcription models
@@ -892,9 +899,11 @@ pub fn transcription_set_model(state: State<'_, AppState>, id: String) -> CmdRes
     state.transcription.set_model(&id).map_err(err)
 }
 
+/// Enumerates input devices, so it must stay off the IPC thread.
 #[tauri::command]
-pub fn transcription_settings(state: State<'_, AppState>) -> crate::transcription::TranscriptionSettings {
-    state.transcription.settings()
+pub async fn transcription_settings(state: State<'_, AppState>) -> CmdResult<crate::transcription::TranscriptionSettings> {
+    let transcription = state.transcription.clone();
+    tauri::async_runtime::spawn_blocking(move || transcription.settings()).await.map_err(err)
 }
 
 #[tauri::command]
