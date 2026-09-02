@@ -171,3 +171,9 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 
 ### Dictation ✅
 - [x] Mic button in the composer (⌘⇧D): microphone → Apple's speech recogniser, on-device when supported, partial text live in the draft, each finished phrase appended. Info.plist carries the microphone and speech usage strings.
+
+### Workspaces and projects ✅
+- [x] Sidebar is a project rail plus a workspace column: every checkout of a project (root, Raccoon worktrees, worktrees made elsewhere) with +/− and unpushed counts, sessions grouped under their workspace, Sessions | Explorer tabs.
+- [x] Sessions can start inside an existing workspace; the new-session form sits at the bottom with project, agent, model, effort and permission pills.
+- [x] Project menu: rename, logo, colour, pixel mascot, pin, reveal, refresh, archive, remove. Global and per-project refresh.
+- [x] Deleting a workspace checks uncommitted files, unpushed commits and the branch's pull request; merged and clean is called out as safe.

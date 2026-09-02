@@ -1,7 +1,7 @@
 //! Tauri commands. Thin: validate, call a module, map the error to a string.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -82,6 +82,9 @@ pub struct NewSession {
     pub worktree_name: Option<String>,
     #[serde(default)]
     pub issue: Option<IssueRef>,
+    /// An existing workspace to run in instead of a new worktree.
+    #[serde(default)]
+    pub cwd: Option<String>,
     pub tab: NewTab,
 }
 
@@ -169,7 +172,11 @@ fn create_session_blocking(app: &AppHandle, req: NewSession) -> CmdResult<Sessio
     };
     entry.active_tab = Some(entry.tabs[0].id.clone());
 
-    if req.use_worktree {
+    if let Some(cwd) = req.cwd.as_deref().filter(|c| !c.is_empty()) {
+        let cwd = projects::canonical(cwd).map_err(err)?;
+        entry.branch = git::current_branch(Path::new(&cwd));
+        entry.cwd = cwd;
+    } else if req.use_worktree {
         let taken = index::load().map(|s| index::claimed_worktree_names(&s)).unwrap_or_default();
         let taken = git::taken_worktree_names(project_path, &taken);
         let name = req
@@ -934,4 +941,89 @@ mod issue_name_tests {
         let taken = vec!["eng-42-fix-login".to_string(), "eng-42-fix-login-2".to_string()];
         assert_eq!(requested_worktree_name("eng-42-fix-login", &taken).as_deref(), Some("eng-42-fix-login-3"));
     }
+}
+
+// ------------------------------------------------------------------ projects & workspaces
+
+#[tauri::command]
+pub fn update_project(path: String, patch: projects::ProjectPatch) -> CmdResult<Project> {
+    projects::update(&path, patch).map_err(err)
+}
+
+/// Copy a chosen image into the store so the project keeps it even if the
+/// original moves, and record it as the logo.
+#[tauri::command]
+pub fn set_project_logo(path: String, source: Option<String>) -> CmdResult<Project> {
+    let logo = match source {
+        Some(src) => {
+            let dir = store::root().map_err(err)?.join("logos");
+            std::fs::create_dir_all(&dir).map_err(err)?;
+            let ext = Path::new(&src).extension().and_then(|e| e.to_str()).unwrap_or("png");
+            let name = format!("{:x}.{ext}", md5_like(&path));
+            let dest = dir.join(name);
+            std::fs::copy(&src, &dest).map_err(err)?;
+            Some(dest.to_string_lossy().into_owned())
+        }
+        None => None,
+    };
+    projects::update(&path, projects::ProjectPatch { logo: Some(logo), ..Default::default() }).map_err(err)
+}
+
+fn md5_like(s: &str) -> u64 {
+    // A stable file name per project; not a security hash.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+#[tauri::command]
+pub async fn list_workspaces(project_path: String) -> CmdResult<Vec<crate::workspaces::Workspace>> {
+    tauri::async_runtime::spawn_blocking(move || crate::workspaces::list(Path::new(&project_path)).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn workspace_disposition(project_path: String, path: String) -> CmdResult<crate::workspaces::WorkspaceDisposition> {
+    tauri::async_runtime::spawn_blocking(move || crate::workspaces::disposition(Path::new(&project_path), Path::new(&path))).await.map_err(err)
+}
+
+/// Remove a worktree; sessions that lived there move to the project root
+/// and keep their transcripts.
+#[tauri::command]
+pub async fn delete_workspace(app: AppHandle, project_path: String, path: String, delete_branch: bool) -> CmdResult<Vec<SessionEntry>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<crate::AppState>();
+        let target = std::fs::canonicalize(&path).unwrap_or_else(|_| PathBuf::from(&path));
+        let sessions = index::load().map_err(err)?;
+        let affected: Vec<SessionEntry> = sessions.into_iter().filter(|s| std::fs::canonicalize(&s.cwd).map(|c| c == target).unwrap_or(s.cwd == path)).collect();
+        for s in &affected {
+            for t in &s.tabs {
+                state.host.kill(&format!("{}/{}", s.id, t.id));
+            }
+        }
+        crate::workspaces::delete(Path::new(&project_path), &target, delete_branch).map_err(err)?;
+        let branch = git::current_branch(Path::new(&project_path));
+        let mut moved = Vec::new();
+        for s in &affected {
+            let out = index::update_session(&s.id, |s| {
+                s.cwd = s.project_path.clone();
+                s.worktree_name = None;
+                s.worktree_removed = true;
+                s.branch = branch.clone();
+                s.base_ref = None;
+                for t in &mut s.tabs {
+                    t.status = TabStatus::Idle;
+                }
+                Ok(s.clone())
+            })
+            .map_err(err)?;
+            let _ = app.emit("session_updated", &out);
+            moved.push(out);
+        }
+        Ok(moved)
+    })
+    .await
+    .map_err(err)?
 }

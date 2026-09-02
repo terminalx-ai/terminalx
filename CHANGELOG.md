@@ -18,3 +18,4 @@ First runnable build, assembled checkpoint by checkpoint.
 - Dictation from the composer, using the Mac's own on-device speech recognition; nothing is downloaded and audio never leaves the machine.
 - File explorer beside the transcript (⌘⇧E) with Material file icons, git status badges, keyboard navigation and a right-click menu.
 - Issues from GitHub and Linear (⌘I): browse, read, and start a session on one; the worktree is named after the issue and the header links back to it.
+- Projects rail with mascots, colours and logos; workspaces (every checkout, including worktrees made outside the app) listed with their sessions; workspace delete guarded by pushed state and pull-request status.

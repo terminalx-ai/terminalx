@@ -45,6 +45,53 @@ export interface Project {
   path: string;
   name: string;
   lastOpened?: string | null;
+  color?: string | null;
+  mascot?: string | null;
+  logo?: string | null;
+  pinned?: boolean;
+  archived?: boolean;
+}
+
+export interface ProjectPatch {
+  name?: string;
+  color?: string | null;
+  mascot?: string | null;
+  logo?: string | null;
+  pinned?: boolean;
+  archived?: boolean;
+}
+
+/** One checkout of a project: the root or any worktree, whoever made it. */
+export interface Workspace {
+  path: string;
+  name: string;
+  branch: string | null;
+  head: string | null;
+  isMain: boolean;
+  managed: boolean;
+  uncommitted: number;
+  additions: number;
+  deletions: number;
+  unpushed: number;
+}
+
+export interface WorkspacePr {
+  number: number;
+  title: string;
+  url: string;
+  state: "OPEN" | "MERGED" | "CLOSED" | string;
+  isDraft: boolean;
+}
+
+export interface WorkspaceDisposition {
+  exists: boolean;
+  isMain: boolean;
+  branch: string | null;
+  uncommitted: number;
+  unpushed: number;
+  aheadOfBase?: number | null;
+  pr?: WorkspacePr | null;
+  prChecked: boolean;
 }
 
 export interface Capabilities {

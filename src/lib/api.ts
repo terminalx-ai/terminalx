@@ -6,7 +6,10 @@ import type {
   CommitInfo,
   HarnessInfo,
   Project,
+  ProjectPatch,
   SessionEntry,
+  Workspace,
+  WorkspaceDisposition,
   TabEntry,
   WorkStatus,
   WorktreeDisposition,
@@ -21,6 +24,8 @@ export interface NewTab {
 
 export interface NewSession {
   projectPath: string;
+  /** Run in this existing workspace instead of creating a worktree. */
+  cwd?: string | null;
   title?: string | null;
   useWorktree: boolean;
   baseRef?: string | null;
@@ -36,6 +41,12 @@ export const api = {
   addProject: (path: string) => invoke<Project>("add_project", { path }),
   removeProject: (path: string) => invoke<void>("remove_project", { path }),
   selectProject: (path: string) => invoke<void>("select_project", { path }),
+  updateProject: (path: string, patch: ProjectPatch) => invoke<Project>("update_project", { path, patch }),
+  setProjectLogo: (path: string, source: string | null) => invoke<Project>("set_project_logo", { path, source }),
+  listWorkspaces: (projectPath: string) => invoke<Workspace[]>("list_workspaces", { projectPath }),
+  workspaceDisposition: (projectPath: string, path: string) => invoke<WorkspaceDisposition>("workspace_disposition", { projectPath, path }),
+  deleteWorkspace: (projectPath: string, path: string, deleteBranch: boolean) =>
+    invoke<SessionEntry[]>("delete_workspace", { projectPath, path, deleteBranch }),
 
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),

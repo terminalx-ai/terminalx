@@ -13,6 +13,7 @@ mod names;
 mod pty;
 mod session;
 mod store;
+mod workspaces;
 
 use std::sync::Arc;
 use tauri::Manager;
@@ -131,6 +132,11 @@ pub fn run() {
             commands::dictation_available,
             commands::dictation_start,
             commands::dictation_stop,
+            commands::update_project,
+            commands::set_project_logo,
+            commands::list_workspaces,
+            commands::workspace_disposition,
+            commands::delete_workspace,
             commands::issues_list,
             commands::issue_details,
             commands::linear_status,

@@ -12,6 +12,67 @@ pub struct Project {
     pub name: String,
     #[serde(default)]
     pub last_opened: Option<String>,
+    /// Accent for the mascot and badges; a token name like `blue`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Pixel mascot id; the folder icon when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mascot: Option<String>,
+    /// Absolute path of an image the reader chose instead of a mascot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub archived: bool,
+}
+
+/// Fields a reader can change from the project menu. `Some(None)` clears.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPatch {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub color: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub mascot: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub logo: Option<Option<String>>,
+    #[serde(default)]
+    pub pinned: Option<bool>,
+    #[serde(default)]
+    pub archived: Option<bool>,
+}
+
+fn double_option<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<Option<String>>, D::Error> {
+    Ok(Some(Option::<String>::deserialize(d)?))
+}
+
+pub fn update(path: &str, patch: ProjectPatch) -> Result<Project> {
+    let mut f = load()?;
+    let p = f.projects.iter_mut().find(|p| p.path == path).with_context(|| format!("project {path} is not attached"))?;
+    if let Some(n) = patch.name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) {
+        p.name = n;
+    }
+    if let Some(c) = patch.color {
+        p.color = c;
+    }
+    if let Some(m) = patch.mascot {
+        p.mascot = m;
+    }
+    if let Some(l) = patch.logo {
+        p.logo = l;
+    }
+    if let Some(v) = patch.pinned {
+        p.pinned = v;
+    }
+    if let Some(v) = patch.archived {
+        p.archived = v;
+    }
+    let out = p.clone();
+    save(&f)?;
+    Ok(out)
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -66,7 +127,7 @@ pub fn add(path: &str) -> Result<Project> {
         save(&f)?;
         return Ok(out);
     }
-    let p = Project { name: project_name(&path), path: path.clone(), last_opened: Some(now) };
+    let p = Project { name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false };
     f.projects.push(p.clone());
     f.last_selected = Some(path);
     save(&f)?;
