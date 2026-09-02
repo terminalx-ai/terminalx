@@ -90,6 +90,8 @@ pub fn run() {
             commands::send_message,
             commands::interrupt_turn,
             commands::stop_tab,
+            commands::tab_handoff,
+            commands::tab_reconcile,
             commands::cancel_queued,
             commands::list_queued,
             commands::respond_permission,

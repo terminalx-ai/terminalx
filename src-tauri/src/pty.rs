@@ -60,7 +60,11 @@ impl Terminals {
         Self::default()
     }
 
-    pub fn spawn(&self, app: AppHandle, id: &str, cwd: &str, cols: u16, rows: u16) -> Result<()> {
+    /// `command`, when given, replaces the interactive shell: the login shell
+    /// execs it so PATH and rc files still apply, and the pane exits with it.
+    /// That exit is the signal a terminal-view tab relies on, so there is no
+    /// fallback shell kept alive behind the command.
+    pub fn spawn(&self, app: AppHandle, id: &str, cwd: &str, cols: u16, rows: u16, command: Option<&str>) -> Result<()> {
         if self.panes.lock().unwrap().contains_key(id) {
             return Ok(());
         }
@@ -69,8 +73,21 @@ impl Terminals {
         let sh = shell();
         let mut cmd = CommandBuilder::new(&sh);
         // A login shell so PATH and prompts match the reader's own terminal.
-        if sh.ends_with("zsh") || sh.ends_with("bash") || sh.ends_with("fish") || sh.ends_with("sh") {
-            cmd.arg("-l");
+        let known_shell = sh.ends_with("zsh") || sh.ends_with("bash") || sh.ends_with("fish") || sh.ends_with("sh");
+        match command {
+            Some(c) if known_shell => {
+                cmd.arg("-l");
+                cmd.arg("-c");
+                cmd.arg(format!("exec {c}"));
+            }
+            Some(c) => {
+                cmd.arg("-c");
+                cmd.arg(c);
+            }
+            None if known_shell => {
+                cmd.arg("-l");
+            }
+            None => {}
         }
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");

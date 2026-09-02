@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
-import { Plus, X } from "lucide-react";
+import { Plus, Terminal, X } from "lucide-react";
+import { useTabViews } from "@/lib/tabViews";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import {
@@ -24,6 +25,7 @@ import type { SessionEntry, TabEntry } from "@/types/session";
  */
 export function TabStrip({ session, activeTab }: { session: SessionEntry; activeTab: TabEntry | undefined }) {
   const store = useSessionStore();
+  const tabViews = useTabViews();
   const ed = useEditors();
   const hasEditors = ed.editors.some((e) => e.sessionId === session.id);
   const activeEditor = ed.active[session.id] ?? null;
@@ -96,6 +98,7 @@ export function TabStrip({ session, activeTab }: { session: SessionEntry; active
             />
             <AgentMark id={t.harness} className="size-3.5 shrink-0" />
             <span className="max-w-[9rem] truncate">{name}</span>
+            {tabViews.views[t.id] === "terminal" && <Terminal className="size-3 shrink-0 text-faint" aria-label="In terminal view" />}
             <button
               type="button"
               aria-label="Close tab"

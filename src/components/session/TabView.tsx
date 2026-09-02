@@ -8,6 +8,11 @@ import { useHotkey } from "@/lib/hotkeys";
 import { changeRange, useChanges } from "@/lib/changes";
 import { Chat } from "@/components/chat/Chat";
 import { Composer } from "@/components/chat/Composer";
+import { TerminalView } from "@/components/terminal/TerminalView";
+import { Button } from "@/components/ui/button";
+import { MessageSquare } from "lucide-react";
+import { useTerminals } from "@/lib/terminal";
+import { clearTabViewError, leaveTerminalView, terminalPaneId, useTabViews } from "@/lib/tabViews";
 import type { SessionEntry, TabEntry } from "@/types/session";
 
 /**
@@ -32,6 +37,11 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
   const log = useTabLog(session.id, tab.id);
   const draft = useDraft(tab.id);
   const [error, setError] = useState<string | null>(null);
+  const views = useTabViews();
+  const terminalMode = views.views[tab.id] === "terminal";
+  const viewError = views.errors[tab.id] ?? null;
+  const terms = useTerminals();
+  const pane = terms.panes.find((p) => p.id === terminalPaneId(tab.id));
   const [answering, setAnswering] = useState(false);
 
   useEffect(() => {
@@ -102,6 +112,32 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
     [session.id, tab.id],
   );
 
+  if (terminalMode) {
+    const info = views.info[tab.id];
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="flex h-8 shrink-0 items-center gap-2 border-b border-hairline px-3 text-xs text-muted-foreground">
+          <span className="shrink-0 text-foreground">Terminal view</span>
+          <span className="truncate font-mono text-[11px] text-faint" title={info?.command}>
+            {info?.command}
+          </span>
+          <span className="ml-auto shrink-0 text-faint">The chat resumes when you switch back.</span>
+        </div>
+        {pane?.exited && (
+          <div className="flex shrink-0 items-center gap-2 bg-warning/10 px-3 py-1.5 text-xs text-foreground">
+            The agent's terminal exited{pane.exitCode != null ? ` (${pane.exitCode})` : ""}.
+            <Button size="xs" variant="outline" className="ml-auto" onClick={() => void leaveTerminalView(session, tab)}>
+              <MessageSquare /> Back to chat
+            </Button>
+          </div>
+        )}
+        <div className="relative min-h-0 flex-1">
+          <TerminalView id={terminalPaneId(tab.id)} visible={active} />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <Chat
       transcript={transcript}
@@ -117,7 +153,10 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
           cwd={session.cwd}
           busy={live}
           draft={draft}
-          onDraftChange={(v) => setDraft(tab.id, v)}
+          onDraftChange={(v) => {
+            if (viewError) clearTabViewError(tab.id);
+            setDraft(tab.id, v);
+          }}
           onSend={send}
           onStop={stop}
           onSetModel={(m) => {
@@ -137,7 +176,7 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
           usageWindows={transcript.usageWindows}
           codexUsage={transcript.codexUsage}
           handoffs={handoffsFor(transcript, changes.files.length > 0)}
-          disabledReason={error}
+          disabledReason={error ?? viewError}
           autoFocus={active}
         />
       }

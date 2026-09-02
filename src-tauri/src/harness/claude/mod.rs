@@ -3,6 +3,7 @@
 pub mod commands;
 pub mod mapper;
 pub mod parser;
+pub mod transcript;
 
 use serde_json::{json, Value};
 

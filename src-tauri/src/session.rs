@@ -84,6 +84,23 @@ pub struct SessionManager {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct HandoffInfo {
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    pub harness: String,
+}
+
+/// Timestamp of the last persisted event in a tab log, read from the tail.
+fn last_event_ts(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let line = text.lines().rev().find(|l| !l.trim().is_empty())?;
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    v["ts"].as_str().map(String::from)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TabStatusEvent {
     pub session_id: String,
     pub tab_id: String,
@@ -629,6 +646,97 @@ impl SessionManager {
     }
 
     // ---- inbound from the child
+
+    /// Hand a tab to its CLI in a terminal: the headless child is stopped and
+    /// the command that resumes the same conversation is returned. Refused
+    /// mid-turn, because the CLI would otherwise resume a session another
+    /// process is still writing.
+    pub fn handoff(&self, session_id: &str, tab_id: &str) -> Result<HandoffInfo> {
+        let rt_arc = self.runtime(session_id, tab_id)?;
+        let entry = index::get(session_id)?;
+        let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
+        {
+            let rt = rt_arc.lock().unwrap();
+            if rt.turn_open && rt.child.is_some() {
+                bail!("Wait for the agent to finish, or stop it, before switching to the terminal.");
+            }
+        }
+        self.stop(session_id, tab_id)?;
+        {
+            let mut rt = rt_arc.lock().unwrap();
+            rt.engine = Engine::None;
+            rt.turn_open = false;
+            rt.queued.clear();
+            self.set_status(&mut rt, TabStatus::Idle);
+        }
+        let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+        let command = match HarnessId::parse(&tab.harness) {
+            HarnessId::Claude => {
+                let mut c = String::from("claude");
+                if let Some(id) = &tab.provider_session_id {
+                    c.push_str(&format!(" --resume {}", quote(id)));
+                }
+                if !tab.model.is_empty() {
+                    c.push_str(&format!(" --model {}", quote(&tab.model)));
+                }
+                c.push_str(&format!(" --permission-mode {}", claude::normalize_mode(&tab.permission_mode)));
+                c
+            }
+            HarnessId::Codex => {
+                let mut c = match &tab.provider_session_id {
+                    Some(id) => format!("codex resume {}", quote(id)),
+                    None => String::from("codex"),
+                };
+                if !tab.model.is_empty() {
+                    c.push_str(&format!(" -m {}", quote(&tab.model)));
+                }
+                let (approval, sandbox) = codex::stance(&tab.permission_mode);
+                if approval == "never" {
+                    c.push_str(" --dangerously-bypass-approvals-and-sandbox");
+                } else {
+                    c.push_str(&format!(" -a {approval} -s {sandbox}"));
+                }
+                c
+            }
+            HarnessId::Acp(binary) => binary,
+            HarnessId::OpenCode => "opencode".into(),
+            HarnessId::Other(name) => bail!("The {name} agent has no terminal form."),
+        };
+        Ok(HandoffInfo { command, provider_session_id: tab.provider_session_id.clone(), harness: tab.harness.clone() })
+    }
+
+    /// Bring what was said in the terminal back into the app's log. Claude
+    /// keeps a transcript per session that both sides write to; anything newer
+    /// than the app's last event came from the terminal. Returns how many
+    /// events were imported.
+    pub fn reconcile(&self, session_id: &str, tab_id: &str) -> Result<usize> {
+        let entry = index::get(session_id)?;
+        let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
+        if !matches!(HarnessId::parse(&tab.harness), HarnessId::Claude) {
+            return Ok(0);
+        }
+        let Some(pid) = tab.provider_session_id.as_deref() else { return Ok(0) };
+        let Some(path) = claude::transcript::cli_transcript_path(&entry.cwd, pid) else { return Ok(0) };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => return Ok(0),
+        };
+        let rt_arc = self.runtime(session_id, tab_id)?;
+        let mut rt = rt_arc.lock().unwrap();
+        let last_ts = last_event_ts(&rt.log_path);
+        let payloads = claude::transcript::import_after(&text, last_ts.as_deref());
+        let n = payloads.len();
+        for p in payloads {
+            self.publish(&mut rt, p, None);
+        }
+        if n > 0 {
+            let _ = index::update_tab(session_id, tab_id, |t| {
+                t.modified = index::now();
+                Ok(())
+            });
+        }
+        Ok(n)
+    }
 
     fn on_line(&self, rt_arc: &Arc<Mutex<TabRuntime>>, line: &str) {
         let mut rt = rt_arc.lock().unwrap();
