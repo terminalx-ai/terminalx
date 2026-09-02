@@ -95,6 +95,12 @@ export function upsertSession(s: SessionEntry) {
   const i = state.sessions.findIndex((x) => x.id === s.id);
   const sessions = i >= 0 ? state.sessions.map((x) => (x.id === s.id ? s : x)) : [...state.sessions, s];
   set({ sessions });
+  // A session that just cut its own worktree is ahead of the cached workspace
+  // list, and the sidebar files an unknown cwd under "missing". Every creation
+  // path lands here, so the catch-up belongs here rather than in each caller.
+  const known = state.workspaces[s.projectPath] ?? [];
+  const stale = !s.worktreeRemoved && !known.some((w) => w.path === s.cwd);
+  if (stale && !state.workspacesLoading[s.projectPath]) void refreshWorkspaces(s.projectPath);
 }
 
 export function patchSession(id: string, patch: Partial<SessionEntry>) {
