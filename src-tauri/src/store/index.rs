@@ -113,19 +113,6 @@ impl SessionEntry {
     pub fn tab_mut(&mut self, tab_id: &str) -> Option<&mut TabEntry> {
         self.tabs.iter_mut().find(|t| t.id == tab_id)
     }
-    /// A session is busy when any tab is.
-    pub fn status(&self) -> TabStatus {
-        let mut out = TabStatus::Idle;
-        for t in &self.tabs {
-            match t.status {
-                TabStatus::Waiting => return TabStatus::Waiting,
-                TabStatus::InProgress => out = TabStatus::InProgress,
-                TabStatus::Completed if out == TabStatus::Idle => out = TabStatus::Completed,
-                _ => {}
-            }
-        }
-        out
-    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -227,33 +214,6 @@ mod tests {
         let text = std::fs::read_to_string(file_path().unwrap()).unwrap();
         assert!(text.contains("futureField"));
         assert!(text.contains("\"extra\": 1"));
-    }
-
-    #[test]
-    fn status_folds_across_tabs() {
-        let mut s = entry("a");
-        assert_eq!(s.status(), TabStatus::Idle);
-        s.tabs.push(TabEntry {
-            id: "1".into(),
-            harness: "claude".into(),
-            title: None,
-            model: String::new(),
-            effort: None,
-            permission_mode: "auto".into(),
-            provider_session_id: None,
-            status: TabStatus::Completed,
-            created: now(),
-            modified: now(),
-            context_used: None,
-            context_max: None,
-            fork_from: None,
-            unknown: BTreeMap::new(),
-        });
-        assert_eq!(s.status(), TabStatus::Completed);
-        s.tabs[0].status = TabStatus::InProgress;
-        s.tabs.push(s.tabs[0].clone());
-        s.tabs[1].status = TabStatus::Waiting;
-        assert_eq!(s.status(), TabStatus::Waiting);
     }
 
     #[test]

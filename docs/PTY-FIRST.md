@@ -18,6 +18,13 @@ Phase 1 did this for Claude Code and phase 2 for Codex. Phase 3 drew the line:
 Claude Code and Codex are the only agents the UI offers, and ACP (Cursor) and
 OpenCode — the two that are still headless and still hand off — are hidden.
 
+Every shape described here — the transcript and rollout formats, the hook
+payloads, the keystroke and readiness behaviour of the two TUIs — was
+verified against Claude Code 2.1.258 / codex-cli 0.152.0 on 2026-09-02.
+Both CLIs move quickly and none of this is a stable public interface; when a
+newer CLI stops matching, the fixtures under `harness/*/fixtures/` are what
+to re-record first.
+
 ## The architecture
 
 ```
@@ -463,14 +470,17 @@ per event — the two that park on a person get 600 s, `SessionEnd` and
 
 ## Phases
 
-1. **Claude Code** ✅ — PTY-first tabs, transcript projection, hook bridge,
-   permissions by hook decision, terminal view as a view flag.
-2. **Codex** ✅ (this change) — the same shape for `codex`: the interactive CLI
+All three have landed. Each was its own change; none of them is "this
+change", and the shape they arrived at is what the repository holds now.
+
+1. **Claude Code** ✅ landed — PTY-first tabs, transcript projection, hook
+   bridge, permissions by hook decision, terminal view as a view flag.
+2. **Codex** ✅ landed — the same shape for `codex`: the interactive CLI
    in the PTY, its rollout tailed, its hooks carrying status and approvals, a
    managed `CODEX_HOME` to put them in. The headless Codex engine and its
    hand-off are gone with it, and the shared half of phase 1 moved into
    `harness/tui.rs`.
-3. **ACP and OpenCode** ✅ (this change) — they are protocols, not TUIs:
+3. **ACP and OpenCode** ✅ landed — they are protocols, not TUIs:
    `cursor-agent acp` and `opencode serve` have no interactive surface to
    project, so headless stays the right answer for them and `tab_handoff`
    stays for their terminal view. Rather than build a second shape out to

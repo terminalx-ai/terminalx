@@ -160,6 +160,10 @@ export function TranscriptionTab() {
                     <ExternalLink className="size-3" />
                   </button>
                   <span> · {mb(m.sizeBytes)}</span>
+                  <span> · </span>
+                  <button type="button" className="text-faint underline decoration-hairline-strong underline-offset-2 hover:text-foreground" onClick={() => void openUrl(m.licenseUrl)}>
+                    {m.license}
+                  </button>
                 </>
               }
               scores={

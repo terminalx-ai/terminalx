@@ -21,40 +21,70 @@ state. Tick boxes as they land; keep the "Verification" notes honest.
    session share that tree. Settling a session offers to remove the tree.
 4. **Processes are guarded.** Child spawns are stamped with an epoch and a
    kill generation; exits are matched by pid; PTY output is coalesced.
-5. **Everything visual is verified with screenshots**, compared against the
-   two reference apps at the same window size, and fixed before the checkpoint
-   is committed.
-6. **Clean room.** No code, asset, or name is taken from the reference apps.
+5. **Everything visual is verified with screenshots**, read back at
+   1360×860 and 1000×700 and checked against native macOS conventions —
+   window chrome, traffic-light inset, sidebar and panel proportions, focus
+   rings — and fixed before the checkpoint is committed.
+6. **Nothing is borrowed.** Every line of code, every asset and every name in
+   this repository is written for it.
 
 ## Architecture
 
 ```
 src-tauri/src
-  lib.rs             Tauri builder, command registry
-  store/             ~/.raccoon: projects.json, sessions/index.json, sessions/<id>.jsonl
+  main.rs            binary entry point; `raccoon hook <Event>` before Tauri starts
+  lib.rs             Tauri builder, command registry, module list
+  commands.rs        every #[tauri::command]: validate, call a module, stringify the error
   events.rs          normalized AgentEvent (+ TS twin in src/types/events.ts)
+  session.rs         SessionManager: one runtime per tab, numbering and persisting events
+  store/
+    mod.rs           the $RACCOON_HOME layout
+    index.rs         sessions/index.json — one entry per session, holding its tabs
+    projects.rs      projects.json — repo roots the reader has attached
+    settings.rs      settings.json — what Rust needs before the webview exists
   harness/
+    mod.rs           the harness list, availability, HIDDEN_HARNESSES
     host.rs          child spawn/write/kill with epoch + kill-gen guards
     tui.rs           what the two PTY-first harnesses share (paste, readiness, tails)
-    claude/          pty.rs (launch, keystrokes, hooks), transcript.rs, mapper.rs, trust.rs
-    codex/           pty.rs, rollout.rs, home.rs (managed CODEX_HOME), appserver.rs
-    acp/             generic Agent Client Protocol adapter (cursor-agent, others) — hidden
+    claude/          pty.rs, transcript.rs, mapper.rs, trust.rs, commands.rs
+                     + fixtures/interactive_session.jsonl
+    codex/           pty.rs, rollout.rs, home.rs (managed CODEX_HOME), appserver.rs,
+                     models.rs + fixtures/rollout.jsonl, fixtures/model_list.json
+    acp/             generic Agent Client Protocol adapter — hidden
     opencode/        local HTTP+SSE adapter — hidden
-  session.rs         SessionManager: spawn/resume/queue/interrupt/status
+  hooks.rs           the hook bridge: unix socket, parked permission requests
+  pty.rs             terminal PTYs with 8ms/32KB output coalescing
   git.rs             worktrees, snapshots (temp-index write-tree), diffs, commit, push
+  workspaces.rs      every checkout a project has, whoever made it
   github.rs          gh-backed PR status/create
-  pty.rs             PTY spawn with 8ms/32KB coalescing
+  issues.rs          GitHub (gh) and Linear (GraphQL) issues in one shape
   files.rs           in-memory file index + fuzzy search + watcher
+  summaries.rs       last prompt and reply per session, read backwards, for the dashboard
+  models.rs          the model list per harness: ids, labels, efforts, defaults
+  names.rs           worktree names: adjective-color-animal
   binpath.rs         CLI resolution incl. login-shell PATH
-  notifications.rs  desktop banners, badge
+  dictation.rs       microphone to text, out as events
+  transcription/     catalog.rs (models on offer), download.rs, engine.rs, audio.rs
 src
-  components/layout  AppShell, TitleBar, Sidebar, RightPanel
-  components/chat    Transcript, TurnGroup, ToolCall, Markdown, Composer, pickers
-  components/changes ChangesPanel, DiffView
-  components/terminal, editor, settings, ui (primitives)
-  lib/               transcript builder, streaming previews, theme, hotkeys
-  hooks/             useSessions, useAgentEvents, useChanges, useHotkey
-  animation/         raccoon sprite + idle/busy scenes
+  App.tsx            routes the whole app off the session store
+  components/layout    AppShell, TitleBar, Sidebar, ProjectRail, WorkspaceColumn, RightPanel
+  components/session   SessionView, NewSessionView, TabStrip, TabView, settle/delete dialogs
+  components/chat      Chat, TurnBlock, ToolCallRow, Markdown, DiffBlock, Composer,
+                       PickerMenu, AskCards, Dictation
+  components/changes   ChangesPanel, DiffPane, FileList, RepoPanel, PrPanel
+  components/files     ExplorerPane, FileTree, FileTreeView, FileTypeIcon
+  components/editor    EditorPane, EditorSplit, QuickOpen, ProjectSearch
+  components/dashboard AgentDashboard, AgentCard
+  components/issues    IssuesView
+  components/terminal  TerminalView, TerminalDock
+  components/settings  SettingsDialog, TranscriptionTab
+  components/raccoon   pixel sprite + idle/busy scenes
+  components/ui        button, dialog, menu, controls, tooltip, Toasts
+  lib/               api (every invoke), transcript builder, sessions store, theme,
+                     hotkeys, prefs, diff, dashboard, summaries, dictation, repo
+  types/             events.ts, session.ts — the TS twins of the Rust shapes
+  styles/            tokens.css (three-layer token system), app.css
+  demo/              the synthetic-transcript page the scroll tests drive
 ```
 
 ## Checkpoints
@@ -117,31 +147,38 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Handoff row (Commit / Create PR / Run it) as one-click prompts after a turn that touched files.
 - [x] PR panel via `gh` (status, checks, merge, create, mark ready).
 
-### C9 — Terminal
+### C9 — Terminal ✅
 - [x] PTY with coalesced output, xterm with fit + webgl, theme sync, OSC colour queries.
 - [x] Terminal tabs inside a session; session terminal dock (⌘J), panes survive session switches.
 
-### C10 — Files and editor
+### C10 — Files and editor ✅
 - [x] File tree in the right panel (Files, ⌘⌥4), fuzzy file search (⌘P), project text search (⌘⇧F).
 - [x] CodeMirror editor tab with git gutter, save, external-change detection, unsaved-close guard.
 
-### C11 — Notifications and attention
+### C11 — Notifications and attention ✅
 - [x] Desktop banner when unfocused, in-app notice when focused elsewhere, nothing when on screen.
 - [x] Rail marks: green unread, amber waiting; dock badge; sounds (toggle).
 
-### C12 — Raccoon animation
+### C12 — Raccoon animation ✅
 - [x] Pixel raccoon sprite; idle scene in an empty session (walks, sits, washes paws, glances, peeks).
 - [x] Busy runner along the composer while a turn is in flight; stunned on the jump chevron.
 - [x] Toggle in settings; respects reduced motion.
 
-### C13 — Worktree lifecycle
+### C13 — Worktree lifecycle ✅
 - [x] Settle dialog after a session's PR merges or on request: delete worktree (with unpushed warning), keep, relocate session to project root.
 - [x] Archive / delete session (confirm names what is lost; removes log, attachments, tree best effort).
 - [x] Fork session (new worktree at the branch tip, copied log, Claude conversation forked on first send).
 
-### C14 — More harnesses
-- [x] Generic ACP adapter (cursor-agent, and any `acp` speaker): handshake, authenticate, new/load session, prompt, updates, permission and fs requests. Live check reached the sign-in step (machine not logged in to Cursor).
-- [x] OpenCode over local HTTP+SSE: server as the tab's child, event pump, HTTP actions. Built against the documented API and unit-tested on fixtures; the installed 0.1.150 server never finished starting here, so not yet exercised live.
+### C14 — More harnesses ✅
+> **Both of these are hidden and neither has ever been exercised live.**
+> Since phase 3 of the PTY-first work the UI offers Claude Code and Codex
+> only, so no tab made from here on can reach either adapter. Both were built
+> against a published protocol and are covered by unit tests on fixtures; no
+> end-to-end conversation has ever run through either one. Treat them as
+> unproven code that is still compiled in, not as working features.
+
+- [x] Generic ACP adapter (cursor-agent, and any `acp` speaker): handshake, authenticate, new/load session, prompt, updates, permission and fs requests. Hidden, and never exercised live: the one live attempt reached the sign-in step and stopped there (machine not logged in to Cursor).
+- [x] OpenCode over local HTTP+SSE: server as the tab's child, event pump, HTTP actions. Hidden, and never exercised live: built against the documented API and unit-tested on fixtures, but the installed 0.1.150 server never finished starting here, so no conversation has ever gone through it.
 - [x] Availability probe; disabled rows with install hints.
 - [x] **Cursor and OpenCode are hidden, headless, not offered.** Since phase 3
       of the PTY-first work the UI lists Claude Code and Codex only: neither
@@ -150,13 +187,13 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
       already on one are untouched and still run, hand-off and all. One list,
       `HIDDEN_HARNESSES` in `src-tauri/src/harness/mod.rs`, is the switch.
 
-### C15 — Settings, updater, usage
+### C15 — Settings, updater, usage ✅
 - [x] Settings tabs: General, Appearance, Agents (installed CLIs, paths, capabilities, re-check), Shortcuts, About.
-- [x] Updater plugin with channel; changelog surface (CHANGELOG.md rendered in About). Signing key at `~/.tauri/raccoon.key`; the endpoint in tauri.conf.json is a placeholder until a release feed exists.
+- [x] Updater plugin with channel; changelog surface (CHANGELOG.md rendered in About). Signing key at `~/.tauri/raccoon.key`; the endpoint is the repository's GitHub Releases feed. The check is manual only — nothing runs on launch or on a timer.
 - [x] Claude/Codex usage windows in footer.
 
-### C16 — Audit and hardening
-- [x] Side-by-side screenshots vs the installed reference app at 1360×860 and 1000×700 (sidebar, transcript, composer and panel all hold their layout at both sizes).
+### C16 — Audit and hardening ✅
+- [x] Screenshots read back against native macOS conventions at 1360×860 and 1000×700 (sidebar, transcript, composer and panel all hold their layout at both sizes; traffic lights, drag region and focus rings behave as a native window's).
 - [x] Long-session stress: demo page `?turns=200&live=1&stream=1000` sustains ~830 deltas/s with ~1 long task/s (max 72 ms) after chunking the streaming preview; composer stays visible and typed text arrives intact.
 - [x] Light mode pass (session, editor, terminal), keyboard pass (focus rings on tabs, rows, composer); reduced motion honoured through `prefers-reduced-motion` in the raccoon scene and runner (code path, not toggled system-wide).
 
@@ -169,7 +206,7 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Files open in a pane beside the transcript (tab bar, resizable from its left edge, collapsible to a strip) instead of replacing the chat; the composer stays put.
 - [x] Markdown opens as a rendered preview with a Preview | Source toggle (⌘⇧P); jumps from search open source at the line. ⌘⌥W closes every file; ⌘W closes the file or the agent tab depending on which was last focused.
 
-### C17 — Issues as tasks
+### C17 — Issues as tasks ✅
 - [x] GitHub issues through `gh` (repo from origin; open, assigned-to-me, search) and Linear through its GraphQL API with a stored key (teams, assigned-to-me, search).
 - [x] Issues view (⌘I) with detail column; Start session creates a worktree named after the issue (`raccoon/eng-42-fix-login`) and sends the issue as the first prompt; the session header links back.
 - [x] Settings → Integrations: Linear key (validated, stored owner-only), GitHub CLI status.
@@ -202,9 +239,12 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 
 ## Verification protocol
 
-- `pnpm check` = vitest + tsc; `cargo test` + `cargo clippy -D warnings`.
-- Native screenshots: `screencapture -x` of the running dev app, read back and
-  compared against the reference apps launched at the same size.
+- Four checks, all of which must pass before a checkpoint is committed:
+  `pnpm exec tsc --noEmit`, `pnpm vitest run`,
+  `cargo clippy --all-targets -- -D warnings`, `cargo test`.
+  `pnpm check` runs the first two together; `pnpm test` runs vitest alone.
+- Native screenshots: `screencapture -x` of the running dev app, read back at
+  1360×860 and 1000×700 and checked against native macOS conventions.
 - Interaction: `cliclick` for clicks/typing where a real webview is needed;
   Playwright against the Vite dev server for DOM-level assertions.
 

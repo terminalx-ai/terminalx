@@ -49,6 +49,97 @@ Raccoon is macOS-only today, and it brings no compute of its own: it drives the
   tone), a Dock badge, four themes in light and dark, and a pixel raccoon that
   potters about while you wait.
 
+## What leaves your machine
+
+Raccoon has **no telemetry, no analytics and no crash reporting**. There is no
+account, no sign-in, and nothing is phoned home about how you use it. The only
+outbound connections it makes are these four, all of them things you asked for:
+
+| To | When | Carrying |
+| --- | --- | --- |
+| GitHub | You open the Issues view or a PR panel | Nothing of Raccoon's own — it shells out to your `gh`, which uses your existing credentials |
+| Linear | You open the Issues view with a Linear key configured | A GraphQL query to `api.linear.app`, authorized with the key you pasted |
+| Hugging Face | You press Download on a transcription model | A plain GET for the weights, at a pinned revision |
+| The update endpoint | You press "Check for updates" | The current version and your channel |
+
+Some detail on each:
+
+- **The agents themselves.** `claude` and `codex` talk to Anthropic and OpenAI
+  the same way they do in your terminal, under your own login. Raccoon does not
+  proxy, inspect or re-send any of it; it reads the transcript files the CLIs
+  write on disk.
+- **Linear.** The API key is yours, entered in Settings → Integrations. It is
+  stored in `$RACCOON_HOME/settings.json` (default `~/.raccoon/settings.json`),
+  which is written `0600` inside a `0700` directory. It is never sent anywhere
+  but `https://api.linear.app/graphql`.
+- **Model downloads.** Every transcription model in the catalogue is pinned to
+  a Hugging Face commit revision, so a URL always names the same bytes, and the
+  download is verified against a compiled-in SHA-256 before it is moved into
+  place. A failed checksum leaves nothing behind. Nothing is downloaded until
+  you ask for it.
+- **The updater is manual only.** Nothing checks on launch, on a timer, or in
+  the background. The one call happens when you press "Check for updates" in
+  Settings → About, and it goes to the endpoint in
+  `src-tauri/tauri.conf.json`. Updates are signed and verified against a public
+  key compiled into the app; nothing installs without you pressing Install.
+- **Dictation stays local.** Apple's recogniser runs on-device where your
+  language supports it, and the optional local models run entirely in-process.
+  Audio never leaves the machine.
+
+## What Raccoon touches outside your repo
+
+Driving somebody else's CLI means writing a few things outside your checkout.
+All of them, in full:
+
+- **`~/.claude.json`** — Claude Code asks "do you trust this folder?" the first
+  time it runs anywhere new, and every session worktree is somewhere new. That
+  dialog would swallow your first prompt where you could not see it, so Raccoon
+  sets `projects["<worktree>"].hasTrustDialogAccepted` for each worktree it
+  creates, and changes nothing else in the file. It does nothing at all if the
+  file does not exist yet — a first-ever run's dialog is yours to answer.
+- **`$RACCOON_HOME/codex`** — Codex reads hooks from `$CODEX_HOME/hooks.json`
+  and only runs one whose hash is recorded in `$CODEX_HOME/config.toml`, so
+  Raccoon needs a Codex home it owns. It builds one here and points `CODEX_HOME`
+  at it for the tabs it launches. **Your `~/.codex` is never edited.** Instead
+  the managed home *symlinks* to it: `auth.json`, `AGENTS.md`, `skills`,
+  `prompts` and `plugins` are links, so you stay on the same account and a
+  refreshed token lands in your own file.
+- **`$RACCOON_HOME/run/hooks.sock`** — the unix socket the CLIs' hooks report
+  status and permission requests over. Created `0600`, inside the `0700`
+  Raccoon home, and removed when the app exits.
+- **`$RACCOON_HOME`** itself (default `~/.raccoon`) — projects, the session
+  index, transcripts, settings and downloaded models. Created `0700`.
+- **`<repo>/.raccoon/worktrees/`** — inside your repository, but outside your
+  working tree: the checkouts sessions run in.
+
+## Permission modes
+
+Raccoon's five modes are its own vocabulary; each maps onto flags the two CLIs
+already have. This is the whole mapping:
+
+| Mode | Claude Code | Codex |
+| --- | --- | --- |
+| **Plan** — read and plan only | `--permission-mode plan` | `-a on-request -s read-only` |
+| **Ask every time** — every edit and command waits for you | `--permission-mode manual` | `-a on-request -s workspace-write`, plus a `PreToolUse` hook gate on *every* tool |
+| **Auto** — routine actions approved, risky ones ask | `--permission-mode auto` | `-a on-request -s workspace-write` |
+| **Accept edits** — edits go through, commands still ask | `--permission-mode acceptEdits` | `-a on-request -s workspace-write` |
+| **Bypass** — nothing asks | `--permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` |
+
+Two things are worth knowing:
+
+- **Codex has fewer knobs than Claude.** codex-cli 0.152 accepts only
+  `on-request` or `never` for `-a`, so Auto and Accept edits land on the same
+  pair as Ask every time. What separates Ask every time is not a flag: Raccoon
+  gates every tool through the `PreToolUse` hook, which is the only way to be
+  asked about a tool Codex would otherwise have run without asking.
+- **Bypass means what it says** on both. No sandbox, no approvals, nothing
+  asked. Use it only in a tree you would be happy to throw away.
+
+The source of truth is `normalize_mode` in
+`src-tauri/src/harness/claude/mod.rs` and `stance` / `asks_every_tool` in
+`src-tauri/src/harness/codex/mod.rs`; both are covered by tests that assert
+every mode names something the CLI will accept.
+
 ## Install
 
 Download the `.dmg` from this repository's Releases page and drag Raccoon to
@@ -81,9 +172,15 @@ are in [CONTRIBUTING.md](CONTRIBUTING.md).
 - [CHANGELOG.md](CHANGELOG.md) — what has shipped. The app renders it in the
   About tab.
 
+## Security
+
+Found something? See [SECURITY.md](SECURITY.md). Please do not open a public
+issue for a vulnerability.
+
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE), and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)
+for the licences of everything Raccoon bundles or links against.
 
 ## Acknowledgements
 

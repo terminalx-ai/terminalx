@@ -334,6 +334,8 @@ export interface TranscriptionModel {
   filename: string;
   sizeBytes: number;
   languages: string;
+  license: string;
+  licenseUrl: string;
   speed: number;
   accuracy: number;
   recommended: boolean;

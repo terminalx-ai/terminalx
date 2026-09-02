@@ -7,9 +7,10 @@ run what you change.
 
 ## Prerequisites
 
-- **Rust**, stable toolchain (`rustup toolchain install stable`), with
-  `clippy` and `rustfmt`.
-- **Node** 20 or newer and **pnpm** (`corepack enable`).
+- **Rust**, stable toolchain, with `clippy` and `rustfmt`. `rust-toolchain.toml`
+  asks for all of it, so `rustup` installs it on the first build.
+- **Node** 20 or newer (`.nvmrc`) and **pnpm** (`corepack enable`, which reads
+  the `packageManager` field and gets the right version).
 - **Xcode command line tools** for a dev build. A *full* Xcode install is
   needed for `pnpm tauri build`: the build script links clang's builtins
   archive (`libclang_rt.osx.a`) for the local transcription engine's Metal
@@ -48,6 +49,11 @@ pnpm vitest run
 cd src-tauri && cargo clippy --all-targets -- -D warnings
 cd src-tauri && cargo test
 ```
+
+`pnpm check` runs the first two together and `pnpm test` runs vitest alone.
+The same four run on every pull request in `.github/workflows/ci.yml`, on
+macOS, because the Rust side links AppKit, AVFoundation and Speech and will
+not build anywhere else.
 
 Clippy is run with `-D warnings`, so a warning is a failure.
 
@@ -135,7 +141,8 @@ version, and what the tab was doing — attach the relevant part of
 `~/.raccoon/sessions/<id>.jsonl` if you can share it.
 
 For anything with a security impact, do **not** open a public issue. Email
-dudhatparesh@gmail.com and give it a few days before disclosing.
+dudhatparesh@gmail.com — the full policy, including scope and the disclosure
+window, is in [SECURITY.md](SECURITY.md).
 
 ## Code of conduct
 

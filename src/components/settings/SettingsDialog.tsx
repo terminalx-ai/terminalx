@@ -12,6 +12,7 @@ import { Markdown } from "@/components/chat/Markdown";
 import { cn } from "@/lib/cn";
 import { THEMES, hasLightMode, setMode, setTheme, useTheme, type Mode, type ThemeId } from "@/lib/theme";
 import { setPrefs, usePrefs } from "@/lib/prefs";
+import { repoFile } from "@/lib/repo";
 import { keycaps } from "@/lib/hotkeys";
 import { SHORTCUTS } from "@/lib/shortcuts";
 import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
@@ -420,6 +421,16 @@ function AboutTab() {
         <div className="text-base font-semibold">Raccoon</div>
         <div className="text-muted-foreground">Version {version || "…"}</div>
         <p className="mt-1 text-muted-foreground">A workbench for coding agents. Every session is a git worktree; every tab is an agent.</p>
+        <p className="mt-2 text-xs text-faint">
+          MIT licensed.{" "}
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 underline decoration-hairline-strong underline-offset-2 hover:text-foreground"
+            onClick={() => void openUrl(repoFile("THIRD-PARTY-NOTICES.md"))}
+          >
+            Third-party notices <ExternalLink className="size-3" />
+          </button>
+        </p>
       </div>
 
       <SettingRow

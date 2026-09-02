@@ -130,11 +130,6 @@ fn resolve_uncached(name: &str) -> Option<PathBuf> {
     is_executable(&p).then_some(p)
 }
 
-#[allow(dead_code)]
-pub fn available(name: &str) -> bool {
-    resolve(name).is_some()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

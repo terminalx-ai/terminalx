@@ -1,5 +1,3 @@
-#![allow(dead_code)] // consumers land in later checkpoints; audited at C16
-
 //! Everything under `~/.raccoon`.
 //!
 //! Two kinds of file with two kinds of write:

@@ -258,9 +258,12 @@ mod tests {
 
     /// A rollout the installed CLI wrote itself, running interactively in a
     /// PTY: one turn, then two more after `codex resume` reopened the same
-    /// conversation. Only the model's standing instructions, the environment
-    /// preamble and the account's credit balance are trimmed; every record,
-    /// key and value the decoder reads is exactly as Codex wrote it.
+    /// conversation. The model's standing instructions and the environment
+    /// preamble are trimmed for size, and everything that described the
+    /// account or the machine that recorded it is gone: the `rate_limits`
+    /// records (plan, usage, credit balance) were removed whole, the local
+    /// timezone reads `UTC` and every `process_id` reads `0`. Every record,
+    /// key and value the decoder actually reads is exactly as Codex wrote it.
     const FIXTURE: &str = include_str!("fixtures/rollout.jsonl");
 
     fn kinds(payloads: &[Payload]) -> Vec<&'static str> {
