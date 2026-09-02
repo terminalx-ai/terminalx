@@ -102,7 +102,9 @@ pub struct NewSession {
     /// An existing workspace to run in instead of a new worktree.
     #[serde(default)]
     pub cwd: Option<String>,
-    pub tab: NewTab,
+    /// The first agent conversation. Omitted when a checkout is opened directly.
+    #[serde(default)]
+    pub tab: Option<NewTab>,
 }
 
 /// A worktree name the reader asked for, made safe for a branch and a folder:
@@ -152,9 +154,10 @@ fn new_tab_entry(t: &NewTab) -> TabEntry {
     }
 }
 
-/// Create a session: a worktree (unless opted out), an index entry, and its
-/// first tab. The index entry lands before anything else can fail after it, so
-/// a session whose agent never starts is still visible and deletable.
+/// Create a session: an index entry around an existing checkout, or a new
+/// worktree and its first tab. The index entry lands before anything else can
+/// fail after it, so a session whose agent never starts is still visible and
+/// deletable.
 #[tauri::command]
 pub async fn create_session(app: AppHandle, req: NewSession) -> CmdResult<SessionEntry> {
     tauri::async_runtime::spawn_blocking(move || create_session_blocking(&app, req))
@@ -163,11 +166,19 @@ pub async fn create_session(app: AppHandle, req: NewSession) -> CmdResult<Sessio
 }
 
 fn create_session_blocking(app: &AppHandle, req: NewSession) -> CmdResult<SessionEntry> {
+    let entry = create_session_entry(req)?;
+    let _ = app.emit("session_created", &entry);
+    Ok(entry)
+}
+
+fn create_session_entry(req: NewSession) -> CmdResult<SessionEntry> {
     let project = projects::canonical(&req.project_path).map_err(err)?;
     let project_path = Path::new(&project);
     let id = uuid::Uuid::now_v7().to_string();
     let now = index::now();
-    let title = req.title.clone().filter(|t| !t.trim().is_empty()).unwrap_or_else(|| "New session".into());
+    let requested_title = req.title.clone().filter(|t| !t.trim().is_empty());
+    let first_tab = req.tab.as_ref().map(new_tab_entry);
+    let has_agent = first_tab.is_some();
 
     let mut entry = SessionEntry {
         id: id.clone(),
@@ -178,22 +189,21 @@ fn create_session_blocking(app: &AppHandle, req: NewSession) -> CmdResult<Sessio
         base_ref: None,
         worktree_removed: false,
         issue: req.issue.clone(),
-        title,
+        title: String::new(),
         created: now.clone(),
         modified: now,
         archived: false,
         pinned: false,
-        tabs: vec![new_tab_entry(&req.tab)],
-        active_tab: None,
+        active_tab: first_tab.as_ref().map(|tab| tab.id.clone()),
+        tabs: first_tab.into_iter().collect(),
         unknown: BTreeMap::new(),
     };
-    entry.active_tab = Some(entry.tabs[0].id.clone());
 
     if let Some(cwd) = req.cwd.as_deref().filter(|c| !c.is_empty()) {
         let cwd = projects::canonical(cwd).map_err(err)?;
         entry.branch = git::current_branch(Path::new(&cwd));
         entry.cwd = cwd;
-    } else if req.use_worktree {
+    } else if has_agent && req.use_worktree {
         let taken = index::load().map(|s| index::claimed_worktree_names(&s)).unwrap_or_default();
         let taken = git::taken_worktree_names(project_path, &taken);
         let name = req
@@ -208,12 +218,19 @@ fn create_session_blocking(app: &AppHandle, req: NewSession) -> CmdResult<Sessio
         entry.base_ref = Some(wt.base_tree);
     }
 
+    entry.title = requested_title.unwrap_or_else(|| {
+        if has_agent {
+            "New session".into()
+        } else {
+            entry.branch.clone().unwrap_or_else(|| projects::project_name(&entry.cwd))
+        }
+    });
+
     index::update(|sessions| {
         sessions.push(entry.clone());
         Ok(())
     })
     .map_err(err)?;
-    let _ = app.emit("session_created", &entry);
     Ok(entry)
 }
 
@@ -1031,8 +1048,17 @@ pub fn github_repo(project_path: String) -> Option<String> {
 }
 
 #[cfg(test)]
-mod issue_name_tests {
-    use super::requested_worktree_name;
+mod command_tests {
+    use std::path::Path;
+    use std::process::Command;
+
+    use super::{create_session_entry, requested_worktree_name, NewSession};
+
+    fn git(cwd: &Path, args: &[&str]) -> String {
+        let output = Command::new("git").current_dir(cwd).args(args).output().unwrap();
+        assert!(output.status.success(), "git {}: {}", args.join(" "), String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
 
     #[test]
     fn requested_names_are_sanitised_and_unique() {
@@ -1040,6 +1066,44 @@ mod issue_name_tests {
         assert_eq!(requested_worktree_name("!!!", &[]), None);
         let taken = vec!["eng-42-fix-login".to_string(), "eng-42-fix-login-2".to_string()];
         assert_eq!(requested_worktree_name("eng-42-fix-login", &taken).as_deref(), Some("eng-42-fix-login-3"));
+    }
+
+    #[test]
+    fn create_session_opens_an_existing_worktree_without_a_tab() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let external = dir.path().join("external");
+        std::fs::create_dir(&project).unwrap();
+        git(&project, &["init", "-q", "-b", "main"]);
+        git(&project, &["config", "user.email", "t@example.com"]);
+        git(&project, &["config", "user.name", "T"]);
+        std::fs::write(project.join("README.md"), "project\n").unwrap();
+        git(&project, &["add", "."]);
+        git(&project, &["commit", "-q", "-m", "initial"]);
+        git(&project, &["worktree", "add", "-q", "-b", "feature/external", external.to_str().unwrap()]);
+        let before = git(&project, &["worktree", "list", "--porcelain"]);
+
+        let session = create_session_entry(NewSession {
+            project_path: project.to_string_lossy().into_owned(),
+            title: None,
+            use_worktree: true,
+            base_ref: None,
+            worktree_name: None,
+            issue: None,
+            cwd: Some(external.to_string_lossy().into_owned()),
+            tab: None,
+        })
+        .unwrap();
+
+        assert_eq!(session.cwd, external.canonicalize().unwrap().to_string_lossy());
+        assert_eq!(session.branch.as_deref(), Some("feature/external"));
+        assert_eq!(session.title, "feature/external");
+        assert!(session.tabs.is_empty());
+        assert_eq!(session.active_tab, None);
+        assert_eq!(session.worktree_name, None);
+        assert_eq!(git(&project, &["worktree", "list", "--porcelain"]), before);
+        assert_eq!(crate::store::index::load().unwrap(), vec![session]);
     }
 }
 
