@@ -96,6 +96,13 @@ mod mac {
         stopping: Arc<AtomicBool>,
     }
 
+    /// Whether the running binary declares a privacy usage string. Read from
+    /// the main bundle so the answer matches what TCC will check.
+    fn usage_string_present(key: &str) -> bool {
+        let bundle = objc2_foundation::NSBundle::mainBundle();
+        bundle.objectForInfoDictionaryKey(&objc2_foundation::NSString::from_str(key)).is_some()
+    }
+
     impl Dictation {
         pub fn available() -> bool {
             true
@@ -110,6 +117,16 @@ mod mac {
                 return Ok(());
             }
             let model = transcription.effective_model();
+            // macOS terminates a process that asks for the microphone or speech
+            // without the matching usage string in its Info.plist. A binary can
+            // lack them (a dev build made before the plist was picked up), so
+            // refuse here with a message rather than let the OS kill the app.
+            let needed: &[&str] = if model == APPLE { &["NSMicrophoneUsageDescription", "NSSpeechRecognitionUsageDescription"] } else { &["NSMicrophoneUsageDescription"] };
+            if let Some(missing) = needed.iter().find(|k| !usage_string_present(k)) {
+                let msg = format!("This build has no {missing} in its Info.plist, so macOS would refuse the request. Rebuild the app (the bundled release, or a fresh `tauri dev` after `Info.plist` changed) and try again.");
+                emit(&app, "error", None, Some(msg.clone()));
+                return Err(msg);
+            }
             if model == APPLE {
                 self.start_apple(app)
             } else {
