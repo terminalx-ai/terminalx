@@ -185,17 +185,43 @@ pub fn submit_delay(body_len: usize) -> Duration {
     Duration::from_millis(250 + (body_len / 4096) as u64)
 }
 
-/// A TUI drops keystrokes while it is still painting its first frame, and it
-/// has no way to say when it is ready. The sign is that it has drawn something
-/// and then stopped.
-///
-/// Three seconds, not less. A fresh start paints at 0.3 s, pauses 0.7 s and
-/// settles at 2.0 s; a `--resume` replays the conversation and pauses **2.7 s**
-/// in the middle of doing it. A prompt typed into either gap is swallowed
-/// without a trace, and a restart resumes, so the longer gap sets the rule.
-/// The timeout is the give-up, after which typing anyway beats never sending.
+/// A TUI drops keystrokes while it is still painting its first frame, and the
+/// screen cannot be asked whether it is listening. The `SessionStart` hook can:
+/// the CLI runs it once its session is up, for a fresh start and a `--resume`
+/// alike, and a short settle after it covers the last of the first paint.
+pub const READY_SETTLE: Duration = Duration::from_millis(300);
+/// The fallback, for a CLI whose hooks never reach us: it has drawn something
+/// and then stopped. Three seconds, because a `--resume` replays the
+/// conversation and pauses 2.7 s in the middle of doing it — but a busy TUI
+/// redraws a spinner forever and never goes quiet at all, which is why this is
+/// the fallback and not the rule.
 pub const READY_QUIET: Duration = Duration::from_millis(3000);
-pub const READY_TIMEOUT: Duration = Duration::from_secs(20);
+/// The give-up. Long, because it is only reached when both signals failed, and
+/// what follows is typing anyway and saying so — never dropping the prompt.
+pub const READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// When a pane's CLI said it was up. Shared with the thread that types into
+/// the pane, which is the only thing that has to wait for it.
+#[derive(Default)]
+pub struct Ready {
+    at: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl Ready {
+    /// The `SessionStart` hook arrived. Only the first one counts: the CLI
+    /// fires it again after `/clear`, and by then it is long since listening.
+    pub fn mark(&self) {
+        let mut at = self.at.lock().unwrap();
+        if at.is_none() {
+            *at = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Whether the CLI has been up long enough to have finished drawing.
+    pub fn settled(&self) -> bool {
+        self.at.lock().unwrap().is_some_and(|at| at.elapsed() >= READY_SETTLE)
+    }
+}
 
 /// An image the CLI should attach: the path, bracketed-pasted on its own. A
 /// typed path is read as prose; only a paste becomes an attachment.
@@ -333,6 +359,7 @@ impl TurnTail {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn settings_point_every_hook_at_this_binary() {
@@ -349,6 +376,45 @@ mod tests {
         // A person answers the permission card; the rest only report.
         assert_eq!(hooks["PermissionRequest"][0]["hooks"][0]["timeout"], 600);
         assert_eq!(hooks["Stop"][0]["hooks"][0]["timeout"], 10);
+    }
+
+    /// The composer waits for this before typing. It used to wait for the
+    /// pane to fall quiet instead, which a resumed TUI drawing a spinner never
+    /// does, and the prompt was dropped when the wait timed out.
+    #[test]
+    fn readiness_flips_when_the_session_starts_and_not_before() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let ready = Arc::new(Ready::default());
+        assert!(!ready.settled());
+
+        let typed = Arc::new(AtomicBool::new(false));
+        let (r, t) = (ready.clone(), typed.clone());
+        let waiter = std::thread::spawn(move || {
+            while !r.settled() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            t.store(true, Ordering::SeqCst);
+        });
+
+        std::thread::sleep(READY_SETTLE * 2);
+        assert!(!typed.load(Ordering::SeqCst), "nothing is typed before SessionStart");
+
+        ready.mark();
+        assert!(!ready.settled(), "nor in the instant it arrives");
+        waiter.join().unwrap();
+        assert!(typed.load(Ordering::SeqCst), "the prompt held back goes in once the CLI is up");
+    }
+
+    #[test]
+    fn only_the_first_session_start_counts() {
+        let ready = Ready::default();
+        ready.mark();
+        std::thread::sleep(READY_SETTLE + Duration::from_millis(50));
+        assert!(ready.settled());
+        // The CLI fires it again after a /clear; by then it is long since up.
+        ready.mark();
+        assert!(ready.settled());
     }
 
     #[test]

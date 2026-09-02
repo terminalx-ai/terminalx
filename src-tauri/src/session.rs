@@ -59,6 +59,9 @@ pub struct ClaudePty {
     /// A setting the CLI only reads at startup, changed mid-turn. The restart
     /// waits for the turn to end.
     pub restart_when_idle: bool,
+    /// Set when this CLI's `SessionStart` hook arrives; what the thread that
+    /// types into the pane waits on.
+    pub ready: Arc<claude::pty::Ready>,
     pub tail: Arc<claude::pty::Tail>,
     /// Prompts the composer already published, waiting for the transcript to
     /// echo them back so the reader is not shown the same message twice.
@@ -615,7 +618,10 @@ impl SessionManager {
         match &mut rt.engine {
             // The CLI's own `/model` takes the change live; nothing else can
             // reach a running TUI.
-            Engine::ClaudePty(p) => self.type_command(&p.pane_id, format!("/model {model}")),
+            Engine::ClaudePty(p) => {
+                let pane = p.pane_id.clone();
+                self.type_command(&rt_arc, &pane, format!("/model {model}"));
+            }
             Engine::Codex(c) => c.model = Some(model.into()),
             Engine::Acp(a) => {
                 let actions = a.set_model(model);
@@ -692,7 +698,8 @@ impl SessionManager {
         match &mut rt.engine {
             Engine::ClaudePty(p) => {
                 if let Some(e) = effort.filter(|e| !e.is_empty()) {
-                    self.type_command(&p.pane_id, format!("/effort {e}"));
+                    let pane = p.pane_id.clone();
+                    self.type_command(&rt_arc, &pane, format!("/effort {e}"));
                 }
             }
             Engine::Codex(c) => c.effort = effort.map(String::from),
@@ -801,10 +808,12 @@ impl SessionManager {
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: 120, rows: 30, command: Some(&command), env: &env };
         self.terminals.spawn(self.app.clone(), &pane, spec).context("start Claude Code")?;
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let ready = Arc::new(claude::pty::Ready::default());
         rt.engine = Engine::ClaudePty(ClaudePty {
             pane_id: pane.clone(),
             generation,
             restart_when_idle: false,
+            ready: ready.clone(),
             tail: tail.clone(),
             echoed: Default::default(),
             decisions: HashMap::new(),
@@ -976,9 +985,9 @@ impl SessionManager {
         text: String,
         images: Vec<ImageRef>,
     ) -> Result<SendOutcome> {
-        let just_started = self.start_cli(rt, rt_arc, entry, tab)?;
-        let pane = match &rt.engine {
-            Engine::ClaudePty(p) => p.pane_id.clone(),
+        self.start_cli(rt, rt_arc, entry, tab)?;
+        let (pane, ready) = match &rt.engine {
+            Engine::ClaudePty(p) => (p.pane_id.clone(), p.ready.clone()),
             _ => bail!("the agent is not running"),
         };
         let queued = rt.turn_open;
@@ -990,7 +999,7 @@ impl SessionManager {
             }
         }
         let ev = self.publish(rt, Payload::UserMessage { text: text.clone(), images, baseline, queued, cwd: Some(entry.cwd.clone()) }, None);
-        self.type_prompt(&pane, text, paths, just_started);
+        self.type_prompt(rt_arc, &pane, text, paths, Some(ready));
         if !queued {
             rt.turn_open = true;
             rt.turn_started_at = Some(Instant::now());
@@ -1003,22 +1012,23 @@ impl SessionManager {
     /// Enter has to be a later write than the body — a carriage return inside
     /// the same one is read as part of the paste and never submits — so this
     /// sleeps, which no caller holding the tab lock could afford to do.
-    fn type_prompt(&self, pane: &str, text: String, attachments: Vec<String>, await_ready: bool) {
+    fn type_prompt(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, text: String, attachments: Vec<String>, ready: Option<Arc<claude::pty::Ready>>) {
         let lock = self.writers.lock().unwrap().entry(pane.to_string()).or_default().clone();
         let terminals = self.terminals.clone();
+        let manager = self.clone();
+        let rt_arc = rt_arc.clone();
         let pane = pane.to_string();
         let _ = std::thread::Builder::new().name("cli-input".into()).spawn(move || {
             let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
-            // A TUI that is still drawing its first frame drops what is typed
-            // at it. There is nothing to ask, so the sign it is listening is
-            // that it has painted something and then gone quiet.
-            if await_ready {
-                let deadline = std::time::Instant::now() + claude::pty::READY_TIMEOUT;
-                while std::time::Instant::now() < deadline {
-                    if terminals.quiet_for(&pane).is_some_and(|q| q >= claude::pty::READY_QUIET) {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+            if let Some(ready) = ready {
+                if !manager.wait_ready(&pane, &ready) {
+                    // Both signals failed. Typing anyway may lose the prompt to
+                    // a TUI that is not listening, but dropping it silently is
+                    // worse: the reader would watch a message they sent never
+                    // appear anywhere at all.
+                    log::warn!("[{pane}] never reported ready; typing the prompt regardless");
+                    let mut rt = rt_arc.lock().unwrap();
+                    manager.apply(&mut rt, Payload::Status { text: "The agent was slow to start; check that your message arrived.".into() }, None);
                 }
             }
             let write = |bytes: &[u8]| {
@@ -1040,9 +1050,38 @@ impl SessionManager {
         });
     }
 
+    /// Wait until the pane's CLI is listening. `true` when it said so — or looked
+    /// like it — and `false` when neither signal came in time.
+    ///
+    /// The `SessionStart` hook is the deterministic one: the CLI runs it once its
+    /// session is up, whether it started fresh or resumed. Quiet output is the
+    /// fallback for a CLI whose hooks never reach us, and only a fallback: a TUI
+    /// that is drawing a spinner never goes quiet, which is how a prompt sent to a
+    /// resumed tab used to be dropped after the wait timed out.
+    fn wait_ready(&self, pane: &str, ready: &claude::pty::Ready) -> bool {
+        let deadline = Instant::now() + claude::pty::READY_TIMEOUT;
+        loop {
+            if ready.settled() {
+                return true;
+            }
+            if !self.terminals.is_running(pane) {
+                log::warn!("[{pane}] exited before it was ready");
+                return false;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            if self.terminals.quiet_for(pane).is_some_and(|q| q >= claude::pty::READY_QUIET) {
+                log::warn!("[{pane}] never ran its SessionStart hook; falling back to quiet output");
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
     /// A slash command the CLI runs itself (`/model`, `/effort`).
-    fn type_command(&self, pane: &str, command: String) {
-        self.type_prompt(pane, command, Vec::new(), false);
+    fn type_command(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, command: String) {
+        self.type_prompt(rt_arc, pane, command, Vec::new(), None);
     }
 
     // ---- inbound from the CLI's hooks
@@ -1070,6 +1109,12 @@ impl SessionManager {
         self.pump(&rt_arc, &tail);
 
         match frame.event.as_str() {
+            // The CLI's session is up; the composer may stop waiting.
+            "SessionStart" => {
+                if let Engine::ClaudePty(p) = &rt_arc.lock().unwrap().engine {
+                    p.ready.mark();
+                }
+            }
             "PermissionRequest" => return self.ask_permission(&rt_arc, &frame),
             "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => {
                 let mut rt = rt_arc.lock().unwrap();
