@@ -128,8 +128,7 @@ export function Composer({
     };
   }, [cwd, tab.harness]);
 
-  const focusInput = useCallback(() => ref.current?.focus(), []);
-  const dictation = useDictationInto(tab.id, draft, onDraftChange, focusInput);
+  const dictation = useDictationInto(tab.id, draft, onDraftChange, ref);
   useHotkey("mod+shift+d", dictation.toggle, { enabled: autoFocus });
 
   const token = useMemo(() => tokenAtCaret(draft, caret), [draft, caret]);

@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { Mic } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 import { keycaps } from "@/lib/hotkeys";
 import { clearDictationError, dictationAvailable, startDictation, stopDictation, useDictation, type DictationState } from "@/lib/dictation";
+import { anchorAt, applyFinal, applyPartial, draftWithSpeech, EMPTY_BUFFER, type DictationAnchor, type DictationBuffer } from "@/lib/dictationText";
 
 /**
  * The mic, shared by the two composers: the one inside a session and the one
@@ -25,26 +26,76 @@ export interface Dictation {
 }
 
 /**
- * Dictate into a draft. The draft at the moment the mic opens is the base;
- * partial results replace what follows it, and each finished phrase extends it.
- * `onCommitted` runs after a phrase lands, to put the caret back in the field.
+ * Dictate into a draft. Where the caret sits when the mic opens is where the
+ * words go: the draft is split there and the two halves are kept as they are,
+ * so nothing the reader typed is ever overwritten. What the recogniser hands
+ * back is folded together by `@/lib/dictationText`, which is where the rules
+ * about segments and spacing live.
+ *
+ * `field` is the textarea the draft belongs to. It is read for the caret when
+ * the mic opens, and moved to the end of the dictated words as they arrive.
+ *
+ * If the reader edits the draft while the mic is open, the hook stops trying
+ * to be clever: the draft in front of them becomes the new base, the caret is
+ * read again, and what has been dictated so far is left where it already sits.
  */
-export function useDictationInto(target: string, draft: string, onDraftChange: (v: string) => void, onCommitted?: () => void): Dictation {
+export function useDictationInto(target: string, draft: string, onDraftChange: (v: string) => void, field?: RefObject<HTMLTextAreaElement | null>): Dictation {
   const state = useDictation();
   const dictating = state.target === target && state.phase !== "idle";
-  const base = useRef("");
   const [available, setAvailable] = useState<boolean | null>(null);
   useEffect(() => {
     void dictationAvailable().then(setAvailable);
   }, []);
 
+  // Where the words go, and what has been heard so far.
+  const anchor = useRef<DictationAnchor>({ before: "", after: "" });
+  const buffer = useRef<DictationBuffer>(EMPTY_BUFFER);
+  // The draft as this hook last wrote it. Anything else is the reader typing.
+  const written = useRef<string | null>(null);
+  // Where the caret should end up, and whether the field should be focused
+  // first — it is, after a phrase lands, because clicking the mic blurred it.
+  const caret = useRef<number | null>(null);
+  const refocus = useRef(false);
+  const current = useRef(draft);
+  current.current = draft;
+  const change = useRef(onDraftChange);
+  change.current = onDraftChange;
+
+  /** Read the field's caret and start the words from there. */
+  const reanchor = useCallback(() => {
+    const text = current.current;
+    const el = field?.current;
+    anchor.current = anchorAt(text, el?.selectionStart ?? text.length, el?.selectionEnd ?? text.length);
+    buffer.current = EMPTY_BUFFER;
+    written.current = text;
+  }, [field]);
+
+  const write = useCallback(() => {
+    const next = draftWithSpeech(anchor.current, buffer.current);
+    written.current = next.text;
+    caret.current = next.caret;
+    change.current(next.text);
+  }, []);
+
   useEffect(() => {
-    if (!dictating || state.phase !== "listening") return;
-    const b = base.current;
-    const sep = b && !/\s$/.test(b) && state.partial ? " " : "";
-    onDraftChange(state.partial ? b + sep + state.partial : b);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.partial, dictating, state.phase]);
+    if (!dictating || state.phase !== "listening" || !state.partial) return;
+    if (written.current !== current.current) reanchor();
+    buffer.current = applyPartial(buffer.current, state.partial);
+    write();
+  }, [state.partial, dictating, state.phase, reanchor, write]);
+
+  // Put the caret back after the words, once the draft has come round again.
+  useLayoutEffect(() => {
+    const el = field?.current;
+    const pos = caret.current;
+    if (!el || pos == null || draft !== written.current) return;
+    caret.current = null;
+    if (refocus.current) {
+      refocus.current = false;
+      el.focus();
+    }
+    el.setSelectionRange(pos, pos);
+  }, [draft, field]);
 
   const toggle = useCallback(() => {
     if (dictating) {
@@ -52,15 +103,14 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
       return;
     }
     if (state.phase !== "idle") return;
-    base.current = draft;
+    reanchor();
     void startDictation(target, (text) => {
-      const b = base.current;
-      const sep = b && !/\s$/.test(b) ? " " : "";
-      base.current = b + sep + text + " ";
-      onDraftChange(base.current);
-      requestAnimationFrame(() => onCommitted?.());
+      if (written.current !== current.current) reanchor();
+      buffer.current = applyFinal(buffer.current, text);
+      refocus.current = true;
+      write();
     });
-  }, [dictating, state.phase, draft, target, onDraftChange, onCommitted]);
+  }, [dictating, state.phase, target, reanchor, write]);
 
   return { state, dictating, available, toggle };
 }
