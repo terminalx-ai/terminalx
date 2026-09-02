@@ -14,6 +14,7 @@
 //! `attachment`, …) carry nothing the transcript view would draw and are
 //! skipped, as are sidechain (subagent) and meta records.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -25,6 +26,21 @@ use crate::events::{Payload, ToolResult, ToolType, TurnStatus, Usage};
 /// yields a double dash.
 pub fn cli_transcript_path(cwd: &str, session_id: &str) -> Option<PathBuf> {
     Some(transcript_under(&dirs::home_dir()?, cwd, session_id))
+}
+
+/// Every record uuid in a session's transcript. A fork copies those records
+/// into its own file, so this is what the copy will look like.
+pub fn record_uuids(cwd: &str, session_id: &str) -> Option<HashSet<String>> {
+    let path = cli_transcript_path(cwd, session_id)?;
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(uuids_in(&text))
+}
+
+fn uuids_in(text: &str) -> HashSet<String> {
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|v| v["uuid"].as_str().map(String::from))
+        .collect()
 }
 
 /// Path check without the home lookup, for tests and callers that have one.
@@ -62,12 +78,15 @@ fn occupancy(usage: &Value) -> Option<u64> {
 }
 
 /// One transcript record as payloads. Unknown record types yield nothing.
-pub fn decode_line(line: &str, out: &mut Vec<Payload>) {
+pub fn decode_line(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>) {
     if line.trim().is_empty() {
         return;
     }
     let Ok(v) = serde_json::from_str::<Value>(line) else { return };
     if v["isSidechain"].as_bool().unwrap_or(false) || v["isMeta"].as_bool().unwrap_or(false) {
+        return;
+    }
+    if v["uuid"].as_str().is_some_and(|u| skip.contains(u)) {
         return;
     }
     match v["type"].as_str().unwrap_or("") {
@@ -230,6 +249,20 @@ mod tests {
         assert!(matches!(&p[2], Payload::AssistantText { text, .. } if text == "pong"));
         assert!(matches!(&p[4], Payload::UserMessage { text, .. } if text == "Reply with exactly: second"));
         assert!(matches!(&p[6], Payload::AssistantText { text, .. } if text == "second"));
+    }
+
+    /// A forked tab's log already holds the parent conversation, and the CLI
+    /// writes a copy of it into the fork's own file. The copy keeps each
+    /// record's uuid, which is what tells it apart from what is new.
+    #[test]
+    fn a_forks_copy_of_the_parent_conversation_is_not_logged_again() {
+        let carried = uuids_in(FIXTURE);
+        assert!(carried.contains("u1") && carried.contains("a2"));
+        let mut s = Streamer::skipping(0, decode_line, carried);
+        assert!(s.push(FIXTURE.as_bytes()).is_empty(), "every record was carried over");
+
+        let fresh = "{\"type\":\"user\",\"uuid\":\"u9\",\"message\":{\"content\":\"after the fork\"}}\n";
+        assert!(matches!(&s.push(fresh.as_bytes())[0], Payload::UserMessage { text, .. } if text == "after the fork"));
     }
 
     #[test]

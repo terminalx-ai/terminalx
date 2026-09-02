@@ -40,7 +40,10 @@ export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, 
   const ref = useRef<HTMLTextAreaElement>(null);
 
   const preset = store.newSessionPreset;
-  const project = store.projects.find((p) => p.path === (preset?.projectPath ?? prefs.lastProject)) ?? store.projects[0] ?? null;
+  // The rail is what the reader last pointed at, so it beats the project they
+  // happened to start a session in some other day; a preset beats both.
+  const wanted = preset?.projectPath ?? store.selectedProject ?? prefs.lastProject;
+  const project = store.projects.find((p) => p.path === wanted) ?? store.projects[0] ?? null;
   const harness = store.harnesses.find((h) => h.id === prefs.lastAgent) ?? store.harnesses[0] ?? null;
   const available = harness?.available ?? false;
   const models = useModels(harness?.id);

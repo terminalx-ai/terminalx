@@ -13,6 +13,7 @@
 //! Everything harness-specific — the launch line, the hook definitions, the
 //! record shapes — stays in that harness's own module.
 
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -74,20 +75,23 @@ pub fn submit_delay(body_len: usize) -> Duration {
 ///
 /// A TUI drops keystrokes while it is still painting its first frame and has
 /// no way to say when it is ready, so the sign is that it has drawn something
-/// and then stopped. Measured, not guessed, against both installed CLIs:
-/// Claude Code paints at 0.3 s, pauses 0.7 s, paints again at 1.0 s and
-/// settles at 2.0 s; Codex paints in a burst to 0.3 s and settles somewhere
-/// between 1.8 s (a resumed session) and 3.5 s (a cold start, while the model
-/// and directory lines resolve). One second of quiet clears both, and a
-/// prompt typed into the gap before it vanishes without a trace.
-pub const READY_QUIET: Duration = Duration::from_millis(1000);
+/// and then stopped. Three seconds, not less — measured, not guessed, against
+/// both installed CLIs. Claude Code paints at 0.3 s, pauses 0.7 s and settles
+/// at 2.0 s from cold, and a `--resume` replays the conversation with a
+/// **2.7 s** pause in the middle of doing it. Codex paints in a burst to
+/// 0.3 s and settles between 1.9 s (a resume) and 3.5 s (a cold start, while
+/// its model and directory lines resolve), with gaps of up to 1.6 s before
+/// that. A prompt typed into any of those gaps vanishes without a trace, and
+/// a restart resumes, so the longest gap sets the rule.
+pub const READY_QUIET: Duration = Duration::from_millis(3000);
 pub const READY_TIMEOUT: Duration = Duration::from_secs(20);
 
 // ------------------------------------------------------------------ the tail
 
 /// Turns one transcript record into the app's payloads. Unknown records
-/// yield nothing.
-pub type Decoder = fn(&str, &mut Vec<Payload>);
+/// yield nothing. The set is records the app has already logged under
+/// another id, which the decoder recognises and drops.
+pub type Decoder = fn(&str, &HashSet<String>, &mut Vec<Payload>);
 
 /// A cursor into one transcript file: how far it has been read, and the bytes
 /// after the last newline, which are a record still being written.
@@ -99,13 +103,28 @@ pub struct Streamer {
     offset: u64,
     partial: Vec<u8>,
     decode: Decoder,
+    /// Records the app has already logged under another id. A forked Claude
+    /// conversation is copied into its new file record for record, and the
+    /// copies keep their original uuids.
+    skip: HashSet<String>,
 }
 
 impl Streamer {
     /// Start reading at `offset` — the file's length when the CLI was spawned,
-    /// so a resumed conversation is not replayed into the log twice.
+    /// so a resumed conversation is not replayed into the log twice. `skip`
+    /// names records already logged elsewhere, which is how a fork's copy of
+    /// its parent is left out.
+    pub fn skipping(offset: u64, decode: Decoder, skip: HashSet<String>) -> Self {
+        Self { offset, partial: Vec::new(), decode, skip }
+    }
+
     pub fn at(offset: u64, decode: Decoder) -> Self {
-        Self { offset, partial: Vec::new(), decode }
+        Self::skipping(offset, decode, HashSet::new())
+    }
+
+    /// The records this cursor will drop, so a re-opened cursor keeps them.
+    pub fn carried(&self) -> &HashSet<String> {
+        &self.skip
     }
 
     pub fn offset(&self) -> u64 {
@@ -123,13 +142,17 @@ impl Streamer {
             if let Ok(text) = std::str::from_utf8(&line) {
                 let line = text.trim_end_matches(['\n', '\r']);
                 if !line.trim().is_empty() {
-                    (self.decode)(line, &mut out);
+                    (self.decode)(line, &self.skip, &mut out);
                 }
             }
         }
         out
     }
 }
+
+/// How long a `Stop` hook waits for the transcript to catch up with the reply
+/// the hook is already holding. Well inside the hook's own 10 s.
+pub const STOP_SETTLE: Duration = Duration::from_secs(2);
 
 /// How often the transcript is looked at. Polling is the authority: a CLI
 /// appends without any signal the app could subscribe to, and a watch on a
@@ -147,11 +170,12 @@ pub struct Tail {
 }
 
 impl Tail {
-    /// Start at the file's current length: everything already in it is either
-    /// history the app has logged or a conversation it is resuming.
-    pub fn opening(path: PathBuf, decode: Decoder) -> Self {
+    /// Follow from the file's length now: whatever it already holds is either
+    /// history the app has logged or a conversation it is resuming. `carried`
+    /// names records a fork will copy in later, which are history too.
+    pub fn opening(path: PathBuf, decode: Decoder, carried: HashSet<String>) -> Self {
         let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        Self { path: Mutex::new(path), stream: Mutex::new(Streamer::at(len, decode)), decode }
+        Self { path: Mutex::new(path), stream: Mutex::new(Streamer::skipping(len, decode, carried)), decode }
     }
 
     /// Follow a file whose name is not known yet. A Codex tab is like this
@@ -161,6 +185,7 @@ impl Tail {
         Self { path: Mutex::new(PathBuf::new()), stream: Mutex::new(Streamer::at(0, decode)), decode }
     }
 
+
     /// Point at the file the CLI actually opened. Hooks carry
     /// `transcript_path`, which is authoritative; anything derived before the
     /// CLI started is only a guess.
@@ -169,9 +194,10 @@ impl Tail {
         if *current == path {
             return;
         }
-        let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         *current = path.to_path_buf();
-        *self.stream.lock().unwrap() = Streamer::at(len, self.decode);
+        let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let mut stream = self.stream.lock().unwrap();
+        *stream = Streamer::skipping(len, self.decode, stream.carried().clone());
     }
 
     /// Read whatever has been appended since the last call.
@@ -194,7 +220,7 @@ impl Tail {
             // Skipping to the new end loses a little; replaying from zero
             // would duplicate the whole conversation in the log.
             log::warn!("transcript {} shrank; skipping to its end", path.display());
-            *stream = Streamer::at(size, self.decode);
+            *stream = Streamer::skipping(size, self.decode, stream.carried().clone());
             return Vec::new();
         }
         let mut file = match std::fs::File::open(&path) {
@@ -215,12 +241,105 @@ impl Tail {
     }
 }
 
+/// What one turn has said, and what a `Stop` hook says it finished with.
+///
+/// The two arrive over different channels and can cross: the hook fires as soon
+/// as the model stops, while the record is a file write the tailer has yet to
+/// see. Publishing `turn_completed` first closes the turn, and the assistant
+/// record then lands outside it and is drawn a second time.
+#[derive(Default)]
+pub struct TurnTail {
+    /// The last assistant text published for the turn in progress.
+    said: Option<String>,
+    /// Text the app published from a `Stop` hook because the transcript had
+    /// not caught up; its record is skipped when it finally lands.
+    anticipated: VecDeque<String>,
+}
+
+impl TurnTail {
+    /// Note an assistant message from the transcript. `false` means this is a
+    /// record the app has already published and the caller must drop it.
+    pub fn observe(&mut self, text: &str) -> bool {
+        if self.anticipated.front().is_some_and(|a| a == text.trim()) {
+            self.anticipated.pop_front();
+            return false;
+        }
+        self.said = Some(text.trim().to_string());
+        true
+    }
+
+    /// Whether the transcript has already delivered what the hook is holding.
+    pub fn saw(&self, want: &str) -> bool {
+        self.said.as_deref() == Some(want.trim())
+    }
+
+    /// Say it on the transcript's behalf, and skip its record when it lands.
+    pub fn anticipate(&mut self, want: &str) {
+        let want = want.trim().to_string();
+        self.said = Some(want.clone());
+        self.anticipated.push_back(want);
+    }
+
+    /// A turn boundary. What the next turn says is judged on its own, so the
+    /// same reply twice running is not mistaken for one already seen.
+    pub fn turn_ended(&mut self) {
+        self.said = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn echo(line: &str, out: &mut Vec<Payload>) {
+    fn echo(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>) {
+        if skip.contains(line) {
+            return;
+        }
         out.push(Payload::Status { text: line.to_string() });
+    }
+
+    /// The `Stop` hook and the assistant record race, and the reply must be
+    /// drawn exactly once whichever wins.
+    #[test]
+    fn a_reply_is_published_once_whichever_of_stop_and_the_record_lands_first() {
+        // Record first: the hook has nothing to add.
+        let mut t = TurnTail::default();
+        assert!(t.observe("demo"));
+        assert!(t.saw("demo"));
+
+        // Stop first: the app says it, and drops the record when it lands.
+        let mut t = TurnTail::default();
+        assert!(!t.saw("demo"));
+        t.anticipate("demo");
+        assert!(t.saw("demo"));
+        assert!(!t.observe("demo"), "the record the app pre-empted is dropped");
+        assert!(t.observe("demo"), "a genuine second one is not");
+    }
+
+    #[test]
+    fn the_same_reply_in_the_next_turn_is_not_mistaken_for_one_already_seen() {
+        let mut t = TurnTail::default();
+        t.observe("demo");
+        t.turn_ended();
+        assert!(!t.saw("demo"));
+    }
+
+    #[test]
+    fn trailing_whitespace_does_not_make_a_reply_look_new() {
+        let mut t = TurnTail::default();
+        t.observe("demo\n");
+        assert!(t.saw("demo"));
+        let mut t = TurnTail::default();
+        t.anticipate("demo");
+        assert!(!t.observe(" demo "));
+    }
+
+    #[test]
+    fn records_already_logged_elsewhere_are_left_out() {
+        let mut s = Streamer::skipping(0, echo, HashSet::from(["copied".to_string()]));
+        let out = s.push(b"copied\nfresh\n");
+        assert_eq!(out.len(), 1);
+        assert!(matches!(&out[0], Payload::Status { text } if text == "fresh"));
     }
 
     #[test]
@@ -252,7 +371,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         std::fs::write(&path, "old\n").unwrap();
-        let tail = Tail::opening(path.clone(), echo);
+        let tail = Tail::opening(path.clone(), echo, HashSet::new());
         assert!(tail.drain().is_empty());
 
         let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();

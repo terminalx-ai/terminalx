@@ -16,6 +16,8 @@ use tauri::{AppHandle, Emitter};
 
 const COALESCE: Duration = Duration::from_millis(8);
 const MAX_CHUNK: usize = 32 * 1024;
+/// How long a pane gets to exit on its own before it is killed outright.
+const TERM_GRACE: Duration = Duration::from_millis(400);
 
 struct Pane {
     master: Box<dyn MasterPty + Send>,
@@ -201,6 +203,35 @@ impl Terminals {
             }
             drop(pane);
         }
+    }
+
+    /// Kill the pane and wait for its process to really be gone.
+    ///
+    /// An agent CLI holds its conversation for as long as it runs, and refuses
+    /// to open one another process still has, so a replacement started before
+    /// the old one has let go dies on the spot. Claude Code's TUI also ignores
+    /// SIGTERM outright, so asking politely and moving on is not enough.
+    pub fn kill_and_wait(&self, id: &str, timeout: Duration) {
+        let Some(pane) = self.panes.lock().unwrap().remove(id) else { return };
+        let pid = pane.pid;
+        if let Some(pid) = pid {
+            crate::harness::host::terminate(pid);
+        }
+        drop(pane);
+        let Some(pid) = pid else { return };
+        let start = Instant::now();
+        let mut forced = false;
+        while start.elapsed() < timeout {
+            if !crate::harness::host::is_alive(pid) {
+                return;
+            }
+            if !forced && start.elapsed() >= TERM_GRACE {
+                crate::harness::host::kill_now(pid);
+                forced = true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        log::warn!("pane {id} did not exit within {timeout:?}");
     }
 
     pub fn kill_all(&self) {

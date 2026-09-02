@@ -188,6 +188,34 @@ fn wait_child(mut child: Child) -> Option<i32> {
 /// SIGTERM the group and the pid, then SIGKILL whatever is left after 2s. The
 /// group goes first: looking it up through a dead leader would lose
 /// descendants that ignored the first signal.
+/// Whether a process is still there. Signal 0 only asks; the pane's own wait
+/// thread reaps the child, so a pid that has exited is gone rather than a
+/// zombie answering for it.
+pub fn is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as i32, 0) == 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+/// Straight to SIGKILL, for a process that has been asked nicely and declined.
+pub fn kill_now(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
 pub fn terminate(pid: u32) {
     #[cfg(unix)]
     {

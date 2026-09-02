@@ -81,12 +81,18 @@ pub struct CliTab {
     /// Which start this is. A pane restarted in place keeps its id, so the
     /// generation is what tells the previous tailer that it is finished.
     pub generation: u64,
+    /// A setting the CLI only reads at startup, changed mid-turn. The restart
+    /// waits for the turn to end.
+    pub restart_when_idle: bool,
     pub tail: Arc<tui::Tail>,
     /// Prompts the composer already published, waiting for the transcript to
     /// echo them back so the reader is not shown the same message twice.
     pub echoed: std::collections::VecDeque<String>,
     /// Hook threads parked on a decision, by request id.
     pub decisions: HashMap<String, std::sync::mpsc::Sender<Decision>>,
+    /// Keeps the turn's reply from being drawn twice when the `Stop` hook and
+    /// the transcript record cross.
+    pub turn_tail: tui::TurnTail,
     /// Tools already answered for in this turn, by the command they name.
     /// Codex fires `PreToolUse` and then `PermissionRequest` for the same
     /// call, and one tool must not cost the reader two cards.
@@ -185,6 +191,9 @@ pub struct ImageInput {
 
 /// Archived image refs for the log, and (media type, base64) pairs for the wire.
 type ArchivedImages = (Vec<ImageRef>, Vec<(String, String)>);
+
+/// How long a restart waits for the outgoing CLI to let go of its conversation.
+const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(6);
 
 fn key_of(session_id: &str, tab_id: &str) -> String {
     format!("{session_id}/{tab_id}")
@@ -528,13 +537,17 @@ impl SessionManager {
         let key = key_of(session_id, tab_id);
         self.host.kill(&key);
         let rt = self.tabs.lock().unwrap().get(&key).cloned();
-        if let Some(rt) = rt {
+        let pane = rt.and_then(|rt| {
             let mut rt = rt.lock().unwrap();
             rt.child = None;
             rt.child_pid = None;
-            if matches!(rt.engine, Engine::Cli(_)) {
-                self.stop_cli(&mut rt);
-            }
+            self.release_cli(&mut rt)
+        });
+        // The CLI holds its conversation until it is gone, and Claude Code
+        // ignores a polite signal, so a prompt sent straight after Stop would
+        // otherwise find the session still taken.
+        if let Some(pane) = pane {
+            self.terminals.kill_and_wait(&pane, RESTART_WAIT);
         }
         Ok(())
     }
@@ -613,13 +626,20 @@ impl SessionManager {
         })?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
+        let turn_open = rt.turn_open;
         let mut restart = false;
         match &mut rt.engine {
             // Claude's own `/model` takes the change live. Codex's `/model`
             // opens a picker rather than taking an argument, so its tab is
             // restarted on the same conversation instead.
             Engine::Cli(p) if p.harness == CliKind::Claude => self.type_command(&p.pane_id, format!("/model {model}")),
-            Engine::Cli(_) => restart = !rt.turn_open,
+            Engine::Cli(p) => {
+                if turn_open {
+                    p.restart_when_idle = true;
+                } else {
+                    restart = true;
+                }
+            }
             Engine::Acp(a) => {
                 let actions = a.set_model(model);
                 self.apply_actions(&mut rt, actions);
@@ -627,10 +647,11 @@ impl SessionManager {
             Engine::OpenCode(o) => o.model = Some(model.into()),
             _ => {}
         }
-        if restart {
-            self.restart_cli(&mut rt, &rt_arc, session_id, tab_id)?;
-        }
         self.publish(&mut rt, Payload::SettingsChanged { model: Some(model.into()), effort: None, permission_mode: None }, None);
+        drop(rt);
+        if restart {
+            self.restart_for_settings(session_id, tab_id)?;
+        }
         Ok(())
     }
 
@@ -644,10 +665,17 @@ impl SessionManager {
         let turn_open = rt.turn_open;
         let mut restart = false;
         match &mut rt.engine {
-            // Neither TUI has a command for this — Claude cycles it on a key,
-            // Codex fixes the sandbox at launch. Restarting the CLI on the
-            // same conversation is lossless and immediate.
-            Engine::Cli(_) => restart = !turn_open,
+            // Neither TUI has a command for this — Claude cycles modes on a
+            // key with no way to read the result back, Codex fixes its
+            // approval policy and sandbox at launch — so the change means
+            // replacing the process.
+            Engine::Cli(p) => {
+                if turn_open {
+                    p.restart_when_idle = true;
+                } else {
+                    restart = true;
+                }
+            }
             Engine::Acp(a) => {
                 let actions = a.set_mode(mode);
                 self.apply_actions(&mut rt, actions);
@@ -655,12 +683,14 @@ impl SessionManager {
             Engine::OpenCode(o) => o.mode = mode.into(),
             _ => {}
         }
-        if restart {
-            self.restart_cli(&mut rt, &rt_arc, session_id, tab_id)?;
-        } else if matches!(rt.engine, Engine::Cli(_)) {
-            self.publish(&mut rt, Payload::Status { text: format!("{} applies when the agent next starts.", claude::mapper::mode_label(mode)) }, None);
+        if turn_open && matches!(rt.engine, Engine::Cli(_)) {
+            self.publish(&mut rt, Payload::Status { text: "Permission mode applies after this turn.".into() }, None);
         }
         self.publish(&mut rt, Payload::SettingsChanged { model: None, effort: None, permission_mode: Some(mode.into()) }, None);
+        drop(rt);
+        if restart {
+            self.restart_for_settings(session_id, tab_id)?;
+        }
         Ok(())
     }
 
@@ -683,7 +713,13 @@ impl SessionManager {
                     self.type_command(&p.pane_id, format!("/effort {e}"));
                 }
             }
-            Engine::Cli(_) => restart = !turn_open,
+            Engine::Cli(p) => {
+                if turn_open {
+                    p.restart_when_idle = true;
+                } else {
+                    restart = true;
+                }
+            }
             Engine::Acp(_) | Engine::OpenCode(_) => {}
             _ => respawn = !turn_open,
         }
@@ -693,10 +729,11 @@ impl SessionManager {
             rt.child_pid = None;
             rt.engine = Engine::None;
         }
-        if restart {
-            self.restart_cli(&mut rt, &rt_arc, session_id, tab_id)?;
-        }
         self.publish(&mut rt, Payload::SettingsChanged { model: None, effort: effort.map(String::from), permission_mode: None }, None);
+        drop(rt);
+        if restart {
+            self.restart_for_settings(session_id, tab_id)?;
+        }
         Ok(())
     }
 
@@ -745,7 +782,7 @@ impl SessionManager {
                 return Ok(false);
             }
         }
-        self.terminals.kill(&pane);
+        self.terminals.kill_and_wait(&pane, RESTART_WAIT);
 
         let exe = std::env::current_exe().context("locate this binary for the CLI's hooks")?;
         let mut env = vec![
@@ -772,9 +809,11 @@ impl SessionManager {
             mode: tab.permission_mode.clone(),
             pane_id: pane.clone(),
             generation,
+            restart_when_idle: false,
             tail: tail.clone(),
             echoed: Default::default(),
             decisions: HashMap::new(),
+            turn_tail: Default::default(),
             answered: HashMap::new(),
         });
         rt.turn_open = false;
@@ -819,9 +858,14 @@ impl SessionManager {
             log::warn!("trust {}: {e:#}", entry.cwd);
         }
         let path = claude::transcript::cli_transcript_path(&entry.cwd, &provider_id).ok_or_else(|| anyhow!("no home directory"))?;
+        // A fork is handed a copy of the whole parent conversation, written
+        // into its new file when the first turn lands. The app already has all
+        // of it, and the copy keeps each record's original uuid, so those are
+        // the ones to drop.
+        let carried = fork_from.as_deref().and_then(|parent| claude::transcript::record_uuids(&entry.cwd, parent)).unwrap_or_default();
         Ok(CliLaunch {
             command,
-            tail: tui::Tail::opening(path, claude::transcript::decode_line),
+            tail: tui::Tail::opening(path, claude::transcript::decode_line, carried),
             minted: (!resume).then_some(provider_id),
         })
     }
@@ -878,31 +922,50 @@ impl SessionManager {
         Ok(CliLaunch {
             command,
             tail: match rollout {
-                Some(path) => tui::Tail::opening(path, codex::rollout::decode_line),
+                Some(path) => tui::Tail::opening(path, codex::rollout::decode_line, Default::default()),
                 None => tui::Tail::unknown(codex::rollout::decode_line),
             },
             minted: None,
         })
     }
 
-    /// Restart the CLI on the same conversation. Lossless, and the only way
-    /// to change a flag a running TUI has no command for.
-    fn restart_cli(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, session_id: &str, tab_id: &str) -> Result<()> {
-        self.stop_cli(rt);
+    /// Restart the CLI so it reads a setting it only takes at startup: the
+    /// permission mode for either CLI, and the model and effort for Codex,
+    /// which has no command for them. The pane is kept and the conversation
+    /// resumes, so what the reader sees is the CLI redrawing, not a new tab.
+    ///
+    /// The old process has to be *gone*, not merely signalled: it holds the
+    /// conversation until it exits, and the replacement is refused a session
+    /// another process still has.
+    fn restart_for_settings(&self, session_id: &str, tab_id: &str) -> Result<()> {
+        let rt_arc = self.runtime(session_id, tab_id)?;
         let entry = index::get(session_id)?;
         let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
-        self.start_cli(rt, rt_arc, &entry, &tab)?;
+        let pane = Self::pane_id(tab_id);
+        {
+            let mut rt = rt_arc.lock().unwrap();
+            if let Engine::Cli(p) = &mut rt.engine {
+                p.restart_when_idle = false;
+            }
+            self.release_cli(&mut rt);
+        }
+        // Outside the lock: this waits on another process.
+        self.terminals.kill_and_wait(&pane, RESTART_WAIT);
+        let mut rt = rt_arc.lock().unwrap();
+        self.start_cli(&mut rt, &rt_arc, &entry, &tab)?;
         Ok(())
     }
 
-    /// Stop the tab's CLI, keeping the conversation so the next prompt resumes.
-    fn stop_cli(&self, rt: &mut TabRuntime) {
-        if let Engine::Cli(p) = &rt.engine {
-            self.terminals.kill(&p.pane_id);
-        }
+    /// Let go of the tab's CLI, keeping the conversation so the next prompt
+    /// resumes. Returns the pane the caller must kill — outside the tab lock,
+    /// because waiting for the process to go is a wait on another process.
+    fn release_cli(&self, rt: &mut TabRuntime) -> Option<String> {
+        let Engine::Cli(p) = &rt.engine else { return None };
+        let pane = p.pane_id.clone();
         rt.engine = Engine::None;
         rt.turn_open = false;
         self.set_status(rt, TabStatus::Idle);
+        Some(pane)
     }
 
     /// Poll the transcript. The CLI appends without any signal to subscribe
@@ -951,15 +1014,55 @@ impl SessionManager {
                     continue;
                 }
             }
+            if let (Payload::AssistantText { text, .. }, Engine::Cli(p)) = (&payload, &mut rt.engine) {
+                if !p.turn_tail.observe(text) {
+                    continue; // the app already said this for a Stop hook
+                }
+            }
             if matches!(payload, Payload::UserMessage { .. }) {
                 rt.turn_open = true;
                 self.set_status(&mut rt, TabStatus::InProgress);
+            }
+            if payload.is_turn_boundary() {
+                if let Engine::Cli(p) = &mut rt.engine {
+                    p.turn_tail.turn_ended();
+                }
             }
             self.apply(&mut rt, payload, None);
         }
     }
 
+    /// Wait, briefly, for the transcript to deliver the reply the `Stop` hook
+    /// is already holding. If it never comes, publish it here and mark its
+    /// record to be dropped when it lands, so it is drawn exactly once.
+    fn settle_reply(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: &Arc<tui::Tail>, want: Option<&str>) {
+        let Some(want) = want.map(str::trim).filter(|w| !w.is_empty()) else { return };
+        let saw = |rt: &TabRuntime| matches!(&rt.engine, Engine::Cli(p) if p.turn_tail.saw(want));
+        let deadline = Instant::now() + tui::STOP_SETTLE;
+        loop {
+            if saw(&rt_arc.lock().unwrap()) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(tui::POLL_INTERVAL);
+            self.pump(rt_arc, tail);
+        }
+        let mut rt = rt_arc.lock().unwrap();
+        // The poll thread may have landed it in the moment since the last look.
+        if saw(&rt) {
+            return;
+        }
+        let Engine::Cli(p) = &mut rt.engine else { return };
+        p.turn_tail.anticipate(want);
+        self.apply(&mut rt, Payload::AssistantText { block: None, text: want.to_string() }, None);
+    }
+
     fn close_open_turn(&self, rt: &mut TabRuntime, status: TurnStatus, final_text: Option<String>) {
+        if let Engine::Cli(p) = &mut rt.engine {
+            p.turn_tail.turn_ended();
+        }
         if !rt.turn_open {
             return;
         }
@@ -1111,9 +1214,14 @@ impl SessionManager {
                 self.set_status(&mut rt, TabStatus::Waiting);
             }
             "Stop" => {
+                let final_text = frame.payload["last_assistant_message"].as_str().map(String::from);
+                // The hook fires the moment the model stops; the record of what
+                // it said is a file write the tailer has yet to see. Closing
+                // the turn first would leave that record outside it, drawn a
+                // second time under the "Worked for Ns" line.
+                self.settle_reply(&rt_arc, &tail, final_text.as_deref());
                 let mut rt = rt_arc.lock().unwrap();
                 rt.last_activity = Instant::now();
-                let final_text = frame.payload["last_assistant_message"].as_str().map(String::from);
                 self.forget_tool_answers(&mut rt);
                 self.close_open_turn(&mut rt, TurnStatus::Ok, final_text);
             }
@@ -1130,7 +1238,28 @@ impl SessionManager {
             }
             _ => {}
         }
+        self.restart_if_due(&rt_arc, &frame.session, &frame.tab);
         HookReply::default()
+    }
+
+    /// A setting the CLI only reads at startup changed mid-turn: the restart
+    /// it needs waits here, until the turn it would have interrupted is over.
+    /// Off this thread, so the hook's reply reaches the CLI before the CLI is
+    /// replaced.
+    fn restart_if_due(&self, rt_arc: &Arc<Mutex<TabRuntime>>, session_id: &str, tab_id: &str) {
+        {
+            let rt = rt_arc.lock().unwrap();
+            let due = matches!(&rt.engine, Engine::Cli(p) if p.restart_when_idle) && !rt.turn_open;
+            if !due {
+                return;
+            }
+        }
+        let (manager, session, tab) = (self.clone(), session_id.to_string(), tab_id.to_string());
+        std::thread::spawn(move || {
+            if let Err(e) = manager.restart_for_settings(&session, &tab) {
+                log::warn!("restart {session}/{tab}: {e:#}");
+            }
+        });
     }
 
     fn record_provider_session(&self, rt_arc: &Arc<Mutex<TabRuntime>>, id: &str) {

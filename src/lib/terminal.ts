@@ -179,8 +179,11 @@ export function setActiveTerminal(sessionId: string, id: string) {
  */
 export async function adoptPane(pane: Omit<TerminalPane, "exited" | "exitCode">) {
   await subscribeTerminals();
-  if (state.panes.some((p) => p.id === pane.id)) return;
-  set({ panes: [...state.panes, { ...pane, exited: false, exitCode: null }] });
+  const live = { ...pane, exited: false, exitCode: null };
+  // The same pane can be adopted twice: a tab whose CLI is replaced in place
+  // keeps its pane, so the exit the old process reported is stale news.
+  const existing = state.panes.some((p) => p.id === pane.id);
+  set({ panes: existing ? state.panes.map((p) => (p.id === pane.id ? { ...p, ...live } : p)) : [...state.panes, live] });
 }
 
 /** ⌘J and the header button: show the dock (spawning a first shell), or hide it. */

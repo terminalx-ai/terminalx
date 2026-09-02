@@ -224,6 +224,33 @@ mod tests {
         assert!(forked.contains("--resume 'parent' --fork-session --session-id 'new'"));
     }
 
+    /// Changing the permission mode restarts the CLI as a fork, because the
+    /// CLI restores a resumed session's own mode and ignores the flag.
+    #[test]
+    fn a_settings_restart_forks_the_conversation_and_carries_the_new_mode() {
+        if crate::binpath::resolve("claude").is_none() {
+            return;
+        }
+        let settings = json!({});
+        let c = launch_command(LaunchOptions {
+            provider_session_id: "minted",
+            resume: false,
+            fork_from: Some("the-conversation-so-far"),
+            model: "opus",
+            effort: None,
+            permission_mode: "plan",
+            title: None,
+            settings: &settings,
+        })
+        .unwrap();
+        assert!(c.contains("--resume 'the-conversation-so-far' --fork-session --session-id 'minted'"));
+        assert!(c.contains("--permission-mode plan"));
+        // Never both: a plain resume would silently keep the old mode.
+        assert!(!c.contains("--resume 'minted'"));
+    }
+
+
+
 
 
 }

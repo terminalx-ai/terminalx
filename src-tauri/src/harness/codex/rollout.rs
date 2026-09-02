@@ -87,7 +87,11 @@ fn plain_path(v: &Value) -> Option<String> {
 }
 
 /// One rollout record as payloads. Unknown records yield nothing.
-pub fn decode_line(line: &str, out: &mut Vec<Payload>) {
+///
+/// `_skip` is the tail's list of records already logged under another id; it
+/// is a Claude fork's problem and Codex has no equivalent, since a Codex
+/// conversation is only ever appended to.
+pub fn decode_line(line: &str, _skip: &std::collections::HashSet<String>, out: &mut Vec<Payload>) {
     let Ok(v) = serde_json::from_str::<Value>(line) else { return };
     if v["type"].as_str() != Some("event_msg") {
         return;
@@ -256,6 +260,10 @@ mod tests {
     use super::*;
     use crate::harness::tui::Streamer;
 
+    fn none() -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
+
     /// A rollout the installed CLI wrote itself, running interactively in a
     /// PTY: one turn, then two more after `codex resume` reopened the same
     /// conversation. Only the model's standing instructions, the environment
@@ -396,7 +404,7 @@ mod tests {
             let v: Value = serde_json::from_str(line).unwrap();
             if v["type"] == "response_item" || v["type"] == "session_meta" || v["type"] == "turn_context" || v["type"] == "world_state" {
                 let mut out = Vec::new();
-                decode_line(line, &mut out);
+                decode_line(line, &none(), &mut out);
                 assert!(out.is_empty(), "{} drew something", v["type"]);
             }
         }
@@ -410,10 +418,10 @@ mod tests {
     #[test]
     fn a_record_that_is_not_json_or_not_an_event_is_skipped() {
         let mut out = Vec::new();
-        decode_line("not json at all", &mut out);
-        decode_line(r#"{"type":"response_item","payload":{"type":"message"}}"#, &mut out);
-        decode_line(r#"{"type":"event_msg","payload":{"type":"something_new"}}"#, &mut out);
-        decode_line(r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"Whatever"}}}"#, &mut out);
+        decode_line("not json at all", &none(), &mut out);
+        decode_line(r#"{"type":"response_item","payload":{"type":"message"}}"#, &none(), &mut out);
+        decode_line(r#"{"type":"event_msg","payload":{"type":"something_new"}}"#, &none(), &mut out);
+        decode_line(r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"Whatever"}}}"#, &none(), &mut out);
         assert!(out.is_empty());
     }
 
@@ -422,6 +430,7 @@ mod tests {
         let mut out = Vec::new();
         decode_line(
             r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"e1","command":["/bin/zsh","-lc","false"],"cwd":"file:///w/demo","status":"failed","exit_code":1,"aggregated_output":""}}}"#,
+            &none(),
             &mut out,
         );
         let Payload::ToolCallCompleted { result, .. } = &out[1] else { panic!() };
@@ -431,6 +440,7 @@ mod tests {
         let mut out = Vec::new();
         decode_line(
             r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","id":"f1","status":"completed","changes":{"/w/demo/gone.rs":{"type":"delete","unified_diff":"@@\n-x\n","move_path":null},"/w/demo/new.rs":{"type":"add","unified_diff":"@@\n+y\n","move_path":null}}}}}"#,
+            &none(),
             &mut out,
         );
         let Payload::FileEdits { edits, .. } = &out[1] else { panic!() };
