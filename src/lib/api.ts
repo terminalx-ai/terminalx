@@ -80,6 +80,12 @@ export const api = {
   // harnesses
   listHarnesses: () => invoke<HarnessInfo[]>("list_harnesses"),
 
+  // first-party command line tool and discovery skill
+  cliToolStatus: () => invoke<CliToolStatus>("cli_tool_status"),
+  installCliTool: () => invoke<CliToolStatus>("install_cli_tool"),
+  cliSkillStatus: () => invoke<SkillInstallStatus>("cli_skill_status"),
+  installCliSkill: () => invoke<SkillInstallStatus>("install_cli_skill"),
+
   // git
   workStatus: (cwd: string) => invoke<WorkStatus>("work_status", { cwd }),
   listBranches: (cwd: string) => invoke<BranchInfo[]>("list_branches", { cwd }),
@@ -92,6 +98,22 @@ export const api = {
   logCommits: (cwd: string, range?: string | null, limit?: number) =>
     invoke<CommitInfo[]>("log_commits", { cwd, range: range ?? null, limit: limit ?? 100 }),
 };
+
+export interface CliToolStatus {
+  installed: boolean;
+  directory: string;
+  commands: string[];
+}
+
+export interface SkillTargetStatus {
+  path: string;
+  installed: boolean;
+}
+
+export interface SkillInstallStatus {
+  installed: boolean;
+  targets: SkillTargetStatus[];
+}
 
 export function errorMessage(e: unknown): string {
   if (typeof e === "string") return e;

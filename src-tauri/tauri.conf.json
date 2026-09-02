@@ -44,6 +44,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": [
+      "binaries/terminalx-next"
+    ],
     "macOS": {
       "signingIdentity": "-",
       "entitlements": "Entitlements.plist",

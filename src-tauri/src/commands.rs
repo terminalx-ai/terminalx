@@ -73,7 +73,7 @@ pub async fn session_summaries(session_ids: Option<Vec<String>>) -> CmdResult<Ve
         .map_err(err)?
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewTab {
     pub harness: String,
@@ -85,7 +85,7 @@ pub struct NewTab {
     pub permission_mode: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSession {
     pub project_path: String,
@@ -162,7 +162,7 @@ pub async fn create_session(app: AppHandle, req: NewSession) -> CmdResult<Sessio
         .map_err(err)?
 }
 
-fn create_session_blocking(app: &AppHandle, req: NewSession) -> CmdResult<SessionEntry> {
+pub(crate) fn create_session_blocking(app: &AppHandle, req: NewSession) -> CmdResult<SessionEntry> {
     let project = projects::canonical(&req.project_path).map_err(err)?;
     let project_path = Path::new(&project);
     let id = uuid::Uuid::now_v7().to_string();
