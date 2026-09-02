@@ -26,9 +26,8 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 
 use crate::events::*;
-use crate::harness::codex::{self, Action};
 use crate::harness::host::{Host, LiveChild, Sink, SpawnSpec};
-use crate::harness::{acp, claude, opencode, HarnessId};
+use crate::harness::{acp, claude, codex, opencode, tui, Action, CliKind, HarnessId};
 use crate::hooks::{HookFrame, HookReply};
 use crate::store::index::{self, TabEntry, TabStatus};
 use crate::{git, pty, store};
@@ -49,9 +48,35 @@ pub struct QueuedMessage {
     pub images: Vec<(String, String)>,
 }
 
-/// A Claude tab: the CLI in a pane, its transcript being followed, and the
+/// What the reader chose, in terms every CLI's hooks can express. The hook
+/// thread that parked turns it into that CLI's own reply shape.
+#[derive(Debug, Clone)]
+pub enum Decision {
+    Allow,
+    /// Allow, and take one of the CLI's own permission suggestions with it.
+    AllowWith(Value),
+    /// Allow, carrying the answers to a question back as the tool's input.
+    Answers(Value),
+    Deny,
+}
+
+/// What a PTY-first tab needs to start: the line the pane runs, the
+/// transcript to follow, and the conversation id if the app minted one.
+struct CliLaunch {
+    command: String,
+    tail: tui::Tail,
+    minted: Option<String>,
+}
+
+/// A PTY-first tab: the CLI in a pane, its transcript being followed, and the
 /// permission frames its hooks have parked here waiting for an answer.
-pub struct ClaudePty {
+pub struct CliTab {
+    /// Which CLI is in the pane. The launch line, the hook plumbing and the
+    /// transcript differ per harness; nothing below does.
+    pub harness: CliKind,
+    /// The permission mode it was started with. A Codex tab reads it on every
+    /// tool hook to know whether the reader wants to be asked about that tool.
+    pub mode: String,
     pub pane_id: String,
     /// Which start this is. A pane restarted in place keeps its id, so the
     /// generation is what tells the previous tailer that it is finished.
@@ -61,24 +86,27 @@ pub struct ClaudePty {
     pub restart_when_idle: bool,
     /// Set when this CLI's `SessionStart` hook arrives; what the thread that
     /// types into the pane waits on.
-    pub ready: Arc<claude::pty::Ready>,
-    pub tail: Arc<claude::pty::Tail>,
+    pub ready: Arc<tui::Ready>,
+    pub tail: Arc<tui::Tail>,
     /// Prompts the composer already published, waiting for the transcript to
     /// echo them back so the reader is not shown the same message twice.
     pub echoed: std::collections::VecDeque<String>,
     /// Hook threads parked on a decision, by request id.
-    pub decisions: HashMap<String, std::sync::mpsc::Sender<Value>>,
+    pub decisions: HashMap<String, std::sync::mpsc::Sender<Decision>>,
     /// Keeps the turn's reply from being drawn twice when the `Stop` hook and
     /// the transcript record cross.
-    pub turn_tail: claude::pty::TurnTail,
+    pub turn_tail: tui::TurnTail,
+    /// Tools already answered for in this turn, by the command they name.
+    /// Codex fires `PreToolUse` and then `PermissionRequest` for the same
+    /// call, and one tool must not cost the reader two cards.
+    pub answered: HashMap<String, bool>,
     /// What the pane is running, for the terminal view's header and for a
     /// window that has to be told about a pane it did not see start.
     pub command: String,
 }
 
 pub enum Engine {
-    ClaudePty(ClaudePty),
-    Codex(codex::Codex),
+    Cli(CliTab),
     Acp(acp::Acp),
     OpenCode(opencode::OpenCode),
     None,
@@ -148,6 +176,7 @@ pub struct TabPtyEvent {
     pub tab_id: String,
     pub pane_id: String,
     pub command: String,
+    pub harness: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -191,6 +220,42 @@ fn one_per_key<V: Clone>(map: &Mutex<HashMap<String, V>>, key: &str, make: impl 
     let v = make()?;
     map.insert(key.to_string(), v.clone());
     Ok(v)
+}
+
+/// What one tool call is, for the purpose of not asking about it twice. The
+/// same command reaches `PreToolUse` and `PermissionRequest` under different
+/// ids but with the same input, minus the justification Codex adds.
+fn tool_key(tool_name: &str, input: &Value) -> String {
+    let target = ["command", "file_path", "path", "pattern", "query", "url"].iter().find_map(|k| input.get(*k).and_then(Value::as_str)).unwrap_or_default();
+    format!("{tool_name}\u{1}{target}")
+}
+
+/// The reader's decision as the hook that asked has to print it.
+fn reply_for(kind: CliKind, event: &str, decision: Decision) -> HookReply {
+    let allow = !matches!(decision, Decision::Deny);
+    let output = match (kind, event) {
+        (CliKind::Claude, _) => {
+            let (input, perms) = match decision {
+                Decision::AllowWith(s) => (None, vec![s]),
+                Decision::Answers(v) => (Some(v), Vec::new()),
+                _ => (None, Vec::new()),
+            };
+            claude::pty::permission_decision(allow, input, perms)
+        }
+        (CliKind::Codex, "PreToolUse") => codex::pty::pre_tool_decision(allow),
+        (CliKind::Codex, _) => codex::pty::permission_decision(allow),
+    };
+    HookReply { output: Some(output) }
+}
+
+/// Which CLI a harness runs as its tab, or `None` for the harnesses that are
+/// still driven headless.
+pub fn pty_first(harness: &str) -> Option<CliKind> {
+    match HarnessId::parse(harness) {
+        HarnessId::Claude => Some(CliKind::Claude),
+        HarnessId::Codex => Some(CliKind::Codex),
+        _ => None,
+    }
 }
 
 impl SessionManager {
@@ -353,7 +418,7 @@ impl SessionManager {
         let mut rt = rt_arc.lock().unwrap();
         let (refs, wire_images) = Self::archive_images(session_id, &images)?;
 
-        if matches!(HarnessId::parse(&tab.harness), HarnessId::Claude) {
+        if pty_first(&tab.harness).is_some() {
             return self.send_to_cli(&mut rt, &rt_arc, &entry, &tab, text, refs);
         }
 
@@ -366,8 +431,7 @@ impl SessionManager {
 
         if rt.child.is_none() {
             match HarnessId::parse(&tab.harness) {
-                HarnessId::Claude => bail!("Claude tabs run their own CLI"),
-                HarnessId::Codex => self.start_codex(&mut rt, &rt_arc, &tab, &entry.cwd)?,
+                HarnessId::Claude | HarnessId::Codex => bail!("that agent runs its own CLI"),
                 HarnessId::Acp(binary) => self.start_acp(&mut rt, &rt_arc, &tab, &entry.cwd, &binary)?,
                 HarnessId::OpenCode => self.start_opencode(&mut rt, &rt_arc, &tab, &entry.cwd)?,
                 HarnessId::Other(name) => bail!("The {name} agent is not wired up yet."),
@@ -378,10 +442,6 @@ impl SessionManager {
         let events = vec![self.publish(&mut rt, Payload::UserMessage { text: text.clone(), images: refs, baseline, queued: false, cwd: Some(entry.cwd.clone()) }, None)];
 
         match &mut rt.engine {
-            Engine::Codex(c) => {
-                let actions = if c.ready { c.prompt(text.clone(), wire_images) } else { c.start(text.clone(), wire_images) };
-                self.apply_actions(&mut rt, actions);
-            }
             Engine::Acp(a) => {
                 let actions = if a.ready { a.prompt(text.clone(), wire_images) } else { a.start(text.clone(), wire_images) };
                 self.apply_actions(&mut rt, actions);
@@ -390,35 +450,13 @@ impl SessionManager {
                 let actions = if o.ready { o.prompt(text.clone(), wire_images) } else { o.start(text.clone(), wire_images) };
                 self.apply_actions(&mut rt, actions);
             }
-            Engine::ClaudePty(_) | Engine::None => bail!("no engine"),
+            Engine::Cli(_) | Engine::None => bail!("no engine"),
         }
         rt.turn_open = true;
         rt.turn_started_at = Some(Instant::now());
         rt.last_activity = Instant::now();
         self.set_status(&mut rt, TabStatus::InProgress);
         Ok(SendOutcome { queued: false, events })
-    }
-
-    fn start_codex(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str) -> Result<()> {
-        let plan = codex::spawn_plan().ok_or_else(|| anyhow!("Codex is not installed. Install it and log in, then try again."))?;
-        // A tab stored before the account's list was known can name a model
-        // this account cannot run; sending it would fail the turn with a 400.
-        let model = match self.codex_models.substitute_for(&tab.model) {
-            Some(sub) => {
-                let text = format!("{} is not available on this account; using {}.", tab.model, sub.label);
-                self.publish(rt, Payload::Status { text }, None);
-                let _ = index::update_tab(&rt.session_id, &rt.tab_id, |t| {
-                    t.model = sub.id.clone();
-                    Ok(())
-                });
-                self.publish(rt, Payload::SettingsChanged { model: Some(sub.id.clone()), effort: None, permission_mode: None }, None);
-                sub.id
-            }
-            None => tab.model.clone(),
-        };
-        rt.engine = Engine::Codex(codex::Codex::new(cwd, tab.provider_session_id.clone(), Some(model), tab.effort.clone(), &tab.permission_mode));
-        self.spawn_child(rt, rt_arc, &plan.program, &plan.args, cwd).context("start Codex")?;
-        Ok(())
     }
 
     fn start_acp(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str, binary: &str) -> Result<()> {
@@ -487,17 +525,13 @@ impl SessionManager {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         rt.queued.clear();
-        if rt.child.is_none() && !matches!(rt.engine, Engine::ClaudePty(_)) {
+        if rt.child.is_none() && !matches!(rt.engine, Engine::Cli(_)) {
             return Ok(());
         }
         match &mut rt.engine {
             // The TUI reads a bare Escape as "stop"; nothing else can reach it.
-            Engine::ClaudePty(p) => {
-                let _ = self.terminals.write(&p.pane_id, claude::pty::ESCAPE);
-            }
-            Engine::Codex(c) => {
-                let actions = c.interrupt();
-                self.apply_actions(&mut rt, actions);
+            Engine::Cli(p) => {
+                let _ = self.terminals.write(&p.pane_id, tui::ESCAPE);
             }
             Engine::Acp(a) => {
                 let actions = a.interrupt();
@@ -530,9 +564,9 @@ impl SessionManager {
             rt.child_pid = None;
             self.release_cli(&mut rt)
         });
-        // The CLI holds its conversation until it is gone, and it ignores a
-        // polite signal, so a prompt sent straight after Stop would otherwise
-        // find the session still taken.
+        // The CLI holds its conversation until it is gone, and Claude Code
+        // ignores a polite signal, so a prompt sent straight after Stop would
+        // otherwise find the session still taken.
         if let Some(pane) = pane {
             self.terminals.kill_and_wait(&pane, RESTART_WAIT);
         }
@@ -542,32 +576,27 @@ impl SessionManager {
     pub fn respond_permission(&self, session_id: &str, tab_id: &str, request_id: &str, option_id: &str) -> Result<()> {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
-        if rt.child.is_none() && !matches!(rt.engine, Engine::ClaudePty(_)) {
+        if rt.child.is_none() && !matches!(rt.engine, Engine::Cli(_)) {
             rt.pending.remove(request_id);
             bail!("the agent is no longer running; the request lapsed");
         }
         let ask = rt.pending.remove(request_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
         let (allow, label) = match &mut rt.engine {
-            Engine::ClaudePty(p) => {
-                let (allow, label, perms) = match option_id {
-                    "deny" => (false, "Denied".to_string(), Vec::new()),
-                    "allow" => (true, "Allowed".to_string(), Vec::new()),
+            Engine::Cli(p) => {
+                let (decision, label) = match option_id {
+                    "deny" => (Decision::Deny, "Denied".to_string()),
+                    "allow" => (Decision::Allow, "Allowed".to_string()),
                     s if s.starts_with("suggest:") => {
                         let i: usize = s[8..].parse().unwrap_or(usize::MAX);
                         let sugg = ask.suggestions.get(i).cloned().ok_or_else(|| anyhow!("unknown option"))?;
-                        (true, "Allowed always".to_string(), vec![sugg])
+                        (Decision::AllowWith(sugg), "Allowed always".to_string())
                     }
                     _ => bail!("unknown option"),
                 };
+                let allow = !matches!(decision, Decision::Deny);
                 let tx = p.decisions.remove(request_id).ok_or_else(|| anyhow!("the agent stopped waiting for that request"))?;
-                let _ = tx.send(claude::pty::permission_decision(allow, None, perms));
+                let _ = tx.send(decision);
                 (allow, label)
-            }
-            Engine::Codex(c) => {
-                let actions = c.answer(request_id, option_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
-                let allow = !option_id.contains("cancel");
-                self.apply_actions(&mut rt, actions);
-                (allow, if allow { "Allowed".to_string() } else { "Denied".to_string() })
             }
             Engine::Acp(a) => {
                 let actions = a.answer(request_id, option_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
@@ -598,9 +627,9 @@ impl SessionManager {
         let mut input = ask.input.clone();
         input["answers"] = serde_json::to_value(&answers)?;
         match &mut rt.engine {
-            Engine::ClaudePty(p) => {
+            Engine::Cli(p) if p.harness == CliKind::Claude => {
                 let tx = p.decisions.remove(request_id).ok_or_else(|| anyhow!("the agent stopped waiting for that question"))?;
-                let _ = tx.send(claude::pty::permission_decision(true, Some(input), Vec::new()));
+                let _ = tx.send(Decision::Answers(input));
             }
             _ => bail!("that agent does not ask questions this way"),
         }
@@ -618,14 +647,23 @@ impl SessionManager {
         })?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
+        let turn_open = rt.turn_open;
+        let mut restart = false;
         match &mut rt.engine {
-            // The CLI's own `/model` takes the change live; nothing else can
-            // reach a running TUI.
-            Engine::ClaudePty(p) => {
+            // Claude's own `/model` takes the change live. Codex's `/model`
+            // opens a picker rather than taking an argument, so its tab is
+            // restarted on the same conversation instead.
+            Engine::Cli(p) if p.harness == CliKind::Claude => {
                 let pane = p.pane_id.clone();
                 self.type_command(&rt_arc, &pane, format!("/model {model}"));
             }
-            Engine::Codex(c) => c.model = Some(model.into()),
+            Engine::Cli(p) => {
+                if turn_open {
+                    p.restart_when_idle = true;
+                } else {
+                    restart = true;
+                }
+            }
             Engine::Acp(a) => {
                 let actions = a.set_model(model);
                 self.apply_actions(&mut rt, actions);
@@ -634,6 +672,10 @@ impl SessionManager {
             _ => {}
         }
         self.publish(&mut rt, Payload::SettingsChanged { model: Some(model.into()), effort: None, permission_mode: None }, None);
+        drop(rt);
+        if restart {
+            self.restart_for_settings(session_id, tab_id)?;
+        }
         Ok(())
     }
 
@@ -645,23 +687,18 @@ impl SessionManager {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         let turn_open = rt.turn_open;
-        let mut respawn = false;
         let mut restart = false;
         match &mut rt.engine {
-            // The TUI cycles modes on a key with no way to read the result
-            // back, and the CLI takes `--permission-mode` only at startup, so
-            // the change means replacing the process.
-            Engine::ClaudePty(p) => {
+            // Neither TUI has a command for this — Claude cycles modes on a
+            // key with no way to read the result back, Codex fixes its
+            // approval policy and sandbox at launch — so the change means
+            // replacing the process.
+            Engine::Cli(p) => {
                 if turn_open {
                     p.restart_when_idle = true;
                 } else {
                     restart = true;
                 }
-            }
-            Engine::Codex(c) => {
-                // The sandbox half only applies at thread start; a respawn lands it.
-                c.mode = mode.into();
-                respawn = !turn_open;
             }
             Engine::Acp(a) => {
                 let actions = a.set_mode(mode);
@@ -670,13 +707,7 @@ impl SessionManager {
             Engine::OpenCode(o) => o.mode = mode.into(),
             _ => {}
         }
-        if respawn {
-            self.host.kill(&rt.key());
-            rt.child = None;
-            rt.child_pid = None;
-            rt.engine = Engine::None;
-        }
-        if turn_open && matches!(rt.engine, Engine::ClaudePty(_)) {
+        if turn_open && matches!(rt.engine, Engine::Cli(_)) {
             self.publish(&mut rt, Payload::Status { text: "Permission mode applies after this turn.".into() }, None);
         }
         self.publish(&mut rt, Payload::SettingsChanged { model: None, effort: None, permission_mode: Some(mode.into()) }, None);
@@ -687,8 +718,9 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Claude takes effort live through its own `/effort`; the headless peers
-    /// need a respawn.
+    /// Claude takes effort live through its own `/effort`. Codex has no such
+    /// command, so its tab is restarted on the same conversation; the
+    /// headless peers respawn.
     pub fn set_effort(&self, session_id: &str, tab_id: &str, effort: Option<&str>) -> Result<()> {
         index::update_tab(session_id, tab_id, |t| {
             t.effort = effort.map(String::from);
@@ -698,14 +730,21 @@ impl SessionManager {
         let mut rt = rt_arc.lock().unwrap();
         let turn_open = rt.turn_open;
         let mut respawn = false;
+        let mut restart = false;
         match &mut rt.engine {
-            Engine::ClaudePty(p) => {
+            Engine::Cli(p) if p.harness == CliKind::Claude => {
                 if let Some(e) = effort.filter(|e| !e.is_empty()) {
                     let pane = p.pane_id.clone();
                     self.type_command(&rt_arc, &pane, format!("/effort {e}"));
                 }
             }
-            Engine::Codex(c) => c.effort = effort.map(String::from),
+            Engine::Cli(p) => {
+                if turn_open {
+                    p.restart_when_idle = true;
+                } else {
+                    restart = true;
+                }
+            }
             Engine::Acp(_) | Engine::OpenCode(_) => {}
             _ => respawn = !turn_open,
         }
@@ -716,6 +755,10 @@ impl SessionManager {
             rt.engine = Engine::None;
         }
         self.publish(&mut rt, Payload::SettingsChanged { model: None, effort: effort.map(String::from), permission_mode: None }, None);
+        drop(rt);
+        if restart {
+            self.restart_for_settings(session_id, tab_id)?;
+        }
         Ok(())
     }
 
@@ -750,7 +793,7 @@ impl SessionManager {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let entry = index::get(session_id)?;
         let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
-        if !matches!(HarnessId::parse(&tab.harness), HarnessId::Claude) {
+        if pty_first(&tab.harness).is_none() {
             return Ok(());
         }
         let mut rt = rt_arc.lock().unwrap();
@@ -769,12 +812,13 @@ impl SessionManager {
     }
 
     fn pane_event(rt: &TabRuntime) -> Option<TabPtyEvent> {
-        let Engine::ClaudePty(p) = &rt.engine else { return None };
+        let Engine::Cli(p) = &rt.engine else { return None };
         Some(TabPtyEvent {
             session_id: rt.session_id.clone(),
             tab_id: rt.tab_id.clone(),
             pane_id: p.pane_id.clone(),
             command: p.command.clone(),
+            harness: rt.harness.clone(),
         })
     }
 
@@ -787,21 +831,71 @@ impl SessionManager {
     /// Returns whether this call is what started it, so a prompt sent in the
     /// same breath knows to wait for the TUI to finish drawing.
     fn start_cli(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry) -> Result<bool> {
+        let Some(kind) = pty_first(&tab.harness) else { return Ok(false) };
         let pane = Self::pane_id(&tab.id);
-        if let Engine::ClaudePty(p) = &rt.engine {
+        if let Engine::Cli(p) = &rt.engine {
             if p.pane_id == pane && self.terminals.is_running(&pane) {
                 return Ok(false);
             }
         }
         self.terminals.kill_and_wait(&pane, RESTART_WAIT);
 
-        // The conversation id is minted here, not read back from the CLI, so
-        // the transcript's path is known before the first byte is written.
+        let exe = std::env::current_exe().context("locate this binary for the CLI's hooks")?;
+        let mut env = vec![
+            ("RACCOON_SESSION_ID".to_string(), rt.session_id.clone()),
+            ("RACCOON_TAB_ID".to_string(), rt.tab_id.clone()),
+        ];
+        match crate::hooks::socket_path() {
+            Ok(p) => env.push((crate::hooks::SOCKET_ENV.to_string(), p.to_string_lossy().into_owned())),
+            // Without the socket the CLI still runs; the chat just loses the
+            // status and permission half until the app is restarted.
+            Err(e) => log::warn!("no hook socket: {e:#}"),
+        }
+        let launch = match kind {
+            CliKind::Claude => self.claude_launch(entry, tab, &exe)?,
+            CliKind::Codex => self.codex_launch(rt, entry, tab, &exe, &mut env)?,
+        };
+
+        let tail = Arc::new(launch.tail);
+        let spec = pty::PaneSpec { cwd: &entry.cwd, cols: 120, rows: 30, command: Some(&launch.command), env: &env };
+        self.terminals.spawn(self.app.clone(), &pane, spec).context("start the agent's CLI")?;
+        let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        rt.engine = Engine::Cli(CliTab {
+            harness: kind,
+            mode: tab.permission_mode.clone(),
+            pane_id: pane.clone(),
+            generation,
+            restart_when_idle: false,
+            // Claude Code runs its SessionStart hook the moment it is up;
+            // Codex has no session, and so no hook, until a prompt makes one.
+            ready: Arc::new(tui::Ready::new(kind == CliKind::Claude)),
+            tail: tail.clone(),
+            echoed: Default::default(),
+            decisions: HashMap::new(),
+            turn_tail: Default::default(),
+            answered: HashMap::new(),
+            command: launch.command,
+        });
+        rt.turn_open = false;
+        self.announce_pane(rt);
+        if let Some(id) = launch.minted {
+            index::update_tab(&rt.session_id, &rt.tab_id, |t| {
+                t.provider_session_id = Some(id.clone());
+                t.fork_from = None;
+                Ok(())
+            })?;
+        }
+        self.follow_transcript(rt_arc, tail, pane, generation);
+        Ok(true)
+    }
+
+    /// Claude Code: the app mints the conversation id, so the transcript's
+    /// path is known before the CLI has written a byte.
+    fn claude_launch(&self, entry: &index::SessionEntry, tab: &TabEntry, exe: &Path) -> Result<CliLaunch> {
         let provider_id = tab.provider_session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let resume = tab.provider_session_id.is_some();
         let fork_from = if resume { None } else { tab.fork_from.clone() };
-        let exe = std::env::current_exe().context("locate this binary for the CLI's hooks")?;
-        let settings = claude::pty::settings_json(&exe);
+        let settings = claude::pty::settings_json(exe);
         let command = claude::pty::launch_command(claude::pty::LaunchOptions {
             provider_session_id: &provider_id,
             resume,
@@ -813,17 +907,6 @@ impl SessionManager {
             settings: &settings,
         })
         .ok_or_else(|| anyhow!("Claude Code is not installed. Install it and log in, then try again."))?;
-
-        let mut env = vec![
-            ("RACCOON_SESSION_ID".to_string(), rt.session_id.clone()),
-            ("RACCOON_TAB_ID".to_string(), rt.tab_id.clone()),
-        ];
-        match crate::hooks::socket_path() {
-            Ok(p) => env.push((crate::hooks::SOCKET_ENV.to_string(), p.to_string_lossy().into_owned())),
-            // Without the socket the CLI still runs; the chat just loses the
-            // status and permission half until the app is restarted.
-            Err(e) => log::warn!("no hook socket: {e:#}"),
-        }
 
         // The CLI's trust dialog would take the first prompt instead of the
         // composer, and a session's worktree is always a folder it has not
@@ -837,39 +920,83 @@ impl SessionManager {
         // of it, and the copy keeps each record's original uuid, so those are
         // the ones to drop.
         let carried = fork_from.as_deref().and_then(|parent| claude::transcript::record_uuids(&entry.cwd, parent)).unwrap_or_default();
-        let tail = Arc::new(claude::pty::Tail::opening(path, carried));
-        let spec = pty::PaneSpec { cwd: &entry.cwd, cols: 120, rows: 30, command: Some(&command), env: &env };
-        self.terminals.spawn(self.app.clone(), &pane, spec).context("start Claude Code")?;
-        let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let ready = Arc::new(claude::pty::Ready::default());
-        rt.engine = Engine::ClaudePty(ClaudePty {
-            pane_id: pane.clone(),
-            generation,
-            restart_when_idle: false,
-            ready: ready.clone(),
-            tail: tail.clone(),
-            echoed: Default::default(),
-            decisions: HashMap::new(),
-            turn_tail: Default::default(),
-            command: command.clone(),
-        });
-        rt.turn_open = false;
-        self.announce_pane(rt);
-        if !resume {
-            index::update_tab(&rt.session_id, &rt.tab_id, |t| {
-                t.provider_session_id = Some(provider_id.clone());
-                t.fork_from = None;
-                Ok(())
-            })?;
-        }
-        self.follow_transcript(rt_arc, tail, pane, generation);
-        Ok(true)
+        Ok(CliLaunch {
+            command,
+            tail: tui::Tail::opening(path, claude::transcript::decode_line, carried),
+            minted: (!resume).then_some(provider_id),
+        })
     }
 
-    /// Restart the CLI so it reads a setting it only takes at startup — the
-    /// permission mode, which the TUI can only cycle on a key with no way to
-    /// read the result back. The pane is kept and the conversation resumes, so
-    /// what the reader sees is the CLI redrawing, not a new tab.
+    /// Codex: the CLI mints its own conversation id and names the rollout
+    /// after it, so a new tab has nothing to follow until its `SessionStart`
+    /// hook says which file it opened. A tab that already holds an id follows
+    /// that rollout from wherever it stands.
+    fn codex_launch(&self, rt: &mut TabRuntime, entry: &index::SessionEntry, tab: &TabEntry, exe: &Path, env: &mut Vec<(String, String)>) -> Result<CliLaunch> {
+        // A tab stored before the account's list was known can name a model
+        // this account cannot run; sending it would fail the turn with a 400.
+        let model = match self.codex_models.substitute_for(&tab.model) {
+            Some(sub) => {
+                let text = format!("{} is not available on this account; using {}.", tab.model, sub.label);
+                self.publish(rt, Payload::Status { text }, None);
+                let _ = index::update_tab(&rt.session_id, &rt.tab_id, |t| {
+                    t.model = sub.id.clone();
+                    Ok(())
+                });
+                self.publish(rt, Payload::SettingsChanged { model: Some(sub.id.clone()), effort: None, permission_mode: None }, None);
+                sub.id
+            }
+            None => tab.model.clone(),
+        };
+
+        let codex::home::Prepared { home, hooks_live } = codex::home::prepare(&entry.cwd, exe).context("prepare the Codex home")?;
+        env.push(("CODEX_HOME".to_string(), home.to_string_lossy().into_owned()));
+        if !hooks_live {
+            // The hooks are what say a turn began, needs a decision, or ended.
+            // Without them the chat is only the rollout, which never says the
+            // turn is over — so say so rather than leave a turn spinning.
+            let text = "Codex could not install its hooks here, so this tab shows the conversation but not its progress. The terminal view is unaffected.".to_string();
+            self.publish(rt, Payload::Status { text }, None);
+        }
+
+        // A conversation started by the old headless engine lives in the
+        // reader's own home, where a `codex resume` against ours would not
+        // look for it.
+        let mut resume = tab.provider_session_id.clone();
+        if let (Some(id), Some(user)) = (&resume, codex::home::user_root()) {
+            match codex::home::adopt_rollout(&home, &user, id) {
+                Ok(true) => log::info!("brought Codex conversation {id} into the managed home"),
+                Ok(false) => {}
+                Err(e) => log::warn!("could not adopt Codex conversation {id}: {e:#}"),
+            }
+        }
+        let rollout = resume.as_deref().and_then(|id| codex::home::find_rollout(&home, id));
+        if resume.is_some() && rollout.is_none() {
+            // Resuming an id Codex cannot find fails the launch outright, so
+            // the tab starts a new conversation and says so.
+            self.publish(rt, Payload::Status { text: "The previous Codex conversation is no longer on this machine; starting a new one.".into() }, None);
+            resume = None;
+        }
+        let command = codex::pty::launch_command(codex::pty::LaunchOptions {
+            resume: resume.as_deref(),
+            model: &model,
+            effort: tab.effort.as_deref(),
+            permission_mode: &tab.permission_mode,
+        })
+        .ok_or_else(|| anyhow!("Codex is not installed. Install it and log in, then try again."))?;
+        Ok(CliLaunch {
+            command,
+            tail: match rollout {
+                Some(path) => tui::Tail::opening(path, codex::rollout::decode_line, Default::default()),
+                None => tui::Tail::unknown(codex::rollout::decode_line),
+            },
+            minted: None,
+        })
+    }
+
+    /// Restart the CLI so it reads a setting it only takes at startup: the
+    /// permission mode for either CLI, and the model and effort for Codex,
+    /// which has no command for them. The pane is kept and the conversation
+    /// resumes, so what the reader sees is the CLI redrawing, not a new tab.
     ///
     /// The old process has to be *gone*, not merely signalled: it holds the
     /// conversation until it exits, and the replacement is refused a session
@@ -881,7 +1008,7 @@ impl SessionManager {
         let pane = Self::pane_id(tab_id);
         {
             let mut rt = rt_arc.lock().unwrap();
-            if let Engine::ClaudePty(p) = &mut rt.engine {
+            if let Engine::Cli(p) = &mut rt.engine {
                 p.restart_when_idle = false;
             }
             self.release_cli(&mut rt);
@@ -897,7 +1024,7 @@ impl SessionManager {
     /// resumes. Returns the pane the caller must kill — outside the tab lock,
     /// because waiting for the process to go is a wait on another process.
     fn release_cli(&self, rt: &mut TabRuntime) -> Option<String> {
-        let Engine::ClaudePty(p) = &rt.engine else { return None };
+        let Engine::Cli(p) = &rt.engine else { return None };
         let pane = p.pane_id.clone();
         rt.engine = Engine::None;
         rt.turn_open = false;
@@ -909,20 +1036,20 @@ impl SessionManager {
     /// to, and the file may not exist for a second or two after the CLI
     /// starts, so a stat every 200 ms is both the simplest and the surest way
     /// to follow it. The same loop notices the pane dying.
-    fn follow_transcript(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: Arc<claude::pty::Tail>, pane: String, generation: u64) {
+    fn follow_transcript(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: Arc<tui::Tail>, pane: String, generation: u64) {
         let manager = self.clone();
         let weak = Arc::downgrade(rt_arc);
         let _ = std::thread::Builder::new().name(format!("transcript-{pane}")).spawn(move || loop {
-            std::thread::sleep(claude::pty::POLL_INTERVAL);
+            std::thread::sleep(tui::POLL_INTERVAL);
             let Some(rt_arc) = weak.upgrade() else { return };
-            let mine = matches!(&rt_arc.lock().unwrap().engine, Engine::ClaudePty(p) if p.generation == generation);
+            let mine = matches!(&rt_arc.lock().unwrap().engine, Engine::Cli(p) if p.generation == generation);
             if !mine {
                 return;
             }
             manager.pump(&rt_arc, &tail);
             if !manager.terminals.is_running(&pane) {
                 let mut rt = rt_arc.lock().unwrap();
-                if matches!(&rt.engine, Engine::ClaudePty(p) if p.generation == generation) {
+                if matches!(&rt.engine, Engine::Cli(p) if p.generation == generation) {
                     manager.close_open_turn(&mut rt, TurnStatus::Aborted, None);
                     rt.engine = Engine::None;
                     manager.set_status(&mut rt, TabStatus::Idle);
@@ -935,7 +1062,7 @@ impl SessionManager {
     /// Publish everything the transcript has gained since the last look. The
     /// tail's own lock orders this against the poll loop, so a `Stop` hook
     /// flushing before it closes the turn cannot overtake it.
-    fn pump(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: &Arc<claude::pty::Tail>) {
+    fn pump(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: &Arc<tui::Tail>) {
         let payloads = tail.drain();
         if payloads.is_empty() {
             return;
@@ -945,24 +1072,30 @@ impl SessionManager {
         for payload in payloads {
             // A prompt sent from the composer was published when it was sent;
             // the transcript's copy of it would be the same message twice.
-            if let (Payload::UserMessage { text, .. }, Engine::ClaudePty(p)) = (&payload, &mut rt.engine) {
+            if let (Payload::UserMessage { text, .. }, Engine::Cli(p)) = (&payload, &mut rt.engine) {
                 if p.echoed.front().is_some_and(|q| q == text) {
                     p.echoed.pop_front();
                     continue;
                 }
             }
-            if let (Payload::AssistantText { text, .. }, Engine::ClaudePty(p)) = (&payload, &mut rt.engine) {
+            if let (Payload::AssistantText { text, .. }, Engine::Cli(p)) = (&payload, &mut rt.engine) {
                 if !p.turn_tail.observe(text) {
                     continue; // the app already said this for a Stop hook
                 }
             }
             if matches!(payload, Payload::UserMessage { .. }) {
                 rt.turn_open = true;
+                if let Engine::Cli(p) = &mut rt.engine {
+                    p.turn_tail.opened();
+                }
                 self.set_status(&mut rt, TabStatus::InProgress);
             }
             if payload.is_turn_boundary() {
-                if let Engine::ClaudePty(p) = &mut rt.engine {
-                    p.turn_tail.turn_ended();
+                if let Engine::Cli(p) = &mut rt.engine {
+                    // The CLI's own hook may have closed this turn already.
+                    if !p.turn_tail.closing() {
+                        continue;
+                    }
                 }
             }
             self.apply(&mut rt, payload, None);
@@ -972,10 +1105,10 @@ impl SessionManager {
     /// Wait, briefly, for the transcript to deliver the reply the `Stop` hook
     /// is already holding. If it never comes, publish it here and mark its
     /// record to be dropped when it lands, so it is drawn exactly once.
-    fn settle_reply(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: &Arc<claude::pty::Tail>, want: Option<&str>) {
+    fn settle_reply(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: &Arc<tui::Tail>, want: Option<&str>) {
         let Some(want) = want.map(str::trim).filter(|w| !w.is_empty()) else { return };
-        let saw = |rt: &TabRuntime| matches!(&rt.engine, Engine::ClaudePty(p) if p.turn_tail.saw(want));
-        let deadline = Instant::now() + claude::pty::STOP_SETTLE;
+        let saw = |rt: &TabRuntime| matches!(&rt.engine, Engine::Cli(p) if p.turn_tail.saw(want));
+        let deadline = Instant::now() + tui::STOP_SETTLE;
         loop {
             if saw(&rt_arc.lock().unwrap()) {
                 return;
@@ -983,7 +1116,7 @@ impl SessionManager {
             if Instant::now() >= deadline {
                 break;
             }
-            std::thread::sleep(claude::pty::POLL_INTERVAL);
+            std::thread::sleep(tui::POLL_INTERVAL);
             self.pump(rt_arc, tail);
         }
         let mut rt = rt_arc.lock().unwrap();
@@ -991,17 +1124,22 @@ impl SessionManager {
         if saw(&rt) {
             return;
         }
-        let Engine::ClaudePty(p) = &mut rt.engine else { return };
+        let Engine::Cli(p) = &mut rt.engine else { return };
         p.turn_tail.anticipate(want);
         self.apply(&mut rt, Payload::AssistantText { block: None, text: want.to_string() }, None);
     }
 
+    /// Publish the turn's boundary, once. Both guards matter: `turn_open` stops
+    /// a close with no turn behind it, and the latch stops the second of the
+    /// two closers that race for a PTY-first tab.
     fn close_open_turn(&self, rt: &mut TabRuntime, status: TurnStatus, final_text: Option<String>) {
-        if let Engine::ClaudePty(p) = &mut rt.engine {
-            p.turn_tail.turn_ended();
-        }
         if !rt.turn_open {
             return;
+        }
+        if let Engine::Cli(p) = &mut rt.engine {
+            if !p.turn_tail.closing() {
+                return;
+            }
         }
         let duration_ms = rt.turn_started_at.map(|t| t.elapsed().as_millis() as u64);
         self.apply(rt, Payload::TurnCompleted { status, final_text, usage: None, duration_ms, head: None, auth_failed: false }, None);
@@ -1021,15 +1159,16 @@ impl SessionManager {
     ) -> Result<SendOutcome> {
         self.start_cli(rt, rt_arc, entry, tab)?;
         let (pane, ready) = match &rt.engine {
-            Engine::ClaudePty(p) => (p.pane_id.clone(), p.ready.clone()),
+            Engine::Cli(p) => (p.pane_id.clone(), p.ready.clone()),
             _ => bail!("the agent is not running"),
         };
         let queued = rt.turn_open;
         let baseline = if queued { None } else { git::snapshot_tree(Path::new(&entry.cwd)).ok() };
         let paths: Vec<String> = images.iter().map(|i| i.url.clone()).collect();
         if !queued {
-            if let Engine::ClaudePty(p) = &mut rt.engine {
+            if let Engine::Cli(p) = &mut rt.engine {
                 p.echoed.push_back(text.clone());
+                p.turn_tail.opened();
             }
         }
         let ev = self.publish(rt, Payload::UserMessage { text: text.clone(), images, baseline, queued, cwd: Some(entry.cwd.clone()) }, None);
@@ -1046,7 +1185,7 @@ impl SessionManager {
     /// Enter has to be a later write than the body — a carriage return inside
     /// the same one is read as part of the paste and never submits — so this
     /// sleeps, which no caller holding the tab lock could afford to do.
-    fn type_prompt(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, text: String, attachments: Vec<String>, ready: Option<Arc<claude::pty::Ready>>) {
+    fn type_prompt(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, text: String, attachments: Vec<String>, ready: Option<Arc<tui::Ready>>) {
         let lock = self.writers.lock().unwrap().entry(pane.to_string()).or_default().clone();
         let terminals = self.terminals.clone();
         let manager = self.clone();
@@ -1070,30 +1209,35 @@ impl SessionManager {
                     log::warn!("[{pane}] write: {e:#}");
                 }
             };
-            write(claude::pty::CLEAR_LINE);
+            write(tui::CLEAR_LINE);
             for path in &attachments {
-                write(&claude::pty::attachment_bytes(path));
+                write(&tui::attachment_bytes(path));
             }
             if !attachments.is_empty() {
                 std::thread::sleep(std::time::Duration::from_millis(300));
             }
-            let body = claude::pty::body_bytes(&text);
+            let body = tui::body_bytes(&text);
             write(&body);
-            std::thread::sleep(claude::pty::submit_delay(body.len()));
-            write(claude::pty::SUBMIT);
+            std::thread::sleep(tui::submit_delay(body.len()));
+            write(tui::SUBMIT);
         });
     }
 
     /// Wait until the pane's CLI is listening. `true` when it said so — or looked
     /// like it — and `false` when neither signal came in time.
     ///
-    /// The `SessionStart` hook is the deterministic one: the CLI runs it once its
-    /// session is up, whether it started fresh or resumed. Quiet output is the
-    /// fallback for a CLI whose hooks never reach us, and only a fallback: a TUI
-    /// that is drawing a spinner never goes quiet, which is how a prompt sent to a
-    /// resumed tab used to be dropped after the wait timed out.
-    fn wait_ready(&self, pane: &str, ready: &claude::pty::Ready) -> bool {
-        let deadline = Instant::now() + claude::pty::READY_TIMEOUT;
+    /// Claude Code's `SessionStart` hook is the deterministic signal: it runs
+    /// once the session is up, whether it started fresh or resumed. Quiet output
+    /// is only the fallback there — a TUI drawing a spinner never goes quiet,
+    /// which is how a prompt sent to a resumed tab used to be dropped after the
+    /// wait timed out.
+    ///
+    /// Codex has no equivalent: probed fresh and resumed with no prompt sent, it
+    /// runs no hook at all until a prompt creates its session, which is the very
+    /// thing being waited for. Its tab reads the screen, and that is not a
+    /// failure, so it is not logged as one.
+    fn wait_ready(&self, pane: &str, ready: &tui::Ready) -> bool {
+        let deadline = Instant::now() + tui::READY_TIMEOUT;
         loop {
             if ready.settled() {
                 return true;
@@ -1105,8 +1249,10 @@ impl SessionManager {
             if Instant::now() >= deadline {
                 return false;
             }
-            if self.terminals.quiet_for(pane).is_some_and(|q| q >= claude::pty::READY_QUIET) {
-                log::warn!("[{pane}] never ran its SessionStart hook; falling back to quiet output");
+            if self.terminals.quiet_for(pane).is_some_and(|q| q >= tui::READY_QUIET) {
+                if ready.announces_start() {
+                    log::warn!("[{pane}] never ran its SessionStart hook; falling back to quiet output");
+                }
                 return true;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1122,34 +1268,51 @@ impl SessionManager {
 
     /// One hook occurrence. The reply is what the hook prints for the CLI, so
     /// only a permission decision ever carries anything.
+    ///
+    /// The event names are the same for both CLIs, and so is most of what
+    /// they mean. Two are not: Claude's `Notification` says its own TUI is
+    /// asking (Codex has no such event), and a Codex `PreToolUse` is a gate
+    /// rather than a report when the reader has asked to see every tool.
     pub fn on_hook(&self, frame: HookFrame) -> HookReply {
         let Ok(rt_arc) = self.runtime(&frame.session, &frame.tab) else {
             return HookReply::default();
         };
-        let tail = {
+        let (kind, tail, asks_every_tool) = {
             let rt = rt_arc.lock().unwrap();
             match &rt.engine {
-                Engine::ClaudePty(p) => p.tail.clone(),
+                Engine::Cli(p) => (p.harness, p.tail.clone(), p.harness == CliKind::Codex && codex::asks_every_tool(&p.mode)),
                 // A hook from a CLI this app did not start, or from one whose
                 // tab has moved on: nothing to say, and nothing to block.
                 _ => return HookReply::default(),
             }
         };
-        // The path derived from the session id is a guess made before the CLI
-        // ran; the hook carries the file it actually opened.
+        // Claude's transcript path is a guess made before the CLI ran and
+        // Codex's is not knowable at all until now; either way the hook
+        // carries the file it actually opened.
         if let Some(path) = frame.payload["transcript_path"].as_str() {
             tail.retarget(Path::new(path));
         }
         self.pump(&rt_arc, &tail);
 
         match frame.event.as_str() {
-            // The CLI's session is up; the composer may stop waiting.
+            // The CLI's session is up; the composer may stop waiting. Codex
+            // also mints its own conversation id, so this is where the app
+            // learns which one to resume next time.
             "SessionStart" => {
-                if let Engine::ClaudePty(p) = &rt_arc.lock().unwrap().engine {
+                if let Engine::Cli(p) = &rt_arc.lock().unwrap().engine {
                     p.ready.mark();
                 }
+                if kind == CliKind::Codex {
+                    if let Some(id) = frame.payload["session_id"].as_str() {
+                        self.record_provider_session(&rt_arc, id);
+                    }
+                }
             }
-            "PermissionRequest" => return self.ask_permission(&rt_arc, &frame),
+            "PermissionRequest" => return self.ask_permission(&rt_arc, &frame, kind),
+            // Codex asks twice about one escalating command: once here for
+            // every tool, and again as a `PermissionRequest` when the sandbox
+            // stops it. The reader answers once.
+            "PreToolUse" if asks_every_tool => return self.ask_permission(&rt_arc, &frame, kind),
             "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => {
                 let mut rt = rt_arc.lock().unwrap();
                 rt.last_activity = Instant::now();
@@ -1176,7 +1339,14 @@ impl SessionManager {
                 self.settle_reply(&rt_arc, &tail, final_text.as_deref());
                 let mut rt = rt_arc.lock().unwrap();
                 rt.last_activity = Instant::now();
+                self.forget_tool_answers(&mut rt);
                 self.close_open_turn(&mut rt, TurnStatus::Ok, final_text);
+            }
+            // Codex only: the reader pressed Escape in the TUI.
+            "Interrupt" => {
+                let mut rt = rt_arc.lock().unwrap();
+                self.forget_tool_answers(&mut rt);
+                self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
             }
             "SessionEnd" => {
                 let mut rt = rt_arc.lock().unwrap();
@@ -1189,13 +1359,14 @@ impl SessionManager {
         HookReply::default()
     }
 
-    /// A permission mode changed mid-turn: the restart it needs waits here,
-    /// until the turn it would have interrupted is over. Off this thread, so
-    /// the hook's reply reaches the CLI before the CLI is replaced.
+    /// A setting the CLI only reads at startup changed mid-turn: the restart
+    /// it needs waits here, until the turn it would have interrupted is over.
+    /// Off this thread, so the hook's reply reaches the CLI before the CLI is
+    /// replaced.
     fn restart_if_due(&self, rt_arc: &Arc<Mutex<TabRuntime>>, session_id: &str, tab_id: &str) {
         {
             let rt = rt_arc.lock().unwrap();
-            let due = matches!(&rt.engine, Engine::ClaudePty(p) if p.restart_when_idle) && !rt.turn_open;
+            let due = matches!(&rt.engine, Engine::Cli(p) if p.restart_when_idle) && !rt.turn_open;
             if !due {
                 return;
             }
@@ -1208,18 +1379,60 @@ impl SessionManager {
         });
     }
 
-    /// Turn a `PermissionRequest` into the chat's own card and wait for it to
-    /// be answered. The hook thread parks here, which is exactly what holds
-    /// the CLI's tool call up until the reader decides.
-    fn ask_permission(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame) -> HookReply {
+    fn record_provider_session(&self, rt_arc: &Arc<Mutex<TabRuntime>>, id: &str) {
+        let (session_id, tab_id) = {
+            let rt = rt_arc.lock().unwrap();
+            (rt.session_id.clone(), rt.tab_id.clone())
+        };
+        let id = id.to_string();
+        std::thread::spawn(move || {
+            let _ = index::update_tab(&session_id, &tab_id, |t| {
+                if t.provider_session_id.as_deref() != Some(&id) {
+                    t.provider_session_id = Some(id);
+                }
+                Ok(())
+            });
+        });
+    }
+
+    /// Answers only stand for the turn they were given in.
+    fn forget_tool_answers(&self, rt: &mut TabRuntime) {
+        if let Engine::Cli(p) = &mut rt.engine {
+            p.answered.clear();
+        }
+    }
+
+    /// Turn a permission hook into the chat's own card and wait for it to be
+    /// answered. The hook thread parks here, which is exactly what holds the
+    /// CLI's tool call up until the reader decides.
+    fn ask_permission(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame, kind: CliKind) -> HookReply {
         let request_id = uuid::Uuid::now_v7().to_string();
         let tool_name = frame.payload["tool_name"].as_str().unwrap_or("tool").to_string();
         let input = frame.payload["tool_input"].clone();
         let suggestions: Vec<Value> = frame.payload["permission_suggestions"].as_array().cloned().unwrap_or_default();
-        let (tx, rx) = std::sync::mpsc::channel::<Value>();
+        let gate = frame.event.as_str();
+
+        // Codex raises `PermissionRequest` for a command the reader has just
+        // been asked about at `PreToolUse`. Reusing that answer is what keeps
+        // one tool to one card.
+        if kind == CliKind::Codex {
+            let key = tool_key(&tool_name, &input);
+            let already = {
+                let rt = rt_arc.lock().unwrap();
+                match &rt.engine {
+                    Engine::Cli(p) => p.answered.get(&key).copied(),
+                    _ => None,
+                }
+            };
+            if let Some(allow) = already {
+                return reply_for(kind, gate, if allow { Decision::Allow } else { Decision::Deny });
+            }
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel::<Decision>();
         {
             let mut rt = rt_arc.lock().unwrap();
-            let Engine::ClaudePty(p) = &mut rt.engine else { return HookReply::default() };
+            let Engine::Cli(p) = &mut rt.engine else { return HookReply::default() };
             p.decisions.insert(request_id.clone(), tx);
             // The event carries no tool_use_id — it fires before the call is
             // recorded — so the card stands on its own rather than attaching
@@ -1231,22 +1444,31 @@ impl SessionManager {
                     request_id: request_id.clone(),
                     tool_use_id: String::new(),
                     title: Some(claude::mapper::tool_title(&tool_name, &input)),
-                    description: None,
+                    // Codex explains itself in the tool input when it wants an
+                    // escalation; Claude says nothing here.
+                    description: input["description"].as_str().map(String::from),
                     options: claude::mapper::build_options(&suggestions),
-                    tool_name,
+                    tool_name: tool_name.clone(),
                     input: input.clone(),
                 }
             };
-            rt.pending.insert(request_id.clone(), PendingAsk { tool_use_id: String::new(), input, suggestions });
+            rt.pending.insert(request_id.clone(), PendingAsk { tool_use_id: String::new(), input: input.clone(), suggestions });
             self.apply(&mut rt, payload, None);
         }
-        let answer = rx.recv_timeout(claude::pty::PERMISSION_WAIT).ok();
+        let wait = match kind {
+            CliKind::Claude => claude::pty::PERMISSION_WAIT,
+            CliKind::Codex => codex::pty::PERMISSION_WAIT,
+        };
+        let answer = rx.recv_timeout(wait).ok();
         let mut rt = rt_arc.lock().unwrap();
-        if let Engine::ClaudePty(p) = &mut rt.engine {
+        if let Engine::Cli(p) = &mut rt.engine {
             p.decisions.remove(&request_id);
+            if let Some(d) = &answer {
+                p.answered.insert(tool_key(&tool_name, &input), !matches!(d, Decision::Deny));
+            }
         }
         match answer {
-            Some(output) => HookReply { output: Some(output) },
+            Some(decision) => reply_for(kind, gate, decision),
             None => {
                 // The CLI has stopped waiting on us and will ask in its own
                 // TUI; the card must stop offering buttons that go nowhere.
@@ -1261,7 +1483,7 @@ impl SessionManager {
     /// mid-turn, because the CLI would otherwise resume a session another
     /// process is still writing.
     ///
-    /// Claude tabs never come here — their CLI is already the tab, so their
+    /// A PTY-first tab never comes here — its CLI is already the tab, so its
     /// terminal view is a view flag, not a hand-off.
     pub fn handoff(&self, session_id: &str, tab_id: &str) -> Result<HandoffInfo> {
         let rt_arc = self.runtime(session_id, tab_id)?;
@@ -1281,25 +1503,8 @@ impl SessionManager {
             rt.queued.clear();
             self.set_status(&mut rt, TabStatus::Idle);
         }
-        let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
         let command = match HarnessId::parse(&tab.harness) {
-            HarnessId::Claude => bail!("A Claude tab already runs its own CLI; use the terminal view."),
-            HarnessId::Codex => {
-                let mut c = match &tab.provider_session_id {
-                    Some(id) => format!("codex resume {}", quote(id)),
-                    None => String::from("codex"),
-                };
-                if !tab.model.is_empty() {
-                    c.push_str(&format!(" -m {}", quote(&tab.model)));
-                }
-                let (approval, sandbox) = codex::stance(&tab.permission_mode);
-                if approval == "never" {
-                    c.push_str(" --dangerously-bypass-approvals-and-sandbox");
-                } else {
-                    c.push_str(&format!(" -a {approval} -s {sandbox}"));
-                }
-                c
-            }
+            HarnessId::Claude | HarnessId::Codex => bail!("That agent already runs its own CLI; use the terminal view."),
             HarnessId::Acp(binary) => binary,
             HarnessId::OpenCode => "opencode".into(),
             HarnessId::Other(name) => bail!("The {name} agent has no terminal form."),
@@ -1311,10 +1516,9 @@ impl SessionManager {
         let mut rt = rt_arc.lock().unwrap();
         rt.last_activity = Instant::now();
         let actions = match &mut rt.engine {
-            Engine::Codex(c) => c.handle(line),
             Engine::Acp(a) => a.handle(line),
             Engine::OpenCode(o) => o.handle(line),
-            Engine::ClaudePty(_) | Engine::None => return,
+            Engine::Cli(_) | Engine::None => return,
         };
         self.apply_actions(&mut rt, actions);
     }
@@ -1377,12 +1581,11 @@ impl SessionManager {
             if !rt.queued.is_empty() {
                 let q = rt.queued.remove(0);
                 let actions = match &mut rt.engine {
-                    Engine::Codex(c) => c.prompt(q.text.clone(), q.images.clone()),
                     Engine::Acp(a) => a.prompt(q.text.clone(), q.images.clone()),
                     Engine::OpenCode(o) => o.prompt(q.text.clone(), q.images.clone()),
                     // A PTY tab never queues here: the CLI holds typed input
                     // itself, so the message went in when it was written.
-                    Engine::ClaudePty(_) | Engine::None => Vec::new(),
+                    Engine::Cli(_) | Engine::None => Vec::new(),
                 };
                 let sent = !actions.is_empty();
                 self.apply_actions(rt, actions);
@@ -1441,14 +1644,15 @@ impl Sink for TabSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
 
     /// Two tab views mounting at once — React runs a mount effect twice in
     /// development — used to build a runtime each, so each held its own lock
-    /// and both got past the "already running?" check into a spawn. Claude
-    /// refuses the second CLI on a conversation the first already has, and the
-    /// tab was left pointing at whichever spawn won.
+    /// and both got past the "already running?" check into a spawn. A CLI
+    /// refuses the second process a conversation the first already has, and
+    /// the tab was left pointing at whichever spawn won.
     #[test]
     fn concurrent_callers_share_one_runtime_and_one_creation() {
         let map: Arc<Mutex<HashMap<String, Arc<usize>>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -1488,5 +1692,50 @@ mod tests {
         assert!(one_per_key(&map, "s/t", || Err(anyhow!("no such tab"))).is_err());
         assert!(map.lock().unwrap().is_empty());
         assert_eq!(*one_per_key(&map, "s/t", || Ok(Arc::new(3))).unwrap(), 3);
+    }
+
+    #[test]
+    fn a_decision_is_printed_in_the_shape_the_hook_that_asked_expects() {
+        let out = |kind, event, d| reply_for(kind, event, d).output.unwrap();
+
+        // Claude: one event, and an allow can carry a rule or an answer.
+        let allow = out(CliKind::Claude, "PermissionRequest", Decision::Allow);
+        assert_eq!(allow["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        let always = out(CliKind::Claude, "PermissionRequest", Decision::AllowWith(json!({"type": "addRules"})));
+        assert_eq!(always["hookSpecificOutput"]["decision"]["updatedPermissions"][0]["type"], "addRules");
+        let answered = out(CliKind::Claude, "PermissionRequest", Decision::Answers(json!({"answers": {"q": "a"}})));
+        assert_eq!(answered["hookSpecificOutput"]["decision"]["updatedInput"]["answers"]["q"], "a");
+
+        // Codex: two events, two shapes, and neither takes anything extra —
+        // it fails the hook closed if updatedInput is so much as present.
+        let gate = out(CliKind::Codex, "PreToolUse", Decision::Deny);
+        assert_eq!(gate["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(gate["hookSpecificOutput"]["permissionDecision"], "deny");
+        let ask = out(CliKind::Codex, "PermissionRequest", Decision::Allow);
+        assert_eq!(ask["hookSpecificOutput"]["hookEventName"], "PermissionRequest");
+        assert_eq!(ask["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        // A suggestion has nowhere to go in a Codex reply, and is dropped
+        // rather than smuggled into a field that would fail closed.
+        let odd = out(CliKind::Codex, "PermissionRequest", Decision::AllowWith(json!({"type": "addRules"})));
+        assert_eq!(odd["hookSpecificOutput"]["decision"], json!({"behavior": "allow"}));
+    }
+
+    #[test]
+    fn one_tool_is_the_same_tool_whichever_hook_asks_about_it() {
+        // Codex adds its justification to the input when it escalates; the
+        // command is what says these are one call, so the reader is asked once.
+        let pre = tool_key("Bash", &json!({"command": "rm -rf build"}));
+        let request = tool_key("Bash", &json!({"command": "rm -rf build", "description": "Delete the build tree?"}));
+        assert_eq!(pre, request);
+        assert_ne!(pre, tool_key("Bash", &json!({"command": "rm -rf dist"})));
+        assert_ne!(pre, tool_key("Read", &json!({"command": "rm -rf build"})));
+    }
+
+    #[test]
+    fn only_the_tabs_that_are_their_cli_are_pty_first() {
+        assert_eq!(pty_first("claude"), Some(CliKind::Claude));
+        assert_eq!(pty_first("codex"), Some(CliKind::Codex));
+        assert_eq!(pty_first("cursor"), None);
+        assert_eq!(pty_first("opencode"), None);
     }
 }

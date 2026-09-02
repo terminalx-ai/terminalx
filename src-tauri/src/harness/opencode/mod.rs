@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::events::*;
-pub use crate::harness::codex::Action;
+pub use crate::harness::Action;
 
 pub struct SpawnPlan {
     pub program: std::path::PathBuf,

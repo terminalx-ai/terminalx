@@ -7,6 +7,11 @@
   file, status and permission cards come from its hooks, and ⌘⇧T flips between
   chat and terminal without stopping anything or waiting for a turn to end.
   ([docs/PTY-FIRST.md](docs/PTY-FIRST.md))
+- Codex tabs work the same way: the real `codex` TUI in the tab, its rollout
+  read into the chat, and its hooks — installed in a Codex home Raccoon manages
+  so your own `~/.codex` is never edited — carrying status and approvals, with
+  "Ask every time" now asking about every tool rather than only the ones Codex
+  would have stopped for.
 
 ## 0.1.0
 

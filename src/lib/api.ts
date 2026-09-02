@@ -144,6 +144,7 @@ export interface TabPtyEvent {
   tabId: string;
   paneId: string;
   command: string;
+  harness: string;
 }
 
 export const agent = {

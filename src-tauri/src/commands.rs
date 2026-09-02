@@ -620,9 +620,12 @@ pub async fn ensure_tab_started(state: State<'_, AppState>, session_id: String, 
     tauri::async_runtime::spawn_blocking(move || m.ensure_started(&session_id, &tab_id).map_err(err)).await.map_err(err)?
 }
 
+/// Stopping and the three settings below all wait for the CLI in the pane to
+/// really be gone before they answer, so none of them runs on the main thread.
 #[tauri::command]
-pub fn stop_tab(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
-    state.manager().ok_or("not ready")?.stop(&session_id, &tab_id).map_err(err)
+pub async fn stop_tab(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
+    let m = state.manager().ok_or("not ready")?;
+    tauri::async_runtime::spawn_blocking(move || m.stop(&session_id, &tab_id).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -652,18 +655,21 @@ pub fn answer_questions(
 }
 
 #[tauri::command]
-pub fn set_tab_model(state: State<'_, AppState>, session_id: String, tab_id: String, model: String) -> CmdResult<()> {
-    state.manager().ok_or("not ready")?.set_model(&session_id, &tab_id, &model).map_err(err)
+pub async fn set_tab_model(state: State<'_, AppState>, session_id: String, tab_id: String, model: String) -> CmdResult<()> {
+    let m = state.manager().ok_or("not ready")?;
+    tauri::async_runtime::spawn_blocking(move || m.set_model(&session_id, &tab_id, &model).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
-pub fn set_tab_permission_mode(state: State<'_, AppState>, session_id: String, tab_id: String, mode: String) -> CmdResult<()> {
-    state.manager().ok_or("not ready")?.set_permission_mode(&session_id, &tab_id, &mode).map_err(err)
+pub async fn set_tab_permission_mode(state: State<'_, AppState>, session_id: String, tab_id: String, mode: String) -> CmdResult<()> {
+    let m = state.manager().ok_or("not ready")?;
+    tauri::async_runtime::spawn_blocking(move || m.set_permission_mode(&session_id, &tab_id, &mode).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
-pub fn set_tab_effort(state: State<'_, AppState>, session_id: String, tab_id: String, effort: Option<String>) -> CmdResult<()> {
-    state.manager().ok_or("not ready")?.set_effort(&session_id, &tab_id, effort.as_deref()).map_err(err)
+pub async fn set_tab_effort(state: State<'_, AppState>, session_id: String, tab_id: String, effort: Option<String>) -> CmdResult<()> {
+    let m = state.manager().ok_or("not ready")?;
+    tauri::async_runtime::spawn_blocking(move || m.set_effort(&session_id, &tab_id, effort.as_deref()).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]

@@ -77,62 +77,8 @@ fn occupancy(usage: &Value) -> Option<u64> {
     (sum > 0).then_some(sum)
 }
 
-/// A cursor into one transcript file: how far it has been read, and the bytes
-/// after the last newline, which are a record still being written.
-///
-/// It works in bytes, not text: a read can land in the middle of a record and
-/// therefore in the middle of a multi-byte character, so nothing is decoded
-/// until its newline has arrived.
-pub struct Streamer {
-    offset: u64,
-    partial: Vec<u8>,
-    /// Records the app has already logged, by the uuid the CLI gave them. A
-    /// forked conversation is copied into its new file record for record, and
-    /// the copies keep their original uuids.
-    skip: HashSet<String>,
-}
-
-impl Streamer {
-    /// Start reading at `offset` — the file's length when the CLI was spawned,
-    /// so a resumed conversation is not replayed into the log twice. `skip`
-    /// names records the app has already logged under another session id,
-    /// which is how a fork's copy of its parent is left out.
-    pub fn skipping(offset: u64, skip: HashSet<String>) -> Self {
-        Self { offset, partial: Vec::new(), skip }
-    }
-
-    #[cfg(test)]
-    fn at(offset: u64) -> Self {
-        Self::skipping(offset, HashSet::new())
-    }
-
-    /// The records this cursor will drop, so a re-opened cursor keeps them.
-    pub fn carried(&self) -> &HashSet<String> {
-        &self.skip
-    }
-
-    pub fn offset(&self) -> u64 {
-        self.offset
-    }
-
-    /// Feed the bytes read after `offset()`. Complete lines are decoded; the
-    /// tail after the last newline is kept for the next chunk.
-    pub fn push(&mut self, chunk: &[u8]) -> Vec<Payload> {
-        self.offset += chunk.len() as u64;
-        self.partial.extend_from_slice(chunk);
-        let mut out = Vec::new();
-        while let Some(nl) = self.partial.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = self.partial.drain(..=nl).collect();
-            if let Ok(text) = std::str::from_utf8(&line) {
-                decode_line(text.trim_end_matches(['\n', '\r']), &self.skip, &mut out);
-            }
-        }
-        out
-    }
-}
-
 /// One transcript record as payloads. Unknown record types yield nothing.
-fn decode_line(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>) {
+pub fn decode_line(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>) {
     if line.trim().is_empty() {
         return;
     }
@@ -218,6 +164,7 @@ fn decode_assistant(v: &Value, out: &mut Vec<Payload>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::tui::Streamer;
 
     const FIXTURE: &str = r#"{"type":"queue-operation","timestamp":"2026-09-02T02:41:16.631Z","sessionId":"s"}
 {"parentUuid":null,"isSidechain":false,"type":"user","uuid":"u1","timestamp":"2026-09-02T02:41:18.686Z","userType":"external","cwd":"/tmp/x","sessionId":"s","message":{"role":"user","content":[{"type":"text","text":"Add multiply"}]}}
@@ -253,14 +200,14 @@ mod tests {
     /// which splits a record mid-line — must decode identically.
     #[test]
     fn streams_the_same_payloads_however_the_file_is_chunked() {
-        let mut whole = Streamer::at(0);
+        let mut whole = Streamer::at(0, decode_line);
         let expected = kinds(&whole.push(FIXTURE.as_bytes()));
         assert_eq!(expected, vec!["user", "thinking", "text", "usage", "tool", "result", "tool", "edits", "user", "end"]);
         assert_eq!(whole.offset(), FIXTURE.len() as u64);
 
         // Cut inside the fourth record, so a line arrives across two chunks.
         let cut = FIXTURE.find("Looking first").unwrap() + 4;
-        let mut split = Streamer::at(0);
+        let mut split = Streamer::at(0, decode_line);
         let mut got = split.push(&FIXTURE.as_bytes()[..cut]);
         got.extend(split.push(&FIXTURE.as_bytes()[cut..]));
         assert_eq!(kinds(&got), expected);
@@ -270,14 +217,14 @@ mod tests {
     #[test]
     fn a_trailing_fragment_is_held_until_its_newline() {
         let one_and_a_half = FIXTURE.find("\"a1\"").unwrap();
-        let mut s = Streamer::at(0);
+        let mut s = Streamer::at(0, decode_line);
         assert_eq!(kinds(&s.push(&FIXTURE.as_bytes()[..one_and_a_half])), vec!["user"]);
         assert_eq!(kinds(&s.push(&FIXTURE.as_bytes()[one_and_a_half..])).len(), 9);
     }
 
     #[test]
     fn decodes_prose_tools_and_occupancy() {
-        let mut s = Streamer::at(0);
+        let mut s = Streamer::at(0, decode_line);
         let p = s.push(FIXTURE.as_bytes());
         assert!(matches!(&p[0], Payload::UserMessage { text, .. } if text == "Add multiply"));
         assert!(matches!(&p[3], Payload::UsageUpdate(u) if u.context_used == Some(105)));
@@ -293,7 +240,7 @@ mod tests {
     #[test]
     fn decodes_a_real_interactive_session_including_its_resume() {
         const REAL: &str = include_str!("fixtures/interactive_session.jsonl");
-        let mut s = Streamer::at(0);
+        let mut s = Streamer::at(0, decode_line);
         let p = s.push(REAL.as_bytes());
         // The redacted `thinking` blocks the CLI writes carry no text, so they
         // draw nothing; `mode`, `last-prompt` and the rest are bookkeeping.
@@ -311,7 +258,7 @@ mod tests {
     fn a_forks_copy_of_the_parent_conversation_is_not_logged_again() {
         let carried = uuids_in(FIXTURE);
         assert!(carried.contains("u1") && carried.contains("a2"));
-        let mut s = Streamer::skipping(0, carried);
+        let mut s = Streamer::skipping(0, decode_line, carried);
         assert!(s.push(FIXTURE.as_bytes()).is_empty(), "every record was carried over");
 
         let fresh = "{\"type\":\"user\",\"uuid\":\"u9\",\"message\":{\"content\":\"after the fork\"}}\n";
