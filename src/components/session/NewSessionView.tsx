@@ -38,6 +38,7 @@ export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<WorkStatus | null>(null);
+  const [useWorktree, setUseWorktree] = useState(prefs.useWorktree);
   const ref = useRef<HTMLTextAreaElement>(null);
 
   const preset = store.newSessionPreset;
@@ -93,7 +94,8 @@ export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, 
       const s = await api.createSession({
         projectPath: project.path,
         title,
-        useWorktree: preset?.cwd ? false : prefs.useWorktree,
+        useWorktree: preset?.cwd ? false : useWorktree,
+        onMain: !preset?.cwd && !useWorktree,
         cwd: preset?.cwd ?? null,
         tab: { harness: harness.id, model: modelId, effort, permissionMode: prefs.lastMode },
       });
@@ -256,10 +258,10 @@ export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, 
               </span>
             ) : (
               <label className="ml-1 flex items-center gap-2 text-xs text-muted-foreground">
-                <Switch size="sm" checked={prefs.useWorktree} onCheckedChange={(v) => setPrefs({ useWorktree: v })} />
+                <Switch size="sm" checked={useWorktree} onCheckedChange={setUseWorktree} />
                 <span className="flex items-center gap-1">
                   <GitBranch className="size-3.5" />
-                  {prefs.useWorktree ? (
+                  {useWorktree ? (
                     <>
                       New worktree from <span className="text-foreground">{status?.defaultBranch ?? "default"}</span>
                     </>
@@ -293,7 +295,7 @@ export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, 
                   ? "Add a project to get started."
                   : preset?.cwd
                     ? "Describe the task. It runs in this workspace."
-                    : prefs.useWorktree
+                    : useWorktree
                       ? "Describe the task. A worktree is created when you send."
                       : "Describe the task."
               }

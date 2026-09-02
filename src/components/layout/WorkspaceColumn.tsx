@@ -235,6 +235,7 @@ async function confirmDelete(session: SessionEntry) {
 export function SessionRow({ session, selected }: { session: SessionEntry; selected: boolean }) {
   const status = sessionStatus(session);
   const harnesses = [...new Set(session.tabs.map((t) => t.harness))];
+  const branchBadge = session.issue && !session.worktreeName && !session.worktreeRemoved ? session.branch : null;
   return (
     <DropdownMenu>
       <div
@@ -265,6 +266,7 @@ export function SessionRow({ session, selected }: { session: SessionEntry; selec
           <div className="flex items-center gap-1">
             {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
             <span className="truncate text-[13px]">{session.title}</span>
+            {branchBadge && <span className="shrink-0 rounded-sm bg-veil-raised px-1 font-mono text-[10px] text-faint">{branchBadge}</span>}
           </div>
           {session.tabs.length > 1 && <div className="truncate text-[11px] text-faint">{session.tabs.length} tabs</div>}
         </div>
