@@ -11,6 +11,7 @@ import { api, errorMessage, gh, issues as issuesApi, type Issue, type IssueTeam,
 import { selectProject, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { PERMISSION_MODES } from "@/lib/models";
+import { chooseMode } from "@/lib/dialogs";
 import { relativeTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
 
@@ -368,7 +369,7 @@ export function IssuesView({ onCreated }: { onCreated?: (sessionId: string, tabI
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="start">
                     {PERMISSION_MODES.map((m) => (
-                      <DropdownMenuItem key={m.id} onSelect={() => setPrefs({ lastMode: m.id })}>
+                      <DropdownMenuItem key={m.id} onSelect={() => chooseMode(harness?.id ?? "", m.id, (v) => setPrefs({ lastMode: v }))}>
                         {m.label}
                       </DropdownMenuItem>
                     ))}

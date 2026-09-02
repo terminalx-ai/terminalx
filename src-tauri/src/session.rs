@@ -17,7 +17,7 @@
 //! share — the child, the seq counter, the log, the queue.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -29,7 +29,7 @@ use tauri::{AppHandle, Emitter};
 use crate::events::*;
 use crate::harness::host::{Host, LiveChild, Sink, SpawnSpec};
 use crate::harness::{acp, claude, codex, opencode, tui, Action, CliKind, HarnessId};
-use crate::hooks::{HookFrame, HookReply};
+use crate::hooks::{HookFrame, HookReply, Origin};
 use crate::store::index::{self, TabEntry, TabStatus};
 use crate::{git, pty, store};
 
@@ -67,6 +67,8 @@ struct CliLaunch {
     command: String,
     tail: tui::Tail,
     minted: Option<String>,
+    /// The only directory this launch's hooks may point the tail into.
+    transcript_root: PathBuf,
 }
 
 /// A PTY-first tab: the CLI in a pane, its transcript being followed, and the
@@ -104,6 +106,9 @@ pub struct CliTab {
     /// What the pane is running, for the terminal view's header and for a
     /// window that has to be told about a pane it did not see start.
     pub command: String,
+    /// What this launch's hooks have to prove to be heard: the secret it was
+    /// given, and where its transcript is allowed to be.
+    pub origin: Origin,
 }
 
 pub enum Engine {
@@ -846,8 +851,15 @@ impl SessionManager {
             ("RACCOON_SESSION_ID".to_string(), rt.session_id.clone()),
             ("RACCOON_TAB_ID".to_string(), rt.tab_id.clone()),
         ];
+        // A fresh secret per launch, per tab: the socket path is inherited by
+        // every process the agent starts, so what keeps one tab's hooks from
+        // speaking for another is that only this CLI was given this token.
+        let token = crate::hooks::mint_token();
         match crate::hooks::socket_path() {
-            Ok(p) => env.push((crate::hooks::SOCKET_ENV.to_string(), p.to_string_lossy().into_owned())),
+            Ok(p) => {
+                env.push((crate::hooks::SOCKET_ENV.to_string(), p.to_string_lossy().into_owned()));
+                env.push((crate::hooks::TOKEN_ENV.to_string(), token.clone()));
+            }
             // Without the socket the CLI still runs; the chat just loses the
             // status and permission half until the app is restarted.
             Err(e) => log::warn!("no hook socket: {e:#}"),
@@ -876,6 +888,7 @@ impl SessionManager {
             turn_tail: Default::default(),
             answered: HashMap::new(),
             command: launch.command,
+            origin: Origin { token, transcript_root: launch.transcript_root },
         });
         rt.turn_open = false;
         self.announce_pane(rt);
@@ -916,6 +929,9 @@ impl SessionManager {
             log::warn!("trust {}: {e:#}", entry.cwd);
         }
         let path = claude::transcript::cli_transcript_path(&entry.cwd, &provider_id).ok_or_else(|| anyhow!("no home directory"))?;
+        // The CLI keeps every transcript for this checkout here, and the file
+        // it reports at `SessionStart` has to be one of them.
+        let transcript_root = path.parent().context("the transcript path has no directory")?.to_path_buf();
         // A fork is handed a copy of the whole parent conversation, written
         // into its new file when the first turn lands. The app already has all
         // of it, and the copy keeps each record's original uuid, so those are
@@ -925,6 +941,7 @@ impl SessionManager {
             command,
             tail: tui::Tail::opening(path, claude::transcript::decode_line, carried),
             minted: (!resume).then_some(provider_id),
+            transcript_root,
         })
     }
 
@@ -991,6 +1008,9 @@ impl SessionManager {
                 None => tui::Tail::unknown(codex::rollout::decode_line),
             },
             minted: None,
+            // Codex names its own rollout, and only ever under the home
+            // Raccoon built for it.
+            transcript_root: home.join("sessions"),
         })
     }
 
@@ -1278,20 +1298,38 @@ impl SessionManager {
         let Ok(rt_arc) = self.runtime(&frame.session, &frame.tab) else {
             return HookReply::default();
         };
-        let (kind, tail, asks_every_tool) = {
+        let (kind, tail, asks_every_tool, origin) = {
             let rt = rt_arc.lock().unwrap();
             match &rt.engine {
-                Engine::Cli(p) => (p.harness, p.tail.clone(), p.harness == CliKind::Codex && codex::asks_every_tool(&p.mode)),
+                Engine::Cli(p) => (p.harness, p.tail.clone(), p.harness == CliKind::Codex && codex::asks_every_tool(&p.mode), p.origin.clone()),
                 // A hook from a CLI this app did not start, or from one whose
                 // tab has moved on: nothing to say, and nothing to block.
                 _ => return HookReply::default(),
             }
         };
+        // The socket is owner-only, but so is everything else this user runs,
+        // including whatever the agent itself starts. A frame that cannot
+        // show this launch's token did not come from this tab's CLI, and
+        // answering it would let one tab decide another tab's permissions.
+        if !origin.accepts(&frame) {
+            log::warn!("hook {} for {}/{} refused: not this tab's token", frame.event, frame.session, frame.tab);
+            return HookReply::default();
+        }
         // Claude's transcript path is a guess made before the CLI ran and
         // Codex's is not knowable at all until now; either way the hook
-        // carries the file it actually opened.
-        if let Some(path) = frame.payload["transcript_path"].as_str() {
-            tail.retarget(Path::new(path));
+        // carries the file it actually opened — but only a file this CLI
+        // could have opened, so a frame cannot aim the tail at, say, the
+        // reader's private notes and have the chat read them out.
+        match (frame.payload["transcript_path"].as_str(), origin.transcript(&frame)) {
+            (_, Some(path)) => tail.retarget(path),
+            (Some(named), None) => log::warn!(
+                "hook {} for {}/{} named a transcript outside {}: {named}",
+                frame.event,
+                frame.session,
+                frame.tab,
+                origin.transcript_root.display()
+            ),
+            (None, None) => {}
         }
         self.pump(&rt_arc, &tail);
 

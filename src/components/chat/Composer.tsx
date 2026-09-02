@@ -16,6 +16,7 @@ import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { EFFORT_LABEL, PERMISSION_MODES, modeLabel, refreshModels, upgradeHint, useModels } from "@/lib/models";
+import { chooseMode } from "@/lib/dialogs";
 import { files as filesApi, type FileHit, type ImageInput, type SlashCommand } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
 import { DictationStatus, MicButton, useDictationInto } from "./Dictation";
@@ -460,7 +461,7 @@ export function Composer({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="min-w-[16rem]">
               <DropdownMenuLabel>Permissions</DropdownMenuLabel>
-              <DropdownMenuRadioGroup value={tab.permissionMode} onValueChange={onSetMode}>
+              <DropdownMenuRadioGroup value={tab.permissionMode} onValueChange={(v) => chooseMode(tab.harness, v, onSetMode)}>
                 {PERMISSION_MODES.map((m) => (
                   <DropdownMenuRadioItem key={m.id} value={m.id} className="flex-col items-start gap-0">
                     <span>{m.label}</span>

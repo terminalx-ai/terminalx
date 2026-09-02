@@ -60,7 +60,9 @@ pub fn load() -> Settings {
 pub fn save(s: &Settings) -> Result<()> {
     let path = file_path()?;
     super::write_json(&path, s)?;
-    // The file can hold a tracker API key, so nobody else on the machine reads it.
+    // A new file is already owner-only; this is what tightens one left loose
+    // by an older build, which matters because the file can hold a tracker
+    // API key. Raccoon owns this file, so narrowing it is ours to do.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
