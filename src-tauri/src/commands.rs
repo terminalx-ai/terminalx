@@ -659,9 +659,20 @@ pub fn tab_status(state: State<'_, AppState>, session_id: String, tab_id: String
     Ok(state.manager().ok_or("not ready")?.status_of(&session_id, &tab_id))
 }
 
+/// The picker's list. Everything but Codex is static; Codex depends on the
+/// signed-in account, so it is read from the CLI and cached. `refresh` is what
+/// the picker sends when it opens, so a model added (or retired) mid-session
+/// shows up without a restart.
 #[tauri::command]
-pub fn list_models() -> Vec<crate::models::Model> {
-    crate::models::catalog()
+pub async fn list_models(state: State<'_, AppState>, refresh: Option<bool>) -> CmdResult<Vec<crate::models::Model>> {
+    let cache = state.codex_models.clone();
+    let refresh = refresh.unwrap_or(false);
+    let codex = tauri::async_runtime::spawn_blocking(move || cache.get(refresh)).await.map_err(err)?;
+    let statics = crate::models::catalog();
+    let mut out: Vec<crate::models::Model> = statics.iter().filter(|m| m.harness == "claude").cloned().collect();
+    out.extend(codex);
+    out.extend(statics.into_iter().filter(|m| m.harness != "claude"));
+    Ok(out)
 }
 
 #[tauri::command]

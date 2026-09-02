@@ -14,6 +14,8 @@
 //! - The prompt is echoed back as a `userMessage` item; the app records its
 //!   own, so the echo is dropped.
 
+pub mod models;
+
 use std::collections::HashMap;
 
 use serde_json::{json, Value};

@@ -25,6 +25,8 @@ pub struct AppState {
     pub terminals: Arc<pty::Terminals>,
     pub dictation: Arc<dictation::Dictation>,
     pub transcription: Arc<transcription::Transcription>,
+    /// Which Codex models this account may run, read from the CLI once.
+    pub codex_models: Arc<harness::codex::models::Cache>,
     manager: std::sync::Mutex<Option<session::SessionManager>>,
 }
 
@@ -38,7 +40,15 @@ impl AppState {
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let host = Arc::new(harness::host::Host::new());
-    let state = AppState { host: host.clone(), terminals: Arc::new(pty::Terminals::new()), dictation: Arc::new(dictation::Dictation::default()), transcription: Arc::new(transcription::Transcription::default()), manager: std::sync::Mutex::new(None) };
+    let codex_models = Arc::new(harness::codex::models::Cache::default());
+    let state = AppState {
+        host: host.clone(),
+        terminals: Arc::new(pty::Terminals::new()),
+        dictation: Arc::new(dictation::Dictation::default()),
+        transcription: Arc::new(transcription::Transcription::default()),
+        codex_models: codex_models.clone(),
+        manager: std::sync::Mutex::new(None),
+    };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -50,7 +60,7 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(state)
         .setup(move |app| {
-            let manager = session::SessionManager::new(app.handle().clone(), host.clone());
+            let manager = session::SessionManager::new(app.handle().clone(), host.clone(), codex_models.clone());
             *app.state::<AppState>().manager.lock().unwrap() = Some(manager);
             // No child survives a restart: a tab persisted mid-turn or waiting
             // is idle now, whatever the index says.

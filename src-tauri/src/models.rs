@@ -1,6 +1,10 @@
 //! The model list per harness, one source for ids, labels, efforts and
 //! defaults. Ids are the aliases the CLI accepts, so sessions follow the
 //! latest model of a family.
+//!
+//! Codex is the exception: which models a ChatGPT account may run is decided
+//! by the account, not by us, so those come from the CLI itself (see
+//! `harness::codex::models`) and are spliced in by the `list_models` command.
 
 use serde::Serialize;
 
@@ -14,6 +18,11 @@ pub struct Model {
     pub default_effort: Option<String>,
     pub accepts_images: bool,
     pub is_default: bool,
+    /// The model that replaces this one, when the provider says it is being
+    /// retired. Still offered, but marked as on its way out.
+    pub upgrade: Option<String>,
+    /// The provider's own one-line description, when it gives one.
+    pub description: Option<String>,
 }
 
 fn m(harness: &str, id: &str, label: &str, efforts: &[&str], default_effort: Option<&str>, is_default: bool) -> Model {
@@ -25,20 +34,19 @@ fn m(harness: &str, id: &str, label: &str, efforts: &[&str], default_effort: Opt
         default_effort: default_effort.map(String::from),
         accepts_images: true,
         is_default,
+        upgrade: None,
+        description: None,
     }
 }
 
+/// Every model we know statically. Codex is absent by design.
 pub fn catalog() -> Vec<Model> {
     let claude_efforts = ["low", "medium", "high", "xhigh", "max"];
-    let codex_efforts = ["low", "medium", "high", "xhigh"];
     vec![
         m("claude", "fable", "Fable 5.1", &claude_efforts, Some("high"), false),
         m("claude", "opus", "Opus 5", &claude_efforts, Some("high"), true),
         m("claude", "sonnet", "Sonnet 5", &claude_efforts, Some("high"), false),
         m("claude", "haiku", "Haiku 4.5", &[], None, false),
-        m("codex", "gpt-5.6", "GPT-5.6", &codex_efforts, Some("medium"), true),
-        m("codex", "gpt-5.6-codex", "GPT-5.6 Codex", &codex_efforts, Some("medium"), false),
-        m("codex", "gpt-5.5", "GPT-5.5", &codex_efforts, Some("medium"), false),
         m("cursor", "auto", "Auto", &[], None, true),
         m("cursor", "sonnet-4.5", "Sonnet 4.5", &[], None, false),
         m("cursor", "sonnet-4.5-thinking", "Sonnet 4.5 Thinking", &[], None, false),
@@ -49,9 +57,4 @@ pub fn catalog() -> Vec<Model> {
         m("opencode", "anthropic/claude-opus-4-5", "Claude Opus 4.5", &[], None, false),
         m("opencode", "openai/gpt-5", "GPT-5", &[], None, false),
     ]
-}
-
-#[allow(dead_code)]
-pub fn default_for(harness: &str) -> Option<Model> {
-    catalog().into_iter().find(|x| x.harness == harness && x.is_default)
 }

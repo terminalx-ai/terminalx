@@ -18,6 +18,16 @@ export function loadModels() {
   return loading;
 }
 
+/** Re-read the list from the agents themselves; the picker does this as it opens. */
+export async function refreshModels() {
+  try {
+    models = await agent.listModels(true);
+    for (const l of listeners) l();
+  } catch {
+    /* keep whatever was known */
+  }
+}
+
 export function useModels(harness?: string): ModelInfo[] {
   const all = useSyncExternalStore(
     (cb) => {
@@ -31,9 +41,31 @@ export function useModels(harness?: string): ModelInfo[] {
   return harness ? all.filter((m) => m.harness === harness) : all;
 }
 
+/**
+ * A readable name for an id the list no longer carries — a session stored
+ * before a model was retired, say. `gpt-5.6-sol` reads as `GPT-5.6 Sol`.
+ */
+export function prettyModelId(id: string): string {
+  if (!id) return "Default";
+  const last = id.split("/").pop() ?? id;
+  return last
+    .replace(/^gpt/i, "GPT")
+    .replace(/(\d)-([a-z])/gi, "$1 $2")
+    .replace(/\b[a-z]/g, (c) => c.toUpperCase());
+}
+
+/**
+ * How a model being retired reads in the picker: the replacement's own label,
+ * shown faintly after the name. `null` when the model is current.
+ */
+export function upgradeHint(m: ModelInfo, all: ModelInfo[]): string | null {
+  if (!m.upgrade) return null;
+  return all.find((x) => x.id === m.upgrade)?.label ?? prettyModelId(m.upgrade);
+}
+
 export function modelLabel(harness: string, id: string): string {
   const m = models.find((x) => x.harness === harness && x.id === id);
-  return m?.label ?? (id || "Default");
+  return m?.label ?? prettyModelId(id);
 }
 
 export const PERMISSION_MODES: { id: string; label: string; hint: string }[] = [
@@ -54,6 +86,7 @@ export const EFFORT_LABEL: Record<string, string> = {
   high: "High",
   xhigh: "Extra high",
   max: "Max",
+  ultra: "Ultra",
 };
 
 // Module state lives here; a hot update would lose it, so edits reload the page.
