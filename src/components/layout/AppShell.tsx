@@ -21,6 +21,9 @@ import { Toasts } from "@/components/ui/Toasts";
 import { BypassDialog } from "@/components/session/BypassDialog";
 import { SettleDialog } from "@/components/session/SettleDialog";
 import { WorkspaceDeleteDialog } from "@/components/session/WorkspaceDeleteDialog";
+import { AutomationsView } from "@/components/automations/AutomationsView";
+import { bootAutomations } from "@/lib/automations";
+import { openAutomations } from "@/lib/sessions";
 
 export const TITLEBAR_INSET = 78; // traffic-light clearance, px
 
@@ -38,6 +41,7 @@ export function AppShell() {
     void subscribeAgentEvents();
     void subscribeTabPty();
     void bootSessions();
+    void bootAutomations();
     void loadModels();
     startNotifications();
   }, []);
@@ -56,6 +60,7 @@ export function AppShell() {
   const newSession = useCallback(() => selectSession(null), []);
   const showIssues = useCallback(() => openIssues(), []);
   const showAgents = useCallback(() => openAgents(), []);
+  const showAutomations = useCallback(() => openAutomations(), []);
 
   useHotkey("mod+b", toggleSidebar);
   useHotkey("mod+e", togglePanel);
@@ -63,6 +68,7 @@ export function AppShell() {
   useHotkey("mod+n", newSession);
   useHotkey("mod+i", showIssues);
   useHotkey("mod+shift+a", showAgents);
+  useHotkey("mod+shift+r", showAutomations);
   useHotkey("mod+k", setSessionSearch);
 
   const sidebarOpen = prefs.sidebarOpen;
@@ -74,7 +80,7 @@ export function AppShell() {
       <BypassDialog />
       <SettleDialog />
       <WorkspaceDeleteDialog />
-      {sidebarOpen && <Sidebar onToggle={toggleSidebar} onOpenSettings={openSettings} onOpenIssues={showIssues} onOpenAgents={showAgents} onSearch={setSessionSearch} />}
+      {sidebarOpen && <Sidebar onToggle={toggleSidebar} onOpenSettings={openSettings} onOpenIssues={showIssues} onOpenAgents={showAgents} onOpenAutomations={showAutomations} onSearch={setSessionSearch} />}
 
       <main className="flex h-full min-w-0 flex-1 flex-col">
         {selected ? (
@@ -97,7 +103,7 @@ export function AppShell() {
               )}
               {/* The dashboard draws its own title, so the strip stays quiet for it. */}
               <span className="min-w-0 flex-1 truncate px-1 text-sm text-muted-foreground">
-                {store.view === "issues" ? "Issues" : store.view === "agents" ? "" : "New session"}
+                {store.view === "issues" ? "Issues" : store.view === "agents" ? "" : store.view === "automations" ? "Automations" : "New session"}
               </span>
               <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} keys={keycaps("mod+e")}>
                 <Button variant="ghost" size="icon-sm" aria-label="Toggle panel" onClick={togglePanel}>
@@ -110,6 +116,8 @@ export function AppShell() {
                 <IssuesView onCreated={onCreated} />
               ) : store.view === "agents" ? (
                 <AgentDashboard />
+              ) : store.view === "automations" ? (
+                <AutomationsView />
               ) : (
                 <NewSessionView onCreated={onCreated} />
               )}

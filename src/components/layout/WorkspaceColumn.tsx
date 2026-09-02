@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Archive, ArrowUp, ChevronDown, FolderOpen, GitBranch, GitFork, Pin, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
+import { Archive, ArrowUp, CalendarClock, ChevronDown, FolderOpen, GitBranch, GitFork, Pin, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ import {
   deleteSession,
   forkSession,
   pinSession,
+  openAutomations,
   refreshWorkspaces,
   selectSession,
   sortSessions,
@@ -266,7 +267,21 @@ export function SessionRow({ session, selected }: { session: SessionEntry; selec
             {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
             <span className="truncate text-[13px]">{session.title}</span>
           </div>
-          {session.tabs.length > 1 && <div className="truncate text-[11px] text-faint">{session.tabs.length} tabs</div>}
+          {session.automation ? (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                openAutomations();
+              }}
+              className="flex max-w-full items-center gap-1 truncate text-[11px] text-faint hover:text-muted-foreground"
+            >
+              <CalendarClock className="size-3 shrink-0" />
+              <span className="truncate">Automation · {session.automation.name} #{session.automation.runNumber}</span>
+            </button>
+          ) : session.tabs.length > 1 ? (
+            <div className="truncate text-[11px] text-faint">{session.tabs.length} tabs</div>
+          ) : null}
         </div>
         <span className="text-[11px] text-faint tabular-nums group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0">{relativeTime(session.modified)}</span>
         <DropdownMenuTrigger asChild>

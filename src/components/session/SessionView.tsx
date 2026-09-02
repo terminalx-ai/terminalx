@@ -1,4 +1,4 @@
-import { CircleDot, FolderTree, GitBranch, MessageSquare, PanelLeft, PanelRight, Terminal, TerminalSquare } from "lucide-react";
+import { CalendarClock, CircleDot, FolderTree, GitBranch, MessageSquare, PanelLeft, PanelRight, Terminal, TerminalSquare } from "lucide-react";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
@@ -6,7 +6,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
-import { useSessionStore } from "@/lib/sessions";
+import { openAutomations, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
 import { TabView } from "./TabView";
@@ -92,6 +92,18 @@ export function SessionView({
                 >
                   <CircleDot className="size-3" />
                   {session.issue.identifier}
+                </button>
+              </WithTooltip>
+            )}
+            {session.automation && (
+              <WithTooltip label={`Open ${session.automation.name} in Automations`}>
+                <button
+                  type="button"
+                  onClick={openAutomations}
+                  className="ml-1 flex shrink-0 items-center gap-1 rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+                >
+                  <CalendarClock className="size-3" />
+                  {session.automation.name} #{session.automation.runNumber}
                 </button>
               </WithTooltip>
             )}
