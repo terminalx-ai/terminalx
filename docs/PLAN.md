@@ -156,6 +156,10 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Git status in the tree: tinted names with A/M/D/R badges, a dot on folders holding changes, refreshed on agent status changes and a gentle poll.
 - [x] Keyboard walk (arrows, Home/End, Enter), right-click menu: Open, Reveal in Finder, Copy path, Copy relative path, Mention in composer.
 - [x] The right panel's Files tab uses the same tree.
+### Editor pane ✅
+- [x] Files open in a pane beside the transcript (tab bar, resizable from its left edge, collapsible to a strip) instead of replacing the chat; the composer stays put.
+- [x] Markdown opens as a rendered preview with a Preview | Source toggle (⌘⇧P); jumps from search open source at the line. ⌘⌥W closes every file; ⌘W closes the file or the agent tab depending on which was last focused.
+
 ### C17 — Issues as tasks
 - [x] GitHub issues through `gh` (repo from origin; open, assigned-to-me, search) and Linear through its GraphQL API with a stored key (teams, assigned-to-me, search).
 - [x] Issues view (⌘I) with detail column; Start session creates a worktree named after the issue (`raccoon/eng-42-fix-login`) and sends the issue as the first prompt; the session header links back.

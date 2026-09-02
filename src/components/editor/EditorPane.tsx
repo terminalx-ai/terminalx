@@ -14,12 +14,15 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirro
 import { bracketMatching, indentOnInput } from "@codemirror/language";
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
-import { AlertTriangle, Save } from "lucide-react";
+import { AlertTriangle, FolderOpen, Save } from "lucide-react";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { Segmented } from "@/components/ui/controls";
+import { Markdown } from "@/components/chat/Markdown";
 import { Button } from "@/components/ui/button";
 import { api, fs } from "@/lib/api";
 import { languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
 import { diffLines } from "@/lib/diff";
-import { clearJump, setEditorDirty, type EditorEntry } from "@/lib/editors";
+import { clearJump, isMarkdown, setEditorDirty, setViewMode, type EditorEntry, type ViewMode } from "@/lib/editors";
 import { keycaps } from "@/lib/hotkeys";
 import { cn } from "@/lib/cn";
 
@@ -108,7 +111,11 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
   const [changedOnDisk, setChangedOnDisk] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [truncated, setTruncated] = useState(false);
+  // The buffer as text, for the markdown preview; refreshed a beat after edits.
+  const [docText, setDocText] = useState("");
   const abs = `${entry.root}/${entry.rel}`;
+  const markdown = isMarkdown(entry.rel);
+  const preview = markdown && entry.viewMode === "preview";
 
   const updateMarks = useCallback(() => {
     const view = viewRef.current;
@@ -140,6 +147,7 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
       mtime.current = f.mtimeMs;
       savedDoc.current = f.content;
       view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: f.content } });
+      setDocText(f.content);
       setDirty(false);
       setEditorDirty(entry.id, false);
       setChangedOnDisk(false);
@@ -166,6 +174,8 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
         mtime.current = f.mtimeMs;
         savedDoc.current = f.content;
         setTruncated(f.truncated);
+        setDocText(f.content);
+        let textTimer: number | undefined;
         const extensions: Extension[] = [
           raccoonTheme,
           raccoonHighlight,
@@ -195,6 +205,8 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
             setEditorDirty(entry.id, d);
             window.clearTimeout(markTimer);
             markTimer = window.setTimeout(updateMarks, 250);
+            window.clearTimeout(textTimer);
+            textTimer = window.setTimeout(() => setDocText(u.state.doc.toString()), 150);
           }),
         ];
         const view = new EditorView({ parent: el, state: EditorState.create({ doc: f.content, extensions }) });
@@ -240,8 +252,8 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
 
   // Focus when shown.
   useEffect(() => {
-    if (visible && status === "ready") requestAnimationFrame(() => viewRef.current?.focus());
-  }, [visible, status]);
+    if (visible && status === "ready" && !preview) requestAnimationFrame(() => viewRef.current?.focus());
+  }, [visible, status, preview]);
 
   // Watch the disk while visible.
   useEffect(() => {
@@ -264,6 +276,20 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
         {truncated && <span className="text-warning">first 4 MB shown</span>}
         <span className="ml-auto flex items-center gap-1">
           {dirty && <span className="text-faint">unsaved</span>}
+          {markdown && (
+            <Segmented<ViewMode>
+              aria-label="View"
+              value={entry.viewMode}
+              onChange={(m) => setViewMode(entry.id, m)}
+              options={[
+                { value: "preview", label: "Preview" },
+                { value: "source", label: "Source" },
+              ]}
+            />
+          )}
+          <Button variant="ghost" size="icon-xs" aria-label="Reveal in Finder" onClick={() => void revealItemInDir(abs).catch(() => {})}>
+            <FolderOpen />
+          </Button>
           <Button variant="ghost" size="xs" onClick={() => void save()} disabled={!dirty} aria-label="Save">
             <Save className="size-3.5" />
             Save
@@ -286,7 +312,12 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
       {error && <div className="shrink-0 px-3 py-1.5 text-xs text-destructive">{error}</div>}
       {status === "binary" && <div className="p-4 text-sm text-muted-foreground">Binary file, not shown.</div>}
       {status === "loading" && <div className="p-4 text-sm text-muted-foreground">Loading…</div>}
-      <div ref={host} className={cn("editor-pane min-h-0 flex-1 overflow-auto scrollbar-thin select-text", status !== "ready" && "hidden")} />
+      {preview && status === "ready" && (
+        <div className="min-h-0 flex-1 overflow-auto scrollbar-thin px-6 py-4 select-text">
+          <Markdown text={docText} className="prose-chat" />
+        </div>
+      )}
+      <div ref={host} className={cn("editor-pane min-h-0 flex-1 overflow-auto scrollbar-thin select-text", (status !== "ready" || preview) && "hidden")} />
     </div>
   );
 }
