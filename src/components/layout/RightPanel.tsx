@@ -26,7 +26,7 @@ const TABS: { id: PanelTab; label: string; chord: string }[] = [
  * unmount so scroll position and picked files survive the flip, and the
  * `active` prop keeps a hidden body from refetching.
  */
-export function RightPanel({ session, events, live }: { session: SessionEntry; events: AgentEvent[]; live: boolean }) {
+export function RightPanel({ session, events, version, live }: { session: SessionEntry; events: AgentEvent[]; version: number; live: boolean }) {
   const prefs = usePrefs();
   const [tab, setTab] = useState<PanelTab>("changes");
   const [refreshTick, setRefreshTick] = useState(0);
@@ -94,7 +94,7 @@ export function RightPanel({ session, events, live }: { session: SessionEntry; e
       </div>
       <div className="min-h-0 flex-1">
         <div className={cn("h-full", tab !== "changes" && "hidden")}>
-          <ChangesPanel key={refreshTick} cwd={session.cwd} events={events} baseRef={session.baseRef} active={tab === "changes"} live={live} />
+          <ChangesPanel key={refreshTick} cwd={session.cwd} events={events} version={version} baseRef={session.baseRef} active={tab === "changes"} live={live} />
         </div>
         <div className={cn("h-full", tab !== "repo" && "hidden")}>
           <RepoPanel key={refreshTick} cwd={session.cwd} active={tab === "repo"} />

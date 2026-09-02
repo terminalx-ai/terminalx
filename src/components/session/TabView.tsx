@@ -5,6 +5,7 @@ import { buildTranscript, type Transcript } from "@/lib/transcript";
 import { getDraft, setDraft, useDraft } from "@/lib/drafts";
 import { patchTab } from "@/lib/sessions";
 import { useHotkey } from "@/lib/hotkeys";
+import { changeRange, useChanges } from "@/lib/changes";
 import { Chat } from "@/components/chat/Chat";
 import { Composer } from "@/components/chat/Composer";
 import type { SessionEntry, TabEntry } from "@/types/session";
@@ -16,11 +17,10 @@ import type { SessionEntry, TabEntry } from "@/types/session";
  * After a turn that touched files, the obvious next steps as one-click
  * prompts. They only fill the composer; the reader still sends.
  */
-function handoffsFor(t: Transcript): { label: string; prompt: string }[] | undefined {
+function handoffsFor(t: Transcript, changed: boolean): { label: string; prompt: string }[] | undefined {
   const last = t.turns[t.turns.length - 1];
   if (!last?.completed || last.completed.status !== "ok") return undefined;
-  const edited = t.turns.some((x) => x.editedFiles > 0);
-  if (!edited) return undefined;
+  if (!changed) return undefined;
   return [
     { label: "Commit", prompt: "Commit the current changes with a clear, conventional message. Do not push." },
     { label: "Create PR", prompt: "Push this branch and open a pull request with a title and a short description of the changes." },
@@ -48,6 +48,10 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
 
   const live = tab.status === "in_progress" || tab.status === "waiting";
   const transcript = useMemo(() => buildTranscript(log.events, live), [log.events, log.version, live]);
+  // Whether the session's checkout differs from where the conversation
+  // started, by tree diff, so a shell heredoc counts as much as an edit tool.
+  const range = useMemo(() => changeRange(log.events, session.baseRef), [log.events, log.version, session.baseRef]);
+  const changes = useChanges(session.cwd, range, active && !live);
 
   const send = useCallback(
     async (text: string, images: ImageInput[]) => {
@@ -132,7 +136,7 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
           contextMax={transcript.contextMax ?? tab.contextMax ?? undefined}
           usageWindows={transcript.usageWindows}
           codexUsage={transcript.codexUsage}
-          handoffs={handoffsFor(transcript)}
+          handoffs={handoffsFor(transcript, changes.files.length > 0)}
           disabledReason={error}
           autoFocus={active}
         />

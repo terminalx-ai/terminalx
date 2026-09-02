@@ -23,7 +23,7 @@ import type { TabEntry } from "@/types/session";
 function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
   const log = useTabLog(session.id, tab.id);
   const live = tab.status === "in_progress" || tab.status === "waiting";
-  return <RightPanel session={session} events={log.events} live={live} />;
+  return <RightPanel session={session} events={log.events} version={log.version} live={live} />;
 }
 
 /**

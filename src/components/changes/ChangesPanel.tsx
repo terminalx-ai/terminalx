@@ -17,17 +17,20 @@ import { FileList, sumChanges } from "./FileList";
 export function ChangesPanel({
   cwd,
   events,
+  version,
   baseRef,
   active,
   live,
 }: {
   cwd: string;
   events: AgentEvent[];
+  /** Bumps when the log grows; the array itself is reused, so this drives the range. */
+  version: number;
   baseRef?: string | null;
   active: boolean;
   live: boolean;
 }) {
-  const range = useMemo(() => changeRange(events, baseRef), [events, baseRef]);
+  const range = useMemo(() => changeRange(events, baseRef), [events, version, baseRef]);
   const [tick, setTick] = useState(0);
   useEffect(() => {
     if (!live || !active) return;
