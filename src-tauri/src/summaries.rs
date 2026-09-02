@@ -6,7 +6,7 @@
 //! append-only JSONL and can run to megabytes after a long session. So the
 //! reader walks the file **backwards** in 64 KB blocks and stops as soon as it
 //! has what a card shows; opening the dashboard on fifty sessions then costs
-//! one block each rather than fifty whole transcripts.
+//! about one block per tab rather than fifty whole transcripts.
 
 use std::collections::HashSet;
 use std::fs;
@@ -95,17 +95,35 @@ impl TailLines {
     }
 }
 
-/// The three strings a card shows, read from one tab's log.
+/// Something said, with when it was said. The stamp is what lets lines from
+/// different tabs of one session be ordered against each other.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Said {
+    pub text: String,
+    pub ts: String,
+}
+
+/// What a card shows, read from one tab's log.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LogTail {
-    pub last_prompt: Option<String>,
-    pub last_reply: Option<String>,
+    pub last_prompt: Option<Said>,
+    pub last_reply: Option<Said>,
     pub waiting_on: Option<String>,
 }
 
 impl LogTail {
     fn wants_more(&self, waiting: bool) -> bool {
         self.last_prompt.is_none() || self.last_reply.is_none() || (waiting && self.waiting_on.is_none())
+    }
+}
+
+/// Keep whichever line was said later. Stamps are RFC 3339 in UTC, so they
+/// compare as strings; a line with no stamp only wins an empty slot.
+fn keep_newer(slot: &mut Option<Said>, found: Option<Said>) {
+    if let Some(f) = found {
+        if slot.as_ref().is_none_or(|cur| cur.ts <= f.ts) {
+            *slot = Some(f);
+        }
     }
 }
 
@@ -141,12 +159,13 @@ pub fn read_log_tail(path: &Path, waiting: bool) -> LogTail {
             continue;
         }
         let Some(payload) = v.get("payload") else { continue };
+        let ts = || v.get("ts").and_then(Value::as_str).unwrap_or_default().to_string();
         match payload.get("type").and_then(Value::as_str).unwrap_or_default() {
             "user_message" if out.last_prompt.is_none() => {
-                out.last_prompt = snippet(payload.get("text").and_then(Value::as_str).unwrap_or_default());
+                out.last_prompt = said(payload.get("text").and_then(Value::as_str).unwrap_or_default(), ts());
             }
             "assistant_text" if out.last_reply.is_none() => {
-                out.last_reply = snippet(payload.get("text").and_then(Value::as_str).unwrap_or_default());
+                out.last_reply = said(payload.get("text").and_then(Value::as_str).unwrap_or_default(), ts());
             }
             "permission_decided" if waiting => {
                 if let Some(id) = payload.get("requestId").and_then(Value::as_str) {
@@ -182,6 +201,10 @@ fn question_title(payload: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .and_then(snippet)
         .or_else(|| first.get("header").and_then(Value::as_str).and_then(snippet))
+}
+
+fn said(text: &str, ts: String) -> Option<Said> {
+    snippet(text).map(|text| Said { text, ts })
 }
 
 /// One line's worth of text: whitespace collapsed, capped, empty means none.
@@ -231,16 +254,30 @@ pub fn collect(session_ids: Option<Vec<String>>) -> Result<Vec<SessionSummary>> 
         if wanted.as_ref().is_some_and(|w| !w.contains(&s.id)) {
             continue;
         }
-        let Some(tab) = card_tab(&s) else { continue };
-        let path = store::log_path(&s.id, &tab.id)?;
-        let tail = read_log_tail(&path, tab.status == TabStatus::Waiting);
+        let Some(card) = card_tab(&s) else { continue };
+        // Every tab is tailed, not only the one the card speaks for. A session
+        // often holds an older tab with the whole conversation beside a newer
+        // one barely started, and the card should show what was last said
+        // wherever it was said. Each tail stops as soon as it has its lines, so
+        // a second tab costs about one block read.
+        let mut merged = LogTail::default();
+        for tab in &s.tabs {
+            let path = store::log_path(&s.id, &tab.id)?;
+            let tail = read_log_tail(&path, tab.status == TabStatus::Waiting);
+            keep_newer(&mut merged.last_prompt, tail.last_prompt);
+            keep_newer(&mut merged.last_reply, tail.last_reply);
+            // Only a waiting tab yields one, and a session shows the first.
+            if merged.waiting_on.is_none() {
+                merged.waiting_on = tail.waiting_on;
+            }
+        }
         out.push(SessionSummary {
             session_id: s.id.clone(),
-            tab_id: tab.id.clone(),
-            last_prompt: tail.last_prompt,
-            last_reply: tail.last_reply,
-            waiting_on: tail.waiting_on,
-            updated_at: if tab.modified.is_empty() { s.modified.clone() } else { tab.modified.clone() },
+            tab_id: card.id.clone(),
+            last_prompt: merged.last_prompt.map(|l| l.text),
+            last_reply: merged.last_reply.map(|l| l.text),
+            waiting_on: merged.waiting_on,
+            updated_at: if card.modified.is_empty() { s.modified.clone() } else { card.modified.clone() },
         });
     }
     Ok(out)
@@ -290,8 +327,16 @@ mod tests {
         assert_eq!(read_log_tail(&dir.path().join("gone.jsonl"), true), LogTail::default());
     }
 
+    fn event_at(ts: &str, payload: serde_json::Value) -> String {
+        serde_json::json!({ "id": "e", "sessionId": "s", "tabId": "t", "harness": "claude", "seq": 1, "ts": ts, "payload": payload }).to_string()
+    }
+
     fn event(payload: serde_json::Value) -> String {
-        serde_json::json!({ "id": "e", "sessionId": "s", "tabId": "t", "harness": "claude", "seq": 1, "ts": "now", "payload": payload }).to_string()
+        event_at("2026-01-01T00:00:00.000Z", payload)
+    }
+
+    fn text(said: &Option<Said>) -> Option<&str> {
+        said.as_ref().map(|s| s.text.as_str())
     }
 
     #[test]
@@ -312,8 +357,8 @@ mod tests {
             ],
         );
         let tail = read_log_tail(&p, false);
-        assert_eq!(tail.last_prompt.as_deref(), Some("now fix the build"));
-        assert_eq!(tail.last_reply.as_deref(), Some("Fixed the build."));
+        assert_eq!(text(&tail.last_prompt), Some("now fix the build"));
+        assert_eq!(text(&tail.last_reply), Some("Fixed the build."));
         assert!(tail.waiting_on.is_none());
     }
 
@@ -328,7 +373,7 @@ mod tests {
                 event(serde_json::json!({"type": "assistant_text", "text": "word ".repeat(200)})),
             ],
         );
-        let reply = read_log_tail(&p, false).last_reply.unwrap();
+        let reply = read_log_tail(&p, false).last_reply.unwrap().text;
         assert_eq!(reply.chars().count(), SNIPPET_CHARS + 1); // the cap plus its ellipsis
         assert!(reply.ends_with('…'));
     }
@@ -381,28 +426,8 @@ mod tests {
         assert_eq!(read_log_tail(&p, true).waiting_on.as_deref(), Some("Bash"));
     }
 
-    #[test]
-    fn collect_picks_the_waiting_tab_and_skips_unasked_sessions() {
-        let _home = store::temp_home();
-        let mut s = SessionEntry {
-            id: "s1".into(),
-            project_path: "/p".into(),
-            cwd: "/p".into(),
-            worktree_name: None,
-            branch: None,
-            base_ref: None,
-            worktree_removed: false,
-            issue: None,
-            title: "t".into(),
-            created: index::now(),
-            modified: index::now(),
-            archived: false,
-            pinned: false,
-            tabs: vec![],
-            active_tab: Some("t1".into()),
-            unknown: Default::default(),
-        };
-        let tab = |id: &str, status: TabStatus| TabEntry {
+    fn a_tab(id: &str, status: TabStatus) -> TabEntry {
+        TabEntry {
             id: id.into(),
             harness: "claude".into(),
             title: None,
@@ -417,9 +442,35 @@ mod tests {
             context_max: None,
             fork_from: None,
             unknown: Default::default(),
-        };
-        s.tabs.push(tab("t1", TabStatus::Idle));
-        s.tabs.push(tab("t2", TabStatus::Waiting));
+        }
+    }
+
+    /// The first tab is the active one, as a session's own tab strip has it.
+    fn a_session(id: &str, tabs: Vec<TabEntry>) -> SessionEntry {
+        SessionEntry {
+            id: id.into(),
+            project_path: "/p".into(),
+            cwd: "/p".into(),
+            worktree_name: None,
+            branch: None,
+            base_ref: None,
+            worktree_removed: false,
+            issue: None,
+            title: "t".into(),
+            created: index::now(),
+            modified: index::now(),
+            archived: false,
+            pinned: false,
+            active_tab: tabs.first().map(|t| t.id.clone()),
+            tabs,
+            unknown: Default::default(),
+        }
+    }
+
+    #[test]
+    fn collect_picks_the_waiting_tab_and_skips_unasked_sessions() {
+        let _home = store::temp_home();
+        let s = a_session("s1", vec![a_tab("t1", TabStatus::Idle), a_tab("t2", TabStatus::Waiting)]);
         let mut other = s.clone();
         other.id = "s2".into();
         index::save(&[s, other]).unwrap();
@@ -437,5 +488,56 @@ mod tests {
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].session_id, "s2");
         assert!(one[0].waiting_on.is_none());
+    }
+
+    #[test]
+    fn a_quiet_active_tab_borrows_the_text_from_the_tab_that_spoke() {
+        let _home = store::temp_home();
+        // The real shape this fixes: a new active tab holding two bookkeeping
+        // lines beside an older tab that holds the whole conversation.
+        index::save(&[a_session("s1", vec![a_tab("new", TabStatus::Idle), a_tab("old", TabStatus::Idle)])]).unwrap();
+        write(
+            &store::log_path("s1", "new").unwrap(),
+            &[
+                event_at("2026-03-02T00:00:00.000Z", serde_json::json!({"type": "settings_changed", "model": "opus"})),
+                event_at("2026-03-02T00:00:01.000Z", serde_json::json!({"type": "status", "text": "ready"})),
+            ],
+        );
+        write(
+            &store::log_path("s1", "old").unwrap(),
+            &[
+                event_at("2026-03-01T00:00:00.000Z", serde_json::json!({"type": "user_message", "text": "ship the parser"})),
+                event_at("2026-03-01T00:00:05.000Z", serde_json::json!({"type": "assistant_text", "text": "Parser shipped."})),
+            ],
+        );
+
+        let out = collect(None).unwrap();
+        assert_eq!(out[0].tab_id, "new"); // the card still speaks for the active tab
+        assert_eq!(out[0].last_prompt.as_deref(), Some("ship the parser"));
+        assert_eq!(out[0].last_reply.as_deref(), Some("Parser shipped."));
+    }
+
+    #[test]
+    fn the_newer_line_wins_when_both_tabs_spoke() {
+        let _home = store::temp_home();
+        index::save(&[a_session("s1", vec![a_tab("t1", TabStatus::Idle), a_tab("t2", TabStatus::Idle)])]).unwrap();
+        write(
+            &store::log_path("s1", "t1").unwrap(),
+            &[
+                event_at("2026-03-01T00:00:00.000Z", serde_json::json!({"type": "user_message", "text": "older ask"})),
+                event_at("2026-03-01T00:00:01.000Z", serde_json::json!({"type": "assistant_text", "text": "older answer"})),
+            ],
+        );
+        write(
+            &store::log_path("s1", "t2").unwrap(),
+            &[
+                event_at("2026-03-03T00:00:00.000Z", serde_json::json!({"type": "user_message", "text": "newer ask"})),
+                event_at("2026-03-03T00:00:01.000Z", serde_json::json!({"type": "assistant_text", "text": "newer answer"})),
+            ],
+        );
+
+        let out = collect(None).unwrap();
+        assert_eq!(out[0].last_prompt.as_deref(), Some("newer ask"));
+        assert_eq!(out[0].last_reply.as_deref(), Some("newer answer"));
     }
 }

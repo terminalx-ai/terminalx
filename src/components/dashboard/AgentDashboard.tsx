@@ -28,8 +28,8 @@ import type { SessionEntry } from "@/types/session";
  * than a couple of agents are working.
  *
  * The columns scroll on their own so the header and the three counts stay put,
- * and the page never scrolls sideways: under 1000px of room the columns stack
- * and the whole area scrolls instead.
+ * and the page never scrolls sideways: under 760px of room — narrower than
+ * three readable cards — they stack and the whole area scrolls instead.
  */
 export function AgentDashboard() {
   const store = useSessionStore();
@@ -209,8 +209,8 @@ export function AgentDashboard() {
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin px-4 pb-4 @min-[1000px]:overflow-hidden">
-        <div className="flex flex-col gap-4 @min-[1000px]:h-full @min-[1000px]:flex-row @min-[1000px]:gap-3">
+      <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin px-4 pb-4 @min-[760px]:overflow-hidden">
+        <div className="flex flex-col gap-4 @min-[760px]:h-full @min-[760px]:flex-row @min-[760px]:gap-3">
           {COLUMNS.map((c) => (
             <Column key={c.id} id={c.id} label={c.label} count={buckets[c.id].length} loading={loading}>
               {shown[c.id].map((s, row) => (
@@ -268,7 +268,9 @@ function Column({
 }) {
   const empty = count === 0 && !loading;
   return (
-    <section aria-label={label} className="flex min-w-0 flex-col @min-[1000px]:min-h-0 @min-[1000px]:flex-1">
+    // Columns share the width evenly but never squeeze below a readable card;
+    // below the breakpoint they stack and the whole area scrolls instead.
+    <section aria-label={label} className="flex min-w-0 flex-col @min-[760px]:min-h-0 @min-[760px]:min-w-[220px] @min-[760px]:flex-1">
       <header className="flex shrink-0 items-center gap-1.5 px-1 pb-1.5">
         <span
           aria-hidden
@@ -282,7 +284,7 @@ function Column({
         <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</span>
         <span className="rounded-full bg-veil-raised px-1.5 text-[10px] text-faint tabular-nums">{count}</span>
       </header>
-      <div className="flex flex-col gap-1.5 pr-0.5 @min-[1000px]:min-h-0 @min-[1000px]:flex-1 @min-[1000px]:overflow-y-auto scrollbar-thin">
+      <div className="flex flex-col gap-1.5 pr-0.5 @min-[760px]:min-h-0 @min-[760px]:flex-1 @min-[760px]:overflow-y-auto scrollbar-thin">
         {loading && count === 0 ? (
           <>
             <AgentCardSkeleton />
