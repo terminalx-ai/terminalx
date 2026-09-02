@@ -19,6 +19,12 @@ pub struct ModelSpec {
     /// What it understands, as a phrase: a short list is worth naming, a long
     /// one is only ever a count.
     pub languages: &'static str,
+    /// The weights' own licence, which is the upstream model's and not
+    /// Raccoon's — a download is a separate grant from the one covering the
+    /// app. Shown next to the model so nobody has to guess before fetching a
+    /// few hundred megabytes.
+    pub license: &'static str,
+    pub license_url: &'static str,
     /// Relative to each other, 0–100. Not a benchmark: they answer "which of
     /// these", nothing about seconds or word error rate.
     pub speed: u8,
@@ -47,6 +53,8 @@ pub const MODELS: &[ModelSpec] = &[
         size_bytes: 731_357_568,
         sha256: "4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795",
         languages: "English",
+        license: "NVIDIA Open Model License",
+        license_url: "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/",
         speed: 79,
         accuracy: 90,
         recommended: true,
@@ -61,6 +69,8 @@ pub const MODELS: &[ModelSpec] = &[
         size_bytes: 751_094_240,
         sha256: "b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c",
         languages: "28 languages",
+        license: "OpenMDW-1.1",
+        license_url: "https://openmdw.ai/license/1-1/",
         speed: 84,
         accuracy: 82,
         recommended: false,
@@ -75,6 +85,8 @@ pub const MODELS: &[ModelSpec] = &[
         size_bytes: 218_447_552,
         sha256: "e13c7f5d0952b056a027cfffec13e3a3a134d1608babed24f983568f141e297c",
         languages: "English, German, Spanish, French",
+        license: "CC-BY-4.0",
+        license_url: "https://creativecommons.org/licenses/by/4.0/",
         speed: 98,
         accuracy: 88,
         recommended: false,
@@ -89,6 +101,8 @@ pub const MODELS: &[ModelSpec] = &[
         size_bytes: 269_751_136,
         sha256: "9b9c8811bbcc82a7766f0fb0925614bdacb0923b2cc630daeac17108b655b860",
         languages: "99 languages",
+        license: "Apache-2.0",
+        license_url: "https://www.apache.org/licenses/LICENSE-2.0",
         speed: 78,
         accuracy: 80,
         recommended: false,
@@ -103,6 +117,8 @@ pub const MODELS: &[ModelSpec] = &[
         size_bytes: 886_381_760,
         sha256: "b2e30cc286bc9f3aba4db9099fc7403543497c05ce7100d0d83091ddfd25a183",
         languages: "100 languages",
+        license: "MIT",
+        license_url: "https://opensource.org/license/mit",
         speed: 35,
         accuracy: 88,
         recommended: false,
@@ -127,6 +143,10 @@ mod tests {
             assert!(m.url().contains(m.revision));
             assert_eq!(m.sha256.len(), 64);
             assert!(m.size_bytes > 0);
+            // A weights download is its own licence grant, and the screen
+            // that offers it has to be able to name one.
+            assert!(!m.license.is_empty(), "{} has no licence", m.id);
+            assert!(m.license_url.starts_with("https://"), "{} has no licence link", m.id);
         }
         assert_eq!(MODELS.iter().filter(|m| m.recommended).count(), 1);
     }
