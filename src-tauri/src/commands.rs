@@ -323,7 +323,7 @@ pub async fn delete_session(app: AppHandle, session_id: String, remove_worktree:
 
 #[tauri::command]
 pub async fn list_harnesses() -> CmdResult<Vec<harness::HarnessInfo>> {
-    tauri::async_runtime::spawn_blocking(harness::catalog).await.map_err(err)
+    tauri::async_runtime::spawn_blocking(harness::offered).await.map_err(err)
 }
 
 // ------------------------------------------------------------------ git
@@ -685,17 +685,14 @@ pub fn tab_status(state: State<'_, AppState>, session_id: String, tab_id: String
 /// The picker's list. Everything but Codex is static; Codex depends on the
 /// signed-in account, so it is read from the CLI and cached. `refresh` is what
 /// the picker sends when it opens, so a model added (or retired) mid-session
-/// shows up without a restart.
+/// shows up without a restart. Ordering and the hidden-harness filter both
+/// live in `models::offered`.
 #[tauri::command]
 pub async fn list_models(state: State<'_, AppState>, refresh: Option<bool>) -> CmdResult<Vec<crate::models::Model>> {
     let cache = state.codex_models.clone();
     let refresh = refresh.unwrap_or(false);
     let codex = tauri::async_runtime::spawn_blocking(move || cache.get(refresh)).await.map_err(err)?;
-    let statics = crate::models::catalog();
-    let mut out: Vec<crate::models::Model> = statics.iter().filter(|m| m.harness == "claude").cloned().collect();
-    out.extend(codex);
-    out.extend(statics.into_iter().filter(|m| m.harness != "claude"));
-    Ok(out)
+    Ok(crate::models::offered(codex))
 }
 
 #[tauri::command]

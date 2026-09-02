@@ -5,15 +5,16 @@
 //! completed (meaning finished and unread), child exit → idle. A pending
 //! permission or question marks the tab waiting until it is answered.
 //!
-//! Claude Code is PTY-first: the tab *is* the interactive CLI, running in a
-//! terminal pane. Nothing is parsed off the wire — what was said comes from
-//! the CLI's transcript file, what is happening comes from its hooks, and what
-//! the reader types goes back in as keystrokes.
+//! Claude Code and Codex are PTY-first: the tab *is* the interactive CLI,
+//! running in a terminal pane. Nothing is parsed off the wire — what was said
+//! comes from the CLI's transcript file, what is happening comes from its
+//! hooks, and what the reader types goes back in as keystrokes.
 //!
-//! The other harnesses are still headless children: Codex is a peer (a state
-//! machine answering each line with actions), ACP and OpenCode likewise. The
-//! manager owns the parts they share — the child, the seq counter, the log,
-//! the queue.
+//! ACP and OpenCode are still headless children — peers, each inbound line
+//! answered with a list of actions. They are no longer offered for new tabs
+//! (`harness::HIDDEN_HARNESSES`), but a tab already on one runs unchanged, so
+//! everything below still serves them. The manager owns the parts both shapes
+//! share — the child, the seq counter, the log, the queue.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -1484,7 +1485,8 @@ impl SessionManager {
     /// process is still writing.
     ///
     /// A PTY-first tab never comes here — its CLI is already the tab, so its
-    /// terminal view is a view flag, not a hand-off.
+    /// terminal view is a view flag, not a hand-off. Only the hidden
+    /// harnesses reach this, which is why it outlives them being offered.
     pub fn handoff(&self, session_id: &str, tab_id: &str) -> Result<HandoffInfo> {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let entry = index::get(session_id)?;

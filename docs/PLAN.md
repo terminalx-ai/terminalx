@@ -35,9 +35,11 @@ src-tauri/src
   events.rs          normalized AgentEvent (+ TS twin in src/types/events.ts)
   harness/
     host.rs          child spawn/write/kill with epoch + kill-gen guards
-    claude/          parser.rs (wire→typed), mapper.rs (typed→AgentEvent), control.rs
-    codex/           rpc.rs, parser.rs, mapper.rs
-    acp/             generic Agent Client Protocol adapter (cursor-agent, others)
+    tui.rs           what the two PTY-first harnesses share (paste, readiness, tails)
+    claude/          pty.rs (launch, keystrokes, hooks), transcript.rs, mapper.rs, trust.rs
+    codex/           pty.rs, rollout.rs, home.rs (managed CODEX_HOME), appserver.rs
+    acp/             generic Agent Client Protocol adapter (cursor-agent, others) — hidden
+    opencode/        local HTTP+SSE adapter — hidden
   session.rs         SessionManager: spawn/resume/queue/interrupt/status
   git.rs             worktrees, snapshots (temp-index write-tree), diffs, commit, push
   github.rs          gh-backed PR status/create
@@ -141,6 +143,12 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Generic ACP adapter (cursor-agent, and any `acp` speaker): handshake, authenticate, new/load session, prompt, updates, permission and fs requests. Live check reached the sign-in step (machine not logged in to Cursor).
 - [x] OpenCode over local HTTP+SSE: server as the tab's child, event pump, HTTP actions. Built against the documented API and unit-tested on fixtures; the installed 0.1.150 server never finished starting here, so not yet exercised live.
 - [x] Availability probe; disabled rows with install hints.
+- [x] **Cursor and OpenCode are hidden, headless, not offered.** Since phase 3
+      of the PTY-first work the UI lists Claude Code and Codex only: neither
+      appears in the new-session picker, the new-tab menu, Settings → Agents
+      or the model picker. Their adapters, their model entries and every tab
+      already on one are untouched and still run, hand-off and all. One list,
+      `HIDDEN_HARNESSES` in `src-tauri/src/harness/mod.rs`, is the switch.
 
 ### C15 — Settings, updater, usage
 - [x] Settings tabs: General, Appearance, Agents (installed CLIs, paths, capabilities, re-check), Shortcuts, About.
@@ -187,6 +195,10 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
       "Ask every time" — and the headless Codex engine and its hand-off are
       gone. ACP and OpenCode stay headless; see the phases in
       [PTY-FIRST.md](PTY-FIRST.md).
+- [x] Phase 3: Claude Code and Codex are the only agents offered. Cursor (ACP)
+      and OpenCode keep their engines, their models and their existing tabs,
+      but are hidden from every list, so the hand-off is a path no tab made
+      from here on can take and ⌘⇧T is a view flag for every new tab.
 
 ## Verification protocol
 
@@ -202,10 +214,12 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 ### Terminal view ✅
 - [x] ⌘⇧T flips an agent tab between the transcript and the agent's own CLI in a
       terminal. For Claude that is now a view flag over one process, not a
-      hand-off: see **PTY-first tabs** below. Codex is the same since phase 2.
-      ACP and OpenCode still hand off — the headless child is stopped and the
-      CLI resumes the conversation in the terminal — and the switch is refused
-      mid-turn for as long as that lasts.
+      hand-off: see **PTY-first tabs** below. Codex is the same since phase 2,
+      and since phase 3 they are the only agents offered, so the toggle is a
+      view flag for every tab that can still be made. A tab left on ACP or
+      OpenCode still hands off — the headless child is stopped and the CLI
+      resumes the conversation in the terminal — and that switch is still
+      refused mid-turn.
 - [x] Local models: a compiled-in catalog (Parakeet, Nemotron, Canary, Whisper Small, Whisper Large v3 Turbo) downloaded from Hugging Face with checksum verification into `~/.raccoon/models`, run through transcribe-cpp with Metal; the loaded model stays warm between dictations.
 - [x] Settings → Transcription: model cards with speed/accuracy, download progress, delete; microphone device picker; mute while recording.
 ### Workspaces and projects ✅
