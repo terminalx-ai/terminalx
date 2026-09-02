@@ -189,11 +189,12 @@ pub fn submit_delay(body_len: usize) -> Duration {
 /// has no way to say when it is ready. The sign is that it has drawn something
 /// and then stopped.
 ///
-/// A second, not less: the CLI's startup here paints at 0.3 s, pauses 0.7 s,
-/// paints again at 1.0 s and settles at 2.0 s, and a prompt typed into the gap
-/// is swallowed without a trace. The timeout is the give-up, after which
-/// typing anyway beats never sending.
-pub const READY_QUIET: Duration = Duration::from_millis(1000);
+/// Three seconds, not less. A fresh start paints at 0.3 s, pauses 0.7 s and
+/// settles at 2.0 s; a `--resume` replays the conversation and pauses **2.7 s**
+/// in the middle of doing it. A prompt typed into either gap is swallowed
+/// without a trace, and a restart resumes, so the longer gap sets the rule.
+/// The timeout is the give-up, after which typing anyway beats never sending.
+pub const READY_QUIET: Duration = Duration::from_millis(3000);
 pub const READY_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// An image the CLI should attach: the path, bracketed-pasted on its own. A
@@ -414,6 +415,31 @@ mod tests {
         })
         .unwrap();
         assert!(forked.contains("--resume 'parent' --fork-session --session-id 'new'"));
+    }
+
+    /// Changing the permission mode restarts the CLI as a fork, because the
+    /// CLI restores a resumed session's own mode and ignores the flag.
+    #[test]
+    fn a_settings_restart_forks_the_conversation_and_carries_the_new_mode() {
+        if crate::binpath::resolve("claude").is_none() {
+            return;
+        }
+        let settings = json!({});
+        let c = launch_command(LaunchOptions {
+            provider_session_id: "minted",
+            resume: false,
+            fork_from: Some("the-conversation-so-far"),
+            model: "opus",
+            effort: None,
+            permission_mode: "plan",
+            title: None,
+            settings: &settings,
+        })
+        .unwrap();
+        assert!(c.contains("--resume 'the-conversation-so-far' --fork-session --session-id 'minted'"));
+        assert!(c.contains("--permission-mode plan"));
+        // Never both: a plain resume would silently keep the old mode.
+        assert!(!c.contains("--resume 'minted'"));
     }
 
     #[test]
