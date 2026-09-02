@@ -5,9 +5,15 @@
 //! completed (meaning finished and unread), child exit → idle. A pending
 //! permission or question marks the tab waiting until it is answered.
 //!
-//! Two engines: Claude Code is a pipe (parse → map per line); Codex is a peer
-//! (a state machine answering each line with actions). The manager owns the
-//! parts they share — the child, the seq counter, the log, the queue.
+//! Claude Code is PTY-first: the tab *is* the interactive CLI, running in a
+//! terminal pane. Nothing is parsed off the wire — what was said comes from
+//! the CLI's transcript file, what is happening comes from its hooks, and what
+//! the reader types goes back in as keystrokes.
+//!
+//! The other harnesses are still headless children: Codex is a peer (a state
+//! machine answering each line with actions), ACP and OpenCode likewise. The
+//! manager owns the parts they share — the child, the seq counter, the log,
+//! the queue.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -23,8 +29,9 @@ use crate::events::*;
 use crate::harness::codex::{self, Action};
 use crate::harness::host::{Host, LiveChild, Sink, SpawnSpec};
 use crate::harness::{acp, claude, opencode, HarnessId};
+use crate::hooks::{HookFrame, HookReply};
 use crate::store::index::{self, TabEntry, TabStatus};
-use crate::{git, store};
+use crate::{git, pty, store};
 
 pub struct PendingAsk {
     pub tool_use_id: String,
@@ -42,8 +49,20 @@ pub struct QueuedMessage {
     pub images: Vec<(String, String)>,
 }
 
+/// A Claude tab: the CLI in a pane, its transcript being followed, and the
+/// permission frames its hooks have parked here waiting for an answer.
+pub struct ClaudePty {
+    pub pane_id: String,
+    pub tail: Arc<claude::pty::Tail>,
+    /// Prompts the composer already published, waiting for the transcript to
+    /// echo them back so the reader is not shown the same message twice.
+    pub echoed: std::collections::VecDeque<String>,
+    /// Hook threads parked on a decision, by request id.
+    pub decisions: HashMap<String, std::sync::mpsc::Sender<Value>>,
+}
+
 pub enum Engine {
-    Claude(claude::mapper::Mapper),
+    ClaudePty(ClaudePty),
     Codex(codex::Codex),
     Acp(acp::Acp),
     OpenCode(opencode::OpenCode),
@@ -79,8 +98,12 @@ impl TabRuntime {
 pub struct SessionManager {
     app: AppHandle,
     host: Arc<Host>,
+    terminals: Arc<pty::Terminals>,
     codex_models: Arc<codex::models::Cache>,
     tabs: Arc<Mutex<HashMap<String, Arc<Mutex<TabRuntime>>>>>,
+    /// One lock per pane, so two prompts sent in quick succession cannot
+    /// interleave their paste and their Enter.
+    writers: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,20 +115,23 @@ pub struct HandoffInfo {
     pub harness: String,
 }
 
-/// Timestamp of the last persisted event in a tab log, read from the tail.
-fn last_event_ts(path: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let line = text.lines().rev().find(|l| !l.trim().is_empty())?;
-    let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    v["ts"].as_str().map(String::from)
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TabStatusEvent {
     pub session_id: String,
     pub tab_id: String,
     pub status: TabStatus,
+}
+
+/// Told to the frontend when a tab's CLI gets its terminal pane, so the pane
+/// can be adopted by the tab's terminal view.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TabPtyEvent {
+    pub session_id: String,
+    pub tab_id: String,
+    pub pane_id: String,
+    pub command: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -126,17 +152,14 @@ pub struct ImageInput {
 
 /// Archived image refs for the log, and (media type, base64) pairs for the wire.
 type ArchivedImages = (Vec<ImageRef>, Vec<(String, String)>);
-/// What one Claude line mapped to: payloads, the subagent stamp, and the
-/// suggestion payloads plus ask input the mapper saw last.
-type ClaudeLine = (Vec<Payload>, Option<SubagentRef>, Vec<Value>, Value);
 
 fn key_of(session_id: &str, tab_id: &str) -> String {
     format!("{session_id}/{tab_id}")
 }
 
 impl SessionManager {
-    pub fn new(app: AppHandle, host: Arc<Host>, codex_models: Arc<codex::models::Cache>) -> Self {
-        Self { app, host, codex_models, tabs: Arc::new(Mutex::new(HashMap::new())) }
+    pub fn new(app: AppHandle, host: Arc<Host>, terminals: Arc<pty::Terminals>, codex_models: Arc<codex::models::Cache>) -> Self {
+        Self { app, host, terminals, codex_models, tabs: Arc::new(Mutex::new(HashMap::new())), writers: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     fn runtime(&self, session_id: &str, tab_id: &str) -> Result<Arc<Mutex<TabRuntime>>> {
@@ -288,6 +311,10 @@ impl SessionManager {
         let mut rt = rt_arc.lock().unwrap();
         let (refs, wire_images) = Self::archive_images(session_id, &images)?;
 
+        if matches!(HarnessId::parse(&tab.harness), HarnessId::Claude) {
+            return self.send_to_cli(&mut rt, &rt_arc, &entry, &tab, text, refs);
+        }
+
         if rt.turn_open && rt.child.is_some() {
             let q = QueuedMessage { id: uuid::Uuid::now_v7().to_string(), text: text.clone(), images: wire_images };
             rt.queued.push(q);
@@ -297,7 +324,7 @@ impl SessionManager {
 
         if rt.child.is_none() {
             match HarnessId::parse(&tab.harness) {
-                HarnessId::Claude => self.start_claude(&mut rt, &rt_arc, session_id, tab_id, &tab, &entry.cwd)?,
+                HarnessId::Claude => bail!("Claude tabs run their own CLI"),
                 HarnessId::Codex => self.start_codex(&mut rt, &rt_arc, &tab, &entry.cwd)?,
                 HarnessId::Acp(binary) => self.start_acp(&mut rt, &rt_arc, &tab, &entry.cwd, &binary)?,
                 HarnessId::OpenCode => self.start_opencode(&mut rt, &rt_arc, &tab, &entry.cwd)?,
@@ -309,12 +336,6 @@ impl SessionManager {
         let events = vec![self.publish(&mut rt, Payload::UserMessage { text: text.clone(), images: refs, baseline, queued: false, cwd: Some(entry.cwd.clone()) }, None)];
 
         match &mut rt.engine {
-            Engine::Claude(m) => {
-                let provider_id = index::get(session_id).ok().and_then(|e| e.tab(tab_id).and_then(|t| t.provider_session_id.clone())).unwrap_or_default();
-                let line = claude::user_line(&provider_id, &text, &wire_images);
-                m.begin_turn();
-                self.write(&rt, &line)?;
-            }
             Engine::Codex(c) => {
                 let actions = if c.ready { c.prompt(text.clone(), wire_images) } else { c.start(text.clone(), wire_images) };
                 self.apply_actions(&mut rt, actions);
@@ -327,38 +348,13 @@ impl SessionManager {
                 let actions = if o.ready { o.prompt(text.clone(), wire_images) } else { o.start(text.clone(), wire_images) };
                 self.apply_actions(&mut rt, actions);
             }
-            Engine::None => bail!("no engine"),
+            Engine::ClaudePty(_) | Engine::None => bail!("no engine"),
         }
         rt.turn_open = true;
         rt.turn_started_at = Some(Instant::now());
         rt.last_activity = Instant::now();
         self.set_status(&mut rt, TabStatus::InProgress);
         Ok(SendOutcome { queued: false, events })
-    }
-
-    fn start_claude(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, session_id: &str, tab_id: &str, tab: &TabEntry, cwd: &str) -> Result<()> {
-        let provider_id = tab.provider_session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let resume = tab.provider_session_id.is_some();
-        let fork_from = if resume { None } else { tab.fork_from.clone() };
-        let plan = claude::spawn_plan(claude::SpawnOptions {
-            provider_session_id: &provider_id,
-            resume,
-            fork_from: fork_from.as_deref(),
-            model: Some(&tab.model),
-            effort: tab.effort.as_deref(),
-            permission_mode: &tab.permission_mode,
-        })
-        .ok_or_else(|| anyhow!("Claude Code is not installed. Install it and log in, then try again."))?;
-        rt.engine = Engine::Claude(claude::mapper::Mapper::new());
-        self.spawn_child(rt, rt_arc, &plan.program, &plan.args, cwd).context("start Claude Code")?;
-        if !resume {
-            index::update_tab(session_id, tab_id, |t| {
-                t.provider_session_id = Some(provider_id.clone());
-                t.fork_from = None;
-                Ok(())
-            })?;
-        }
-        Ok(())
     }
 
     fn start_codex(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str) -> Result<()> {
@@ -449,14 +445,13 @@ impl SessionManager {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         rt.queued.clear();
-        if rt.child.is_none() {
+        if rt.child.is_none() && !matches!(rt.engine, Engine::ClaudePty(_)) {
             return Ok(());
         }
         match &mut rt.engine {
-            Engine::Claude(m) => {
-                m.interrupt_requested = true;
-                let line = claude::interrupt_line(&uuid::Uuid::now_v7().to_string());
-                self.write(&rt, &line)?;
+            // The TUI reads a bare Escape as "stop"; nothing else can reach it.
+            Engine::ClaudePty(p) => {
+                let _ = self.terminals.write(&p.pane_id, claude::pty::ESCAPE);
             }
             Engine::Codex(c) => {
                 let actions = c.interrupt();
@@ -482,14 +477,18 @@ impl SessionManager {
         Ok(pos.map(|p| rt.queued.remove(p)))
     }
 
-    /// Kill the child but keep resume state, so the next prompt resumes.
+    /// Kill the agent but keep resume state, so the next prompt resumes.
     pub fn stop(&self, session_id: &str, tab_id: &str) -> Result<()> {
         let key = key_of(session_id, tab_id);
         self.host.kill(&key);
-        if let Some(rt) = self.tabs.lock().unwrap().get(&key) {
+        let rt = self.tabs.lock().unwrap().get(&key).cloned();
+        if let Some(rt) = rt {
             let mut rt = rt.lock().unwrap();
             rt.child = None;
             rt.child_pid = None;
+            if matches!(rt.engine, Engine::ClaudePty(_)) {
+                self.stop_cli(&mut rt);
+            }
         }
         Ok(())
     }
@@ -497,13 +496,13 @@ impl SessionManager {
     pub fn respond_permission(&self, session_id: &str, tab_id: &str, request_id: &str, option_id: &str) -> Result<()> {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
-        if rt.child.is_none() {
+        if rt.child.is_none() && !matches!(rt.engine, Engine::ClaudePty(_)) {
             rt.pending.remove(request_id);
             bail!("the agent is no longer running; the request lapsed");
         }
         let ask = rt.pending.remove(request_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
         let (allow, label) = match &mut rt.engine {
-            Engine::Claude(_) => {
+            Engine::ClaudePty(p) => {
                 let (allow, label, perms) = match option_id {
                     "deny" => (false, "Denied".to_string(), Vec::new()),
                     "allow" => (true, "Allowed".to_string(), Vec::new()),
@@ -514,8 +513,8 @@ impl SessionManager {
                     }
                     _ => bail!("unknown option"),
                 };
-                let line = claude::permission_response(request_id, allow, Some(ask.input.clone()), perms, None);
-                self.write(&rt, &line)?;
+                let tx = p.decisions.remove(request_id).ok_or_else(|| anyhow!("the agent stopped waiting for that request"))?;
+                let _ = tx.send(claude::pty::permission_decision(allow, None, perms));
                 (allow, label)
             }
             Engine::Codex(c) => {
@@ -552,8 +551,13 @@ impl SessionManager {
         let ask = rt.pending.remove(request_id).ok_or_else(|| anyhow!("that question is no longer open"))?;
         let mut input = ask.input.clone();
         input["answers"] = serde_json::to_value(&answers)?;
-        let line = claude::permission_response(request_id, true, Some(input), Vec::new(), None);
-        self.write(&rt, &line)?;
+        match &mut rt.engine {
+            Engine::ClaudePty(p) => {
+                let tx = p.decisions.remove(request_id).ok_or_else(|| anyhow!("the agent stopped waiting for that question"))?;
+                let _ = tx.send(claude::pty::permission_decision(true, Some(input), Vec::new()));
+            }
+            _ => bail!("that agent does not ask questions this way"),
+        }
         self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: true, label: "Answered".into(), automatic: false }, None);
         if rt.pending.is_empty() {
             self.set_status(&mut rt, TabStatus::InProgress);
@@ -568,12 +572,10 @@ impl SessionManager {
         })?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
-        let has_child = rt.child.is_some();
         match &mut rt.engine {
-            Engine::Claude(_) if has_child => {
-                let line = claude::set_model_line(&uuid::Uuid::now_v7().to_string(), model);
-                self.write(&rt, &line)?;
-            }
+            // The CLI's own `/model` takes the change live; nothing else can
+            // reach a running TUI.
+            Engine::ClaudePty(p) => self.type_command(&p.pane_id, format!("/model {model}")),
             Engine::Codex(c) => c.model = Some(model.into()),
             Engine::Acp(a) => {
                 let actions = a.set_model(model);
@@ -593,14 +595,13 @@ impl SessionManager {
         })?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
-        let has_child = rt.child.is_some();
         let turn_open = rt.turn_open;
         let mut respawn = false;
+        let mut restart = false;
         match &mut rt.engine {
-            Engine::Claude(_) if has_child => {
-                let line = claude::set_mode_line(&uuid::Uuid::now_v7().to_string(), mode);
-                self.write(&rt, &line)?;
-            }
+            // The TUI has no command for this, only a key cycle. Restarting
+            // the CLI on the same conversation is lossless and immediate.
+            Engine::ClaudePty(_) => restart = !turn_open,
             Engine::Codex(c) => {
                 // The sandbox half only applies at thread start; a respawn lands it.
                 c.mode = mode.into();
@@ -619,11 +620,17 @@ impl SessionManager {
             rt.child_pid = None;
             rt.engine = Engine::None;
         }
+        if restart {
+            self.stop_cli(&mut rt);
+        } else if matches!(rt.engine, Engine::ClaudePty(_)) {
+            self.publish(&mut rt, Payload::Status { text: format!("{} applies when the agent next starts.", claude::mapper::mode_label(mode)) }, None);
+        }
         self.publish(&mut rt, Payload::SettingsChanged { model: None, effort: None, permission_mode: Some(mode.into()) }, None);
         Ok(())
     }
 
-    /// Claude has no in-place effort control; the change lands on the next spawn.
+    /// Claude takes effort live through its own `/effort`; the headless peers
+    /// need a respawn.
     pub fn set_effort(&self, session_id: &str, tab_id: &str, effort: Option<&str>) -> Result<()> {
         index::update_tab(session_id, tab_id, |t| {
             t.effort = effort.map(String::from);
@@ -634,6 +641,11 @@ impl SessionManager {
         let turn_open = rt.turn_open;
         let mut respawn = false;
         match &mut rt.engine {
+            Engine::ClaudePty(p) => {
+                if let Some(e) = effort.filter(|e| !e.is_empty()) {
+                    self.type_command(&p.pane_id, format!("/effort {e}"));
+                }
+            }
             Engine::Codex(c) => c.effort = effort.map(String::from),
             Engine::Acp(_) | Engine::OpenCode(_) => {}
             _ => respawn = !turn_open,
@@ -663,10 +675,339 @@ impl SessionManager {
 
     // ---- inbound from the child
 
-    /// Hand a tab to its CLI in a terminal: the headless child is stopped and
+    // ---- Claude, PTY-first
+
+    /// The terminal pane a tab's CLI runs in. Derived from the tab id so the
+    /// frontend can find the same pane without being told.
+    pub fn pane_id(tab_id: &str) -> String {
+        format!("tab:{tab_id}")
+    }
+
+    /// Start the tab's CLI if it is not already running. Idempotent: opening a
+    /// tab, sending a prompt and switching to the terminal view all call it.
+    pub fn ensure_started(&self, session_id: &str, tab_id: &str) -> Result<()> {
+        let rt_arc = self.runtime(session_id, tab_id)?;
+        let entry = index::get(session_id)?;
+        let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
+        if !matches!(HarnessId::parse(&tab.harness), HarnessId::Claude) {
+            return Ok(());
+        }
+        let mut rt = rt_arc.lock().unwrap();
+        self.start_cli(&mut rt, &rt_arc, &entry, &tab)
+    }
+
+    fn start_cli(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry) -> Result<()> {
+        let pane = Self::pane_id(&tab.id);
+        if let Engine::ClaudePty(p) = &rt.engine {
+            if p.pane_id == pane && self.terminals.is_running(&pane) {
+                return Ok(());
+            }
+        }
+        self.terminals.kill(&pane);
+
+        // The conversation id is minted here, not read back from the CLI, so
+        // the transcript's path is known before the first byte is written.
+        let provider_id = tab.provider_session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let resume = tab.provider_session_id.is_some();
+        let fork_from = if resume { None } else { tab.fork_from.clone() };
+        let exe = std::env::current_exe().context("locate this binary for the CLI's hooks")?;
+        let settings = claude::pty::settings_json(&exe);
+        let command = claude::pty::launch_command(claude::pty::LaunchOptions {
+            provider_session_id: &provider_id,
+            resume,
+            fork_from: fork_from.as_deref(),
+            model: &tab.model,
+            effort: tab.effort.as_deref(),
+            permission_mode: &tab.permission_mode,
+            title: tab.title.as_deref(),
+            settings: &settings,
+        })
+        .ok_or_else(|| anyhow!("Claude Code is not installed. Install it and log in, then try again."))?;
+
+        let mut env = vec![
+            ("RACCOON_SESSION_ID".to_string(), rt.session_id.clone()),
+            ("RACCOON_TAB_ID".to_string(), rt.tab_id.clone()),
+        ];
+        match crate::hooks::socket_path() {
+            Ok(p) => env.push((crate::hooks::SOCKET_ENV.to_string(), p.to_string_lossy().into_owned())),
+            // Without the socket the CLI still runs; the chat just loses the
+            // status and permission half until the app is restarted.
+            Err(e) => log::warn!("no hook socket: {e:#}"),
+        }
+
+        let path = claude::transcript::cli_transcript_path(&entry.cwd, &provider_id).ok_or_else(|| anyhow!("no home directory"))?;
+        let tail = Arc::new(claude::pty::Tail::opening(path));
+        let spec = pty::PaneSpec { cwd: &entry.cwd, cols: 120, rows: 30, command: Some(&command), env: &env };
+        self.terminals.spawn(self.app.clone(), &pane, spec).context("start Claude Code")?;
+        rt.engine = Engine::ClaudePty(ClaudePty { pane_id: pane.clone(), tail: tail.clone(), echoed: Default::default(), decisions: HashMap::new() });
+        rt.turn_open = false;
+        let _ = self.app.emit("tab_pty", TabPtyEvent { session_id: rt.session_id.clone(), tab_id: rt.tab_id.clone(), pane_id: pane.clone(), command });
+        if !resume {
+            index::update_tab(&rt.session_id, &rt.tab_id, |t| {
+                t.provider_session_id = Some(provider_id.clone());
+                t.fork_from = None;
+                Ok(())
+            })?;
+        }
+        self.follow_transcript(rt_arc, tail, pane);
+        Ok(())
+    }
+
+    /// Stop the tab's CLI, keeping the conversation so the next prompt resumes.
+    fn stop_cli(&self, rt: &mut TabRuntime) {
+        if let Engine::ClaudePty(p) = &rt.engine {
+            self.terminals.kill(&p.pane_id);
+        }
+        rt.engine = Engine::None;
+        rt.turn_open = false;
+        self.set_status(rt, TabStatus::Idle);
+    }
+
+    /// Poll the transcript. The CLI appends without any signal to subscribe
+    /// to, and the file may not exist for a second or two after the CLI
+    /// starts, so a stat every 200 ms is both the simplest and the surest way
+    /// to follow it. The same loop notices the pane dying.
+    fn follow_transcript(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: Arc<claude::pty::Tail>, pane: String) {
+        let manager = self.clone();
+        let weak = Arc::downgrade(rt_arc);
+        let _ = std::thread::Builder::new().name(format!("transcript-{pane}")).spawn(move || loop {
+            std::thread::sleep(claude::pty::POLL_INTERVAL);
+            let Some(rt_arc) = weak.upgrade() else { return };
+            let mine = matches!(&rt_arc.lock().unwrap().engine, Engine::ClaudePty(p) if p.pane_id == pane);
+            if !mine {
+                return;
+            }
+            manager.pump(&rt_arc, &tail);
+            if !manager.terminals.is_running(&pane) {
+                let mut rt = rt_arc.lock().unwrap();
+                if matches!(&rt.engine, Engine::ClaudePty(p) if p.pane_id == pane) {
+                    manager.close_open_turn(&mut rt, TurnStatus::Aborted, None);
+                    rt.engine = Engine::None;
+                    manager.set_status(&mut rt, TabStatus::Idle);
+                }
+                return;
+            }
+        });
+    }
+
+    /// Publish everything the transcript has gained since the last look. The
+    /// tail's own lock orders this against the poll loop, so a `Stop` hook
+    /// flushing before it closes the turn cannot overtake it.
+    fn pump(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: &Arc<claude::pty::Tail>) {
+        let payloads = tail.drain();
+        if payloads.is_empty() {
+            return;
+        }
+        let mut rt = rt_arc.lock().unwrap();
+        rt.last_activity = Instant::now();
+        for payload in payloads {
+            // A prompt sent from the composer was published when it was sent;
+            // the transcript's copy of it would be the same message twice.
+            if let (Payload::UserMessage { text, .. }, Engine::ClaudePty(p)) = (&payload, &mut rt.engine) {
+                if p.echoed.front().is_some_and(|q| q == text) {
+                    p.echoed.pop_front();
+                    continue;
+                }
+            }
+            if matches!(payload, Payload::UserMessage { .. }) {
+                rt.turn_open = true;
+                self.set_status(&mut rt, TabStatus::InProgress);
+            }
+            self.apply(&mut rt, payload, None);
+        }
+    }
+
+    fn close_open_turn(&self, rt: &mut TabRuntime, status: TurnStatus, final_text: Option<String>) {
+        if !rt.turn_open {
+            return;
+        }
+        let duration_ms = rt.turn_started_at.map(|t| t.elapsed().as_millis() as u64);
+        self.apply(rt, Payload::TurnCompleted { status, final_text, usage: None, duration_ms, head: None, auth_failed: false }, None);
+    }
+
+    /// Send a prompt to the CLI as keystrokes. A tab mid-turn writes anyway:
+    /// the TUI queues typed input itself, so the message is only *shown* as
+    /// queued until the CLI takes it and the transcript says so.
+    fn send_to_cli(
+        &self,
+        rt: &mut TabRuntime,
+        rt_arc: &Arc<Mutex<TabRuntime>>,
+        entry: &index::SessionEntry,
+        tab: &TabEntry,
+        text: String,
+        images: Vec<ImageRef>,
+    ) -> Result<SendOutcome> {
+        self.start_cli(rt, rt_arc, entry, tab)?;
+        let pane = match &rt.engine {
+            Engine::ClaudePty(p) => p.pane_id.clone(),
+            _ => bail!("the agent is not running"),
+        };
+        let queued = rt.turn_open;
+        let baseline = if queued { None } else { git::snapshot_tree(Path::new(&entry.cwd)).ok() };
+        let paths: Vec<String> = images.iter().map(|i| i.url.clone()).collect();
+        if !queued {
+            if let Engine::ClaudePty(p) = &mut rt.engine {
+                p.echoed.push_back(text.clone());
+            }
+        }
+        let ev = self.publish(rt, Payload::UserMessage { text: text.clone(), images, baseline, queued, cwd: Some(entry.cwd.clone()) }, None);
+        self.type_prompt(&pane, text, paths);
+        if !queued {
+            rt.turn_open = true;
+            rt.turn_started_at = Some(Instant::now());
+            self.set_status(rt, TabStatus::InProgress);
+        }
+        Ok(SendOutcome { queued, events: vec![ev] })
+    }
+
+    /// Write into a pane on its own thread, under that pane's write lock. The
+    /// Enter has to be a later write than the body — a carriage return inside
+    /// the same one is read as part of the paste and never submits — so this
+    /// sleeps, which no caller holding the tab lock could afford to do.
+    fn type_prompt(&self, pane: &str, text: String, attachments: Vec<String>) {
+        let lock = self.writers.lock().unwrap().entry(pane.to_string()).or_default().clone();
+        let terminals = self.terminals.clone();
+        let pane = pane.to_string();
+        let _ = std::thread::Builder::new().name("cli-input".into()).spawn(move || {
+            let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let write = |bytes: &[u8]| {
+                if let Err(e) = terminals.write(&pane, bytes) {
+                    log::warn!("[{pane}] write: {e:#}");
+                }
+            };
+            write(claude::pty::CLEAR_LINE);
+            for path in &attachments {
+                write(&claude::pty::attachment_bytes(path));
+            }
+            if !attachments.is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            let body = claude::pty::body_bytes(&text);
+            write(&body);
+            std::thread::sleep(claude::pty::submit_delay(body.len()));
+            write(claude::pty::SUBMIT);
+        });
+    }
+
+    /// A slash command the CLI runs itself (`/model`, `/effort`).
+    fn type_command(&self, pane: &str, command: String) {
+        self.type_prompt(pane, command, Vec::new());
+    }
+
+    // ---- inbound from the CLI's hooks
+
+    /// One hook occurrence. The reply is what the hook prints for the CLI, so
+    /// only a permission decision ever carries anything.
+    pub fn on_hook(&self, frame: HookFrame) -> HookReply {
+        let Ok(rt_arc) = self.runtime(&frame.session, &frame.tab) else {
+            return HookReply::default();
+        };
+        let tail = {
+            let rt = rt_arc.lock().unwrap();
+            match &rt.engine {
+                Engine::ClaudePty(p) => p.tail.clone(),
+                // A hook from a CLI this app did not start, or from one whose
+                // tab has moved on: nothing to say, and nothing to block.
+                _ => return HookReply::default(),
+            }
+        };
+        // The path derived from the session id is a guess made before the CLI
+        // ran; the hook carries the file it actually opened.
+        if let Some(path) = frame.payload["transcript_path"].as_str() {
+            tail.retarget(Path::new(path));
+        }
+        self.pump(&rt_arc, &tail);
+
+        match frame.event.as_str() {
+            "PermissionRequest" => return self.ask_permission(&rt_arc, &frame),
+            "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => {
+                let mut rt = rt_arc.lock().unwrap();
+                rt.last_activity = Instant::now();
+                if !rt.turn_open {
+                    rt.turn_open = true;
+                    rt.turn_started_at = Some(Instant::now());
+                }
+                if rt.pending.is_empty() {
+                    self.set_status(&mut rt, TabStatus::InProgress);
+                }
+            }
+            // The CLI is asking in its own TUI, which means our permission
+            // hook did not answer in time. The reader has to go and look.
+            "Notification" if frame.payload["notification_type"] == "permission_prompt" => {
+                let mut rt = rt_arc.lock().unwrap();
+                self.set_status(&mut rt, TabStatus::Waiting);
+            }
+            "Stop" => {
+                let mut rt = rt_arc.lock().unwrap();
+                rt.last_activity = Instant::now();
+                let final_text = frame.payload["last_assistant_message"].as_str().map(String::from);
+                self.close_open_turn(&mut rt, TurnStatus::Ok, final_text);
+            }
+            "SessionEnd" => {
+                let mut rt = rt_arc.lock().unwrap();
+                self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
+                self.set_status(&mut rt, TabStatus::Idle);
+            }
+            _ => {}
+        }
+        HookReply::default()
+    }
+
+    /// Turn a `PermissionRequest` into the chat's own card and wait for it to
+    /// be answered. The hook thread parks here, which is exactly what holds
+    /// the CLI's tool call up until the reader decides.
+    fn ask_permission(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame) -> HookReply {
+        let request_id = uuid::Uuid::now_v7().to_string();
+        let tool_name = frame.payload["tool_name"].as_str().unwrap_or("tool").to_string();
+        let input = frame.payload["tool_input"].clone();
+        let suggestions: Vec<Value> = frame.payload["permission_suggestions"].as_array().cloned().unwrap_or_default();
+        let (tx, rx) = std::sync::mpsc::channel::<Value>();
+        {
+            let mut rt = rt_arc.lock().unwrap();
+            let Engine::ClaudePty(p) = &mut rt.engine else { return HookReply::default() };
+            p.decisions.insert(request_id.clone(), tx);
+            // The event carries no tool_use_id — it fires before the call is
+            // recorded — so the card stands on its own rather than attaching
+            // to a tool row.
+            let payload = if tool_name == "AskUserQuestion" {
+                Payload::QuestionsAsked { request_id: request_id.clone(), tool_use_id: String::new(), questions: claude::mapper::questions_from_input(&input) }
+            } else {
+                Payload::PermissionRequested {
+                    request_id: request_id.clone(),
+                    tool_use_id: String::new(),
+                    title: Some(claude::mapper::tool_title(&tool_name, &input)),
+                    description: None,
+                    options: claude::mapper::build_options(&suggestions),
+                    tool_name,
+                    input: input.clone(),
+                }
+            };
+            rt.pending.insert(request_id.clone(), PendingAsk { tool_use_id: String::new(), input, suggestions });
+            self.apply(&mut rt, payload, None);
+        }
+        let answer = rx.recv_timeout(claude::pty::PERMISSION_WAIT).ok();
+        let mut rt = rt_arc.lock().unwrap();
+        if let Engine::ClaudePty(p) = &mut rt.engine {
+            p.decisions.remove(&request_id);
+        }
+        match answer {
+            Some(output) => HookReply { output: Some(output) },
+            None => {
+                // The CLI has stopped waiting on us and will ask in its own
+                // TUI; the card must stop offering buttons that go nowhere.
+                self.apply(&mut rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true }, None);
+                HookReply::default()
+            }
+        }
+    }
+
+    /// Hand a headless tab to its CLI in a terminal: the child is stopped and
     /// the command that resumes the same conversation is returned. Refused
     /// mid-turn, because the CLI would otherwise resume a session another
     /// process is still writing.
+    ///
+    /// Claude tabs never come here — their CLI is already the tab, so their
+    /// terminal view is a view flag, not a hand-off.
     pub fn handoff(&self, session_id: &str, tab_id: &str) -> Result<HandoffInfo> {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let entry = index::get(session_id)?;
@@ -687,17 +1028,7 @@ impl SessionManager {
         }
         let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
         let command = match HarnessId::parse(&tab.harness) {
-            HarnessId::Claude => {
-                let mut c = String::from("claude");
-                if let Some(id) = &tab.provider_session_id {
-                    c.push_str(&format!(" --resume {}", quote(id)));
-                }
-                if !tab.model.is_empty() {
-                    c.push_str(&format!(" --model {}", quote(&tab.model)));
-                }
-                c.push_str(&format!(" --permission-mode {}", claude::normalize_mode(&tab.permission_mode)));
-                c
-            }
+            HarnessId::Claude => bail!("A Claude tab already runs its own CLI; use the terminal view."),
             HarnessId::Codex => {
                 let mut c = match &tab.provider_session_id {
                     Some(id) => format!("codex resume {}", quote(id)),
@@ -721,76 +1052,16 @@ impl SessionManager {
         Ok(HandoffInfo { command, provider_session_id: tab.provider_session_id.clone(), harness: tab.harness.clone() })
     }
 
-    /// Bring what was said in the terminal back into the app's log. Claude
-    /// keeps a transcript per session that both sides write to; anything newer
-    /// than the app's last event came from the terminal. Returns how many
-    /// events were imported.
-    pub fn reconcile(&self, session_id: &str, tab_id: &str) -> Result<usize> {
-        let entry = index::get(session_id)?;
-        let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
-        if !matches!(HarnessId::parse(&tab.harness), HarnessId::Claude) {
-            return Ok(0);
-        }
-        let Some(pid) = tab.provider_session_id.as_deref() else { return Ok(0) };
-        let Some(path) = claude::transcript::cli_transcript_path(&entry.cwd, pid) else { return Ok(0) };
-        let text = match std::fs::read_to_string(&path) {
-            Ok(t) => t,
-            Err(_) => return Ok(0),
-        };
-        let rt_arc = self.runtime(session_id, tab_id)?;
-        let mut rt = rt_arc.lock().unwrap();
-        let last_ts = last_event_ts(&rt.log_path);
-        let payloads = claude::transcript::import_after(&text, last_ts.as_deref());
-        let n = payloads.len();
-        for p in payloads {
-            self.publish(&mut rt, p, None);
-        }
-        if n > 0 {
-            let _ = index::update_tab(session_id, tab_id, |t| {
-                t.modified = index::now();
-                Ok(())
-            });
-        }
-        Ok(n)
-    }
-
     fn on_line(&self, rt_arc: &Arc<Mutex<TabRuntime>>, line: &str) {
         let mut rt = rt_arc.lock().unwrap();
         rt.last_activity = Instant::now();
-        let mut claude_out: Option<ClaudeLine> = None;
-        let mut codex_out: Option<Vec<Action>> = None;
-        match &mut rt.engine {
-            Engine::Claude(mapper) => {
-                let parsed = match claude::parser::parse_line(line) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        log::warn!("unparsed line: {e}: {}", &line[..line.len().min(200)]);
-                        let _ = store::root().map(|r| store::append_line(&r.join("parse_failures.jsonl"), line));
-                        return;
-                    }
-                };
-                let mapped = mapper.map(parsed);
-                claude_out = Some((mapped.payloads, mapped.subagent, mapper.last_suggestions.clone(), mapper.last_ask_input.clone()));
-            }
-            Engine::Codex(c) => codex_out = Some(c.handle(line)),
-            Engine::Acp(a) => codex_out = Some(a.handle(line)),
-            Engine::OpenCode(o) => codex_out = Some(o.handle(line)),
-            Engine::None => {}
-        }
-        if let Some((payloads, subagent, suggestions, ask_input)) = claude_out {
-            for payload in payloads {
-                if let Payload::PermissionRequested { request_id, tool_use_id, input, .. } = &payload {
-                    rt.pending.insert(request_id.clone(), PendingAsk { tool_use_id: tool_use_id.clone(), input: input.clone(), suggestions: suggestions.clone() });
-                }
-                if let Payload::QuestionsAsked { request_id, tool_use_id, .. } = &payload {
-                    rt.pending.insert(request_id.clone(), PendingAsk { tool_use_id: tool_use_id.clone(), input: ask_input.clone(), suggestions: Vec::new() });
-                }
-                self.apply(&mut rt, payload, subagent.clone());
-            }
-        }
-        if let Some(actions) = codex_out {
-            self.apply_actions(&mut rt, actions);
-        }
+        let actions = match &mut rt.engine {
+            Engine::Codex(c) => c.handle(line),
+            Engine::Acp(a) => a.handle(line),
+            Engine::OpenCode(o) => o.handle(line),
+            Engine::ClaudePty(_) | Engine::None => return,
+        };
+        self.apply_actions(&mut rt, actions);
     }
 
     fn apply(&self, rt: &mut TabRuntime, payload: Payload, subagent: Option<SubagentRef>) {
@@ -850,28 +1121,16 @@ impl SessionManager {
             rt.turn_open = false;
             if !rt.queued.is_empty() {
                 let q = rt.queued.remove(0);
-                let mut line_to_write: Option<String> = None;
-                let mut codex_actions: Option<Vec<Action>> = None;
-                match &mut rt.engine {
-                    Engine::Claude(m) => {
-                        let pid = index::get(&rt.session_id).ok().and_then(|e| e.tab(&rt.tab_id).and_then(|t| t.provider_session_id.clone())).unwrap_or_default();
-                        m.begin_turn();
-                        line_to_write = Some(claude::user_line(&pid, &q.text, &q.images));
-                    }
-                    Engine::Codex(c) => codex_actions = Some(c.prompt(q.text.clone(), q.images.clone())),
-                    Engine::Acp(a) => codex_actions = Some(a.prompt(q.text.clone(), q.images.clone())),
-                    Engine::OpenCode(o) => codex_actions = Some(o.prompt(q.text.clone(), q.images.clone())),
-                    Engine::None => {}
-                }
-                let sent = if let Some(line) = line_to_write {
-                    self.write(rt, &line).is_ok()
-                } else if let Some(actions) = codex_actions {
-                    let ok = !actions.is_empty();
-                    self.apply_actions(rt, actions);
-                    ok
-                } else {
-                    false
+                let actions = match &mut rt.engine {
+                    Engine::Codex(c) => c.prompt(q.text.clone(), q.images.clone()),
+                    Engine::Acp(a) => a.prompt(q.text.clone(), q.images.clone()),
+                    Engine::OpenCode(o) => o.prompt(q.text.clone(), q.images.clone()),
+                    // A PTY tab never queues here: the CLI holds typed input
+                    // itself, so the message went in when it was written.
+                    Engine::ClaudePty(_) | Engine::None => Vec::new(),
                 };
+                let sent = !actions.is_empty();
+                self.apply_actions(rt, actions);
                 if sent {
                     rt.turn_open = true;
                     rt.turn_started_at = Some(Instant::now());

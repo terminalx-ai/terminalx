@@ -21,7 +21,6 @@ struct Pane {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     pid: Option<u32>,
-    #[allow(dead_code)]
     alive: Arc<Mutex<bool>>,
 }
 
@@ -45,6 +44,17 @@ pub struct PtyExit {
     pub code: Option<i32>,
 }
 
+/// What a pane runs and where.
+pub struct PaneSpec<'a> {
+    pub cwd: &'a str,
+    pub cols: u16,
+    pub rows: u16,
+    /// Replaces the interactive shell; the pane exits with it.
+    pub command: Option<&'a str>,
+    /// Set inside the PTY before the command runs.
+    pub env: &'a [(String, String)],
+}
+
 fn shell() -> String {
     std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| {
         if cfg!(target_os = "macos") {
@@ -64,10 +74,15 @@ impl Terminals {
     /// execs it so PATH and rc files still apply, and the pane exits with it.
     /// That exit is the signal a terminal-view tab relies on, so there is no
     /// fallback shell kept alive behind the command.
-    pub fn spawn(&self, app: AppHandle, id: &str, cwd: &str, cols: u16, rows: u16, command: Option<&str>) -> Result<()> {
+    ///
+    /// `env` is set inside the PTY before the command runs. An agent tab uses
+    /// it to tell the CLI — and every hook the CLI spawns, since a hook is a
+    /// grandchild of this shell — which tab it belongs to.
+    pub fn spawn(&self, app: AppHandle, id: &str, spec: PaneSpec<'_>) -> Result<()> {
         if self.panes.lock().unwrap().contains_key(id) {
             return Ok(());
         }
+        let PaneSpec { cwd, cols, rows, command, env } = spec;
         let pty = portable_pty::native_pty_system();
         let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("openpty: {e}"))?;
         let sh = shell();
@@ -95,6 +110,16 @@ impl Terminals {
         cmd.env("TERM_PROGRAM", "Raccoon");
         cmd.env("PATH", crate::binpath::login_path());
         cmd.env("RACCOON", "1");
+        // Raccoon itself may have been started from inside an agent's session
+        // (a `tauri dev` an agent ran). Those stamps would tell a CLI spawned
+        // here that it is a nested child, and a nested child stops writing the
+        // transcript the chat view is projected from.
+        for k in ["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_BRIDGE_SESSION_ID"] {
+            cmd.env_remove(k);
+        }
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
         let mut child = pair.slave.spawn_command(cmd).map_err(|e| anyhow!("spawn shell: {e}"))?;
         drop(pair.slave);
         let pid = child.process_id();
@@ -180,5 +205,12 @@ impl Terminals {
 
     pub fn is_live(&self, id: &str) -> bool {
         self.panes.lock().unwrap().contains_key(id)
+    }
+
+    /// Whether the pane's own process is still there. `is_live` only says the
+    /// pane was opened and not closed; a command that exited on its own leaves
+    /// the pane in place so its last output stays on screen.
+    pub fn is_running(&self, id: &str) -> bool {
+        self.panes.lock().unwrap().get(id).map(|p| *p.alive.lock().unwrap()).unwrap_or(false)
     }
 }

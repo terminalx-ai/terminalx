@@ -598,9 +598,12 @@ pub fn tab_handoff(state: State<'_, AppState>, session_id: String, tab_id: Strin
     state.manager().ok_or("not ready")?.handoff(&session_id, &tab_id).map_err(err)
 }
 
+/// Start a tab's own CLI. PTY-first tabs are the CLI, so opening one starts
+/// it; harnesses that still run headless do nothing here.
 #[tauri::command]
-pub fn tab_reconcile(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<usize> {
-    state.manager().ok_or("not ready")?.reconcile(&session_id, &tab_id).map_err(err)
+pub async fn ensure_tab_started(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
+    let m = state.manager().ok_or("not ready")?;
+    tauri::async_runtime::spawn_blocking(move || m.ensure_started(&session_id, &tab_id).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -816,7 +819,8 @@ pub fn gh_available() -> bool {
 
 #[tauri::command]
 pub fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, cwd: String, cols: u16, rows: u16, command: Option<String>) -> CmdResult<()> {
-    state.terminals.spawn(app, &id, &cwd, cols.max(2), rows.max(1), command.as_deref()).map_err(err)
+    let spec = crate::pty::PaneSpec { cwd: &cwd, cols: cols.max(2), rows: rows.max(1), command: command.as_deref(), env: &[] };
+    state.terminals.spawn(app, &id, spec).map_err(err)
 }
 
 #[tauri::command]
