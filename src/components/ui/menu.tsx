@@ -11,7 +11,7 @@ export const DropdownMenuSubTrigger = Prim.SubTrigger;
 export const DropdownMenuRadioGroup = Prim.RadioGroup;
 
 const contentClass =
-  "z-[80] min-w-[10rem] overflow-hidden rounded-lg bg-popover glass p-1 text-popover-foreground shadow-surface hairline animate-fade-in";
+  "z-(--z-menu) min-w-[10rem] overflow-hidden rounded-lg bg-popover glass p-1 text-popover-foreground shadow-surface hairline animate-fade-in";
 
 export const DropdownMenuContent = React.forwardRef<
   React.ComponentRef<typeof Prim.Content>,
@@ -34,7 +34,7 @@ export const DropdownMenuSubContent = React.forwardRef<
 DropdownMenuSubContent.displayName = "DropdownMenuSubContent";
 
 const itemClass =
-  "relative flex cursor-default select-none items-center gap-2 rounded-md px-2 py-1.5 text-[13px] outline-none data-[highlighted]:bg-veil-strong data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:text-muted-foreground";
+  "relative flex cursor-default select-none items-center gap-2 whitespace-nowrap rounded-md px-2 py-1.5 text-[13px] outline-none data-[highlighted]:bg-veil-strong data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:text-muted-foreground";
 
 export const DropdownMenuItem = React.forwardRef<
   React.ComponentRef<typeof Prim.Item>,

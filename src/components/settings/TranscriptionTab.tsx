@@ -53,6 +53,19 @@ export function TranscriptionTab() {
     }
   }, []);
 
+  /**
+   * Devices come and go while the tab sits open — a headset paired after mount
+   * is otherwise invisible until Settings is reopened. `transcription_settings`
+   * re-enumerates them, so re-read it as the menu opens.
+   */
+  const refreshInputs = useCallback(async () => {
+    try {
+      setSettings(await transcription.settings());
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  }, []);
+
   useEffect(() => {
     void reload();
     let unlisten: (() => void) | null = null;
@@ -198,7 +211,11 @@ export function TranscriptionTab() {
         <SettingRow
           label="Microphone"
           control={
-            <DropdownMenu>
+            <DropdownMenu
+              onOpenChange={(open) => {
+                if (open) void refreshInputs();
+              }}
+            >
               <DropdownMenuTrigger asChild>
                 <Button variant="outline" size="sm" className="gap-1.5">
                   {settings?.inputDevice ?? "System default"}
