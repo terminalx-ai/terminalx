@@ -156,12 +156,17 @@ part of the paste, so the text lands in the composer and never sends. It is
 last character has arrived.
 
 The first prompt after a spawn waits for the TUI to finish drawing first, since
-a TUI mid-paint drops what is typed at it and has no way to say when it is
-ready. The sign is that the pane has drawn something and then been quiet for
-three seconds — measured, not guessed: a fresh start paints at 0.3 s, pauses
-0.7 s and settles at 2.0 s, while a `--resume` replays the conversation and
-pauses **2.7 s** in the middle of doing it. A prompt typed into either gap
-vanishes without a trace.
+a TUI mid-paint drops what is typed at it. The CLI says when it is up: the
+`SessionStart` hook runs once its session exists, for a fresh start and a
+`--resume` alike, and a 300 ms settle after it covers the last of the paint.
+
+Reading the screen instead does not work. A fresh start paints at 0.3 s, pauses
+0.7 s and settles at 2.0 s, so a short quiet threshold fires into the gap; a
+`--resume` replays the conversation and then keeps redrawing, so a long one
+never fires at all. Quiet output survives only as the fallback for a CLI whose
+hooks never reach us. If neither signal comes, the prompt is typed anyway
+behind a status line — losing it to a TUI that was not listening is bad, but
+discarding it in silence, which is what used to happen, is worse.
 
 A single-line prompt starting with `/` is written as plain keystrokes instead,
 because a pasted slash command is classified as prose and never opens the
@@ -212,6 +217,13 @@ against the installed CLI, not taken on trust.
 
 ### Chat and terminal are one pane
 
+A window claims a tab's pane by asking for it (`tab_pane`) when the tab view
+mounts, not only by hearing it announced: an app that restarts into a session
+whose CLI is already running was not listening when the pane opened. Starting a
+tab is shared per tab on both sides — one runtime per tab in Rust, one in-flight
+promise per tab in the frontend — because two starts racing is how a tab ended
+up with two CLIs fighting over one conversation.
+
 `tabViews.ts` keeps a `chat | terminal` flag per tab. For a PTY-first tab the
 terminal pane stays mounted underneath and the chat is drawn over it, so
 toggling never unmounts xterm, never loses scrollback and never resizes the
@@ -229,8 +241,10 @@ is gone: nothing used it once Claude stopped handing off.
   per token, so assistant prose appears a message at a time. There are no
   deltas and no streaming preview for a Claude tab.
 - **Keystroke input.** Everything the composer sends is typed into a TUI. It is
-  robust for prose and for slash commands, but it is not a protocol: there is no
-  acknowledgement, and a prompt sent while the CLI is starting up can be lost.
+  robust for prose and for slash commands, but it is not a protocol: nothing
+  acknowledges a prompt, so the app can say it typed one and not that the CLI
+  took it. The `UserPromptSubmit` hook arriving is the nearest thing to a
+  receipt.
 - **Images by path.** An attachment is archived as today and its *path* is
   pasted for the CLI to pick up, rather than base64 bytes on a wire.
 - **Queueing.** A prompt sent mid-turn is written immediately — the CLI queues
