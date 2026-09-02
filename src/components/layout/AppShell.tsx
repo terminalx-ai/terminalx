@@ -18,6 +18,7 @@ import { loadModels } from "@/lib/models";
 import { startNotifications } from "@/lib/notify";
 import { subscribeTabPty } from "@/lib/tabViews";
 import { Toasts } from "@/components/ui/Toasts";
+import { BypassDialog } from "@/components/session/BypassDialog";
 import { SettleDialog } from "@/components/session/SettleDialog";
 import { WorkspaceDeleteDialog } from "@/components/session/WorkspaceDeleteDialog";
 
@@ -70,6 +71,7 @@ export function AppShell() {
   return (
     <div className="flex h-full w-full">
       <Toasts />
+      <BypassDialog />
       <SettleDialog />
       <WorkspaceDeleteDialog />
       {sidebarOpen && <Sidebar onToggle={toggleSidebar} onOpenSettings={openSettings} onOpenIssues={showIssues} onOpenAgents={showAgents} onSearch={setSessionSearch} />}

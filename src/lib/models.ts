@@ -80,6 +80,35 @@ export function modeLabel(id: string): string {
   return PERMISSION_MODES.find((m) => m.id === id)?.label ?? "Auto";
 }
 
+export const BYPASS_MODE = "bypassPermissions";
+
+/**
+ * What "Bypass permissions" comes down to for one agent: the flag its CLI is
+ * launched with, and what that flag stops doing. The hint in the picker is
+ * one line; this is what the reader is asked to agree to, so it says which
+ * protections are gone rather than that some are.
+ */
+export function bypassEffect(harness: string): { flag: string; effect: string } {
+  if (harness === "codex") {
+    return {
+      flag: "--dangerously-bypass-approvals-and-sandbox",
+      effect:
+        "Codex runs with its sandbox off and its approvals off. Every command it writes executes immediately, with your own access to the disk and the network, and nothing stops to ask — not for edits outside this workspace, not for deletions, not for anything that reaches the internet.",
+    };
+  }
+  if (harness === "claude") {
+    return {
+      flag: "--permission-mode bypassPermissions",
+      effect:
+        "Claude Code stops asking about anything. File edits, shell commands and network calls all go through the moment it decides on them, inside this workspace and out.",
+    };
+  }
+  return {
+    flag: BYPASS_MODE,
+    effect: "The agent stops asking about anything. Every edit and every command it decides on runs the moment it decides on it.",
+  };
+}
+
 export const EFFORT_LABEL: Record<string, string> = {
   low: "Low",
   medium: "Medium",

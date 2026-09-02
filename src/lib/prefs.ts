@@ -27,6 +27,8 @@ export interface Prefs {
   lastMode: string;
   issueProvider: "github" | "linear";
   useWorktree: boolean;
+  /** The reader ticked "don't ask again" on the bypass warning. */
+  bypassConfirmed: boolean;
 }
 
 const DEFAULTS: Prefs = {
@@ -51,6 +53,7 @@ const DEFAULTS: Prefs = {
   lastMode: "auto",
   issueProvider: "github",
   useWorktree: true,
+  bypassConfirmed: false,
 };
 
 const KEY = "raccoon.prefs";

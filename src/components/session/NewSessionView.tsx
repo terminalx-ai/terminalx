@@ -20,6 +20,7 @@ import { api, errorMessage } from "@/lib/api";
 import { addProject, clearNewSessionPreset, selectProject, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { EFFORT_LABEL, PERMISSION_MODES, refreshModels, upgradeHint, useModels } from "@/lib/models";
 import { setPrefs, usePrefs } from "@/lib/prefs";
+import { chooseMode } from "@/lib/dialogs";
 import { useHotkey } from "@/lib/hotkeys";
 import { stopDictation } from "@/lib/dictation";
 import { cn } from "@/lib/cn";
@@ -238,7 +239,7 @@ export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, 
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="min-w-[14rem]">
                 <DropdownMenuLabel>Permissions</DropdownMenuLabel>
-                <DropdownMenuRadioGroup value={mode.id} onValueChange={(v) => setPrefs({ lastMode: v })}>
+                <DropdownMenuRadioGroup value={mode.id} onValueChange={(v) => chooseMode(harness?.id ?? "", v, (m) => setPrefs({ lastMode: m }))}>
                   {PERMISSION_MODES.map((m) => (
                     <DropdownMenuRadioItem key={m.id} value={m.id} className="flex-col items-start gap-0">
                       <span>{m.label}</span>
