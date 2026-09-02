@@ -3,10 +3,16 @@
 ## One-time setup
 
 - Updater signing keys live at `~/.tauri/raccoon.key` (private) and
-  `~/.tauri/raccoon.key.pub`. The public key is already in
+  `~/.tauri/raccoon.key.pub`, made once with `pnpm tauri signer generate -w
+  ~/.tauri/raccoon.key`. The public key is already in
   `src-tauri/tauri.conf.json` under `plugins.updater.pubkey`. Losing the
   private key means shipped builds can never verify a later update; keep a
   copy somewhere safe.
+- The private key is encrypted with the password chosen when it was
+  generated. That password is never written down here or anywhere else in the
+  repository — it is supplied to a build through
+  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, out of whatever password manager or
+  CI secret holds it.
 - `plugins.updater.endpoints` in `tauri.conf.json` is a placeholder. Point it
   at wherever `latest.json` (below) will be hosted. For GitHub Releases:
   `https://github.com/<owner>/raccoon/releases/latest/download/latest.json`.
@@ -82,7 +88,8 @@ a macOS dev build never loads.
 
 ```sh
 export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/raccoon.key)"
-export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+read -rs TAURI_SIGNING_PRIVATE_KEY_PASSWORD  # the password set at key generation
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 pnpm tauri build
 ```
 
