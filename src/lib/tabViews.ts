@@ -14,6 +14,9 @@ import type { SessionEntry, TabEntry } from "@/types/session";
  *
  * The agents still driven headless keep the old hand-off: their child is
  * stopped and a second command resumes the same conversation in a terminal.
+ * Those agents are no longer offered for new tabs — the decision lives in
+ * `HIDDEN_HARNESSES` in src-tauri/src/harness/mod.rs — so this branch serves
+ * only the tabs that were made before, which still open and run.
  */
 export type TabViewMode = "chat" | "terminal";
 

@@ -12,6 +12,9 @@
   so your own `~/.codex` is never edited — carrying status and approvals, with
   "Ask every time" now asking about every tool rather than only the ones Codex
   would have stopped for.
+- Claude Code and Codex are the agents Raccoon offers; Cursor and OpenCode are
+  no longer listed in the pickers or in Settings → Agents. Sessions and tabs
+  already running on them open and work exactly as before.
 
 ## 0.1.0
 

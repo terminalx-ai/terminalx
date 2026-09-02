@@ -39,7 +39,8 @@ fn m(harness: &str, id: &str, label: &str, efforts: &[&str], default_effort: Opt
     }
 }
 
-/// Every model we know statically. Codex is absent by design.
+/// Every model we know statically, hidden harnesses included. Codex is absent
+/// by design.
 pub fn catalog() -> Vec<Model> {
     let claude_efforts = ["low", "medium", "high", "xhigh", "max"];
     vec![
@@ -57,4 +58,38 @@ pub fn catalog() -> Vec<Model> {
         m("opencode", "anthropic/claude-opus-4-5", "Claude Opus 4.5", &[], None, false),
         m("opencode", "openai/gpt-5", "GPT-5", &[], None, false),
     ]
+}
+
+/// The list the pickers see: Claude's statics first, the models this account
+/// can actually run on Codex spliced in after them, then whatever else is
+/// static — minus the harnesses the UI does not offer, which is decided in
+/// one place (`harness::HIDDEN_HARNESSES`) rather than by leaving them out of
+/// the catalogue. A tab already on a hidden harness keeps its stored model id;
+/// the pickers just have nothing to offer it.
+pub fn offered(codex: Vec<Model>) -> Vec<Model> {
+    let statics = catalog();
+    let mut out: Vec<Model> = statics.iter().filter(|m| m.harness == "claude").cloned().collect();
+    out.extend(codex);
+    out.extend(statics.into_iter().filter(|m| m.harness != "claude"));
+    out.retain(|m| crate::harness::visible(&m.harness));
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_pickers_are_not_offered_a_hidden_harness() {
+        let hidden = crate::harness::HIDDEN_HARNESSES;
+        // The catalogue still carries them, so unhiding is one line.
+        for h in hidden {
+            assert!(catalog().iter().any(|m| &m.harness == h), "{h} models should still be in the catalog");
+        }
+        let offered = offered(vec![m("codex", "gpt-5.6-codex", "GPT-5.6 Codex", &[], None, true)]);
+        assert!(offered.iter().all(|m| !hidden.contains(&m.harness.as_str())));
+        // Claude first, then the account's Codex models.
+        assert_eq!(offered.first().map(|m| m.harness.as_str()), Some("claude"));
+        assert_eq!(offered.last().map(|m| m.harness.as_str()), Some("codex"));
+    }
 }

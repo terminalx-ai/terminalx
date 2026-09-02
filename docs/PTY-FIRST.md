@@ -14,8 +14,9 @@ chat is a projection of that process, and the terminal view is the same process
 seen directly. Switching between them is a view flag — nothing is stopped,
 resumed, or reconciled.
 
-Phase 1 did this for Claude Code and phase 2 for Codex. ACP and OpenCode still
-run headless and keep the old hand-off.
+Phase 1 did this for Claude Code and phase 2 for Codex. Phase 3 drew the line:
+Claude Code and Codex are the only agents the UI offers, and ACP (Cursor) and
+OpenCode — the two that are still headless and still hand off — are hidden.
 
 ## The architecture
 
@@ -242,8 +243,10 @@ itself to.) The backend names the pane it spawned in a `tab_pty` event and the
 frontend adopts it, which is what routes the CLI's output into this window's
 xterm instance.
 
-`tab_handoff` still exists for ACP and OpenCode. `tab_reconcile` is gone:
-nothing used it once Claude stopped handing off.
+`tab_handoff` still exists for ACP and OpenCode, which are the only tabs that
+can reach it — the backend refuses it for a PTY-first tab, and no button asks
+for it. `tab_reconcile` is gone: nothing used it once Claude stopped handing
+off.
 
 ## Codex
 
@@ -453,8 +456,10 @@ per event — the two that park on a person get 600 s, `SessionEnd` and
 - **A Codex tab has no fork.** `codex fork` exists but nothing is wired to it.
 - **The managed Codex home mirrors an allowlist**, so a `config.toml` key the
   reader adds that is not on that list does not reach a Raccoon tab.
-- **ACP and OpenCode are unchanged**: still headless, still handing off to a
-  terminal.
+- **ACP and OpenCode are unchanged, and hidden**: still headless, still handing
+  off to a terminal, but no longer offered for a new session or a new tab. A
+  tab already on one opens and runs exactly as before; its model picker is
+  empty, because the hidden harnesses' models are filtered out of the list too.
 
 ## Phases
 
@@ -465,8 +470,22 @@ per event — the two that park on a person get 600 s, `SessionEnd` and
    managed `CODEX_HOME` to put them in. The headless Codex engine and its
    hand-off are gone with it, and the shared half of phase 1 moved into
    `harness/tui.rs`.
-3. **ACP and OpenCode** — they are protocols, not TUIs: `cursor-agent acp` and
-   `opencode serve` have no interactive surface to project, so headless stays
-   the right answer for them and `tab_handoff` stays for their terminal view.
-   The open question is narrower than it was — whether either grows a hook
-   mechanism worth reading — and until one does, nothing here changes.
+3. **ACP and OpenCode** ✅ (this change) — they are protocols, not TUIs:
+   `cursor-agent acp` and `opencode serve` have no interactive surface to
+   project, so headless stays the right answer for them and `tab_handoff`
+   stays for their terminal view. Rather than build a second shape out to
+   match, they are **hidden**: the code, the engines and the model entries all
+   stay, and every tab already on one keeps working, but neither is offered
+   for new work. Claude Code and Codex are the two agents the UI lists, and
+   ⌘⇧T is a view flag for both of them and nothing else.
+
+   The switch is one list, `HIDDEN_HARNESSES` in `harness/mod.rs`. `catalog`
+   still returns all four and `models::catalog` still carries their models;
+   `harness::offered` and `models::offered` are what the `list_harnesses` and
+   `list_models` commands answer with, so taking an id out of that list puts
+   the agent back in the new-session picker, the new-tab menu, Settings →
+   Agents and the model picker at once.
+
+   The open question is unchanged — whether either grows a hook mechanism
+   worth reading — and if one does, phase 4 is to make it PTY-first and
+   unhide it.

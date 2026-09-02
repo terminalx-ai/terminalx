@@ -6,6 +6,8 @@
 //! is the same for both. A **headless** harness (ACP, OpenCode) is a peer
 //! driven over a pipe: each inbound line becomes a list of `Action`s the
 //! session manager applies, which is what keeps them testable on fixtures.
+//!
+//! Only the PTY-first two are offered to the reader; see `HIDDEN_HARNESSES`.
 
 pub mod acp;
 pub mod claude;
@@ -60,6 +62,26 @@ impl HarnessId {
             other => Self::Other(other.to_string()),
         }
     }
+}
+
+/// The agents this build can drive but does not offer.
+///
+/// Cursor (ACP) and OpenCode still work — their engines, their model entries
+/// and every tab already on disk are untouched, so an existing session opens
+/// and runs exactly as before. They are simply not offered for new work:
+/// with Claude Code and Codex both PTY-first, these two are the only agents
+/// left that have to hand off to a terminal instead of being one, and that is
+/// not a shape the app wants to grow. Hiding rather than deleting keeps the
+/// headless path alive for the tabs that have it, and keeps the door open.
+///
+/// **This list is the whole switch.** Take an id out of it and that agent is
+/// offered again — in the new-session picker, the new-tab menu, Settings →
+/// Agents and the model picker alike. Nothing else knows about the decision.
+pub const HIDDEN_HARNESSES: &[&str] = &["cursor", "opencode"];
+
+/// Whether the UI offers this harness at all.
+pub fn visible(harness: &str) -> bool {
+    !HIDDEN_HARNESSES.contains(&harness)
 }
 
 /// Which agents this build knows how to drive, and what each can do.
@@ -176,4 +198,25 @@ pub fn catalog() -> Vec<HarnessInfo> {
         }
     }
     v
+}
+
+/// The agents the UI lists. `catalog` keeps the hidden ones so a tab already
+/// running on one still has its name, its binary and its capabilities.
+pub fn offered() -> Vec<HarnessInfo> {
+    catalog().into_iter().filter(|h| visible(&h.id)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_hidden_agents_are_kept_but_not_offered() {
+        let all: Vec<String> = catalog().into_iter().map(|h| h.id).collect();
+        for id in HIDDEN_HARNESSES {
+            assert!(all.iter().any(|h| h == id), "{id} should still be in the catalog");
+        }
+        let offered: Vec<String> = offered().into_iter().map(|h| h.id).collect();
+        assert_eq!(offered, ["claude", "codex"]);
+    }
 }
