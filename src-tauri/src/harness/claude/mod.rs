@@ -7,6 +7,7 @@ pub mod commands;
 pub mod mapper;
 pub mod pty;
 pub mod transcript;
+pub mod trust;
 
 use serde_json::{json, Value};
 

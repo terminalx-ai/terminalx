@@ -252,6 +252,23 @@ mod tests {
         assert!(matches!(&p[9], Payload::TurnCompleted { status: TurnStatus::Aborted, .. }));
     }
 
+    /// A file the installed CLI wrote itself, running interactively in a PTY:
+    /// one turn, then a second after `--resume` reopened the same session.
+    /// Everything between the two prompts is the CLI's own bookkeeping.
+    #[test]
+    fn decodes_a_real_interactive_session_including_its_resume() {
+        const REAL: &str = include_str!("fixtures/interactive_session.jsonl");
+        let mut s = Streamer::at(0);
+        let p = s.push(REAL.as_bytes());
+        // The redacted `thinking` blocks the CLI writes carry no text, so they
+        // draw nothing; `mode`, `last-prompt` and the rest are bookkeeping.
+        assert_eq!(kinds(&p), vec!["user", "usage", "text", "usage", "user", "usage", "text", "usage"]);
+        assert!(matches!(&p[0], Payload::UserMessage { text, .. } if text == "Reply with exactly: pong"));
+        assert!(matches!(&p[2], Payload::AssistantText { text, .. } if text == "pong"));
+        assert!(matches!(&p[4], Payload::UserMessage { text, .. } if text == "Reply with exactly: second"));
+        assert!(matches!(&p[6], Payload::AssistantText { text, .. } if text == "second"));
+    }
+
     #[test]
     fn encodes_the_project_folder_like_the_cli() {
         let p = transcript_under(Path::new("/h"), "/Users/dev/code/ai/raccoon-e2e/.raccoon/worktrees/sly-ochre-hare", "abc");

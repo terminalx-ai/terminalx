@@ -16,6 +16,13 @@ fn err<E: std::fmt::Display>(e: E) -> String {
     format!("{e:#}")
 }
 
+/// Stop whatever a tab is running: a headless child, or the terminal pane a
+/// PTY-first tab's own CLI lives in.
+fn kill_tab(state: &tauri::State<'_, crate::AppState>, session_id: &str, tab_id: &str) {
+    state.host.kill(&format!("{session_id}/{tab_id}"));
+    state.terminals.kill(&crate::session::SessionManager::pane_id(tab_id));
+}
+
 // ------------------------------------------------------------------ projects
 
 #[derive(Serialize)]
@@ -226,7 +233,7 @@ pub fn add_tab(session_id: String, tab: NewTab) -> CmdResult<TabEntry> {
 #[tauri::command]
 pub fn remove_tab(app: AppHandle, session_id: String, tab_id: String) -> CmdResult<()> {
     let state = app.state::<crate::AppState>();
-    state.host.kill(&format!("{session_id}/{tab_id}"));
+    kill_tab(&state, &session_id, &tab_id);
     index::update_session(&session_id, |s| {
         s.tabs.retain(|t| t.id != tab_id);
         if s.active_tab.as_deref() == Some(&tab_id) {
@@ -286,7 +293,7 @@ pub async fn delete_session(app: AppHandle, session_id: String, remove_worktree:
         let state = app.state::<crate::AppState>();
         let entry = index::get(&session_id).map_err(err)?;
         for t in &entry.tabs {
-            state.host.kill(&format!("{}/{}", entry.id, t.id));
+            kill_tab(&state, &entry.id, &t.id);
         }
         index::update(|sessions| {
             sessions.retain(|s| s.id != session_id);
@@ -353,7 +360,7 @@ pub async fn remove_session_worktree(app: AppHandle, session_id: String) -> CmdR
         let s = index::get(&session_id).map_err(err)?;
         let name = s.worktree_name.clone().ok_or("session has no worktree")?;
         for t in &s.tabs {
-            state.host.kill(&format!("{}/{}", s.id, t.id));
+            kill_tab(&state, &s.id, &t.id);
         }
         git::remove_worktree(Path::new(&s.project_path), &name).map_err(err)?;
         let out = index::update_session(&session_id, |s| {
@@ -380,7 +387,7 @@ pub async fn settle_session(app: AppHandle, session_id: String, action: String) 
         let s = index::get(&session_id).map_err(err)?;
         let name = s.worktree_name.clone().ok_or("session has no worktree")?;
         for t in &s.tabs {
-            state.host.kill(&format!("{}/{}", s.id, t.id));
+            kill_tab(&state, &s.id, &t.id);
         }
         let deleted = match action.as_str() {
             "delete" => {
@@ -1081,7 +1088,7 @@ pub async fn delete_workspace(app: AppHandle, project_path: String, path: String
         let affected: Vec<SessionEntry> = sessions.into_iter().filter(|s| std::fs::canonicalize(&s.cwd).map(|c| c == target).unwrap_or(s.cwd == path)).collect();
         for s in &affected {
             for t in &s.tabs {
-                state.host.kill(&format!("{}/{}", s.id, t.id));
+                kill_tab(&state, &s.id, &t.id);
             }
         }
         crate::workspaces::delete(Path::new(&project_path), &target, delete_branch).map_err(err)?;

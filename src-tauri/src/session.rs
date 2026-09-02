@@ -735,6 +735,12 @@ impl SessionManager {
             Err(e) => log::warn!("no hook socket: {e:#}"),
         }
 
+        // The CLI's trust dialog would take the first prompt instead of the
+        // composer, and a session's worktree is always a folder it has not
+        // seen. The reader adopted this checkout when they made the session.
+        if let Err(e) = claude::trust::ensure_trusted(&entry.cwd) {
+            log::warn!("trust {}: {e:#}", entry.cwd);
+        }
         let path = claude::transcript::cli_transcript_path(&entry.cwd, &provider_id).ok_or_else(|| anyhow!("no home directory"))?;
         let tail = Arc::new(claude::pty::Tail::opening(path));
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: 120, rows: 30, command: Some(&command), env: &env };
