@@ -850,12 +850,54 @@ pub fn dictation_available() -> bool {
 
 #[tauri::command]
 pub fn dictation_start(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
-    state.dictation.start(app)
+    state.dictation.start(app, state.transcription.clone())
 }
 
 #[tauri::command]
 pub fn dictation_stop(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
-    state.dictation.stop(app)
+    state.dictation.stop(app, state.transcription.clone())
+}
+
+// ------------------------------------------------------------------ transcription models
+
+#[tauri::command]
+pub fn transcription_models(state: State<'_, AppState>) -> Vec<crate::transcription::ModelRow> {
+    state.transcription.models()
+}
+
+#[tauri::command]
+pub fn transcription_download(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    state.transcription.downloads.start(app, &id).map_err(err)
+}
+
+#[tauri::command]
+pub fn transcription_cancel_download(state: State<'_, AppState>, id: String) {
+    state.transcription.downloads.cancel(&id);
+}
+
+#[tauri::command]
+pub fn transcription_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    state.transcription.delete(&id).map_err(err)
+}
+
+#[tauri::command]
+pub fn transcription_set_model(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    state.transcription.set_model(&id).map_err(err)
+}
+
+#[tauri::command]
+pub fn transcription_settings(state: State<'_, AppState>) -> crate::transcription::TranscriptionSettings {
+    state.transcription.settings()
+}
+
+#[tauri::command]
+pub fn transcription_set_input(state: State<'_, AppState>, device: Option<String>) -> CmdResult<()> {
+    state.transcription.set_input(device).map_err(err)
+}
+
+#[tauri::command]
+pub fn transcription_set_mute(state: State<'_, AppState>, mute: bool) -> CmdResult<()> {
+    state.transcription.set_mute(mute).map_err(err)
 }
 
 // ------------------------------------------------------------------ issues

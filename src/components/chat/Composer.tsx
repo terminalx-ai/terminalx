@@ -415,7 +415,7 @@ export function Composer({
             </Button>
           </WithTooltip>
           {canDictate !== false && (
-            <WithTooltip label={dictating ? "Stop dictating" : "Dictate"} keys={keycaps("mod+shift+d")}>
+            <WithTooltip label={dictating ? "Stop dictating" : `Dictate · ${dictation.engine}`} keys={keycaps("mod+shift+d")}>
               <Button
                 variant="ghost"
                 size="icon-sm"

@@ -17,9 +17,11 @@ export interface DictationState {
   target: string | null;
   error: string | null;
   available: boolean | null;
+  /** Human name of the engine dictation will use, for the mic tooltip. */
+  engine: string;
 }
 
-let state: DictationState = { phase: "idle", partial: "", target: null, error: null, available: null };
+let state: DictationState = { phase: "idle", partial: "", target: null, error: null, available: null, engine: "Apple" };
 const listeners = new Set<() => void>();
 function set(patch: Partial<DictationState>) {
   state = { ...state, ...patch };
@@ -42,7 +44,7 @@ type Sink = (text: string) => void;
 let sink: Sink | null = null;
 
 interface DictationEvent {
-  kind: "partial" | "final" | "error" | "stopped" | "listening";
+  kind: "partial" | "final" | "error" | "stopped" | "listening" | "transcribing";
   text?: string;
   message?: string;
 }
@@ -57,6 +59,9 @@ async function subscribe() {
       switch (p.kind) {
         case "listening":
           set({ phase: "listening", error: null });
+          break;
+        case "transcribing":
+          set({ phase: "finishing", partial: "" });
           break;
         case "partial":
           set({ partial: p.text ?? "" });
@@ -85,10 +90,25 @@ export async function dictationAvailable(): Promise<boolean> {
   try {
     const ok = await invoke<boolean>("dictation_available");
     set({ available: ok });
+    void refreshDictationEngine();
     return ok;
   } catch {
     set({ available: false });
     return false;
+  }
+}
+
+/** Re-read which engine is selected; the settings tab calls this after a change. */
+export async function refreshDictationEngine() {
+  try {
+    const [settings, models] = await Promise.all([
+      invoke<{ model: string }>("transcription_settings"),
+      invoke<{ id: string; name: string; installed: boolean }[]>("transcription_models"),
+    ]);
+    const m = models.find((x) => x.id === settings.model);
+    set({ engine: m && m.installed ? m.name : "Apple" });
+  } catch {
+    /* outside a webview */
   }
 }
 

@@ -286,4 +286,48 @@ export const issues = {
   linearSetApiKey: (key: string) => invoke<LinearStatus>("linear_set_api_key", { key }),
   linearTeams: () => invoke<IssueTeam[]>("linear_teams"),
   githubRepo: (projectPath: string) => invoke<string | null>("github_repo", { projectPath }),
+// ---- transcription models and dictation input
+export interface TranscriptionModel {
+  id: string;
+  name: string;
+  description: string;
+  repo: string;
+  filename: string;
+  sizeBytes: number;
+  languages: string;
+  speed: number;
+  accuracy: number;
+  recommended: boolean;
+  installed: boolean;
+  downloading: boolean;
+  progress?: DownloadProgress;
+  page: string;
+}
+export interface DownloadProgress {
+  id: string;
+  received: number;
+  total: number;
+  done: boolean;
+  error?: string;
+}
+export interface InputDevice {
+  id: string;
+  name: string;
+  isDefault: boolean;
+}
+export interface TranscriptionSettings {
+  model: string;
+  inputDevice: string | null;
+  muteWhileRecording: boolean;
+  inputs: InputDevice[];
+}
+export const transcription = {
+  models: () => invoke<TranscriptionModel[]>("transcription_models"),
+  download: (id: string) => invoke<void>("transcription_download", { id }),
+  cancelDownload: (id: string) => invoke<void>("transcription_cancel_download", { id }),
+  remove: (id: string) => invoke<void>("transcription_delete", { id }),
+  setModel: (id: string) => invoke<void>("transcription_set_model", { id }),
+  settings: () => invoke<TranscriptionSettings>("transcription_settings"),
+  setInput: (device: string | null) => invoke<void>("transcription_set_input", { device }),
+  setMute: (mute: boolean) => invoke<void>("transcription_set_mute", { mute }),
 };

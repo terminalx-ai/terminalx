@@ -17,6 +17,7 @@ First runnable build, assembled checkpoint by checkpoint.
 - Themes (den, slate, moss, ember) with light and dark modes and window vibrancy.
 - Terminal view for any agent tab (⌘⇧T): the same conversation in the agent's own CLI, and back again with the transcript caught up.
 - Dictation from the composer, using the Mac's own on-device speech recognition; nothing is downloaded and audio never leaves the machine.
+- Optional local transcription models (Parakeet, Nemotron, Canary, Whisper) downloaded on demand in Settings → Transcription, plus a microphone picker and mute-while-recording.
 - File explorer beside the transcript (⌘⇧E) with Material file icons, git status badges, keyboard navigation and a right-click menu.
 - Issues from GitHub and Linear (⌘I): browse, read, and start a session on one; the worktree is named after the issue and the header links back to it.
 - Files open in an editor pane beside the chat with their own tabs; markdown renders as a preview with a Source toggle.
