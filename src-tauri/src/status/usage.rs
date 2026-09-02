@@ -109,8 +109,14 @@ fn parse_claude(payload: &Value, updated_at: i64) -> Vec<UsageWindow> {
     rate_limits
         .iter()
         .filter_map(|(key, raw)| {
-            let utilization = numeric(raw.get("utilization")?)?;
-            let used_percent = if utilization <= 1.0 { utilization * 100.0 } else { utilization }.clamp(0.0, 100.0);
+            let usage = raw.get("used_percentage").or_else(|| raw.get("utilization"))?;
+            let utilization = numeric(usage)?;
+            let used_percent = if raw.get("used_percentage").is_none() && utilization <= 1.0 {
+                utilization * 100.0
+            } else {
+                utilization
+            }
+            .clamp(0.0, 100.0);
             let (label, window_minutes) = claude_label(key);
             Some(UsageWindow {
                 agent: "claude".into(),
@@ -283,10 +289,10 @@ mod tests {
     }
 
     #[test]
-    fn claude_statusline_uses_utilization_and_snake_case_resets() {
+    fn claude_statusline_accepts_documented_and_fractional_usage() {
         let windows = parse_claude(
             &json!({"rate_limits": {
-                "five_hour": {"utilization": 0.62, "resets_at": 1788757220},
+                "five_hour": {"used_percentage": 62, "resets_at": 1788757220},
                 "seven_day_opus": {"utilization": 0.9, "resets_at": 1788981737}
             }}),
             456,
