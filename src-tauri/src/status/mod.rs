@@ -8,6 +8,13 @@ use anyhow::Result;
 use tauri::menu::{CheckMenuItemBuilder, Menu, MenuItemKind};
 use tauri::{App, AppHandle, Emitter, Runtime};
 
+pub mod usage;
+
+#[derive(Default)]
+pub struct StatusState {
+    pub usage: usage::UsageStore,
+}
+
 pub const MENU_ID: &str = "status-bar-visible";
 pub const SETTINGS_EVENT: &str = "status_bar_settings";
 

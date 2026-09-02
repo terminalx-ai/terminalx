@@ -104,7 +104,6 @@ function Demo() {
                   onSetMode={() => {}}
                   contextUsed={42000}
                   contextMax={200000}
-                  usageWindows={{ five_hour: { utilization: 0.47, resetsAt: Date.now() / 1000 + 5400 }, seven_day: { utilization: 0.09, resetsAt: Date.now() / 1000 + 300000 } }}
                   handoffs={live ? undefined : [{ label: "Commit", prompt: "Commit the current changes." }, { label: "Create PR", prompt: "Open a pull request." }, { label: "Run it", prompt: "Run the tests." }]}
                   autoFocus
                 />

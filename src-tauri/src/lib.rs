@@ -28,6 +28,7 @@ pub struct AppState {
     pub transcription: Arc<transcription::Transcription>,
     /// Which Codex models this account may run, read from the CLI once.
     pub codex_models: Arc<harness::codex::models::Cache>,
+    pub status: Arc<status::StatusState>,
     manager: std::sync::Mutex<Option<session::SessionManager>>,
 }
 
@@ -43,12 +44,14 @@ pub fn run() {
     let host = Arc::new(harness::host::Host::new());
     let codex_models = Arc::new(harness::codex::models::Cache::default());
     let terminals = Arc::new(pty::Terminals::new());
+    let status_state = Arc::new(status::StatusState::default());
     let state = AppState {
         host: host.clone(),
         terminals: terminals.clone(),
         dictation: Arc::new(dictation::Dictation::default()),
         transcription: Arc::new(transcription::Transcription::default()),
         codex_models: codex_models.clone(),
+        status: status_state.clone(),
         manager: std::sync::Mutex::new(None),
     };
 
@@ -63,7 +66,7 @@ pub fn run() {
         .manage(state)
         .setup(move |app| {
             status::install_menu(app)?;
-            let manager = session::SessionManager::new(app.handle().clone(), host.clone(), terminals.clone(), codex_models.clone());
+            let manager = session::SessionManager::new(app.handle().clone(), host.clone(), terminals.clone(), codex_models.clone(), status_state.clone());
             *app.state::<AppState>().manager.lock().unwrap() = Some(manager.clone());
             // The agent CLIs' hooks reach the app through this socket; without
             // it a PTY-first tab still runs, it just cannot report or ask.
@@ -179,6 +182,8 @@ pub fn run() {
             commands::transcription_set_mute,
             commands::status_bar_settings,
             commands::set_status_bar_settings,
+            commands::status_usage_snapshot,
+            commands::status_usage_refresh,
         ])
         .on_menu_event(|app, event| {
             if event.id().as_ref() == status::MENU_ID {

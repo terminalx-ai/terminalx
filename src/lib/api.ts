@@ -107,10 +107,28 @@ export interface StatusBarSettings {
   percent: "used" | "remaining";
 }
 
+export interface UsageWindow {
+  agent: "claude" | "codex";
+  key: string;
+  label: string;
+  usedPercent: number;
+  resetsAt: number | null;
+  windowMinutes: number | null;
+  updatedAt: number;
+  plan?: string;
+  stale: boolean;
+}
+
+export interface UsageSnapshot {
+  windows: UsageWindow[];
+}
+
 export const statusBar = {
   settings: () => invoke<StatusBarSettings>("status_bar_settings"),
   setSettings: (patch: Partial<StatusBarSettings>) =>
     invoke<StatusBarSettings>("set_status_bar_settings", { patch }),
+  usage: () => invoke<UsageSnapshot>("status_usage_snapshot"),
+  refreshUsage: (manual = false) => invoke<UsageSnapshot>("status_usage_refresh", { manual }),
 };
 
 // ---- agent tabs

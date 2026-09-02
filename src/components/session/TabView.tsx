@@ -156,8 +156,6 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
           }}
           contextUsed={transcript.contextUsed ?? tab.contextUsed ?? undefined}
           contextMax={transcript.contextMax ?? tab.contextMax ?? undefined}
-          usageWindows={transcript.usageWindows}
-          codexUsage={transcript.codexUsage}
           handoffs={handoffsFor(transcript, changes.files.length > 0)}
           disabledReason={error ?? viewError}
           autoFocus={active}
@@ -210,4 +208,3 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
   if (terminalMode) return terminal;
   return chat;
 }
-

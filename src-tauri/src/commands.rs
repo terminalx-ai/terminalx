@@ -323,6 +323,7 @@ pub async fn delete_session(app: AppHandle, session_id: String, remove_worktree:
 
 #[tauri::command]
 pub async fn list_harnesses() -> CmdResult<Vec<harness::HarnessInfo>> {
+    crate::binpath::invalidate();
     tauri::async_runtime::spawn_blocking(harness::offered).await.map_err(err)
 }
 
@@ -741,6 +742,23 @@ pub fn set_status_bar_settings(app: AppHandle, patch: StatusBarPatch) -> CmdResu
     crate::status::set_menu_checked(&app, settings.status_bar.visible);
     let _ = app.emit(crate::status::SETTINGS_EVENT, &settings.status_bar);
     Ok(settings.status_bar)
+}
+
+#[tauri::command]
+pub fn status_usage_snapshot(state: State<'_, AppState>) -> CmdResult<crate::status::usage::UsageSnapshot> {
+    Ok(state.manager().ok_or("not ready")?.usage_snapshot())
+}
+
+#[tauri::command]
+pub async fn status_usage_refresh(app: AppHandle, state: State<'_, AppState>, manual: Option<bool>) -> CmdResult<crate::status::usage::UsageSnapshot> {
+    let status = state.status.clone();
+    let manager = state.manager().ok_or("not ready")?;
+    tauri::async_runtime::spawn_blocking(move || status.usage.refresh_codex(manual.unwrap_or(false)).map_err(err))
+        .await
+        .map_err(err)??;
+    let snapshot = manager.usage_snapshot();
+    let _ = app.emit(crate::status::usage::EVENT, &snapshot);
+    Ok(snapshot)
 }
 
 // ------------------------------------------------------------------ files & commands
