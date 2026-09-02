@@ -219,6 +219,14 @@ is gone: nothing used it once Claude stopped handing off.
   the TUI has no command for it. Model and effort change in place.
 - **One permission surface.** While the hook answers, the CLI never shows its
   own prompt. If the hook lapses it does, and the answer has to be given there.
+- **One CLI per visited tab.** Opening a Claude tab starts a real `claude`
+  process, and it stays up until the tab, the session or the app is closed —
+  that is the point of the model, but it does mean a long afternoon of clicking
+  through sessions leaves several running. They are killed together when the
+  window closes, and individually when a tab or session is removed.
+- **The hook socket is a unix socket**, so the Raccoon home has to sit inside
+  the platform's path limit (about 104 bytes on macOS). A path too long to bind
+  is logged and the tab runs without status or permission cards.
 - **Codex, ACP and OpenCode are unchanged** in this phase: still headless, still
   handing off to a terminal.
 
