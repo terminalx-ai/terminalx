@@ -43,7 +43,7 @@ pub struct PtyData {
     pub data: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PtyExit {
     pub id: String,
