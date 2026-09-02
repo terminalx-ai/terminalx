@@ -88,10 +88,10 @@ rm -rf src-tauri/icons-dev/android src-tauri/icons-dev/ios \
 The script needs Pillow (`pip install pillow`). It extracts the largest
 PNG-encoded entry from
 `/Applications/TerminalX.app/Contents/Resources/icon.icns`, composites "N" and
-"D" badges in the app's own amber accent, and writes the two 1024px masters;
-the same source, fonts, and Pillow version produce the same bytes. The final
-command drops mobile and Windows Store output from the dev set, which a macOS
-dev build never loads.
+"D" badges in the app's own amber accent, removes the source artwork's stray
+vertical highlight, and writes the two 1024px masters; the same source, fonts,
+and Pillow version produce the same bytes. The final command drops mobile and
+Windows Store output from the dev set, which a macOS dev build never loads.
 
 ## Build
 

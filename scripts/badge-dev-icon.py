@@ -5,8 +5,9 @@
 
 The source of truth is the icon embedded in the installed predecessor app.
 The script extracts the largest PNG entry from that ICNS container, stamps an
-amber "N" or "D" badge into its bottom-right corner, and writes the two 1024px
-masters consumed by Tauri:
+unwanted vertical highlight out of the left chevron, stamps an amber "N" or
+"D" badge into its bottom-right corner, and writes the two 1024px masters
+consumed by Tauri:
 
     src-tauri/icons/app-icon-next.png
     src-tauri/icons-dev/app-icon-next-dev.png
@@ -52,6 +53,16 @@ LETTER_CAP_HEIGHT = 0.52  # of the badge's own size
 
 # Drawn at 4x and downsampled; PIL has no anti-aliased shape drawing.
 SUPERSAMPLE = 4
+
+# The source artwork contains a narrow vertical highlight behind the left
+# chevron. These coordinates name that strip in its 1024px master. Replacing
+# its dark pixels from the adjacent background keeps the chevron's white,
+# anti-aliased edges intact while removing the line at every generated size.
+SOURCE_REFERENCE_SIZE = 1024
+HIGHLIGHT_X = (320, 334)
+HIGHLIGHT_Y = (408, 608)
+HIGHLIGHT_COPY_OFFSET = 20
+HIGHLIGHT_MAX_CHANNEL = 180
 
 # First one that exists wins, so the result is stable across machines that
 # have the same fonts installed.
@@ -99,6 +110,22 @@ def largest_icns_image(path: Path) -> Image.Image:
     if best is None:
         raise SystemExit(f"{path} holds no PNG entry to badge")
     return best
+
+
+def remove_vertical_highlight(icon: Image.Image) -> Image.Image:
+    """Remove the source icon's stray line without touching the logo edges."""
+    cleaned = icon.copy()
+    scale = icon.width / SOURCE_REFERENCE_SIZE
+    left, right = (round(value * scale) for value in HIGHLIGHT_X)
+    top, bottom = (round(value * scale) for value in HIGHLIGHT_Y)
+    offset = max(1, round(HIGHLIGHT_COPY_OFFSET * scale))
+    for x in range(left, right):
+        source_x = x - offset
+        for y in range(top, bottom):
+            pixel = icon.getpixel((x, y))
+            if max(pixel[:3]) < HIGHLIGHT_MAX_CHANNEL:
+                cleaned.putpixel((x, y), icon.getpixel((source_x, y)))
+    return cleaned
 
 
 def load_font(pixel_size: int) -> ImageFont.FreeTypeFont:
@@ -170,7 +197,7 @@ def main(argv: list[str]) -> int:
     source = Path(argv[1]) if len(argv) > 1 else DEFAULT_SOURCE
     if not source.exists():
         raise SystemExit(f"no source icon at {source}")
-    icon = load_source(source)
+    icon = remove_vertical_highlight(load_source(source))
     write(icon, "N", RELEASE_OUTPUT)
     write(icon, "D", DEV_OUTPUT)
     return 0
