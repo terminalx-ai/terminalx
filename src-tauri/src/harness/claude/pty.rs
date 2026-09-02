@@ -212,17 +212,19 @@ pub struct Tail {
     /// The cursor, held across polls. Also serialises the two callers — the
     /// poll thread and a `Stop` hook flushing before it closes the turn — so
     /// payloads are published in file order whichever gets there first.
+    ///
     stream: std::sync::Mutex<Streamer>,
 }
 
 pub const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 impl Tail {
-    /// Start at the file's current length: everything already in it is either
-    /// history the app has logged or a conversation it is resuming.
-    pub fn opening(path: PathBuf) -> Self {
+    /// Follow from the file's length now: whatever it already holds is either
+    /// history the app has logged or a conversation it is resuming. `carried`
+    /// names records a fork will copy in later, which are history too.
+    pub fn opening(path: PathBuf, carried: std::collections::HashSet<String>) -> Self {
         let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        Self { path: std::sync::Mutex::new(path), stream: std::sync::Mutex::new(Streamer::at(len)) }
+        Self { path: std::sync::Mutex::new(path), stream: std::sync::Mutex::new(Streamer::skipping(len, carried)) }
     }
 
     /// Point at the file the CLI actually opened. Hooks carry
@@ -233,9 +235,10 @@ impl Tail {
         if *current == path {
             return;
         }
-        let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         *current = path.to_path_buf();
-        *self.stream.lock().unwrap() = Streamer::at(len);
+        let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let mut stream = self.stream.lock().unwrap();
+        *stream = Streamer::skipping(len, stream.carried().clone());
     }
 
     /// Read whatever has been appended since the last call.
@@ -255,7 +258,7 @@ impl Tail {
             // Skipping to the new end loses a little; replaying from zero
             // would duplicate the whole conversation in the log.
             log::warn!("transcript {} shrank; skipping to its end", path.display());
-            *stream = Streamer::at(size);
+            *stream = Streamer::skipping(size, stream.carried().clone());
             return Vec::new();
         }
         let mut file = match std::fs::File::open(&path) {
@@ -392,7 +395,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         std::fs::write(&path, "{\"type\":\"user\",\"message\":{\"content\":\"old\"}}\n").unwrap();
-        let tail = Tail::opening(path.clone());
+        let tail = Tail::opening(path.clone(), Default::default());
         assert!(tail.drain().is_empty());
 
         let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
@@ -414,7 +417,7 @@ mod tests {
         let real = dir.path().join("real.jsonl");
         std::fs::write(&guessed, "").unwrap();
         std::fs::write(&real, "{\"type\":\"user\",\"message\":{\"content\":\"before\"}}\n").unwrap();
-        let tail = Tail::opening(guessed);
+        let tail = Tail::opening(guessed, Default::default());
         tail.retarget(&real);
         // What the file already held is history, not something to replay.
         assert!(tail.drain().is_empty());

@@ -758,7 +758,12 @@ impl SessionManager {
             log::warn!("trust {}: {e:#}", entry.cwd);
         }
         let path = claude::transcript::cli_transcript_path(&entry.cwd, &provider_id).ok_or_else(|| anyhow!("no home directory"))?;
-        let tail = Arc::new(claude::pty::Tail::opening(path));
+        // A fork is handed a copy of the whole parent conversation, written
+        // into its new file when the first turn lands. The app already has all
+        // of it, and the copy keeps each record's original uuid, so those are
+        // the ones to drop.
+        let carried = fork_from.as_deref().and_then(|parent| claude::transcript::record_uuids(&entry.cwd, parent)).unwrap_or_default();
+        let tail = Arc::new(claude::pty::Tail::opening(path, carried));
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: 120, rows: 30, command: Some(&command), env: &env };
         self.terminals.spawn(self.app.clone(), &pane, spec).context("start Claude Code")?;
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
