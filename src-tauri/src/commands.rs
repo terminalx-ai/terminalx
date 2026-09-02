@@ -577,6 +577,16 @@ pub fn interrupt_turn(state: State<'_, AppState>, session_id: String, tab_id: St
 }
 
 #[tauri::command]
+pub fn tab_handoff(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<crate::session::HandoffInfo> {
+    state.manager().ok_or("not ready")?.handoff(&session_id, &tab_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn tab_reconcile(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<usize> {
+    state.manager().ok_or("not ready")?.reconcile(&session_id, &tab_id).map_err(err)
+}
+
+#[tauri::command]
 pub fn stop_tab(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
     state.manager().ok_or("not ready")?.stop(&session_id, &tab_id).map_err(err)
 }
@@ -777,8 +787,8 @@ pub fn gh_available() -> bool {
 // ------------------------------------------------------------------ terminals
 
 #[tauri::command]
-pub fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, cwd: String, cols: u16, rows: u16) -> CmdResult<()> {
-    state.terminals.spawn(app, &id, &cwd, cols.max(2), rows.max(1)).map_err(err)
+pub fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, cwd: String, cols: u16, rows: u16, command: Option<String>) -> CmdResult<()> {
+    state.terminals.spawn(app, &id, &cwd, cols.max(2), rows.max(1), command.as_deref()).map_err(err)
 }
 
 #[tauri::command]

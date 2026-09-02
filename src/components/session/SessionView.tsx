@@ -1,4 +1,5 @@
-import { CircleDot, FolderTree, GitBranch, PanelLeft, PanelRight, TerminalSquare } from "lucide-react";
+import { CircleDot, FolderTree, GitBranch, MessageSquare, PanelLeft, PanelRight, Terminal, TerminalSquare } from "lucide-react";
+import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -45,6 +46,12 @@ export function SessionView({
   const store = useSessionStore();
   const project = store.projects.find((p) => p.path === session.projectPath);
   const activeTab = session.tabs.find((t) => t.id === session.activeTab) ?? session.tabs[0];
+  const tabViews = useTabViews();
+  const activeInTerminal = !!activeTab && tabViews.views[activeTab.id] === "terminal";
+  const switching = !!activeTab && !!tabViews.switching[activeTab.id];
+  useHotkey("mod+shift+t", () => {
+    if (activeTab) void toggleTabView(session, activeTab);
+  });
   const ed = useEditors();
   const editors = ed.editors.filter((e) => e.sessionId === session.id);
   const activeEditor = ed.active[session.id] ?? null;
@@ -100,6 +107,21 @@ export function SessionView({
 
           <div className="ml-auto flex max-w-[70%] shrink-0 items-center gap-0.5">
             <TabStrip session={session} activeTab={activeTab} />
+            {activeTab && (
+              <WithTooltip label={activeInTerminal ? "Back to chat" : "Show terminal view"} keys={keycaps("mod+shift+t")}>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={activeInTerminal ? "Back to chat" : "Show terminal view"}
+                  aria-pressed={activeInTerminal}
+                  disabled={switching}
+                  onClick={() => void toggleTabView(session, activeTab)}
+                  className={cn(activeInTerminal && "bg-veil-strong text-foreground")}
+                >
+                  {activeInTerminal ? <MessageSquare /> : <Terminal />}
+                </Button>
+              </WithTooltip>
+            )}
             <WithTooltip label={prefs.explorerOpen ? "Hide explorer" : "Show explorer"} keys={keycaps("mod+shift+e")}>
               <Button
                 variant="ghost"

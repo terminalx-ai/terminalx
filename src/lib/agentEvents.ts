@@ -157,6 +157,16 @@ export async function loadTab(sessionId: string, tabId: string) {
   touch(k, true);
 }
 
+/** Re-read a tab's log from disk, for after something else wrote to it. */
+export async function reloadTab(sessionId: string, tabId: string) {
+  const k = key(sessionId, tabId);
+  const log = getLog(k);
+  log.loaded = false;
+  log.events = [];
+  log.stream = [];
+  await loadTab(sessionId, tabId);
+}
+
 export function setTabStatus(sessionId: string, tabId: string, status: TabStatus) {
   const k = key(sessionId, tabId);
   const log = getLog(k);

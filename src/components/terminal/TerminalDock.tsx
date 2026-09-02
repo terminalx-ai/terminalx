@@ -16,7 +16,7 @@ import { TerminalView } from "./TerminalView";
 export function TerminalDock({ sessionId, cwd, active }: { sessionId: string; cwd: string; active: boolean }) {
   const terms = useTerminals();
   const prefs = usePrefs();
-  const panes = terms.panes.filter((p) => p.sessionId === sessionId);
+  const panes = terms.panes.filter((p) => p.sessionId === sessionId && !p.hidden);
   const open = !!terms.open[sessionId];
   const activeId = terms.active[sessionId] ?? panes[0]?.id;
   const drag = useRef<{ y: number; h: number } | null>(null);

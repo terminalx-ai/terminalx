@@ -17,6 +17,16 @@ export interface TerminalPane {
   title: string;
   exited: boolean;
   exitCode: number | null;
+  /** Owned by a tab's terminal view; the dock leaves it out. */
+  hidden?: boolean;
+}
+
+export interface OpenTerminalOptions {
+  id?: string;
+  title?: string;
+  /** Run this instead of an interactive shell; the pane exits with it. */
+  command?: string;
+  hidden?: boolean;
 }
 
 interface State {
@@ -122,14 +132,20 @@ export async function subscribeTerminals() {
 }
 
 let counter = 0;
-export async function openTerminal(sessionId: string, cwd: string, cols = 100, rows = 24): Promise<TerminalPane> {
+export async function openTerminal(sessionId: string, cwd: string, cols = 100, rows = 24, opts: OpenTerminalOptions = {}): Promise<TerminalPane> {
   await subscribeTerminals();
   counter++;
-  const id = `${sessionId}:${Date.now().toString(36)}${counter}`;
-  const pane: TerminalPane = { id, sessionId, title: `Terminal ${state.panes.filter((p) => p.sessionId === sessionId).length + 1}`, exited: false, exitCode: null };
-  set({ panes: [...state.panes, pane], active: { ...state.active, [sessionId]: id }, open: { ...state.open, [sessionId]: true } });
+  const id = opts.id ?? `${sessionId}:${Date.now().toString(36)}${counter}`;
+  if (state.panes.some((p) => p.id === id)) await closeTerminal(id);
+  const visibleCount = state.panes.filter((p) => p.sessionId === sessionId && !p.hidden).length;
+  const pane: TerminalPane = { id, sessionId, title: opts.title ?? `Terminal ${visibleCount + 1}`, exited: false, exitCode: null, hidden: opts.hidden };
+  set({
+    panes: [...state.panes, pane],
+    active: opts.hidden ? state.active : { ...state.active, [sessionId]: id },
+    open: opts.hidden ? state.open : { ...state.open, [sessionId]: true },
+  });
   try {
-    await pty.spawn(id, cwd, cols, rows);
+    await pty.spawn(id, cwd, cols, rows, opts.command);
   } catch (e) {
     set({ panes: state.panes.filter((p) => p.id !== id) });
     throw e;
@@ -142,7 +158,7 @@ export async function closeTerminal(id: string) {
   if (!pane) return;
   await pty.kill(id).catch(() => {});
   const rest = state.panes.filter((p) => p.id !== id);
-  const siblings = rest.filter((p) => p.sessionId === pane.sessionId);
+  const siblings = rest.filter((p) => p.sessionId === pane.sessionId && !p.hidden);
   set({
     panes: rest,
     active: { ...state.active, [pane.sessionId]: siblings[siblings.length - 1]?.id ?? "" },
@@ -162,7 +178,7 @@ export async function toggleDock(sessionId: string, cwd: string) {
     return;
   }
   setDockOpen(sessionId, true);
-  if (!state.panes.some((p) => p.sessionId === sessionId)) await openTerminal(sessionId, cwd);
+  if (!state.panes.some((p) => p.sessionId === sessionId && !p.hidden)) await openTerminal(sessionId, cwd);
 }
 
 export function setDockOpen(sessionId: string, open: boolean) {
