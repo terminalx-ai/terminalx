@@ -22,6 +22,10 @@ struct Pane {
     writer: Box<dyn Write + Send>,
     pid: Option<u32>,
     alive: Arc<Mutex<bool>>,
+    /// When this pane last wrote something. A caller that has to type into a
+    /// program rather than talk to it uses the gap since the last byte as its
+    /// only sign that the program has finished drawing and is listening.
+    last_output: Arc<Mutex<Option<Instant>>>,
 }
 
 #[derive(Default)]
@@ -126,11 +130,13 @@ impl Terminals {
         let mut reader = pair.master.try_clone_reader().map_err(|e| anyhow!("pty reader: {e}"))?;
         let writer = pair.master.take_writer().map_err(|e| anyhow!("pty writer: {e}"))?;
         let alive = Arc::new(Mutex::new(true));
+        let last_output = Arc::new(Mutex::new(None));
 
         {
             let app = app.clone();
             let id = id.to_string();
             let alive = alive.clone();
+            let last_output = last_output.clone();
             std::thread::Builder::new().name(format!("pty-read-{id}")).spawn(move || {
                 let mut buf = vec![0u8; 16 * 1024];
                 let mut acc: Vec<u8> = Vec::with_capacity(MAX_CHUNK);
@@ -148,6 +154,7 @@ impl Terminals {
                                 continue;
                             }
                             let data = base64::engine::general_purpose::STANDARD.encode(&acc);
+                            *last_output.lock().unwrap() = Some(Instant::now());
                             let _ = app.emit("pty_data", PtyData { id: id.clone(), data });
                             acc.clear();
                             window_start = None;
@@ -169,7 +176,7 @@ impl Terminals {
                 let _ = app.emit("pty_exit", PtyExit { id, code });
             })?;
         }
-        self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, writer, pid, alive });
+        self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, writer, pid, alive, last_output });
         Ok(())
     }
 
@@ -205,6 +212,14 @@ impl Terminals {
 
     pub fn is_live(&self, id: &str) -> bool {
         self.panes.lock().unwrap().contains_key(id)
+    }
+
+    /// How long the pane has been quiet, once it has said anything at all.
+    /// `None` means it has not drawn yet, or there is no such pane.
+    pub fn quiet_for(&self, id: &str) -> Option<Duration> {
+        let panes = self.panes.lock().unwrap();
+        let at = *panes.get(id)?.last_output.lock().unwrap();
+        Some(at?.elapsed())
     }
 
     /// Whether the pane's own process is still there. `is_live` only says the

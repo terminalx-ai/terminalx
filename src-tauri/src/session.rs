@@ -53,6 +53,9 @@ pub struct QueuedMessage {
 /// permission frames its hooks have parked here waiting for an answer.
 pub struct ClaudePty {
     pub pane_id: String,
+    /// Which start this is. A pane restarted in place keeps its id, so the
+    /// generation is what tells the previous tailer that it is finished.
+    pub generation: u64,
     pub tail: Arc<claude::pty::Tail>,
     /// Prompts the composer already published, waiting for the transcript to
     /// echo them back so the reader is not shown the same message twice.
@@ -104,6 +107,7 @@ pub struct SessionManager {
     /// One lock per pane, so two prompts sent in quick succession cannot
     /// interleave their paste and their Enter.
     writers: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    starts: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -159,7 +163,15 @@ fn key_of(session_id: &str, tab_id: &str) -> String {
 
 impl SessionManager {
     pub fn new(app: AppHandle, host: Arc<Host>, terminals: Arc<pty::Terminals>, codex_models: Arc<codex::models::Cache>) -> Self {
-        Self { app, host, terminals, codex_models, tabs: Arc::new(Mutex::new(HashMap::new())), writers: Arc::new(Mutex::new(HashMap::new())) }
+        Self {
+            app,
+            host,
+            terminals,
+            codex_models,
+            tabs: Arc::new(Mutex::new(HashMap::new())),
+            writers: Arc::new(Mutex::new(HashMap::new())),
+            starts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
     }
 
     fn runtime(&self, session_id: &str, tab_id: &str) -> Result<Arc<Mutex<TabRuntime>>> {
@@ -622,6 +634,9 @@ impl SessionManager {
         }
         if restart {
             self.stop_cli(&mut rt);
+            let entry = index::get(session_id)?;
+            let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
+            self.start_cli(&mut rt, &rt_arc, &entry, &tab)?;
         } else if matches!(rt.engine, Engine::ClaudePty(_)) {
             self.publish(&mut rt, Payload::Status { text: format!("{} applies when the agent next starts.", claude::mapper::mode_label(mode)) }, None);
         }
@@ -673,8 +688,6 @@ impl SessionManager {
         self.host.kill_all();
     }
 
-    // ---- inbound from the child
-
     // ---- Claude, PTY-first
 
     /// The terminal pane a tab's CLI runs in. Derived from the tab id so the
@@ -693,14 +706,17 @@ impl SessionManager {
             return Ok(());
         }
         let mut rt = rt_arc.lock().unwrap();
-        self.start_cli(&mut rt, &rt_arc, &entry, &tab)
+        self.start_cli(&mut rt, &rt_arc, &entry, &tab)?;
+        Ok(())
     }
 
-    fn start_cli(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry) -> Result<()> {
+    /// Returns whether this call is what started it, so a prompt sent in the
+    /// same breath knows to wait for the TUI to finish drawing.
+    fn start_cli(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry) -> Result<bool> {
         let pane = Self::pane_id(&tab.id);
         if let Engine::ClaudePty(p) = &rt.engine {
             if p.pane_id == pane && self.terminals.is_running(&pane) {
-                return Ok(());
+                return Ok(false);
             }
         }
         self.terminals.kill(&pane);
@@ -745,7 +761,8 @@ impl SessionManager {
         let tail = Arc::new(claude::pty::Tail::opening(path));
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: 120, rows: 30, command: Some(&command), env: &env };
         self.terminals.spawn(self.app.clone(), &pane, spec).context("start Claude Code")?;
-        rt.engine = Engine::ClaudePty(ClaudePty { pane_id: pane.clone(), tail: tail.clone(), echoed: Default::default(), decisions: HashMap::new() });
+        let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        rt.engine = Engine::ClaudePty(ClaudePty { pane_id: pane.clone(), generation, tail: tail.clone(), echoed: Default::default(), decisions: HashMap::new() });
         rt.turn_open = false;
         let _ = self.app.emit("tab_pty", TabPtyEvent { session_id: rt.session_id.clone(), tab_id: rt.tab_id.clone(), pane_id: pane.clone(), command });
         if !resume {
@@ -755,8 +772,8 @@ impl SessionManager {
                 Ok(())
             })?;
         }
-        self.follow_transcript(rt_arc, tail, pane);
-        Ok(())
+        self.follow_transcript(rt_arc, tail, pane, generation);
+        Ok(true)
     }
 
     /// Stop the tab's CLI, keeping the conversation so the next prompt resumes.
@@ -773,20 +790,20 @@ impl SessionManager {
     /// to, and the file may not exist for a second or two after the CLI
     /// starts, so a stat every 200 ms is both the simplest and the surest way
     /// to follow it. The same loop notices the pane dying.
-    fn follow_transcript(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: Arc<claude::pty::Tail>, pane: String) {
+    fn follow_transcript(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: Arc<claude::pty::Tail>, pane: String, generation: u64) {
         let manager = self.clone();
         let weak = Arc::downgrade(rt_arc);
         let _ = std::thread::Builder::new().name(format!("transcript-{pane}")).spawn(move || loop {
             std::thread::sleep(claude::pty::POLL_INTERVAL);
             let Some(rt_arc) = weak.upgrade() else { return };
-            let mine = matches!(&rt_arc.lock().unwrap().engine, Engine::ClaudePty(p) if p.pane_id == pane);
+            let mine = matches!(&rt_arc.lock().unwrap().engine, Engine::ClaudePty(p) if p.generation == generation);
             if !mine {
                 return;
             }
             manager.pump(&rt_arc, &tail);
             if !manager.terminals.is_running(&pane) {
                 let mut rt = rt_arc.lock().unwrap();
-                if matches!(&rt.engine, Engine::ClaudePty(p) if p.pane_id == pane) {
+                if matches!(&rt.engine, Engine::ClaudePty(p) if p.generation == generation) {
                     manager.close_open_turn(&mut rt, TurnStatus::Aborted, None);
                     rt.engine = Engine::None;
                     manager.set_status(&mut rt, TabStatus::Idle);
@@ -843,7 +860,7 @@ impl SessionManager {
         text: String,
         images: Vec<ImageRef>,
     ) -> Result<SendOutcome> {
-        self.start_cli(rt, rt_arc, entry, tab)?;
+        let just_started = self.start_cli(rt, rt_arc, entry, tab)?;
         let pane = match &rt.engine {
             Engine::ClaudePty(p) => p.pane_id.clone(),
             _ => bail!("the agent is not running"),
@@ -857,7 +874,7 @@ impl SessionManager {
             }
         }
         let ev = self.publish(rt, Payload::UserMessage { text: text.clone(), images, baseline, queued, cwd: Some(entry.cwd.clone()) }, None);
-        self.type_prompt(&pane, text, paths);
+        self.type_prompt(&pane, text, paths, just_started);
         if !queued {
             rt.turn_open = true;
             rt.turn_started_at = Some(Instant::now());
@@ -870,12 +887,24 @@ impl SessionManager {
     /// Enter has to be a later write than the body — a carriage return inside
     /// the same one is read as part of the paste and never submits — so this
     /// sleeps, which no caller holding the tab lock could afford to do.
-    fn type_prompt(&self, pane: &str, text: String, attachments: Vec<String>) {
+    fn type_prompt(&self, pane: &str, text: String, attachments: Vec<String>, await_ready: bool) {
         let lock = self.writers.lock().unwrap().entry(pane.to_string()).or_default().clone();
         let terminals = self.terminals.clone();
         let pane = pane.to_string();
         let _ = std::thread::Builder::new().name("cli-input".into()).spawn(move || {
             let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+            // A TUI that is still drawing its first frame drops what is typed
+            // at it. There is nothing to ask, so the sign it is listening is
+            // that it has painted something and then gone quiet.
+            if await_ready {
+                let deadline = std::time::Instant::now() + claude::pty::READY_TIMEOUT;
+                while std::time::Instant::now() < deadline {
+                    if terminals.quiet_for(&pane).is_some_and(|q| q >= claude::pty::READY_QUIET) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
             let write = |bytes: &[u8]| {
                 if let Err(e) = terminals.write(&pane, bytes) {
                     log::warn!("[{pane}] write: {e:#}");
@@ -897,7 +926,7 @@ impl SessionManager {
 
     /// A slash command the CLI runs itself (`/model`, `/effort`).
     fn type_command(&self, pane: &str, command: String) {
-        self.type_prompt(pane, command, Vec::new());
+        self.type_prompt(pane, command, Vec::new(), false);
     }
 
     // ---- inbound from the CLI's hooks

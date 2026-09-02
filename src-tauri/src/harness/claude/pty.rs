@@ -185,6 +185,17 @@ pub fn submit_delay(body_len: usize) -> Duration {
     Duration::from_millis(250 + (body_len / 4096) as u64)
 }
 
+/// A TUI drops keystrokes while it is still painting its first frame, and it
+/// has no way to say when it is ready. The sign is that it has drawn something
+/// and then stopped.
+///
+/// A second, not less: the CLI's startup here paints at 0.3 s, pauses 0.7 s,
+/// paints again at 1.0 s and settles at 2.0 s, and a prompt typed into the gap
+/// is swallowed without a trace. The timeout is the give-up, after which
+/// typing anyway beats never sending.
+pub const READY_QUIET: Duration = Duration::from_millis(1000);
+pub const READY_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// An image the CLI should attach: the path, bracketed-pasted on its own. A
 /// typed path is read as prose; only a paste becomes an attachment.
 pub fn attachment_bytes(path: &str) -> Vec<u8> {
