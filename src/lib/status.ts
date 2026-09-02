@@ -1,17 +1,34 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { statusBar, type StatusBarSettings, type UsageSnapshot } from "@/lib/api";
+import {
+  statusBar,
+  type ResourceOverview,
+  type ResourceSnapshot,
+  type StatusBarSettings,
+  type UsageSnapshot,
+} from "@/lib/api";
 
 interface StatusState {
   settings: StatusBarSettings;
   usage: UsageSnapshot;
   usageRefreshing: boolean;
+  resources: ResourceOverview;
+  resourceSample: ResourceSnapshot | null;
+  resourcesRefreshing: boolean;
   ready: boolean;
 }
 
 const defaults: StatusBarSettings = { visible: true, usage: true, resources: true, percent: "used" };
-let state: StatusState = { settings: defaults, usage: { windows: [] }, usageRefreshing: false, ready: false };
+let state: StatusState = {
+  settings: defaults,
+  usage: { windows: [] },
+  usageRefreshing: false,
+  resources: { agentCount: 0, orphanCount: 0, rssBytes: null, pressure: null },
+  resourceSample: null,
+  resourcesRefreshing: false,
+  ready: false,
+};
 const listeners = new Set<() => void>();
 
 function set(patch: Partial<StatusState>) {
@@ -36,10 +53,12 @@ export function bootStatus(): Promise<void> {
     try {
       await listen<StatusBarSettings>("status_bar_settings", (event) => set({ settings: event.payload, ready: true }));
       await listen<UsageSnapshot>("status_usage", (event) => set({ usage: event.payload }));
-      const [settings, usage] = await Promise.all([statusBar.settings(), statusBar.usage()]);
-      set({ settings, usage, ready: true });
+      await listen("status_resources_changed", () => void refreshResourceOverview());
+      const [settings, usage, resources] = await Promise.all([statusBar.settings(), statusBar.usage(), statusBar.resourceOverview()]);
+      set({ settings, usage, resources, ready: true });
       installFocusRefresh();
       void refreshUsage();
+      void refreshResourceSample();
     } catch {
       set({ ready: true });
     }
@@ -74,11 +93,57 @@ export function refreshUsage(manual = false): Promise<void> {
   }));
 }
 
+export async function refreshResourceOverview() {
+  try {
+    set({ resources: await statusBar.resourceOverview() });
+  } catch {
+    /* the next pane event or focus will try again */
+  }
+}
+
+let resourceFlight: Promise<void> | null = null;
+export function refreshResourceSample(): Promise<void> {
+  if (resourceFlight) return resourceFlight;
+  return (resourceFlight = (async () => {
+    if (!(await windowCanPoll())) return;
+    set({ resourcesRefreshing: true });
+    try {
+      const sample = await statusBar.sampleResources();
+      const total = sample.host.totalBytes;
+      const available = sample.host.availableBytes;
+      const pressure = total != null && available != null && total > 0 ? Math.max(0, Math.min(1, 1 - available / total)) : null;
+      set({
+        resourceSample: sample,
+        resources: {
+          agentCount: sample.processes.filter((process) => process.kind === "agent").length,
+          orphanCount: sample.processes.filter((process) => process.orphaned && process.kind === "agent").length,
+          rssBytes: sample.totalRssBytes,
+          pressure,
+        },
+      });
+    } catch {
+      // Keep the last sample: the badge is a focus snapshot, not a heartbeat.
+    } finally {
+      set({ resourcesRefreshing: false });
+    }
+  })().finally(() => {
+    resourceFlight = null;
+  }));
+}
+
+export function removeResourceOptimistically(paneId: string) {
+  if (!state.resourceSample) return;
+  set({ resourceSample: { ...state.resourceSample, processes: state.resourceSample.processes.filter((process) => process.paneId !== paneId) } });
+}
+
 let focusRefreshInstalled = false;
 function installFocusRefresh() {
   if (focusRefreshInstalled || typeof window === "undefined") return;
   focusRefreshInstalled = true;
-  const onFocus = () => void refreshUsage();
+  const onFocus = () => {
+    void refreshUsage();
+    void refreshResourceSample();
+  };
   window.addEventListener("focus", onFocus);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) onFocus();

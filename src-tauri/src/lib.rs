@@ -184,6 +184,9 @@ pub fn run() {
             commands::set_status_bar_settings,
             commands::status_usage_snapshot,
             commands::status_usage_refresh,
+            commands::status_resource_overview,
+            commands::status_resource_sample,
+            commands::status_resource_kill,
         ])
         .on_menu_event(|app, event| {
             if event.id().as_ref() == status::MENU_ID {

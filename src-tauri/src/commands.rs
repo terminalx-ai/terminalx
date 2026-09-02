@@ -761,6 +761,31 @@ pub async fn status_usage_refresh(app: AppHandle, state: State<'_, AppState>, ma
     Ok(snapshot)
 }
 
+#[tauri::command]
+pub fn status_resource_overview(state: State<'_, AppState>) -> crate::status::resources::ResourceOverview {
+    state.status.resources.overview(&state.terminals)
+}
+
+#[tauri::command]
+pub async fn status_resource_sample(state: State<'_, AppState>) -> CmdResult<crate::status::resources::ResourceSnapshot> {
+    let status = state.status.clone();
+    let terminals = state.terminals.clone();
+    tauri::async_runtime::spawn_blocking(move || status.resources.sample(&terminals).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn status_resource_kill(
+    state: State<'_, AppState>,
+    pane_id: String,
+    confirmed: Option<bool>,
+) -> CmdResult<crate::status::resources::KillResult> {
+    let status = state.status.clone();
+    let terminals = state.terminals.clone();
+    tauri::async_runtime::spawn_blocking(move || status.resources.kill(&terminals, &pane_id, confirmed.unwrap_or(false)).map_err(err))
+        .await
+        .map_err(err)?
+}
+
 // ------------------------------------------------------------------ files & commands
 
 #[tauri::command]

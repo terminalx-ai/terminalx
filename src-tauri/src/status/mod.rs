@@ -9,10 +9,12 @@ use tauri::menu::{CheckMenuItemBuilder, Menu, MenuItemKind};
 use tauri::{App, AppHandle, Emitter, Runtime};
 
 pub mod usage;
+pub mod resources;
 
 #[derive(Default)]
 pub struct StatusState {
     pub usage: usage::UsageStore,
+    pub resources: resources::ResourceStore,
 }
 
 pub const MENU_ID: &str = "status-bar-visible";

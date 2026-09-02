@@ -28,11 +28,26 @@ struct Pane {
     /// program rather than talk to it uses the gap since the last byte as its
     /// only sign that the program has finished drawing and is listening.
     last_output: Arc<Mutex<Option<Instant>>>,
+    cwd: String,
 }
 
-#[derive(Default)]
 pub struct Terminals {
     panes: Mutex<HashMap<String, Pane>>,
+    app: Mutex<Option<AppHandle>>,
+}
+
+impl Default for Terminals {
+    fn default() -> Self {
+        Self { panes: Mutex::new(HashMap::new()), app: Mutex::new(None) }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PaneInfo {
+    pub id: String,
+    pub pid: Option<u32>,
+    pub running: bool,
+    pub cwd: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -89,6 +104,7 @@ impl Terminals {
             return Ok(());
         }
         let PaneSpec { cwd, cols, rows, command, env } = spec;
+        *self.app.lock().unwrap() = Some(app.clone());
         let pty = portable_pty::native_pty_system();
         let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("openpty: {e}"))?;
         let sh = shell();
@@ -168,6 +184,7 @@ impl Terminals {
                     let _ = app.emit("pty_data", PtyData { id: id.clone(), data });
                 }
                 *alive.lock().unwrap() = false;
+                let _ = app.emit(crate::status::resources::CHANGED_EVENT, ());
             })?;
         }
         {
@@ -178,7 +195,8 @@ impl Terminals {
                 let _ = app.emit("pty_exit", PtyExit { id, code });
             })?;
         }
-        self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, writer, pid, alive, last_output });
+        self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, writer, pid, alive, last_output, cwd: cwd.to_string() });
+        self.changed();
         Ok(())
     }
 
@@ -203,6 +221,7 @@ impl Terminals {
             }
             drop(pane);
         }
+        self.changed();
     }
 
     /// Kill the pane and wait for its process to really be gone.
@@ -218,6 +237,7 @@ impl Terminals {
             crate::harness::host::terminate(pid);
         }
         drop(pane);
+        self.changed();
         let Some(pid) = pid else { return };
         let start = Instant::now();
         let mut forced = false;
@@ -258,5 +278,25 @@ impl Terminals {
     /// the pane in place so its last output stays on screen.
     pub fn is_running(&self, id: &str) -> bool {
         self.panes.lock().unwrap().get(id).map(|p| *p.alive.lock().unwrap()).unwrap_or(false)
+    }
+
+    pub fn panes(&self) -> Vec<PaneInfo> {
+        self.panes
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, pane)| PaneInfo {
+                id: id.clone(),
+                pid: pane.pid,
+                running: *pane.alive.lock().unwrap(),
+                cwd: pane.cwd.clone(),
+            })
+            .collect()
+    }
+
+    fn changed(&self) {
+        if let Some(app) = self.app.lock().unwrap().as_ref() {
+            let _ = app.emit(crate::status::resources::CHANGED_EVENT, ());
+        }
     }
 }
