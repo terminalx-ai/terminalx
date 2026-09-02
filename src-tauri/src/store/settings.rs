@@ -16,6 +16,12 @@ pub struct Settings {
     /// Extra directories to search for agent binaries.
     pub extra_bin_dirs: Vec<String>,
     pub notifications: bool,
+    /// Dictation engine: "apple" for the system recogniser, or a catalog id.
+    pub transcription_model: String,
+    /// Microphone by name, or the system default when unset.
+    pub transcription_input_device: Option<String>,
+    /// Drop system output to zero while recording so playback stays out of the text.
+    pub transcription_mute: bool,
 }
 
 impl Default for Settings {
@@ -25,6 +31,9 @@ impl Default for Settings {
             branch_prefix: "raccoon/".into(),
             extra_bin_dirs: Vec::new(),
             notifications: true,
+            transcription_model: "apple".into(),
+            transcription_input_device: None,
+            transcription_mute: false,
         }
     }
 }

@@ -42,6 +42,8 @@ nucleo-matcher = "0.3"
 tauri-plugin-notification = "2.4.0"
 ureq = { version = "2", features = ["json"] }
 tauri-plugin-updater = "2.11.0"
+cpal = "0.16"
+sha2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -53,6 +55,10 @@ objc2-avf-audio = { version = "0.3", features = ["AVAudioEngine", "AVAudioNode",
 block2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry"] }
 objc2-speech = { version = "0.3", default-features = false, features = ["std", "SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFSpeechRecognitionTaskHint", "SFTranscription", "SFErrors", "block2", "objc2-avf-audio"] }
+transcribe-cpp = { version = "0.2", default-features = false, features = ["metal"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+transcribe-cpp = { version = "0.2", default-features = false }
 
 [profile.dev]
 incremental = true

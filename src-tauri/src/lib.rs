@@ -1,6 +1,7 @@
 mod binpath;
 mod commands;
 mod dictation;
+mod transcription;
 #[allow(dead_code)] // consumed once the harness mappers land
 mod events;
 mod files;
@@ -20,6 +21,7 @@ pub struct AppState {
     pub host: Arc<harness::host::Host>,
     pub terminals: Arc<pty::Terminals>,
     pub dictation: Arc<dictation::Dictation>,
+    pub transcription: Arc<transcription::Transcription>,
     manager: std::sync::Mutex<Option<session::SessionManager>>,
 }
 
@@ -33,7 +35,7 @@ impl AppState {
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let host = Arc::new(harness::host::Host::new());
-    let state = AppState { host: host.clone(), terminals: Arc::new(pty::Terminals::new()), dictation: Arc::new(dictation::Dictation::default()), manager: std::sync::Mutex::new(None) };
+    let state = AppState { host: host.clone(), terminals: Arc::new(pty::Terminals::new()), dictation: Arc::new(dictation::Dictation::default()), transcription: Arc::new(transcription::Transcription::default()), manager: std::sync::Mutex::new(None) };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -130,6 +132,14 @@ pub fn run() {
             commands::dictation_available,
             commands::dictation_start,
             commands::dictation_stop,
+            commands::transcription_models,
+            commands::transcription_download,
+            commands::transcription_cancel_download,
+            commands::transcription_delete,
+            commands::transcription_set_model,
+            commands::transcription_settings,
+            commands::transcription_set_input,
+            commands::transcription_set_mute,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

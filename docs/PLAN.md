@@ -167,3 +167,5 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 
 ### Dictation ✅
 - [x] Mic button in the composer (⌘⇧D): microphone → Apple's speech recogniser, on-device when supported, partial text live in the draft, each finished phrase appended. Info.plist carries the microphone and speech usage strings.
+- [x] Local models: a compiled-in catalog (Parakeet, Nemotron, Canary, Whisper Small, Whisper Large v3 Turbo) downloaded from Hugging Face with checksum verification into `~/.raccoon/models`, run through transcribe-cpp with Metal; the loaded model stays warm between dictations.
+- [x] Settings → Transcription: model cards with speed/accuracy, download progress, delete; microphone device picker; mute while recording.

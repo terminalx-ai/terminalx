@@ -17,13 +17,15 @@ import { SHORTCUTS } from "@/lib/shortcuts";
 import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
 import { errorMessage } from "@/lib/api";
 import changelog from "../../../CHANGELOG.md?raw";
+import { TranscriptionTab } from "./TranscriptionTab";
 
-const TABS = ["general", "appearance", "agents", "shortcuts", "about"] as const;
+const TABS = ["general", "appearance", "agents", "transcription", "shortcuts", "about"] as const;
 type Tab = (typeof TABS)[number];
 const TAB_LABEL: Record<Tab, string> = {
   general: "General",
   appearance: "Appearance",
   agents: "Agents",
+  transcription: "Transcription",
   shortcuts: "Shortcuts",
   about: "About",
 };
@@ -57,6 +59,7 @@ export function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
             {tab === "general" && <GeneralTab />}
             {tab === "appearance" && <AppearanceTab />}
             {tab === "agents" && <AgentsTab />}
+            {tab === "transcription" && <TranscriptionTab />}
             {tab === "shortcuts" && <ShortcutsTab />}
             {tab === "about" && <AboutTab />}
           </div>
