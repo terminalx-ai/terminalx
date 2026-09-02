@@ -76,8 +76,14 @@ mod mac {
         },
     }
 
-    /// The microphone, its frame stream, and the volume to put back afterwards.
-    type Opened = (audio::Capture, Receiver<Vec<f32>>, Option<u8>);
+    /// The microphone, its frame stream, how opening it went, and the volume
+    /// to put back afterwards.
+    struct Opened {
+        capture: audio::Capture,
+        frames: Receiver<Vec<f32>>,
+        opening: audio::Opening,
+        restore_volume: Option<u8>,
+    }
 
     pub struct Active {
         capture: Option<audio::Capture>,
@@ -144,8 +150,8 @@ mod mac {
                 None
             };
             let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
-            match audio::Capture::start(settings.transcription_input_device.as_deref(), tx) {
-                Ok(c) => Ok((c, rx, restore)),
+            match audio::Capture::start(settings.transcription_input_device.clone(), tx) {
+                Ok((capture, opening)) => Ok(Opened { capture, frames: rx, opening, restore_volume: restore }),
                 Err(e) => {
                     if let Some(l) = restore {
                         volume::set(l);
@@ -155,18 +161,36 @@ mod mac {
             }
         }
 
+        /// The microphone opens on its own thread, so the failure — a denied
+        /// permission, an unplugged device — arrives after the command that
+        /// asked for it has returned. Wait for it here and, if it is bad news,
+        /// tell the reader and put everything back.
+        fn watch_capture(self: &Arc<Self>, app: AppHandle, opening: audio::Opening) {
+            let me = self.clone();
+            let spawned = std::thread::Builder::new().name("mic-opening".into()).spawn(move || {
+                let outcome = opening.recv().unwrap_or_else(|_| Err("The microphone stopped before it started.".into()));
+                if let Err(message) = outcome {
+                    emit(&app, "error", None, Some(message));
+                    me.finish(&app);
+                }
+            });
+            if let Err(e) = spawned {
+                log::warn!("could not watch the microphone opening: {e}");
+            }
+        }
+
         // ---- local models
 
         fn start_local(self: &Arc<Self>, app: AppHandle, id: &str) -> Result<(), String> {
             let spec = crate::transcription::catalog::find(id).ok_or_else(|| format!("unknown model {id}"))?;
             let path = crate::transcription::download::model_path(spec).map_err(|e| e.to_string())?;
-            let (capture, rx, restore_volume) = self.open_capture()?;
+            let Opened { capture, frames, opening, restore_volume } = self.open_capture()?;
             let audio = Arc::new(Mutex::new(Vec::<f32>::new()));
             let sink = audio.clone();
             std::thread::Builder::new()
                 .name("dictation-pump".into())
                 .spawn(move || {
-                    for chunk in rx {
+                    for chunk in frames {
                         sink.lock().unwrap().extend_from_slice(&chunk);
                     }
                 })
@@ -174,6 +198,8 @@ mod mac {
             self.stopping.store(false, Ordering::SeqCst);
             *self.active.lock().unwrap() = Some(Active { capture: Some(capture), route: Route::Local { id: id.into(), path, audio }, restore_volume });
             emit(&app, "listening", None, None);
+            // Only once `active` holds the capture, so a failure can undo it.
+            self.watch_capture(app, opening);
             Ok(())
         }
 
@@ -220,7 +246,7 @@ mod mac {
                 }
                 request.setAddsPunctuation(true);
 
-                let (capture, rx, restore_volume) = self.open_capture()?;
+                let Opened { capture, frames, opening, restore_volume } = self.open_capture()?;
 
                 // Frames arrive on the capture thread; wrap them as PCM buffers
                 // in the recogniser's standard 16 kHz mono float layout.
@@ -231,7 +257,7 @@ mod mac {
                         let handle = handle;
                         let format = AVAudioFormat::initStandardFormatWithSampleRate_channels(AVAudioFormat::alloc(), TARGET_RATE as f64, 1);
                         let Some(format) = format else { return };
-                        for chunk in rx {
+                        for chunk in frames {
                             if chunk.is_empty() {
                                 continue;
                             }
@@ -287,6 +313,8 @@ mod mac {
                     restore_volume,
                 });
                 emit(&app, "listening", None, None);
+                // Only once `active` holds the capture, so a failure can undo it.
+                self.watch_capture(app, opening);
                 Ok(())
             }
         }

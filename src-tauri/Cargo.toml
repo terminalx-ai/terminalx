@@ -42,7 +42,7 @@ nucleo-matcher = "0.3"
 tauri-plugin-notification = "2.4.0"
 ureq = { version = "2", features = ["json"] }
 tauri-plugin-updater = "2.11.0"
-cpal = "0.16"
+cpal = "0.17"
 sha2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
