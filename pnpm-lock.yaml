@@ -116,6 +116,9 @@ importers:
       react-dom:
         specifier: ^19.1.0
         version: 19.2.8(react@19.2.8)
+      react-material-icon-theme:
+        specifier: ^1.2.0
+        version: 1.2.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       streamdown:
         specifier: ^2.6.0
         version: 2.6.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -2342,6 +2345,13 @@ packages:
 
   react-is@17.0.2:
     resolution: {integrity: sha512-w2GsyukL62IJnlaff/nRegPQR94C/XXamvMWmSHRJ4y7Ts/4ocGRmTHvOs8PSE6pB3dWOrD/nueuU5sduBsQ4w==}
+
+  react-material-icon-theme@1.2.0:
+    resolution: {integrity: sha512-nagDJHXw/nn+7K4HhasyH8yr3C3hJb6kBFHPnR5QIui4dySAHjTJP8u13rI42smS8PHQBhL+/TOZJfG4YYOGgw==}
+    engines: {node: '>=18.0.0', npm: '>=9.0.0'}
+    peerDependencies:
+      react: ^17.0.0 || ^18.0.0 || ^19.0.0
+      react-dom: ^17.0.0 || ^18.0.0 || ^19.0.0
 
   react-refresh@0.17.0:
     resolution: {integrity: sha512-z6F7K9bV85EfseRCp2bzrpyQ0Gkw1uLoCel9XBVWPg/TjRj94SkJzUTGfOa4bs7iJvBWtQG0Wq7wnI0syw3EBQ==}
@@ -5180,6 +5190,11 @@ snapshots:
       scheduler: 0.27.0
 
   react-is@17.0.2: {}
+
+  react-material-icon-theme@1.2.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8):
+    dependencies:
+      react: 19.2.8
+      react-dom: 19.2.8(react@19.2.8)
 
   react-refresh@0.17.0: {}
 

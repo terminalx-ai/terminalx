@@ -16,3 +16,4 @@ First runnable build, assembled checkpoint by checkpoint.
 - Worktree lifecycle: settle after a merge, fork a session, guarded delete.
 - Themes (den, slate, moss, ember) with light and dark modes and window vibrancy.
 - Dictation from the composer, using the Mac's own on-device speech recognition; nothing is downloaded and audio never leaves the machine.
+- File explorer beside the transcript (⌘⇧E) with Material file icons, git status badges, keyboard navigation and a right-click menu.

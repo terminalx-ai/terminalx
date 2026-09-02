@@ -110,7 +110,14 @@ export function RightPanel({ session, events, version, live }: { session: Sessio
           />
         </div>
         <div className={cn("h-full", tab !== "files" && "hidden")}>
-          <FileTree key={refreshTick} sessionId={session.id} root={session.cwd} active={tab === "files"} />
+          <FileTree
+            key={refreshTick}
+            sessionId={session.id}
+            root={session.cwd}
+            active={tab === "files"}
+            mentionTabId={session.activeTab ?? session.tabs[0]?.id ?? null}
+            statusKey={session.tabs.map((t) => t.status).join(",")}
+          />
         </div>
       </div>
     </aside>
