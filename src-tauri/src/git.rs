@@ -1,5 +1,3 @@
-#![allow(dead_code)] // consumers land in later checkpoints; audited at C16
-
 //! Git, by shelling out. The only other thing this module shells out to is
 //! nothing: `gh` lives in `github.rs`.
 //!
@@ -37,17 +35,6 @@ fn run_ok(cwd: &Path, args: &[&str]) -> bool {
 
 pub fn is_repo(cwd: &Path) -> bool {
     run_ok(cwd, &["rev-parse", "--is-inside-work-tree"])
-}
-
-/// The repository's main worktree root, wherever `cwd` is inside it. Linked
-/// worktrees answer their own tree to `--show-toplevel`, so the first record of
-/// `worktree list` is used instead.
-pub fn main_worktree(cwd: &Path) -> Result<PathBuf> {
-    let out = run(cwd, &["worktree", "list", "--porcelain"])?;
-    out.lines()
-        .find_map(|l| l.strip_prefix("worktree "))
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("not a git repository"))
 }
 
 pub fn current_branch(cwd: &Path) -> Option<String> {
@@ -580,11 +567,6 @@ pub fn checkout_branch(cwd: &Path, name: &str, create: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn stash(cwd: &Path, message: &str) -> Result<()> {
-    run(cwd, &["stash", "push", "-u", "-m", message])?;
-    Ok(())
-}
-
 pub fn remote_url(cwd: &Path) -> Option<String> {
     run(cwd, &["remote", "get-url", "origin"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
@@ -652,7 +634,6 @@ mod tests {
         remove_worktree(p, "quiet-amber-fox").unwrap();
         assert!(!Path::new(&wt.path).exists());
         assert!(!worktree_branch_names(p).contains(&"quiet-amber-fox".to_string()));
-        assert_eq!(main_worktree(p).unwrap().canonicalize().unwrap(), p.canonicalize().unwrap());
     }
 
     #[test]

@@ -2,7 +2,6 @@ mod binpath;
 mod commands;
 mod dictation;
 mod transcription;
-#[allow(dead_code)] // consumed once the harness mappers land
 mod events;
 mod files;
 mod git;
