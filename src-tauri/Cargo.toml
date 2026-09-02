@@ -1,7 +1,7 @@
 [package]
 name = "raccoon"
 version = "0.1.0"
-description = "Raccoon — a desktop workbench for coding agents"
+description = "TerminalX Next — a desktop workbench for coding agents"
 authors = ["Paresh Dudhat"]
 edition = "2021"
 license = "MIT"
@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset", "macos-private-api", "tray-icon"] }
 tauri-plugin-opener = "2"
+tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-process = "2"
 tauri-plugin-shell = "2"

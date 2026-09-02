@@ -123,7 +123,7 @@ pub fn mirrored_config(user_toml: &str, previous: &str, cwd: &str, trust: &BTree
     hooks.insert("state".into(), toml::Value::Table(state));
     out.insert("hooks".into(), toml::Value::Table(hooks));
 
-    Ok(format!("# Written by Raccoon. Edit ~/.codex/config.toml instead.\n\n{}", toml::to_string_pretty(&out)?))
+    Ok(format!("# Written by TerminalX Next. Edit ~/.codex/config.toml instead.\n\n{}", toml::to_string_pretty(&out)?))
 }
 
 // ------------------------------------------------------------------ hook trust

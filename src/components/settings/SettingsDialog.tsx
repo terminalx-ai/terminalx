@@ -82,7 +82,7 @@ function GeneralTab() {
         control={<Switch checked={prefs.sounds} onCheckedChange={(v) => setPrefs({ sounds: v })} />}
       />
       <SettingRow
-        label="Raccoon animation"
+        label="Pixel raccoon"
         description="The raccoon forages in an empty session and runs along the composer while an agent is working. Off follows your system's reduced-motion setting automatically."
         control={<Switch checked={prefs.animations} onCheckedChange={(v) => setPrefs({ animations: v })} />}
       />
@@ -209,7 +209,7 @@ function AgentsTab() {
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
-        <p className="text-xs text-muted-foreground">Raccoon runs the agent CLIs you already have. Log in to each one in a terminal first.</p>
+        <p className="text-xs text-muted-foreground">TerminalX Next runs the agent CLIs you already have. Log in to each one in a terminal first.</p>
         <Button
           size="xs"
           variant="ghost"
@@ -312,7 +312,7 @@ function IntegrationsTab() {
       <div>
         <div className="text-sm font-medium">Linear</div>
         <p className="mt-0.5 text-xs text-muted-foreground">
-          A personal API key from Linear → Settings → Security &amp; access. It is stored in Raccoon's settings file, readable only by you, and sent only to api.linear.app.
+          A personal API key from Linear → Settings → Security &amp; access. It is stored in TerminalX Next's settings file, readable only by you, and sent only to api.linear.app.
         </p>
         <div className="mt-2 flex items-center gap-2 text-xs">
           {linear?.connected ? (
@@ -418,7 +418,7 @@ function AboutTab() {
   return (
     <div className="flex flex-col gap-4 text-sm">
       <div>
-        <div className="text-base font-semibold">Raccoon</div>
+        <div className="text-base font-semibold">TerminalX Next</div>
         <div className="text-muted-foreground">Version {version || "…"}</div>
         <p className="mt-1 text-muted-foreground">A workbench for coding agents. Every session is a git worktree; every tab is an agent.</p>
         <p className="mt-2 text-xs text-faint">
@@ -468,7 +468,7 @@ function AboutTab() {
       <div>
         <div className="mb-1 text-xs font-medium uppercase tracking-wide text-faint">What's new</div>
         <div className="prose-chat rounded-lg bg-well px-3 py-2 text-[13px]">
-          <Markdown text={changelog.replace(/^# Changelog\s*/m, "")} />
+          <Markdown text={changelog.replace(/^# TerminalX Next changelog\s*/m, "")} />
         </div>
       </div>
     </div>
