@@ -71,6 +71,9 @@ pub struct ClaudePty {
     /// Keeps the turn's reply from being drawn twice when the `Stop` hook and
     /// the transcript record cross.
     pub turn_tail: claude::pty::TurnTail,
+    /// What the pane is running, for the terminal view's header and for a
+    /// window that has to be told about a pane it did not see start.
+    pub command: String,
 }
 
 pub enum Engine {
@@ -739,6 +742,10 @@ impl SessionManager {
 
     /// Start the tab's CLI if it is not already running. Idempotent: opening a
     /// tab, sending a prompt and switching to the terminal view all call it.
+    ///
+    /// The pane is announced either way. A window that opens after the CLI
+    /// started — the app restarting into a session that was already running —
+    /// never saw the event, and would show a terminal view with nothing in it.
     pub fn ensure_started(&self, session_id: &str, tab_id: &str) -> Result<()> {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let entry = index::get(session_id)?;
@@ -747,8 +754,34 @@ impl SessionManager {
             return Ok(());
         }
         let mut rt = rt_arc.lock().unwrap();
-        self.start_cli(&mut rt, &rt_arc, &entry, &tab)?;
+        if !self.start_cli(&mut rt, &rt_arc, &entry, &tab)? {
+            self.announce_pane(&rt);
+        }
         Ok(())
+    }
+
+    /// The pane a tab's CLI is running in, for a window that has to ask
+    /// because it was not listening when the pane opened.
+    pub fn pane_of(&self, session_id: &str, tab_id: &str) -> Option<TabPtyEvent> {
+        let rt_arc = self.runtime(session_id, tab_id).ok()?;
+        let rt = rt_arc.lock().unwrap();
+        Self::pane_event(&rt)
+    }
+
+    fn pane_event(rt: &TabRuntime) -> Option<TabPtyEvent> {
+        let Engine::ClaudePty(p) = &rt.engine else { return None };
+        Some(TabPtyEvent {
+            session_id: rt.session_id.clone(),
+            tab_id: rt.tab_id.clone(),
+            pane_id: p.pane_id.clone(),
+            command: p.command.clone(),
+        })
+    }
+
+    fn announce_pane(&self, rt: &TabRuntime) {
+        if let Some(ev) = Self::pane_event(rt) {
+            let _ = self.app.emit("tab_pty", ev);
+        }
     }
 
     /// Returns whether this call is what started it, so a prompt sent in the
@@ -818,9 +851,10 @@ impl SessionManager {
             echoed: Default::default(),
             decisions: HashMap::new(),
             turn_tail: Default::default(),
+            command: command.clone(),
         });
         rt.turn_open = false;
-        let _ = self.app.emit("tab_pty", TabPtyEvent { session_id: rt.session_id.clone(), tab_id: rt.tab_id.clone(), pane_id: pane.clone(), command });
+        self.announce_pane(rt);
         if !resume {
             index::update_tab(&rt.session_id, &rt.tab_id, |t| {
                 t.provider_session_id = Some(provider_id.clone());
