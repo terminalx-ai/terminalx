@@ -32,6 +32,14 @@ pub enum Action {
     Http { tag: String, method: String, url: String, body: Option<Value> },
 }
 
+/// Which CLI a PTY-first tab is running. The two differ in their launch line,
+/// their hook plumbing and their transcript, and in nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliKind {
+    Claude,
+    Codex,
+}
+
 /// The harness a tab runs on. Unknown names are carried verbatim.
 pub enum HarnessId {
     Claude,

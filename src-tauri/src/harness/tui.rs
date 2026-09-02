@@ -154,6 +154,13 @@ impl Tail {
         Self { path: Mutex::new(path), stream: Mutex::new(Streamer::at(len, decode)), decode }
     }
 
+    /// Follow a file whose name is not known yet. A Codex tab is like this
+    /// until its first `SessionStart` hook: Codex mints the conversation id
+    /// itself, so there is nothing to derive the path from beforehand.
+    pub fn unknown(decode: Decoder) -> Self {
+        Self { path: Mutex::new(PathBuf::new()), stream: Mutex::new(Streamer::at(0, decode)), decode }
+    }
+
     /// Point at the file the CLI actually opened. Hooks carry
     /// `transcript_path`, which is authoritative; anything derived before the
     /// CLI started is only a guess.
@@ -260,6 +267,22 @@ mod tests {
         assert!(tail.drain().is_empty());
     }
 
+
+    #[test]
+    fn a_tail_with_no_file_yet_reads_nothing_until_it_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("later.jsonl");
+        let tail = Tail::unknown(echo);
+        assert!(tail.drain().is_empty());
+        std::fs::write(&path, "first\n").unwrap();
+        tail.retarget(&path);
+        // What the file already held when it was named is history.
+        assert!(tail.drain().is_empty());
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"second\n").unwrap();
+        assert!(matches!(&tail.drain()[0], Payload::Status { text } if text == "second"));
+    }
 
     #[test]
     fn a_split_multibyte_character_is_not_decoded_until_it_is_whole() {

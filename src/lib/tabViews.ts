@@ -19,7 +19,7 @@ export type TabViewMode = "chat" | "terminal";
 
 /** Agents whose tab is the CLI itself. */
 export function isPtyFirst(harness: string): boolean {
-  return harness === "claude";
+  return harness === "claude" || harness === "codex";
 }
 
 interface State {
@@ -70,9 +70,9 @@ export async function subscribeTabPty() {
   subscribed = true;
   try {
     await listen<TabPtyEvent>("tab_pty", (e) => {
-      const { sessionId, tabId, paneId, command } = e.payload;
+      const { sessionId, tabId, paneId, command, harness } = e.payload;
       void adoptPane({ id: paneId, sessionId, title: "Agent", hidden: true, owned: true });
-      set({ info: { ...state.info, [tabId]: { command, harness: "claude" } } });
+      set({ info: { ...state.info, [tabId]: { command, harness } } });
     });
   } catch {
     /* outside a webview */

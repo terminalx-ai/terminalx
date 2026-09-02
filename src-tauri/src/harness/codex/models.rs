@@ -3,28 +3,21 @@
 //! The list is not ours to guess: it depends on the signed-in account, and
 //! naming a model the account cannot use fails the turn outright with
 //! `The '<id>' model is not supported when using Codex with a ChatGPT account`.
-//! `codex app-server` answers `model/list` with the real set, so we ask it —
-//! the same binary, handshake and JSON-RPC framing the harness already uses,
-//! just against a short-lived child that is killed as soon as it has answered.
+//! `codex app-server` answers `model/list` with the real set, so we ask it
+//! through `appserver`, which runs a short-lived child and kills it as soon as
+//! it has answered.
 //!
 //! The answer is cached for the life of the process (the account does not
 //! change under us) and refreshed on demand when the model picker opens. Every
 //! failure — no `codex` on PATH, a hung child, a shape we do not understand —
 //! falls back to a built-in list rather than leaving the picker empty.
 
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use serde_json::{json, Value};
 
 use crate::models::Model;
-
-/// A cold `codex app-server` takes a moment to come up; past this the list is
-/// not worth blocking the picker (or the first prompt) for.
-const TIMEOUT: Duration = Duration::from_secs(6);
 
 /// The process-lifetime cache. One lives in `AppState` and is shared with the
 /// session manager, so a tab starting and the picker opening agree on the list.
@@ -75,74 +68,11 @@ impl Cache {
     }
 }
 
-/// Ask a throwaway `codex app-server` for the list, then kill it.
+/// Ask a throwaway `codex app-server` for the list. The managed home is not
+/// named: the list depends on the account, and the account is the one
+/// `auth.json` names wherever Codex is run from.
 fn fetch() -> Result<Vec<Model>> {
-    let program = crate::binpath::resolve("codex").context("codex is not installed")?;
-    let mut cmd = Command::new(&program);
-    cmd.arg("app-server")
-        .env("PATH", crate::binpath::login_path())
-        .env("TERM", "dumb")
-        .env("NO_COLOR", "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    // Its own group, so terminating it takes any helper it forked with it.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    let mut child = cmd.spawn().with_context(|| format!("spawn {}", program.display()))?;
-    let pid = child.id();
-
-    let result = (|| -> Result<Value> {
-        let mut stdin = child.stdin.take().context("no stdin")?;
-        let stdout = child.stdout.take().context("no stdout")?;
-        let (tx, rx) = std::sync::mpsc::channel::<String>();
-        std::thread::Builder::new().name("codex-model-list".into()).spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        })?;
-
-        // The server ignores anything sent before `initialize`, and answers
-        // requests in whatever order it likes, so both go out at once and the
-        // reply is matched by id.
-        let hello = json!({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "raccoon", "title": "Raccoon", "version": env!("CARGO_PKG_VERSION")}}});
-        writeln!(stdin, "{hello}")?;
-        writeln!(stdin, "{}", json!({"method": "initialized", "params": {}}))?;
-        writeln!(stdin, "{}", json!({"id": 2, "method": "model/list", "params": {}}))?;
-        stdin.flush()?;
-
-        let deadline = Instant::now() + TIMEOUT;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                bail!("timed out after {}s", TIMEOUT.as_secs());
-            }
-            let line = rx.recv_timeout(left).map_err(|_| anyhow::anyhow!("codex app-server closed without answering"))?;
-            let v: Value = match serde_json::from_str(&line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            if v.get("id").and_then(Value::as_u64) != Some(2) {
-                continue;
-            }
-            if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
-                bail!("{}", err.get("message").and_then(Value::as_str).unwrap_or("model/list failed"));
-            }
-            return Ok(v["result"].clone());
-        }
-    })();
-
-    // Whatever happened, the child has served its purpose.
-    crate::harness::host::terminate(pid);
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(parse(&result?))
+    Ok(parse(&super::appserver::ask(super::appserver::Where::default(), "model/list", json!({}))?))
 }
 
 /// A `model/list` result onto our own model shape. Hidden entries are the
