@@ -16,6 +16,8 @@ interface State {
   sessions: SessionEntry[];
   harnesses: HarnessInfo[];
   selectedSessionId: string | null;
+  /** What the workspace shows when no session is selected. */
+  view: "new" | "issues";
   showArchived: boolean;
 }
 
@@ -26,6 +28,7 @@ let state: State = {
   sessions: [],
   harnesses: [],
   selectedSessionId: null,
+  view: "new",
   showArchived: false,
 };
 
@@ -91,7 +94,12 @@ export function patchTab(sessionId: string, tabId: string, patch: Partial<TabEnt
 }
 
 export function selectSession(id: string | null) {
-  set({ selectedSessionId: id });
+  set({ selectedSessionId: id, view: "new" });
+}
+
+/** The issues browser takes the workspace; no session stays selected. */
+export function openIssues() {
+  set({ selectedSessionId: null, view: "issues" });
 }
 
 export async function refreshHarnesses() {

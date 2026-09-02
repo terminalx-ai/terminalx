@@ -15,6 +15,14 @@ export interface TabEntry {
   contextMax?: number | null;
 }
 
+export interface IssueRef {
+  provider: string;
+  id: string;
+  identifier: string;
+  title: string;
+  url: string;
+}
+
 export interface SessionEntry {
   id: string;
   projectPath: string;
@@ -23,6 +31,7 @@ export interface SessionEntry {
   branch?: string | null;
   baseRef?: string | null;
   worktreeRemoved: boolean;
+  issue?: IssueRef | null;
   title: string;
   created: string;
   modified: string;

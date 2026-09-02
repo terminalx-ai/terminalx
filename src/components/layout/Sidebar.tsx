@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Archive, ChevronDown, FolderPlus, GitFork, PanelLeft, Pin, Plus, Search, Settings, Trash2, X } from "lucide-react";
+import { Archive, ChevronDown, CircleDot, FolderPlus, GitFork, PanelLeft, Pin, Plus, Search, Settings, Trash2, X } from "lucide-react";
 import { ask, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -48,10 +48,12 @@ export function Sidebar({
   onToggle,
   onOpenSettings,
   onNewSession,
+  onOpenIssues,
 }: {
   onToggle: () => void;
   onOpenSettings: () => void;
   onNewSession: () => void;
+  onOpenIssues: () => void;
 }) {
   const store = useSessionStore();
   const [query, setQuery] = useState("");
@@ -120,6 +122,17 @@ export function Sidebar({
             </span>
           </Button>
         </div>
+        <Button variant="ghost" className={cn("justify-start gap-2 px-2", store.view === "issues" && !store.selectedSessionId ? "bg-selected text-foreground" : "text-foreground")} onClick={onOpenIssues}>
+          <CircleDot />
+          Issues
+          <span className="ml-auto flex gap-0.5 text-[10px] text-faint">
+            {keycaps("mod+i").map((k) => (
+              <kbd key={k} className="rounded-sm bg-veil-raised px-1 font-sans">
+                {k}
+              </kbd>
+            ))}
+          </span>
+        </Button>
         {searching ? (
           <div className="flex items-center gap-1 rounded-md bg-well px-2">
             <Search className="size-3.5 text-faint" />

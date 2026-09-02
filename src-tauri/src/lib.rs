@@ -7,6 +7,7 @@ mod files;
 mod git;
 mod github;
 mod harness;
+mod issues;
 mod models;
 mod names;
 mod pty;
@@ -130,6 +131,12 @@ pub fn run() {
             commands::dictation_available,
             commands::dictation_start,
             commands::dictation_stop,
+            commands::issues_list,
+            commands::issue_details,
+            commands::linear_status,
+            commands::linear_set_api_key,
+            commands::linear_teams,
+            commands::github_repo,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

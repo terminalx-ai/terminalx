@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   BranchInfo,
+  IssueRef,
   ChangedFile,
   CommitInfo,
   HarnessInfo,
@@ -23,6 +24,9 @@ export interface NewSession {
   title?: string | null;
   useWorktree: boolean;
   baseRef?: string | null;
+  /** A requested worktree name (an issue slug); sanitised and made unique. */
+  worktreeName?: string | null;
+  issue?: IssueRef | null;
   tab: NewTab;
 }
 
@@ -227,4 +231,51 @@ export const fs = {
   mtime: (path: string) => invoke<number | null>("file_mtime", { path }),
   searchText: (root: string, query: string, regex: boolean, caseSensitive: boolean, limit = 500) =>
     invoke<TextSearch>("search_text", { root, query, regex, caseSensitive, limit }),
+};
+
+// ---- issues (GitHub through gh, Linear through its API)
+export interface IssueLabel {
+  name: string;
+  color: string;
+}
+export interface IssueAssignee {
+  name: string;
+  avatarUrl?: string | null;
+}
+export interface IssueTeam {
+  id: string;
+  key: string;
+  name: string;
+}
+export interface Issue {
+  provider: "github" | "linear";
+  id: string;
+  identifier: string;
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  stateType: "open" | "started" | "completed" | "canceled";
+  labels: IssueLabel[];
+  assignee?: IssueAssignee | null;
+  updatedAt: string;
+  body?: string | null;
+  team?: IssueTeam | null;
+}
+export interface IssueFilter {
+  assignedToMe?: boolean;
+  teamId?: string | null;
+  search?: string | null;
+}
+export interface LinearStatus {
+  connected: boolean;
+  viewer?: string | null;
+}
+export const issues = {
+  list: (projectPath: string, provider: string, filter: IssueFilter) => invoke<Issue[]>("issues_list", { projectPath, provider, filter }),
+  details: (projectPath: string, provider: string, id: string) => invoke<Issue>("issue_details", { projectPath, provider, id }),
+  linearStatus: () => invoke<LinearStatus>("linear_status"),
+  linearSetApiKey: (key: string) => invoke<LinearStatus>("linear_set_api_key", { key }),
+  linearTeams: () => invoke<IssueTeam[]>("linear_teams"),
+  githubRepo: (projectPath: string) => invoke<string | null>("github_repo", { projectPath }),
 };

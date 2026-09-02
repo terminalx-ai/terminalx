@@ -16,6 +16,12 @@ pub struct Settings {
     /// Extra directories to search for agent binaries.
     pub extra_bin_dirs: Vec<String>,
     pub notifications: bool,
+    /// Personal API key for Linear; the file is kept owner-readable only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linear_api_key: Option<String>,
+    /// Who the key belonged to when it was saved, for the settings row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linear_viewer: Option<String>,
 }
 
 impl Default for Settings {
@@ -25,6 +31,8 @@ impl Default for Settings {
             branch_prefix: "raccoon/".into(),
             extra_bin_dirs: Vec::new(),
             notifications: true,
+            linear_api_key: None,
+            linear_viewer: None,
         }
     }
 }
@@ -41,5 +49,13 @@ pub fn load() -> Settings {
 }
 
 pub fn save(s: &Settings) -> Result<()> {
-    super::write_json(&file_path()?, s)
+    let path = file_path()?;
+    super::write_json(&path, s)?;
+    // The file can hold a tracker API key, so nobody else on the machine reads it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }

@@ -61,6 +61,17 @@ fn default_mode() -> String {
     "auto".into()
 }
 
+/// The tracker issue a session was started from, enough to link back.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueRef {
+    pub provider: String,
+    pub id: String,
+    pub identifier: String,
+    pub title: String,
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionEntry {
@@ -77,6 +88,9 @@ pub struct SessionEntry {
     pub base_ref: Option<String>,
     #[serde(default)]
     pub worktree_removed: bool,
+    /// Set when the session was started from a tracker issue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<IssueRef>,
     pub title: String,
     pub created: String,
     pub modified: String,
@@ -189,6 +203,7 @@ mod tests {
             branch: None,
             base_ref: None,
             worktree_removed: false,
+            issue: None,
             title: "t".into(),
             created: now(),
             modified: now(),

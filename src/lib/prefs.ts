@@ -24,6 +24,7 @@ export interface Prefs {
   lastModel: Record<string, string>;
   lastEffort: Record<string, string>;
   lastMode: string;
+  issueProvider: "github" | "linear";
   useWorktree: boolean;
 }
 
@@ -46,6 +47,7 @@ const DEFAULTS: Prefs = {
   lastModel: {},
   lastEffort: {},
   lastMode: "auto",
+  issueProvider: "github",
   useWorktree: true,
 };
 

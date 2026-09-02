@@ -156,6 +156,10 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Git status in the tree: tinted names with A/M/D/R badges, a dot on folders holding changes, refreshed on agent status changes and a gentle poll.
 - [x] Keyboard walk (arrows, Home/End, Enter), right-click menu: Open, Reveal in Finder, Copy path, Copy relative path, Mention in composer.
 - [x] The right panel's Files tab uses the same tree.
+### C17 — Issues as tasks
+- [x] GitHub issues through `gh` (repo from origin; open, assigned-to-me, search) and Linear through its GraphQL API with a stored key (teams, assigned-to-me, search).
+- [x] Issues view (⌘I) with detail column; Start session creates a worktree named after the issue (`raccoon/eng-42-fix-login`) and sends the issue as the first prompt; the session header links back.
+- [x] Settings → Integrations: Linear key (validated, stored owner-only), GitHub CLI status.
 
 ## Verification protocol
 

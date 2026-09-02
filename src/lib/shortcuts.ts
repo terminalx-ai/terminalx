@@ -7,6 +7,7 @@ export interface Shortcut {
 
 export const SHORTCUTS: Shortcut[] = [
   { chord: "mod+n", label: "New session", group: "App" },
+  { chord: "mod+i", label: "Issues", group: "App" },
   { chord: "mod+,", label: "Settings", group: "App" },
   { chord: "mod+b", label: "Toggle sidebar", group: "App" },
   { chord: "mod+e", label: "Toggle right panel", group: "App" },
