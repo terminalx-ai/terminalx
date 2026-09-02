@@ -74,6 +74,15 @@ can serve a different document per channel if it wants to.
   dev binary keeps the old plist and macOS will kill the process on the first
   microphone or speech request.
 
+- The bundle is signed with the hardened runtime, so microphone access needs
+  the `com.apple.security.device.audio-input` entitlement from
+  `src-tauri/Entitlements.plist` (wired in through
+  `bundle.macOS.entitlements`). Without it macOS neither prompts nor records:
+  no permission dialog appears, no Microphone row shows up under Privacy &
+  Security, and CoreAudio hands the app an endless stream of zeroes, so every
+  dictation comes back empty. The usage strings above are necessary but not
+  sufficient once the runtime is hardened.
+
 - Ad-hoc signing means Gatekeeper will ask the first time the app opens on
   another Mac. A Developer ID identity and notarization replace `"-"` in
   `bundle.macOS.signingIdentity` when that matters.

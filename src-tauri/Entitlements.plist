@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The bundle is code-signed with the hardened runtime. Under it the
+	     microphone is closed to a process that does not ask for it here:
+	     macOS raises no permission prompt at all and CoreAudio hands back an
+	     endless stream of zeroes, so a dictation records only silence. -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+</dict>
+</plist>
