@@ -52,8 +52,11 @@ file. A forked tab gets `--resume <parent> --fork-session --session-id <new>`.
 The rest of the command line is `--model`, `--effort`, `--permission-mode`,
 `--name` (so the tab is recognisable in the CLI's own picker) and `--settings`.
 
-The pane's environment carries `RACCOON_TAB_ID`, `RACCOON_SESSION_ID` and
-`RACCOON_HOOK_SOCKET`, all of which the CLI passes on to every hook it runs.
+The pane's environment carries `RACCOON_TAB_ID`, `RACCOON_SESSION_ID`,
+`RACCOON_HOOK_SOCKET` and `RACCOON_HOOK_TOKEN`, all of which the CLI passes on
+to every hook it runs. The token is minted per launch of the tab's CLI; the
+server drops any frame whose token does not match the live tab, and only
+accepts a `transcript_path` under that tab's own transcript directory.
 
 Opening a Claude tab starts its CLI (`ensure_tab_started`); it does not wait for
 a first prompt, because in this model the tab *is* the CLI.
@@ -100,7 +103,7 @@ so it works for `cargo run` and for the bundle alike:
 
 `main.rs` answers `argv[1] == "hook"` before Tauri starts: it reads all of
 stdin, connects to `$RACCOON_HOOK_SOCKET`, sends one framed
-`{tab, session, event, payload}` line, waits for a reply, prints it, and exits
+`{tab, session, event, token, payload}` line, waits for a reply, prints it, and exits
 0. If anything at all goes wrong — no socket, no app, a bad frame — it prints
 `{}` and exits 0, so the CLI is never blocked and never sees an error. It
 prints `{}` rather than nothing on purpose: an empty stdout from a permission
