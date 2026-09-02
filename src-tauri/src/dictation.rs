@@ -20,6 +20,10 @@ pub struct DictationEvent {
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Stable within one Apple transcription segment and incremented at a
+    /// timestamp boundary. Other engines leave it absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment: Option<u64>,
 }
 
 /// Every event, into the log before it goes out. Dictation goes wrong in the
@@ -27,7 +31,8 @@ pub struct DictationEvent {
 /// expected — and the only way to tell that from a composer that mishandled it
 /// is a record of what was actually emitted. Run the binary with `RUST_LOG=debug`
 /// to see it, next to the webview's own line for the same event.
-fn trace(kind: &str, text: Option<&str>, message: Option<&str>) {
+fn trace(kind: &str, text: Option<&str>, message: Option<&str>, segment: Option<u64>) {
+    let segment = segment.map_or_else(String::new, |index| format!(" segment={index}"));
     let detail = match (text, message) {
         (Some(t), _) => {
             let head: String = t.chars().take(40).collect();
@@ -37,12 +42,16 @@ fn trace(kind: &str, text: Option<&str>, message: Option<&str>) {
         (None, Some(m)) => format!(" {m}"),
         (None, None) => String::new(),
     };
-    log::debug!("dictation emit {kind}{detail}");
+    log::debug!("dictation emit {kind}{segment}{detail}");
 }
 
 fn emit(app: &AppHandle, kind: &'static str, text: Option<String>, message: Option<String>) {
-    trace(kind, text.as_deref(), message.as_deref());
-    let _ = app.emit("dictation", DictationEvent { kind, text, message });
+    emit_segment(app, kind, text, message, None);
+}
+
+fn emit_segment(app: &AppHandle, kind: &'static str, text: Option<String>, message: Option<String>, segment: Option<u64>) {
+    trace(kind, text.as_deref(), message.as_deref(), segment);
+    let _ = app.emit("dictation", DictationEvent { kind, text, message, segment });
 }
 
 /// System output volume, read and written through AppleScript. Best effort:
@@ -70,7 +79,7 @@ mod mac {
     use objc2::AllocAnyThread;
     use objc2_avf_audio::{AVAudioFormat, AVAudioPCMBuffer};
     use objc2_foundation::NSError;
-    use objc2_speech::{SFSpeechAudioBufferRecognitionRequest, SFSpeechRecognitionResult, SFSpeechRecognitionTask, SFSpeechRecognizer, SFSpeechRecognizerAuthorizationStatus};
+    use objc2_speech::{SFSpeechAudioBufferRecognitionRequest, SFSpeechRecognitionResult, SFSpeechRecognitionTask, SFSpeechRecognizer, SFSpeechRecognizerAuthorizationStatus, SFTranscription};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::mpsc::Receiver;
@@ -84,6 +93,53 @@ mod mac {
     const NOT_RECOGNISED: &str = "Nothing was recognised. Try again, speak closer to the microphone, or pick another model under Settings → Transcription.";
     /// Shown when macOS will not let this app near the microphone at all.
     const MIC_DENIED: &str = "Raccoon is not allowed to use the microphone. Enable it under System Settings → Privacy & Security → Microphone.";
+    /// Timestamp movement smaller than this can be a recogniser correction,
+    /// not a new spoken segment.
+    const SEGMENT_TIMESTAMP_TOLERANCE: f64 = 0.05;
+
+    #[derive(Debug, Clone, Copy)]
+    struct LiveSegment {
+        index: u64,
+        end: f64,
+    }
+
+    /// Turns Apple's shifting timestamp ranges into a stable identity that the
+    /// frontend can trust while the words inside the segment are revised.
+    #[derive(Debug, Default)]
+    struct AppleSegmentTracker {
+        next: u64,
+        live: Option<LiveSegment>,
+    }
+
+    impl AppleSegmentTracker {
+        fn observe(&mut self, bounds: Option<(f64, f64)>, is_final: bool) -> Option<u64> {
+            let Some((start, end)) = bounds.filter(|(start, end)| start.is_finite() && end.is_finite() && *start >= 0.0 && *end >= *start) else {
+                if is_final {
+                    self.live = None;
+                }
+                return None;
+            };
+            let current = match self.live {
+                Some(live) if start <= live.end + SEGMENT_TIMESTAMP_TOLERANCE => LiveSegment { index: live.index, end: live.end.max(end) },
+                _ => {
+                    let live = LiveSegment { index: self.next, end };
+                    self.next += 1;
+                    live
+                }
+            };
+            self.live = (!is_final).then_some(current);
+            Some(current.index)
+        }
+    }
+
+    fn apple_segment_bounds(transcription: &SFTranscription) -> Option<(f64, f64)> {
+        unsafe {
+            let segments = transcription.segments();
+            let first = segments.firstObject()?;
+            let last = segments.lastObject()?;
+            Some((first.timestamp(), last.timestamp() + last.duration()))
+        }
+    }
 
     /// Whether a captured buffer is worth handing to an engine. Anything under
     /// a quarter second cannot hold a word, and a buffer of exact zeroes is
@@ -187,6 +243,8 @@ mod mac {
         heard: Arc<AtomicBool>,
         /// Set once the recogniser hands back a transcript with words in it.
         produced: Arc<AtomicBool>,
+        /// Stable Apple segment identities for the current dictation.
+        segments: Arc<Mutex<AppleSegmentTracker>>,
     }
 
     /// Whether the running binary declares a privacy usage string. Read from
@@ -398,9 +456,11 @@ mod mac {
 
                 let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
                 self.stopping.store(false, Ordering::SeqCst);
+                *self.segments.lock().unwrap() = AppleSegmentTracker::default();
                 let gen_ref = self.generation.clone();
                 let stopping = self.stopping.clone();
                 let produced = self.produced.clone();
+                let segments = self.segments.clone();
                 let app_h = app.clone();
                 let me = self.clone();
                 let handler = RcBlock::new(move |result: *mut SFSpeechRecognitionResult, error: *mut NSError| {
@@ -409,17 +469,20 @@ mod mac {
                     }
                     if !result.is_null() {
                         let result = &*result;
-                        let text = result.bestTranscription().formattedString().to_string();
+                        let transcription = result.bestTranscription();
+                        let text = transcription.formattedString().to_string();
+                        let is_final = result.isFinal();
+                        let segment = segments.lock().unwrap().observe(apple_segment_bounds(&transcription), is_final);
                         if !text.trim().is_empty() {
                             produced.store(true, Ordering::SeqCst);
                         }
-                        if result.isFinal() {
-                            emit(&app_h, "final", Some(text), None);
+                        if is_final {
+                            emit_segment(&app_h, "final", Some(text), None, segment);
                             if stopping.load(Ordering::SeqCst) {
                                 me.finish(&app_h);
                             }
                         } else {
-                            emit(&app_h, "partial", Some(text), None);
+                            emit_segment(&app_h, "partial", Some(text), None, segment);
                         }
                     }
                     if !error.is_null() {
@@ -542,7 +605,7 @@ mod mac {
 
     #[cfg(test)]
     mod tests {
-        use super::{is_silent, TARGET_RATE};
+        use super::{is_silent, AppleSegmentTracker, TARGET_RATE};
 
         const SECOND: usize = TARGET_RATE as usize;
 
@@ -571,6 +634,27 @@ mod mac {
         #[test]
         fn a_quarter_second_of_speech_is_not_silence() {
             assert!(!is_silent(&vec![0.2; SECOND / 4]));
+        }
+
+        #[test]
+        fn timestamp_revisions_keep_the_same_segment() {
+            let mut segments = AppleSegmentTracker::default();
+            assert_eq!(segments.observe(Some((0.20, 0.75)), false), Some(0));
+            assert_eq!(segments.observe(Some((0.18, 1.40)), false), Some(0));
+        }
+
+        #[test]
+        fn a_timestamp_after_the_live_range_starts_a_new_segment() {
+            let mut segments = AppleSegmentTracker::default();
+            assert_eq!(segments.observe(Some((0.20, 1.40)), false), Some(0));
+            assert_eq!(segments.observe(Some((2.95, 3.60)), false), Some(1));
+        }
+
+        #[test]
+        fn a_final_result_closes_its_segment() {
+            let mut segments = AppleSegmentTracker::default();
+            assert_eq!(segments.observe(Some((0.20, 1.40)), true), Some(0));
+            assert_eq!(segments.observe(Some((0.25, 0.90)), false), Some(1));
         }
     }
 }

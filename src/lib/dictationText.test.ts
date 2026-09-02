@@ -2,15 +2,23 @@ import { describe, expect, it } from "vitest";
 import { anchorAt, applyFinal, applyPartial, draftWithSpeech, EMPTY_BUFFER, joinSpoken, revises, type DictationAnchor, type DictationBuffer } from "@/lib/dictationText";
 
 /** A recogniser event, as the store hands it over. */
-type Event = { partial: string } | { final: string };
+type Event = { partial: string; at?: number; segment?: number } | { final: string; segment?: number };
 
 /** Replay a dictation and read back the draft and the caret at the end. */
 function dictate(draft: string, caret: number, events: Event[]): { text: string; caret: number } {
   const anchor = anchorAt(draft, caret, caret);
   let buffer: DictationBuffer = EMPTY_BUFFER;
   let out = draftWithSpeech(anchor, buffer);
+  let previousPartialAt: number | undefined;
   for (const e of events) {
-    buffer = "partial" in e ? applyPartial(buffer, e.partial) : applyFinal(buffer, e.final);
+    if ("partial" in e) {
+      const sincePreviousMs = e.at == null || previousPartialAt == null ? undefined : e.at - previousPartialAt;
+      buffer = applyPartial(buffer, e.partial, { segment: e.segment, sincePreviousMs });
+      previousPartialAt = e.at;
+    } else {
+      buffer = applyFinal(buffer, e.final, { segment: e.segment });
+      previousPartialAt = undefined;
+    }
     out = draftWithSpeech(anchor, buffer);
   }
   return out;
@@ -82,9 +90,40 @@ describe("revises", () => {
     expect(revises("Hello", "Goodbye")).toBe(false);
     expect(revises("Testing one two three", "Four five six")).toBe(false);
   });
+
+  it("counts a rewrite with the same first word as the same segment", () => {
+    expect(revises("Green Light lighthouse", "Green lighthouse beam shine brightly", 80)).toBe(true);
+  });
 });
 
 describe("a dictated draft", () => {
+  it("replaces the short leading guess when the recogniser revises it", () => {
+    const events: Event[] = [
+      { partial: "Green", at: 0 },
+      { partial: "Green Light", at: 80 },
+      { partial: "Green Light lighthouse", at: 160 },
+      { partial: "Green lighthouse beam shine brightly beyond the quiet Harbour this morning", at: 240 },
+      // The pause. The next partial stands on its own.
+      { partial: "Silver lanterns glow softly beside the open window tonight", at: 1_840 },
+    ];
+    expect(end("", events)).toEqual({
+      text: "Green lighthouse beam shine brightly beyond the quiet Harbour this morning Silver lanterns glow softly beside the open window tonight",
+      caret: 133,
+    });
+  });
+
+  it("keeps a short guess live until a long enough pause separates it", () => {
+    const short = applyPartial(EMPTY_BUFFER, "Hello");
+    expect(applyPartial(short, "Goodbye", { sincePreviousMs: 1_499 })).toEqual({ committed: "", live: "Goodbye" });
+    expect(applyPartial(short, "Goodbye", { sincePreviousMs: 1_500 })).toEqual({ committed: "Hello", live: "Goodbye" });
+  });
+
+  it("trusts recogniser segment identities over the fallback heuristic", () => {
+    const first = applyPartial(EMPTY_BUFFER, "Alpha beta gamma", { segment: 7 });
+    expect(applyPartial(first, "Entirely revised", { segment: 7, sincePreviousMs: 5_000 })).toEqual({ committed: "", live: "Entirely revised", segment: 7 });
+    expect(applyPartial(first, "Alpha starts again", { segment: 8, sincePreviousMs: 10 })).toEqual({ committed: "Alpha beta gamma", live: "Alpha starts again", segment: 8 });
+  });
+
   it("grows with cumulative partials rather than repeating them", () => {
     expect(end("", [{ partial: "Fix" }, { partial: "Fix the" }, { partial: "Fix the build" }])).toEqual({ text: "Fix the build", caret: 13 });
   });

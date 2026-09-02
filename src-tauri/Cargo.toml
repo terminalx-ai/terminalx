@@ -56,7 +56,7 @@ objc2-av-foundation = { version = "0.3", default-features = false, features = ["
 objc2-avf-audio = { version = "0.3", features = ["AVAudioEngine", "AVAudioNode", "AVAudioIONode", "AVAudioBuffer", "AVAudioFormat", "AVAudioTime", "AVAudioTypes", "block2"] }
 block2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry", "NSBundle", "NSDictionary"] }
-objc2-speech = { version = "0.3", default-features = false, features = ["std", "SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFSpeechRecognitionTaskHint", "SFTranscription", "SFErrors", "block2", "objc2-avf-audio"] }
+objc2-speech = { version = "0.3", default-features = false, features = ["std", "SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFSpeechRecognitionTaskHint", "SFTranscription", "SFTranscriptionSegment", "SFErrors", "block2", "objc2-avf-audio"] }
 transcribe-cpp = { version = "0.2", default-features = false, features = ["metal"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]

@@ -24,6 +24,8 @@ export interface DictationBuffer {
   committed: string;
   /** The segment still being revised; every partial replaces it wholesale. */
   live: string;
+  /** Recogniser-owned identity for `live`, when the engine can provide one. */
+  segment?: number;
 }
 
 export const EMPTY_BUFFER: DictationBuffer = { committed: "", live: "" };
@@ -73,15 +75,25 @@ function words(text: string): string[] {
     .filter(Boolean);
 }
 
+/** What the recogniser knows about a result beyond its text. */
+export interface DictationResult {
+  /** Stable within one recogniser segment and different after a real boundary. */
+  segment?: number;
+  /** Time since the preceding partial, for engines without segment metadata. */
+  sincePreviousMs?: number;
+}
+
+const SHORT_PARTIAL_WORDS = 3;
+const SEGMENT_PAUSE_MS = 1_500;
+
 /**
  * Whether `next` is the recogniser thinking again about `prev` rather than
- * starting somewhere new. A revision keeps the opening words: it extends them,
- * shortens back to them, or rewrites a tail while most of the head survives. A
- * new segment after a pause is a different sentence and shares almost nothing,
- * so requiring half of the previous words to still be there at the front tells
- * the two apart without needing the recogniser to say which it is.
+ * starting somewhere new. A revision extends or shortens an opening, keeps
+ * most of the old head, or arrives quickly enough that a short guess or shared
+ * first word is likelier to be a corrected tail. After 1.5 seconds the recent
+ * result allowances stop applying, so a text-only engine can fold a new phrase.
  */
-export function revises(prev: string, next: string): boolean {
+export function revises(prev: string, next: string, sincePreviousMs?: number): boolean {
   const a = words(prev);
   const b = words(next);
   if (a.length === 0) return true;
@@ -89,15 +101,29 @@ export function revises(prev: string, next: string): boolean {
   while (shared < a.length && shared < b.length && a[shared] === b[shared]) shared += 1;
   // One is a word-for-word prefix of the other: plainly the same segment.
   if (shared === a.length || shared === b.length) return true;
+  const recent = sincePreviousMs != null && Number.isFinite(sincePreviousMs) && sincePreviousMs >= 0 && sincePreviousMs < SEGMENT_PAUSE_MS;
+  // With no pause, a short guess or a stable leading word is much likelier to
+  // be a correction than a new utterance. A long enough gap restores the old
+  // text-only distinction for engines that cannot identify their segments.
+  if (recent && (a.length < SHORT_PARTIAL_WORDS || a[0] === b[0])) return true;
   return shared * 2 >= a.length;
 }
 
+function isRevision(buffer: DictationBuffer, next: string, result: DictationResult): boolean {
+  if (buffer.segment != null && result.segment != null) return buffer.segment === result.segment;
+  return revises(buffer.live, next, result.sincePreviousMs);
+}
+
+function withLive(committed: string, live: string, segment: number | undefined): DictationBuffer {
+  return segment == null ? { committed, live } : { committed, live, segment };
+}
+
 /** Take a partial result. Blank ones say nothing and change nothing. */
-export function applyPartial(buffer: DictationBuffer, partial: string): DictationBuffer {
+export function applyPartial(buffer: DictationBuffer, partial: string, result: DictationResult = {}): DictationBuffer {
   const next = partial.trim();
   if (!next) return buffer;
-  if (revises(buffer.live, next)) return { committed: buffer.committed, live: next };
-  return { committed: joinSpoken(buffer.committed, buffer.live), live: next };
+  if (isRevision(buffer, next, result)) return withLive(buffer.committed, next, result.segment);
+  return withLive(joinSpoken(buffer.committed, buffer.live), next, result.segment);
 }
 
 /**
@@ -105,10 +131,10 @@ export function applyPartial(buffer: DictationBuffer, partial: string): Dictatio
  * last partial said again (or tidied up) replaces it; one that stands on its
  * own is kept as well, so a phrase is never lost to a dedupe.
  */
-export function applyFinal(buffer: DictationBuffer, final: string): DictationBuffer {
+export function applyFinal(buffer: DictationBuffer, final: string, result: DictationResult = {}): DictationBuffer {
   const text = final.trim();
   if (!text) return { committed: spokenText(buffer), live: "" };
-  if (revises(buffer.live, text)) return { committed: joinSpoken(buffer.committed, text), live: "" };
+  if (isRevision(buffer, text, result)) return { committed: joinSpoken(buffer.committed, text), live: "" };
   return { committed: joinSpoken(spokenText(buffer), text), live: "" };
 }
 
