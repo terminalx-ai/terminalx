@@ -22,6 +22,16 @@ export interface NewTab {
   permissionMode?: string | null;
 }
 
+/** The tail of one session's active tab, as the dashboard cards need it. */
+export interface SessionSummary {
+  sessionId: string;
+  tabId: string;
+  lastPrompt: string | null;
+  lastReply: string | null;
+  waitingOn: string | null;
+  updatedAt: string;
+}
+
 export interface NewSession {
   projectPath: string;
   /** Run in this existing workspace instead of creating a worktree. */
@@ -50,6 +60,8 @@ export const api = {
 
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
+  /** Card snippets for the agent dashboard; every session when no ids are given. */
+  sessionSummaries: (sessionIds?: string[]) => invoke<SessionSummary[]>("session_summaries", { sessionIds: sessionIds ?? null }),
   createSession: (req: NewSession) => invoke<SessionEntry>("create_session", { req }),
   addTab: (sessionId: string, tab: NewTab) => invoke<TabEntry>("add_tab", { sessionId, tab }),
   removeTab: (sessionId: string, tabId: string) => invoke<void>("remove_tab", { sessionId, tabId }),

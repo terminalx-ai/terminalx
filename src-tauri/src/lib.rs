@@ -14,6 +14,7 @@ mod names;
 mod pty;
 mod session;
 mod store;
+mod summaries;
 mod workspaces;
 
 use std::sync::Arc;
@@ -71,6 +72,7 @@ pub fn run() {
             commands::remove_project,
             commands::select_project,
             commands::list_sessions,
+            commands::session_summaries,
             commands::create_session,
             commands::add_tab,
             commands::remove_tab,

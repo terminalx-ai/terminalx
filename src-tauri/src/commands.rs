@@ -56,6 +56,16 @@ pub fn list_sessions() -> CmdResult<Vec<SessionEntry>> {
     index::load().map_err(err)
 }
 
+/// The snippets the agent dashboard draws on its cards. Reading tails off the
+/// disk is blocking work, and the dashboard asks for every session at once, so
+/// it runs off the UI thread.
+#[tauri::command]
+pub async fn session_summaries(session_ids: Option<Vec<String>>) -> CmdResult<Vec<crate::summaries::SessionSummary>> {
+    tauri::async_runtime::spawn_blocking(move || crate::summaries::collect(session_ids).map_err(err))
+        .await
+        .map_err(err)?
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewTab {

@@ -16,11 +16,13 @@ export function Sidebar({
   onToggle,
   onOpenSettings,
   onOpenIssues,
+  onOpenAgents,
   onSearch,
 }: {
   onToggle: () => void;
   onOpenSettings: () => void;
   onOpenIssues: () => void;
+  onOpenAgents: () => void;
   onSearch: () => void;
 }) {
   const store = useSessionStore();
@@ -37,7 +39,7 @@ export function Sidebar({
 
   return (
     <aside className="relative flex h-full shrink-0">
-      <ProjectRail onOpenSettings={onOpenSettings} onOpenIssues={onOpenIssues} onSearch={onSearch} />
+      <ProjectRail onOpenSettings={onOpenSettings} onOpenIssues={onOpenIssues} onOpenAgents={onOpenAgents} onSearch={onSearch} />
       {focus ? (
         <WorkspaceColumn projectPath={focus} onNewSession={() => startSessionIn(focus, null)} />
       ) : (

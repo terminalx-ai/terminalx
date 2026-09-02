@@ -186,3 +186,16 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Sessions can start inside an existing workspace; the new-session form sits at the bottom with project, agent, model, effort and permission pills.
 - [x] Project menu: rename, logo, colour, pixel mascot, pin, reveal, refresh, archive, remove. Global and per-project refresh.
 - [x] Deleting a workspace checks uncommitted files, unpushed commits and the branch's pull request; merged and clean is called out as safe.
+
+### Agent dashboard ✅
+- [x] Full-area Agents view (⌘⇧A, or the rail entry under Issues, which carries
+      an amber count of sessions waiting on you and a green count of ones that
+      finished unread) with three columns — Needs you, Working, Done — each
+      scrolling on its own, stacking under 1000px of room.
+- [x] Cards carry the session, its checkout and issue, the last prompt and the
+      last reply — or, for a waiting session, what it is waiting on — with a
+      card menu for Open, Stop and Archive, and ↑/↓, ←/→ and Enter to walk them.
+- [x] `session_summaries` reads each session's log **backwards** in 64 KB blocks
+      for those snippets, so opening the dashboard costs a block per session
+      rather than a transcript; the frontend caches by session and status and
+      re-reads on any status change and every 30 s.
