@@ -57,6 +57,68 @@ mod mac {
     use std::sync::mpsc::Receiver;
     use std::sync::Arc;
 
+    /// Shown when the microphone was open but delivered nothing: no frames at
+    /// all, or nothing but zeroes. That is what an unpermitted or muted input
+    /// looks like from here, and it must never pass as a successful dictation.
+    const NO_AUDIO: &str = "The microphone delivered no audio. Check the input under Settings → Transcription and that Raccoon is allowed to use the microphone.";
+    /// Shown when a local model heard real sound and still made no words of it.
+    const NOT_RECOGNISED: &str = "Nothing was recognised. Try again, speak closer to the microphone, or pick another model under Settings → Transcription.";
+    /// Shown when macOS will not let this app near the microphone at all.
+    const MIC_DENIED: &str = "Raccoon is not allowed to use the microphone. Enable it under System Settings → Privacy & Security → Microphone.";
+
+    /// Whether a captured buffer is worth handing to an engine. Anything under
+    /// a quarter second cannot hold a word, and a buffer of exact zeroes is
+    /// what a microphone the app may not open delivers.
+    fn is_silent(samples: &[f32]) -> bool {
+        samples.len() < TARGET_RATE as usize / 4 || samples.iter().all(|s| *s == 0.0)
+    }
+
+    /// Microphone permission, as macOS sees it. Asking before opening the
+    /// device matters under the hardened runtime: without the audio-input
+    /// entitlement no prompt is ever raised and CoreAudio simply hands back
+    /// silence, so a refusal has to be recognised rather than recorded.
+    mod permission {
+        use block2::RcBlock;
+        use objc2::runtime::Bool;
+        use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaType, AVMediaTypeAudio};
+
+        pub enum Mic {
+            Granted,
+            Denied,
+            /// Never asked; a prompt will be raised.
+            Ask,
+        }
+
+        /// The audio media type constant, or `None` if AVFoundation did not
+        /// load — in which case there is nothing to ask and nothing to refuse.
+        fn audio() -> Option<&'static AVMediaType> {
+            unsafe { AVMediaTypeAudio }
+        }
+
+        pub fn status() -> Mic {
+            let Some(media) = audio() else { return Mic::Granted };
+            let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(media) };
+            if status == AVAuthorizationStatus::Authorized {
+                Mic::Granted
+            } else if status == AVAuthorizationStatus::NotDetermined {
+                Mic::Ask
+            } else {
+                Mic::Denied
+            }
+        }
+
+        /// Raise the system prompt. `then` runs on an arbitrary thread once
+        /// the reader has answered.
+        pub fn request(then: impl Fn(bool) + 'static) {
+            let Some(media) = audio() else {
+                then(true);
+                return;
+            };
+            let block = RcBlock::new(move |granted: Bool| then(granted.as_bool()));
+            unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(media, &block) };
+        }
+    }
+
     /// A recogniser request handed to the pump thread. The framework accepts
     /// buffers from any thread; only creation and teardown stay on main.
     struct RequestHandle(Retained<SFSpeechAudioBufferRecognitionRequest>);
@@ -100,6 +162,12 @@ mod mac {
         /// Bumped per start; a result handler from an older run is ignored.
         generation: Arc<AtomicU64>,
         stopping: Arc<AtomicBool>,
+        /// Set once the capture delivers a sample that is not exactly zero.
+        /// The Apple route has no buffer to inspect afterwards, so the pump
+        /// answers the same question the local route asks of its samples.
+        heard: Arc<AtomicBool>,
+        /// Set once the recogniser hands back a transcript with words in it.
+        produced: Arc<AtomicBool>,
     }
 
     /// Whether the running binary declares a privacy usage string. Read from
@@ -133,10 +201,39 @@ mod mac {
                 emit(&app, "error", None, Some(msg.clone()));
                 return Err(msg);
             }
+            // And the microphone itself has to be allowed. Under the hardened
+            // runtime a refusal is silent — zeroes rather than an error — so
+            // settle it here instead of recording nothing.
+            match permission::status() {
+                permission::Mic::Granted => self.begin(app, &model),
+                permission::Mic::Denied => {
+                    emit(&app, "error", None, Some(MIC_DENIED.into()));
+                    Err(MIC_DENIED.into())
+                }
+                permission::Mic::Ask => {
+                    // The prompt is answered on another thread; the dictation
+                    // carries on from there, reporting through events because
+                    // the command that asked for it has long since returned.
+                    let me = self.clone();
+                    permission::request(move |granted| {
+                        if !granted {
+                            emit(&app, "error", None, Some(MIC_DENIED.into()));
+                            return;
+                        }
+                        if let Err(e) = me.begin(app.clone(), &model) {
+                            emit(&app, "error", None, Some(e));
+                        }
+                    });
+                    Ok(())
+                }
+            }
+        }
+
+        fn begin(self: &Arc<Self>, app: AppHandle, model: &str) -> Result<(), String> {
             if model == APPLE {
                 self.start_apple(app)
             } else {
-                self.start_local(app, &model)
+                self.start_local(app, model)
             }
         }
 
@@ -251,6 +348,9 @@ mod mac {
                 // Frames arrive on the capture thread; wrap them as PCM buffers
                 // in the recogniser's standard 16 kHz mono float layout.
                 let handle = RequestHandle(request.clone());
+                self.heard.store(false, Ordering::SeqCst);
+                self.produced.store(false, Ordering::SeqCst);
+                let heard = self.heard.clone();
                 std::thread::Builder::new()
                     .name("dictation-pump".into())
                     .spawn(move || {
@@ -260,6 +360,9 @@ mod mac {
                         for chunk in frames {
                             if chunk.is_empty() {
                                 continue;
+                            }
+                            if !heard.load(Ordering::Relaxed) && chunk.iter().any(|s| *s != 0.0) {
+                                heard.store(true, Ordering::Relaxed);
                             }
                             let Some(buffer) = AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(AVAudioPCMBuffer::alloc(), &format, chunk.len() as u32) else { continue };
                             let channels = buffer.floatChannelData();
@@ -278,6 +381,7 @@ mod mac {
                 self.stopping.store(false, Ordering::SeqCst);
                 let gen_ref = self.generation.clone();
                 let stopping = self.stopping.clone();
+                let produced = self.produced.clone();
                 let app_h = app.clone();
                 let me = self.clone();
                 let handler = RcBlock::new(move |result: *mut SFSpeechRecognitionResult, error: *mut NSError| {
@@ -287,6 +391,9 @@ mod mac {
                     if !result.is_null() {
                         let result = &*result;
                         let text = result.bestTranscription().formattedString().to_string();
+                        if !text.trim().is_empty() {
+                            produced.store(true, Ordering::SeqCst);
+                        }
                         if result.isFinal() {
                             emit(&app_h, "final", Some(text), None);
                             if stopping.load(Ordering::SeqCst) {
@@ -344,13 +451,17 @@ mod mac {
                         // The pump may still be draining the last chunk.
                         std::thread::sleep(std::time::Duration::from_millis(60));
                         let samples = audio.lock().unwrap().clone();
-                        match transcription.engine.transcribe(&id, &path, &samples) {
-                            Ok(text) => {
-                                if !text.is_empty() {
-                                    emit(&app, "final", Some(text), None);
-                                }
+                        if is_silent(&samples) {
+                            emit(&app, "error", None, Some(NO_AUDIO.into()));
+                        } else {
+                            match transcription.engine.transcribe(&id, &path, &samples) {
+                                // A model can be handed real speech and still
+                                // make no words of it. An empty composer would
+                                // read as a dictation that quietly vanished.
+                                Ok(text) if text.trim().is_empty() => emit(&app, "error", None, Some(NOT_RECOGNISED.into())),
+                                Ok(text) => emit(&app, "final", Some(text), None),
+                                Err(e) => emit(&app, "error", None, Some(format!("{e:#}"))),
                             }
-                            Err(e) => emit(&app, "error", None, Some(format!("{e:#}"))),
                         }
                         me.finish(&app);
                     })
@@ -387,6 +498,17 @@ mod mac {
                 if let Some(level) = a.restore_volume.take() {
                     volume::set(level);
                 }
+                // A recogniser that finishes a stopped dictation with no words,
+                // over audio that never held a single non-zero sample, was
+                // reading a microphone that was never really open. The local
+                // route says so from its buffer; this is the same answer.
+                if matches!(a.route, Route::Apple { .. })
+                    && self.stopping.load(Ordering::SeqCst)
+                    && !self.produced.load(Ordering::SeqCst)
+                    && !self.heard.load(Ordering::SeqCst)
+                {
+                    emit(app, "error", None, Some(NO_AUDIO.into()));
+                }
                 let app = app.clone();
                 let _ = app.clone().run_on_main_thread(move || {
                     if let Route::Apple { task, .. } = &a.route {
@@ -396,6 +518,40 @@ mod mac {
                     emit(&app, "stopped", None, None);
                 });
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{is_silent, TARGET_RATE};
+
+        const SECOND: usize = TARGET_RATE as usize;
+
+        #[test]
+        fn a_buffer_of_zeroes_is_silence() {
+            assert!(is_silent(&vec![0.0; SECOND]));
+        }
+
+        #[test]
+        fn nothing_at_all_is_silence() {
+            assert!(is_silent(&[]));
+        }
+
+        #[test]
+        fn a_buffer_under_a_quarter_second_is_silence_however_loud() {
+            assert!(is_silent(&vec![0.8; SECOND / 4 - 1]));
+        }
+
+        #[test]
+        fn one_faint_sample_in_a_long_buffer_is_not_silence() {
+            let mut samples = vec![0.0f32; SECOND];
+            samples[SECOND / 2] = -0.0001;
+            assert!(!is_silent(&samples));
+        }
+
+        #[test]
+        fn a_quarter_second_of_speech_is_not_silence() {
+            assert!(!is_silent(&vec![0.2; SECOND / 4]));
         }
     }
 }
