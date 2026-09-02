@@ -101,10 +101,15 @@ function disposeInstance(id: string) {
   }
 }
 
-let subscribed = false;
-export async function subscribeTerminals() {
-  if (subscribed) return;
-  subscribed = true;
+// One subscription per window, and callers wait for it: a second caller that
+// returned early while the first was still registering would miss the events
+// arriving in between.
+let subscribed: Promise<void> | null = null;
+export function subscribeTerminals(): Promise<void> {
+  return (subscribed ??= register());
+}
+
+async function register() {
   try {
     await listen<{ id: string; data: string }>("pty_data", (e) => {
       const { id, data } = e.payload;

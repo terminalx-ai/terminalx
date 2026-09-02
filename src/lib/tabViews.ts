@@ -64,10 +64,12 @@ export function clearTabViewError(tabId: string) {
  * it landed in. Adopting it here is what routes the pane's output to this
  * window's xterm instance.
  */
-let subscribed = false;
-export async function subscribeTabPty() {
-  if (subscribed) return;
-  subscribed = true;
+let subscribed: Promise<void> | null = null;
+export function subscribeTabPty(): Promise<void> {
+  return (subscribed ??= registerTabPty());
+}
+
+async function registerTabPty() {
   try {
     await listen<TabPtyEvent>("tab_pty", (e) => {
       const { sessionId, tabId, paneId, command } = e.payload;
