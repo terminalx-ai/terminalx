@@ -11,7 +11,11 @@ export type DictationPhase = "idle" | "starting" | "listening" | "finishing";
 
 export interface DictationState {
   phase: DictationPhase;
-  /** Text recognised so far for the current utterance; replaced, not appended. */
+  /**
+   * The recogniser's latest result for the segment it is working on. It is
+   * replaced wholesale, and after a pause it can start again from nothing —
+   * the composer keeps what came before (see `@/lib/dictationText`).
+   */
   partial: string;
   /** Which composer (tab id) the text belongs to. */
   target: string | null;

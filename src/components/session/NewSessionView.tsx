@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, FolderGit2, GitBranch, Loader2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
@@ -78,8 +78,7 @@ export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, 
     }
   };
 
-  const focusInput = useCallback(() => ref.current?.focus(), []);
-  const dictation = useDictationInto(NEW_SESSION_TARGET, text, setText, focusInput);
+  const dictation = useDictationInto(NEW_SESSION_TARGET, text, setText, ref);
   useHotkey("mod+shift+d", dictation.toggle);
 
   const canSend = useMemo(() => !!project && !!harness && available && text.trim().length > 0 && !busy, [project, harness, available, text, busy]);
