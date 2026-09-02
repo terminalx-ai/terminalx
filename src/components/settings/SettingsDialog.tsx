@@ -15,15 +15,16 @@ import { setPrefs, usePrefs } from "@/lib/prefs";
 import { keycaps } from "@/lib/hotkeys";
 import { SHORTCUTS } from "@/lib/shortcuts";
 import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
-import { errorMessage } from "@/lib/api";
+import { errorMessage, gh, issues, type LinearStatus } from "@/lib/api";
 import changelog from "../../../CHANGELOG.md?raw";
 
-const TABS = ["general", "appearance", "agents", "shortcuts", "about"] as const;
+const TABS = ["general", "appearance", "agents", "integrations", "shortcuts", "about"] as const;
 type Tab = (typeof TABS)[number];
 const TAB_LABEL: Record<Tab, string> = {
   general: "General",
   appearance: "Appearance",
   agents: "Agents",
+  integrations: "Integrations",
   shortcuts: "Shortcuts",
   about: "About",
 };
@@ -57,6 +58,7 @@ export function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
             {tab === "general" && <GeneralTab />}
             {tab === "appearance" && <AppearanceTab />}
             {tab === "agents" && <AgentsTab />}
+            {tab === "integrations" && <IntegrationsTab />}
             {tab === "shortcuts" && <ShortcutsTab />}
             {tab === "about" && <AboutTab />}
           </div>
@@ -256,6 +258,90 @@ function AgentsTab() {
         ))}
         {!store.harnesses.length && <li className="px-3 py-3 text-xs text-faint">Looking for agents…</li>}
       </ul>
+    </div>
+  );
+}
+
+/** Trackers the issues view can read. Keys live in the app's own settings file. */
+function IntegrationsTab() {
+  const [linear, setLinear] = useState<LinearStatus | null>(null);
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [ghOk, setGhOk] = useState<boolean | null>(null);
+  useEffect(() => {
+    issues.linearStatus().then(setLinear).catch(() => setLinear({ connected: false }));
+    gh.available().then(setGhOk).catch(() => setGhOk(false));
+  }, []);
+  const save = async (value: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const s = await issues.linearSetApiKey(value);
+      setLinear(s);
+      setKey("");
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <div className="text-sm font-medium">GitHub</div>
+        <p className="mt-0.5 text-xs text-muted-foreground">Issues and pull requests go through the GitHub CLI, which holds its own login.</p>
+        <div className="mt-2 flex items-center gap-2 text-xs">
+          {ghOk == null ? (
+            <Loader2 className="size-3.5 animate-spin text-faint" />
+          ) : ghOk ? (
+            <span className="flex items-center gap-1 text-add">
+              <Check className="size-3.5" /> gh is installed and signed in
+            </span>
+          ) : (
+            <span className="flex items-center gap-1 text-warning">
+              <CircleAlert className="size-3.5" /> Install gh and run <code className="font-mono">gh auth login</code>
+            </span>
+          )}
+        </div>
+      </div>
+      <div>
+        <div className="text-sm font-medium">Linear</div>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          A personal API key from Linear → Settings → Security &amp; access. It is stored in Raccoon's settings file, readable only by you, and sent only to api.linear.app.
+        </p>
+        <div className="mt-2 flex items-center gap-2 text-xs">
+          {linear?.connected ? (
+            <span className="flex items-center gap-1 text-add">
+              <Check className="size-3.5" /> Connected as {linear.viewer ?? "you"}
+            </span>
+          ) : (
+            <span className="flex items-center gap-1 text-faint">
+              <CircleAlert className="size-3.5" /> Not connected
+            </span>
+          )}
+        </div>
+        <div className="mt-2 flex items-center gap-2">
+          <input
+            type="password"
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && key.trim() && void save(key)}
+            placeholder={linear?.connected ? "Paste a new key to replace" : "lin_api_…"}
+            spellCheck={false}
+            className="h-8 min-w-0 flex-1 rounded-md bg-well px-2 font-mono text-xs outline-none placeholder:text-faint focus-visible:ring-2 focus-visible:ring-ring/40"
+          />
+          <Button size="sm" variant="outline" disabled={busy || !key.trim()} onClick={() => void save(key)}>
+            {busy ? <Loader2 className="animate-spin" /> : null} Save
+          </Button>
+          {linear?.connected && (
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => void save("")}>
+              Disconnect
+            </Button>
+          )}
+        </div>
+        {error && <div className="mt-2 text-xs text-destructive">{error}</div>}
+      </div>
     </div>
   );
 }

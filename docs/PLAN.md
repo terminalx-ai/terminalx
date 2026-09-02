@@ -151,6 +151,11 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Long-session stress: demo page `?turns=200&live=1&stream=1000` sustains ~830 deltas/s with ~1 long task/s (max 72 ms) after chunking the streaming preview; composer stays visible and typed text arrives intact.
 - [x] Light mode pass (session, editor, terminal), keyboard pass (focus rings on tabs, rows, composer); reduced motion honoured through `prefers-reduced-motion` in the raccoon scene and runner (code path, not toggled system-wide).
 
+### C17 — Issues as tasks
+- [x] GitHub issues through `gh` (repo from origin; open, assigned-to-me, search) and Linear through its GraphQL API with a stored key (teams, assigned-to-me, search).
+- [x] Issues view (⌘I) with detail column; Start session creates a worktree named after the issue (`raccoon/eng-42-fix-login`) and sends the issue as the first prompt; the session header links back.
+- [x] Settings → Integrations: Linear key (validated, stored owner-only), GitHub CLI status.
+
 ## Verification protocol
 
 - `pnpm check` = vitest + tsc; `cargo test` + `cargo clippy -D warnings`.

@@ -1,4 +1,5 @@
-import { GitBranch, PanelLeft, PanelRight, TerminalSquare } from "lucide-react";
+import { CircleDot, GitBranch, PanelLeft, PanelRight, TerminalSquare } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { TITLEBAR_INSET } from "@/components/layout/AppShell";
@@ -68,6 +69,18 @@ export function SessionView({
             <span className="truncate text-foreground" title={session.title}>
               {session.title}
             </span>
+            {session.issue && (
+              <WithTooltip label={session.issue.title}>
+                <button
+                  type="button"
+                  onClick={() => void openUrl(session.issue!.url)}
+                  className="ml-1 flex shrink-0 items-center gap-1 rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+                >
+                  <CircleDot className="size-3" />
+                  {session.issue.identifier}
+                </button>
+              </WithTooltip>
+            )}
             {session.branch && (
               <span className="ml-1 flex shrink-0 items-center gap-1 rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground" title={session.cwd}>
                 <GitBranch className="size-3" />

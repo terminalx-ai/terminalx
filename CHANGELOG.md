@@ -15,3 +15,4 @@ First runnable build, assembled checkpoint by checkpoint.
 - A pixel raccoon that potters about an empty session and runs along the composer while an agent works.
 - Worktree lifecycle: settle after a merge, fork a session, guarded delete.
 - Themes (den, slate, moss, ember) with light and dark modes and window vibrancy.
+- Issues from GitHub and Linear (⌘I): browse, read, and start a session on one; the worktree is named after the issue and the header links back to it.

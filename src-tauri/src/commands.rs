@@ -6,7 +6,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::store::index::{self, SessionEntry, TabEntry, TabStatus};
+use crate::store::index::{self, IssueRef, SessionEntry, TabEntry, TabStatus};
 use crate::store::projects::{self, Project};
 use crate::{git, harness, names, store};
 
@@ -77,7 +77,40 @@ pub struct NewSession {
     pub use_worktree: bool,
     #[serde(default)]
     pub base_ref: Option<String>,
+    /// A requested worktree name (an issue slug); sanitised and made unique.
+    #[serde(default)]
+    pub worktree_name: Option<String>,
+    #[serde(default)]
+    pub issue: Option<IssueRef>,
     pub tab: NewTab,
+}
+
+/// A worktree name the reader asked for, made safe for a branch and a folder:
+/// lowercase, `[a-z0-9-]`, at most 40 chars, and suffixed when already taken.
+fn requested_worktree_name(requested: &str, taken: &[String]) -> Option<String> {
+    let mut base = String::new();
+    let mut last_dash = true;
+    for ch in requested.chars() {
+        let c = ch.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() {
+            base.push(c);
+            last_dash = false;
+        } else if !last_dash {
+            base.push('-');
+            last_dash = true;
+        }
+        if base.len() >= 40 {
+            break;
+        }
+    }
+    let base = base.trim_matches('-').to_string();
+    if base.is_empty() {
+        return None;
+    }
+    if !taken.iter().any(|t| t == &base) {
+        return Some(base);
+    }
+    (2..1000).map(|n| format!("{base}-{n}")).find(|c| !taken.iter().any(|t| t == c))
 }
 
 fn new_tab_entry(t: &NewTab) -> TabEntry {
@@ -124,6 +157,7 @@ fn create_session_blocking(app: &AppHandle, req: NewSession) -> CmdResult<Sessio
         branch: git::current_branch(project_path),
         base_ref: None,
         worktree_removed: false,
+        issue: req.issue.clone(),
         title,
         created: now.clone(),
         modified: now,
@@ -138,7 +172,11 @@ fn create_session_blocking(app: &AppHandle, req: NewSession) -> CmdResult<Sessio
     if req.use_worktree {
         let taken = index::load().map(|s| index::claimed_worktree_names(&s)).unwrap_or_default();
         let taken = git::taken_worktree_names(project_path, &taken);
-        let name = names::unclaimed(&taken);
+        let name = req
+            .worktree_name
+            .as_deref()
+            .and_then(|r| requested_worktree_name(r, &taken))
+            .unwrap_or_else(|| names::unclaimed(&taken));
         let wt = git::create_worktree(project_path, &name, req.base_ref.as_deref()).map_err(err)?;
         entry.cwd = wt.path;
         entry.worktree_name = Some(wt.name);
@@ -382,6 +420,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             branch: src.branch.clone(),
             base_ref: None,
             worktree_removed: false,
+            issue: src.issue.clone(),
             title: format!("{} (fork)", src.title),
             created: now.clone(),
             modified: now,
@@ -790,4 +829,92 @@ pub async fn search_text(root: String, query: String, regex: bool, case_sensitiv
         .await
         .map_err(err)?
         .map_err(err)
+}
+
+// ------------------------------------------------------------------ issues
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinearStatus {
+    pub connected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer: Option<String>,
+}
+
+fn linear_key() -> CmdResult<String> {
+    store::settings::load().linear_api_key.filter(|k| !k.trim().is_empty()).ok_or_else(|| "Linear is not connected. Add an API key in Settings → Integrations.".to_string())
+}
+
+#[tauri::command]
+pub async fn issues_list(project_path: String, provider: String, filter: crate::issues::IssueFilter) -> CmdResult<Vec<crate::issues::Issue>> {
+    tauri::async_runtime::spawn_blocking(move || match provider.as_str() {
+        "github" => crate::issues::github_list(Path::new(&project_path), &filter).map_err(err),
+        "linear" => crate::issues::linear_list(&linear_key()?, &filter).map_err(err),
+        other => Err(format!("unknown issue provider {other}")),
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn issue_details(project_path: String, provider: String, id: String) -> CmdResult<crate::issues::Issue> {
+    tauri::async_runtime::spawn_blocking(move || match provider.as_str() {
+        "github" => crate::issues::github_details(Path::new(&project_path), &id).map_err(err),
+        "linear" => crate::issues::linear_details(&linear_key()?, &id).map_err(err),
+        other => Err(format!("unknown issue provider {other}")),
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub fn linear_status() -> LinearStatus {
+    let s = store::settings::load();
+    let connected = s.linear_api_key.as_deref().map(|k| !k.trim().is_empty()).unwrap_or(false);
+    LinearStatus { connected, viewer: if connected { s.linear_viewer } else { None } }
+}
+
+/// Store a key after checking it answers; an empty key disconnects.
+#[tauri::command]
+pub async fn linear_set_api_key(key: String) -> CmdResult<LinearStatus> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let key = key.trim().to_string();
+        let mut s = store::settings::load();
+        if key.is_empty() {
+            s.linear_api_key = None;
+            s.linear_viewer = None;
+            store::settings::save(&s).map_err(err)?;
+            return Ok(LinearStatus { connected: false, viewer: None });
+        }
+        let viewer = crate::issues::linear_viewer(&key).map_err(err)?;
+        s.linear_api_key = Some(key);
+        s.linear_viewer = Some(viewer.clone());
+        store::settings::save(&s).map_err(err)?;
+        Ok(LinearStatus { connected: true, viewer: Some(viewer) })
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn linear_teams() -> CmdResult<Vec<crate::issues::IssueTeam>> {
+    tauri::async_runtime::spawn_blocking(move || crate::issues::linear_teams(&linear_key()?).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub fn github_repo(project_path: String) -> Option<String> {
+    crate::issues::github_repo(Path::new(&project_path))
+}
+
+#[cfg(test)]
+mod issue_name_tests {
+    use super::requested_worktree_name;
+
+    #[test]
+    fn requested_names_are_sanitised_and_unique() {
+        assert_eq!(requested_worktree_name("ENG-42 Fix Login!", &[]).as_deref(), Some("eng-42-fix-login"));
+        assert_eq!(requested_worktree_name("!!!", &[]), None);
+        let taken = vec!["eng-42-fix-login".to_string(), "eng-42-fix-login-2".to_string()];
+        assert_eq!(requested_worktree_name("eng-42-fix-login", &taken).as_deref(), Some("eng-42-fix-login-3"));
+    }
 }
