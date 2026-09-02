@@ -326,6 +326,29 @@ pub async fn list_harnesses() -> CmdResult<Vec<harness::HarnessInfo>> {
     tauri::async_runtime::spawn_blocking(harness::offered).await.map_err(err)
 }
 
+// ------------------------------------------------------------------ skills
+
+#[tauri::command]
+pub async fn list_skills(project_path: Option<String>, refresh: bool) -> CmdResult<Vec<crate::skills::DiscoveredSkill>> {
+    tauri::async_runtime::spawn_blocking(move || crate::skills::discover(project_path.as_deref(), refresh).map_err(err))
+        .await
+        .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn skill_detail(dir_path: String) -> CmdResult<crate::skills::SkillDetail> {
+    tauri::async_runtime::spawn_blocking(move || crate::skills::detail(Path::new(&dir_path)).map_err(err))
+        .await
+        .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn install_raccoon_skill(agents: Vec<String>) -> CmdResult<crate::skills::BundledInstallResult> {
+    tauri::async_runtime::spawn_blocking(move || crate::skills::install_bundled(&agents).map_err(err))
+        .await
+        .map_err(err)?
+}
+
 // ------------------------------------------------------------------ git
 
 #[tauri::command]

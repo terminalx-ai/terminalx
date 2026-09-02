@@ -8,5 +8,10 @@ fn main() {
     if raccoon_lib::hooks::run_hook_cli() {
         return;
     }
+    // Skills and read-only session inspection are also short-lived CLI
+    // commands. They must never initialise Tauri or flash an app window.
+    if raccoon_lib::skills::run_cli() {
+        return;
+    }
     raccoon_lib::run()
 }
