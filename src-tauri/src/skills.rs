@@ -140,29 +140,19 @@ fn read_capped(path: &Path, limit: u64) -> Result<String> {
 }
 
 fn parse_frontmatter(path: &Path) -> Result<(Frontmatter, String)> {
-    let text = read_capped(path, SKILL_FILE_LIMIT)?;
-    let mut lines = text.lines();
-    if lines.next() != Some("---") {
+    let text = read_capped(path, SKILL_FILE_LIMIT)?.replace("\r\n", "\n");
+    let Some(rest) = text.strip_prefix("---\n") else {
         return Err(anyhow!("{} has no YAML frontmatter", path.display()));
-    }
-    let mut yaml = Vec::new();
-    let mut closed = false;
-    for line in lines {
-        if line == "---" {
-            closed = true;
-            break;
-        }
-        yaml.push(line);
-    }
-    if !closed {
+    };
+    let Some(end) = rest.find("\n---\n") else {
         return Err(anyhow!("{} has unclosed YAML frontmatter", path.display()));
-    }
-    let frontmatter: Frontmatter = serde_yaml::from_str(&yaml.join("\n"))
+    };
+    let frontmatter: Frontmatter = serde_yaml::from_str(&rest[..end])
         .with_context(|| format!("parse frontmatter in {}", path.display()))?;
     if frontmatter.name.trim().is_empty() || frontmatter.description.trim().is_empty() {
         return Err(anyhow!("{} needs name and description", path.display()));
     }
-    Ok((frontmatter, text))
+    Ok((frontmatter, rest[end + "\n---\n".len()..].to_string()))
 }
 
 fn pretty_path(path: &Path, home: &Path) -> String {
