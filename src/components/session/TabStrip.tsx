@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { FileCode2, Plus, X } from "lucide-react";
+import { Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import {
@@ -14,7 +14,7 @@ import { cn } from "@/lib/cn";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { addTab, removeTab, setActiveTab, useSessionStore } from "@/lib/sessions";
 import { getPrefs } from "@/lib/prefs";
-import { closeEditor, setActiveEditor, useEditors } from "@/lib/editors";
+import { closeEditor, useEditors } from "@/lib/editors";
 import type { SessionEntry, TabEntry } from "@/types/session";
 
 /**
@@ -25,14 +25,13 @@ import type { SessionEntry, TabEntry } from "@/types/session";
 export function TabStrip({ session, activeTab }: { session: SessionEntry; activeTab: TabEntry | undefined }) {
   const store = useSessionStore();
   const ed = useEditors();
-  const editors = ed.editors.filter((e) => e.sessionId === session.id);
+  const hasEditors = ed.editors.some((e) => e.sessionId === session.id);
   const activeEditor = ed.active[session.id] ?? null;
   const [pickerOpen, setPickerOpen] = useState(false);
   const tabs = session.tabs;
 
   const pickAgentTab = useCallback(
     (id: string) => {
-      setActiveEditor(session.id, null);
       void setActiveTab(session.id, id);
     },
     [session.id],
@@ -48,10 +47,12 @@ export function TabStrip({ session, activeTab }: { session: SessionEntry; active
     [tabs, activeTab, session.id],
   );
 
+  // ⌘W closes whatever the reader last touched: a file in the editor pane
+  // or the agent tab in the chat.
   const closeActive = useCallback(() => {
-    if (activeEditor) void closeEditor(activeEditor);
+    if (ed.lastFocused === "editor" && hasEditors && activeEditor) void closeEditor(activeEditor);
     else if (activeTab && tabs.length > 1) void removeTab(session.id, activeTab.id);
-  }, [activeEditor, activeTab, tabs.length, session.id]);
+  }, [ed.lastFocused, hasEditors, activeEditor, activeTab, tabs.length, session.id]);
 
   const add = useCallback(
     async (harness: string) => {
@@ -69,7 +70,7 @@ export function TabStrip({ session, activeTab }: { session: SessionEntry; active
   return (
     <div className="flex min-w-0 items-center gap-0.5 overflow-hidden rounded-md bg-well p-0.5">
       {tabs.map((t) => {
-        const active = t.id === activeTab?.id && !activeEditor;
+        const active = t.id === activeTab?.id;
         const name = t.title ?? store.harnesses.find((h) => h.id === t.harness)?.name ?? t.harness;
         return (
           <div
@@ -107,40 +108,6 @@ export function TabStrip({ session, activeTab }: { session: SessionEntry; active
                 "ml-0.5 rounded-sm p-0.5 text-faint opacity-0 hover:bg-veil-strong hover:text-foreground group-hover/tab:opacity-100 focus-visible:opacity-100",
                 tabs.length <= 1 && "hidden",
               )}
-            >
-              <X className="size-3" />
-            </button>
-          </div>
-        );
-      })}
-      {editors.map((e) => {
-        const active = e.id === activeEditor;
-        return (
-          <div
-            key={e.id}
-            role="tab"
-            aria-selected={active}
-            tabIndex={0}
-            title={e.rel}
-            onClick={() => setActiveEditor(session.id, e.id)}
-            onKeyDown={(k) => k.key === "Enter" && setActiveEditor(session.id, e.id)}
-            onAuxClick={(k) => k.button === 1 && void closeEditor(e.id)}
-            className={cn(
-              "group/tab relative flex h-6 min-w-0 items-center gap-1.5 rounded-[5px] pl-2 pr-1 text-xs transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-              active ? "bg-(--surface-thumb) text-foreground shadow-button" : "text-muted-foreground hover:text-foreground",
-            )}
-          >
-            <FileCode2 className="size-3.5 shrink-0 text-faint" />
-            <span className="max-w-[9rem] truncate">{e.name}</span>
-            {e.dirty && <span className="size-1.5 shrink-0 rounded-full bg-warning" aria-label="Unsaved" />}
-            <button
-              type="button"
-              aria-label="Close file"
-              onClick={(k) => {
-                k.stopPropagation();
-                void closeEditor(e.id);
-              }}
-              className="ml-0.5 rounded-sm p-0.5 text-faint opacity-0 hover:bg-veil-strong hover:text-foreground group-hover/tab:opacity-100 focus-visible:opacity-100"
             >
               <X className="size-3" />
             </button>

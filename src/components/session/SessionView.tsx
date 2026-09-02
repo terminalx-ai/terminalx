@@ -12,8 +12,8 @@ import { TabView } from "./TabView";
 import { TabStrip } from "./TabStrip";
 import { TerminalDock } from "@/components/terminal/TerminalDock";
 import { toggleDock } from "@/lib/terminal";
-import { useEditors } from "@/lib/editors";
-import { EditorPane } from "@/components/editor/EditorPane";
+import { setLastFocused, useEditors } from "@/lib/editors";
+import { EditorSplit } from "@/components/editor/EditorSplit";
 import { QuickOpen } from "@/components/editor/QuickOpen";
 import { ProjectSearch } from "@/components/editor/ProjectSearch";
 import { ExplorerPane } from "@/components/files/ExplorerPane";
@@ -46,8 +46,7 @@ export function SessionView({
   const project = store.projects.find((p) => p.path === session.projectPath);
   const activeTab = session.tabs.find((t) => t.id === session.activeTab) ?? session.tabs[0];
   const ed = useEditors();
-  const editors = ed.editors.filter((e) => e.sessionId === session.id);
-  const activeEditor = ed.active[session.id] ?? null;
+  const hasEditors = ed.editors.some((e) => e.sessionId === session.id);
   // Agents change files when their status changes; the explorer re-reads git then.
   const statusKey = session.tabs.map((t) => t.status).join(",");
 
@@ -134,19 +133,23 @@ export function SessionView({
         </header>
 
         <section className="flex min-h-0 flex-1 flex-col">
-          {session.tabs.map((t) => (
-            <div key={t.id} className={cn("flex min-h-0 flex-1 flex-col", (t.id !== activeTab?.id || activeEditor) && "hidden")}>
-              <TabView session={session} tab={t} active={t.id === activeTab?.id && !activeEditor} />
+          <div className="flex min-h-0 flex-1">
+            <div
+              className="flex h-full min-w-0 flex-1 flex-col"
+              onPointerDownCapture={() => setLastFocused("chat")}
+              onFocusCapture={() => setLastFocused("chat")}
+            >
+              {session.tabs.map((t) => (
+                <div key={t.id} className={cn("flex min-h-0 flex-1 flex-col", t.id !== activeTab?.id && "hidden")}>
+                  <TabView session={session} tab={t} active={t.id === activeTab?.id} />
+                </div>
+              ))}
+              {!session.tabs.length && (
+                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">No tabs.</div>
+              )}
             </div>
-          ))}
-          {editors.map((e) => (
-            <div key={e.id} className={cn("flex min-h-0 flex-1 flex-col", e.id !== activeEditor && "hidden")}>
-              <EditorPane entry={e} visible={e.id === activeEditor} />
-            </div>
-          ))}
-          {!session.tabs.length && (
-            <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">No tabs.</div>
-          )}
+            {hasEditors && <EditorSplit sessionId={session.id} active />}
+          </div>
           <TerminalDock sessionId={session.id} cwd={session.cwd} active />
         </section>
       </div>
