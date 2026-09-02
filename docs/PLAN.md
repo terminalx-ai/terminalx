@@ -1,6 +1,6 @@
-# Raccoon — build plan
+# TerminalX Next — build plan
 
-Raccoon is a desktop workbench for coding agents. It wraps the agent CLIs you
+TerminalX Next is a desktop workbench for coding agents. It wraps the agent CLIs you
 already have installed (Claude Code, Codex, and others over time) in a native
 chat UI, gives every session its own git worktree, and lets one session hold
 several tabs, each running a different agent against the same tree.
@@ -159,7 +159,7 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Desktop banner when unfocused, in-app notice when focused elsewhere, nothing when on screen.
 - [x] Rail marks: green unread, amber waiting; dock badge; sounds (toggle).
 
-### C12 — Raccoon animation ✅
+### C12 — Pixel raccoon animation ✅
 - [x] Pixel raccoon sprite; idle scene in an empty session (walks, sits, washes paws, glances, peeks).
 - [x] Busy runner along the composer while a turn is in flight; stunned on the jump chevron.
 - [x] Toggle in settings; respects reduced motion.
@@ -217,8 +217,8 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
       the existing payloads — and the composer writes keystrokes into the same
       PTY (bracketed paste, then the Enter a beat later).
 - [x] Status and permissions come from the CLI's hooks: `--settings` points every
-      hook at the Raccoon binary as `raccoon hook <Event>`, which forwards the
-      payload over a unix socket under the Raccoon home. `PermissionRequest`
+      hook at the app's `raccoon` binary as `raccoon hook <Event>`, which forwards the
+      payload over a unix socket under `$RACCOON_HOME`. `PermissionRequest`
       parks there until the chat's card is answered and replies with the
       decision the CLI expects.
 - [x] Chat ↔ terminal is a view flag with the pane still mounted underneath;
@@ -227,7 +227,7 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
       Codex, ACP and OpenCode are unchanged; phase 2 is Codex, phase 3 the
       cleanup. Written up in [PTY-FIRST.md](PTY-FIRST.md).
 - [x] Phase 2: a Codex tab is the interactive `codex` TUI in the same PTY-first
-      shape — its rollout tailed, its hooks (in a `CODEX_HOME` Raccoon owns and
+      shape — its rollout tailed, its hooks (in a `CODEX_HOME` TerminalX Next owns and
       trusts) carrying status and approvals, `PreToolUse` gating every tool in
       "Ask every time" — and the headless Codex engine and its hand-off are
       gone. ACP and OpenCode stay headless; see the phases in
@@ -263,7 +263,7 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Local models: a compiled-in catalog (Parakeet, Nemotron, Canary, Whisper Small, Whisper Large v3 Turbo) downloaded from Hugging Face with checksum verification into `~/.raccoon/models`, run through transcribe-cpp with Metal; the loaded model stays warm between dictations.
 - [x] Settings → Transcription: model cards with speed/accuracy, download progress, delete; microphone device picker; mute while recording.
 ### Workspaces and projects ✅
-- [x] Sidebar is a project rail plus a workspace column: every checkout of a project (root, Raccoon worktrees, worktrees made elsewhere) with +/− and unpushed counts, sessions grouped under their workspace, Sessions | Explorer tabs.
+- [x] Sidebar is a project rail plus a workspace column: every checkout of a project (root, TerminalX Next worktrees, worktrees made elsewhere) with +/− and unpushed counts, sessions grouped under their workspace, Sessions | Explorer tabs.
 - [x] Sessions can start inside an existing workspace; the new-session form sits at the bottom with project, agent, model, effort and permission pills.
 - [x] Project menu: rename, logo, colour, pixel mascot, pin, reveal, refresh, archive, remove. Global and per-project refresh.
 - [x] Deleting a workspace checks uncommitted files, unpushed commits and the branch's pull request; merged and clean is called out as safe.
@@ -280,3 +280,14 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
       for those snippets, so opening the dashboard costs a block per session
       rather than a transcript; the frontend caches by session and status and
       re-reads on any status change and every 30 s.
+
+### Transition identity ✅
+
+- [x] Release builds are `TerminalX Next` / `com.terminalx.next`, with the
+      TerminalX icon carrying an amber "N" badge and the private
+      `terminalx-next://` scheme.
+- [x] Development builds are `TerminalX Next Dev` /
+      `com.terminalx.next.dev`, with the same source art carrying a "D" badge.
+- [x] The `raccoon` crate and binary, `RACCOON_HOME`, `~/.raccoon`, branch and
+      socket names, and repository identity remain unchanged during the
+      transition.
