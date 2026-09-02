@@ -364,6 +364,13 @@ pub struct CreatedWorktree {
     pub base_tree: String,
 }
 
+/// A path as an argument for `git`, which takes strings. A checkout under a
+/// name this platform allows but UTF-8 does not is the reader's to hear about,
+/// not something to take the app down over.
+fn arg(path: &Path) -> Result<&str> {
+    path.to_str().with_context(|| format!("{} is not a name git can be given", path.display()))
+}
+
 pub fn create_worktree(project: &Path, name: &str, base: Option<&str>) -> Result<CreatedWorktree> {
     if !crate::names::is_worktree_name(name) && name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') {
         bail!("bad worktree name");
@@ -372,7 +379,7 @@ pub fn create_worktree(project: &Path, name: &str, base: Option<&str>) -> Result
     let path = worktree_path(project, name);
     std::fs::create_dir_all(worktree_root(project))?;
     let branch = worktree_branch(name);
-    run(project, &["worktree", "add", "--no-track", "-B", &branch, path.to_str().unwrap(), &base])?;
+    run(project, &["worktree", "add", "--no-track", "-B", &branch, arg(&path)?, &base])?;
     ensure_worktree_dir_ignored(project);
     let base_tree = run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
     Ok(CreatedWorktree { name: name.to_string(), path: path.to_string_lossy().into_owned(), branch, base, base_tree })
@@ -386,11 +393,12 @@ fn ensure_worktree_dir_ignored(project: &Path) {
     if let Ok(git_dir) = run(project, &["rev-parse", "--git-common-dir"]) {
         let git_dir = git_dir.trim();
         let git_dir = if Path::new(git_dir).is_absolute() { PathBuf::from(git_dir) } else { project.join(git_dir) };
-        let exclude = git_dir.join("info").join("exclude");
+        let info = git_dir.join("info");
+        let exclude = info.join("exclude");
         let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
         let line = format!("/{top}/");
         if !existing.lines().any(|l| l.trim() == line) {
-            let _ = std::fs::create_dir_all(exclude.parent().unwrap());
+            let _ = std::fs::create_dir_all(&info);
             let mut s = existing;
             if !s.is_empty() && !s.ends_with('\n') {
                 s.push('\n');
@@ -442,8 +450,9 @@ pub fn remove_worktree(project: &Path, name: &str) -> Result<()> {
         bail!("refusing to remove: not under the worktree directory");
     }
     if path.exists() {
-        let _ = run(project, &["worktree", "unlock", path.to_str().unwrap()]);
-        run(project, &["worktree", "remove", "--force", path.to_str().unwrap()])?;
+        let path = arg(&path)?;
+        let _ = run(project, &["worktree", "unlock", path]);
+        run(project, &["worktree", "remove", "--force", path])?;
     }
     let _ = run(project, &["worktree", "prune"]);
     let branch = worktree_branch(name);
