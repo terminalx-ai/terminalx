@@ -146,7 +146,6 @@ pub fn run() {
             commands::pty_write,
             commands::pty_resize,
             commands::pty_kill,
-            commands::pty_is_live,
             commands::list_dir,
             commands::read_text_file,
             commands::write_text_file,

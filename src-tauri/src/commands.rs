@@ -838,11 +838,6 @@ pub fn pty_kill(state: State<'_, AppState>, id: String) {
     state.terminals.kill(&id);
 }
 
-#[tauri::command]
-pub fn pty_is_live(state: State<'_, AppState>, id: String) -> bool {
-    state.terminals.is_live(&id)
-}
-
 // ------------------------------------------------------------------ files & editor
 
 #[tauri::command]

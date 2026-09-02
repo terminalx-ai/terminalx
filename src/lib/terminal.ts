@@ -19,6 +19,8 @@ export interface TerminalPane {
   exitCode: number | null;
   /** Owned by a tab's terminal view; the dock leaves it out. */
   hidden?: boolean;
+  /** Spawned by the backend for an agent tab, so closing it is the backend's. */
+  owned?: boolean;
 }
 
 export interface OpenTerminalOptions {
@@ -106,7 +108,6 @@ export async function subscribeTerminals() {
   try {
     await listen<{ id: string; data: string }>("pty_data", (e) => {
       const { id, data } = e.payload;
-      if (!state.panes.some((p) => p.id === id)) return;
       const bytes = decode(data);
       const inst = instances.get(id);
       if (inst) {
@@ -169,6 +170,17 @@ export async function closeTerminal(id: string) {
 
 export function setActiveTerminal(sessionId: string, id: string) {
   set({ active: { ...state.active, [sessionId]: id } });
+}
+
+/**
+ * Take over a pane the backend opened — an agent tab's own CLI. The pane may
+ * already have produced output before this window heard about it, which is why
+ * the replay buffer is kept for ids no pane claims yet.
+ */
+export async function adoptPane(pane: Omit<TerminalPane, "exited" | "exitCode">) {
+  await subscribeTerminals();
+  if (state.panes.some((p) => p.id === pane.id)) return;
+  set({ panes: [...state.panes, { ...pane, exited: false, exitCode: null }] });
 }
 
 /** ⌘J and the header button: show the dock (spawning a first shell), or hide it. */

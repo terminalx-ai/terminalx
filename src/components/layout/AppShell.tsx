@@ -16,6 +16,7 @@ import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
 import { agent } from "@/lib/api";
 import { loadModels } from "@/lib/models";
 import { startNotifications } from "@/lib/notify";
+import { subscribeTabPty } from "@/lib/tabViews";
 import { Toasts } from "@/components/ui/Toasts";
 import { SettleDialog } from "@/components/session/SettleDialog";
 import { WorkspaceDeleteDialog } from "@/components/session/WorkspaceDeleteDialog";
@@ -34,6 +35,7 @@ export function AppShell() {
 
   useEffect(() => {
     void subscribeAgentEvents();
+    void subscribeTabPty();
     void bootSessions();
     void loadModels();
     startNotifications();
