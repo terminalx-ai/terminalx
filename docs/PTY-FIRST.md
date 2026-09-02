@@ -157,16 +157,37 @@ last character has arrived.
 
 The first prompt after a spawn waits for the TUI to finish drawing first, since
 a TUI mid-paint drops what is typed at it and has no way to say when it is
-ready. The sign is that the pane has drawn something and then been quiet for a
-second — measured, not guessed: the CLI paints at 0.3 s, pauses 0.7 s, paints
-again at 1.0 s and settles at 2.0 s, and a prompt typed into that gap vanishes
-without a trace.
+ready. The sign is that the pane has drawn something and then been quiet for
+three seconds — measured, not guessed: a fresh start paints at 0.3 s, pauses
+0.7 s and settles at 2.0 s, while a `--resume` replays the conversation and
+pauses **2.7 s** in the middle of doing it. A prompt typed into either gap
+vanishes without a trace.
 
 A single-line prompt starting with `/` is written as plain keystrokes instead,
 because a pasted slash command is classified as prose and never opens the
 command palette. `/model` and `/effort` reach the running CLI the same way.
 
 Interrupt writes a bare Escape. Stop kills the pane.
+
+### Replacing the process in a pane
+
+A restart keeps the pane and swaps what runs inside it, so the reader sees the
+CLI redraw rather than a new tab. Two things make that harder than it sounds:
+
+- an agent CLI **holds its conversation** while it runs, and refuses to open one
+  another process still has (`--session-id` on a live session is refused
+  outright), so the replacement has to start after the old process is gone, not
+  after it has been signalled; and
+- **Claude Code ignores SIGTERM.** It was still running six seconds after one in
+  a probe here. So `Terminals::kill_and_wait` asks politely, gives it a short
+  grace, then kills it outright, and waits for the pid to actually disappear.
+
+The same wait guards Stop, so a prompt sent straight after it does not find the
+session still taken.
+
+A restart resumes; it does not fork. `--permission-mode` *is* honoured on
+`--resume` — verified against the installed CLI by reading the mode back out of
+a `Stop` hook payload after a completed turn.
 
 ### Workspace trust
 
@@ -216,7 +237,10 @@ is gone: nothing used it once Claude stopped handing off.
   typed input itself. The chat shows it as queued until the CLI takes it and the
   transcript says so; the app keeps no queue of its own for these tabs.
 - **Permission mode changes** restart the CLI on the same conversation, because
-  the TUI has no command for it. Model and effort change in place.
+  the TUI only cycles modes on a key with no way to read the result back and
+  the CLI reads `--permission-mode` at startup alone. A change made mid-turn
+  waits for the turn to end. Model and effort change in place through the CLI's
+  own `/model` and `/effort`.
 - **One permission surface.** While the hook answers, the CLI never shows its
   own prompt. If the hook lapses it does, and the answer has to be given there.
 - **One CLI per visited tab.** Opening a Claude tab starts a real `claude`
