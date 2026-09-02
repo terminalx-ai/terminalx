@@ -94,7 +94,16 @@ export function RightPanel({ session, events, version, live }: { session: Sessio
       </div>
       <div className="min-h-0 flex-1">
         <div className={cn("h-full", tab !== "changes" && "hidden")}>
-          <ChangesPanel key={refreshTick} cwd={session.cwd} events={events} version={version} baseRef={session.baseRef} active={tab === "changes"} live={live} />
+          <ChangesPanel
+            key={refreshTick}
+            cwd={session.cwd}
+            events={events}
+            version={version}
+            baseRef={session.baseRef}
+            active={tab === "changes"}
+            live={live}
+            workingTree={!session.tabs.length}
+          />
         </div>
         <div className={cn("h-full", tab !== "repo" && "hidden")}>
           <RepoPanel key={refreshTick} cwd={session.cwd} active={tab === "repo"} />

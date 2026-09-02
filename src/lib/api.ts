@@ -42,7 +42,8 @@ export interface NewSession {
   /** A requested worktree name (an issue slug); sanitised and made unique. */
   worktreeName?: string | null;
   issue?: IssueRef | null;
-  tab: NewTab;
+  /** The first agent conversation. Omit to open the checkout by itself. */
+  tab?: NewTab;
 }
 
 export const api = {
