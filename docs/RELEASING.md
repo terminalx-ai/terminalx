@@ -63,6 +63,17 @@ can serve a different document per channel if it wants to.
 
 ## Notes
 
+- The build script links clang's builtins archive (`libclang_rt.osx.a` from
+  the active Xcode toolchain) because the local transcription engine's Metal
+  code uses `@available` checks; without it a release link fails on
+  `___isPlatformVersionAtLeast`. Command line tools alone may lack the
+  archive; a full Xcode install has it.
+- Microphone and speech usage strings live in `src-tauri/Info.plist`. Cargo
+  only re-runs the Tauri build script when a declared input changes, so after
+  editing that file force a rebuild (`touch src-tauri/tauri.conf.json`) or the
+  dev binary keeps the old plist and macOS will kill the process on the first
+  microphone or speech request.
+
 - Ad-hoc signing means Gatekeeper will ask the first time the app opens on
   another Mac. A Developer ID identity and notarization replace `"-"` in
   `bundle.macOS.signingIdentity` when that matters.
