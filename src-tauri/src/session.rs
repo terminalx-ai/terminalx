@@ -62,6 +62,9 @@ pub struct ClaudePty {
     pub echoed: std::collections::VecDeque<String>,
     /// Hook threads parked on a decision, by request id.
     pub decisions: HashMap<String, std::sync::mpsc::Sender<Value>>,
+    /// Keeps the turn's reply from being drawn twice when the `Stop` hook and
+    /// the transcript record cross.
+    pub turn_tail: claude::pty::TurnTail,
 }
 
 pub enum Engine {
@@ -767,7 +770,14 @@ impl SessionManager {
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: 120, rows: 30, command: Some(&command), env: &env };
         self.terminals.spawn(self.app.clone(), &pane, spec).context("start Claude Code")?;
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        rt.engine = Engine::ClaudePty(ClaudePty { pane_id: pane.clone(), generation, tail: tail.clone(), echoed: Default::default(), decisions: HashMap::new() });
+        rt.engine = Engine::ClaudePty(ClaudePty {
+            pane_id: pane.clone(),
+            generation,
+            tail: tail.clone(),
+            echoed: Default::default(),
+            decisions: HashMap::new(),
+            turn_tail: Default::default(),
+        });
         rt.turn_open = false;
         let _ = self.app.emit("tab_pty", TabPtyEvent { session_id: rt.session_id.clone(), tab_id: rt.tab_id.clone(), pane_id: pane.clone(), command });
         if !resume {
@@ -837,15 +847,55 @@ impl SessionManager {
                     continue;
                 }
             }
+            if let (Payload::AssistantText { text, .. }, Engine::ClaudePty(p)) = (&payload, &mut rt.engine) {
+                if !p.turn_tail.observe(text) {
+                    continue; // the app already said this for a Stop hook
+                }
+            }
             if matches!(payload, Payload::UserMessage { .. }) {
                 rt.turn_open = true;
                 self.set_status(&mut rt, TabStatus::InProgress);
+            }
+            if payload.is_turn_boundary() {
+                if let Engine::ClaudePty(p) = &mut rt.engine {
+                    p.turn_tail.turn_ended();
+                }
             }
             self.apply(&mut rt, payload, None);
         }
     }
 
+    /// Wait, briefly, for the transcript to deliver the reply the `Stop` hook
+    /// is already holding. If it never comes, publish it here and mark its
+    /// record to be dropped when it lands, so it is drawn exactly once.
+    fn settle_reply(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: &Arc<claude::pty::Tail>, want: Option<&str>) {
+        let Some(want) = want.map(str::trim).filter(|w| !w.is_empty()) else { return };
+        let saw = |rt: &TabRuntime| matches!(&rt.engine, Engine::ClaudePty(p) if p.turn_tail.saw(want));
+        let deadline = Instant::now() + claude::pty::STOP_SETTLE;
+        loop {
+            if saw(&rt_arc.lock().unwrap()) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(claude::pty::POLL_INTERVAL);
+            self.pump(rt_arc, tail);
+        }
+        let mut rt = rt_arc.lock().unwrap();
+        // The poll thread may have landed it in the moment since the last look.
+        if saw(&rt) {
+            return;
+        }
+        let Engine::ClaudePty(p) = &mut rt.engine else { return };
+        p.turn_tail.anticipate(want);
+        self.apply(&mut rt, Payload::AssistantText { block: None, text: want.to_string() }, None);
+    }
+
     fn close_open_turn(&self, rt: &mut TabRuntime, status: TurnStatus, final_text: Option<String>) {
+        if let Engine::ClaudePty(p) = &mut rt.engine {
+            p.turn_tail.turn_ended();
+        }
         if !rt.turn_open {
             return;
         }
@@ -978,9 +1028,14 @@ impl SessionManager {
                 self.set_status(&mut rt, TabStatus::Waiting);
             }
             "Stop" => {
+                let final_text = frame.payload["last_assistant_message"].as_str().map(String::from);
+                // The hook fires the moment the model stops; the record of what
+                // it said is a file write the tailer has yet to see. Closing
+                // the turn first would leave that record outside it, drawn a
+                // second time under the "Worked for Ns" line.
+                self.settle_reply(&rt_arc, &tail, final_text.as_deref());
                 let mut rt = rt_arc.lock().unwrap();
                 rt.last_activity = Instant::now();
-                let final_text = frame.payload["last_assistant_message"].as_str().map(String::from);
                 self.close_open_turn(&mut rt, TurnStatus::Ok, final_text);
             }
             "SessionEnd" => {

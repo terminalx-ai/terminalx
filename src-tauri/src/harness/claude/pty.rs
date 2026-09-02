@@ -218,6 +218,10 @@ pub struct Tail {
 
 pub const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
+/// How long a `Stop` hook waits for the transcript to catch up with the reply
+/// the hook is already holding. Well inside the hook's own 10 s.
+pub const STOP_SETTLE: Duration = Duration::from_secs(2);
+
 impl Tail {
     /// Follow from the file's length now: whatever it already holds is either
     /// history the app has logged or a conversation it is resuming. `carried`
@@ -276,6 +280,52 @@ impl Tail {
             return Vec::new();
         }
         stream.push(&buf)
+    }
+}
+
+/// What one turn has said, and what a `Stop` hook says it finished with.
+///
+/// The two arrive over different channels and can cross: the hook fires as soon
+/// as the model stops, while the record is a file write the tailer has yet to
+/// see. Publishing `turn_completed` first closes the turn, and the assistant
+/// record then lands outside it and is drawn a second time.
+#[derive(Default)]
+pub struct TurnTail {
+    /// The last assistant text published for the turn in progress.
+    said: Option<String>,
+    /// Text the app published from a `Stop` hook because the transcript had
+    /// not caught up; its record is skipped when it finally lands.
+    anticipated: std::collections::VecDeque<String>,
+}
+
+impl TurnTail {
+    /// Note an assistant message from the transcript. `false` means this is a
+    /// record the app has already published and the caller must drop it.
+    pub fn observe(&mut self, text: &str) -> bool {
+        if self.anticipated.front().is_some_and(|a| a == text.trim()) {
+            self.anticipated.pop_front();
+            return false;
+        }
+        self.said = Some(text.trim().to_string());
+        true
+    }
+
+    /// Whether the transcript has already delivered what the hook is holding.
+    pub fn saw(&self, want: &str) -> bool {
+        self.said.as_deref() == Some(want.trim())
+    }
+
+    /// Say it on the transcript's behalf, and skip its record when it lands.
+    pub fn anticipate(&mut self, want: &str) {
+        let want = want.trim().to_string();
+        self.said = Some(want.clone());
+        self.anticipated.push_back(want);
+    }
+
+    /// A turn boundary. What the next turn says is judged on its own, so the
+    /// same reply twice running is not mistaken for one already seen.
+    pub fn turn_ended(&mut self) {
+        self.said = None;
     }
 }
 
@@ -408,6 +458,42 @@ mod tests {
         assert_eq!(p.len(), 1);
         assert!(matches!(&p[0], Payload::UserMessage { text, .. } if text == "new"));
         assert!(tail.drain().is_empty());
+    }
+
+    /// The `Stop` hook and the assistant record race, and the reply must be
+    /// drawn exactly once whichever wins.
+    #[test]
+    fn a_reply_is_published_once_whichever_of_stop_and_the_record_lands_first() {
+        // Record first: the hook has nothing to add.
+        let mut t = TurnTail::default();
+        assert!(t.observe("demo"));
+        assert!(t.saw("demo"));
+
+        // Stop first: the app says it, and drops the record when it lands.
+        let mut t = TurnTail::default();
+        assert!(!t.saw("demo"));
+        t.anticipate("demo");
+        assert!(t.saw("demo"));
+        assert!(!t.observe("demo"), "the record the app pre-empted is dropped");
+        assert!(t.observe("demo"), "a genuine second one is not");
+    }
+
+    #[test]
+    fn the_same_reply_in_the_next_turn_is_not_mistaken_for_one_already_seen() {
+        let mut t = TurnTail::default();
+        t.observe("demo");
+        t.turn_ended();
+        assert!(!t.saw("demo"));
+    }
+
+    #[test]
+    fn trailing_whitespace_does_not_make_a_reply_look_new() {
+        let mut t = TurnTail::default();
+        t.observe("demo\n");
+        assert!(t.saw("demo"));
+        let mut t = TurnTail::default();
+        t.anticipate("demo");
+        assert!(!t.observe(" demo "));
     }
 
     #[test]
