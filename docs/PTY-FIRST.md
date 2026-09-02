@@ -338,6 +338,23 @@ record types matter:
   conversation, so `rollout.rs` skips it whole — and a test asserts that
   nothing decoded ever contains `tools.exec_command`.
 
+`task_complete` and `turn_aborted` are the exception among the `event_msg`
+records: they say the turn ended, and they draw nothing. The `Stop` and
+`Interrupt` hooks say the same thing with the same reply, moments apart, and
+two closers for one turn is one too many — the second lands as a turn with no
+prompt in front of it and draws the reply again as its final text, which read
+in the app as "delta / Worked for 10s / delta / Worked for 2s". The hooks are
+the authority, as they are for Claude; these records only carry the tail
+forward to them. `TurnTail` latches it: a turn is opened by the prompt that
+starts it and closed by whichever closer arrives first, and a second close is
+dropped until a new prompt is published. That guard is not Codex-specific —
+Claude's transcript records an interruption as a boundary too, and it can race
+the same way.
+
+The cost is that a tab whose hooks could not be trusted has nothing to close a
+turn with, so it says so in the chat when it starts rather than leaving a turn
+spinning.
+
 `session_meta`, `turn_context`, `world_state` and `thread_settings_applied` are
 configuration snapshots and draw nothing. Occupancy is
 `token_count.info.last_token_usage.total_tokens`; the sibling `total` is

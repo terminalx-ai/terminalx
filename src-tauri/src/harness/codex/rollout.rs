@@ -25,7 +25,7 @@
 
 use serde_json::Value;
 
-use crate::events::{BlockRef, EditKind, FileEdit, Payload, ToolResult, ToolType, TurnStatus, Usage};
+use crate::events::{BlockRef, EditKind, FileEdit, Payload, ToolResult, ToolType, Usage};
 
 fn block(id: &str) -> BlockRef {
     BlockRef { message_id: id.to_string(), index: 0 }
@@ -99,22 +99,14 @@ pub fn decode_line(line: &str, _skip: &std::collections::HashSet<String>, out: &
     let p = &v["payload"];
     match p["type"].as_str().unwrap_or("") {
         "task_started" => out.push(Payload::ModelRequestStarted),
-        "task_complete" => out.push(Payload::TurnCompleted {
-            status: TurnStatus::Ok,
-            final_text: p["last_agent_message"].as_str().map(String::from),
-            usage: None,
-            duration_ms: p["duration_ms"].as_u64(),
-            head: None,
-            auth_failed: false,
-        }),
-        "turn_aborted" => out.push(Payload::TurnCompleted {
-            status: TurnStatus::Aborted,
-            final_text: None,
-            usage: None,
-            duration_ms: None,
-            head: None,
-            auth_failed: false,
-        }),
+        // `task_complete` and `turn_aborted` say the turn ended, and so do the
+        // `Stop` and `Interrupt` hooks — with the same reply and moments
+        // apart. Two closers is one too many: the second lands as a turn with
+        // no prompt in front of it and draws the reply again under a second
+        // "worked for" line. The hooks are the authority (they are what closes
+        // a Claude turn too, and they carry the same `last_assistant_message`),
+        // so these records only carry the tail forward to them.
+        "task_complete" | "turn_aborted" => {}
         "token_count" => {
             let info = &p["info"];
             // `last` is what the next request will carry, which is occupancy;
@@ -299,16 +291,31 @@ mod tests {
             kinds(&p),
             vec![
                 // "reply with the word ok"
-                "start", "user", "text", "usage", "end",
+                "start", "user", "text", "usage",
                 // `date`, then a write outside the workspace that was approved
-                "start", "user", "text", "tool", "result", "usage", "tool", "result", "usage", "text", "usage", "end",
+                "start", "user", "text", "tool", "result", "usage", "tool", "result", "usage", "text", "usage",
                 // an apply_patch, then a sentence about it
-                "start", "user", "text", "tool", "result", "usage", "tool", "edits", "result", "usage", "text", "usage", "end",
+                "start", "user", "text", "tool", "result", "usage", "tool", "edits", "result", "usage", "text", "usage",
             ]
         );
         assert!(matches!(&p[1], Payload::UserMessage { text, .. } if text == "reply with the word ok"));
         assert!(matches!(&p[2], Payload::AssistantText { text, .. } if text == "ok"));
-        assert!(matches!(&p[4], Payload::TurnCompleted { final_text: Some(t), duration_ms: Some(3435), .. } if t == "ok"));
+    }
+
+    /// Three turns end in this file, and none of them closes a turn here: the
+    /// `Stop` hook does that, carrying the same reply, and two closers for one
+    /// turn draw the reply twice — once as itself and once as the final text
+    /// of a turn that had no prompt in front of it.
+    #[test]
+    fn the_turn_end_records_leave_the_closing_to_the_hook() {
+        assert_eq!(FIXTURE.matches(r#""type": "task_complete""#).count(), 3);
+        let mut s = Streamer::at(0, decode_line);
+        let p = s.push(FIXTURE.as_bytes());
+        assert!(!p.iter().any(|p| matches!(p, Payload::TurnCompleted { .. })));
+
+        let mut out = Vec::new();
+        decode_line(r#"{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t"}}"#, &none(), &mut out);
+        assert!(out.is_empty());
     }
 
     #[test]

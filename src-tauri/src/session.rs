@@ -948,8 +948,15 @@ impl SessionManager {
             None => tab.model.clone(),
         };
 
-        let home = codex::home::prepare(&entry.cwd, exe).context("prepare the Codex home")?;
+        let codex::home::Prepared { home, hooks_live } = codex::home::prepare(&entry.cwd, exe).context("prepare the Codex home")?;
         env.push(("CODEX_HOME".to_string(), home.to_string_lossy().into_owned()));
+        if !hooks_live {
+            // The hooks are what say a turn began, needs a decision, or ended.
+            // Without them the chat is only the rollout, which never says the
+            // turn is over — so say so rather than leave a turn spinning.
+            let text = "Codex could not install its hooks here, so this tab shows the conversation but not its progress. The terminal view is unaffected.".to_string();
+            self.publish(rt, Payload::Status { text }, None);
+        }
 
         // A conversation started by the old headless engine lives in the
         // reader's own home, where a `codex resume` against ours would not
@@ -1078,11 +1085,17 @@ impl SessionManager {
             }
             if matches!(payload, Payload::UserMessage { .. }) {
                 rt.turn_open = true;
+                if let Engine::Cli(p) = &mut rt.engine {
+                    p.turn_tail.opened();
+                }
                 self.set_status(&mut rt, TabStatus::InProgress);
             }
             if payload.is_turn_boundary() {
                 if let Engine::Cli(p) = &mut rt.engine {
-                    p.turn_tail.turn_ended();
+                    // The CLI's own hook may have closed this turn already.
+                    if !p.turn_tail.closing() {
+                        continue;
+                    }
                 }
             }
             self.apply(&mut rt, payload, None);
@@ -1116,12 +1129,17 @@ impl SessionManager {
         self.apply(&mut rt, Payload::AssistantText { block: None, text: want.to_string() }, None);
     }
 
+    /// Publish the turn's boundary, once. Both guards matter: `turn_open` stops
+    /// a close with no turn behind it, and the latch stops the second of the
+    /// two closers that race for a PTY-first tab.
     fn close_open_turn(&self, rt: &mut TabRuntime, status: TurnStatus, final_text: Option<String>) {
-        if let Engine::Cli(p) = &mut rt.engine {
-            p.turn_tail.turn_ended();
-        }
         if !rt.turn_open {
             return;
+        }
+        if let Engine::Cli(p) = &mut rt.engine {
+            if !p.turn_tail.closing() {
+                return;
+            }
         }
         let duration_ms = rt.turn_started_at.map(|t| t.elapsed().as_millis() as u64);
         self.apply(rt, Payload::TurnCompleted { status, final_text, usage: None, duration_ms, head: None, auth_failed: false }, None);
@@ -1150,6 +1168,7 @@ impl SessionManager {
         if !queued {
             if let Engine::Cli(p) = &mut rt.engine {
                 p.echoed.push_back(text.clone());
+                p.turn_tail.opened();
             }
         }
         let ev = self.publish(rt, Payload::UserMessage { text: text.clone(), images, baseline, queued, cwd: Some(entry.cwd.clone()) }, None);

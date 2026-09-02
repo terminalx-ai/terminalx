@@ -281,19 +281,38 @@ impl Tail {
     }
 }
 
-/// What one turn has said, and what a `Stop` hook says it finished with.
+/// One turn's bookkeeping: what it has said, and whether it has been closed.
 ///
-/// The two arrive over different channels and can cross: the hook fires as soon
-/// as the model stops, while the record is a file write the tailer has yet to
-/// see. Publishing `turn_completed` first closes the turn, and the assistant
-/// record then lands outside it and is drawn a second time.
-#[derive(Default)]
+/// Both facts exist because a turn ends over two channels at once. The CLI's
+/// `Stop` hook fires the moment the model stops; the record of what it said,
+/// and in some transcripts a record that the turn ended, are file writes the
+/// tailer has yet to see. Either can arrive first, and both used to be
+/// believed:
+///
+/// - the hook winning the race published `turn_completed` before the reply,
+///   so the reply landed outside its own turn and was drawn again under it;
+/// - both closers publishing left a second `turn_completed` with no prompt in
+///   front of it — a turn out of nowhere whose final text was drawn as another
+///   bubble, reading as "delta / Worked for 10s / delta / Worked for 2s".
+///
+/// So a turn is opened once by the prompt that starts it, closed once by
+/// whichever closer gets there first, and its reply is drawn once.
 pub struct TurnTail {
     /// The last assistant text published for the turn in progress.
     said: Option<String>,
     /// Text the app published from a `Stop` hook because the transcript had
     /// not caught up; its record is skipped when it finally lands.
     anticipated: VecDeque<String>,
+    /// Whether the turn in progress has already had its boundary published.
+    /// A tab that has not been prompted starts closed, so a stray boundary
+    /// before the first prompt is not a turn either.
+    closed: bool,
+}
+
+impl Default for TurnTail {
+    fn default() -> Self {
+        Self { said: None, anticipated: VecDeque::new(), closed: true }
+    }
 }
 
 impl TurnTail {
@@ -320,10 +339,27 @@ impl TurnTail {
         self.anticipated.push_back(want);
     }
 
-    /// A turn boundary. What the next turn says is judged on its own, so the
-    /// same reply twice running is not mistaken for one already seen.
-    pub fn turn_ended(&mut self) {
+    /// A prompt was published: a turn is open and its close is due again.
+    /// What the new turn says is judged on its own, so the same reply twice
+    /// running is not mistaken for one already seen.
+    pub fn opened(&mut self) {
         self.said = None;
+        self.closed = false;
+    }
+
+    /// Take the right to close the turn. `false` means it is already closed
+    /// and the caller is the second of the two racing closers, whose boundary
+    /// would land as a turn with no prompt in it.
+    ///
+    /// The reply is deliberately *not* forgotten here: a `Stop` hook settles
+    /// against it after the transcript's own records have been read, and the
+    /// next `opened` is what clears it.
+    pub fn closing(&mut self) -> bool {
+        if self.closed {
+            return false;
+        }
+        self.closed = true;
+        true
     }
 }
 
@@ -414,9 +450,51 @@ mod tests {
     #[test]
     fn the_same_reply_in_the_next_turn_is_not_mistaken_for_one_already_seen() {
         let mut t = TurnTail::default();
+        t.opened();
         t.observe("demo");
-        t.turn_ended();
+        t.closing();
+        // The hook settles against the reply after the close is taken, so it
+        // survives it; the next prompt is what forgets it.
+        assert!(t.saw("demo"));
+        t.opened();
         assert!(!t.saw("demo"));
+    }
+
+    /// A turn ends over two channels at once: the CLI's `Stop` hook and, in a
+    /// transcript that records one, the turn-end record. Either can arrive
+    /// first. Only the first publishes the boundary — the second used to land
+    /// as a turn with no prompt in front of it, drawing the reply again under
+    /// a second "worked for" line.
+    #[test]
+    fn a_turn_is_closed_once_whichever_closer_arrives_first() {
+        // The hook first, the record second.
+        let mut t = TurnTail::default();
+        t.opened();
+        t.observe("delta");
+        assert!(t.saw("delta"), "the reply landed before the hook");
+        assert!(t.closing(), "the Stop hook closes the turn");
+        assert!(!t.closing(), "the record that follows it does not close it again");
+
+        // The record first, the hook second.
+        let mut t = TurnTail::default();
+        t.opened();
+        t.observe("delta");
+        assert!(t.closing(), "the turn-end record closes the turn");
+        assert!(!t.closing(), "the Stop hook that follows it does not");
+        // And the hook can still settle against what the turn said.
+        assert!(t.saw("delta"));
+
+        // The next prompt is a new turn, which closes on its own account.
+        t.opened();
+        assert!(t.closing());
+    }
+
+    #[test]
+    fn a_boundary_with_no_prompt_behind_it_is_not_a_turn() {
+        // A tab that has not been prompted — one just opened on a resumed
+        // conversation, say — starts closed.
+        let mut t = TurnTail::default();
+        assert!(!t.closing());
     }
 
     #[test]

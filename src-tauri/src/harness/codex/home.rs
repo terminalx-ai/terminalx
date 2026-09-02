@@ -280,22 +280,30 @@ fn no_hooks() -> Value {
     json!({ "hooks": {} })
 }
 
+/// A prepared home, and whether the hooks in it will actually run. Without
+/// them a tab has no status, no permission cards and — because the `Stop`
+/// hook is what closes a turn — no way to tell when one has ended.
+pub struct Prepared {
+    pub home: PathBuf,
+    pub hooks_live: bool,
+}
+
 /// Build (or refresh) the managed home for a tab about to run in `cwd`, and
 /// return the path to put in `CODEX_HOME`.
 ///
 /// Asking Codex for the hook hashes costs a short-lived child, so it only
 /// happens when `hooks.json` has actually changed — which is when Raccoon
 /// moves, or is upgraded, and not on every tab.
-pub fn prepare(cwd: &str, exe: &Path) -> Result<PathBuf> {
+pub fn prepare(cwd: &str, exe: &Path) -> Result<Prepared> {
     let _building = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
     let managed = managed_root()?;
-    prepare_in(&managed, user_root(), cwd, exe)?;
-    Ok(managed)
+    let hooks_live = prepare_in(&managed, user_root(), cwd, exe)?;
+    Ok(Prepared { home: managed, hooks_live })
 }
 
 /// The body of `prepare`, with both homes named so it can be exercised
 /// against a real `codex` without touching either of the real ones.
-fn prepare_in(managed: &Path, user: Option<PathBuf>, cwd: &str, exe: &Path) -> Result<()> {
+fn prepare_in(managed: &Path, user: Option<PathBuf>, cwd: &str, exe: &Path) -> Result<bool> {
     let user = user.filter(|u| u.is_dir());
     if let Some(user) = &user {
         for name in LINKED {
@@ -353,7 +361,7 @@ fn prepare_in(managed: &Path, user: Option<PathBuf>, cwd: &str, exe: &Path) -> R
     }
 
     dismiss_update_prompt(managed);
-    Ok(())
+    Ok(!state.trust.is_empty())
 }
 
 #[cfg(test)]
@@ -483,7 +491,7 @@ url = "https://example.test/mcp"
         std::fs::write(user.path().join("config.toml"), "model = \"gpt-5.6-sol\"\n\n[features]\nsteer = true\n").unwrap();
         // A real account is not needed to list hooks, and none is linked in.
         let cwd = work.path().to_string_lossy().into_owned();
-        prepare_in(managed.path(), Some(user.path().to_path_buf()), &cwd, Path::new("/opt/raccoon")).unwrap();
+        assert!(prepare_in(managed.path(), Some(user.path().to_path_buf()), &cwd, Path::new("/opt/raccoon")).unwrap());
 
         let config = std::fs::read_to_string(managed.path().join("config.toml")).unwrap();
         let t: toml::Table = toml::from_str(&config).unwrap();
@@ -501,7 +509,7 @@ url = "https://example.test/mcp"
         // The second build asks Codex nothing: the answer is cached against
         // the hooks file it was computed for.
         std::fs::remove_file(managed.path().join("config.toml")).unwrap();
-        prepare_in(managed.path(), Some(user.path().to_path_buf()), &cwd, Path::new("/opt/raccoon")).unwrap();
+        assert!(prepare_in(managed.path(), Some(user.path().to_path_buf()), &cwd, Path::new("/opt/raccoon")).unwrap());
         let again: toml::Table = toml::from_str(&std::fs::read_to_string(managed.path().join("config.toml")).unwrap()).unwrap();
         assert_eq!(again["hooks"]["state"].as_table().unwrap().len(), state.len());
     }
