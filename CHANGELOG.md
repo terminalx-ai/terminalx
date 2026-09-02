@@ -16,7 +16,7 @@ First runnable build, assembled checkpoint by checkpoint.
 - Worktree lifecycle: settle after a merge, fork a session, guarded delete.
 - Themes (den, slate, moss, ember) with light and dark modes and window vibrancy.
 - Terminal view for any agent tab (⌘⇧T): the same conversation in the agent's own CLI, and back again with the transcript caught up.
-- Dictation from the composer, using the Mac's own on-device speech recognition; nothing is downloaded and audio never leaves the machine.
+- Dictation from either composer — the new-session box and the one inside a session (⌘⇧D) — using the Mac's own on-device speech recognition; nothing is downloaded and audio never leaves the machine.
 - Optional local transcription models (Parakeet, Nemotron, Canary, Whisper) downloaded on demand in Settings → Transcription, plus a microphone picker and mute-while-recording.
 - File explorer beside the transcript (⌘⇧E) with Material file icons, git status badges, keyboard navigation and a right-click menu.
 - Issues from GitHub and Linear (⌘I): browse, read, and start a session on one; the worktree is named after the issue and the header links back to it.
