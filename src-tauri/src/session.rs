@@ -79,6 +79,7 @@ impl TabRuntime {
 pub struct SessionManager {
     app: AppHandle,
     host: Arc<Host>,
+    codex_models: Arc<codex::models::Cache>,
     tabs: Arc<Mutex<HashMap<String, Arc<Mutex<TabRuntime>>>>>,
 }
 
@@ -134,8 +135,8 @@ fn key_of(session_id: &str, tab_id: &str) -> String {
 }
 
 impl SessionManager {
-    pub fn new(app: AppHandle, host: Arc<Host>) -> Self {
-        Self { app, host, tabs: Arc::new(Mutex::new(HashMap::new())) }
+    pub fn new(app: AppHandle, host: Arc<Host>, codex_models: Arc<codex::models::Cache>) -> Self {
+        Self { app, host, codex_models, tabs: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     fn runtime(&self, session_id: &str, tab_id: &str) -> Result<Arc<Mutex<TabRuntime>>> {
@@ -362,7 +363,22 @@ impl SessionManager {
 
     fn start_codex(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str) -> Result<()> {
         let plan = codex::spawn_plan().ok_or_else(|| anyhow!("Codex is not installed. Install it and log in, then try again."))?;
-        rt.engine = Engine::Codex(codex::Codex::new(cwd, tab.provider_session_id.clone(), Some(tab.model.clone()), tab.effort.clone(), &tab.permission_mode));
+        // A tab stored before the account's list was known can name a model
+        // this account cannot run; sending it would fail the turn with a 400.
+        let model = match self.codex_models.substitute_for(&tab.model) {
+            Some(sub) => {
+                let text = format!("{} is not available on this account; using {}.", tab.model, sub.label);
+                self.publish(rt, Payload::Status { text }, None);
+                let _ = index::update_tab(&rt.session_id, &rt.tab_id, |t| {
+                    t.model = sub.id.clone();
+                    Ok(())
+                });
+                self.publish(rt, Payload::SettingsChanged { model: Some(sub.id.clone()), effort: None, permission_mode: None }, None);
+                sub.id
+            }
+            None => tab.model.clone(),
+        };
+        rt.engine = Engine::Codex(codex::Codex::new(cwd, tab.provider_session_id.clone(), Some(model), tab.effort.clone(), &tab.permission_mode));
         self.spawn_child(rt, rt_arc, &plan.program, &plan.args, cwd).context("start Codex")?;
         Ok(())
     }

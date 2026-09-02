@@ -101,6 +101,7 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] `codex app-server` JSON-RPC client, handshake, thread/turn lifecycle, steering, interrupt with turn id.
 - [x] Approval card from server-provided decisions; sandbox/approval mode pairs.
 - [x] Subagent thread filtering; token usage ring from `last`.
+- [x] The model list comes from the CLI's own `model/list`, not from us: which models a ChatGPT account may run is the account's to say. Cached per process, refreshed when the picker opens, with a built-in list if the CLI cannot be asked.
 
 ### C7 — Composer extras ✅
 - [x] Slash-command picker (from harness), `@file` mentions from the file index, `#issue` later.

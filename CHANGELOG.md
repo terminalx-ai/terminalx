@@ -23,3 +23,4 @@ First runnable build, assembled checkpoint by checkpoint.
 - Files open in an editor pane beside the chat with their own tabs; markdown renders as a preview with a Source toggle.
 - Projects rail with mascots, colours and logos; workspaces (every checkout, including worktrees made outside the app) listed with their sessions; workspace delete guarded by pushed state and pull-request status.
 - Agent dashboard (⌘⇧A): every session across every project in three columns — needs you, working, done — with the last thing said on each card, search, filters and keyboard navigation.
+- Codex offers the models your account can actually run, read from the CLI itself rather than hard-coded; a session still on a retired model is moved to the current one and told so.

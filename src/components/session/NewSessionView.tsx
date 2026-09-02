@@ -18,7 +18,7 @@ import { DictationStatus, MicButton, NEW_SESSION_TARGET, useDictationInto } from
 import { RaccoonScene } from "@/components/raccoon/Raccoon";
 import { api, errorMessage } from "@/lib/api";
 import { addProject, clearNewSessionPreset, selectProject, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
-import { EFFORT_LABEL, PERMISSION_MODES, useModels } from "@/lib/models";
+import { EFFORT_LABEL, PERMISSION_MODES, refreshModels, upgradeHint, useModels } from "@/lib/models";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { useHotkey } from "@/lib/hotkeys";
 import { stopDictation } from "@/lib/dictation";
@@ -181,7 +181,7 @@ export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, 
             </DropdownMenu>
 
             {harness && models.length > 0 && (
-              <DropdownMenu>
+              <DropdownMenu onOpenChange={(open) => open && void refreshModels()}>
                 <DropdownMenuTrigger asChild>
                   <Button variant="secondary" size="sm" className={pill}>
                     {model?.label ?? modelId ?? "Model"}
@@ -191,11 +191,15 @@ export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, 
                 <DropdownMenuContent align="start" className="min-w-[12rem]">
                   <DropdownMenuLabel>Model</DropdownMenuLabel>
                   <DropdownMenuRadioGroup value={modelId} onValueChange={(v) => setPrefs({ lastModel: { ...prefs.lastModel, [harness.id]: v } })}>
-                    {models.map((m) => (
-                      <DropdownMenuRadioItem key={m.id} value={m.id}>
-                        {m.label}
-                      </DropdownMenuRadioItem>
-                    ))}
+                    {models.map((m) => {
+                      const upgrade = upgradeHint(m, models);
+                      return (
+                        <DropdownMenuRadioItem key={m.id} value={m.id}>
+                          {m.label}
+                          {upgrade ? <span className="ml-1.5 text-faint">→ {upgrade}</span> : null}
+                        </DropdownMenuRadioItem>
+                      );
+                    })}
                   </DropdownMenuRadioGroup>
                 </DropdownMenuContent>
               </DropdownMenu>

@@ -127,6 +127,9 @@ export interface ModelInfo {
   defaultEffort: string | null;
   acceptsImages: boolean;
   isDefault: boolean;
+  /** The model that replaces this one when the provider is retiring it. */
+  upgrade: string | null;
+  description: string | null;
 }
 
 export interface HandoffInfo {
@@ -156,7 +159,7 @@ export const agent = {
   setEffort: (sessionId: string, tabId: string, effort: string | null) =>
     invoke<void>("set_tab_effort", { sessionId, tabId, effort }),
   markRead: (sessionId: string, tabId: string) => invoke<void>("mark_tab_read", { sessionId, tabId }),
-  listModels: () => invoke<ModelInfo[]>("list_models"),
+  listModels: (refresh?: boolean) => invoke<ModelInfo[]>("list_models", { refresh: refresh ?? false }),
 };
 
 // ---- files & commands

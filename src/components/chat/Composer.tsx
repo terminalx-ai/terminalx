@@ -15,7 +15,7 @@ import {
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
-import { EFFORT_LABEL, PERMISSION_MODES, modeLabel, useModels } from "@/lib/models";
+import { EFFORT_LABEL, PERMISSION_MODES, modeLabel, refreshModels, upgradeHint, useModels } from "@/lib/models";
 import { files as filesApi, type FileHit, type ImageInput, type SlashCommand } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
 import { DictationStatus, MicButton, useDictationInto } from "./Dictation";
@@ -396,7 +396,7 @@ export function Composer({
             </WithTooltip>
           )}
 
-          <DropdownMenu>
+          <DropdownMenu onOpenChange={(open) => open && void refreshModels()}>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="sm" className="gap-1.5 px-2 text-muted-foreground">
                 <AgentMark id={tab.harness} className="size-3.5" />
@@ -408,11 +408,15 @@ export function Composer({
             <DropdownMenuContent align="start" className="min-w-[14rem]">
               <DropdownMenuLabel>Model</DropdownMenuLabel>
               <DropdownMenuRadioGroup value={model?.id ?? ""} onValueChange={onSetModel}>
-                {models.map((m) => (
-                  <DropdownMenuRadioItem key={m.id} value={m.id}>
-                    {m.label}
-                  </DropdownMenuRadioItem>
-                ))}
+                {models.map((m) => {
+                  const upgrade = upgradeHint(m, models);
+                  return (
+                    <DropdownMenuRadioItem key={m.id} value={m.id}>
+                      {m.label}
+                      {upgrade ? <span className="ml-1.5 text-faint">→ {upgrade}</span> : null}
+                    </DropdownMenuRadioItem>
+                  );
+                })}
               </DropdownMenuRadioGroup>
               {model?.efforts.length ? (
                 <>
