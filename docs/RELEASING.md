@@ -14,7 +14,7 @@
   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, out of whatever password manager or
   CI secret holds it.
 - `plugins.updater.endpoints` in `tauri.conf.json` points at
-  `https://github.com/dudhatparesh/raccoon/releases/latest/download/latest.json`
+  `https://github.com/terminalx-ai/raccoon/releases/latest/download/latest.json`
   — the `latest.json` below, attached to whichever GitHub Release is marked
   latest. Change it if the repository moves; nothing else about the feed
   depends on the host.
@@ -131,7 +131,7 @@ is:
   "platforms": {
     "darwin-aarch64": {
       "signature": "<contents of Raccoon.app.tar.gz.sig>",
-      "url": "https://github.com/dudhatparesh/raccoon/releases/download/v0.2.0/Raccoon.app.tar.gz"
+      "url": "https://github.com/terminalx-ai/raccoon/releases/download/v0.2.0/Raccoon.app.tar.gz"
     }
   }
 }
