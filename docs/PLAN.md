@@ -174,7 +174,7 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
   Playwright against the Vite dev server for DOM-level assertions.
 
 ### Dictation ✅
-- [x] Mic button in the composer (⌘⇧D): microphone → Apple's speech recogniser, on-device when supported, partial text live in the draft, each finished phrase appended. Info.plist carries the microphone and speech usage strings.
+- [x] Mic button in both composers — the new-session box and the one inside a session (⌘⇧D): microphone → Apple's speech recogniser, on-device when supported, partial text live in the draft, each finished phrase appended. Info.plist carries the microphone and speech usage strings.
 
 ### Terminal view ✅
 - [x] ⌘⇧T flips an agent tab between the transcript and the agent's own CLI in a terminal running the same conversation (`claude --resume`, `codex resume`), one side at a time; refused mid-turn.

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, AtSign, ChevronDown, FileText, ImagePlus, Mic, SlashSquare, Square, X } from "lucide-react";
-import { clearDictationError, dictationAvailable, startDictation, stopDictation, useDictation } from "@/lib/dictation";
+import { ArrowUp, AtSign, ChevronDown, FileText, ImagePlus, SlashSquare, Square, X } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -19,6 +18,7 @@ import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { EFFORT_LABEL, PERMISSION_MODES, modeLabel, useModels } from "@/lib/models";
 import { files as filesApi, type FileHit, type ImageInput, type SlashCommand } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
+import { DictationStatus, MicButton, useDictationInto } from "./Dictation";
 import { PickerMenu, type PickerItem } from "./PickerMenu";
 import { tokenAtCaret } from "@/lib/pickers";
 
@@ -122,38 +122,9 @@ export function Composer({
     };
   }, [cwd, tab.harness]);
 
-  // Dictation: the draft at the moment the mic opens is the base; partial
-  // results replace what follows it, and each finished phrase extends it.
-  const dictation = useDictation();
-  const dictating = dictation.target === tab.id && dictation.phase !== "idle";
-  const dictBase = useRef("");
-  const [canDictate, setCanDictate] = useState<boolean | null>(null);
-  useEffect(() => {
-    void dictationAvailable().then(setCanDictate);
-  }, []);
-  useEffect(() => {
-    if (!dictating || dictation.phase !== "listening") return;
-    const base = dictBase.current;
-    const sep = base && !/\s$/.test(base) && dictation.partial ? " " : "";
-    onDraftChange(dictation.partial ? base + sep + dictation.partial : base);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dictation.partial, dictating, dictation.phase]);
-  const toggleDictation = useCallback(() => {
-    if (dictating) {
-      void stopDictation();
-      return;
-    }
-    if (dictation.phase !== "idle") return;
-    dictBase.current = draft;
-    void startDictation(tab.id, (text) => {
-      const base = dictBase.current;
-      const sep = base && !/\s$/.test(base) ? " " : "";
-      dictBase.current = base + sep + text + " ";
-      onDraftChange(dictBase.current);
-      requestAnimationFrame(() => ref.current?.focus());
-    });
-  }, [dictating, dictation.phase, draft, tab.id, onDraftChange]);
-  useHotkey("mod+shift+d", toggleDictation, { enabled: autoFocus });
+  const focusInput = useCallback(() => ref.current?.focus(), []);
+  const dictation = useDictationInto(tab.id, draft, onDraftChange, focusInput);
+  useHotkey("mod+shift+d", dictation.toggle, { enabled: autoFocus });
 
   const token = useMemo(() => tokenAtCaret(draft, caret), [draft, caret]);
   const tokenKey = token ? `${token.kind}:${token.start}` : null;
@@ -316,20 +287,7 @@ export function Composer({
   return (
     <div className="mx-auto w-full max-w-3xl px-4 pb-4 pt-2">
       {disabledReason && <div className="mb-2 rounded-md bg-warning/10 px-3 py-2 text-xs text-warning">{disabledReason}</div>}
-      {dictation.error && dictation.target === null && (
-        <div className="mb-2 flex items-center gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          <span className="flex-1">{dictation.error}</span>
-          <button type="button" className="underline-offset-2 hover:underline" onClick={clearDictationError}>
-            Dismiss
-          </button>
-        </div>
-      )}
-      {dictating && (
-        <div className="mb-2 flex items-center gap-2 px-1 text-xs text-muted-foreground">
-          <span className={cn("size-2 rounded-full", dictation.phase === "listening" ? "bg-destructive animate-pulse-soft" : "bg-faint")} />
-          {dictation.phase === "starting" ? "Opening the microphone…" : dictation.phase === "finishing" ? "Finishing…" : "Listening. Speak, then press the mic again."}
-        </div>
-      )}
+      <DictationStatus dictation={dictation} />
       <div
         className={cn(
           "relative rounded-2xl bg-composer glass p-2.5 shadow-surface hairline focus-within:ring-1 focus-within:ring-ring/40",
@@ -414,21 +372,7 @@ export function Composer({
               <ImagePlus />
             </Button>
           </WithTooltip>
-          {canDictate !== false && (
-            <WithTooltip label={dictating ? "Stop dictating" : `Dictate · ${dictation.engine}`} keys={keycaps("mod+shift+d")}>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                aria-label={dictating ? "Stop dictating" : "Dictate"}
-                aria-pressed={dictating}
-                onClick={toggleDictation}
-                disabled={dictation.phase !== "idle" && !dictating}
-                className={cn(dictating && "bg-destructive/15 text-destructive hover:bg-destructive/25 hover:text-destructive")}
-              >
-                <Mic className={cn(dictating && dictation.phase === "listening" && "animate-pulse-soft")} />
-              </Button>
-            </WithTooltip>
-          )}
+          <MicButton dictation={dictation} />
           {cwd && (
             <WithTooltip label="Mention a file">
               <Button

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, FolderGit2, GitBranch, Loader2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
@@ -14,11 +14,14 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import { AgentMark } from "@/components/AgentMark";
+import { DictationStatus, MicButton, NEW_SESSION_TARGET, useDictationInto } from "@/components/chat/Dictation";
 import { RaccoonScene } from "@/components/raccoon/Raccoon";
 import { api, errorMessage } from "@/lib/api";
 import { addProject, clearNewSessionPreset, selectProject, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { EFFORT_LABEL, PERMISSION_MODES, useModels } from "@/lib/models";
 import { setPrefs, usePrefs } from "@/lib/prefs";
+import { useHotkey } from "@/lib/hotkeys";
+import { stopDictation } from "@/lib/dictation";
 import { cn } from "@/lib/cn";
 import type { WorkStatus } from "@/types/session";
 
@@ -34,6 +37,7 @@ export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<WorkStatus | null>(null);
+  const ref = useRef<HTMLTextAreaElement>(null);
 
   const preset = store.newSessionPreset;
   const project = store.projects.find((p) => p.path === (preset?.projectPath ?? prefs.lastProject)) ?? store.projects[0] ?? null;
@@ -70,10 +74,15 @@ export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, 
     }
   };
 
+  const focusInput = useCallback(() => ref.current?.focus(), []);
+  const dictation = useDictationInto(NEW_SESSION_TARGET, text, setText, focusInput);
+  useHotkey("mod+shift+d", dictation.toggle);
+
   const canSend = useMemo(() => !!project && !!harness && available && text.trim().length > 0 && !busy, [project, harness, available, text, busy]);
 
   const create = async () => {
     if (!project || !harness || !canSend) return;
+    if (dictation.dictating) await stopDictation();
     setBusy(true);
     setError(null);
     try {
@@ -257,8 +266,11 @@ export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, 
             )}
           </div>
 
+          <DictationStatus dictation={dictation} />
+
           <div className="rounded-2xl bg-composer glass p-3 shadow-surface hairline">
             <textarea
+              ref={ref}
               autoFocus
               value={text}
               onChange={(e) => setText(e.target.value)}
@@ -280,8 +292,9 @@ export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, 
               }
               className="w-full resize-none bg-transparent text-[15px] leading-relaxed outline-none placeholder:text-faint"
             />
-            <div className="flex items-center justify-between pt-1">
-              <div className="text-xs text-faint">
+            <div className="flex items-center gap-1 pt-1">
+              <MicButton dictation={dictation} />
+              <div className="min-w-0 text-xs text-faint">
                 {harness && !available ? (
                   <span className="text-warning">
                     {harness.name} isn't installed. <code className="font-mono">{harness.installHint}</code>
@@ -292,7 +305,7 @@ export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, 
                   </>
                 )}
               </div>
-              <Button size="sm" variant="accent" disabled={!canSend} onClick={create}>
+              <Button size="sm" variant="accent" className="ml-auto" disabled={!canSend} onClick={create}>
                 {busy ? <Loader2 className="animate-spin" /> : null}
                 Start
               </Button>
