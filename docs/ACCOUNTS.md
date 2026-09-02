@@ -510,7 +510,8 @@ and shipped phases.
  | Linear | You open the Issues view with a Linear key configured | A GraphQL query to `api.linear.app`, authorized with the key you pasted |
  | Hugging Face | You press Download on a transcription model | A plain GET for the weights, at a pinned revision |
  | The update endpoint | You press "Check for updates" | The current version and your channel |
-+| Raccoon account, directory and relay service | Only after you choose to sign in; while signed in, a liveness heartbeat runs every 30 seconds, and a relay is used only for a remote connection that cannot go direct | Your user id, email and display name; host id and public key; binding generation; the machine display name, platform, app version, environment kind, capabilities and liveness. A relay also sees connection ids, public keys, IP addresses, timing, byte counts and encrypted frames |
++| A directly paired device | You explicitly pair by QR/code or reconnect that device over LAN/Tailscale | The pairing handshake and, after you share a workspace, its allowed RPC and terminal data. The channel is end-to-end encrypted; the network still exposes endpoint addresses, timing and byte counts |
++| Raccoon account, directory and relay service | After you choose to sign in, for identity and the 30-second host heartbeat; or when an explicit pairing offer includes a relay invite and a paired connection cannot go direct | Your user id, email and display name; host id and public key; binding generation; the machine display name, platform, app version, environment kind, capabilities and liveness. A relay also sees connection ids, public keys, IP addresses, timing, byte counts and encrypted frames |
 
  Some detail on each:
 
