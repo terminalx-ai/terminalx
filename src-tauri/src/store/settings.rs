@@ -28,6 +28,31 @@ pub struct Settings {
     pub transcription_input_device: Option<String>,
     /// Drop system output to zero while recording so playback stays out of the text.
     pub transcription_mute: bool,
+    /// Bottom-chrome visibility and presentation. Unlike ordinary webview
+    /// preferences this also drives the native View menu, so it lives here.
+    pub status_bar: StatusBarSettings,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusPercent {
+    Used,
+    Remaining,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StatusBarSettings {
+    pub visible: bool,
+    pub usage: bool,
+    pub resources: bool,
+    pub percent: StatusPercent,
+}
+
+impl Default for StatusBarSettings {
+    fn default() -> Self {
+        Self { visible: true, usage: true, resources: true, percent: StatusPercent::Used }
+    }
 }
 
 impl Default for Settings {
@@ -42,6 +67,7 @@ impl Default for Settings {
             transcription_model: "apple".into(),
             transcription_input_device: None,
             transcription_mute: false,
+            status_bar: StatusBarSettings::default(),
         }
     }
 }
@@ -69,4 +95,17 @@ pub fn save(s: &Settings) -> Result<()> {
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_bar_defaults_on_and_used() {
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.status_bar, StatusBarSettings::default());
+        assert!(settings.status_bar.visible);
+        assert_eq!(settings.status_bar.percent, StatusPercent::Used);
+    }
 }

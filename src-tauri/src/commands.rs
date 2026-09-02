@@ -706,6 +706,43 @@ pub fn frontend_log(level: String, message: String) {
     }
 }
 
+// ------------------------------------------------------------------ status bar
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusBarPatch {
+    pub visible: Option<bool>,
+    pub usage: Option<bool>,
+    pub resources: Option<bool>,
+    pub percent: Option<crate::store::settings::StatusPercent>,
+}
+
+#[tauri::command]
+pub fn status_bar_settings() -> crate::store::settings::StatusBarSettings {
+    store::settings::load().status_bar
+}
+
+#[tauri::command]
+pub fn set_status_bar_settings(app: AppHandle, patch: StatusBarPatch) -> CmdResult<crate::store::settings::StatusBarSettings> {
+    let mut settings = store::settings::load();
+    if let Some(value) = patch.visible {
+        settings.status_bar.visible = value;
+    }
+    if let Some(value) = patch.usage {
+        settings.status_bar.usage = value;
+    }
+    if let Some(value) = patch.resources {
+        settings.status_bar.resources = value;
+    }
+    if let Some(value) = patch.percent {
+        settings.status_bar.percent = value;
+    }
+    store::settings::save(&settings).map_err(err)?;
+    crate::status::set_menu_checked(&app, settings.status_bar.visible);
+    let _ = app.emit(crate::status::SETTINGS_EVENT, &settings.status_bar);
+    Ok(settings.status_bar)
+}
+
 // ------------------------------------------------------------------ files & commands
 
 #[tauri::command]

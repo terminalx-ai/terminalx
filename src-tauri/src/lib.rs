@@ -14,6 +14,7 @@ mod names;
 mod pty;
 mod session;
 mod store;
+mod status;
 mod summaries;
 mod workspaces;
 
@@ -61,6 +62,7 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(state)
         .setup(move |app| {
+            status::install_menu(app)?;
             let manager = session::SessionManager::new(app.handle().clone(), host.clone(), terminals.clone(), codex_models.clone());
             *app.state::<AppState>().manager.lock().unwrap() = Some(manager.clone());
             // The agent CLIs' hooks reach the app through this socket; without
@@ -175,7 +177,14 @@ pub fn run() {
             commands::transcription_settings,
             commands::transcription_set_input,
             commands::transcription_set_mute,
+            commands::status_bar_settings,
+            commands::set_status_bar_settings,
         ])
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == status::MENU_ID {
+                status::toggle_from_menu(app);
+            }
+        })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(state) = window.try_state::<AppState>() {

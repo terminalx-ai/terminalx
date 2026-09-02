@@ -99,6 +99,20 @@ export function errorMessage(e: unknown): string {
   return String(e);
 }
 
+// ---- status bar
+export interface StatusBarSettings {
+  visible: boolean;
+  usage: boolean;
+  resources: boolean;
+  percent: "used" | "remaining";
+}
+
+export const statusBar = {
+  settings: () => invoke<StatusBarSettings>("status_bar_settings"),
+  setSettings: (patch: Partial<StatusBarSettings>) =>
+    invoke<StatusBarSettings>("set_status_bar_settings", { patch }),
+};
+
 // ---- agent tabs
 import type { AgentEvent } from "@/types/events";
 

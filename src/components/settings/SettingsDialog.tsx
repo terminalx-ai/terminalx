@@ -19,6 +19,7 @@ import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
 import { errorMessage, gh, issues, type LinearStatus } from "@/lib/api";
 import changelog from "../../../CHANGELOG.md?raw";
 import { TranscriptionTab } from "./TranscriptionTab";
+import { setStatusSettings, useStatus } from "@/lib/status";
 
 const TABS = ["general", "appearance", "agents", "transcription", "integrations", "shortcuts", "about"] as const;
 type Tab = (typeof TABS)[number];
@@ -104,6 +105,7 @@ function AppearanceTab() {
   const { theme, mode, resolvedMode } = useTheme();
   const prefs = usePrefs();
   const light = hasLightMode(theme);
+  const status = useStatus();
   return (
     <div className="flex flex-col">
       <SettingRow
@@ -194,6 +196,40 @@ function AppearanceTab() {
             options={[
               { value: "wide", label: "Wide" },
               { value: "chat", label: "Chat" },
+            ]}
+          />
+        }
+      />
+      <SettingRow
+        label="Status bar"
+        description="Show app-wide agent usage and the resources used by live tabs along the bottom edge."
+        control={<Switch checked={status.settings.visible} onCheckedChange={(visible) => void setStatusSettings({ visible })} />}
+      />
+      <SettingRow
+        label="Usage"
+        description="Show the tightest usage window and its reset countdown."
+        disabled={!status.settings.visible}
+        control={<Switch checked={status.settings.usage} disabled={!status.settings.visible} onCheckedChange={(usage) => void setStatusSettings({ usage })} />}
+      />
+      <SettingRow
+        label="Resources"
+        description="Show the live agent count and the most recently sampled memory total."
+        disabled={!status.settings.visible}
+        control={<Switch checked={status.settings.resources} disabled={!status.settings.visible} onCheckedChange={(resources) => void setStatusSettings({ resources })} />}
+      />
+      <SettingRow
+        label="Usage display"
+        description="Meters can show what has been used or what remains; urgency always follows usage."
+        disabled={!status.settings.visible || !status.settings.usage}
+        control={
+          <Segmented
+            aria-label="Usage display"
+            disabled={!status.settings.visible || !status.settings.usage}
+            value={status.settings.percent}
+            onChange={(percent) => void setStatusSettings({ percent })}
+            options={[
+              { value: "used", label: "Used" },
+              { value: "remaining", label: "Remaining" },
             ]}
           />
         }
