@@ -181,6 +181,12 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] The headless Claude engine, its wire parser and `tab_reconcile` are gone.
       Codex, ACP and OpenCode are unchanged; phase 2 is Codex, phase 3 the
       cleanup. Written up in [PTY-FIRST.md](PTY-FIRST.md).
+- [x] Phase 2: a Codex tab is the interactive `codex` TUI in the same PTY-first
+      shape — its rollout tailed, its hooks (in a `CODEX_HOME` Raccoon owns and
+      trusts) carrying status and approvals, `PreToolUse` gating every tool in
+      "Ask every time" — and the headless Codex engine and its hand-off are
+      gone. ACP and OpenCode stay headless; see the phases in
+      [PTY-FIRST.md](PTY-FIRST.md).
 
 ## Verification protocol
 
@@ -196,8 +202,9 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 ### Terminal view ✅
 - [x] ⌘⇧T flips an agent tab between the transcript and the agent's own CLI in a
       terminal. For Claude that is now a view flag over one process, not a
-      hand-off: see **PTY-first tabs** below. Codex still hands off — its
-      headless child is stopped and `codex resume` takes over — and is refused
+      hand-off: see **PTY-first tabs** below. Codex is the same since phase 2.
+      ACP and OpenCode still hand off — the headless child is stopped and the
+      CLI resumes the conversation in the terminal — and the switch is refused
       mid-turn for as long as that lasts.
 - [x] Local models: a compiled-in catalog (Parakeet, Nemotron, Canary, Whisper Small, Whisper Large v3 Turbo) downloaded from Hugging Face with checksum verification into `~/.raccoon/models`, run through transcribe-cpp with Metal; the loaded model stays warm between dictations.
 - [x] Settings → Transcription: model cards with speed/accuracy, download progress, delete; microphone device picker; mute while recording.

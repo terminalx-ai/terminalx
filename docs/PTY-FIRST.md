@@ -14,8 +14,8 @@ chat is a projection of that process, and the terminal view is the same process
 seen directly. Switching between them is a view flag — nothing is stopped,
 resumed, or reconciled.
 
-Phase 1 does this for Claude Code. Codex, ACP and OpenCode still run headless
-and keep the old hand-off.
+Phase 1 did this for Claude Code and phase 2 for Codex. ACP and OpenCode still
+run headless and keep the old hand-off.
 
 ## The architecture
 
@@ -220,8 +220,149 @@ itself to.) The backend names the pane it spawned in a `tab_pty` event and the
 frontend adopts it, which is what routes the CLI's output into this window's
 xterm instance.
 
-`tab_handoff` still exists for the harnesses that still need it. `tab_reconcile`
-is gone: nothing used it once Claude stopped handing off.
+`tab_handoff` still exists for ACP and OpenCode. `tab_reconcile` is gone:
+nothing used it once Claude stopped handing off.
+
+## Codex
+
+Codex is the same architecture with the same three channels — the CLI in the
+pane, its own transcript projected into the chat, its hooks carrying status and
+decisions — and the parts that are identical live in `harness/tui.rs`: the
+bracketed paste, the delayed Enter, the quiet-for readiness rule, the
+byte-level tail, and the `TurnTail` that keeps a reply from being drawn twice.
+What differs is not the shape but four facts about the CLI, each read out of
+codex-cli 0.152.0 rather than assumed.
+
+### A home Raccoon owns
+
+There is no `--settings`. Codex reads hooks from `$CODEX_HOME/hooks.json`, and
+it runs a hook only if `$CODEX_HOME/config.toml` holds a `trusted_hash` for it:
+
+```toml
+[hooks.state."/…/hooks.json:pre_tool_use:0:0"]
+trusted_hash = "sha256:764f7e14…"
+```
+
+Installing that in the reader's `~/.codex` would edit two files Raccoon does
+not own and would fire our hooks at every `codex` they run in their own
+terminal. So `home.rs` keeps a home at `$RACCOON_HOME/codex` and points
+`CODEX_HOME` at it. A separate home must not become a separate Codex, so it
+gets the reader's account (`auth.json` **symlinked**, never copied, so a
+refreshed token is shared), their `skills`, `prompts`, `plugins` and
+`AGENTS.md` (symlinked too), and an explicit list of their `config.toml` keys —
+model, effort, `[features]`, `[mcp_servers]`, `[plugins]`, `[marketplaces]` and
+a few more. Two keys are deliberately *not* mirrored: `notify`, which runs the
+reader's own desktop helper and has nothing to do with a tab, and `projects`,
+because Raccoon trusts only the checkouts it opened (`trust_level = "trusted"`
+for the session's worktree, which is what stops the TUI asking).
+
+The hash is **asked of Codex, not computed**. `codex app-server` answers
+`hooks/list` with a `key` and a `currentHash` per hook, which is the same pair
+the TUI's own "Trust all" writes; reimplementing the digest would be one more
+thing to get wrong on every upgrade. The answer is cached against a digest of
+`hooks.json`, so the short-lived child runs when Raccoon moves or is upgraded,
+not on every tab.
+
+Two startup dialogs would otherwise eat the first prompt, and both are handled
+before the CLI starts:
+
+- **"Hooks need review"** — an *untrusted* hook is worse than no hook: the TUI
+  opens a modal whose default choice is "Review hooks". If trust cannot be
+  established, `hooks.json` is emptied for that launch, so the tab runs without
+  status or cards rather than behind a dialog.
+- **"Update available"** — once Codex has seen a newer version, it opens a
+  modal whose default is "Update now", and the Enter meant for the prompt runs
+  `npm install -g @openai/codex` instead. (Observed here, the hard way.)
+  Recording the version it found as `dismissed_version` in the managed home's
+  `version.json` — the same thing its own "Skip until next version" does —
+  leaves a passive banner and no modal. A `codex` the reader runs themselves is
+  untouched and still offered the update.
+
+### The conversation names itself
+
+Claude is told `--session-id`; Codex is not, and mints its own. A new tab
+therefore has *nothing* to follow until its first `SessionStart` hook arrives
+carrying `session_id` and `transcript_path` — which is when the tail is pointed
+at `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` and the id is
+recorded so the tab can resume. Launch is `codex resume <id>` for a tab that
+has one, plain `codex` for one that does not, plus `-m <model>`,
+`-c model_reasoning_effort=<effort>` and the approval/sandbox flags.
+
+Tabs made by the old headless engine hold an id whose rollout is in the
+reader's own home, where a `codex resume` against ours will not look. That file
+is **copied** into the managed home on first use, keeping its relative path;
+the reader's copy is left exactly as it was. Resuming a copied rollout was
+verified against the installed CLI — the conversation replays in full, so the
+sqlite thread history is not needed. If the id cannot be found in either home
+the tab says so in the chat and starts a new conversation, because
+`codex resume <unknown>` fails the launch outright.
+
+### The rollout is the conversation
+
+Codex appends `{"timestamp", "ordinal", "type", "payload"}` per event, and two
+record types matter:
+
+- **`event_msg`** is the stream the TUI itself draws from — typed items
+  (`UserMessage`, `AgentMessage`, `CommandExecution`, `FileChange`,
+  `Reasoning`, `McpToolCall`, `WebSearch`) plus `task_started`,
+  `task_complete`, `token_count`. This is the conversation.
+- **`response_item`** is the model's *input tape*: the same messages again, but
+  also the developer prompts, the environment preamble, the encrypted reasoning
+  blobs, and the JavaScript `exec` wrapper Codex builds around every shell
+  command. Drawing it would show the reader the harness instead of the
+  conversation, so `rollout.rs` skips it whole — and a test asserts that
+  nothing decoded ever contains `tools.exec_command`.
+
+`session_meta`, `turn_context`, `world_state` and `thread_settings_applied` are
+configuration snapshots and draw nothing. Occupancy is
+`token_count.info.last_token_usage.total_tokens`; the sibling `total` is
+cumulative over the turn and would over-report it several times.
+
+### Two gates, one card
+
+`PermissionRequest` is a decision-returning hook for Codex as it is for Claude,
+but its shape and its reach both differ:
+
+```json
+{"hookSpecificOutput": {"hookEventName": "PermissionRequest",
+                        "decision": {"behavior": "allow"}}}
+```
+
+`updatedInput` and `updatedPermissions` exist in the schema but Codex **fails
+closed** if either is present, so an allow says nothing but allow — there are
+no "allow always" suggestions and no `AskUserQuestion` for a Codex tab.
+
+More importantly, `PermissionRequest` only fires when Codex *itself* wants
+approval — a command escalating out of the sandbox. Under `-a on-request` a
+plain `date` never reaches it. "Ask every time" therefore cannot be a flag:
+`-a` takes only `on-request` or `never` in 0.152 (the old `untrusted` and
+`on-failure` policies are gone, and naming one makes the CLI refuse to start).
+It is built on **`PreToolUse`**, which fires for every tool and can answer:
+
+```json
+{"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": "…"}}
+```
+
+A denial blocks the call and the model is told `Command blocked by PreToolUse
+hook: <reason>`; the reason is required, and `permissionDecision: "ask"` was
+probed and does nothing useful (the tool simply runs). An allow at `PreToolUse`
+does *not* satisfy the sandbox, so an escalating command reaches
+`PermissionRequest` a moment later with the same `tool_input.command`. One tool
+must not cost two cards, so the answer is remembered for the turn under the
+tool and its target and reused for the request that follows.
+
+Permission modes map as `plan → -a on-request -s read-only`, everything else
+`→ -a on-request -s workspace-write` (with the `PreToolUse` gate for "Ask every
+time"), and `bypassPermissions → --dangerously-bypass-approvals-and-sandbox`.
+
+The events registered are `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+`PermissionRequest`, `PostToolUse`, `Stop`, `Interrupt` and `SessionEnd`. None
+of them carries a matcher: a Codex tool hook without one runs for every tool,
+where Claude's has to say `*` or it is never called. Codex clamps hook timeouts
+per event — the two that park on a person get 600 s, `SessionEnd` and
+`Interrupt` are clamped to 3 s, which is why neither ever waits on anything.
 
 ## Limitations
 
@@ -243,24 +384,39 @@ is gone: nothing used it once Claude stopped handing off.
   own `/model` and `/effort`.
 - **One permission surface.** While the hook answers, the CLI never shows its
   own prompt. If the hook lapses it does, and the answer has to be given there.
-- **One CLI per visited tab.** Opening a Claude tab starts a real `claude`
-  process, and it stays up until the tab, the session or the app is closed —
+- **One CLI per visited tab.** Opening a PTY-first tab starts a real `claude`
+  or `codex` process, and it stays up until the tab, the session or the app is
+  closed —
   that is the point of the model, but it does mean a long afternoon of clicking
   through sessions leaves several running. They are killed together when the
   window closes, and individually when a tab or session is removed.
 - **The hook socket is a unix socket**, so the Raccoon home has to sit inside
   the platform's path limit (about 104 bytes on macOS). A path too long to bind
   is logged and the tab runs without status or permission cards.
-- **Codex, ACP and OpenCode are unchanged** in this phase: still headless, still
-  handing off to a terminal.
+- **No streaming preview for Codex either.** The rollout is written per item,
+  and only `item_completed` is persisted, so there are no deltas.
+- **No "allow always" for Codex**, and no question card: the decision it
+  accepts is a bare allow or deny, and anything richer fails the hook closed.
+- **A Codex model or effort change restarts the tab**, because the TUI's
+  `/model` opens a picker rather than taking an argument and there is no
+  `/effort` at all. Mid-turn, the restart waits for the turn to end.
+- **A Codex tab has no fork.** `codex fork` exists but nothing is wired to it.
+- **The managed Codex home mirrors an allowlist**, so a `config.toml` key the
+  reader adds that is not on that list does not reach a Raccoon tab.
+- **ACP and OpenCode are unchanged**: still headless, still handing off to a
+  terminal.
 
 ## Phases
 
-1. **Claude Code** (this change) — PTY-first tabs, transcript projection, hook
-   bridge, permissions by hook decision, terminal view as a view flag.
-2. **Codex** — the same shape for `codex`: interactive CLI in the PTY, its
-   rollout file tailed, its own hook/notify mechanism for status and approvals.
-3. **Cleanup** — remove the headless Codex engine and the `tab_handoff` path
-   with it; decide whether ACP and OpenCode follow (they are protocols, not
-   TUIs, so headless may stay the right answer for them) and, if they do not,
-   say so in the plan rather than leaving the question open.
+1. **Claude Code** ✅ — PTY-first tabs, transcript projection, hook bridge,
+   permissions by hook decision, terminal view as a view flag.
+2. **Codex** ✅ (this change) — the same shape for `codex`: the interactive CLI
+   in the PTY, its rollout tailed, its hooks carrying status and approvals, a
+   managed `CODEX_HOME` to put them in. The headless Codex engine and its
+   hand-off are gone with it, and the shared half of phase 1 moved into
+   `harness/tui.rs`.
+3. **ACP and OpenCode** — they are protocols, not TUIs: `cursor-agent acp` and
+   `opencode serve` have no interactive surface to project, so headless stays
+   the right answer for them and `tab_handoff` stays for their terminal view.
+   The open question is narrower than it was — whether either grows a hook
+   mechanism worth reading — and until one does, nothing here changes.

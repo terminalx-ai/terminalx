@@ -250,6 +250,14 @@ fn dismiss_update_prompt(managed: &Path) {
 
 // ------------------------------------------------------------------- assembly
 
+/// `hooks.json` with nothing in it. An *untrusted* hook is worse than no
+/// hook: the TUI opens a blocking "Hooks need review" dialog on startup whose
+/// default choice is "Review hooks", and the Enter that submits the first
+/// prompt would answer that instead.
+fn no_hooks() -> Value {
+    json!({ "hooks": {} })
+}
+
 /// Build (or refresh) the managed home for a tab about to run in `cwd`, and
 /// return the path to put in `CODEX_HOME`.
 ///
@@ -284,6 +292,7 @@ pub fn prepare(cwd: &str, exe: &Path) -> Result<PathBuf> {
     crate::store::write_atomic(&config_path, mirrored_config(&user_toml, &previous, cwd, &state.trust)?.as_bytes())?;
 
     if state.hooks_digest != want || state.trust.is_empty() {
+        state = State::default();
         match super::appserver::ask(
             super::appserver::Where { codex_home: Some(&managed), cwd: Some(Path::new(cwd)) },
             "hooks/list",
@@ -292,19 +301,24 @@ pub fn prepare(cwd: &str, exe: &Path) -> Result<PathBuf> {
             Ok(result) => {
                 let trust = trust_entries(&result, &hooks_path);
                 if trust.is_empty() {
-                    log::warn!("codex named no hooks of ours; the tab will run without status or permission cards");
+                    log::warn!("codex named no hooks of ours in {}", hooks_path.display());
                 } else {
                     state = State { hooks_digest: want, trust };
-                    let previous = std::fs::read_to_string(&config_path).unwrap_or_default();
-                    crate::store::write_atomic(&config_path, mirrored_config(&user_toml, &previous, cwd, &state.trust)?.as_bytes())?;
-                    let _ = crate::store::write_json(&state_path, &state);
                 }
             }
-            // Without trust Codex simply skips the hooks: the CLI still runs
-            // and the terminal view is unaffected, the chat just loses status
-            // and permission cards.
-            Err(e) => log::warn!("could not trust the Codex hooks ({e:#}); this tab runs without them"),
+            Err(e) => log::warn!("could not trust the Codex hooks: {e:#}"),
         }
+        let previous = std::fs::read_to_string(&config_path).unwrap_or_default();
+        crate::store::write_atomic(&config_path, mirrored_config(&user_toml, &previous, cwd, &state.trust)?.as_bytes())?;
+        let _ = crate::store::write_json(&state_path, &state);
+    }
+
+    if state.trust.is_empty() {
+        // The tab still runs and the terminal view is unaffected; the chat
+        // loses status and permission cards until the next start manages to
+        // trust them. What it must not do is start behind a dialog.
+        log::warn!("the Codex hooks are not trusted; this tab runs without status or permission cards");
+        crate::store::write_atomic(&hooks_path, &serde_json::to_vec_pretty(&no_hooks())?)?;
     }
 
     dismiss_update_prompt(&managed);
@@ -408,6 +422,16 @@ url = "https://example.test/mcp"
         assert!(!adopt_rollout(managed.path(), user.path(), id).unwrap());
         assert_eq!(std::fs::read_to_string(&copied).unwrap(), "grown\n");
         assert!(!adopt_rollout(managed.path(), user.path(), "never-existed").unwrap());
+    }
+
+    #[test]
+    fn a_home_that_cannot_trust_its_hooks_installs_none() {
+        // An untrusted hook opens a "Hooks need review" modal on startup whose
+        // default choice is "Review hooks", and the Enter meant for the first
+        // prompt would answer that. No hooks is the lesser loss.
+        let empty = no_hooks();
+        assert!(empty["hooks"].as_object().unwrap().is_empty());
+        assert!(!super::super::pty::hooks_json(Path::new("/opt/raccoon"))["hooks"].as_object().unwrap().is_empty());
     }
 
     #[test]
