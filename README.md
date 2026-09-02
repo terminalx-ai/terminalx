@@ -169,6 +169,8 @@ are in [CONTRIBUTING.md](CONTRIBUTING.md).
   held to.
 - [docs/RELEASING.md](docs/RELEASING.md) — dev and release builds, signing, and
   the update feed.
+- [docs/ACCOUNTS.md](docs/ACCOUNTS.md) — the Phase 1 decision on optional
+  accounts, device pairing and the cost of operating a service.
 - [CHANGELOG.md](CHANGELOG.md) — what has shipped. The app renders it in the
   About tab.
 
