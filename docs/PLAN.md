@@ -151,6 +151,12 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Long-session stress: demo page `?turns=200&live=1&stream=1000` sustains ~830 deltas/s with ~1 long task/s (max 72 ms) after chunking the streaming preview; composer stays visible and typed text arrives intact.
 - [x] Light mode pass (session, editor, terminal), keyboard pass (focus rings on tabs, rows, composer); reduced motion honoured through `prefers-reduced-motion` in the raccoon scene and runner (code path, not toggled system-wide).
 
+### Explorer ✅
+- [x] Explorer column beside the transcript (⌘⇧E, header button, resizable, persisted), the checkout as a lazy tree with Material file and folder icons loaded after first paint.
+- [x] Git status in the tree: tinted names with A/M/D/R badges, a dot on folders holding changes, refreshed on agent status changes and a gentle poll.
+- [x] Keyboard walk (arrows, Home/End, Enter), right-click menu: Open, Reveal in Finder, Copy path, Copy relative path, Mention in composer.
+- [x] The right panel's Files tab uses the same tree.
+
 ## Verification protocol
 
 - `pnpm check` = vitest + tsc; `cargo test` + `cargo clippy -D warnings`.

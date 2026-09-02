@@ -10,6 +10,7 @@ export const SHORTCUTS: Shortcut[] = [
   { chord: "mod+,", label: "Settings", group: "App" },
   { chord: "mod+b", label: "Toggle sidebar", group: "App" },
   { chord: "mod+e", label: "Toggle right panel", group: "App" },
+  { chord: "mod+shift+e", label: "Toggle file explorer", group: "App" },
   { chord: "mod+t", label: "New agent tab", group: "Session" },
   { chord: "mod+w", label: "Close tab or file", group: "Session" },
   { chord: "mod+shift+]", label: "Next tab", group: "Session" },

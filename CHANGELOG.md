@@ -15,3 +15,4 @@ First runnable build, assembled checkpoint by checkpoint.
 - A pixel raccoon that potters about an empty session and runs along the composer while an agent works.
 - Worktree lifecycle: settle after a merge, fork a session, guarded delete.
 - Themes (den, slate, moss, ember) with light and dark modes and window vibrancy.
+- File explorer beside the transcript (⌘⇧E) with Material file icons, git status badges, keyboard navigation and a right-click menu.

@@ -1,5 +1,5 @@
 import * as React from "react";
-import { DropdownMenu as Prim } from "radix-ui";
+import { ContextMenu as Ctx, DropdownMenu as Prim } from "radix-ui";
 import { Check } from "lucide-react";
 import { cn } from "@/lib/cn";
 
@@ -90,4 +90,31 @@ export function MenuShortcut({ keys }: { keys: string[] }) {
       ))}
     </span>
   );
+}
+
+// ---- Context menus share the dropdown's look; only the trigger differs.
+
+export const ContextMenu = Ctx.Root;
+export const ContextMenuTrigger = Ctx.Trigger;
+
+export const ContextMenuContent = React.forwardRef<
+  React.ComponentRef<typeof Ctx.Content>,
+  React.ComponentPropsWithoutRef<typeof Ctx.Content>
+>(({ className, ...props }, ref) => (
+  <Ctx.Portal>
+    <Ctx.Content ref={ref} className={cn(contentClass, className)} {...props} />
+  </Ctx.Portal>
+));
+ContextMenuContent.displayName = "ContextMenuContent";
+
+export const ContextMenuItem = React.forwardRef<
+  React.ComponentRef<typeof Ctx.Item>,
+  React.ComponentPropsWithoutRef<typeof Ctx.Item> & { destructive?: boolean }
+>(({ className, destructive, ...props }, ref) => (
+  <Ctx.Item ref={ref} className={cn(itemClass, destructive && "text-destructive [&_svg]:text-destructive", className)} {...props} />
+));
+ContextMenuItem.displayName = "ContextMenuItem";
+
+export function ContextMenuSeparator({ className }: { className?: string }) {
+  return <Ctx.Separator className={cn("my-1 h-px bg-hairline", className)} />;
 }

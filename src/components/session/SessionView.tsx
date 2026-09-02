@@ -1,8 +1,8 @@
-import { GitBranch, PanelLeft, PanelRight, TerminalSquare } from "lucide-react";
+import { FolderTree, GitBranch, PanelLeft, PanelRight, TerminalSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { TITLEBAR_INSET } from "@/components/layout/AppShell";
-import { keycaps } from "@/lib/hotkeys";
+import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
@@ -15,6 +15,7 @@ import { useEditors } from "@/lib/editors";
 import { EditorPane } from "@/components/editor/EditorPane";
 import { QuickOpen } from "@/components/editor/QuickOpen";
 import { ProjectSearch } from "@/components/editor/ProjectSearch";
+import { ExplorerPane } from "@/components/files/ExplorerPane";
 import { RightPanel } from "@/components/layout/RightPanel";
 import { useTabLog } from "@/lib/agentEvents";
 import type { TabEntry } from "@/types/session";
@@ -46,16 +47,23 @@ export function SessionView({
   const ed = useEditors();
   const editors = ed.editors.filter((e) => e.sessionId === session.id);
   const activeEditor = ed.active[session.id] ?? null;
+  // Agents change files when their status changes; the explorer re-reads git then.
+  const statusKey = session.tabs.map((t) => t.status).join(",");
+
+  useHotkey("mod+shift+e", () => setPrefs({ explorerOpen: !prefs.explorerOpen }));
 
   return (
     <div className="flex h-full min-w-0 flex-1">
+      {prefs.explorerOpen && (
+        <ExplorerPane sessionId={session.id} root={session.cwd} rootName={project?.name ?? "project"} mentionTabId={activeTab?.id ?? null} statusKey={statusKey} />
+      )}
       <div className="flex h-full min-w-0 flex-1 flex-col">
         <header
           data-tauri-drag-region="deep"
           className="flex h-(--titlebar-h) shrink-0 items-center gap-1 px-2"
-          style={{ paddingLeft: sidebarOpen ? 8 : TITLEBAR_INSET }}
+          style={{ paddingLeft: sidebarOpen || prefs.explorerOpen ? 8 : TITLEBAR_INSET }}
         >
-          {!sidebarOpen && (
+          {!sidebarOpen && !prefs.explorerOpen && (
             <WithTooltip label="Show sidebar" keys={keycaps("mod+b")}>
               <Button variant="ghost" size="icon-sm" aria-label="Show sidebar" onClick={onToggleSidebar}>
                 <PanelLeft />
@@ -79,6 +87,16 @@ export function SessionView({
 
           <div className="ml-auto flex max-w-[70%] shrink-0 items-center gap-0.5">
             <TabStrip session={session} activeTab={activeTab} />
+            <WithTooltip label={prefs.explorerOpen ? "Hide explorer" : "Show explorer"} keys={keycaps("mod+shift+e")}>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Toggle explorer"
+                onClick={() => setPrefs({ explorerOpen: !prefs.explorerOpen })}
+              >
+                <FolderTree />
+              </Button>
+            </WithTooltip>
             <WithTooltip label="Terminal" keys={keycaps("mod+j")}>
               <Button
                 variant="ghost"
