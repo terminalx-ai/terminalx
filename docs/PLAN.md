@@ -158,3 +158,6 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
   compared against the reference apps launched at the same size.
 - Interaction: `cliclick` for clicks/typing where a real webview is needed;
   Playwright against the Vite dev server for DOM-level assertions.
+
+### Dictation ✅
+- [x] Mic button in the composer (⌘⇧D): microphone → Apple's speech recogniser, on-device when supported, partial text live in the draft, each finished phrase appended. Info.plist carries the microphone and speech usage strings.

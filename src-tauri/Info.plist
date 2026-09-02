@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Dictation captures the microphone and hands the audio to Apple's
+       on-device speech recogniser. Without these strings macOS refuses the
+       capture outright instead of asking. -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Raccoon listens while you dictate a prompt. Audio stays on this Mac.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Raccoon turns your dictation into text for the composer.</string>
+</dict>
+</plist>

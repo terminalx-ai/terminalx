@@ -791,3 +791,20 @@ pub async fn search_text(root: String, query: String, regex: bool, case_sensitiv
         .map_err(err)?
         .map_err(err)
 }
+
+// ------------------------------------------------------------------ dictation
+
+#[tauri::command]
+pub fn dictation_available() -> bool {
+    crate::dictation::Dictation::available()
+}
+
+#[tauri::command]
+pub fn dictation_start(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    state.dictation.start(app)
+}
+
+#[tauri::command]
+pub fn dictation_stop(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    state.dictation.stop(app)
+}
