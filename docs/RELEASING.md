@@ -13,9 +13,11 @@
   repository — it is supplied to a build through
   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, out of whatever password manager or
   CI secret holds it.
-- `plugins.updater.endpoints` in `tauri.conf.json` is a placeholder. Point it
-  at wherever `latest.json` (below) will be hosted. For GitHub Releases:
-  `https://github.com/<owner>/raccoon/releases/latest/download/latest.json`.
+- `plugins.updater.endpoints` in `tauri.conf.json` points at
+  `https://github.com/dudhatparesh/raccoon/releases/latest/download/latest.json`
+  — the `latest.json` below, attached to whichever GitHub Release is marked
+  latest. Change it if the repository moves; nothing else about the feed
+  depends on the host.
 
 ## Run the dev build
 
@@ -116,7 +118,10 @@ undisturbed: prefix the command with
 ## Publish the update feed
 
 The updater fetches one JSON document and compares `version` with the
-running app. Publish it next to the artifacts:
+running app. Attach it to the GitHub Release as `latest.json`, alongside
+`Raccoon.app.tar.gz` and the `.dmg`, and mark that release latest — the
+endpoint's `/releases/latest/download/` resolves to whichever release that
+is:
 
 ```json
 {
@@ -126,14 +131,22 @@ running app. Publish it next to the artifacts:
   "platforms": {
     "darwin-aarch64": {
       "signature": "<contents of Raccoon.app.tar.gz.sig>",
-      "url": "https://<host>/Raccoon.app.tar.gz"
+      "url": "https://github.com/dudhatparesh/raccoon/releases/download/v0.2.0/Raccoon.app.tar.gz"
     }
   }
 }
 ```
 
-The app sends `X-Raccoon-Channel: stable|beta` with the request, so a feed
-can serve a different document per channel if it wants to.
+The artifact URL names its own tag rather than `latest`, so an installer
+already downloading keeps working after the next release moves the pointer.
+
+The app sends `X-Raccoon-Channel: stable|beta` with the request. GitHub
+Releases serves one document to everyone and ignores the header; a feed
+hosted somewhere that reads headers could serve a different document per
+channel.
+
+The check only ever happens when the reader presses "Check for updates" in
+Settings → About. Nothing runs on launch or on a timer.
 
 ## Notes
 
