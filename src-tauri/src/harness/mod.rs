@@ -1,14 +1,36 @@
-//! Agent harnesses. Each one lives in its own module with a `parser` (wire →
-//! typed) and a `mapper` (typed → `AgentEvent`), and is driven through the
-//! shared child host.
+//! Agent harnesses.
+//!
+//! Two shapes live side by side. A **PTY-first** harness (Claude Code, Codex)
+//! *is* its tab: the real interactive CLI runs in a terminal pane, the chat is
+//! a projection of the transcript it writes, and `tui` holds everything that
+//! is the same for both. A **headless** harness (ACP, OpenCode) is a peer
+//! driven over a pipe: each inbound line becomes a list of `Action`s the
+//! session manager applies, which is what keeps them testable on fixtures.
 
 pub mod acp;
 pub mod claude;
 pub mod codex;
 pub mod host;
 pub mod opencode;
+pub mod tui;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::events::Payload;
+
+/// What a headless harness asks the session manager to do with one inbound
+/// line. Nothing here touches a process, so a whole exchange can be replayed.
+pub enum Action {
+    Write(String),
+    Emit(Payload),
+    /// The thread id the server minted; the manager records it as the
+    /// tab's provider session id so resume works.
+    ThreadReady(String),
+    /// An HTTP request for a server-backed harness; the reply comes back
+    /// to the engine as a line tagged `raccoon_http`.
+    Http { tag: String, method: String, url: String, body: Option<Value> },
+}
 
 /// The harness a tab runs on. Unknown names are carried verbatim.
 pub enum HarnessId {

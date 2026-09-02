@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::events::*;
+pub use crate::harness::Action;
 
 pub struct SpawnPlan {
     pub program: std::path::PathBuf,
@@ -40,17 +41,6 @@ pub fn stance(mode: &str) -> (&'static str, &'static str) {
         "bypassPermissions" => ("never", "danger-full-access"),
         _ => ("on-request", "workspace-write"),
     }
-}
-
-pub enum Action {
-    Write(String),
-    Emit(Payload),
-    /// The thread id the server minted; the manager records it as the
-    /// tab's provider session id so resume works.
-    ThreadReady(String),
-    /// An HTTP request for a server-backed harness; the reply comes back
-    /// to the engine as a line tagged `raccoon_http`.
-    Http { tag: String, method: String, url: String, body: Option<Value> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
