@@ -43,11 +43,14 @@ const send = async (payload: { kind: string; text?: string }) => {
   });
 };
 
-/** Render a composer holding `initial`, with the caret at `caret`. */
+/** Render a composer holding `initial`, the reader's caret at `caret`. */
 async function open(initial = "", caret = initial.length) {
   render(<Field initial={initial} />);
   await act(async () => {});
+  // As the reader would: click into the field, then put the caret there.
+  box().focus();
   box().setSelectionRange(caret, caret);
+  fireEvent.mouseUp(box());
 }
 
 /** Press the mic and get as far as listening. */

@@ -697,10 +697,12 @@ pub async fn list_models(state: State<'_, AppState>, refresh: Option<bool>) -> C
 
 #[tauri::command]
 pub fn frontend_log(level: String, message: String) {
-    if level == "error" {
-        log::error!("[webview] {message}");
-    } else {
-        log::info!("[webview] {message}");
+    match level.as_str() {
+        "error" => log::error!("[webview] {message}"),
+        // Chatty by nature — a line per dictation result — so it sits at the
+        // level a reader has to ask for.
+        "debug" => log::debug!("[webview] {message}"),
+        _ => log::info!("[webview] {message}"),
     }
 }
 

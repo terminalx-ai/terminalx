@@ -22,7 +22,26 @@ pub struct DictationEvent {
     pub message: Option<String>,
 }
 
+/// Every event, into the log before it goes out. Dictation goes wrong in the
+/// field — a recogniser that stops sending, a segment in a shape nobody
+/// expected — and the only way to tell that from a composer that mishandled it
+/// is a record of what was actually emitted. Run the binary with `RUST_LOG=debug`
+/// to see it, next to the webview's own line for the same event.
+fn trace(kind: &str, text: Option<&str>, message: Option<&str>) {
+    let detail = match (text, message) {
+        (Some(t), _) => {
+            let head: String = t.chars().take(40).collect();
+            let more = if t.chars().count() > 40 { "…" } else { "" };
+            format!(" len={} {:?}", t.chars().count(), format!("{head}{more}"))
+        }
+        (None, Some(m)) => format!(" {m}"),
+        (None, None) => String::new(),
+    };
+    log::debug!("dictation emit {kind}{detail}");
+}
+
 fn emit(app: &AppHandle, kind: &'static str, text: Option<String>, message: Option<String>) {
+    trace(kind, text.as_deref(), message.as_deref());
     let _ = app.emit("dictation", DictationEvent { kind, text, message });
 }
 

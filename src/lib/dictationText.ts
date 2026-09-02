@@ -118,7 +118,16 @@ export function applyFinal(buffer: DictationBuffer, final: string): DictationBuf
  * against an empty edge, and none after a line break, which already separates.
  */
 export function draftWithSpeech(anchor: DictationAnchor, buffer: DictationBuffer): { text: string; caret: number } {
-  const spoken = spokenText(buffer);
+  return insertSpoken(anchor, spokenText(buffer));
+}
+
+/**
+ * The draft to show once `spoken` has been heard, and where the caret belongs
+ * in it. Nothing accumulates here: the whole draft is built from the anchor and
+ * the words every time, so a write that never arrives costs a moment, not a
+ * phrase.
+ */
+export function insertSpoken(anchor: DictationAnchor, spoken: string): { text: string; caret: number } {
   if (!spoken) return { text: anchor.before + anchor.after, caret: anchor.before.length };
   const head = anchor.before && !/\s$/.test(anchor.before) ? anchor.before + " " : anchor.before;
   const tail = anchor.after && !/^\s/.test(anchor.after) ? " " + anchor.after : anchor.after;
