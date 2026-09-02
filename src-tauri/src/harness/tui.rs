@@ -70,21 +70,61 @@ pub fn submit_delay(body_len: usize) -> Duration {
     Duration::from_millis(250 + (body_len / 4096) as u64)
 }
 
-/// How long a TUI has to have been quiet before it is taken to be listening,
-/// and how long to wait for that before typing anyway.
-///
-/// A TUI drops keystrokes while it is still painting its first frame and has
-/// no way to say when it is ready, so the sign is that it has drawn something
-/// and then stopped. Three seconds, not less — measured, not guessed, against
-/// both installed CLIs. Claude Code paints at 0.3 s, pauses 0.7 s and settles
-/// at 2.0 s from cold, and a `--resume` replays the conversation with a
-/// **2.7 s** pause in the middle of doing it. Codex paints in a burst to
-/// 0.3 s and settles between 1.9 s (a resume) and 3.5 s (a cold start, while
-/// its model and directory lines resolve), with gaps of up to 1.6 s before
-/// that. A prompt typed into any of those gaps vanishes without a trace, and
-/// a restart resumes, so the longest gap sets the rule.
+/// A TUI drops keystrokes while it is still painting its first frame, and the
+/// screen cannot be asked whether it is listening. Claude Code can be asked:
+/// its `SessionStart` hook runs once its session is up, for a fresh start and
+/// a `--resume` alike, and a short settle after it covers the last of the
+/// paint.
+pub const READY_SETTLE: Duration = Duration::from_millis(300);
+/// Codex has no such moment — its session, and so its `SessionStart`, does not
+/// exist until a prompt creates one — so for Codex, and for any CLI whose
+/// hooks never reach us, readiness is the screen: it has drawn something and
+/// then stopped. Three seconds, because a resumed Claude Code replays the
+/// conversation and pauses 2.7 s in the middle of doing it, and a cold Codex
+/// settles at 3.5 s with gaps of 1.6 s before that. It cannot be the rule for
+/// a CLI that announces itself, because a busy TUI redraws a spinner forever
+/// and never goes quiet at all.
 pub const READY_QUIET: Duration = Duration::from_millis(3000);
-pub const READY_TIMEOUT: Duration = Duration::from_secs(20);
+/// The give-up. Long, because it is only reached when every signal failed, and
+/// what follows is typing anyway and saying so — never dropping the prompt.
+pub const READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// When a pane's CLI said it was up. Shared with the thread that types into
+/// the pane, which is the only thing that has to wait for it.
+pub struct Ready {
+    at: Mutex<Option<std::time::Instant>>,
+    announces_start: bool,
+}
+
+impl Ready {
+    /// `announces_start` is whether this CLI runs its `SessionStart` hook when
+    /// it starts, or only when a first prompt creates a session. Probed both
+    /// ways, fresh and resumed, with no prompt sent: Claude Code does the
+    /// former, Codex the latter. Waiting on a hook that cannot arrive until
+    /// after the thing it is gating would wait for ever.
+    pub fn new(announces_start: bool) -> Self {
+        Self { at: Mutex::new(None), announces_start }
+    }
+
+    pub fn announces_start(&self) -> bool {
+        self.announces_start
+    }
+
+    /// The `SessionStart` hook arrived. Only the first one counts: a CLI fires
+    /// it again after a `/clear` or a compaction, and by then it is long since
+    /// listening.
+    pub fn mark(&self) {
+        let mut at = self.at.lock().unwrap();
+        if at.is_none() {
+            *at = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Whether the CLI has been up long enough to have finished drawing.
+    pub fn settled(&self) -> bool {
+        self.at.lock().unwrap().is_some_and(|at| at.elapsed() >= READY_SETTLE)
+    }
+}
 
 // ------------------------------------------------------------------ the tail
 
@@ -300,6 +340,61 @@ mod tests {
 
     /// The `Stop` hook and the assistant record race, and the reply must be
     /// drawn exactly once whichever wins.
+    /// The composer waits for this before typing. It used to wait for the
+    /// pane to fall quiet instead, which a resumed TUI drawing a spinner never
+    /// does, and the prompt was dropped when the wait timed out.
+    #[test]
+    fn readiness_flips_when_the_session_starts_and_not_before() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let ready = Arc::new(Ready::new(true));
+        assert!(!ready.settled());
+
+        let typed = Arc::new(AtomicBool::new(false));
+        let (r, t) = (ready.clone(), typed.clone());
+        let waiter = std::thread::spawn(move || {
+            while !r.settled() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            t.store(true, Ordering::SeqCst);
+        });
+
+        std::thread::sleep(READY_SETTLE * 2);
+        assert!(!typed.load(Ordering::SeqCst), "nothing is typed before SessionStart");
+
+        ready.mark();
+        assert!(!ready.settled(), "nor in the instant it arrives");
+        waiter.join().unwrap();
+        assert!(typed.load(Ordering::SeqCst), "the prompt held back goes in once the CLI is up");
+    }
+
+    /// Codex never fires the hook before the prompt that would create its
+    /// session, so waiting on it would wait for ever. That tab is told to
+    /// read the screen instead.
+    #[test]
+    fn a_cli_that_does_not_announce_its_start_is_never_waited_on_for_one() {
+        let ready = Ready::new(false);
+        assert!(!ready.announces_start());
+        ready.mark();
+        std::thread::sleep(READY_SETTLE + Duration::from_millis(50));
+        // `settled` still answers honestly if a hook does turn up; what
+        // changes is that the caller does not treat quiet as a failure.
+        assert!(ready.settled());
+        assert!(Ready::new(true).announces_start());
+    }
+
+    #[test]
+    fn only_the_first_session_start_counts() {
+        let ready = Ready::new(true);
+        ready.mark();
+        std::thread::sleep(READY_SETTLE + Duration::from_millis(50));
+        assert!(ready.settled());
+        // A CLI fires it again after a /clear; by then it is long since up.
+        ready.mark();
+        assert!(ready.settled());
+    }
+
     #[test]
     fn a_reply_is_published_once_whichever_of_stop_and_the_record_lands_first() {
         // Record first: the hook has nothing to add.

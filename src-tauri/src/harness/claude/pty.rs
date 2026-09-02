@@ -158,6 +158,7 @@ mod tests {
         assert_eq!(hooks["Stop"][0]["hooks"][0]["timeout"], 10);
     }
 
+
     #[test]
     fn permission_replies_carry_the_events_own_decision_shape() {
         let allow = permission_decision(true, Some(json!({"command": "ls"})), vec![json!({"type": "addRules"})]);

@@ -84,6 +84,9 @@ pub struct CliTab {
     /// A setting the CLI only reads at startup, changed mid-turn. The restart
     /// waits for the turn to end.
     pub restart_when_idle: bool,
+    /// Set when this CLI's `SessionStart` hook arrives; what the thread that
+    /// types into the pane waits on.
+    pub ready: Arc<tui::Ready>,
     pub tail: Arc<tui::Tail>,
     /// Prompts the composer already published, waiting for the transcript to
     /// echo them back so the reader is not shown the same message twice.
@@ -97,6 +100,9 @@ pub struct CliTab {
     /// Codex fires `PreToolUse` and then `PermissionRequest` for the same
     /// call, and one tool must not cost the reader two cards.
     pub answered: HashMap<String, bool>,
+    /// What the pane is running, for the terminal view's header and for a
+    /// window that has to be told about a pane it did not see start.
+    pub command: String,
 }
 
 pub enum Engine {
@@ -199,6 +205,23 @@ fn key_of(session_id: &str, tab_id: &str) -> String {
     format!("{session_id}/{tab_id}")
 }
 
+/// One value per key, created under the lock.
+///
+/// The whole check-and-create is held, not just the lookup. A tab runtime built
+/// twice hands each caller its own mutex, and everything that runtime guards —
+/// above all the check that stops a tab starting a second CLI — is then
+/// guarding nothing: both callers pass it and the tab spawns two agents on the
+/// same conversation, of which the second is refused and the first is lost.
+fn one_per_key<V: Clone>(map: &Mutex<HashMap<String, V>>, key: &str, make: impl FnOnce() -> Result<V>) -> Result<V> {
+    let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(v) = map.get(key) {
+        return Ok(v.clone());
+    }
+    let v = make()?;
+    map.insert(key.to_string(), v.clone());
+    Ok(v)
+}
+
 /// What one tool call is, for the purpose of not asking about it twice. The
 /// same command reaches `PreToolUse` and `PermissionRequest` under different
 /// ids but with the same input, minus the justification Codex adds.
@@ -250,33 +273,31 @@ impl SessionManager {
 
     fn runtime(&self, session_id: &str, tab_id: &str) -> Result<Arc<Mutex<TabRuntime>>> {
         let key = key_of(session_id, tab_id);
-        if let Some(r) = self.tabs.lock().unwrap().get(&key) {
-            return Ok(r.clone());
-        }
-        let entry = index::get(session_id)?;
-        let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
-        let log_path = store::log_path(session_id, tab_id)?;
-        let seq = store::last_seq(&log_path)?;
-        let rt = Arc::new(Mutex::new(TabRuntime {
-            session_id: session_id.into(),
-            tab_id: tab_id.into(),
-            harness: tab.harness.clone(),
-            seq,
-            status: TabStatus::Idle,
-            child: None,
-            child_pid: None,
-            engine: Engine::None,
-            pending: HashMap::new(),
-            queued: Vec::new(),
-            turn_open: false,
-            turn_started_at: None,
-            last_activity: Instant::now(),
-            log_path,
-            me: std::sync::Weak::new(),
-        }));
-        rt.lock().unwrap().me = Arc::downgrade(&rt);
-        self.tabs.lock().unwrap().insert(key, rt.clone());
-        Ok(rt)
+        one_per_key(&self.tabs, &key, || {
+            let entry = index::get(session_id)?;
+            let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
+            let log_path = store::log_path(session_id, tab_id)?;
+            let seq = store::last_seq(&log_path)?;
+            let rt = Arc::new(Mutex::new(TabRuntime {
+                session_id: session_id.into(),
+                tab_id: tab_id.into(),
+                harness: tab.harness.clone(),
+                seq,
+                status: TabStatus::Idle,
+                child: None,
+                child_pid: None,
+                engine: Engine::None,
+                pending: HashMap::new(),
+                queued: Vec::new(),
+                turn_open: false,
+                turn_started_at: None,
+                last_activity: Instant::now(),
+                log_path,
+                me: std::sync::Weak::new(),
+            }));
+            rt.lock().unwrap().me = Arc::downgrade(&rt);
+            Ok(rt)
+        })
     }
 
     /// Stamp, persist, emit. The one path every event takes.
@@ -632,7 +653,10 @@ impl SessionManager {
             // Claude's own `/model` takes the change live. Codex's `/model`
             // opens a picker rather than taking an argument, so its tab is
             // restarted on the same conversation instead.
-            Engine::Cli(p) if p.harness == CliKind::Claude => self.type_command(&p.pane_id, format!("/model {model}")),
+            Engine::Cli(p) if p.harness == CliKind::Claude => {
+                let pane = p.pane_id.clone();
+                self.type_command(&rt_arc, &pane, format!("/model {model}"));
+            }
             Engine::Cli(p) => {
                 if turn_open {
                     p.restart_when_idle = true;
@@ -710,7 +734,8 @@ impl SessionManager {
         match &mut rt.engine {
             Engine::Cli(p) if p.harness == CliKind::Claude => {
                 if let Some(e) = effort.filter(|e| !e.is_empty()) {
-                    self.type_command(&p.pane_id, format!("/effort {e}"));
+                    let pane = p.pane_id.clone();
+                    self.type_command(&rt_arc, &pane, format!("/effort {e}"));
                 }
             }
             Engine::Cli(p) => {
@@ -760,6 +785,10 @@ impl SessionManager {
 
     /// Start the tab's CLI if it is not already running. Idempotent: opening a
     /// tab, sending a prompt and switching to the terminal view all call it.
+    ///
+    /// The pane is announced either way. A window that opens after the CLI
+    /// started — the app restarting into a session that was already running —
+    /// never saw the event, and would show a terminal view with nothing in it.
     pub fn ensure_started(&self, session_id: &str, tab_id: &str) -> Result<()> {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let entry = index::get(session_id)?;
@@ -768,8 +797,35 @@ impl SessionManager {
             return Ok(());
         }
         let mut rt = rt_arc.lock().unwrap();
-        self.start_cli(&mut rt, &rt_arc, &entry, &tab)?;
+        if !self.start_cli(&mut rt, &rt_arc, &entry, &tab)? {
+            self.announce_pane(&rt);
+        }
         Ok(())
+    }
+
+    /// The pane a tab's CLI is running in, for a window that has to ask
+    /// because it was not listening when the pane opened.
+    pub fn pane_of(&self, session_id: &str, tab_id: &str) -> Option<TabPtyEvent> {
+        let rt_arc = self.runtime(session_id, tab_id).ok()?;
+        let rt = rt_arc.lock().unwrap();
+        Self::pane_event(&rt)
+    }
+
+    fn pane_event(rt: &TabRuntime) -> Option<TabPtyEvent> {
+        let Engine::Cli(p) = &rt.engine else { return None };
+        Some(TabPtyEvent {
+            session_id: rt.session_id.clone(),
+            tab_id: rt.tab_id.clone(),
+            pane_id: p.pane_id.clone(),
+            command: p.command.clone(),
+            harness: rt.harness.clone(),
+        })
+    }
+
+    fn announce_pane(&self, rt: &TabRuntime) {
+        if let Some(ev) = Self::pane_event(rt) {
+            let _ = self.app.emit("tab_pty", ev);
+        }
     }
 
     /// Returns whether this call is what started it, so a prompt sent in the
@@ -810,17 +866,18 @@ impl SessionManager {
             pane_id: pane.clone(),
             generation,
             restart_when_idle: false,
+            // Claude Code runs its SessionStart hook the moment it is up;
+            // Codex has no session, and so no hook, until a prompt makes one.
+            ready: Arc::new(tui::Ready::new(kind == CliKind::Claude)),
             tail: tail.clone(),
             echoed: Default::default(),
             decisions: HashMap::new(),
             turn_tail: Default::default(),
             answered: HashMap::new(),
+            command: launch.command,
         });
         rt.turn_open = false;
-        let _ = self.app.emit(
-            "tab_pty",
-            TabPtyEvent { session_id: rt.session_id.clone(), tab_id: rt.tab_id.clone(), pane_id: pane.clone(), command: launch.command, harness: tab.harness.clone() },
-        );
+        self.announce_pane(rt);
         if let Some(id) = launch.minted {
             index::update_tab(&rt.session_id, &rt.tab_id, |t| {
                 t.provider_session_id = Some(id.clone());
@@ -1082,9 +1139,9 @@ impl SessionManager {
         text: String,
         images: Vec<ImageRef>,
     ) -> Result<SendOutcome> {
-        let just_started = self.start_cli(rt, rt_arc, entry, tab)?;
-        let pane = match &rt.engine {
-            Engine::Cli(p) => p.pane_id.clone(),
+        self.start_cli(rt, rt_arc, entry, tab)?;
+        let (pane, ready) = match &rt.engine {
+            Engine::Cli(p) => (p.pane_id.clone(), p.ready.clone()),
             _ => bail!("the agent is not running"),
         };
         let queued = rt.turn_open;
@@ -1096,7 +1153,7 @@ impl SessionManager {
             }
         }
         let ev = self.publish(rt, Payload::UserMessage { text: text.clone(), images, baseline, queued, cwd: Some(entry.cwd.clone()) }, None);
-        self.type_prompt(&pane, text, paths, just_started);
+        self.type_prompt(rt_arc, &pane, text, paths, Some(ready));
         if !queued {
             rt.turn_open = true;
             rt.turn_started_at = Some(Instant::now());
@@ -1109,22 +1166,23 @@ impl SessionManager {
     /// Enter has to be a later write than the body — a carriage return inside
     /// the same one is read as part of the paste and never submits — so this
     /// sleeps, which no caller holding the tab lock could afford to do.
-    fn type_prompt(&self, pane: &str, text: String, attachments: Vec<String>, await_ready: bool) {
+    fn type_prompt(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, text: String, attachments: Vec<String>, ready: Option<Arc<tui::Ready>>) {
         let lock = self.writers.lock().unwrap().entry(pane.to_string()).or_default().clone();
         let terminals = self.terminals.clone();
+        let manager = self.clone();
+        let rt_arc = rt_arc.clone();
         let pane = pane.to_string();
         let _ = std::thread::Builder::new().name("cli-input".into()).spawn(move || {
             let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
-            // A TUI that is still drawing its first frame drops what is typed
-            // at it. There is nothing to ask, so the sign it is listening is
-            // that it has painted something and then gone quiet.
-            if await_ready {
-                let deadline = std::time::Instant::now() + tui::READY_TIMEOUT;
-                while std::time::Instant::now() < deadline {
-                    if terminals.quiet_for(&pane).is_some_and(|q| q >= tui::READY_QUIET) {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+            if let Some(ready) = ready {
+                if !manager.wait_ready(&pane, &ready) {
+                    // Both signals failed. Typing anyway may lose the prompt to
+                    // a TUI that is not listening, but dropping it silently is
+                    // worse: the reader would watch a message they sent never
+                    // appear anywhere at all.
+                    log::warn!("[{pane}] never reported ready; typing the prompt regardless");
+                    let mut rt = rt_arc.lock().unwrap();
+                    manager.apply(&mut rt, Payload::Status { text: "The agent was slow to start; check that your message arrived.".into() }, None);
                 }
             }
             let write = |bytes: &[u8]| {
@@ -1146,9 +1204,45 @@ impl SessionManager {
         });
     }
 
+    /// Wait until the pane's CLI is listening. `true` when it said so — or looked
+    /// like it — and `false` when neither signal came in time.
+    ///
+    /// Claude Code's `SessionStart` hook is the deterministic signal: it runs
+    /// once the session is up, whether it started fresh or resumed. Quiet output
+    /// is only the fallback there — a TUI drawing a spinner never goes quiet,
+    /// which is how a prompt sent to a resumed tab used to be dropped after the
+    /// wait timed out.
+    ///
+    /// Codex has no equivalent: probed fresh and resumed with no prompt sent, it
+    /// runs no hook at all until a prompt creates its session, which is the very
+    /// thing being waited for. Its tab reads the screen, and that is not a
+    /// failure, so it is not logged as one.
+    fn wait_ready(&self, pane: &str, ready: &tui::Ready) -> bool {
+        let deadline = Instant::now() + tui::READY_TIMEOUT;
+        loop {
+            if ready.settled() {
+                return true;
+            }
+            if !self.terminals.is_running(pane) {
+                log::warn!("[{pane}] exited before it was ready");
+                return false;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            if self.terminals.quiet_for(pane).is_some_and(|q| q >= tui::READY_QUIET) {
+                if ready.announces_start() {
+                    log::warn!("[{pane}] never ran its SessionStart hook; falling back to quiet output");
+                }
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
     /// A slash command the CLI runs itself (`/model`, `/effort`).
-    fn type_command(&self, pane: &str, command: String) {
-        self.type_prompt(pane, command, Vec::new(), false);
+    fn type_command(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, command: String) {
+        self.type_prompt(rt_arc, pane, command, Vec::new(), None);
     }
 
     // ---- inbound from the CLI's hooks
@@ -1182,9 +1276,13 @@ impl SessionManager {
         self.pump(&rt_arc, &tail);
 
         match frame.event.as_str() {
-            // Codex mints its own conversation id, so this is where the app
+            // The CLI's session is up; the composer may stop waiting. Codex
+            // also mints its own conversation id, so this is where the app
             // learns which one to resume next time.
             "SessionStart" => {
+                if let Engine::Cli(p) = &rt_arc.lock().unwrap().engine {
+                    p.ready.mark();
+                }
                 if kind == CliKind::Codex {
                     if let Some(id) = frame.payload["session_id"].as_str() {
                         self.record_provider_session(&rt_arc, id);
@@ -1528,6 +1626,54 @@ impl Sink for TabSink {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
+
+    /// Two tab views mounting at once — React runs a mount effect twice in
+    /// development — used to build a runtime each, so each held its own lock
+    /// and both got past the "already running?" check into a spawn. A CLI
+    /// refuses the second process a conversation the first already has, and
+    /// the tab was left pointing at whichever spawn won.
+    #[test]
+    fn concurrent_callers_share_one_runtime_and_one_creation() {
+        let map: Arc<Mutex<HashMap<String, Arc<usize>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let made = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(8));
+
+        let got: Vec<Arc<usize>> = (0..8)
+            .map(|_| {
+                let (map, made, barrier) = (map.clone(), made.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    one_per_key(&map, "s/t", || {
+                        made.fetch_add(1, Ordering::SeqCst);
+                        // Creation reads the index off disk, so the window is
+                        // real rather than theoretical.
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        Ok(Arc::new(7))
+                    })
+                    .unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect();
+
+        assert_eq!(made.load(Ordering::SeqCst), 1, "the runtime is built once");
+        for v in &got {
+            assert!(Arc::ptr_eq(v, &got[0]), "every caller gets the same runtime");
+        }
+        assert_eq!(map.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_failed_creation_is_not_remembered() {
+        let map: Arc<Mutex<HashMap<String, Arc<usize>>>> = Arc::new(Mutex::new(HashMap::new()));
+        assert!(one_per_key(&map, "s/t", || Err(anyhow!("no such tab"))).is_err());
+        assert!(map.lock().unwrap().is_empty());
+        assert_eq!(*one_per_key(&map, "s/t", || Ok(Arc::new(3))).unwrap(), 3);
+    }
 
     #[test]
     fn a_decision_is_printed_in_the_shape_the_hook_that_asked_expects() {

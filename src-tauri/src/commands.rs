@@ -605,6 +605,13 @@ pub fn tab_handoff(state: State<'_, AppState>, session_id: String, tab_id: Strin
     state.manager().ok_or("not ready")?.handoff(&session_id, &tab_id).map_err(err)
 }
 
+/// The terminal pane a tab's CLI is running in, or nothing if it is not.
+/// A window that opened after the CLI did never saw the pane announced.
+#[tauri::command]
+pub fn tab_pane(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<Option<crate::session::TabPtyEvent>> {
+    Ok(state.manager().ok_or("not ready")?.pane_of(&session_id, &tab_id))
+}
+
 /// Start a tab's own CLI. PTY-first tabs are the CLI, so opening one starts
 /// it; harnesses that still run headless do nothing here.
 #[tauri::command]

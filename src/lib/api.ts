@@ -155,6 +155,8 @@ export const agent = {
   tabHandoff: (sessionId: string, tabId: string) => invoke<HandoffInfo>("tab_handoff", { sessionId, tabId }),
   /** Start a tab's own CLI. Idempotent, and a no-op for headless harnesses. */
   ensureStarted: (sessionId: string, tabId: string) => invoke<void>("ensure_tab_started", { sessionId, tabId }),
+  /** The pane a tab's CLI is running in, for a window that missed the event. */
+  tabPane: (sessionId: string, tabId: string) => invoke<TabPtyEvent | null>("tab_pane", { sessionId, tabId }),
   stop: (sessionId: string, tabId: string) => invoke<void>("stop_tab", { sessionId, tabId }),
   cancelQueued: (sessionId: string, tabId: string, messageId: string) =>
     invoke<QueuedMessage | null>("cancel_queued", { sessionId, tabId, messageId }),

@@ -156,12 +156,27 @@ part of the paste, so the text lands in the composer and never sends. It is
 last character has arrived.
 
 The first prompt after a spawn waits for the TUI to finish drawing first, since
-a TUI mid-paint drops what is typed at it and has no way to say when it is
-ready. The sign is that the pane has drawn something and then been quiet for
-three seconds — measured, not guessed: a fresh start paints at 0.3 s, pauses
-0.7 s and settles at 2.0 s, while a `--resume` replays the conversation and
-pauses **2.7 s** in the middle of doing it. A prompt typed into either gap
-vanishes without a trace.
+a TUI mid-paint drops what is typed at it. Claude Code says when it is up: the
+`SessionStart` hook runs once its session exists, for a fresh start and a
+`--resume` alike, and a 300 ms settle after it covers the last of the paint.
+
+Reading the screen instead does not work for it. A fresh start paints at 0.3 s,
+pauses 0.7 s and settles at 2.0 s, so a short quiet threshold fires into the
+gap; a `--resume` replays the conversation and then keeps redrawing, so a long
+one never fires at all. Quiet output survives there only as the fallback for a
+CLI whose hooks never reach us.
+
+Codex has no such moment, and this is the one place the two harnesses part.
+Probed fresh and resumed with no prompt sent, Codex runs *no* hook until a
+prompt creates its session — which is the very thing being waited for — so its
+tab reads the screen, and that is the rule rather than a fallback. It can:
+Codex paints in a burst and settles between 1.9 s (a resume) and 3.5 s (a cold
+start, while its model and directory lines resolve), so three seconds of quiet
+is reached without ever having to be waited out.
+
+If no signal comes at all, the prompt is typed anyway behind a status line —
+losing it to a TUI that was not listening is bad, but discarding it in silence,
+which is what used to happen, is worse.
 
 A single-line prompt starting with `/` is written as plain keystrokes instead,
 because a pasted slash command is classified as prose and never opens the
@@ -211,6 +226,13 @@ removes them from every pane it opens. This was reproduced and then fixed
 against the installed CLI, not taken on trust.
 
 ### Chat and terminal are one pane
+
+A window claims a tab's pane by asking for it (`tab_pane`) when the tab view
+mounts, not only by hearing it announced: an app that restarts into a session
+whose CLI is already running was not listening when the pane opened. Starting a
+tab is shared per tab on both sides — one runtime per tab in Rust, one in-flight
+promise per tab in the frontend — because two starts racing is how a tab ended
+up with two CLIs fighting over one conversation.
 
 `tabViews.ts` keeps a `chat | terminal` flag per tab. For a PTY-first tab the
 terminal pane stays mounted underneath and the chat is drawn over it, so
@@ -360,6 +382,12 @@ Permission modes map as `plan → -a on-request -s read-only`, everything else
 `→ -a on-request -s workspace-write` (with the `PreToolUse` gate for "Ask every
 time"), and `bypassPermissions → --dangerously-bypass-approvals-and-sandbox`.
 
+One thing `SessionStart` is *not* good for here: readiness. Codex fires it
+when the session is created, which is at the first prompt — 20 ms before
+`UserPromptSubmit` in every probe, fresh or resumed — so a composer waiting on
+it would be waiting on the prompt it is holding. That is why a Codex tab's
+readiness is the quiet-output rule and a Claude tab's is the hook.
+
 The events registered are `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
 `PermissionRequest`, `PostToolUse`, `Stop`, `Interrupt` and `SessionEnd`. None
 of them carries a matcher: a Codex tool hook without one runs for every tool,
@@ -373,8 +401,10 @@ per event — the two that park on a person get 600 s, `SessionEnd` and
   per token, so assistant prose appears a message at a time. There are no
   deltas and no streaming preview for a Claude tab.
 - **Keystroke input.** Everything the composer sends is typed into a TUI. It is
-  robust for prose and for slash commands, but it is not a protocol: there is no
-  acknowledgement, and a prompt sent while the CLI is starting up can be lost.
+  robust for prose and for slash commands, but it is not a protocol: nothing
+  acknowledges a prompt, so the app can say it typed one and not that the CLI
+  took it. The `UserPromptSubmit` hook arriving is the nearest thing to a
+  receipt.
 - **Images by path.** An attachment is archived as today and its *path* is
   pasted for the CLI to pick up, rather than base64 bytes on a wire.
 - **Queueing.** A prompt sent mid-turn is written immediately — the CLI queues

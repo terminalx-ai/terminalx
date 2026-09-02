@@ -116,6 +116,7 @@ pub fn run() {
             commands::stop_tab,
             commands::tab_handoff,
             commands::ensure_tab_started,
+            commands::tab_pane,
             commands::cancel_queued,
             commands::list_queued,
             commands::respond_permission,
