@@ -1,22 +1,30 @@
 import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { applyFinal, applyPartial, EMPTY_BUFFER, spokenText, type DictationBuffer } from "./dictationText";
 
 /**
  * Dictation into the composer. The Rust side owns the microphone and Apple's
- * on-device recogniser; this store mirrors its state and carries partial
- * transcripts to whichever composer is listening. One dictation at a time.
+ * on-device recogniser; this store mirrors its state and carries the text to
+ * whichever composer is listening. One dictation at a time.
+ *
+ * The store folds the recogniser's results together itself and publishes the
+ * whole of what has been heard, not the newest piece of it. A composer can
+ * then rebuild its draft from scratch on every change, so a render that is
+ * dropped, coalesced, or arrives late costs a moment rather than a phrase.
  */
 export type DictationPhase = "idle" | "starting" | "listening" | "finishing";
 
 export interface DictationState {
   phase: DictationPhase;
   /**
-   * The recogniser's latest result for the segment it is working on. It is
-   * replaced wholesale, and after a pause it can start again from nothing —
-   * the composer keeps what came before (see `@/lib/dictationText`).
+   * Everything recognised in this dictation so far, as one string. It survives
+   * the end of the dictation and is cleared when the next one starts, so a
+   * final result that lands in the same tick as the stop is never missed.
    */
-  partial: string;
+  text: string;
+  /** Which dictation this is. A composer follows only the one it started. */
+  session: number;
   /** Which composer (tab id) the text belongs to. */
   target: string | null;
   error: string | null;
@@ -25,7 +33,9 @@ export interface DictationState {
   engine: string;
 }
 
-let state: DictationState = { phase: "idle", partial: "", target: null, error: null, available: null, engine: "Apple" };
+let state: DictationState = { phase: "idle", text: "", session: 0, target: null, error: null, available: null, engine: "Apple" };
+/** The segments behind `state.text`; see `./dictationText`. */
+let buffer: DictationBuffer = EMPTY_BUFFER;
 const listeners = new Set<() => void>();
 function set(patch: Partial<DictationState>) {
   state = { ...state, ...patch };
@@ -43,14 +53,23 @@ export function useDictation(): DictationState {
   );
 }
 
-/** Called with the committed text each time an utterance ends. */
-type Sink = (text: string) => void;
-let sink: Sink | null = null;
-
 interface DictationEvent {
   kind: "partial" | "final" | "error" | "stopped" | "listening" | "transcribing";
   text?: string;
   message?: string;
+}
+
+/**
+ * Every event, into the app log. Dictation goes wrong in the field — a
+ * recogniser that stops sending, a segment that arrives in a shape nobody
+ * expected — so the reader's log has to show what the webview was actually
+ * handed, next to what Rust says it emitted.
+ */
+function trace(e: DictationEvent) {
+  const text = e.text ?? "";
+  const head = text.length > 40 ? `${text.slice(0, 40)}…` : text;
+  const detail = e.kind === "error" ? ` ${e.message ?? ""}` : ` len=${text.length} ${JSON.stringify(head)}`;
+  void invoke("frontend_log", { level: "debug", message: `dictation ${e.kind}${detail}` }).catch(() => {});
 }
 
 let subscribed = false;
@@ -60,27 +79,27 @@ async function subscribe() {
   try {
     await listen<DictationEvent>("dictation", (e) => {
       const p = e.payload;
+      trace(p);
       switch (p.kind) {
         case "listening":
           set({ phase: "listening", error: null });
           break;
         case "transcribing":
-          set({ phase: "finishing", partial: "" });
+          set({ phase: "finishing" });
           break;
         case "partial":
-          set({ partial: p.text ?? "" });
+          buffer = applyPartial(buffer, p.text ?? "");
+          set({ text: spokenText(buffer) });
           break;
-        case "final": {
-          const text = (p.text ?? state.partial).trim();
-          if (text && sink) sink(text);
-          set({ partial: "" });
+        case "final":
+          buffer = applyFinal(buffer, p.text ?? "");
+          set({ text: spokenText(buffer) });
           break;
-        }
         case "error":
-          set({ phase: "idle", partial: "", error: p.message ?? "Dictation failed.", target: null });
+          set({ phase: "idle", error: p.message ?? "Dictation failed.", target: null });
           break;
         case "stopped":
-          set({ phase: "idle", partial: "", target: null });
+          set({ phase: "idle", target: null });
           break;
       }
     });
@@ -116,18 +135,28 @@ export async function refreshDictationEngine() {
   }
 }
 
-/** Start listening for `target`; recognised text flows to `onText`. */
-export async function startDictation(target: string, onText: Sink) {
-  await subscribe();
-  if (state.phase !== "idle") return;
-  sink = onText;
-  set({ phase: "starting", partial: "", target, error: null });
-  try {
-    await invoke("dictation_start");
-  } catch (e) {
-    sink = null;
-    set({ phase: "idle", target: null, error: String(e) });
-  }
+/**
+ * Start listening for `target`. The session number comes back at once — before
+ * anything can be recognised — so the composer that asked for the dictation can
+ * tell its own text from a later one's. `null` if a dictation is already going.
+ */
+export function startDictation(target: string): number | null {
+  if (state.phase !== "idle") return null;
+  buffer = EMPTY_BUFFER;
+  const session = state.session + 1;
+  set({ phase: "starting", text: "", session, target, error: null });
+  void (async () => {
+    // The listener is in place before the microphone is, so no result can
+    // arrive before there is somewhere for it to go.
+    await subscribe();
+    if (state.session !== session) return;
+    try {
+      await invoke("dictation_start");
+    } catch (e) {
+      set({ phase: "idle", target: null, error: String(e) });
+    }
+  })();
+  return session;
 }
 
 /** Stop listening; the last utterance is committed when the recogniser finishes it. */
@@ -137,7 +166,7 @@ export async function stopDictation() {
   try {
     await invoke("dictation_stop");
   } catch (e) {
-    set({ phase: "idle", partial: "", target: null, error: String(e) });
+    set({ phase: "idle", target: null, error: String(e) });
   }
 }
 
