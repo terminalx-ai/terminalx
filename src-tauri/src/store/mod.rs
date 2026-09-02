@@ -61,16 +61,46 @@ pub fn log_path(session_id: &str, tab_id: &str) -> Result<PathBuf> {
 
 /// Rewrite `path` atomically. Readers never see a torn file: the temp file is
 /// fully written and fsynced before the rename swaps it in.
+///
+/// The temp file is created owner-only rather than tightened afterwards —
+/// these files hold API keys and transcripts, and a umask of 022 would
+/// otherwise leave every byte world-readable for the whole write. When the
+/// target already exists its mode is carried over: `~/.claude.json` is the
+/// CLI's file, not ours, and a rewrite is no place to change what its owner
+/// chose.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     {
-        let mut f = fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+        let mut f = create_private(&tmp, mode_of(path)).with_context(|| format!("create {}", tmp.display()))?;
         f.write_all(bytes)?;
         f.sync_all()?;
     }
     fs::rename(&tmp, path).with_context(|| format!("rename into {}", path.display()))?;
     Ok(())
+}
+
+/// The mode `path` already has, if it is there to have one.
+#[cfg(unix)]
+fn mode_of(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).ok().map(|m| m.mode() & 0o7777)
+}
+
+#[cfg(not(unix))]
+fn mode_of(_path: &Path) -> Option<u32> {
+    None
+}
+
+#[cfg(unix)]
+fn create_private(path: &Path, keep: Option<u32>) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new().write(true).create(true).truncate(true).mode(keep.unwrap_or(0o600)).open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private(path: &Path, _keep: Option<u32>) -> std::io::Result<fs::File> {
+    fs::File::create(path)
 }
 
 pub fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
@@ -174,6 +204,32 @@ mod tests {
         let v: Option<serde_json::Value> = read_json(&p).unwrap();
         assert_eq!(v.unwrap()["a"], 1);
         assert!(!dir.path().join("x.tmp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_file_is_owner_only_from_the_moment_it_exists() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+
+        // Nothing there before: ours to choose, and the choice is 0600 — not
+        // 0644-then-chmod, which would publish the contents for the length of
+        // the write.
+        let fresh = dir.path().join("settings.json");
+        write_json(&fresh, &serde_json::json!({"linearApiKey": "secret"})).unwrap();
+        assert_eq!(fresh.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+
+        // Someone else's file, rewritten: their mode survives.
+        let theirs = dir.path().join("claude.json");
+        fs::write(&theirs, b"{}").unwrap();
+        fs::set_permissions(&theirs, fs::Permissions::from_mode(0o644)).unwrap();
+        write_json(&theirs, &serde_json::json!({"projects": {}})).unwrap();
+        assert_eq!(theirs.metadata().unwrap().permissions().mode() & 0o777, 0o644);
+
+        // And a file that was already tight stays tight.
+        fs::set_permissions(&theirs, fs::Permissions::from_mode(0o600)).unwrap();
+        write_json(&theirs, &serde_json::json!({"projects": {"a": 1}})).unwrap();
+        assert_eq!(theirs.metadata().unwrap().permissions().mode() & 0o777, 0o600);
     }
 
     #[test]
