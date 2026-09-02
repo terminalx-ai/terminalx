@@ -249,7 +249,10 @@ terminal. So `home.rs` keeps a home at `$RACCOON_HOME/codex` and points
 `CODEX_HOME` at it. A separate home must not become a separate Codex, so it
 gets the reader's account (`auth.json` **symlinked**, never copied, so a
 refreshed token is shared), their `skills`, `prompts`, `plugins` and
-`AGENTS.md` (symlinked too), and an explicit list of their `config.toml` keys —
+`AGENTS.md` (symlinked too — Raccoon writes nothing into their home, but Codex
+goes on keeping its own house there through the links, exactly as it would if
+they had run `codex` themselves), and an explicit list of their `config.toml`
+keys —
 model, effort, `[features]`, `[mcp_servers]`, `[plugins]`, `[marketplaces]` and
 a few more. Two keys are deliberately *not* mirrored: `notify`, which runs the
 reader's own desktop helper and has nothing to do with a tab, and `projects`,

@@ -1523,3 +1523,54 @@ impl Sink for TabSink {
         self.manager.on_exit(&self.rt, pid, code);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_decision_is_printed_in_the_shape_the_hook_that_asked_expects() {
+        let out = |kind, event, d| reply_for(kind, event, d).output.unwrap();
+
+        // Claude: one event, and an allow can carry a rule or an answer.
+        let allow = out(CliKind::Claude, "PermissionRequest", Decision::Allow);
+        assert_eq!(allow["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        let always = out(CliKind::Claude, "PermissionRequest", Decision::AllowWith(json!({"type": "addRules"})));
+        assert_eq!(always["hookSpecificOutput"]["decision"]["updatedPermissions"][0]["type"], "addRules");
+        let answered = out(CliKind::Claude, "PermissionRequest", Decision::Answers(json!({"answers": {"q": "a"}})));
+        assert_eq!(answered["hookSpecificOutput"]["decision"]["updatedInput"]["answers"]["q"], "a");
+
+        // Codex: two events, two shapes, and neither takes anything extra —
+        // it fails the hook closed if updatedInput is so much as present.
+        let gate = out(CliKind::Codex, "PreToolUse", Decision::Deny);
+        assert_eq!(gate["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(gate["hookSpecificOutput"]["permissionDecision"], "deny");
+        let ask = out(CliKind::Codex, "PermissionRequest", Decision::Allow);
+        assert_eq!(ask["hookSpecificOutput"]["hookEventName"], "PermissionRequest");
+        assert_eq!(ask["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        // A suggestion has nowhere to go in a Codex reply, and is dropped
+        // rather than smuggled into a field that would fail closed.
+        let odd = out(CliKind::Codex, "PermissionRequest", Decision::AllowWith(json!({"type": "addRules"})));
+        assert_eq!(odd["hookSpecificOutput"]["decision"], json!({"behavior": "allow"}));
+    }
+
+    #[test]
+    fn one_tool_is_the_same_tool_whichever_hook_asks_about_it() {
+        // Codex adds its justification to the input when it escalates; the
+        // command is what says these are one call, so the reader is asked once.
+        let pre = tool_key("Bash", &json!({"command": "rm -rf build"}));
+        let request = tool_key("Bash", &json!({"command": "rm -rf build", "description": "Delete the build tree?"}));
+        assert_eq!(pre, request);
+        assert_ne!(pre, tool_key("Bash", &json!({"command": "rm -rf dist"})));
+        assert_ne!(pre, tool_key("Read", &json!({"command": "rm -rf build"})));
+    }
+
+    #[test]
+    fn only_the_tabs_that_are_their_cli_are_pty_first() {
+        assert_eq!(pty_first("claude"), Some(CliKind::Claude));
+        assert_eq!(pty_first("codex"), Some(CliKind::Codex));
+        assert_eq!(pty_first("cursor"), None);
+        assert_eq!(pty_first("opencode"), None);
+    }
+}

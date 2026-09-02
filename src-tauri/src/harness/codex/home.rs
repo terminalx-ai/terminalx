@@ -18,7 +18,12 @@
 //!   desktop helper, which has nothing to do with a Raccoon tab), nor is
 //!   `projects` (Raccoon trusts only the checkouts it opened).
 //!
-//! Nothing here writes to the reader's home. It is only ever read.
+//! Raccoon itself never writes into the reader's home — it is read, and
+//! linked to. What the links mean is that Codex keeps its own house: a
+//! refreshed token lands in the reader's `auth.json`, a plugin cache in their
+//! `plugins`, exactly as they would if they had run `codex` themselves.
+
+use std::sync::Mutex;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -63,6 +68,10 @@ struct State {
     /// `hooks.state` key → `trusted_hash`, exactly as Codex named them.
     trust: BTreeMap<String, String>,
 }
+
+/// Two tabs starting at once would otherwise read `config.toml`, add a
+/// checkout each, and write it back over one another.
+static BUILDING: Mutex<()> = Mutex::new(());
 
 pub fn managed_root() -> Result<PathBuf> {
     crate::store::ensure_dir(crate::store::root()?.join("codex"))
@@ -125,18 +134,31 @@ pub fn mirrored_config(user_toml: &str, previous: &str, cwd: &str, trust: &BTree
 /// wrong on every upgrade. Only hooks that came from the file Raccoon wrote
 /// are trusted — a hook discovered anywhere else is not ours to vouch for.
 pub fn trust_entries(result: &Value, hooks_file: &Path) -> BTreeMap<String, String> {
-    let ours = hooks_file.to_string_lossy();
     let mut out = BTreeMap::new();
     for group in result["data"].as_array().into_iter().flatten() {
         for hook in group["hooks"].as_array().into_iter().flatten() {
             let (Some(key), Some(hash)) = (hook["key"].as_str(), hook["currentHash"].as_str()) else { continue };
-            if hook["sourcePath"].as_str() != Some(ours.as_ref()) {
+            if !hook["sourcePath"].as_str().is_some_and(|p| same_file(Path::new(p), hooks_file)) {
                 continue;
             }
             out.insert(key.to_string(), hash.to_string());
         }
     }
     out
+}
+
+/// Whether two paths name the same hooks file. Codex resolves the *directory*
+/// it discovered the file in — so a home under `/var/folders/…` comes back as
+/// `/private/var/folders/…` — while keeping the leaf as written.
+fn same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    let real = |p: &Path| {
+        let dir = p.parent().unwrap_or(Path::new(""));
+        std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf()).join(p.file_name().unwrap_or_default())
+    };
+    real(a) == real(b)
 }
 
 // ------------------------------------------------------------------- rollouts
@@ -265,10 +287,19 @@ fn no_hooks() -> Value {
 /// happens when `hooks.json` has actually changed — which is when Raccoon
 /// moves, or is upgraded, and not on every tab.
 pub fn prepare(cwd: &str, exe: &Path) -> Result<PathBuf> {
+    let _building = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
     let managed = managed_root()?;
-    if let Some(user) = user_root().filter(|u| u.is_dir()) {
+    prepare_in(&managed, user_root(), cwd, exe)?;
+    Ok(managed)
+}
+
+/// The body of `prepare`, with both homes named so it can be exercised
+/// against a real `codex` without touching either of the real ones.
+fn prepare_in(managed: &Path, user: Option<PathBuf>, cwd: &str, exe: &Path) -> Result<()> {
+    let user = user.filter(|u| u.is_dir());
+    if let Some(user) = &user {
         for name in LINKED {
-            if let Err(e) = link(&managed, &user, name) {
+            if let Err(e) = link(managed, user, name) {
                 log::warn!("codex home: {e:#}");
             }
         }
@@ -286,7 +317,7 @@ pub fn prepare(cwd: &str, exe: &Path) -> Result<PathBuf> {
 
     let config_path = managed.join("config.toml");
     let previous = std::fs::read_to_string(&config_path).unwrap_or_default();
-    let user_toml = user_root().map(|u| u.join("config.toml")).and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    let user_toml = user.map(|u| u.join("config.toml")).and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
     // The config has to exist before Codex is asked about the home, because
     // discovery reads it; the hook trust is filled in on the second write.
     crate::store::write_atomic(&config_path, mirrored_config(&user_toml, &previous, cwd, &state.trust)?.as_bytes())?;
@@ -294,7 +325,7 @@ pub fn prepare(cwd: &str, exe: &Path) -> Result<PathBuf> {
     if state.hooks_digest != want || state.trust.is_empty() {
         state = State::default();
         match super::appserver::ask(
-            super::appserver::Where { codex_home: Some(&managed), cwd: Some(Path::new(cwd)) },
+            super::appserver::Where { codex_home: Some(managed), cwd: Some(Path::new(cwd)) },
             "hooks/list",
             json!({}),
         ) {
@@ -321,8 +352,8 @@ pub fn prepare(cwd: &str, exe: &Path) -> Result<PathBuf> {
         crate::store::write_atomic(&hooks_path, &serde_json::to_vec_pretty(&no_hooks())?)?;
     }
 
-    dismiss_update_prompt(&managed);
-    Ok(managed)
+    dismiss_update_prompt(managed);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -391,6 +422,19 @@ url = "https://example.test/mcp"
     }
 
     #[test]
+    fn a_home_reached_through_a_symlinked_directory_is_still_ours() {
+        let real = tempfile::tempdir().unwrap();
+        let ours = real.path().join("hooks.json");
+        std::fs::write(&ours, "{}").unwrap();
+        // What Codex reports: the directory resolved, the leaf as written.
+        let reported = std::fs::canonicalize(real.path()).unwrap().join("hooks.json");
+        let result = json!({"data": [{"hooks": [
+            {"key": "k", "currentHash": "sha256:aa", "sourcePath": reported.to_string_lossy()}
+        ]}]});
+        assert_eq!(trust_entries(&result, &ours).len(), 1);
+    }
+
+    #[test]
     fn a_rollout_is_found_by_the_id_at_the_end_of_its_name() {
         let dir = tempfile::tempdir().unwrap();
         let day = dir.path().join("sessions/2026/09/02");
@@ -422,6 +466,44 @@ url = "https://example.test/mcp"
         assert!(!adopt_rollout(managed.path(), user.path(), id).unwrap());
         assert_eq!(std::fs::read_to_string(&copied).unwrap(), "grown\n");
         assert!(!adopt_rollout(managed.path(), user.path(), "never-existed").unwrap());
+    }
+
+    /// Against the installed `codex`: a home built from nothing ends up with
+    /// hooks Codex will actually run. It is the whole point of the module and
+    /// the one part no fixture can stand in for — the hash is Codex's, and it
+    /// changes when Codex does.
+    #[test]
+    fn a_prepared_home_has_hooks_codex_calls_trusted() {
+        if crate::binpath::resolve("codex").is_none() {
+            return;
+        }
+        let managed = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join("config.toml"), "model = \"gpt-5.6-sol\"\n\n[features]\nsteer = true\n").unwrap();
+        // A real account is not needed to list hooks, and none is linked in.
+        let cwd = work.path().to_string_lossy().into_owned();
+        prepare_in(managed.path(), Some(user.path().to_path_buf()), &cwd, Path::new("/opt/raccoon")).unwrap();
+
+        let config = std::fs::read_to_string(managed.path().join("config.toml")).unwrap();
+        let t: toml::Table = toml::from_str(&config).unwrap();
+        assert_eq!(t["model"].as_str(), Some("gpt-5.6-sol"), "the reader's settings came across");
+        assert_eq!(t["projects"][&cwd]["trust_level"].as_str(), Some("trusted"));
+
+        let hooks: Value = serde_json::from_str(&std::fs::read_to_string(managed.path().join("hooks.json")).unwrap()).unwrap();
+        let state = t["hooks"]["state"].as_table().unwrap();
+        assert_eq!(hooks["hooks"].as_object().unwrap().len(), super::super::pty::HOOK_EVENTS.len());
+        assert_eq!(state.len(), super::super::pty::HOOK_EVENTS.len(), "every hook we installed is trusted: {state:?}");
+        for entry in state.values() {
+            assert!(entry["trusted_hash"].as_str().unwrap().starts_with("sha256:"));
+        }
+
+        // The second build asks Codex nothing: the answer is cached against
+        // the hooks file it was computed for.
+        std::fs::remove_file(managed.path().join("config.toml")).unwrap();
+        prepare_in(managed.path(), Some(user.path().to_path_buf()), &cwd, Path::new("/opt/raccoon")).unwrap();
+        let again: toml::Table = toml::from_str(&std::fs::read_to_string(managed.path().join("config.toml")).unwrap()).unwrap();
+        assert_eq!(again["hooks"]["state"].as_table().unwrap().len(), state.len());
     }
 
     #[test]
