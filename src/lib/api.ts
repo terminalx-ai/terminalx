@@ -14,6 +14,7 @@ import type {
   WorkStatus,
   WorktreeDisposition,
 } from "@/types/session";
+import type { BundledSkillInstall, DiscoveredSkill, SkillDetail } from "@/types/skills";
 
 export interface NewTab {
   harness: string;
@@ -193,6 +194,13 @@ export const files = {
   invalidate: (cwd: string) => invoke<void>("invalidate_file_index", { cwd }),
   readImage: (path: string) => invoke<{ mediaType: string; data: string; name: string } | null>("read_image_file", { path }),
   slashCommands: (cwd: string, harness: string) => invoke<SlashCommand[]>("list_slash_commands", { cwd, harness }),
+};
+
+export const skills = {
+  list: (projectPath?: string | null, refresh = false) =>
+    invoke<DiscoveredSkill[]>("list_skills", { projectPath: projectPath ?? null, refresh }),
+  detail: (dirPath: string) => invoke<SkillDetail>("skill_detail", { dirPath }),
+  installRaccoon: (agents: string[]) => invoke<BundledSkillInstall>("install_raccoon_skill", { agents }),
 };
 
 // ---- git actions & pull requests

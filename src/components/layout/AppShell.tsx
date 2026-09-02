@@ -7,11 +7,12 @@ import { Sidebar } from "@/components/layout/Sidebar";
 import { NewSessionView } from "@/components/session/NewSessionView";
 import { IssuesView } from "@/components/issues/IssuesView";
 import { AgentDashboard } from "@/components/dashboard/AgentDashboard";
+import { SkillsView } from "@/components/skills/SkillsView";
 import { SessionView } from "@/components/session/SessionView";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
-import { bootSessions, openAgents, openIssues, selectSession, setSessionSearch, useSessionStore } from "@/lib/sessions";
+import { bootSessions, openAgents, openIssues, openSkills, selectSession, setSessionSearch, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
 import { agent } from "@/lib/api";
 import { loadModels } from "@/lib/models";
@@ -56,6 +57,7 @@ export function AppShell() {
   const newSession = useCallback(() => selectSession(null), []);
   const showIssues = useCallback(() => openIssues(), []);
   const showAgents = useCallback(() => openAgents(), []);
+  const showSkills = useCallback(() => openSkills(), []);
 
   useHotkey("mod+b", toggleSidebar);
   useHotkey("mod+e", togglePanel);
@@ -63,6 +65,7 @@ export function AppShell() {
   useHotkey("mod+n", newSession);
   useHotkey("mod+i", showIssues);
   useHotkey("mod+shift+a", showAgents);
+  useHotkey("mod+shift+k", showSkills);
   useHotkey("mod+k", setSessionSearch);
 
   const sidebarOpen = prefs.sidebarOpen;
@@ -74,7 +77,16 @@ export function AppShell() {
       <BypassDialog />
       <SettleDialog />
       <WorkspaceDeleteDialog />
-      {sidebarOpen && <Sidebar onToggle={toggleSidebar} onOpenSettings={openSettings} onOpenIssues={showIssues} onOpenAgents={showAgents} onSearch={setSessionSearch} />}
+      {sidebarOpen && (
+        <Sidebar
+          onToggle={toggleSidebar}
+          onOpenSettings={openSettings}
+          onOpenIssues={showIssues}
+          onOpenAgents={showAgents}
+          onOpenSkills={showSkills}
+          onSearch={setSessionSearch}
+        />
+      )}
 
       <main className="flex h-full min-w-0 flex-1 flex-col">
         {selected ? (
@@ -97,7 +109,7 @@ export function AppShell() {
               )}
               {/* The dashboard draws its own title, so the strip stays quiet for it. */}
               <span className="min-w-0 flex-1 truncate px-1 text-sm text-muted-foreground">
-                {store.view === "issues" ? "Issues" : store.view === "agents" ? "" : "New session"}
+                {store.view === "issues" ? "Issues" : store.view === "agents" || store.view === "skills" ? "" : "New session"}
               </span>
               <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} keys={keycaps("mod+e")}>
                 <Button variant="ghost" size="icon-sm" aria-label="Toggle panel" onClick={togglePanel}>
@@ -110,6 +122,12 @@ export function AppShell() {
                 <IssuesView onCreated={onCreated} />
               ) : store.view === "agents" ? (
                 <AgentDashboard />
+              ) : store.view === "skills" ? (
+                <SkillsView
+                  key={`${store.skillsFilter?.projectPath ?? store.selectedProject ?? "home"}:${store.skillsFilter?.agent ?? "all"}`}
+                  projectPath={store.skillsFilter?.projectPath ?? store.selectedProject}
+                  initialAgent={store.skillsFilter?.agent ?? null}
+                />
               ) : (
                 <NewSessionView onCreated={onCreated} />
               )}

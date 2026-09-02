@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Archive, CircleDot, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, Pin, PinOff, RefreshCw, Search, Settings, Trash2 } from "lucide-react";
+import { Archive, CircleDot, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -33,11 +33,13 @@ export function ProjectRail({
   onOpenSettings,
   onOpenIssues,
   onOpenAgents,
+  onOpenSkills,
   onSearch,
 }: {
   onOpenSettings: () => void;
   onOpenIssues: () => void;
   onOpenAgents: () => void;
+  onOpenSkills: () => void;
   onSearch: () => void;
 }) {
   const store = useSessionStore();
@@ -103,6 +105,17 @@ export function ProjectRail({
             <LayoutGrid />
             <span className="truncate">Agent Dashboard</span>
             <AttentionDots needs={needsYou} unread={unread} />
+          </Button>
+        </WithTooltip>
+        <WithTooltip label="Skills" keys={keycaps("mod+shift+k")}>
+          <Button
+            variant="ghost"
+            className={cn("justify-start gap-2 px-2", store.view === "skills" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+            onClick={onOpenSkills}
+          >
+            <Sparkles />
+            Skills
+            <Keys chord="mod+shift+k" />
           </Button>
         </WithTooltip>
       </div>

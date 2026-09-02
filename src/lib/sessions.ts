@@ -19,7 +19,9 @@ interface State {
   harnesses: HarnessInfo[];
   selectedSessionId: string | null;
   /** What the workspace shows when no session is selected. */
-  view: "new" | "issues" | "agents";
+  view: "new" | "issues" | "agents" | "skills";
+  /** A tab menu can open Skills already narrowed to that tab's reach. */
+  skillsFilter: { agent: string; projectPath: string } | null;
   showArchived: boolean;
   /** Which project the sidebar is focused on (its workspaces and sessions). */
   selectedProject: string | null;
@@ -40,6 +42,7 @@ let state: State = {
   harnesses: [],
   selectedSessionId: null,
   view: "new",
+  skillsFilter: null,
   showArchived: false,
   selectedProject: null,
   workspaces: {},
@@ -127,6 +130,11 @@ export function openIssues() {
 /** The agent dashboard, like the issues browser, replaces the whole workspace. */
 export function openAgents() {
   set({ selectedSessionId: null, view: "agents" });
+}
+
+/** The filesystem-backed skills reader, optionally scoped to one agent tab. */
+export function openSkills(filter: State["skillsFilter"] = null) {
+  set({ selectedSessionId: null, view: "skills", skillsFilter: filter });
 }
 
 export function selectProjectInSidebar(path: string | null) {

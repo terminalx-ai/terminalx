@@ -109,6 +109,10 @@ All of them, in full:
   Raccoon home, and removed when the app exits.
 - **`$RACCOON_HOME`** itself (default `~/.raccoon`) — projects, the session
   index, transcripts, settings and downloaded models. Created `0700`.
+- **`~/.claude/skills/raccoon-cli` and `~/.codex/skills/raccoon-cli`** — only
+  when you press Install skill in Settings → Agents, and only for the agents
+  you select. Each is a relative link to the version-matched discovery stub
+  under `$RACCOON_HOME`; an existing folder is kept instead of overwritten.
 - **`<repo>/.raccoon/worktrees/`** — inside your repository, but outside your
   working tree: the checkouts sessions run in.
 
