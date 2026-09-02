@@ -181,3 +181,8 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Coming back folds what was said in the terminal into the log from Claude's own transcript file; the chat view refreshes.
 - [x] Local models: a compiled-in catalog (Parakeet, Nemotron, Canary, Whisper Small, Whisper Large v3 Turbo) downloaded from Hugging Face with checksum verification into `~/.raccoon/models`, run through transcribe-cpp with Metal; the loaded model stays warm between dictations.
 - [x] Settings → Transcription: model cards with speed/accuracy, download progress, delete; microphone device picker; mute while recording.
+### Workspaces and projects ✅
+- [x] Sidebar is a project rail plus a workspace column: every checkout of a project (root, Raccoon worktrees, worktrees made elsewhere) with +/− and unpushed counts, sessions grouped under their workspace, Sessions | Explorer tabs.
+- [x] Sessions can start inside an existing workspace; the new-session form sits at the bottom with project, agent, model, effort and permission pills.
+- [x] Project menu: rename, logo, colour, pixel mascot, pin, reveal, refresh, archive, remove. Global and per-project refresh.
+- [x] Deleting a workspace checks uncommitted files, unpushed commits and the branch's pull request; merged and clean is called out as safe.

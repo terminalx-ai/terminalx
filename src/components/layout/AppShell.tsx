@@ -10,13 +10,14 @@ import { SessionView } from "@/components/session/SessionView";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
-import { bootSessions, openIssues, selectSession, useSessionStore } from "@/lib/sessions";
+import { bootSessions, openIssues, selectSession, setSessionSearch, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
 import { agent } from "@/lib/api";
 import { loadModels } from "@/lib/models";
 import { startNotifications } from "@/lib/notify";
 import { Toasts } from "@/components/ui/Toasts";
 import { SettleDialog } from "@/components/session/SettleDialog";
+import { WorkspaceDeleteDialog } from "@/components/session/WorkspaceDeleteDialog";
 
 export const TITLEBAR_INSET = 78; // traffic-light clearance, px
 
@@ -56,6 +57,7 @@ export function AppShell() {
   useHotkey("mod+,", openSettings);
   useHotkey("mod+n", newSession);
   useHotkey("mod+i", showIssues);
+  useHotkey("mod+k", setSessionSearch);
 
   const sidebarOpen = prefs.sidebarOpen;
   const selected = store.sessions.find((s) => s.id === store.selectedSessionId) ?? null;
@@ -64,7 +66,8 @@ export function AppShell() {
     <div className="flex h-full w-full">
       <Toasts />
       <SettleDialog />
-      {sidebarOpen && <Sidebar onToggle={toggleSidebar} onOpenSettings={openSettings} onNewSession={newSession} onOpenIssues={showIssues} />}
+      <WorkspaceDeleteDialog />
+      {sidebarOpen && <Sidebar onToggle={toggleSidebar} onOpenSettings={openSettings} onOpenIssues={showIssues} onSearch={setSessionSearch} />}
 
       <main className="flex h-full min-w-0 flex-1 flex-col">
         {selected ? (

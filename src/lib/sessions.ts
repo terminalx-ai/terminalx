@@ -2,7 +2,9 @@ import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { api } from "@/lib/api";
-import type { HarnessInfo, Project, SessionEntry, TabEntry } from "@/types/session";
+import type {
+  ProjectPatch,
+  Workspace, HarnessInfo, Project, SessionEntry, TabEntry } from "@/types/session";
 
 /**
  * The index of sessions and projects, mirrored from ~/.raccoon and kept in a
@@ -19,6 +21,15 @@ interface State {
   /** What the workspace shows when no session is selected. */
   view: "new" | "issues";
   showArchived: boolean;
+  /** Which project the sidebar is focused on (its workspaces and sessions). */
+  selectedProject: string | null;
+  /** Workspaces per project path, refreshed on demand. */
+  workspaces: Record<string, Workspace[]>;
+  workspacesLoading: Record<string, boolean>;
+  /** A new-session form pre-filled from a workspace row. */
+  newSessionPreset: { projectPath: string; cwd: string | null } | null;
+  /** Bumped by ⌘K so the workspace column focuses its search box. */
+  sessionSearch: number;
 }
 
 let state: State = {
@@ -30,6 +41,11 @@ let state: State = {
   selectedSessionId: null,
   view: "new",
   showArchived: false,
+  selectedProject: null,
+  workspaces: {},
+  workspacesLoading: {},
+  newSessionPreset: null,
+  sessionSearch: 0,
 };
 
 const listeners = new Set<() => void>();
@@ -100,6 +116,62 @@ export function selectSession(id: string | null) {
 /** The issues browser takes the workspace; no session stays selected. */
 export function openIssues() {
   set({ selectedSessionId: null, view: "issues" });
+}
+
+export function selectProjectInSidebar(path: string | null) {
+  set({ selectedProject: path });
+  if (path) void refreshWorkspaces(path);
+}
+
+/** Open the new-session form for a project, optionally inside one of its workspaces. */
+export function startSessionIn(projectPath: string, cwd: string | null) {
+  set({ selectedSessionId: null, view: "new", newSessionPreset: { projectPath, cwd }, lastProject: projectPath });
+}
+
+export function setSessionSearch() {
+  set({ sessionSearch: state.sessionSearch + 1 });
+  requestAnimationFrame(() => (document.querySelector("[data-session-search]") as HTMLInputElement | null)?.focus());
+}
+
+export function clearNewSessionPreset() {
+  if (state.newSessionPreset) set({ newSessionPreset: null });
+}
+
+export async function refreshWorkspaces(projectPath: string) {
+  set({ workspacesLoading: { ...state.workspacesLoading, [projectPath]: true } });
+  try {
+    const list = await api.listWorkspaces(projectPath);
+    set({ workspaces: { ...state.workspaces, [projectPath]: list } });
+  } catch {
+    /* not a repo, or gone; keep whatever was known */
+  } finally {
+    set({ workspacesLoading: { ...state.workspacesLoading, [projectPath]: false } });
+  }
+}
+
+/** The global refresh: projects, sessions and every project's workspaces. */
+export async function refreshEverything() {
+  const [projects, sessions] = await Promise.all([api.listProjects(), api.listSessions()]);
+  set({ projects: projects.projects, sessions });
+  await Promise.all(projects.projects.map((p) => refreshWorkspaces(p.path)));
+}
+
+export async function updateProject(path: string, patch: ProjectPatch) {
+  const p = await api.updateProject(path, patch);
+  set({ projects: state.projects.map((x) => (x.path === path ? p : x)) });
+  return p;
+}
+
+export async function setProjectLogo(path: string, source: string | null) {
+  const p = await api.setProjectLogo(path, source);
+  set({ projects: state.projects.map((x) => (x.path === path ? p : x)) });
+  return p;
+}
+
+export async function deleteWorkspace(projectPath: string, path: string, deleteBranch: boolean) {
+  const moved = await api.deleteWorkspace(projectPath, path, deleteBranch);
+  for (const s of moved) upsertSession(s);
+  await refreshWorkspaces(projectPath);
 }
 
 export async function refreshHarnesses() {
