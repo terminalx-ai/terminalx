@@ -170,6 +170,23 @@ fn key_of(session_id: &str, tab_id: &str) -> String {
     format!("{session_id}/{tab_id}")
 }
 
+/// One value per key, created under the lock.
+///
+/// The whole check-and-create is held, not just the lookup. A tab runtime built
+/// twice hands each caller its own mutex, and everything that runtime guards —
+/// above all the check that stops a tab starting a second CLI — is then
+/// guarding nothing: both callers pass it and the tab spawns two agents on the
+/// same conversation, of which the second is refused and the first is lost.
+fn one_per_key<V: Clone>(map: &Mutex<HashMap<String, V>>, key: &str, make: impl FnOnce() -> Result<V>) -> Result<V> {
+    let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(v) = map.get(key) {
+        return Ok(v.clone());
+    }
+    let v = make()?;
+    map.insert(key.to_string(), v.clone());
+    Ok(v)
+}
+
 impl SessionManager {
     pub fn new(app: AppHandle, host: Arc<Host>, terminals: Arc<pty::Terminals>, codex_models: Arc<codex::models::Cache>) -> Self {
         Self {
@@ -185,33 +202,31 @@ impl SessionManager {
 
     fn runtime(&self, session_id: &str, tab_id: &str) -> Result<Arc<Mutex<TabRuntime>>> {
         let key = key_of(session_id, tab_id);
-        if let Some(r) = self.tabs.lock().unwrap().get(&key) {
-            return Ok(r.clone());
-        }
-        let entry = index::get(session_id)?;
-        let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
-        let log_path = store::log_path(session_id, tab_id)?;
-        let seq = store::last_seq(&log_path)?;
-        let rt = Arc::new(Mutex::new(TabRuntime {
-            session_id: session_id.into(),
-            tab_id: tab_id.into(),
-            harness: tab.harness.clone(),
-            seq,
-            status: TabStatus::Idle,
-            child: None,
-            child_pid: None,
-            engine: Engine::None,
-            pending: HashMap::new(),
-            queued: Vec::new(),
-            turn_open: false,
-            turn_started_at: None,
-            last_activity: Instant::now(),
-            log_path,
-            me: std::sync::Weak::new(),
-        }));
-        rt.lock().unwrap().me = Arc::downgrade(&rt);
-        self.tabs.lock().unwrap().insert(key, rt.clone());
-        Ok(rt)
+        one_per_key(&self.tabs, &key, || {
+            let entry = index::get(session_id)?;
+            let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
+            let log_path = store::log_path(session_id, tab_id)?;
+            let seq = store::last_seq(&log_path)?;
+            let rt = Arc::new(Mutex::new(TabRuntime {
+                session_id: session_id.into(),
+                tab_id: tab_id.into(),
+                harness: tab.harness.clone(),
+                seq,
+                status: TabStatus::Idle,
+                child: None,
+                child_pid: None,
+                engine: Engine::None,
+                pending: HashMap::new(),
+                queued: Vec::new(),
+                turn_open: false,
+                turn_started_at: None,
+                last_activity: Instant::now(),
+                log_path,
+                me: std::sync::Weak::new(),
+            }));
+            rt.lock().unwrap().me = Arc::downgrade(&rt);
+            Ok(rt)
+        })
     }
 
     /// Stamp, persist, emit. The one path every event takes.
@@ -1341,5 +1356,58 @@ impl Sink for TabSink {
     }
     fn exited(&self, pid: u32, code: Option<i32>) {
         self.manager.on_exit(&self.rt, pid, code);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
+
+    /// Two tab views mounting at once — React runs a mount effect twice in
+    /// development — used to build a runtime each, so each held its own lock
+    /// and both got past the "already running?" check into a spawn. Claude
+    /// refuses the second CLI on a conversation the first already has, and the
+    /// tab was left pointing at whichever spawn won.
+    #[test]
+    fn concurrent_callers_share_one_runtime_and_one_creation() {
+        let map: Arc<Mutex<HashMap<String, Arc<usize>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let made = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(8));
+
+        let got: Vec<Arc<usize>> = (0..8)
+            .map(|_| {
+                let (map, made, barrier) = (map.clone(), made.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    one_per_key(&map, "s/t", || {
+                        made.fetch_add(1, Ordering::SeqCst);
+                        // Creation reads the index off disk, so the window is
+                        // real rather than theoretical.
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        Ok(Arc::new(7))
+                    })
+                    .unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect();
+
+        assert_eq!(made.load(Ordering::SeqCst), 1, "the runtime is built once");
+        for v in &got {
+            assert!(Arc::ptr_eq(v, &got[0]), "every caller gets the same runtime");
+        }
+        assert_eq!(map.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_failed_creation_is_not_remembered() {
+        let map: Arc<Mutex<HashMap<String, Arc<usize>>>> = Arc::new(Mutex::new(HashMap::new()));
+        assert!(one_per_key(&map, "s/t", || Err(anyhow!("no such tab"))).is_err());
+        assert!(map.lock().unwrap().is_empty());
+        assert_eq!(*one_per_key(&map, "s/t", || Ok(Arc::new(3))).unwrap(), 3);
     }
 }
