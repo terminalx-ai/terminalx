@@ -191,7 +191,7 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Full-area Agents view (⌘⇧A, or the rail entry under Issues, which carries
       an amber count of sessions waiting on you and a green count of ones that
       finished unread) with three columns — Needs you, Working, Done — each
-      scrolling on its own, stacking under 1000px of room.
+      scrolling on its own, stacking under 760px of room.
 - [x] Cards carry the session, its checkout and issue, the last prompt and the
       last reply — or, for a waiting session, what it is waiting on — with a
       card menu for Open, Stop and Archive, and ↑/↓, ←/→ and Enter to walk them.
