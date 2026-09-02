@@ -19,7 +19,7 @@ interface State {
   harnesses: HarnessInfo[];
   selectedSessionId: string | null;
   /** What the workspace shows when no session is selected. */
-  view: "new" | "issues";
+  view: "new" | "issues" | "agents";
   showArchived: boolean;
   /** Which project the sidebar is focused on (its workspaces and sessions). */
   selectedProject: string | null;
@@ -116,6 +116,11 @@ export function selectSession(id: string | null) {
 /** The issues browser takes the workspace; no session stays selected. */
 export function openIssues() {
   set({ selectedSessionId: null, view: "issues" });
+}
+
+/** The agent dashboard, like the issues browser, replaces the whole workspace. */
+export function openAgents() {
+  set({ selectedSessionId: null, view: "agents" });
 }
 
 export function selectProjectInSidebar(path: string | null) {

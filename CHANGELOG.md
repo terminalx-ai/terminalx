@@ -22,3 +22,4 @@ First runnable build, assembled checkpoint by checkpoint.
 - Issues from GitHub and Linear (⌘I): browse, read, and start a session on one; the worktree is named after the issue and the header links back to it.
 - Files open in an editor pane beside the chat with their own tabs; markdown renders as a preview with a Source toggle.
 - Projects rail with mascots, colours and logos; workspaces (every checkout, including worktrees made outside the app) listed with their sessions; workspace delete guarded by pushed state and pull-request status.
+- Agent dashboard (⌘⇧A): every session across every project in three columns — needs you, working, done — with the last thing said on each card, search, filters and keyboard navigation.

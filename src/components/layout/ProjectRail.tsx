@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Archive, CircleDot, FolderOpen, FolderPlus, ImagePlus, Pin, PinOff, RefreshCw, Search, Settings, Trash2 } from "lucide-react";
+import { Archive, CircleDot, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, Pin, PinOff, RefreshCw, Search, Settings, Trash2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -19,6 +19,7 @@ import {
   updateProject,
   useSessionStore,
 } from "@/lib/sessions";
+import { isUnread, sessionColumn } from "@/lib/dashboard";
 import type { Project } from "@/types/session";
 import { MASCOTS, PROJECT_COLORS, PixelMascot, colorCss } from "./PixelMascot";
 import { TITLEBAR_INSET } from "./AppShell";
@@ -31,10 +32,12 @@ import { TITLEBAR_INSET } from "./AppShell";
 export function ProjectRail({
   onOpenSettings,
   onOpenIssues,
+  onOpenAgents,
   onSearch,
 }: {
   onOpenSettings: () => void;
   onOpenIssues: () => void;
+  onOpenAgents: () => void;
   onSearch: () => void;
 }) {
   const store = useSessionStore();
@@ -46,6 +49,10 @@ export function ProjectRail({
     .filter((p) => !!p.archived === showArchived)
     .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || a.name.localeCompare(b.name));
   const archivedCount = store.projects.filter((p) => p.archived).length;
+  // The two counts beside the dashboard entry, over every project at once.
+  const liveSessions = store.sessions.filter((s) => !s.archived);
+  const needsYou = liveSessions.filter((s) => sessionColumn(s) === "needs").length;
+  const unread = liveSessions.filter(isUnread).length;
 
   const pickProject = async () => {
     try {
@@ -87,6 +94,17 @@ export function ProjectRail({
           Issues
           <Keys chord="mod+i" />
         </Button>
+        <WithTooltip label="Agent dashboard" keys={keycaps("mod+shift+a")}>
+          <Button
+            variant="ghost"
+            className={cn("justify-start gap-2 px-2", store.view === "agents" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+            onClick={onOpenAgents}
+          >
+            <LayoutGrid />
+            <span className="truncate">Agent Dashboard</span>
+            <AttentionDots needs={needsYou} unread={unread} />
+          </Button>
+        </WithTooltip>
       </div>
 
       <div className="mt-3 flex items-center justify-between pl-4 pr-2">
@@ -132,6 +150,31 @@ export function ProjectRail({
         </Button>
       </div>
     </div>
+  );
+}
+
+/**
+ * Two counts on the dashboard entry: amber for sessions waiting on an answer,
+ * green for ones that finished and have not been looked at. A count of zero
+ * draws nothing, so a quiet rail stays quiet.
+ */
+function AttentionDots({ needs, unread }: { needs: number; unread: number }) {
+  if (!needs && !unread) return null;
+  return (
+    <span className="ml-auto flex items-center gap-1.5 text-[10px] tabular-nums">
+      {needs > 0 && (
+        <span className="flex items-center gap-1 text-warning" title={`${needs} waiting on you`}>
+          <span className="size-1.5 rounded-full bg-warning" />
+          {needs}
+        </span>
+      )}
+      {unread > 0 && (
+        <span className="flex items-center gap-1 text-add" title={`${unread} finished and unread`}>
+          <span className="size-1.5 rounded-full bg-add" />
+          {unread}
+        </span>
+      )}
+    </span>
   );
 }
 
