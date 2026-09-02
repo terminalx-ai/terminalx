@@ -18,11 +18,11 @@ export const DialogContent = React.forwardRef<
   }
 >(({ className, children, showClose = true, width = "max-w-[34rem]", ...props }, ref) => (
   <DialogPrimitive.Portal>
-    <DialogPrimitive.Overlay className="fixed inset-0 z-[90] bg-black/35 data-[state=open]:animate-fade-in" />
+    <DialogPrimitive.Overlay className="fixed inset-0 z-(--z-dialog-overlay) bg-black/35 data-[state=open]:animate-fade-in" />
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        "fixed left-1/2 top-1/2 z-[91] w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 rounded-xl bg-popover glass p-5 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in",
+        "fixed left-1/2 top-1/2 z-(--z-dialog) w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 rounded-xl bg-popover glass p-5 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in",
         width,
         className,
       )}

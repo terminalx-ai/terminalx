@@ -52,6 +52,24 @@
 
   --accent-merge: oklch(0.62 0.17 150);
   --accent-merge-fg: oklch(0.99 0 0);
+
+  /*
+   * Layer scale for everything that escapes the layout into a portal.
+   * Each rung must sit above the one that can open it, because a dialog can
+   * hold a menu, a menu item can carry a tooltip, and a toast has to be
+   * readable over all of them. Use these as z-(--z-menu) — never a fresh
+   * z-[…] literal, or the next portal guesses wrong and lands underneath.
+   *
+   *   dialog overlay 90  <  dialog 91  <  menu/popover 100  <  tooltip 110  <  toast 120
+   *
+   * In-flow z-indexes that only order siblings (resize handles, tab
+   * highlights) stay small and local; they never join this scale.
+   */
+  --z-dialog-overlay: 90;
+  --z-dialog: 91;
+  --z-menu: 100;
+  --z-tooltip: 110;
+  --z-toast: 120;
 }
 
 /* ---------- Mode ramps ---------- */
