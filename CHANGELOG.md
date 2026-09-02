@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Claude tabs now run the real interactive CLI in a terminal, and the chat is a
+  view of that one process: the transcript is read from the CLI's own session
+  file, status and permission cards come from its hooks, and ⌘⇧T flips between
+  chat and terminal without stopping anything or waiting for a turn to end.
+  ([docs/PTY-FIRST.md](docs/PTY-FIRST.md))
+
 ## 0.1.0
 
 First runnable build, assembled checkpoint by checkpoint.

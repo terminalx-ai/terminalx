@@ -166,6 +166,22 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Issues view (⌘I) with detail column; Start session creates a worktree named after the issue (`raccoon/eng-42-fix-login`) and sends the issue as the first prompt; the session header links back.
 - [x] Settings → Integrations: Linear key (validated, stored owner-only), GitHub CLI status.
 
+### PTY-first tabs (Claude) ✅
+- [x] A Claude tab is one process: the interactive CLI in a PTY. The chat is a
+      projection of it — the CLI's own transcript file, tailed and decoded into
+      the existing payloads — and the composer writes keystrokes into the same
+      PTY (bracketed paste, then the Enter a beat later).
+- [x] Status and permissions come from the CLI's hooks: `--settings` points every
+      hook at the Raccoon binary as `raccoon hook <Event>`, which forwards the
+      payload over a unix socket under the Raccoon home. `PermissionRequest`
+      parks there until the chat's card is answered and replies with the
+      decision the CLI expects.
+- [x] Chat ↔ terminal is a view flag with the pane still mounted underneath;
+      nothing is stopped, resumed or reconciled, and the button is never refused.
+- [x] The headless Claude engine, its wire parser and `tab_reconcile` are gone.
+      Codex, ACP and OpenCode are unchanged; phase 2 is Codex, phase 3 the
+      cleanup. Written up in [PTY-FIRST.md](PTY-FIRST.md).
+
 ## Verification protocol
 
 - `pnpm check` = vitest + tsc; `cargo test` + `cargo clippy -D warnings`.
@@ -178,8 +194,11 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Mic button in both composers — the new-session box and the one inside a session (⌘⇧D): microphone → Apple's speech recogniser, on-device when supported, partial text live in the draft, each finished phrase appended. Info.plist carries the microphone and speech usage strings.
 
 ### Terminal view ✅
-- [x] ⌘⇧T flips an agent tab between the transcript and the agent's own CLI in a terminal running the same conversation (`claude --resume`, `codex resume`), one side at a time; refused mid-turn.
-- [x] Coming back folds what was said in the terminal into the log from Claude's own transcript file; the chat view refreshes.
+- [x] ⌘⇧T flips an agent tab between the transcript and the agent's own CLI in a
+      terminal. For Claude that is now a view flag over one process, not a
+      hand-off: see **PTY-first tabs** below. Codex still hands off — its
+      headless child is stopped and `codex resume` takes over — and is refused
+      mid-turn for as long as that lasts.
 - [x] Local models: a compiled-in catalog (Parakeet, Nemotron, Canary, Whisper Small, Whisper Large v3 Turbo) downloaded from Hugging Face with checksum verification into `~/.raccoon/models`, run through transcribe-cpp with Metal; the loaded model stays warm between dictations.
 - [x] Settings → Transcription: model cards with speed/accuracy, download progress, delete; microphone device picker; mute while recording.
 ### Workspaces and projects ✅

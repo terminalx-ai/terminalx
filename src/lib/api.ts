@@ -138,13 +138,24 @@ export interface HandoffInfo {
   harness: string;
 }
 
+/** A tab's own CLI got its terminal pane; the tab's terminal view shows it. */
+export interface TabPtyEvent {
+  sessionId: string;
+  tabId: string;
+  paneId: string;
+  command: string;
+}
+
 export const agent = {
   loadEvents: (sessionId: string, tabId: string) => invoke<AgentEvent[]>("load_tab_events", { sessionId, tabId }),
   send: (sessionId: string, tabId: string, text: string, images?: ImageInput[]) =>
     invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null }),
   interrupt: (sessionId: string, tabId: string) => invoke<void>("interrupt_turn", { sessionId, tabId }),
   tabHandoff: (sessionId: string, tabId: string) => invoke<HandoffInfo>("tab_handoff", { sessionId, tabId }),
-  tabReconcile: (sessionId: string, tabId: string) => invoke<number>("tab_reconcile", { sessionId, tabId }),
+  /** Start a tab's own CLI. Idempotent, and a no-op for headless harnesses. */
+  ensureStarted: (sessionId: string, tabId: string) => invoke<void>("ensure_tab_started", { sessionId, tabId }),
+  /** The pane a tab's CLI is running in, for a window that missed the event. */
+  tabPane: (sessionId: string, tabId: string) => invoke<TabPtyEvent | null>("tab_pane", { sessionId, tabId }),
   stop: (sessionId: string, tabId: string) => invoke<void>("stop_tab", { sessionId, tabId }),
   cancelQueued: (sessionId: string, tabId: string, messageId: string) =>
     invoke<QueuedMessage | null>("cancel_queued", { sessionId, tabId, messageId }),
@@ -231,7 +242,6 @@ export const pty = {
   write: (id: string, data: string) => invoke<void>("pty_write", { id, data }),
   resize: (id: string, cols: number, rows: number) => invoke<void>("pty_resize", { id, cols, rows }),
   kill: (id: string) => invoke<void>("pty_kill", { id }),
-  isLive: (id: string) => invoke<boolean>("pty_is_live", { id }),
 };
 
 // ---- tree, text files, project search

@@ -88,6 +88,11 @@ export function Composer({
   const [dragging, setDragging] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  // The drag-drop subscription is per webview and must be registered once, so
+  // it reads the draft through a ref rather than taking it as a dependency —
+  // otherwise every keystroke tore the listener down and built another.
+  const latest = useRef({ draft, onDraftChange });
+  latest.current = { draft, onDraftChange };
 
   // Grow with content, up to ~10 lines.
   useEffect(() => {
@@ -208,11 +213,22 @@ export function Composer({
   // Dropped paths arrive from the window, not the DOM: images attach, the
   // rest become mentions the harness reads itself.
   useEffect(() => {
-    let unlisten: (() => void) | null = null;
+    let off: (() => void) | null = null;
     let disposed = false;
-    (async () => {
+    // Called from two places — the cleanup and the late-resolving registration
+    // — and Tauri throws if a listener is dropped twice.
+    const stop = () => {
+      const fn = off;
+      off = null;
       try {
-        const off = await getCurrentWebview().onDragDropEvent(async (e) => {
+        fn?.();
+      } catch {
+        /* already gone */
+      }
+    };
+    void (async () => {
+      try {
+        const fn = await getCurrentWebview().onDragDropEvent(async (e) => {
           const p = e.payload;
           if (p.type === "enter" || p.type === "over") setDragging(true);
           else if (p.type === "leave") setDragging(false);
@@ -228,29 +244,24 @@ export function Composer({
               }
             }
             if (mentions.length) {
-              const sep = draft && !/\s$/.test(draft) ? " " : "";
-              onDraftChange(draft + sep + mentions.join(" ") + " ");
+              const { draft: current, onDraftChange: change } = latest.current;
+              const sep = current && !/\s$/.test(current) ? " " : "";
+              change(current + sep + mentions.join(" ") + " ");
             }
             ref.current?.focus();
           }
         });
-        if (disposed) off();
-        else unlisten = off;
+        off = fn;
+        if (disposed) stop();
       } catch {
         /* outside a webview */
       }
     })();
     return () => {
       disposed = true;
-      const off = unlisten;
-      unlisten = null;
-      try {
-        off?.();
-      } catch {
-        /* already gone */
-      }
+      stop();
     };
-  }, [draft, onDraftChange]);
+  }, []);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (pickerOpen && items.length) {

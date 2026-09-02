@@ -12,7 +12,8 @@ import { TerminalView } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
 import { MessageSquare } from "lucide-react";
 import { useTerminals } from "@/lib/terminal";
-import { clearTabViewError, leaveTerminalView, terminalPaneId, useTabViews } from "@/lib/tabViews";
+import { cn } from "@/lib/cn";
+import { clearTabViewError, isPtyFirst, leaveTerminalView, startTabAgent, terminalPaneId, useTabViews } from "@/lib/tabViews";
 import type { SessionEntry, TabEntry } from "@/types/session";
 
 /**
@@ -41,12 +42,20 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
   const terminalMode = views.views[tab.id] === "terminal";
   const viewError = views.errors[tab.id] ?? null;
   const terms = useTerminals();
-  const pane = terms.panes.find((p) => p.id === terminalPaneId(tab.id));
+  const ptyFirst = isPtyFirst(tab.harness);
+  const paneId = terminalPaneId(tab.id);
+  const pane = terms.panes.find((p) => p.id === paneId);
   const [answering, setAnswering] = useState(false);
 
   useEffect(() => {
     void loadTab(session.id, tab.id);
   }, [session.id, tab.id]);
+
+  // A PTY-first tab is its CLI, so opening the tab starts it. Idempotent, and
+  // the pane it lands in is adopted from the backend's own event.
+  useEffect(() => {
+    if (active && ptyFirst) void startTabAgent(session, tab);
+  }, [active, ptyFirst, session.id, tab.id]);
 
   // Viewing a finished tab marks it read.
   useEffect(() => {
@@ -112,33 +121,7 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
     [session.id, tab.id],
   );
 
-  if (terminalMode) {
-    const info = views.info[tab.id];
-    return (
-      <div className="flex h-full min-h-0 flex-col">
-        <div className="flex h-8 shrink-0 items-center gap-2 border-b border-hairline px-3 text-xs text-muted-foreground">
-          <span className="shrink-0 text-foreground">Terminal view</span>
-          <span className="truncate font-mono text-[11px] text-faint" title={info?.command}>
-            {info?.command}
-          </span>
-          <span className="ml-auto shrink-0 text-faint">The chat resumes when you switch back.</span>
-        </div>
-        {pane?.exited && (
-          <div className="flex shrink-0 items-center gap-2 bg-warning/10 px-3 py-1.5 text-xs text-foreground">
-            The agent's terminal exited{pane.exitCode != null ? ` (${pane.exitCode})` : ""}.
-            <Button size="xs" variant="outline" className="ml-auto" onClick={() => void leaveTerminalView(session, tab)}>
-              <MessageSquare /> Back to chat
-            </Button>
-          </div>
-        )}
-        <div className="relative min-h-0 flex-1">
-          <TerminalView id={terminalPaneId(tab.id)} visible={active} />
-        </div>
-      </div>
-    );
-  }
-
-  return (
+  const chat = (
     <Chat
       transcript={transcript}
       stream={log.stream}
@@ -182,4 +165,49 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
       }
     />
   );
+
+  const info = views.info[tab.id];
+  const terminal = (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex h-8 shrink-0 items-center gap-2 border-b border-hairline px-3 text-xs text-muted-foreground">
+        <span className="shrink-0 text-foreground">Terminal view</span>
+        <span className="truncate font-mono text-[11px] text-faint" title={info?.command}>
+          {info?.command}
+        </span>
+        <span className="ml-auto shrink-0 text-faint">
+          {ptyFirst ? "The chat is the same conversation." : "The chat resumes when you switch back."}
+        </span>
+      </div>
+      {pane?.exited && (
+        <div className="flex shrink-0 items-center gap-2 bg-warning/10 px-3 py-1.5 text-xs text-foreground">
+          The agent's terminal exited{pane.exitCode != null ? ` (${pane.exitCode})` : ""}.
+          <Button size="xs" variant="outline" className="ml-auto" onClick={() => void leaveTerminalView(session, tab)}>
+            <MessageSquare /> Back to chat
+          </Button>
+        </div>
+      )}
+      <div className="relative min-h-0 flex-1">
+        <TerminalView id={paneId} visible={active && terminalMode} />
+      </div>
+    </div>
+  );
+
+  // A PTY-first tab keeps its terminal mounted under the chat: the pane holds
+  // the live CLI, so unmounting it to show the transcript would throw away the
+  // scrollback and resize the agent's window on every toggle. `invisible`
+  // rather than `hidden` because xterm needs a laid-out box to fit itself to.
+  if (ptyFirst) {
+    return (
+      <div className="relative flex h-full min-h-0 flex-col">
+        <div className={cn("absolute inset-0 flex min-h-0 flex-col", !terminalMode && "invisible")} aria-hidden={!terminalMode}>
+          {terminal}
+        </div>
+        {!terminalMode && <div className="absolute inset-0 z-10 flex min-h-0 flex-col bg-background">{chat}</div>}
+      </div>
+    );
+  }
+
+  if (terminalMode) return terminal;
+  return chat;
 }
+

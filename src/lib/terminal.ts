@@ -19,6 +19,8 @@ export interface TerminalPane {
   exitCode: number | null;
   /** Owned by a tab's terminal view; the dock leaves it out. */
   hidden?: boolean;
+  /** Spawned by the backend for an agent tab, so closing it is the backend's. */
+  owned?: boolean;
 }
 
 export interface OpenTerminalOptions {
@@ -99,14 +101,18 @@ function disposeInstance(id: string) {
   }
 }
 
-let subscribed = false;
-export async function subscribeTerminals() {
-  if (subscribed) return;
-  subscribed = true;
+// One subscription per window, and callers wait for it: a second caller that
+// returned early while the first was still registering would miss the events
+// arriving in between.
+let subscribed: Promise<void> | null = null;
+export function subscribeTerminals(): Promise<void> {
+  return (subscribed ??= register());
+}
+
+async function register() {
   try {
     await listen<{ id: string; data: string }>("pty_data", (e) => {
       const { id, data } = e.payload;
-      if (!state.panes.some((p) => p.id === id)) return;
       const bytes = decode(data);
       const inst = instances.get(id);
       if (inst) {
@@ -169,6 +175,20 @@ export async function closeTerminal(id: string) {
 
 export function setActiveTerminal(sessionId: string, id: string) {
   set({ active: { ...state.active, [sessionId]: id } });
+}
+
+/**
+ * Take over a pane the backend opened — an agent tab's own CLI. The pane may
+ * already have produced output before this window heard about it, which is why
+ * the replay buffer is kept for ids no pane claims yet.
+ */
+export async function adoptPane(pane: Omit<TerminalPane, "exited" | "exitCode">) {
+  await subscribeTerminals();
+  const live = { ...pane, exited: false, exitCode: null };
+  // The same pane can be adopted twice: a tab whose CLI is replaced in place
+  // keeps its pane, so the exit the old process reported is stale news.
+  const existing = state.panes.some((p) => p.id === pane.id);
+  set({ panes: existing ? state.panes.map((p) => (p.id === pane.id ? { ...p, ...live } : p)) : [...state.panes, live] });
 }
 
 /** ⌘J and the header button: show the dock (spawning a first shell), or hide it. */

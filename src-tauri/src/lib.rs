@@ -8,6 +8,7 @@ mod files;
 mod git;
 mod github;
 mod harness;
+pub mod hooks;
 mod issues;
 mod models;
 mod names;
@@ -41,9 +42,10 @@ pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let host = Arc::new(harness::host::Host::new());
     let codex_models = Arc::new(harness::codex::models::Cache::default());
+    let terminals = Arc::new(pty::Terminals::new());
     let state = AppState {
         host: host.clone(),
-        terminals: Arc::new(pty::Terminals::new()),
+        terminals: terminals.clone(),
         dictation: Arc::new(dictation::Dictation::default()),
         transcription: Arc::new(transcription::Transcription::default()),
         codex_models: codex_models.clone(),
@@ -60,8 +62,15 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(state)
         .setup(move |app| {
-            let manager = session::SessionManager::new(app.handle().clone(), host.clone(), codex_models.clone());
-            *app.state::<AppState>().manager.lock().unwrap() = Some(manager);
+            let manager = session::SessionManager::new(app.handle().clone(), host.clone(), terminals.clone(), codex_models.clone());
+            *app.state::<AppState>().manager.lock().unwrap() = Some(manager.clone());
+            // The agent CLIs' hooks reach the app through this socket; without
+            // it a PTY-first tab still runs, it just cannot report or ask.
+            let hooked = manager.clone();
+            match hooks::serve(move |frame| hooked.on_hook(frame)) {
+                Ok(path) => log::info!("hook socket at {}", path.display()),
+                Err(e) => log::warn!("hook socket: {e:#}"),
+            }
             // No child survives a restart: a tab persisted mid-turn or waiting
             // is idle now, whatever the index says.
             let _ = store::index::update(|sessions| {
@@ -106,7 +115,8 @@ pub fn run() {
             commands::interrupt_turn,
             commands::stop_tab,
             commands::tab_handoff,
-            commands::tab_reconcile,
+            commands::ensure_tab_started,
+            commands::tab_pane,
             commands::cancel_queued,
             commands::list_queued,
             commands::respond_permission,
@@ -137,7 +147,6 @@ pub fn run() {
             commands::pty_write,
             commands::pty_resize,
             commands::pty_kill,
-            commands::pty_is_live,
             commands::list_dir,
             commands::read_text_file,
             commands::write_text_file,
