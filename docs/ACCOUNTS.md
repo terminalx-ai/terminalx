@@ -516,7 +516,9 @@ and shipped phases.
  Some detail on each:
 
 +- **Accounts are optional.** An unsigned-in Raccoon makes no account,
-+  directory, heartbeat or relay request. Signing in opens your system browser.
++  directory or heartbeat request. It contacts a relay only when an explicit
++  pairing offer includes an invite and you connect through it. Signing in opens
++  your system browser.
 +  Access and refresh tokens are opaque server-side sessions stored in the
 +  macOS keychain, not under `$RACCOON_HOME`. Signing in does not pair a device
 +  or authorize a workspace.
