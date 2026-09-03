@@ -114,7 +114,11 @@ pub fn create_pr(cwd: &Path, title: &str, body: &str, base: Option<&str>, draft:
         args.push("--draft");
     }
     let out = run(cwd, &args)?;
-    Ok(out.trim().lines().last().unwrap_or("").to_string())
+    let url = out.trim().lines().last().unwrap_or("").to_string();
+    if let Err(error) = crate::stats::record_pr(&url) {
+        log::warn!("record created PR: {error:#}");
+    }
+    Ok(url)
 }
 
 pub fn merge_pr(cwd: &Path, number: u64, method: &str) -> Result<()> {

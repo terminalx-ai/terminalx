@@ -687,7 +687,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
               className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-[11px] text-muted-foreground outline-none hover:bg-veil-raised hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-60"
             >
               <History className="size-3.5" />
-              <span>Usage details &amp; history</span>
+              <span>Open Stats &amp; Usage</span>
               <ChevronRight className="ml-auto size-3.5 text-faint" />
             </button>
           </div>
