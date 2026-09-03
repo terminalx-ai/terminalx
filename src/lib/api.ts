@@ -14,6 +14,7 @@ import type {
   WorkStatus,
   WorktreeDisposition,
 } from "@/types/session";
+import type { Automation, AutomationInput, AutomationRun, AutomationRef } from "@/types/automations";
 
 export interface NewTab {
   harness: string;
@@ -44,6 +45,7 @@ export interface NewSession {
   /** Explicit acknowledgement that a requested worktree should be skipped. */
   onMain?: boolean;
   issue?: IssueRef | null;
+  automation?: AutomationRef | null;
   /** The first agent conversation. Omit to open the checkout by itself. */
   tab?: NewTab;
 }
@@ -117,6 +119,15 @@ export interface SkillInstallStatus {
   installed: boolean;
   targets: SkillTargetStatus[];
 }
+
+export const automationsApi = {
+  list: () => invoke<Automation[]>("automations_list"),
+  runs: (automationId: string) => invoke<AutomationRun[]>("automation_runs", { automationId }),
+  create: (input: AutomationInput) => invoke<Automation>("automation_create", { input }),
+  update: (id: string, input: AutomationInput) => invoke<Automation>("automation_update", { id, input }),
+  remove: (id: string) => invoke<void>("automation_delete", { id }),
+  runNow: (id: string) => invoke<AutomationRun>("automation_run_now", { id }),
+};
 
 export function errorMessage(e: unknown): string {
   if (typeof e === "string") return e;

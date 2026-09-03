@@ -1,3 +1,4 @@
+mod automations;
 mod binpath;
 pub mod cli;
 mod commands;
@@ -21,7 +22,7 @@ mod summaries;
 mod workspaces;
 
 use std::sync::Arc;
-use tauri::Manager;
+use tauri::{Listener, Manager};
 
 pub struct AppState {
     pub host: Arc<harness::host::Host>,
@@ -81,6 +82,12 @@ pub fn run() {
                 Ok(path) => log::info!("hook socket at {}", path.display()),
                 Err(e) => log::warn!("hook socket: {e:#}"),
             }
+            let exited = manager.clone();
+            app.listen("pty_exit", move |event| {
+                if let Ok(exit) = serde_json::from_str::<pty::PtyExit>(event.payload()) {
+                    exited.pane_exited(&exit.id, exit.code);
+                }
+            });
             // No child survives a restart: a tab persisted mid-turn or waiting
             // is idle now, whatever the index says.
             let _ = store::index::update(|sessions| {
@@ -93,6 +100,7 @@ pub fn run() {
                 }
                 Ok(())
             });
+            automations::start_scheduler(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -101,6 +109,12 @@ pub fn run() {
             commands::remove_project,
             commands::select_project,
             commands::list_sessions,
+            commands::automations_list,
+            commands::automation_runs,
+            commands::automation_create,
+            commands::automation_update,
+            commands::automation_delete,
+            commands::automation_run_now,
             commands::session_summaries,
             commands::create_session,
             commands::add_tab,

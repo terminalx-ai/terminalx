@@ -363,6 +363,7 @@ impl ControlService {
                 base_ref: None,
                 worktree_name: None,
                 issue: None,
+                automation: None,
                 cwd: None,
                 tab: Some(NewTab {
                     harness: p.agent,
@@ -794,6 +795,7 @@ mod tests {
             base_ref: None,
             worktree_removed: false,
             issue: None,
+            automation: None,
             title: "main".into(),
             created: "now".into(),
             modified: "now".into(),
