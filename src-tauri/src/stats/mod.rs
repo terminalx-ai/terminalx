@@ -15,13 +15,14 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Days, Local};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-const CACHE_SCHEMA: u32 = 1;
+const CACHE_SCHEMA: u32 = 2;
 const CACHE_FILE: &str = "stats-usage-cache.json";
 const PR_FILE: &str = "stats-prs.json";
+const OVERVIEW_DAYS: u64 = 30;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,7 +77,7 @@ pub struct ProviderUsage {
     pub has_partial_cost: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 enum Provider {
     Claude,
@@ -92,6 +93,8 @@ struct UsageEvent {
     timestamp_ms: i64,
     day: String,
     model: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
     project: String,
     event_key: Option<String>,
     new_input_tokens: u64,
@@ -101,7 +104,6 @@ struct UsageEvent {
     cache_tokens: u64,
     reasoning_tokens: u64,
     total_tokens: u64,
-    estimated_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,7 +160,8 @@ impl StatsUsageStore {
             }
         };
 
-        let files = discover_sources()?;
+        let store_root = crate::store::root()?;
+        let files = discover_sources(&store_root)?;
         let mut previous_by_path: HashMap<PathBuf, CachedFile> = previous
             .files
             .into_iter()
@@ -197,7 +200,13 @@ impl StatsUsageStore {
         }
 
         current.sort_by(|left, right| left.path.cmp(&right.path));
-        let snapshot = aggregate(&current, app_stats()?);
+        let scope = usage_scope()?;
+        let snapshot = aggregate(
+            &current,
+            app_stats()?,
+            &scope,
+            &overview_cutoff(Local::now()),
+        );
         let cache = ScanCache {
             schema_version: CACHE_SCHEMA,
             files: current,
@@ -219,24 +228,53 @@ fn modified_nanos(metadata: &fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
-fn discover_sources() -> Result<Vec<(PathBuf, Provider)>> {
+fn discover_sources(store_root: &Path) -> Result<Vec<(PathBuf, Provider)>> {
     let home = dirs::home_dir().context("no home directory")?;
-    let roots = [
+    let predecessor_root = predecessor_data_root();
+    Ok(discover_sources_at(
+        &home,
+        store_root,
+        predecessor_root.as_deref(),
+    ))
+}
+
+fn discover_sources_at(
+    home: &Path,
+    store_root: &Path,
+    predecessor_root: Option<&Path>,
+) -> Vec<(PathBuf, Provider)> {
+    let mut roots = vec![
         (home.join(".claude/projects"), Provider::Claude),
         (home.join(".claude/transcripts"), Provider::Claude),
         (home.join(".codex/sessions"), Provider::Codex),
-        (
-            crate::store::root()?.join("codex/sessions"),
-            Provider::Codex,
-        ),
+        (store_root.join("codex/sessions"), Provider::Codex),
     ];
+    add_managed_codex_roots(store_root, &mut roots);
+    if let Some(root) = predecessor_root {
+        roots.push((
+            root.join("codex-runtime-home/home/sessions"),
+            Provider::Codex,
+        ));
+        add_managed_codex_roots(root, &mut roots);
+    }
     let mut files = Vec::new();
     let mut seen = HashSet::new();
     for (root, provider) in roots {
         discover_jsonl(&root, provider, &mut files, &mut seen);
     }
     files.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(files)
+    files
+}
+
+fn add_managed_codex_roots(root: &Path, roots: &mut Vec<(PathBuf, Provider)>) {
+    let Ok(accounts) = fs::read_dir(root.join("codex-accounts")) else {
+        return;
+    };
+    for account in accounts.flatten() {
+        if account.file_type().is_ok_and(|kind| kind.is_dir()) {
+            roots.push((account.path().join("home/sessions"), Provider::Codex));
+        }
+    }
 }
 
 fn discover_jsonl(
@@ -257,9 +295,11 @@ fn discover_jsonl(
             discover_jsonl(&path, provider, out, seen);
         } else if kind.is_file()
             && path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
-            && seen.insert(path.clone())
         {
-            out.push((path, provider));
+            let identity = fs::canonicalize(&path).unwrap_or(path);
+            if seen.insert(identity.clone()) {
+                out.push((identity, provider));
+            }
         }
     }
 }
@@ -348,6 +388,7 @@ fn parse_claude(path: &Path) -> Result<Vec<UsageEvent>> {
             timestamp_ms,
             day,
             model,
+            cwd: cwd.map(str::to_string),
             project: project_label(cwd),
             event_key: event_key.clone(),
             new_input_tokens: input,
@@ -360,13 +401,6 @@ fn parse_claude(path: &Path) -> Result<Vec<UsageEvent>> {
                 .saturating_add(output)
                 .saturating_add(cache_read)
                 .saturating_add(cache_write),
-            estimated_cost_usd: pricing::claude_cost(
-                record["message"]["model"].as_str(),
-                input,
-                output,
-                cache_read,
-                cache_write,
-            ),
         };
 
         if let Some(key) = event_key {
@@ -388,16 +422,10 @@ fn parse_claude(path: &Path) -> Result<Vec<UsageEvent>> {
                     prior.timestamp_ms = event.timestamp_ms;
                     prior.day = event.day;
                     prior.model = event.model;
+                    prior.cwd = event.cwd;
                     prior.project = event.project;
                     prior.session_id = event.session_id;
                 }
-                prior.estimated_cost_usd = pricing::claude_cost(
-                    prior.model.as_deref(),
-                    prior.new_input_tokens,
-                    prior.output_tokens,
-                    prior.cache_read_tokens,
-                    prior.cache_write_tokens,
-                );
                 continue;
             }
             by_key.insert(key, events.len());
@@ -539,11 +567,7 @@ fn extract_model(value: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| value.get("info").and_then(extract_model))
-        .or_else(|| {
-            value
-                .get("metadata")
-                .and_then(extract_model)
-        })
+        .or_else(|| value.get("metadata").and_then(extract_model))
 }
 
 fn usage_tuple(usage: Option<RawUsage>) -> String {
@@ -649,7 +673,8 @@ fn parse_codex(path: &Path) -> Result<Vec<UsageEvent>> {
                 }
                 previous_totals = next;
                 let model = extract_model(payload).or_else(|| current_model.clone());
-                let project = project_label(current_cwd.as_deref().or(session_cwd.as_deref()));
+                let cwd = current_cwd.clone().or_else(|| session_cwd.clone());
+                let project = project_label(cwd.as_deref());
                 events.push(UsageEvent {
                     provider: Provider::Codex,
                     session_id: session_id.clone(),
@@ -657,6 +682,7 @@ fn parse_codex(path: &Path) -> Result<Vec<UsageEvent>> {
                     timestamp_ms,
                     day,
                     model: model.clone(),
+                    cwd,
                     project,
                     event_key: Some(format!(
                         "{}|{}|{}",
@@ -671,12 +697,6 @@ fn parse_codex(path: &Path) -> Result<Vec<UsageEvent>> {
                     cache_tokens: delta.cached_input,
                     reasoning_tokens: delta.reasoning,
                     total_tokens: delta.total,
-                    estimated_cost_usd: pricing::codex_cost(
-                        model.as_deref(),
-                        delta.input,
-                        delta.cached_input,
-                        delta.output,
-                    ),
                 });
             }
             _ => {}
@@ -725,9 +745,151 @@ fn project_label(cwd: Option<&str>) -> String {
     }
 }
 
+#[derive(Debug, Default)]
+struct UsageScope {
+    roots: Vec<String>,
+}
+
+impl UsageScope {
+    fn from_paths(paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        let mut roots = HashSet::new();
+        for path in paths {
+            roots.insert(normalize_path(&path.to_string_lossy()));
+            if let Ok(canonical) = fs::canonicalize(&path) {
+                roots.insert(normalize_path(&canonical.to_string_lossy()));
+            }
+        }
+        roots.remove("");
+        let mut roots = roots.into_iter().collect::<Vec<_>>();
+        roots.sort_by_key(|path| std::cmp::Reverse(path.len()));
+        Self { roots }
+    }
+
+    fn contains(&self, cwd: Option<&str>) -> bool {
+        self.attribution(cwd).is_some()
+    }
+
+    fn attribution(&self, cwd: Option<&str>) -> Option<&str> {
+        let cwd = cwd?;
+        let cwd = normalize_path(cwd);
+        self.roots.iter().find_map(|root| {
+            (cwd == *root
+                || cwd
+                    .strip_prefix(root)
+                    .is_some_and(|rest| rest.starts_with('/')))
+            .then_some(root.as_str())
+        })
+    }
+}
+
+fn normalize_path(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let normalized = normalized.trim_end_matches('/');
+    if normalized.is_empty() && (path.starts_with('/') || path.starts_with('\\')) {
+        "/".into()
+    } else {
+        normalized.to_string()
+    }
+}
+
+fn predecessor_data_root() -> Option<PathBuf> {
+    dirs::config_dir().map(|root| root.join("terminalx"))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageScopeCache {
+    #[serde(default)]
+    daily_aggregates: Vec<UsageScopeRow>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageScopeRow {
+    #[serde(default)]
+    worktree_id: Option<String>,
+}
+
+fn usage_scope() -> Result<UsageScope> {
+    let mut paths = Vec::new();
+    let (projects, _) = crate::store::projects::list()?;
+    for project in projects {
+        let root = PathBuf::from(&project.path);
+        paths.push(root.clone());
+        match crate::git::list_worktrees(&root) {
+            Ok(worktrees) => {
+                paths.extend(worktrees.into_iter().map(|(path, _)| PathBuf::from(path)));
+            }
+            Err(error) => log::warn!("list usage worktrees for {}: {error:#}", root.display()),
+        }
+    }
+    paths.extend(
+        crate::store::index::load()?
+            .into_iter()
+            .map(|session| PathBuf::from(session.cwd)),
+    );
+    if let Some(root) = predecessor_data_root() {
+        for name in ["terminalx-claude-usage.json", "terminalx-codex-usage.json"] {
+            read_usage_scope_cache(&root.join(name), &mut paths);
+        }
+    }
+    Ok(UsageScope::from_paths(paths))
+}
+
+fn read_usage_scope_cache(path: &Path, paths: &mut Vec<PathBuf>) {
+    let Ok(file) = File::open(path) else {
+        return;
+    };
+    let cache = match serde_json::from_reader::<_, UsageScopeCache>(file) {
+        Ok(cache) => cache,
+        Err(error) => {
+            log::warn!("read usage scope cache {}: {error}", path.display());
+            return;
+        }
+    };
+    paths.extend(cache.daily_aggregates.into_iter().filter_map(|entry| {
+        entry
+            .worktree_id
+            .and_then(|id| id.split_once("::").map(|(_, path)| PathBuf::from(path)))
+    }));
+}
+
+fn overview_cutoff(reference: DateTime<Local>) -> String {
+    reference
+        .date_naive()
+        .checked_sub_days(Days::new(OVERVIEW_DAYS - 1))
+        .unwrap_or_else(|| reference.date_naive())
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+#[derive(Default)]
+struct SessionEligibility {
+    last_timestamp_ms: i64,
+    last_day: String,
+    has_scoped_location: bool,
+}
+
+#[derive(Default)]
+struct CostBucket {
+    new_input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+}
+
+impl CostBucket {
+    fn add(&mut self, event: &UsageEvent) {
+        self.new_input = self.new_input.saturating_add(event.new_input_tokens);
+        self.output = self.output.saturating_add(event.output_tokens);
+        self.cache_read = self.cache_read.saturating_add(event.cache_read_tokens);
+        self.cache_write = self.cache_write.saturating_add(event.cache_write_tokens);
+    }
+}
+
 #[derive(Default)]
 struct ProviderAccumulator {
-    sessions: HashSet<String>,
+    sessions: usize,
     activity_count: usize,
     new_input: u64,
     output: u64,
@@ -737,31 +899,39 @@ struct ProviderAccumulator {
     cost: f64,
     has_cost: bool,
     partial_cost: bool,
-    latest: Option<UsageEvent>,
+    model_tokens: BTreeMap<String, u64>,
+    project_tokens: BTreeMap<String, u64>,
 }
 
 impl ProviderAccumulator {
     fn add(&mut self, event: &UsageEvent) {
-        self.sessions.insert(event.session_id.clone());
         self.activity_count += 1;
         self.new_input = self.new_input.saturating_add(event.new_input_tokens);
         self.output = self.output.saturating_add(event.output_tokens);
         self.cache = self.cache.saturating_add(event.cache_tokens);
         self.reasoning = self.reasoning.saturating_add(event.reasoning_tokens);
         self.total = self.total.saturating_add(event.total_tokens);
-        match event.estimated_cost_usd {
+        let model_weight = match event.provider {
+            Provider::Claude => event.new_input_tokens.saturating_add(event.output_tokens),
+            Provider::Codex => event.total_tokens,
+        };
+        let model = event.model.as_deref().unwrap_or("Unknown model");
+        let model_total = self.model_tokens.entry(model.into()).or_default();
+        *model_total = model_total.saturating_add(model_weight);
+        let project_total = self
+            .project_tokens
+            .entry(event.project.clone())
+            .or_default();
+        *project_total = project_total.saturating_add(model_weight);
+    }
+
+    fn add_cost(&mut self, cost: Option<f64>) {
+        match cost {
             Some(cost) => {
                 self.cost += cost;
                 self.has_cost = true;
             }
             None => self.partial_cost = true,
-        }
-        if self
-            .latest
-            .as_ref()
-            .is_none_or(|latest| event.timestamp_ms > latest.timestamp_ms)
-        {
-            self.latest = Some(event.clone());
         }
     }
 
@@ -770,11 +940,11 @@ impl ProviderAccumulator {
             id: id.into(),
             label: label.into(),
             enabled: true,
-            has_data: self.activity_count > 0,
-            last_model: self.latest.as_ref().and_then(|event| event.model.clone()),
-            last_project: self.latest.as_ref().map(|event| event.project.clone()),
+            has_data: self.activity_count > 0 || self.sessions > 0,
+            last_model: top_key(&self.model_tokens),
+            last_project: top_key(&self.project_tokens),
             total_tokens: self.total,
-            sessions: self.sessions.len(),
+            sessions: self.sessions,
             activity_count: self.activity_count,
             activity_label: activity_label.into(),
             estimated_cost_usd: self.has_cost.then_some(self.cost),
@@ -783,15 +953,23 @@ impl ProviderAccumulator {
     }
 }
 
-fn aggregate(files: &[CachedFile], app: AppStats) -> StatsUsageSnapshot {
+fn top_key(totals: &BTreeMap<String, u64>) -> Option<String> {
+    totals
+        .iter()
+        .max_by_key(|(_, tokens)| *tokens)
+        .map(|(key, _)| key.clone())
+}
+
+fn aggregate(
+    files: &[CachedFile],
+    app: AppStats,
+    scope: &UsageScope,
+    cutoff: &str,
+) -> StatsUsageSnapshot {
     let mut claude = ProviderAccumulator::default();
     let mut codex = ProviderAccumulator::default();
     let mut seen = HashSet::<(Provider, String)>::new();
-    let mut daily = BTreeMap::<String, UsageDay>::new();
-    let mut new_input_tokens = 0_u64;
-    let mut output_tokens = 0_u64;
-    let mut cache_tokens = 0_u64;
-    let mut reasoning_tokens = 0_u64;
+    let mut events = Vec::new();
     for file in files {
         for event in &file.events {
             if event
@@ -801,27 +979,95 @@ fn aggregate(files: &[CachedFile], app: AppStats) -> StatsUsageSnapshot {
             {
                 continue;
             }
-            match event.provider {
-                Provider::Claude => claude.add(event),
-                Provider::Codex => codex.add(event),
+            events.push(event);
+        }
+    }
+
+    let mut sessions = HashMap::<(Provider, String), SessionEligibility>::new();
+    for event in &events {
+        let session = sessions
+            .entry((event.provider, event.session_id.clone()))
+            .or_default();
+        session.has_scoped_location |= scope.contains(event.cwd.as_deref());
+        if session.last_day.is_empty() || event.timestamp_ms > session.last_timestamp_ms {
+            session.last_timestamp_ms = event.timestamp_ms;
+            session.last_day.clone_from(&event.day);
+        }
+    }
+    for ((provider, _), session) in sessions {
+        if session.has_scoped_location && session.last_day.as_str() >= cutoff {
+            match provider {
+                Provider::Claude => claude.sessions += 1,
+                Provider::Codex => codex.sessions += 1,
             }
-            new_input_tokens = new_input_tokens.saturating_add(event.new_input_tokens);
-            output_tokens = output_tokens.saturating_add(event.output_tokens);
-            cache_tokens = cache_tokens.saturating_add(event.cache_tokens);
-            reasoning_tokens = reasoning_tokens.saturating_add(event.reasoning_tokens);
-            let day = daily.entry(event.day.clone()).or_insert_with(|| UsageDay {
-                day: event.day.clone(),
-                ..UsageDay::default()
-            });
-            day.total_tokens = day.total_tokens.saturating_add(event.total_tokens);
-            match event.provider {
-                Provider::Claude => {
-                    day.claude_tokens = day.claude_tokens.saturating_add(event.total_tokens)
-                }
-                Provider::Codex => {
-                    day.codex_tokens = day.codex_tokens.saturating_add(event.total_tokens)
-                }
+        }
+    }
+
+    let mut daily = BTreeMap::<String, UsageDay>::new();
+    let mut new_input_tokens = 0_u64;
+    let mut output_tokens = 0_u64;
+    let mut cache_tokens = 0_u64;
+    let mut reasoning_tokens = 0_u64;
+    let mut cost_buckets =
+        BTreeMap::<(Provider, String, Option<String>, String), CostBucket>::new();
+    for event in events {
+        if event.day.as_str() < cutoff {
+            continue;
+        }
+        let Some(location) = scope.attribution(event.cwd.as_deref()) else {
+            continue;
+        };
+        match event.provider {
+            Provider::Claude => claude.add(event),
+            Provider::Codex => codex.add(event),
+        }
+        cost_buckets
+            .entry((
+                event.provider,
+                event.day.clone(),
+                event.model.clone(),
+                location.into(),
+            ))
+            .or_default()
+            .add(event);
+        new_input_tokens = new_input_tokens.saturating_add(event.new_input_tokens);
+        output_tokens = output_tokens.saturating_add(event.output_tokens);
+        cache_tokens = cache_tokens.saturating_add(event.cache_tokens);
+        reasoning_tokens = reasoning_tokens.saturating_add(event.reasoning_tokens);
+        let day = daily.entry(event.day.clone()).or_insert_with(|| UsageDay {
+            day: event.day.clone(),
+            ..UsageDay::default()
+        });
+        day.total_tokens = day.total_tokens.saturating_add(event.total_tokens);
+        match event.provider {
+            Provider::Claude => {
+                day.claude_tokens = day.claude_tokens.saturating_add(event.total_tokens)
             }
+            Provider::Codex => {
+                day.codex_tokens = day.codex_tokens.saturating_add(event.total_tokens)
+            }
+        }
+    }
+
+    for ((provider, _, model, _), bucket) in cost_buckets {
+        let cost = match provider {
+            Provider::Claude => pricing::claude_cost(
+                model.as_deref(),
+                bucket.new_input,
+                bucket.output,
+                bucket.cache_read,
+                bucket.cache_write,
+            ),
+            Provider::Codex => pricing::codex_cost(
+                model.as_deref(),
+                bucket.new_input.saturating_add(bucket.cache_read),
+                bucket.cache_read,
+                bucket.output,
+            ),
+        };
+        match provider {
+            Provider::Claude => claude.add_cost(cost),
+            Provider::Codex => codex.add_cost(cost),
         }
     }
 
@@ -947,6 +1193,218 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    fn test_event(
+        provider: Provider,
+        session_id: &str,
+        day: &str,
+        cwd: &str,
+        total_tokens: u64,
+    ) -> UsageEvent {
+        UsageEvent {
+            provider,
+            session_id: session_id.into(),
+            timestamp: format!("{day}T12:00:00Z"),
+            timestamp_ms: DateTime::parse_from_rfc3339(&format!("{day}T12:00:00Z"))
+                .unwrap()
+                .timestamp_millis(),
+            day: day.into(),
+            model: Some("gpt-5.6-sol".into()),
+            cwd: Some(cwd.into()),
+            project: project_label(Some(cwd)),
+            event_key: None,
+            new_input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: total_tokens,
+            cache_write_tokens: 0,
+            cache_tokens: total_tokens,
+            reasoning_tokens: 0,
+            total_tokens,
+        }
+    }
+
+    fn cached(events: Vec<UsageEvent>) -> CachedFile {
+        CachedFile {
+            path: "fixture.jsonl".into(),
+            provider: events
+                .first()
+                .map(|event| event.provider)
+                .unwrap_or(Provider::Codex),
+            modified_nanos: 1,
+            size: 1,
+            events,
+        }
+    }
+
+    #[test]
+    fn terminalx_fixture_totals_match_hand_calculation() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/stats/fixtures/parity");
+        let files = [
+            ("claude.jsonl", Provider::Claude),
+            ("claude-fork.jsonl", Provider::Claude),
+            ("codex.jsonl", Provider::Codex),
+            ("codex-shell.jsonl", Provider::Codex),
+        ]
+        .into_iter()
+        .map(|(name, provider)| {
+            let path = fixtures.join(name);
+            CachedFile {
+                events: parse_file(&path, provider).unwrap(),
+                path,
+                provider,
+                modified_nanos: 1,
+                size: 1,
+            }
+        })
+        .collect::<Vec<_>>();
+
+        let reference = DateTime::parse_from_rfc3339("2026-09-03T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Local);
+        let scope = UsageScope::from_paths([PathBuf::from("/fixtures/terminalx-worktree")]);
+        let snapshot = aggregate(
+            &files,
+            AppStats::default(),
+            &scope,
+            &overview_cutoff(reference),
+        );
+
+        // Claude: 2 input + 9 output + 20 cache read + 3 cache write = 34.
+        // Codex: 100 input (80 cached) + 25 output = 125 total; reasoning is
+        // already inside output. The old and off-worktree rows do not count.
+        assert_eq!(snapshot.total_tokens, 159);
+        assert_eq!(snapshot.providers[0].sessions, 1);
+        assert_eq!(snapshot.providers[0].activity_count, 1);
+        assert_eq!(snapshot.providers[1].sessions, 1);
+        assert_eq!(snapshot.providers[1].activity_count, 1);
+        assert_eq!(snapshot.active_days, 1);
+        assert_eq!(snapshot.new_input_tokens, 22);
+        assert_eq!(snapshot.output_tokens, 34);
+        assert_eq!(snapshot.cache_tokens, 103);
+        assert_eq!(snapshot.reasoning_tokens, 10);
+        assert!((snapshot.estimated_cost_usd.unwrap() - 0.001_153_75).abs() < 0.000_000_01);
+    }
+
+    #[test]
+    fn overview_scope_accepts_exact_and_descendant_paths_only() {
+        let scope = UsageScope::from_paths([PathBuf::from("/work/repo")]);
+        assert!(scope.contains(Some("/work/repo")));
+        assert!(scope.contains(Some("/work/repo/feature/src")));
+        assert!(!scope.contains(Some("/work/repository")));
+        assert!(!scope.contains(Some("/work/other")));
+    }
+
+    #[test]
+    fn recent_session_with_any_scoped_location_counts_once() {
+        let scope = UsageScope::from_paths([PathBuf::from("/work/repo")]);
+        let files = [cached(vec![
+            test_event(
+                Provider::Codex,
+                "mixed-location",
+                "2026-08-04",
+                "/work/repo",
+                100,
+            ),
+            test_event(
+                Provider::Codex,
+                "mixed-location",
+                "2026-09-03",
+                "/tmp/shell",
+                200,
+            ),
+        ])];
+        let snapshot = aggregate(&files, AppStats::default(), &scope, "2026-08-05");
+        assert_eq!(snapshot.providers[1].sessions, 1);
+        assert_eq!(snapshot.providers[1].activity_count, 0);
+        assert_eq!(snapshot.total_tokens, 0);
+    }
+
+    #[test]
+    fn pricing_tiers_apply_to_each_daily_model_location_bucket() {
+        let scope = UsageScope::from_paths([PathBuf::from("/work/repo")]);
+        let files = [cached(vec![
+            test_event(Provider::Codex, "one", "2026-09-03", "/work/repo", 200_000),
+            test_event(
+                Provider::Codex,
+                "two",
+                "2026-09-03",
+                "/work/repo/feature",
+                200_000,
+            ),
+        ])];
+        let snapshot = aggregate(&files, AppStats::default(), &scope, "2026-08-05");
+        assert!((snapshot.estimated_cost_usd.unwrap() - 0.264).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn discovers_system_shared_and_account_codex_histories() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let store = root.path().join("store");
+        let predecessor = root.path().join("predecessor");
+        let paths = [
+            home.join(".claude/projects/project.jsonl"),
+            home.join(".claude/transcripts/transcript.jsonl"),
+            home.join(".codex/sessions/system.jsonl"),
+            store.join("codex/sessions/shared.jsonl"),
+            store.join("codex-accounts/current/home/sessions/account.jsonl"),
+            predecessor.join("codex-runtime-home/home/sessions/shared.jsonl"),
+            predecessor.join("codex-accounts/existing/home/sessions/account.jsonl"),
+        ];
+        for path in paths {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            File::create(path).unwrap();
+        }
+
+        let sources = discover_sources_at(&home, &store, Some(&predecessor));
+        assert_eq!(sources.len(), 7);
+        assert_eq!(
+            sources
+                .iter()
+                .filter(|(_, provider)| *provider == Provider::Claude)
+                .count(),
+            2
+        );
+        assert_eq!(
+            sources
+                .iter()
+                .filter(|(_, provider)| *provider == Provider::Codex)
+                .count(),
+            5
+        );
+    }
+
+    #[test]
+    fn claude_sidechain_turns_share_the_parent_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.jsonl");
+        let mut file = File::create(&path).unwrap();
+        for (message, sidechain) in [("parent", false), ("child", true)] {
+            writeln!(file, "{}", serde_json::json!({
+                "type": "assistant", "sessionId": "shared", "timestamp": "2026-09-03T10:00:00Z",
+                "cwd": "/work/repo", "isSidechain": sidechain, "agentId": "worker",
+                "requestId": message, "message": { "id": message, "model": "claude-opus-5", "usage": {
+                    "input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0
+                }}
+            })).unwrap();
+        }
+        let scope = UsageScope::from_paths([PathBuf::from("/work/repo")]);
+        let snapshot = aggregate(
+            &[CachedFile {
+                events: parse_claude(&path).unwrap(),
+                path,
+                provider: Provider::Claude,
+                modified_nanos: 1,
+                size: 1,
+            }],
+            AppStats::default(),
+            &scope,
+            "2026-08-05",
+        );
+        assert_eq!(snapshot.providers[0].sessions, 1);
+        assert_eq!(snapshot.providers[0].activity_count, 2);
+    }
+
     #[test]
     fn claude_repeated_stream_rows_count_the_largest_usage_once() {
         let dir = tempfile::tempdir().unwrap();
@@ -1006,6 +1464,7 @@ mod tests {
             timestamp_ms: 1,
             day: "2026-09-03".into(),
             model: Some("gpt-5.6-sol".into()),
+            cwd: Some("/code/raccoon".into()),
             project: "code/raccoon".into(),
             event_key: Some("same".into()),
             new_input_tokens: 20,
@@ -1015,7 +1474,6 @@ mod tests {
             cache_tokens: 80,
             reasoning_tokens: 2,
             total_tokens: 105,
-            estimated_cost_usd: Some(0.01),
         };
         let file = |name: &str| CachedFile {
             path: name.into(),
@@ -1024,7 +1482,13 @@ mod tests {
             size: 1,
             events: vec![event.clone()],
         };
-        let snapshot = aggregate(&[file("a"), file("b")], AppStats::default());
+        let scope = UsageScope::from_paths([PathBuf::from("/code/raccoon")]);
+        let snapshot = aggregate(
+            &[file("a"), file("b")],
+            AppStats::default(),
+            &scope,
+            "2026-08-05",
+        );
         assert_eq!(snapshot.total_tokens, 105);
         assert_eq!(snapshot.providers[1].sessions, 1);
     }
