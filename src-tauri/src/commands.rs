@@ -132,7 +132,7 @@ pub async fn session_summaries(session_ids: Option<Vec<String>>) -> CmdResult<Ve
         .map_err(err)?
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewTab {
     pub harness: String,
@@ -144,7 +144,7 @@ pub struct NewTab {
     pub permission_mode: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSession {
     pub project_path: String,

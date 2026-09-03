@@ -27,6 +27,10 @@ pub const SOCKET_ENV: &str = "RACCOON_HOOK_SOCKET";
 /// says a frame came from the CLI a tab started rather than from something
 /// that merely read the environment of one.
 pub const TOKEN_ENV: &str = "RACCOON_HOOK_TOKEN";
+/// The control socket and per-launch app token injected into agent tabs. The
+/// socket path is shared with hooks; the token authenticates command requests.
+pub const CONTROL_SOCKET_ENV: &str = "TERMINALX_NEXT_SOCKET";
+pub const CONTROL_TOKEN_ENV: &str = "TERMINALX_NEXT_TOKEN";
 /// How long a hook waits for the app. A permission card is answered by a
 /// person, so this has to outlast a moment's thought without outlasting the
 /// CLI's own hook timeout.
@@ -81,6 +85,14 @@ impl Origin {
 /// CSPRNG, which is what `uuid` draws them from.
 pub fn mint_token() -> String {
     format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())
+}
+
+/// One app launch's authenticated control endpoint. Clones stay inside the
+/// app and are used only to configure the listener and child environments.
+#[derive(Clone)]
+pub struct ControlEndpoint {
+    pub socket: PathBuf,
+    pub token: String,
 }
 
 /// Equality that takes the same time whatever the mismatch, so a token cannot
@@ -147,6 +159,19 @@ pub fn socket_path() -> anyhow::Result<PathBuf> {
     Ok(crate::store::ensure_dir(crate::store::root()?.join("run"))?.join("hooks.sock"))
 }
 
+pub fn control_token_path() -> anyhow::Result<PathBuf> {
+    Ok(crate::store::ensure_dir(crate::store::root()?.join("run"))?.join("control.token"))
+}
+
+/// Mint and persist the token before any agent process is launched. Atomic
+/// owner-only creation means a human shell never observes a partial secret.
+pub fn prepare_control() -> anyhow::Result<ControlEndpoint> {
+    let socket = socket_path()?;
+    let token = mint_token();
+    crate::store::write_atomic(&control_token_path()?, token.as_bytes())?;
+    Ok(ControlEndpoint { socket, token })
+}
+
 /// The command a hook definition runs: this binary, quoted, plus the event.
 /// `current_exe` is right for `cargo run` and for the bundle alike.
 pub fn hook_command(exe: &Path, event: &str) -> String {
@@ -157,13 +182,14 @@ pub fn hook_command(exe: &Path, event: &str) -> String {
 // ---------------------------------------------------------------- the app end
 
 #[cfg(unix)]
-pub fn serve<F>(handler: F) -> anyhow::Result<PathBuf>
+pub fn serve<F, C>(endpoint: ControlEndpoint, hook_handler: F, control_handler: C) -> anyhow::Result<PathBuf>
 where
     F: Fn(HookFrame) -> HookReply + Send + Sync + 'static,
+    C: Fn(crate::control::ControlRequest) -> crate::control::ControlResponse + Send + Sync + 'static,
 {
     use std::os::unix::net::UnixListener;
 
-    let path = socket_path()?;
+    let path = endpoint.socket.clone();
     // A socket file left by a crashed instance would refuse every bind.
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)?;
@@ -172,11 +198,15 @@ where
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
-    let handler = std::sync::Arc::new(handler);
+    let hook_handler = std::sync::Arc::new(hook_handler);
+    let control_handler = std::sync::Arc::new(control_handler);
+    let control_token = endpoint.token;
     std::thread::Builder::new().name("hook-socket".into()).spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
-            let handler = handler.clone();
+            let hook_handler = hook_handler.clone();
+            let control_handler = control_handler.clone();
+            let control_token = control_token.clone();
             // One thread per hook: a permission frame parks until it is
             // answered, and the next hook must not queue behind it.
             let _ = std::thread::Builder::new().name("hook-frame".into()).spawn(move || {
@@ -188,13 +218,7 @@ where
                 if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
                     return;
                 }
-                let reply = match serde_json::from_str::<HookFrame>(&line) {
-                    Ok(frame) => handler(frame),
-                    Err(e) => {
-                        log::warn!("hook frame: {e}");
-                        HookReply::default()
-                    }
-                };
+                let reply = dispatch_line(&line, &control_token, &*hook_handler, &*control_handler);
                 let mut stream = stream;
                 if let Ok(mut bytes) = serde_json::to_vec(&reply) {
                     bytes.push(b'\n');
@@ -208,11 +232,64 @@ where
 }
 
 #[cfg(not(unix))]
-pub fn serve<F>(_handler: F) -> anyhow::Result<PathBuf>
+pub fn serve<F, C>(_endpoint: ControlEndpoint, _hook_handler: F, _control_handler: C) -> anyhow::Result<PathBuf>
 where
     F: Fn(HookFrame) -> HookReply + Send + Sync + 'static,
+    C: Fn(crate::control::ControlRequest) -> crate::control::ControlResponse + Send + Sync + 'static,
 {
     anyhow::bail!("hooks need a unix socket")
+}
+
+#[cfg(unix)]
+fn dispatch_line<F, C>(line: &str, control_token: &str, hook_handler: &F, control_handler: &C) -> Value
+where
+    F: Fn(HookFrame) -> HookReply + ?Sized,
+    C: Fn(crate::control::ControlRequest) -> crate::control::ControlResponse + ?Sized,
+{
+    let value: Value = match serde_json::from_str(line) {
+        Ok(value) => value,
+        Err(error) => {
+            log::warn!("socket frame: {error}");
+            return serde_json::to_value(HookReply::default()).unwrap_or_default();
+        }
+    };
+    if value.get("command").is_some() {
+        let request_id = value.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+        let request: crate::control::ControlRequest = match serde_json::from_value(value) {
+            Ok(request) => request,
+            Err(error) => {
+                let response = crate::control::ControlResponse::failure(
+                    request_id,
+                    crate::control::ControlError::new(
+                        "protocol_error",
+                        format!("Invalid control request: {error}"),
+                        Some("Update the app and CLI together, then retry status.".into()),
+                    ),
+                );
+                return serde_json::to_value(response).unwrap_or_default();
+            }
+        };
+        if !token_matches(control_token, &request.token) {
+            let response = crate::control::ControlResponse::failure(
+                request.id,
+                crate::control::ControlError::new(
+                    "unauthorized",
+                    "The control token is missing or does not match this app launch.",
+                    Some("Restart an app-launched tab, or let a human shell read RACCOON_HOME/run/control.token.".into()),
+                ),
+            );
+            return serde_json::to_value(response).unwrap_or_default();
+        }
+        serde_json::to_value(control_handler(request)).unwrap_or_default()
+    } else {
+        match serde_json::from_value::<HookFrame>(value) {
+            Ok(frame) => serde_json::to_value(hook_handler(frame)).unwrap_or_default(),
+            Err(error) => {
+                log::warn!("hook frame: {error}");
+                serde_json::to_value(HookReply::default()).unwrap_or_default()
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------- the hook end
@@ -293,6 +370,41 @@ mod tests {
         assert_eq!(empty, "{}");
         let r = HookReply { output: Some(json!({"decision": "approve"})) };
         assert_eq!(serde_json::from_str::<HookReply>(&serde_json::to_string(&r).unwrap()).unwrap(), r);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_frames_require_the_current_launch_token() {
+        use crate::control::{ControlRequest, ControlResponse};
+
+        let request = ControlRequest {
+            id: "r1".into(),
+            token: "wrong".into(),
+            command: "status".into(),
+            params: json!({}),
+        };
+        let line = serde_json::to_string(&request).unwrap();
+        let reply = dispatch_line(
+            &line,
+            "right",
+            &|_| HookReply::default(),
+            &|request| ControlResponse::success(request.id, json!({"shouldNotRun": true})),
+        );
+        let reply: ControlResponse = serde_json::from_value(reply).unwrap();
+        assert!(!reply.ok);
+        assert_eq!(reply.error.unwrap().code, "unauthorized");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_app_token_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _home = crate::store::temp_home();
+        let endpoint = prepare_control().unwrap();
+        let token_path = control_token_path().unwrap();
+        assert_eq!(std::fs::read_to_string(token_path).unwrap(), endpoint.token);
+        assert_eq!(std::fs::metadata(control_token_path().unwrap()).unwrap().permissions().mode() & 0o777, 0o600);
     }
 
     #[cfg(unix)]

@@ -1,4 +1,5 @@
 fn main() {
+    embed_cli_skill();
     // ggml's Metal backend uses `@available` checks, which compile to a call
     // into clang's builtins runtime. Rust links with `-nodefaultlibs`, so that
     // archive has to be named explicitly or release links fail on
@@ -6,6 +7,13 @@ fn main() {
     #[cfg(target_os = "macos")]
     link_clang_builtins();
     tauri_build::build()
+}
+
+fn embed_cli_skill() {
+    for source in ["../skill-guides/terminalx-next-cli.md", "../skills/terminalx-next-cli/SKILL.md"] {
+        println!("cargo:rerun-if-changed={source}");
+        std::fs::read(source).unwrap_or_else(|e| panic!("read embedded file {source}: {e}"));
+    }
 }
 
 #[cfg(target_os = "macos")]
