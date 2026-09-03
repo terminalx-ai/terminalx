@@ -395,6 +395,10 @@ function orderedWindows(windows: UsageWindow[]): UsageWindow[] {
   return windows.slice().sort((a, b) => windowOrder(a) - windowOrder(b) || (a.windowMinutes ?? 0) - (b.windowMinutes ?? 0) || a.key.localeCompare(b.key));
 }
 
+function hasUsageData(window: UsageWindow): boolean {
+  return window.usedPercent > 0 || window.resetsAt != null;
+}
+
 function nextReset(windows: UsageWindow[]): number | null {
   const resets = windows.map((window) => window.resetsAt).filter((value): value is number => value != null);
   return resets.length ? Math.min(...resets) : null;
@@ -439,6 +443,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
   const providerProbePending = harnesses.length === 0;
   const windows = usage.windows
     .filter((window) => providerProbePending || available.has(window.agent))
+    .filter(hasUsageData)
     .sort((a, b) => b.usedPercent - a.usedPercent);
   const now = useCountdownNow(windows.map((window) => window.resetsAt));
   if (!settings.usage || (!providerProbePending && !available.has("claude") && !available.has("codex"))) return null;
@@ -449,7 +454,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
   }).sort((a, b) => b.tightest.usedPercent - a.tightest.usedPercent);
   const usageLabel = groups.length
     ? groups.flatMap(({ agent, windows: agentWindows }) => orderedWindows(agentWindows).map((window) =>
-      `${agentName(agent)} ${windowLabel(window)} ${Math.round(shownPercent(window, settings.percent))}% ${settings.percent}, resets ${formatResetCountdown(window.resetsAt, now, windowLabel(window))}`,
+      `${agentName(agent)} ${windowLabel(window)} ${Math.round(shownPercent(window, settings.percent))}% ${settings.percent}${window.resetsAt == null ? "" : `, resets ${formatResetCountdown(window.resetsAt, now, "")}`}`,
     )).join("; ")
     : "Usage unavailable";
   const detailGroup = groups.find(({ agent }) => agent === detailAgent) ?? null;
@@ -523,7 +528,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                       >
                         {window.stale ? <TriangleAlert className="size-3" aria-label="Stale usage data" /> : null}
                         <span className="font-medium">{windowLabel(window)} {Math.round(shownPercent(window, settings.percent))}%</span>
-                        {tier === "full" ? <span className="text-faint">· {formatResetCountdown(window.resetsAt, now, windowLabel(window))}</span> : null}
+                        {tier === "full" && window.resetsAt != null ? <span className="text-faint">· {formatResetCountdown(window.resetsAt, now, "")}</span> : null}
                       </span>
                     ))}
                   </span>
@@ -543,7 +548,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
           data-usage-popover
           data-status-context-exempt
           onContextMenu={(event) => event.stopPropagation()}
-          className="relative z-(--z-menu) w-[410px] rounded-xl bg-popover p-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
+          className="relative z-(--z-menu) w-[410px] rounded-xl bg-(--surface-card) p-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
         >
           <div className="mb-2.5 flex items-center gap-2">
             <div>
@@ -591,7 +596,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                       <button
                         type="button"
                         aria-expanded={detailAgent === agent}
-                        aria-label={`${agentName(agent)}, Resets in ${formatResetCountdown(reset, now, "—")}`}
+                        aria-label={`${agentName(agent)}${reset == null ? "" : `, Resets in ${formatResetCountdown(reset, now, "")}`}`}
                         onClick={() => setDetailAgent((current) => current === agent ? null : agent)}
                         className={cn(
                           "flex w-full items-center gap-2 rounded-lg bg-well/60 px-2.5 py-2.5 text-left outline-none transition-colors hover:bg-veil-raised focus-visible:ring-1 focus-visible:ring-ring/50",
@@ -602,9 +607,11 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                         <div className="min-w-0 flex-1">
                           <div className="flex items-baseline gap-2">
                             <span className="text-[12px] font-medium">{agentName(agent)}</span>
-                            <span className="truncate text-[10px] tabular-nums text-faint">
-                              Resets in {formatResetCountdown(reset, now, "—")}
-                            </span>
+                            {reset != null ? (
+                              <span className="truncate text-[10px] tabular-nums text-faint">
+                                Resets in {formatResetCountdown(reset, now, "")}
+                              </span>
+                            ) : null}
                           </div>
                           <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
                             {orderedWindows(agentWindows).map((window) => {
@@ -657,7 +664,9 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                             {window.stale ? <TriangleAlert className="size-3" aria-label="Stale usage data" /> : null}
                             {percent}%
                           </span>
-                          <span className="text-[9.5px] text-faint">resets {formatResetCountdown(window.resetsAt, now, windowLabel(window))}</span>
+                          {window.resetsAt != null ? (
+                            <span className="text-[9.5px] text-faint">resets {formatResetCountdown(window.resetsAt, now, "")}</span>
+                          ) : null}
                         </div>
                       </button>
                     </li>
@@ -698,7 +707,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
             />
           ) : null}
           <Dialog open={resetConfirmOpen} onOpenChange={setResetConfirmOpen}>
-            <DialogContent width="max-w-[26rem]" data-status-context-exempt>
+            <DialogContent width="max-w-[26rem]" className="bg-(--surface-card)" data-status-context-exempt>
               <DialogHeader>
                 <DialogTitle>Reset Codex limits?</DialogTitle>
                 <DialogDescription>
@@ -744,7 +753,7 @@ function AgentUsageDetail({
   const resetCredits = agent === "codex" ? codex?.resetCredits : undefined;
   const credits = agent === "codex" ? codex?.credits : undefined;
   return (
-    <aside data-usage-detail={agent} className="absolute bottom-0 left-[calc(100%+6px)] w-[300px] rounded-xl bg-popover p-3 text-popover-foreground shadow-surface hairline max-[760px]:static max-[760px]:mt-2 max-[760px]:w-full">
+    <aside data-usage-detail={agent} className="absolute bottom-0 left-[calc(100%+6px)] w-[300px] rounded-xl bg-(--surface-card) p-3 text-popover-foreground shadow-surface hairline max-[760px]:static max-[760px]:mt-2 max-[760px]:w-full">
       <div className="flex items-center gap-2">
         <AgentMark id={agent} className="size-4 text-muted-foreground" />
         <span className="text-[13px] font-medium">{agentName(agent)}</span>
@@ -762,7 +771,7 @@ function AgentUsageDetail({
               </div>
               <div className="mt-1 flex items-center justify-between gap-3 text-[10.5px] tabular-nums text-muted-foreground">
                 <span>{shown}% {percent}</span>
-                <span>Resets in {formatResetCountdown(window.resetsAt, now, "—")}</span>
+                {window.resetsAt != null ? <span>Resets in {formatResetCountdown(window.resetsAt, now, "")}</span> : null}
               </div>
             </div>
           );

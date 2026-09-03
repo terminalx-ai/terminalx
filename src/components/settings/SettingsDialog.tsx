@@ -20,11 +20,13 @@ import { api, errorMessage, gh, issues, type CliToolStatus, type LinearStatus, t
 import changelog from "../../../CHANGELOG.md?raw";
 import { TranscriptionTab } from "./TranscriptionTab";
 import { setStatusSettings, useStatus } from "@/lib/status";
+import { AccountTab } from "./AccountTab";
 
-const TABS = ["general", "appearance", "agents", "transcription", "integrations", "shortcuts", "about"] as const;
+const TABS = ["account", "general", "appearance", "agents", "transcription", "integrations", "shortcuts", "about"] as const;
 export type SettingsTab = (typeof TABS)[number];
 type Tab = SettingsTab;
 const TAB_LABEL: Record<Tab, string> = {
+  account: "Account",
   general: "General",
   appearance: "Appearance",
   agents: "Agents",
@@ -71,6 +73,7 @@ export function SettingsDialog({
             ))}
           </nav>
           <div className="min-w-0 flex-1 overflow-y-auto scrollbar-thin p-5">
+            {tab === "account" && <AccountTab />}
             {tab === "general" && <GeneralTab />}
             {tab === "appearance" && <AppearanceTab />}
             {tab === "agents" && <AgentsTab />}

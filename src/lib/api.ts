@@ -97,6 +97,11 @@ export interface NewSession {
 }
 
 export const api = {
+  // optional TerminalX account
+  accountStatus: () => invoke<AccountStatus>("account_status"),
+  accountSignIn: () => invoke<AccountStatus>("account_sign_in"),
+  accountSignOut: () => invoke<AccountStatus>("account_sign_out"),
+
   // projects
   listProjects: () => invoke<{ projects: Project[]; lastSelected: string | null }>("list_projects"),
   addProject: (path: string) => invoke<Project>("add_project", { path }),
@@ -150,6 +155,19 @@ export const api = {
   logCommits: (cwd: string, range?: string | null, limit?: number) =>
     invoke<CommitInfo[]>("log_commits", { cwd, range: range ?? null, limit: limit ?? 100 }),
 };
+
+export interface AccountIdentity {
+  name: string | null;
+  email: string;
+  organization: string | null;
+}
+
+export interface AccountStatus {
+  state: "signed-out" | "signing-in" | "signed-in";
+  identity: AccountIdentity | null;
+  expiresAt: number | null;
+  lastError: string | null;
+}
 
 export interface CliToolStatus {
   installed: boolean;
