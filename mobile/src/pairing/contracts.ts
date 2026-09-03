@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { sha256 } from "@noble/hashes/sha256";
+import { base64Url } from "./bytes";
 
 export const PAIRING_OFFER_VERSION = 2;
 export const RELAY_PROTOCOL_VERSION = 1;
@@ -25,6 +27,12 @@ const canonicalPublicKey = (value: string): boolean => {
   } catch {
     return false;
   }
+};
+
+const relayHostIdForPublicKey = (value: string): string | null => {
+  if (!canonicalPublicKey(value)) return null;
+  const decoded = Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
+  return base64Url(sha256(decoded)).slice(0, 16);
 };
 
 export function createPairingOfferSchema(now: () => number = Date.now) {
@@ -57,15 +65,24 @@ export function createPairingOfferSchema(now: () => number = Date.now) {
     })
     .strict()
     .superRefine((offer, context) => {
-      if (offer.relay && !canonicalPublicKey(offer.publicKeyB64)) {
-        context.addIssue({ code: "custom", path: ["publicKeyB64"], message: "Relay offers require a canonical 32-byte public key" });
-      }
+      if (!offer.relay) return;
+      const expectedRelayHostId = relayHostIdForPublicKey(offer.publicKeyB64);
+      if (!expectedRelayHostId) context.addIssue({ code: "custom", path: ["publicKeyB64"], message: "Relay offers require a canonical 32-byte public key" });
+      else if (offer.relay.relayHostId !== expectedRelayHostId) context.addIssue({ code: "custom", path: ["relay", "relayHostId"], message: "Relay host does not match the desktop public key" });
     });
 }
 
 export const PairingOfferSchema = createPairingOfferSchema();
 export type PairingOffer = z.infer<typeof PairingOfferSchema>;
 export type PairingRelay = NonNullable<PairingOffer["relay"]>;
+
+export const HostStatusSchema = z
+  .object({
+    protocolVersion: z.literal(MOBILE_E2EE_VERSION),
+    product: z.literal("TerminalX"),
+    deviceScope: z.literal("driver"),
+  })
+  .strict();
 
 export const RelayPhoneHelloSchema = z.union([
   z.object({ type: z.literal("relay-hello"), ok: z.literal(false), code: z.number().int().min(4_000).max(4_999) }).strict(),

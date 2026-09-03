@@ -1,5 +1,5 @@
 import { sha256 } from "@noble/hashes/sha256";
-import { DeviceCredentialInstalledSchema, PairingGetEndpointsResultSchema, type PairingOffer } from "./contracts";
+import { DeviceCredentialInstalledSchema, HostStatusSchema, PairingGetEndpointsResultSchema, type PairingOffer } from "./contracts";
 import { base64Url, utf8 } from "./bytes";
 import { RelayClient } from "../transport/relay-client";
 import { savePairedHost, type StoredHost } from "../store/hosts";
@@ -33,6 +33,7 @@ async function finishPairing(journal: PairingJournal): Promise<StoredHost> {
     client = await connectPairingClient(offer, resumeToken);
     const status = await client.request("status.get");
     if (!status.ok) throw new Error(`${status.refusal.code}: ${status.refusal.message}`);
+    HostStatusSchema.parse(status.value);
     const reqId = journal.metadata.installReqId;
     let endpointsResponse = await client.request("pairing.getEndpoints", { installReqId: reqId });
     if (!endpointsResponse.ok) throw new Error(`${endpointsResponse.refusal.code}: ${endpointsResponse.refusal.message}`);

@@ -116,14 +116,9 @@ export function AppProvider({ children }: PropsWithChildren) {
     const stage = connection.onStage((next, attempt) => {
       setConnectionStage(next);
       setConnectionAttempt(attempt);
-      if (next === "connected" && session) {
-        void connection.request("session.authenticate", { accessToken: session.accessToken }).then((result) => {
-          if (result.ok) {
-            void refreshSessions();
-            if (activeHostRef.current) void restoreLocalNotifications(connection, activeHostRef.current.id);
-          }
-          else setError("This Mac did not accept the current account session.");
-        }).catch((cause: unknown) => setError(readableError(cause)));
+      if (next === "connected") {
+        void refreshSessions();
+        if (activeHostRef.current) void restoreLocalNotifications(connection, activeHostRef.current.id);
       }
     });
     const log = connection.onLog((entry) => {
@@ -138,7 +133,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       if (message.method === "sessions.changed") void refreshSessions();
     });
     return () => { stage(); log(); event(); connection.stop(); };
-  }, [connection, refreshSessions, session]);
+  }, [connection, refreshSessions]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {

@@ -18,15 +18,25 @@ export default function MachinesScreen() {
 
   useEffect(() => { if (session) void refreshMachines(); }, [refreshMachines, session]);
 
-  if (!app.ready) return <Screen><EmptyState title="Loading" detail="Reading this installation's device-only credentials." busy /></Screen>;
-  if (!app.session) {
-    return <Screen contentContainerStyle={styles.signedOut}><View style={[styles.mark, { backgroundColor: palette.accent }]}><Text style={[styles.markText, { color: palette.accentInk }]}>TX</Text></View><Text style={[styles.heroTitle, { color: palette.ink }]}>Your work, away from your desk</Text><Text style={[styles.heroDetail, { color: palette.muted }]}>Sign in with the same TerminalX account as your Mac. Sessions stay on the Mac and travel over an end-to-end encrypted connection.</Text><Button label="Sign in" onPress={() => void app.signIn()} /></Screen>;
-  }
-
   const connect = async (host: (typeof app.hosts)[number]) => {
     await app.connectHost(host);
     router.navigate("/(tabs)/sessions");
   };
+
+  if (!app.ready) return <Screen><EmptyState title="Loading" detail="Reading this installation's device-only credentials." busy /></Screen>;
+  if (!app.session) {
+    return <>
+      <Screen contentContainerStyle={app.hosts.length ? undefined : styles.signedOut}>
+        <View style={[styles.mark, { backgroundColor: palette.accent }]}><Text style={[styles.markText, { color: palette.accentInk }]}>TX</Text></View>
+        <Text style={[styles.heroTitle, { color: palette.ink }]}>Your work, away from your desk</Text>
+        <Text style={[styles.heroDetail, { color: palette.muted }]}>Sign in with the same TerminalX account as your Mac, or use an explicit QR pairing. Sessions stay on the Mac and travel over an end-to-end encrypted connection.</Text>
+        <Button label="Sign in" onPress={() => void app.signIn()} />
+        {app.hosts.length ? <><SectionTitle>QR-paired machines</SectionTitle><Card>{app.hosts.map((host, index) => <Pressable key={host.id} accessibilityRole="button" onPress={() => void connect(host)} style={({ pressed }) => [styles.row, index > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }, pressed && { backgroundColor: palette.raised }]}><StatusDot color={app.activeHost?.id === host.id && app.connectionStage === "connected" ? palette.success : palette.muted} /><View style={styles.rowCopy}><Text style={[styles.rowTitle, { color: palette.ink }]}>{host.label}</Text><Text style={[styles.detail, { color: palette.muted }]}>{app.activeHost?.id === host.id ? connectionLabel(app.connectionStage, app.connectionAttempt) : relativeTime(host.lastConnectedAt)}</Text></View><ChevronRight size={18} color={palette.faint} /></Pressable>)}</Card></> : null}
+        <Button label="Use QR code or pairing code" kind="secondary" onPress={() => setPairingOpen(true)} />
+      </Screen>
+      <PairingSheet visible={pairingOpen} onClose={() => setPairingOpen(false)} onPair={async (code) => { await app.pairCode(code); setPairingOpen(false); }} />
+    </>;
+  }
 
   return <>
     <Screen refreshControl={<RefreshControl refreshing={app.loadingMachines} onRefresh={() => void app.refreshMachines()} tintColor={palette.accent} />}>
