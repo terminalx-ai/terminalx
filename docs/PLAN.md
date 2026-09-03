@@ -195,6 +195,44 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] App-wide status bar: Claude/Codex usage windows, live reset countdowns,
       and attributed PTY/app resource usage with guarded idle cleanup.
 
+#### Stats & Usage definitions
+
+- **Window and scope.** The overview covers the latest 30 local calendar dates,
+  including today, and only activity attributed to a known TerminalX project or
+  worktree. Exact worktree paths and their descendants are in scope. Attached
+  projects, their current git worktrees, retained session locations, and
+  worktree attributions from an existing TerminalX analytics cache establish
+  that set. The cache contributes paths only; token totals are always rebuilt
+  from the provider histories.
+- **History sources.** Claude reads `~/.claude/projects/**/*.jsonl` and
+  `~/.claude/transcripts/**/*.jsonl`. Codex reads system history from
+  `~/.codex/sessions/**/*.jsonl`; the shared managed home at
+  `$RACCOON_HOME/codex/sessions/**/*.jsonl`; every managed account at
+  `$RACCOON_HOME/codex-accounts/*/home/sessions/**/*.jsonl`; and the equivalent
+  shared and per-account homes in the existing TerminalX user-data directory.
+  Canonical file paths prevent physical aliases from being scanned twice.
+  OpenCode is disabled, so no OpenCode home is scanned and it contributes zero.
+- **Sessions and activity.** A provider session is one unique provider
+  `sessionId`, even when its records span files. It is shown when its latest
+  event falls in the 30-day window and any event in that session belongs to a
+  TerminalX worktree. Claude sidechain/subagent records count as turns and
+  share their supplied session id; the transcript filename is only the
+  fallback when no id exists. Repeated Claude stream rows and copied
+  Claude/Codex records in forked histories are deduplicated across files.
+  Turn/event counts, token totals, active days, and the heatmap additionally
+  require each underlying record itself to be both in-window and in-scope.
+- **Tokens and estimates.** Claude cache tokens are cache reads plus cache
+  writes. Codex cached input is a subset of input, while reasoning is already
+  included in output and total tokens. Cache share is cached tokens divided by
+  new input plus cached tokens. API-equivalent prices are inferred per local
+  day, model, and attributed worktree; long-context tiers apply within each of
+  those buckets. Unknown model prices leave the estimate explicitly partial.
+- **Local app counters.** Agents spawned, agent working time, created pull
+  requests, and “Tracking since” come from this installation's retained
+  TerminalX sessions and event log, not provider histories. “Tracking since”
+  is the earliest retained local session creation date. Those counters are
+  deliberately installation-local and do not change the analytics window.
+
 ### C16 — Audit and hardening ✅
 - [x] Screenshots read back against native macOS conventions at 1360×860 and 1000×700 (sidebar, transcript, composer and panel all hold their layout at both sizes; traffic lights, drag region and focus rings behave as a native window's).
 - [x] Long-session stress: demo page `?turns=200&live=1&stream=1000` sustains ~830 deltas/s with ~1 long task/s (max 72 ms) after chunking the streaming preview; composer stays visible and typed text arrives intact.
