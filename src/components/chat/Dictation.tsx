@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { Mic } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { ExternalLink, Mic } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
@@ -15,6 +16,11 @@ import { anchorAt, insertSpoken, type DictationAnchor } from "@/lib/dictationTex
 
 /** Dictation target for the new-session composer, which has no tab yet. */
 export const NEW_SESSION_TARGET = "new-session";
+
+const PRIVACY_SETTINGS_URLS = {
+  microphone: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+  speechRecognition: "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition",
+} as const;
 
 export interface Dictation {
   state: DictationState;
@@ -176,6 +182,16 @@ export function DictationStatus({ dictation }: { dictation: Dictation }) {
       {state.error && state.target === null && (
         <div className="mb-2 flex items-center gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
           <span className="flex-1">{state.error}</span>
+          {state.settings && (
+            <button
+              type="button"
+              className="inline-flex shrink-0 items-center gap-1 underline-offset-2 hover:underline"
+              onClick={() => void openUrl(PRIVACY_SETTINGS_URLS[state.settings!])}
+            >
+              Open System Settings
+              <ExternalLink className="size-3" />
+            </button>
+          )}
           <button type="button" className="underline-offset-2 hover:underline" onClick={clearDictationError}>
             Dismiss
           </button>

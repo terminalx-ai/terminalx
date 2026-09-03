@@ -7,7 +7,7 @@ import { SettingRow, Switch } from "@/components/ui/controls";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/menu";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
-import { errorMessage, transcription, type DownloadProgress, type TranscriptionModel, type TranscriptionSettings } from "@/lib/api";
+import { errorMessage, transcription, type DownloadProgress, type InputDevice, type TranscriptionModel, type TranscriptionPreferences } from "@/lib/api";
 import { refreshDictationEngine } from "@/lib/dictation";
 
 const APPLE = "apple";
@@ -36,13 +36,14 @@ function Score({ label, value }: { label: string; value: number }) {
  */
 export function TranscriptionTab() {
   const [models, setModels] = useState<TranscriptionModel[]>([]);
-  const [settings, setSettings] = useState<TranscriptionSettings | null>(null);
+  const [settings, setSettings] = useState<TranscriptionPreferences | null>(null);
+  const [inputs, setInputs] = useState<InputDevice[]>([]);
   const [progress, setProgress] = useState<Record<string, DownloadProgress>>({});
   const [error, setError] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
-      const [m, s] = await Promise.all([transcription.models(), transcription.settings()]);
+      const [m, s] = await Promise.all([transcription.models(), transcription.preferences()]);
       setModels(m);
       setSettings(s);
       const p: Record<string, DownloadProgress> = {};
@@ -55,12 +56,13 @@ export function TranscriptionTab() {
 
   /**
    * Devices come and go while the tab sits open — a headset paired after mount
-   * is otherwise invisible until Settings is reopened. `transcription_settings`
-   * re-enumerates them, so re-read it as the menu opens.
+   * is otherwise invisible until Settings is reopened. Enumeration is kept
+   * behind this explicit action because merely rendering settings must not
+   * make macOS consult microphone privacy.
    */
   const refreshInputs = useCallback(async () => {
     try {
-      setSettings(await transcription.settings());
+      setInputs(await transcription.inputs());
     } catch (e) {
       setError(errorMessage(e));
     }
@@ -234,7 +236,7 @@ export function TranscriptionTab() {
                   }}
                 >
                   <DropdownMenuRadioItem value="">System default</DropdownMenuRadioItem>
-                  {settings?.inputs.map((d) => (
+                  {inputs.map((d) => (
                     <DropdownMenuRadioItem key={d.id} value={d.id}>
                       {d.name}
                       {d.isDefault && <span className="ml-2 text-[11px] text-faint">default</span>}

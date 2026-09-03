@@ -3,12 +3,12 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 /** The recogniser lives in Rust; here it is a function this file calls. */
-let deliver: (payload: { kind: string; text?: string; message?: string }) => void = () => {};
+let deliver: (payload: { kind: string; text?: string; message?: string; settings?: string }) => void = () => {};
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async (cmd: string) => {
     if (cmd === "dictation_available") return true;
-    if (cmd === "transcription_settings") return { model: "apple" };
+    if (cmd === "transcription_preferences") return { model: "apple" };
     if (cmd === "transcription_models") return [];
     return undefined;
   }),
@@ -21,7 +21,11 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 
-const { useDictationInto } = await import("./Dictation");
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
+
+const { openUrl } = await import("@tauri-apps/plugin-opener");
+const { clearDictationError } = await import("@/lib/dictation");
+const { DictationStatus, useDictationInto } = await import("./Dictation");
 
 /** A composer, stripped to the textarea and the mic. */
 function Field({ initial = "" }: { initial?: string }) {
@@ -32,12 +36,13 @@ function Field({ initial = "" }: { initial?: string }) {
     <>
       <textarea ref={ref} value={draft} onChange={(e) => setDraft(e.target.value)} />
       <button onClick={dictation.toggle}>mic</button>
+      <DictationStatus dictation={dictation} />
     </>
   );
 }
 
 const box = () => screen.getByRole("textbox") as HTMLTextAreaElement;
-const send = async (payload: { kind: string; text?: string }) => {
+const send = async (payload: { kind: string; text?: string; message?: string; settings?: string }) => {
   await act(async () => {
     deliver(payload);
   });
@@ -56,17 +61,33 @@ async function open(initial = "", caret = initial.length) {
 /** Press the mic and get as far as listening. */
 async function startDictating() {
   await act(async () => {
-    fireEvent.click(screen.getByRole("button"));
+    fireEvent.click(screen.getByRole("button", { name: "mic" }));
   });
   await send({ kind: "listening" });
 }
 
 afterEach(async () => {
   await send({ kind: "stopped" });
+  clearDictationError();
+  vi.mocked(openUrl).mockClear();
   cleanup();
 });
 
 describe("dictating into a composer", () => {
+  it.each([
+    ["microphone", "Microphone access is denied.", "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"],
+    ["speechRecognition", "Speech recognition access is denied.", "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"],
+  ])("links denied %s access to its System Settings privacy pane", async (settings, message, url) => {
+    await open();
+    await startDictating();
+
+    await send({ kind: "error", message, settings });
+
+    expect(screen.getByText(message)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Open System Settings/i }));
+    expect(openUrl).toHaveBeenCalledWith(url);
+  });
+
   it("appends past a pause instead of replacing what came before", async () => {
     await open();
     await startDictating();

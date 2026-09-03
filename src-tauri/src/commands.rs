@@ -1215,11 +1215,17 @@ pub fn transcription_set_model(state: State<'_, AppState>, id: String) -> CmdRes
     state.transcription.set_model(&id).map_err(err)
 }
 
-/// Enumerates input devices, so it must stay off the IPC thread.
 #[tauri::command]
-pub async fn transcription_settings(state: State<'_, AppState>) -> CmdResult<crate::transcription::TranscriptionSettings> {
+pub fn transcription_preferences(state: State<'_, AppState>) -> crate::transcription::TranscriptionPreferences {
+    state.transcription.preferences()
+}
+
+/// Enumerates input devices, so it must stay off the IPC thread and must only
+/// be invoked in response to an explicit input-picker or dictation action.
+#[tauri::command]
+pub async fn transcription_inputs(state: State<'_, AppState>) -> CmdResult<Vec<crate::transcription::audio::InputDevice>> {
     let transcription = state.transcription.clone();
-    tauri::async_runtime::spawn_blocking(move || transcription.settings()).await.map_err(err)
+    tauri::async_runtime::spawn_blocking(move || transcription.inputs()).await.map_err(err)
 }
 
 #[tauri::command]

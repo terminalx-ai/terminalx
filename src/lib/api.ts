@@ -570,11 +570,10 @@ export interface InputDevice {
   name: string;
   isDefault: boolean;
 }
-export interface TranscriptionSettings {
+export interface TranscriptionPreferences {
   model: string;
   inputDevice: string | null;
   muteWhileRecording: boolean;
-  inputs: InputDevice[];
 }
 export const transcription = {
   models: () => invoke<TranscriptionModel[]>("transcription_models"),
@@ -582,7 +581,8 @@ export const transcription = {
   cancelDownload: (id: string) => invoke<void>("transcription_cancel_download", { id }),
   remove: (id: string) => invoke<void>("transcription_delete", { id }),
   setModel: (id: string) => invoke<void>("transcription_set_model", { id }),
-  settings: () => invoke<TranscriptionSettings>("transcription_settings"),
+  preferences: () => invoke<TranscriptionPreferences>("transcription_preferences"),
+  inputs: () => invoke<InputDevice[]>("transcription_inputs"),
   setInput: (device: string | null) => invoke<void>("transcription_set_input", { device }),
   setMute: (mute: boolean) => invoke<void>("transcription_set_mute", { mute }),
 };

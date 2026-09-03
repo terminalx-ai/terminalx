@@ -28,12 +28,14 @@ export interface DictationState {
   /** Which composer (tab id) the text belongs to. */
   target: string | null;
   error: string | null;
+  /** The privacy pane that can resolve the current permission error. */
+  settings: "microphone" | "speechRecognition" | null;
   available: boolean | null;
   /** Human name of the engine dictation will use, for the mic tooltip. */
   engine: string;
 }
 
-let state: DictationState = { phase: "idle", text: "", session: 0, target: null, error: null, available: null, engine: "Apple" };
+let state: DictationState = { phase: "idle", text: "", session: 0, target: null, error: null, settings: null, available: null, engine: "Apple" };
 /** The segments behind `state.text`; see `./dictationText`. */
 let buffer: DictationBuffer = EMPTY_BUFFER;
 const listeners = new Set<() => void>();
@@ -57,6 +59,7 @@ interface DictationEvent {
   kind: "partial" | "final" | "error" | "stopped" | "listening" | "transcribing";
   text?: string;
   message?: string;
+  settings?: "microphone" | "speechRecognition";
   /** Stable identity derived from Apple's transcription segment timestamps. */
   segment?: number;
 }
@@ -86,7 +89,7 @@ async function subscribe() {
       trace(p);
       switch (p.kind) {
         case "listening":
-          set({ phase: "listening", error: null });
+          set({ phase: "listening", error: null, settings: null });
           break;
         case "transcribing":
           set({ phase: "finishing" });
@@ -107,7 +110,7 @@ async function subscribe() {
           break;
         case "error":
           previousPartialAt = null;
-          set({ phase: "idle", error: p.message ?? "Dictation failed.", target: null });
+          set({ phase: "idle", error: p.message ?? "Dictation failed.", settings: p.settings ?? null, target: null });
           break;
         case "stopped":
           previousPartialAt = null;
@@ -137,7 +140,7 @@ export async function dictationAvailable(): Promise<boolean> {
 export async function refreshDictationEngine() {
   try {
     const [settings, models] = await Promise.all([
-      invoke<{ model: string }>("transcription_settings"),
+      invoke<{ model: string }>("transcription_preferences"),
       invoke<{ id: string; name: string; installed: boolean }[]>("transcription_models"),
     ]);
     const m = models.find((x) => x.id === settings.model);
@@ -157,7 +160,7 @@ export function startDictation(target: string): number | null {
   buffer = EMPTY_BUFFER;
   previousPartialAt = null;
   const session = state.session + 1;
-  set({ phase: "starting", text: "", session, target, error: null });
+  set({ phase: "starting", text: "", session, target, error: null, settings: null });
   void (async () => {
     // The listener is in place before the microphone is, so no result can
     // arrive before there is somewhere for it to go.
@@ -184,7 +187,7 @@ export async function stopDictation() {
 }
 
 export function clearDictationError() {
-  set({ error: null });
+  set({ error: null, settings: null });
 }
 
 if (import.meta.hot) import.meta.hot.accept(() => window.location.reload());
