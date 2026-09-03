@@ -229,10 +229,7 @@ fn validate_relay_transcript(
     require_field(
         &fields,
         "previousGeneration",
-        &context
-            .previous_generation
-            .map(u64::to_be_bytes)
-            .unwrap_or_default(),
+        &previous_generation_bytes(context.previous_generation),
     )?;
     require_field(
         &fields,
@@ -240,6 +237,12 @@ fn validate_relay_transcript(
         &[u8::from(context.resume_requested)],
     )?;
     Ok(())
+}
+
+fn previous_generation_bytes(generation: Option<u64>) -> Vec<u8> {
+    generation
+        .map(|value| value.to_be_bytes().to_vec())
+        .unwrap_or_default()
 }
 
 fn require_field(
@@ -649,6 +652,15 @@ mod tests {
         let expected = general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(key.public()));
         assert_eq!(key.host_id(), &expected[..16]);
         assert_eq!(key.public_key_b64().len(), 44);
+    }
+
+    #[test]
+    fn absent_relay_generation_is_zero_length() {
+        assert!(previous_generation_bytes(None).is_empty());
+        assert_eq!(
+            previous_generation_bytes(Some(7)),
+            7u64.to_be_bytes().as_slice()
+        );
     }
 
     #[test]
