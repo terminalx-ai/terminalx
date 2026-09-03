@@ -317,6 +317,8 @@ impl ControlService {
             prompt: String,
             use_worktree: bool,
             #[serde(default)]
+            on_main: bool,
+            #[serde(default)]
             model: String,
             #[serde(default)]
             effort: Option<String>,
@@ -328,6 +330,7 @@ impl ControlService {
         if p.prompt.trim().is_empty() {
             return Err(ControlError::invalid("--prompt cannot be empty."));
         }
+        validate_control_session_target(p.use_worktree, p.on_main)?;
         let available = crate::harness::offered()
             .into_iter()
             .find(|h| h.id == p.agent)
@@ -356,16 +359,17 @@ impl ControlService {
                 project_path: project.path,
                 title: None,
                 use_worktree: p.use_worktree,
+                on_main: p.on_main,
                 base_ref: None,
                 worktree_name: None,
                 issue: None,
                 cwd: None,
-                tab: NewTab {
+                tab: Some(NewTab {
                     harness: p.agent,
                     model: p.model,
                     effort: p.effort,
                     permission_mode: p.mode,
-                },
+                }),
             },
         )
         .map_err(ControlError::internal)?;
@@ -640,6 +644,20 @@ fn resolve_session(selector: &str) -> Result<SessionEntry, ControlError> {
     )
 }
 
+fn validate_control_session_target(use_worktree: bool, on_main: bool) -> Result<(), ControlError> {
+    if use_worktree && on_main {
+        return Err(ControlError::invalid(
+            "useWorktree and onMain are mutually exclusive.",
+        ));
+    }
+    if !use_worktree && !on_main {
+        return Err(ControlError::invalid(
+            "Skipping a worktree requires onMain to be explicitly true.",
+        ));
+    }
+    Ok(())
+}
+
 fn resolve_target(selector: &str) -> Result<Target, ControlError> {
     let sessions = index::load().map_err(ControlError::internal)?;
     if let Some(session) = sessions
@@ -754,6 +772,47 @@ fn canonical_or_original(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_session_target_requires_explicit_on_main() {
+        assert!(validate_control_session_target(true, false).is_ok());
+        assert!(validate_control_session_target(false, true).is_ok());
+        assert!(validate_control_session_target(true, true).is_err());
+        let error = validate_control_session_target(false, false).unwrap_err();
+        assert!(error.message.contains("onMain"));
+    }
+
+    #[test]
+    fn resolves_an_agentless_session_for_cli_show_and_tab_listing() {
+        let _home = crate::store::temp_home();
+        let session = SessionEntry {
+            id: "zero-tab-session".into(),
+            project_path: "/repo".into(),
+            cwd: "/repo".into(),
+            worktree_name: None,
+            branch: Some("main".into()),
+            base_ref: None,
+            worktree_removed: false,
+            issue: None,
+            title: "main".into(),
+            created: "now".into(),
+            modified: "now".into(),
+            archived: false,
+            pinned: false,
+            tabs: Vec::new(),
+            active_tab: None,
+            unknown: std::collections::BTreeMap::new(),
+        };
+        index::update(|sessions| {
+            sessions.push(session.clone());
+            Ok(())
+        })
+        .unwrap();
+
+        let resolved = resolve_session("zero-tab").unwrap();
+        assert_eq!(resolved, session);
+        assert!(resolved.tabs.is_empty());
+    }
 
     #[test]
     fn request_and_response_are_single_line_json() {

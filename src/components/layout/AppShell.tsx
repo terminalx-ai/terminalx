@@ -21,6 +21,7 @@ import { Toasts } from "@/components/ui/Toasts";
 import { BypassDialog } from "@/components/session/BypassDialog";
 import { SettleDialog } from "@/components/session/SettleDialog";
 import { WorkspaceDeleteDialog } from "@/components/session/WorkspaceDeleteDialog";
+import { RightPanel } from "@/components/layout/RightPanel";
 
 export const TITLEBAR_INSET = 78; // traffic-light clearance, px
 
@@ -76,49 +77,106 @@ export function AppShell() {
       <WorkspaceDeleteDialog />
       {sidebarOpen && <Sidebar onToggle={toggleSidebar} onOpenSettings={openSettings} onOpenIssues={showIssues} onOpenAgents={showAgents} onSearch={setSessionSearch} />}
 
-      <main className="flex h-full min-w-0 flex-1 flex-col">
-        {selected ? (
+      {selected ? (
+        <main className="flex h-full min-w-0 flex-1 flex-col">
           <ErrorBoundary key={selected.id} label="the session">
             <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
           </ErrorBoundary>
-        ) : (
-          <>
-            <header
-              data-tauri-drag-region="deep"
-              className="flex h-(--titlebar-h) shrink-0 items-center gap-1 px-2"
-              style={{ paddingLeft: sidebarOpen ? 8 : TITLEBAR_INSET }}
-            >
-              {!sidebarOpen && (
-                <WithTooltip label="Show sidebar" keys={keycaps("mod+b")}>
-                  <Button variant="ghost" size="icon-sm" aria-label="Show sidebar" onClick={toggleSidebar}>
-                    <PanelLeft />
-                  </Button>
-                </WithTooltip>
-              )}
-              {/* The dashboard draws its own title, so the strip stays quiet for it. */}
-              <span className="min-w-0 flex-1 truncate px-1 text-sm text-muted-foreground">
-                {store.view === "issues" ? "Issues" : store.view === "agents" ? "" : "New session"}
-              </span>
-              <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} keys={keycaps("mod+e")}>
-                <Button variant="ghost" size="icon-sm" aria-label="Toggle panel" onClick={togglePanel}>
-                  <PanelRight />
-                </Button>
-              </WithTooltip>
-            </header>
-            <section className="flex min-h-0 flex-1 flex-col">
-              {store.view === "issues" ? (
-                <IssuesView onCreated={onCreated} />
-              ) : store.view === "agents" ? (
-                <AgentDashboard />
-              ) : (
-                <NewSessionView onCreated={onCreated} />
-              )}
-            </section>
-          </>
-        )}
-      </main>
+        </main>
+      ) : (
+        <UnselectedWorkspace
+          key={store.view}
+          sidebarOpen={sidebarOpen}
+          onToggleSidebar={toggleSidebar}
+          onTogglePanel={togglePanel}
+          onCreated={onCreated}
+        />
+      )}
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
     </div>
+  );
+}
+
+/** A pre-session checkout has the same full-height panel frame as a session. */
+function UnselectedWorkspace({
+  sidebarOpen,
+  onToggleSidebar,
+  onTogglePanel,
+  onCreated,
+}: {
+  sidebarOpen: boolean;
+  onToggleSidebar: () => void;
+  onTogglePanel: () => void;
+  onCreated: (sessionId: string, tabId: string, text: string) => void;
+}) {
+  const prefs = usePrefs();
+  const store = useSessionStore();
+  const [useWorktree, setUseWorktree] = useState(prefs.useWorktree);
+  const [issueProjectPath, setIssueProjectPath] = useState<string | null>(null);
+
+  const preset = store.newSessionPreset;
+  const wanted = preset?.projectPath ?? store.selectedProject ?? prefs.lastProject ?? store.lastProject;
+  const newProject = store.projects.find((project) => project.path === wanted) ?? store.projects[0] ?? null;
+  const issueProject = store.projects.find((project) => project.path === issueProjectPath) ?? null;
+  const project = store.view === "new" ? newProject : store.view === "issues" ? issueProject : null;
+  const cwd = store.view === "new" ? (preset?.cwd ?? project?.path ?? null) : project?.path ?? null;
+  const workspace = cwd && project ? (store.workspaces[project.path] ?? []).find((item) => item.path === cwd) : null;
+  const panelAvailable = !!cwd && !!project;
+  const labelMode = preset?.cwd && store.view === "new" ? "branch" : useWorktree ? "base" : "branch";
+
+  return (
+    <>
+      <main className="flex h-full min-w-0 flex-1 flex-col">
+        <header
+          data-tauri-drag-region="deep"
+          className="flex h-(--titlebar-h) shrink-0 items-center gap-1 px-2"
+          style={{ paddingLeft: sidebarOpen ? 8 : TITLEBAR_INSET }}
+        >
+          {!sidebarOpen && (
+            <WithTooltip label="Show sidebar" keys={keycaps("mod+b")}>
+              <Button variant="ghost" size="icon-sm" aria-label="Show sidebar" onClick={onToggleSidebar}>
+                <PanelLeft />
+              </Button>
+            </WithTooltip>
+          )}
+          {/* The dashboard draws its own title, so the strip stays quiet for it. */}
+          <span className="min-w-0 flex-1 truncate px-1 text-sm text-muted-foreground">
+            {store.view === "issues" ? "Issues" : store.view === "agents" ? "" : "New session"}
+          </span>
+          {panelAvailable && (
+            <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} keys={keycaps("mod+e")}>
+              <Button variant="ghost" size="icon-sm" aria-label="Toggle panel" onClick={onTogglePanel}>
+                <PanelRight />
+              </Button>
+            </WithTooltip>
+          )}
+        </header>
+        <section className="flex min-h-0 flex-1 flex-col">
+          {store.view === "issues" ? (
+            <IssuesView
+              onCreated={onCreated}
+              useWorktree={useWorktree}
+              onUseWorktreeChange={setUseWorktree}
+              onTargetProjectChange={setIssueProjectPath}
+            />
+          ) : store.view === "agents" ? (
+            <AgentDashboard />
+          ) : (
+            <NewSessionView onCreated={onCreated} useWorktree={useWorktree} onUseWorktreeChange={setUseWorktree} />
+          )}
+        </section>
+      </main>
+      {prefs.panelOpen && panelAvailable && cwd && project && (
+        <RightPanel
+          key={cwd}
+          cwd={cwd}
+          branch={workspace?.branch}
+          workingTree
+          rootName={project.name}
+          labelMode={labelMode}
+        />
+      )}
+    </>
   );
 }

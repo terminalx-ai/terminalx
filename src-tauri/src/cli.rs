@@ -295,6 +295,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                     "agent": agent,
                     "prompt": prompt,
                     "useWorktree": !on_main,
+                    "onMain": on_main,
                     "model": model.unwrap_or_default(),
                     "effort": effort,
                     "mode": mode,
@@ -505,7 +506,28 @@ mod tests {
         assert_eq!(params["agent"], "codex");
         assert_eq!(params["prompt"], "reply once");
         assert_eq!(params["useWorktree"], false);
+        assert_eq!(params["onMain"], true);
         assert_eq!(params["effort"], "high");
+    }
+
+    #[test]
+    fn session_creation_defaults_to_a_worktree_without_on_main_acknowledgement() {
+        let parsed = parse(&args(&[
+            "sessions",
+            "create",
+            "--project",
+            "raccoon",
+            "--agent",
+            "codex",
+            "--prompt",
+            "reply once",
+        ]))
+        .unwrap();
+        let Action::Rpc { params, .. } = parsed.action else {
+            panic!("expected rpc")
+        };
+        assert_eq!(params["useWorktree"], true);
+        assert_eq!(params["onMain"], false);
     }
 
     #[test]

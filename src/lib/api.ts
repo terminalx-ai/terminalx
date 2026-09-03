@@ -41,8 +41,11 @@ export interface NewSession {
   baseRef?: string | null;
   /** A requested worktree name (an issue slug); sanitised and made unique. */
   worktreeName?: string | null;
+  /** Explicit acknowledgement that a requested worktree should be skipped. */
+  onMain?: boolean;
   issue?: IssueRef | null;
-  tab: NewTab;
+  /** The first agent conversation. Omit to open the checkout by itself. */
+  tab?: NewTab;
 }
 
 export const api = {
