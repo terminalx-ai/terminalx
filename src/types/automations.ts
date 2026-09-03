@@ -19,6 +19,29 @@ export interface AutomationPrecheck {
   timeoutSeconds: number;
 }
 
+export interface AutomationFailureReport {
+  comment: boolean;
+  addLabels: string[];
+}
+
+export interface AutomationIssueReport {
+  comment: boolean;
+  addLabels: string[];
+  removeLabels: string[];
+  openPr: boolean;
+  onFailure: AutomationFailureReport;
+}
+
+export interface AutomationIssueTrigger {
+  provider: "github";
+  repo: string;
+  query: string;
+  pollIntervalMinutes: number;
+  maxRunsPerTick: number;
+  runOnExisting: boolean;
+  report: AutomationIssueReport;
+}
+
 export type AutomationRunStatus =
   | "pending"
   | "running"
@@ -51,14 +74,14 @@ export interface Automation {
   nextRunAt: string;
   lastRunAt?: string | null;
   lastOutcome?: AutomationRunStatus | null;
-  issueTrigger?: unknown;
+  issueTrigger?: AutomationIssueTrigger | null;
   created: string;
   modified: string;
 }
 
 export type AutomationInput = Omit<
   Automation,
-  "id" | "nextRunAt" | "lastRunAt" | "lastOutcome" | "issueTrigger" | "created" | "modified"
+  "id" | "nextRunAt" | "lastRunAt" | "lastOutcome" | "created" | "modified"
 >;
 
 export type AutomationTrigger = "scheduled" | "manual" | "issue";
@@ -91,13 +114,35 @@ export interface AutomationRun {
   sessionId?: string | null;
   tabId?: string | null;
   worktreeName?: string | null;
+  issue?: AutomationIssueRef | null;
   finalMessage?: string | null;
   changedFiles?: number | null;
   usage?: AutomationUsage | null;
   precheck?: AutomationPrecheckResult | null;
   error?: string | null;
+  reported?: AutomationReported | null;
   repeatCount: number;
   lastRepeatAt?: string | null;
+}
+
+export interface AutomationIssueRef {
+  provider: string;
+  id: string;
+  identifier: string;
+  title: string;
+  url: string;
+}
+
+export interface AutomationReported {
+  comment?: string | null;
+  labels?: string[];
+  prUrl?: string | null;
+}
+
+export interface AutomationIssueState {
+  automationId: string;
+  lastPolledAt?: string | null;
+  lastPollError?: string | null;
 }
 
 export interface AutomationRef {

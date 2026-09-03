@@ -18,6 +18,7 @@ const { invoke, sessionStore } = vi.hoisted(() => ({
       },
     ],
     selectedProject: "/repo",
+    sessions: [],
     newSessionPreset: null,
     workspaces: {},
   },
@@ -67,7 +68,7 @@ const issues = [
     url: "https://example.test/issues/11",
     state: "OPEN",
     stateType: "open" as const,
-    labels: [],
+    labels: [{ name: "raccoon", color: "1D76DB" }],
     updatedAt: "2026-09-02T00:00:00Z",
     body: "First issue body.",
   },
@@ -95,6 +96,7 @@ function mockBackend() {
       return { isRepo: true, dirty: false, branch: "main", upstream: "origin/main", ahead: 0, behind: 0, defaultBranch: "main", aheadOfBase: 0, head: "abc" };
     }
     if (command === "issues_list") return issues;
+    if (command === "automation_issue_preview") return issues;
     if (command === "issue_details") return issues.find((issue) => issue.id === args?.id);
     if (command === "create_session") {
       const req = (args as { req: Record<string, unknown> }).req;
@@ -179,5 +181,17 @@ describe("issue session targets", () => {
     await waitFor(() => expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(true));
     const [, args] = invoke.mock.calls.find(([command]) => command === "create_session") as [string, { req: Record<string, unknown> }];
     expect(args.req).toMatchObject({ useWorktree: false, onMain: true, worktreeName: "11-fix-login-timeout" });
+  });
+
+  it("opens the shared automation editor from an issue label", async () => {
+    render(<IssuesView />);
+    const row = (await screen.findByText("Fix login timeout")).closest("button")!;
+    fireEvent.contextMenu(row);
+    fireEvent.click(await screen.findByText("Automate this label: raccoon…"));
+
+    expect(await screen.findByRole("heading", { name: "New automation" })).toBeTruthy();
+    expect(screen.getByDisplayValue("terminalx-ai/raccoon")).toBeTruthy();
+    expect(screen.getByDisplayValue("label:raccoon")).toBeTruthy();
+    expect(await screen.findByText("2 matching issues")).toBeTruthy();
   });
 });

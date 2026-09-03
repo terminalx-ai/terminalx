@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { automationsApi } from "@/lib/api";
-import type { Automation, AutomationInput, AutomationRun } from "@/types/automations";
+import type { Automation, AutomationInput, AutomationIssueState, AutomationRun } from "@/types/automations";
 import { noteAutomationFailure } from "@/lib/notify";
 
 interface State {
@@ -9,9 +9,10 @@ interface State {
   automations: Automation[];
   runs: Record<string, AutomationRun[]>;
   loadingRuns: Record<string, boolean>;
+  issueStates: Record<string, AutomationIssueState>;
 }
 
-let state: State = { loaded: false, automations: [], runs: {}, loadingRuns: {} };
+let state: State = { loaded: false, automations: [], runs: {}, loadingRuns: {}, issueStates: {} };
 const listeners = new Set<() => void>();
 const loading = new Map<string, Promise<AutomationRun[]>>();
 
@@ -41,12 +42,21 @@ export async function bootAutomations() {
     await Promise.all([
       listen<Automation[]>("automations_changed", (event) => set({ automations: event.payload, loaded: true })),
       listen<AutomationRun>("automation_run", (event) => upsertRun(event.payload)),
+      listen<AutomationIssueState>("automation_issue_state", (event) => {
+        const value = event.payload;
+        set({ issueStates: { ...state.issueStates, [value.automationId]: value } });
+      }),
     ]);
   } catch {
     /* outside a webview */
   }
   try {
-    set({ automations: await automationsApi.list(), loaded: true });
+    const [automations, issueStates] = await Promise.all([automationsApi.list(), automationsApi.issueStates()]);
+    set({
+      automations,
+      issueStates: Object.fromEntries(issueStates.map((value) => [value.automationId, value])),
+      loaded: true,
+    });
   } catch {
     set({ loaded: true });
   }
@@ -68,7 +78,12 @@ export function getAutomationStore(): State {
 }
 
 export async function refreshAutomations() {
-  set({ automations: await automationsApi.list(), loaded: true });
+  const [automations, issueStates] = await Promise.all([automationsApi.list(), automationsApi.issueStates()]);
+  set({
+    automations,
+    issueStates: Object.fromEntries(issueStates.map((value) => [value.automationId, value])),
+    loaded: true,
+  });
 }
 
 export function loadAutomationRuns(automationId: string): Promise<AutomationRun[]> {
@@ -105,8 +120,10 @@ export async function updateAutomation(id: string, input: AutomationInput) {
 export async function deleteAutomation(id: string) {
   await automationsApi.remove(id);
   const runs = { ...state.runs };
+  const issueStates = { ...state.issueStates };
   delete runs[id];
-  set({ automations: state.automations.filter((value) => value.id !== id), runs });
+  delete issueStates[id];
+  set({ automations: state.automations.filter((value) => value.id !== id), runs, issueStates });
 }
 
 export async function runAutomationNow(id: string) {

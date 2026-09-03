@@ -70,7 +70,7 @@ pub struct AutomationPrecheck {
 pub struct AutomationFailureReport {
     #[serde(default)]
     pub comment: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub add_labels: Vec<String>,
 }
 
@@ -88,9 +88,9 @@ impl Default for AutomationFailureReport {
 pub struct AutomationIssueReport {
     #[serde(default)]
     pub comment: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub add_labels: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub remove_labels: Vec<String>,
     #[serde(default)]
     pub open_pr: bool,
@@ -434,7 +434,7 @@ pub struct AutomationRun {
 pub struct AutomationReported {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_url: Option<String>,

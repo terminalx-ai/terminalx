@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { CalendarClock, ChevronDown, ChevronRight, Clock3, FolderGit2, Loader2, Pencil, Play, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { CalendarClock, ChevronDown, ChevronRight, CircleDot, Clock3, ExternalLink, FolderGit2, Loader2, Pencil, Play, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { AgentMark } from "@/components/AgentMark";
 import { Markdown } from "@/components/chat/Markdown";
 import { AutomationEditor } from "@/components/automations/AutomationEditor";
@@ -60,7 +61,14 @@ function toInput(automation: Automation): AutomationInput {
     precheck: automation.precheck ?? null,
     missedRunGraceMinutes: automation.missedRunGraceMinutes,
     runTimeoutMinutes: automation.runTimeoutMinutes ?? null,
+    issueTrigger: automation.issueTrigger ?? null,
   };
+}
+
+function issueTriggerSentence(automation: Automation): string | null {
+  const trigger = automation.issueTrigger;
+  if (!trigger) return null;
+  return `GitHub: ${trigger.query} in ${trigger.repo}, checked every ${trigger.pollIntervalMinutes} min`;
 }
 
 /** Saved prompts on the left; one automation and its chronological run story on the right. */
@@ -157,7 +165,7 @@ export function AutomationsView() {
         <div className="flex items-center gap-2 px-4 pb-2 pt-3">
           <div>
             <h1 className="text-lg font-semibold tracking-tight">Automations</h1>
-            <p className="text-xs text-muted-foreground">Scheduled and manual agent runs</p>
+            <p className="text-xs text-muted-foreground">Scheduled, issue-driven and manual agent runs</p>
           </div>
           <div className="ml-auto flex items-center gap-1">
             <WithTooltip label="Refresh">
@@ -204,10 +212,13 @@ export function AutomationsView() {
                       <span className="truncate text-[13px] font-medium text-foreground">{automation.name}</span>
                       {!automation.enabled && <span className="rounded bg-veil-raised px-1.5 py-0.5 text-[10px] text-faint">Paused</span>}
                     </div>
-                    <div className="mt-0.5 text-[11px] text-muted-foreground">{describeSchedule(automation.schedule)}</div>
+                    <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{issueTriggerSentence(automation) ?? describeSchedule(automation.schedule)}</div>
                     <div className="mt-0.5 flex flex-wrap gap-x-1 text-[11px] text-faint">
-                      <span>Next run {relativeNext(automation.nextRunAt)}</span>
-                      <span>· {nextWallTime(automation.nextRunAt, automation.schedule.timezone)}</span>
+                      {automation.issueTrigger ? (
+                        <span>{automationStore.issueStates[automation.id]?.lastPolledAt ? `Last checked ${relativeTime(automationStore.issueStates[automation.id].lastPolledAt!)}` : "Waiting for first check"}</span>
+                      ) : (
+                        <><span>Next run {relativeNext(automation.nextRunAt)}</span><span>· {nextWallTime(automation.nextRunAt, automation.schedule.timezone)}</span></>
+                      )}
                       {automation.lastOutcome && <span>· {STATUS_LABEL[automation.lastOutcome]}</span>}
                     </div>
                   </div>
@@ -223,7 +234,7 @@ export function AutomationsView() {
           <>
             <div className="shrink-0 border-b border-hairline px-5 py-4">
               <div className="flex items-start gap-3">
-                <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-veil-raised"><CalendarClock className="size-4 text-muted-foreground" /></div>
+                <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-veil-raised">{selected.issueTrigger ? <CircleDot className="size-4 text-muted-foreground" /> : <CalendarClock className="size-4 text-muted-foreground" />}</div>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <h2 className="truncate text-base font-semibold">{selected.name}</h2>
@@ -244,19 +255,25 @@ export function AutomationsView() {
                 <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-faint">Prompt</div>
                 <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">{selected.prompt}</p>
               </div>
-              <div className="mt-3 flex items-start gap-2 text-xs text-muted-foreground">
-                <Clock3 className="mt-0.5 size-3.5 shrink-0" />
-                <div>
-                  <div>{describeSchedule(selected.schedule)}, next {nextWallTime(selected.nextRunAt, selected.schedule.timezone)} ({relativeNext(selected.nextRunAt)})</div>
-                  <div className="mt-0.5 text-[11px] text-faint">{selected.schedule.timezone}</div>
-                  {selected.schedule.kind === "cron" && (
-                    <details className="mt-1">
-                      <summary className="cursor-default text-[11px] hover:text-muted-foreground">Show cron expression</summary>
-                      <code className="mt-1 block font-mono text-[11px] text-foreground">{selected.schedule.cron}</code>
-                    </details>
-                  )}
+              {selected.issueTrigger ? (
+                <div className="mt-3 flex items-start gap-2 text-xs text-muted-foreground">
+                  <CircleDot className="mt-0.5 size-3.5 shrink-0" />
+                  <div>
+                    <div>GitHub issues matching <code className="font-mono text-foreground">{selected.issueTrigger.query}</code> in <code className="font-mono text-foreground">{selected.issueTrigger.repo}</code></div>
+                    <div className="mt-0.5 text-[11px] text-faint">Checked every {selected.issueTrigger.pollIntervalMinutes} min · up to {selected.issueTrigger.maxRunsPerTick} new run{selected.issueTrigger.maxRunsPerTick === 1 ? "" : "s"} per tick</div>
+                    {automationStore.issueStates[selected.id]?.lastPollError && <div className="mt-1 text-[11px] text-destructive">{automationStore.issueStates[selected.id].lastPollError}</div>}
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="mt-3 flex items-start gap-2 text-xs text-muted-foreground">
+                  <Clock3 className="mt-0.5 size-3.5 shrink-0" />
+                  <div>
+                    <div>{describeSchedule(selected.schedule)}, next {nextWallTime(selected.nextRunAt, selected.schedule.timezone)} ({relativeNext(selected.nextRunAt)})</div>
+                    <div className="mt-0.5 text-[11px] text-faint">{selected.schedule.timezone}</div>
+                    {selected.schedule.kind === "cron" && <details className="mt-1"><summary className="cursor-default text-[11px] hover:text-muted-foreground">Show cron expression</summary><code className="mt-1 block font-mono text-[11px] text-foreground">{selected.schedule.cron}</code></details>}
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin px-5 py-4">
@@ -313,11 +330,12 @@ function RunRow({ run, expanded, last, onToggle }: { run: AutomationRun; expande
     <div className="relative pl-6">
       {!last && <span aria-hidden className="absolute bottom-0 left-[5px] top-3 w-px bg-hairline" />}
       <span aria-hidden className={cn("absolute left-0 top-3 size-[11px] rounded-full ring-4 ring-background", statusColor(run.status))} />
-      <button type="button" onClick={onToggle} className="flex w-full items-start gap-2 rounded-md px-2 py-2 text-left hover:bg-selected/50">
+      <div role="button" tabIndex={0} onClick={onToggle} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onToggle(); }} className="flex w-full items-start gap-2 rounded-md px-2 py-2 text-left hover:bg-selected/50">
         {expanded ? <ChevronDown className="mt-0.5 size-3.5 shrink-0 text-faint" /> : <ChevronRight className="mt-0.5 size-3.5 shrink-0 text-faint" />}
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="text-[13px] font-medium">Run {run.runNumber}</span>
+            {run.issue && <button type="button" onClick={(event) => { event.stopPropagation(); void openUrl(run.issue!.url); }} className="flex items-center gap-1 font-mono text-[11px] text-info hover:underline">{run.issue.identifier}<ExternalLink className="size-3" /></button>}
             <span className="text-[11px] text-muted-foreground">{STATUS_LABEL[run.status]}</span>
             <span className="ml-auto text-[11px] text-faint">{relativeTime(run.startedAt ?? run.endedAt ?? "")}</span>
           </div>
@@ -328,7 +346,7 @@ function RunRow({ run, expanded, last, onToggle }: { run: AutomationRun; expande
             {repeated && <span>· {repeated}</span>}
           </div>
         </div>
-      </button>
+      </div>
       {expanded && (
         <div className="mb-3 ml-2 rounded-lg bg-well p-3">
           {run.sessionId && (
@@ -351,6 +369,14 @@ function RunRow({ run, expanded, last, onToggle }: { run: AutomationRun; expande
               {run.precheck.stderrTail && <pre className="mt-1 overflow-x-auto whitespace-pre-wrap text-[11px] text-destructive">{run.precheck.stderrTail}</pre>}
             </div>
           )}
+          {run.reported && (
+            <div className="mt-3 flex flex-wrap gap-2 border-t border-hairline pt-3 text-[11px]">
+              {run.reported.comment && <button type="button" onClick={() => void openUrl(run.reported!.comment!)} className="text-info hover:underline">View comment</button>}
+              {run.reported.prUrl && <button type="button" onClick={() => void openUrl(run.reported!.prUrl!)} className="text-info hover:underline">Open pull request</button>}
+              {(run.reported.labels?.length ?? 0) > 0 && <span className="text-faint">Labels: {run.reported.labels!.join(", ")}</span>}
+            </div>
+          )}
+          {run.finalMessage && run.error && <div className="mt-2 text-[11px] text-destructive">{run.error}</div>}
         </div>
       )}
     </div>

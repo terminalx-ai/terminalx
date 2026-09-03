@@ -15,7 +15,7 @@ import type {
   WorktreeDisposition,
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
-import type { Automation, AutomationInput, AutomationRun, AutomationRef } from "@/types/automations";
+import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
 
 export interface NewTab {
   harness: string;
@@ -124,6 +124,9 @@ export interface SkillInstallStatus {
 export const automationsApi = {
   list: () => invoke<Automation[]>("automations_list"),
   runs: (automationId: string) => invoke<AutomationRun[]>("automation_runs", { automationId }),
+  issueStates: () => invoke<AutomationIssueState[]>("automation_issue_states"),
+  issuePreview: (projectPath: string, repo: string, query: string) =>
+    invoke<Issue[]>("automation_issue_preview", { projectPath, repo, query }),
   create: (input: AutomationInput) => invoke<Automation>("automation_create", { input }),
   update: (id: string, input: AutomationInput) => invoke<Automation>("automation_update", { id, input }),
   remove: (id: string) => invoke<void>("automation_delete", { id }),
@@ -428,6 +431,7 @@ export interface IssueTeam {
 export interface Issue {
   provider: "github" | "linear";
   id: string;
+  nodeId?: string | null;
   identifier: string;
   number: number;
   title: string;
