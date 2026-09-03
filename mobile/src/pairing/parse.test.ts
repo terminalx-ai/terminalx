@@ -33,6 +33,11 @@ describe("pairing payload parsing", () => {
     expect(parsePairingCode(`terminalx://pair?code=${code}`, () => now)).toEqual(offer);
   });
 
+  it("accepts a direct-only offer with the same pinned E2EE key", () => {
+    const { relay: _, ...direct } = offer;
+    expect(parsePairingCode(encode(direct), () => now)).toEqual(direct);
+  });
+
   it("rejects unknown fields and expired invites", () => {
     expect(parsePairingCode(encode({ ...offer, extra: true }), () => now)).toBeNull();
     expect(parsePairingCode(encode({ ...offer, relay: { ...offer.relay, inviteExpiresAt: now } }), () => now)).toBeNull();

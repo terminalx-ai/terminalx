@@ -6,11 +6,14 @@ import { updateStoredHost, writeHostCredential, type HostCredential, type Stored
 import type { RelayClient } from "./relay-client";
 
 const ROTATION_WINDOW_MS = 7 * 24 * 60 * 60_000;
+type RelayHostCredential = HostCredential & { current: NonNullable<HostCredential["current"]> };
 
-export async function rotateCredentialIfNeeded(args: { client: RelayClient; host: StoredHost; credential: HostCredential }): Promise<{ host: StoredHost; credential: HostCredential }> {
+export async function rotateCredentialIfNeeded(args: { client: RelayClient; host: StoredHost; credential: HostCredential }): Promise<{ host: StoredHost; credential: RelayHostCredential }> {
   let credential = args.credential;
-  const malformedHash = credential.current.hash !== hashCredential(credential.current.token);
-  if (!credential.pending && !malformedHash && credential.current.expiresAt - Date.now() > ROTATION_WINDOW_MS) return args;
+  if (!credential.current || !args.host.relay) throw new Error("Relay credential rotation requires a relay host");
+  const current = credential.current;
+  const malformedHash = current.hash !== hashCredential(current.token);
+  if (!credential.pending && !malformedHash && current.expiresAt - Date.now() > ROTATION_WINDOW_MS) return { ...args, credential: { ...credential, current } };
   if (!credential.pending) {
     const token = base64Url(await Crypto.getRandomBytesAsync(32));
     credential = { ...credential, pending: { token, hash: hashCredential(token), reqId: `rotate-${base64Url(await Crypto.getRandomBytesAsync(16))}` } };
@@ -19,7 +22,7 @@ export async function rotateCredentialIfNeeded(args: { client: RelayClient; host
   const pending = credential.pending!;
   let endpointResult = await getEndpoints(args.client, pending.reqId);
   if (!committed(endpointResult)) {
-    const provision = await args.client.request("pairing.provisionRelay", { reqId: pending.reqId, newResumeTokenHash: pending.hash, expectedCurrentHash: credential.current.hash });
+    const provision = await args.client.request("pairing.provisionRelay", { reqId: pending.reqId, newResumeTokenHash: pending.hash, expectedCurrentHash: current.hash });
     if (!provision.ok) throw new Error(`${provision.refusal.code}: ${provision.refusal.message}`);
     const installed = DeviceCredentialInstalledSchema.parse(provision.value);
     endpointResult = await getEndpoints(args.client, pending.reqId);
@@ -27,13 +30,13 @@ export async function rotateCredentialIfNeeded(args: { client: RelayClient; host
   }
   const installed = DeviceCredentialInstalledSchema.parse(endpointResult.installStatus!.result);
   if (!endpointResult.relay) throw new Error("Relay credential rotation returned no endpoint");
-  const nextCredential: HostCredential = {
+  const nextCredential: RelayHostCredential = {
     v: 1,
     deviceToken: credential.deviceToken,
     current: { token: pending.token, hash: pending.hash, version: installed.currentVersion, expiresAt: installed.resumeExpiresAt },
-    ...(installed.graceExpiresAt ? { grace: { ...credential.current, expiresAt: installed.graceExpiresAt } } : {}),
+    ...(installed.graceExpiresAt ? { grace: { ...current, expiresAt: installed.graceExpiresAt } } : {}),
   };
-  const nextHost = { ...args.host, relay: endpointResult.relay };
+  const nextHost: StoredHost = { ...args.host, relay: endpointResult.relay };
   await writeHostCredential(args.host.id, nextCredential);
   await updateStoredHost(nextHost);
   return { host: nextHost, credential: nextCredential };

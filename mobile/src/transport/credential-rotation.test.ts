@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { HostCredential } from "../store/hosts";
 import { applyResumeConfirmation } from "./credential-confirmation";
 
-const credential: HostCredential = {
+const credential: HostCredential & { current: NonNullable<HostCredential["current"]> } = {
   v: 1,
   deviceToken: "device",
   current: { token: "a".repeat(43), hash: "b".repeat(43), version: 2, expiresAt: 100 },

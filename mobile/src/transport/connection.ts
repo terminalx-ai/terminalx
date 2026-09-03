@@ -111,53 +111,70 @@ export class HostConnection {
 
   private async connectOnce(generation: number): Promise<void> {
     if (!this.active) return;
-    const { credential } = this.active;
-    const candidates = [credential.current, ...(credential.grace && credential.grace.expiresAt > Date.now() ? [credential.grace] : [])];
-    let lastError: unknown;
-    for (const candidate of candidates) {
-      try {
-        const host = await resolveRelay(this.active.host, candidate.token).catch(() => this.active!.host);
-        if (generation !== this.generation) return;
-        const client = new RelayClient({ relay: host.relay, credential: candidate.token, credentialKind: "resume", credentialVersion: candidate.version, deviceToken: credential.deviceToken, desktopPublicKeyB64: host.publicKeyB64 });
-        this.client = client;
-        client.subscribe((event) => { for (const listener of this.eventListeners) listener(event); });
-        let wasConnected = false;
-        client.subscribeState((state) => {
-          if (generation !== this.generation) return;
-          if (state === "connected") {
-            wasConnected = true;
-            this.emitStage("connected", 0);
-            this.log("success", "Connected", host.label);
-          } else if (state === "disconnected" && wasConnected) {
-            this.client = null;
-            this.log("warning", "Connection lost", host.label);
-            void this.connectLoop(generation);
-          }
-        });
-        this.log("info", "Opening encrypted relay", redactEndpoint(host.relay.cellUrl));
-        await client.connect();
-        const confirmation = client.getResumeConfirmation();
-        const confirmedCredential = confirmation ? applyResumeConfirmation(this.active.credential, candidate.version, confirmation) : this.active.credential;
-        if (confirmedCredential !== this.active.credential) await writeHostCredential(host.id, confirmedCredential).catch(() => undefined);
-        const connectedHost = { ...host, lastConnectedAt: Date.now() };
-        await updateStoredHost(connectedHost).catch(() => undefined);
-        this.active.host = connectedHost;
-        this.active.credential = confirmedCredential;
-        for (const stream of this.streams.values()) {
-          stream.detach?.();
-          stream.detach = client.subscribeStream(stream.method, stream.params, stream.deliver);
-        }
-        void rotateCredentialIfNeeded({ client, host: connectedHost, credential: confirmedCredential }).then((rotated) => {
-          if (generation === this.generation && this.active) this.active = rotated;
-        }).catch((error: unknown) => this.log("warning", "Credential rotation deferred", safeError(error)));
-        return;
-      } catch (error) {
-        lastError = error;
-        this.client?.close();
-        this.client = null;
+    const { host: storedHost, credential } = this.active;
+    const clients = new Set<RelayClient>();
+    const openDirect = async (): Promise<ConnectionCandidate> => {
+      const client = new RelayClient({ transport: "direct", endpoint: storedHost.endpoint, deviceToken: credential.deviceToken, desktopPublicKeyB64: storedHost.publicKeyB64 });
+      clients.add(client);
+      this.log("info", "Opening encrypted direct connection", redactEndpoint(storedHost.endpoint));
+      await client.connect();
+      return { client, host: storedHost, path: "direct" };
+    };
+    const attempts: Promise<ConnectionCandidate>[] = [openDirect()];
+    if (storedHost.relay && credential.current) {
+      const resumable = [credential.current, ...(credential.grace && credential.grace.expiresAt > Date.now() ? [credential.grace] : [])];
+      for (const resume of resumable) {
+        attempts.push((async () => {
+          const host = await resolveRelay({ ...storedHost, relay: storedHost.relay! }, resume.token).catch(() => storedHost);
+          if (!host.relay) throw new Error("Relay endpoint unavailable");
+          const client = new RelayClient({ relay: host.relay, credential: resume.token, credentialKind: "resume", credentialVersion: resume.version, deviceToken: credential.deviceToken, desktopPublicKeyB64: host.publicKeyB64 });
+          clients.add(client);
+          this.log("info", "Opening encrypted relay", redactEndpoint(host.relay.cellUrl));
+          await client.connect();
+          return { client, host, path: "relay", resumeVersion: resume.version };
+        })());
       }
     }
-    throw lastError ?? new Error("No live resume credential");
+    const winner = await firstCandidate(attempts);
+    for (const client of clients) if (client !== winner.client) client.close();
+    if (generation !== this.generation || !this.active) {
+      winner.client.close();
+      return;
+    }
+    const { client, host } = winner;
+    this.client = client;
+    client.subscribe((event) => { for (const listener of this.eventListeners) listener(event); });
+    let wasConnected = false;
+    client.subscribeState((state) => {
+      if (generation !== this.generation) return;
+      if (state === "connected") {
+        wasConnected = true;
+        this.emitStage("connected", 0);
+        this.log("success", "Connected", `${host.label} · ${winner.path}`);
+      } else if (state === "disconnected" && wasConnected) {
+        this.client = null;
+        this.log("warning", "Connection lost", host.label);
+        void this.connectLoop(generation);
+      }
+    });
+    const confirmation = client.getResumeConfirmation();
+    const confirmedCredential = confirmation && winner.resumeVersion && this.active.credential.current
+      ? applyResumeConfirmation({ ...this.active.credential, current: this.active.credential.current }, winner.resumeVersion, confirmation)
+      : this.active.credential;
+    if (confirmedCredential !== this.active.credential) await writeHostCredential(host.id, confirmedCredential).catch(() => undefined);
+    const connectedHost = { ...host, lastConnectedAt: Date.now() };
+    await updateStoredHost(connectedHost).catch(() => undefined);
+    this.active.host = connectedHost;
+    this.active.credential = confirmedCredential;
+    for (const stream of this.streams.values()) {
+      stream.detach?.();
+      stream.detach = client.subscribeStream(stream.method, stream.params, stream.deliver);
+    }
+    if (winner.path === "relay" && connectedHost.relay && confirmedCredential.current) {
+      void rotateCredentialIfNeeded({ client, host: connectedHost, credential: confirmedCredential }).then((rotated) => {
+        if (generation === this.generation && this.active) this.active = rotated;
+      }).catch((error: unknown) => this.log("warning", "Credential rotation deferred", safeError(error)));
+    }
   }
 
   private emitStage(stage: ConnectionStage, attempt: number): void {
@@ -170,7 +187,28 @@ export class HostConnection {
   }
 }
 
-async function resolveRelay(host: StoredHost, resumeToken: string): Promise<StoredHost> {
+type ConnectionCandidate = { client: RelayClient; host: StoredHost; path: "direct" | "relay"; resumeVersion?: number };
+
+function firstCandidate(attempts: Promise<ConnectionCandidate>[]): Promise<ConnectionCandidate> {
+  return new Promise((resolve, reject) => {
+    let failures = 0;
+    let settled = false;
+    let lastError: unknown;
+    for (const attempt of attempts) {
+      void attempt.then((candidate) => {
+        if (settled) return candidate.client.close();
+        settled = true;
+        resolve(candidate);
+      }).catch((error: unknown) => {
+        lastError = error;
+        failures++;
+        if (!settled && failures === attempts.length) reject(lastError);
+      });
+    }
+  });
+}
+
+async function resolveRelay(host: StoredHost & { relay: NonNullable<StoredHost["relay"]> }, resumeToken: string): Promise<StoredHost> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5_000);
   try {

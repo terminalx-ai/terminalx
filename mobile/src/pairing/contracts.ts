@@ -29,7 +29,7 @@ const canonicalPublicKey = (value: string): boolean => {
   }
 };
 
-const relayHostIdForPublicKey = (value: string): string | null => {
+export const hostIdForPublicKey = (value: string): string | null => {
   if (!canonicalPublicKey(value)) return null;
   const decoded = Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
   return base64Url(sha256(decoded)).slice(0, 16);
@@ -65,10 +65,9 @@ export function createPairingOfferSchema(now: () => number = Date.now) {
     })
     .strict()
     .superRefine((offer, context) => {
-      if (!offer.relay) return;
-      const expectedRelayHostId = relayHostIdForPublicKey(offer.publicKeyB64);
-      if (!expectedRelayHostId) context.addIssue({ code: "custom", path: ["publicKeyB64"], message: "Relay offers require a canonical 32-byte public key" });
-      else if (offer.relay.relayHostId !== expectedRelayHostId) context.addIssue({ code: "custom", path: ["relay", "relayHostId"], message: "Relay host does not match the desktop public key" });
+      const expectedHostId = hostIdForPublicKey(offer.publicKeyB64);
+      if (!expectedHostId) context.addIssue({ code: "custom", path: ["publicKeyB64"], message: "Pairing offers require a canonical 32-byte public key" });
+      else if (offer.relay && offer.relay.relayHostId !== expectedHostId) context.addIssue({ code: "custom", path: ["relay", "relayHostId"], message: "Relay host does not match the desktop public key" });
     });
 }
 

@@ -26,6 +26,25 @@ export class RelayOuterError extends Error {
   }
 }
 
+type RelayClientOptions =
+  | {
+      transport?: "relay";
+      relay: Omit<PairingRelay, "inviteToken" | "inviteExpiresAt">;
+      credential: string;
+      credentialKind: "invite" | "resume";
+      credentialVersion?: number;
+      deviceToken: string;
+      desktopPublicKeyB64: string;
+      createSocket?: (url: string) => WebSocket;
+    }
+  | {
+      transport: "direct";
+      endpoint: string;
+      deviceToken: string;
+      desktopPublicKeyB64: string;
+      createSocket?: (url: string) => WebSocket;
+    };
+
 export class RelayClient {
   private socket: WebSocket | null = null;
   private session: MobileE2EESession | null = null;
@@ -46,17 +65,11 @@ export class RelayClient {
   private resumeConfirmation: DeviceResumeConfirmed | null = null;
   private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(
-    private readonly options: {
-      relay: Omit<PairingRelay, "inviteToken" | "inviteExpiresAt">;
-      credential: string;
-      credentialKind: "invite" | "resume";
-      credentialVersion?: number;
-      deviceToken: string;
-      desktopPublicKeyB64: string;
-      createSocket?: (url: string) => WebSocket;
-    },
-  ) {}
+  constructor(private readonly options: RelayClientOptions) {}
+
+  getTransport(): "direct" | "relay" {
+    return this.options.transport === "direct" ? "direct" : "relay";
+  }
 
   connect(): Promise<void> {
     if (this.state === "connected") return Promise.resolve();
@@ -66,21 +79,30 @@ export class RelayClient {
     this.handshakeReady = false;
     this.authenticated = false;
     this.resumeConfirmation = null;
+    const direct = this.options.transport === "direct";
     this.session = MobileE2EESession.create({
       desktopPublicKeyB64: this.options.desktopPublicKeyB64,
-      transport: "relay",
-      relayHostId: this.options.relay.relayHostId,
+      transport: direct ? "direct" : "relay",
+      ...(!direct ? { relayHostId: this.options.relay.relayHostId } : {}),
       random: secureRandom,
     });
     this.connectPromise = new Promise<void>((resolve, reject) => {
       this.resolveConnect = resolve;
       this.rejectConnect = reject;
     });
-    const socket = (this.options.createSocket ?? ((url) => new WebSocket(url)))(relaySocketUrl(this.options.relay));
+    const socket = (this.options.createSocket ?? ((url) => new WebSocket(url)))(direct ? this.options.endpoint : relaySocketUrl(this.options.relay));
     socket.binaryType = "arraybuffer";
     this.socket = socket;
     this.handshakeTimer = setTimeout(() => this.fail(new Error("Relay handshake timed out")), 15_000);
-    socket.onopen = () => socket.send(JSON.stringify({ type: "relay-auth", v: 1, mode: "connect", credential: this.options.credential }));
+    socket.onopen = () => {
+      if (direct) {
+        this.outerReady = true;
+        this.setState("handshaking");
+        socket.send(JSON.stringify(this.session!.hello));
+      } else {
+        socket.send(JSON.stringify({ type: "relay-auth", v: 1, mode: "connect", credential: this.options.credential }));
+      }
+    };
     socket.onmessage = (event) => void this.handleMessage(event.data).catch((error: unknown) => this.fail(asError(error)));
     socket.onerror = () => this.fail(new RelayOuterError(1006));
     socket.onclose = (event) => this.fail(new RelayOuterError(event.code || 1006));
@@ -135,6 +157,7 @@ export class RelayClient {
   private async handleMessage(raw: unknown): Promise<void> {
     if (!this.socket || !this.session) return;
     if (!this.outerReady) {
+      if (this.options.transport === "direct") throw new Error("Unexpected direct connection state");
       if (typeof raw !== "string") throw new Error("Expected plaintext relay hello");
       const parsed = RelayPhoneHelloSchema.safeParse(JSON.parse(raw));
       if (!parsed.success) throw new Error("Invalid relay hello");
@@ -163,7 +186,7 @@ export class RelayClient {
     if (!this.authenticated) {
       if (!isAuthenticated(value, this.session.transcriptHashB64)) throw new Error("E2EE device authentication rejected");
       this.authenticated = true;
-      if (this.options.credentialKind === "resume") {
+      if (this.options.transport !== "direct" && this.options.credentialKind === "resume") {
         const reqId = `confirm-${encodeBase64Url(secureRandom.bytes(16))}`;
         const result = await this.request<unknown>("pairing.getEndpoints", { resumeConfirmReqId: reqId });
         if (!result.ok) throw new Error(`${result.refusal.code}: ${result.refusal.message}`);

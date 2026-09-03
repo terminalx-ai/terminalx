@@ -19,7 +19,7 @@ const hostSchema = z.object({
   label: z.string().min(1),
   publicKeyB64: z.string().min(1),
   endpoint: z.string().min(1),
-  relay: relaySchema,
+  relay: relaySchema.optional(),
   lastConnectedAt: z.number().int().nonnegative(),
   provenance: z.discriminatedUnion("kind", [z.object({ kind: z.literal("explicit") }), z.object({ kind: z.literal("automatic"), userId: z.string().min(1) })]),
 });
@@ -27,7 +27,7 @@ const hostSchema = z.object({
 const credentialSchema = z.object({
   v: z.literal(1),
   deviceToken: z.string().min(1),
-  current: z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{43}$/), hash: z.string().regex(/^[A-Za-z0-9_-]{43}$/), version: z.number().int().positive(), expiresAt: z.number().int().nonnegative() }),
+  current: z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{43}$/), hash: z.string().regex(/^[A-Za-z0-9_-]{43}$/), version: z.number().int().positive(), expiresAt: z.number().int().nonnegative() }).optional(),
   grace: z.object({ token: z.string(), hash: z.string(), version: z.number().int().positive(), expiresAt: z.number().int().nonnegative() }).optional(),
   pending: z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{43}$/), hash: z.string().regex(/^[A-Za-z0-9_-]{43}$/), reqId: z.string().min(1) }).optional(),
 });

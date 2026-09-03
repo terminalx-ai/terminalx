@@ -5,6 +5,7 @@ import { useRouter } from "expo-router";
 import { ChevronRight, Keyboard, QrCode, X } from "lucide-react-native";
 import { ACCOUNT_PAIRING_CAPABILITY } from "@mobile/pairing/contracts";
 import type { AccountHost } from "@mobile/pairing/account-client";
+import { accountHostIdentityMatches } from "@mobile/pairing/account";
 import { useApp } from "@mobile/state/AppProvider";
 import { Button, Card, EmptyState, Screen, SectionTitle, StatusDot } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
@@ -59,7 +60,7 @@ export default function MachinesScreen() {
 
 function AvailableMachine({ host, divided, onPair }: { host: AccountHost; divided: boolean; onPair(): void }) {
   const { palette } = useTheme();
-  const compatible = host.capabilities.includes(ACCOUNT_PAIRING_CAPABILITY);
+  const compatible = host.capabilities.includes(ACCOUNT_PAIRING_CAPABILITY) && accountHostIdentityMatches(host);
   const live = host.reachability === "live";
   const enabled = compatible && live;
   const state = !compatible ? "Incompatible" : !live ? "Offline" : `Live${host.lastSeenAt ? ` · ${relativeTime(Date.parse(host.lastSeenAt))}` : ""}${host.platform ? ` · ${host.platform}` : ""}`;

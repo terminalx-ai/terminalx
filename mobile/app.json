@@ -11,7 +11,8 @@
       "supportsTablet": false,
       "bundleIdentifier": "com.terminalx.next.mobile",
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSLocalNetworkUsageDescription": "TerminalX connects directly to a Mac you choose to pair."
       }
     },
     "plugins": [

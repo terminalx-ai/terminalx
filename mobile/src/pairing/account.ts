@@ -5,7 +5,7 @@ import { AUTH_CONFIG, type CloudSession } from "../auth/protocol";
 import { readHosts, removeAutomaticHosts, removeHost } from "../store/hosts";
 import { AccountPairingClient, type AccountHost } from "./account-client";
 import { base64Url } from "./bytes";
-import { ACCOUNT_PAIRING_CAPABILITY, PairingOfferSchema } from "./contracts";
+import { ACCOUNT_PAIRING_CAPABILITY, PairingOfferSchema, hostIdForPublicKey } from "./contracts";
 import { openAccountPairingEnvelope } from "./hpke";
 import { clearInstallation, loadOrCreateInstallation, readInstallation, registrationProof, signGrantRequest } from "./installation";
 import { pairFromOffer } from "./pair";
@@ -28,6 +28,7 @@ export async function discoverMachines(session: CloudSession): Promise<{ hosts: 
 
 export async function pairDiscoveredMachine(session: CloudSession, host: AccountHost): Promise<void> {
   if (!host.capabilities.includes(ACCOUNT_PAIRING_CAPABILITY)) throw new Error("account_pairing_host_incompatible");
+  if (!accountHostIdentityMatches(host)) throw new Error("account_pairing_host_key_mismatch");
   if (host.reachability !== "live") throw new Error("account_pairing_host_offline");
   const client = new AccountPairingClient(AUTH_CONFIG.sessionEndpoint, session);
   const operationEpoch = pairingEpoch;
@@ -66,6 +67,10 @@ export async function pairDiscoveredMachine(session: CloudSession, host: Account
     await removeHost(host.hostId).catch(() => undefined);
     throw error;
   }
+}
+
+export function accountHostIdentityMatches(host: AccountHost): boolean {
+  return hostIdForPublicKey(host.hostPublicKeyB64) === host.hostId;
 }
 
 export async function signOutPairing(session: CloudSession): Promise<void> {
