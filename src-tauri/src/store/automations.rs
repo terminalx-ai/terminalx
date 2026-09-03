@@ -12,6 +12,30 @@ use crate::automations::{Automation, AutomationRun};
 const RUN_RETENTION: usize = 100;
 static RUN_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static DEFINITION_WRITE_LOCK: Mutex<()> = Mutex::new(());
+static SEEN_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeenIssue {
+    pub last_updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeenState {
+    #[serde(default)]
+    pub initialized: bool,
+    #[serde(default)]
+    pub issues: BTreeMap<String, SeenIssue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_polled_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_poll_error: Option<String>,
+}
 
 pub fn list() -> Result<Vec<Automation>> {
     Ok(super::read_json::<AutomationFile>(&definitions_path()?)?
@@ -93,6 +117,29 @@ pub fn remove(id: &str) -> Result<()> {
         std::fs::remove_dir_all(dir)?;
     }
     Ok(())
+}
+
+pub fn load_seen(automation_id: &str) -> Result<Option<SeenState>> {
+    super::read_json(&seen_path(automation_id)?)
+}
+
+pub fn save_seen(automation_id: &str, state: &SeenState) -> Result<()> {
+    let _guard = SEEN_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    super::write_json(&seen_path(automation_id)?, state)
+}
+
+pub fn clear_seen(automation_id: &str) -> Result<()> {
+    let _guard = SEEN_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let path = seen_path(automation_id)?;
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn update_definitions(f: impl FnOnce(&mut Vec<Automation>) -> Result<()>) -> Result<()> {
@@ -205,6 +252,13 @@ fn runs_path(automation_id: &str) -> Result<PathBuf> {
     )
 }
 
+fn seen_path(automation_id: &str) -> Result<PathBuf> {
+    Ok(
+        super::ensure_dir(super::root()?.join("automations").join(automation_id))?
+            .join("seen.json"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -267,11 +321,13 @@ mod tests {
             session_id: None,
             tab_id: None,
             worktree_name: None,
+            issue: None,
             final_message: None,
             changed_files: None,
             usage: None,
             precheck: None,
             error: None,
+            reported: None,
             repeat_count: 1,
             last_repeat_at: None,
             unknown: BTreeMap::new(),

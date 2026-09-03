@@ -76,6 +76,18 @@ pub fn automation_runs(automation_id: String) -> CmdResult<Vec<crate::automation
 }
 
 #[tauri::command]
+pub fn automation_issue_states() -> CmdResult<Vec<crate::automations::AutomationIssueState>> {
+    crate::automations::issue_states().map_err(err)
+}
+
+#[tauri::command]
+pub async fn automation_issue_preview(project_path: String, repo: String, query: String) -> CmdResult<Vec<crate::issues::Issue>> {
+    tauri::async_runtime::spawn_blocking(move || crate::issues::github_search(Path::new(&project_path), &repo, &query, 50).map_err(err))
+        .await
+        .map_err(err)?
+}
+
+#[tauri::command]
 pub fn automation_create(app: AppHandle, input: crate::automations::AutomationInput) -> CmdResult<crate::automations::Automation> {
     let mut input = input;
     input.project_path = projects::canonical(&input.project_path).map_err(err)?;
@@ -93,7 +105,19 @@ pub fn automation_update(app: AppHandle, id: String, input: crate::automations::
     input.project_path = projects::canonical(&input.project_path).map_err(err)?;
     validate_automation_target(&input)?;
     let automation = crate::automations::definition_from_input(input, Some(&existing), chrono::Utc::now()).map_err(err)?;
+    let reset_seen = match (&existing.issue_trigger, &automation.issue_trigger) {
+        (Some(before), Some(after)) => {
+            before.repo != after.repo
+                || before.query != after.query
+                || (!before.run_on_existing && after.run_on_existing)
+        }
+        (None, Some(_)) => true,
+        _ => false,
+    };
     let automation = store::automations::replace(automation).map_err(err)?;
+    if reset_seen {
+        store::automations::clear_seen(&id).map_err(err)?;
+    }
     crate::automations::emit_definitions(&app);
     Ok(automation)
 }
