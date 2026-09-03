@@ -54,14 +54,18 @@ drives the `claude` and `codex` CLIs you are already logged into.
 
 ## What leaves your machine
 
-TerminalX has **no telemetry, no analytics and no crash reporting**.
-An optional TerminalX account is used only when you choose Sign in, and nothing is
-phoned home about how you use the app. The only outbound connections it makes are
-these six, all of them things you asked for:
+TerminalX has **no telemetry, no analytics and no crash reporting**. An account
+is optional: signed out, TerminalX makes no account, directory or relay request
+and everything that worked locally before accounts still works. Once you choose
+Sign in, the app keeps this Mac discoverable to your own devices with a metadata
+heartbeat and a persistent relay connection. It never uploads how you use the
+app. The outbound connections are these eight:
 
 | To | When | Carrying |
 | --- | --- | --- |
 | TerminalX account | You press Sign in, a session is refreshed, or you sign out | PKCE authorization values and the account session credentials issued by `login.terminalx.ai`; no prompts, transcripts, files or workspace metadata |
+| TerminalX machine directory | While you remain signed in: once when binding this Mac, then a liveness heartbeat every 30 seconds | Host id, public key, binding generation, the editable machine name, platform, environment kind and pairing capability — no workspace, session, path, transcript, scrollback or device credential |
+| TerminalX relay | While you remain signed in, and whenever a paired device connects | Account and host identifiers, public keys, routing ids, connection metadata and plaintext handshake keys; device credentials, RPC and terminal traffic are end-to-end encrypted |
 | GitHub | You open the Issues view or a PR panel | Nothing of TerminalX's own — it shells out to your `gh`, which uses your existing credentials |
 | Linear | You open the Issues view with a Linear key configured | A GraphQL query to `api.linear.app`, authorized with the key you pasted |
 | Anthropic usage | The focused status bar lacks a Claude model limit, no more than once every 15 minutes | A GET to `api.anthropic.com/api/oauth/usage`, authorized with the OAuth token Claude Code already stores; no prompts, transcripts or files |
@@ -77,7 +81,17 @@ Some detail on each:
   `com.terminalx.next.account` service (or the corresponding development app
   service); they are never written to TerminalX's files. The session refreshes near
   expiry, and sign-out clears the Keychain item before its best-effort logout call.
-  An account is optional and the app remains fully usable without one.
+  Signing in also enables the directory and relay calls listed above. This uses
+  services TerminalX must operate and pay for; an outage makes remote discovery
+  or relay reachability unavailable, never local work.
+- **Pairing and relay.** This Mac has a stable Curve25519 identity only after
+  sign-in or after you explicitly create a pairing code. Its private key and
+  raw per-device credentials stay in macOS Keychain. Account binding synchronizes
+  machine authority, not terminal contents. Pairing codes are made locally and
+  carry a short-lived, single-use relay invite; traffic after the pinned-key
+  handshake uses end-to-end authenticated encryption whether it travels directly
+  over LAN/Tailscale or through `relay.terminalx.ai`. Revoking a device removes
+  its local authority and drops its live socket immediately.
 - **The agents themselves.** `claude` and `codex` talk to Anthropic and OpenAI
   the same way they do in your terminal, under your own login. TerminalX
   does not proxy, inspect or re-send any of it; it reads the transcript files
@@ -138,7 +152,10 @@ All of them, in full:
   only when you install it under Settings → Agents. Its full version-matched
   guide stays embedded in the binary.
 - **`$RACCOON_HOME`** itself (default `~/.raccoon`) — projects, the session
-  index, transcripts, settings and downloaded models. Created `0700`.
+  index, transcripts, settings, downloaded models, the non-secret account mirror,
+  and paired-device records containing credential hashes rather than credentials.
+  Created `0700`; the account session, host private key and device credentials
+  remain in macOS Keychain.
 - **`<repo>/.raccoon/worktrees/`** — inside your repository, but outside your
   working tree: the checkouts sessions run in.
 
