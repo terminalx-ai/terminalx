@@ -19,7 +19,7 @@ interface State {
   harnesses: HarnessInfo[];
   selectedSessionId: string | null;
   /** What the workspace shows when no session is selected. */
-  view: "new" | "issues" | "agents" | "skills";
+  view: "new" | "issues" | "agents" | "automations" | "skills";
   /** A tab menu can open Skills already narrowed to that tab's reach. */
   skillsFilter: { agent: string; projectPath: string } | null;
   showArchived: boolean;
@@ -130,6 +130,11 @@ export function openIssues() {
 /** The agent dashboard, like the issues browser, replaces the whole workspace. */
 export function openAgents() {
   set({ selectedSessionId: null, view: "agents" });
+}
+
+/** Saved agent runs share the full workspace with issues and the dashboard. */
+export function openAutomations() {
+  set({ selectedSessionId: null, view: "automations" });
 }
 
 /** The filesystem-backed skills reader, optionally scoped to one agent tab. */

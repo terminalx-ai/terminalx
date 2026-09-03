@@ -456,6 +456,7 @@ mod tests {
             base_ref: None,
             worktree_removed: false,
             issue: None,
+            automation: None,
             title: "t".into(),
             created: index::now(),
             modified: index::now(),

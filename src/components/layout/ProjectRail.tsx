@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Archive, CircleDot, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
+import { Archive, CalendarClock, CircleDot, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -23,6 +23,7 @@ import { isUnread, sessionColumn } from "@/lib/dashboard";
 import type { Project } from "@/types/session";
 import { MASCOTS, PROJECT_COLORS, PixelMascot, colorCss } from "./PixelMascot";
 import { TITLEBAR_INSET } from "./AppShell";
+import { useAutomationStore } from "@/lib/automations";
 
 /**
  * The left rail: one row per attached project, pinned ones first, each with
@@ -33,16 +34,19 @@ export function ProjectRail({
   onOpenSettings,
   onOpenIssues,
   onOpenAgents,
+  onOpenAutomations,
   onOpenSkills,
   onSearch,
 }: {
   onOpenSettings: () => void;
   onOpenIssues: () => void;
   onOpenAgents: () => void;
+  onOpenAutomations: () => void;
   onOpenSkills: () => void;
   onSearch: () => void;
 }) {
   const store = useSessionStore();
+  const automationStore = useAutomationStore();
   const [error, setError] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
   const [spinning, setSpinning] = useState(false);
@@ -55,6 +59,8 @@ export function ProjectRail({
   const liveSessions = store.sessions.filter((s) => !s.archived);
   const needsYou = liveSessions.filter((s) => sessionColumn(s) === "needs").length;
   const unread = liveSessions.filter(isUnread).length;
+  const automationRunning = automationStore.automations.some((automation) => automation.lastOutcome === "pending" || automation.lastOutcome === "running");
+  const automationFailures = automationStore.automations.filter((automation) => automation.lastOutcome === "failed").length;
 
   const pickProject = async () => {
     try {
@@ -105,6 +111,22 @@ export function ProjectRail({
             <LayoutGrid />
             <span className="truncate">Agent Dashboard</span>
             <AttentionDots needs={needsYou} unread={unread} />
+          </Button>
+        </WithTooltip>
+        <WithTooltip label="Automations" keys={keycaps("mod+shift+r")}>
+          <Button
+            variant="ghost"
+            className={cn("justify-start gap-2 px-2", store.view === "automations" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+            onClick={onOpenAutomations}
+          >
+            <CalendarClock />
+            <span className="truncate">Automations</span>
+            {(automationRunning || automationFailures > 0) && (
+              <span className="ml-auto flex items-center gap-1.5 text-[10px] tabular-nums">
+                {automationRunning && <span className="size-1.5 rounded-full bg-info animate-pulse-soft" title="Automation running" />}
+                {automationFailures > 0 && <span className="text-warning">{automationFailures}</span>}
+              </span>
+            )}
           </Button>
         </WithTooltip>
         <WithTooltip label="Skills" keys={keycaps("mod+shift+k")}>

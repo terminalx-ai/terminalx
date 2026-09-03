@@ -12,7 +12,7 @@ import { SessionView } from "@/components/session/SessionView";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
-import { bootSessions, openAgents, openIssues, openSkills, selectSession, setSessionSearch, useSessionStore } from "@/lib/sessions";
+import { bootSessions, openAgents, openAutomations, openIssues, openSkills, selectSession, setSessionSearch, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
 import { agent } from "@/lib/api";
 import { loadModels } from "@/lib/models";
@@ -22,6 +22,8 @@ import { Toasts } from "@/components/ui/Toasts";
 import { BypassDialog } from "@/components/session/BypassDialog";
 import { SettleDialog } from "@/components/session/SettleDialog";
 import { WorkspaceDeleteDialog } from "@/components/session/WorkspaceDeleteDialog";
+import { AutomationsView } from "@/components/automations/AutomationsView";
+import { bootAutomations } from "@/lib/automations";
 import { RightPanel } from "@/components/layout/RightPanel";
 
 export const TITLEBAR_INSET = 78; // traffic-light clearance, px
@@ -40,6 +42,7 @@ export function AppShell() {
     void subscribeAgentEvents();
     void subscribeTabPty();
     void bootSessions();
+    void bootAutomations();
     void loadModels();
     startNotifications();
   }, []);
@@ -59,6 +62,7 @@ export function AppShell() {
   const showIssues = useCallback(() => openIssues(), []);
   const showAgents = useCallback(() => openAgents(), []);
   const showSkills = useCallback(() => openSkills(), []);
+  const showAutomations = useCallback(() => openAutomations(), []);
 
   useHotkey("mod+b", toggleSidebar);
   useHotkey("mod+e", togglePanel);
@@ -67,6 +71,7 @@ export function AppShell() {
   useHotkey("mod+i", showIssues);
   useHotkey("mod+shift+a", showAgents);
   useHotkey("mod+shift+k", showSkills);
+  useHotkey("mod+shift+r", showAutomations);
   useHotkey("mod+k", setSessionSearch);
 
   const sidebarOpen = prefs.sidebarOpen;
@@ -84,6 +89,7 @@ export function AppShell() {
           onOpenSettings={openSettings}
           onOpenIssues={showIssues}
           onOpenAgents={showAgents}
+          onOpenAutomations={showAutomations}
           onOpenSkills={showSkills}
           onSearch={setSessionSearch}
         />
@@ -154,7 +160,13 @@ function UnselectedWorkspace({
           )}
           {/* The dashboard draws its own title, so the strip stays quiet for it. */}
           <span className="min-w-0 flex-1 truncate px-1 text-sm text-muted-foreground">
-            {store.view === "issues" ? "Issues" : store.view === "agents" || store.view === "skills" ? "" : "New session"}
+            {store.view === "issues"
+              ? "Issues"
+              : store.view === "agents" || store.view === "skills"
+                ? ""
+                : store.view === "automations"
+                  ? "Automations"
+                  : "New session"}
           </span>
           {panelAvailable && (
             <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} keys={keycaps("mod+e")}>
@@ -174,6 +186,8 @@ function UnselectedWorkspace({
             />
           ) : store.view === "agents" ? (
             <AgentDashboard />
+          ) : store.view === "automations" ? (
+            <AutomationsView />
           ) : store.view === "skills" ? (
             <SkillsView
               key={`${store.skillsFilter?.projectPath ?? store.selectedProject ?? "home"}:${store.skillsFilter?.agent ?? "all"}`}
