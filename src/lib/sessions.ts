@@ -139,6 +139,39 @@ export function startSessionIn(projectPath: string, cwd: string | null) {
   set({ selectedSessionId: null, view: "new", newSessionPreset: { projectPath, cwd }, lastProject: projectPath });
 }
 
+const openingWorkspaces = new Map<string, Promise<SessionEntry>>();
+
+/** Open a checkout without starting an agent, reusing its open session. */
+export function openWorkspace(projectPath: string, cwd: string): Promise<SessionEntry> {
+  const pathKey = cwd.replace(/\/+$/, "");
+  const existing = state.sessions.find(
+    (s) =>
+      s.projectPath === projectPath &&
+      !s.archived &&
+      !s.worktreeRemoved &&
+      !s.tabs.length &&
+      s.cwd.replace(/\/+$/, "") === pathKey,
+  );
+  if (existing) {
+    selectSession(existing.id);
+    return Promise.resolve(existing);
+  }
+
+  const key = `${projectPath}\0${pathKey}`;
+  const pending = openingWorkspaces.get(key);
+  if (pending) return pending;
+  const request = api
+    .createSession({ projectPath, cwd, useWorktree: false })
+    .then((session) => {
+      upsertSession(session);
+      selectSession(session.id);
+      return session;
+    })
+    .finally(() => openingWorkspaces.delete(key));
+  openingWorkspaces.set(key, request);
+  return request;
+}
+
 export function setSessionSearch() {
   set({ sessionSearch: state.sessionSearch + 1 });
   requestAnimationFrame(() => (document.querySelector("[data-session-search]") as HTMLInputElement | null)?.focus());

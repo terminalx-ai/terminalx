@@ -66,6 +66,11 @@ describe("search", () => {
 });
 
 describe("bucketSessions", () => {
+  it("skips sessions that have no agent tabs", () => {
+    const b = bucketSessions([session("workspace", [])], opts);
+    expect(b).toEqual({ needs: [], working: [], done: [] });
+  });
+
   it("drops archived sessions and sorts each column newest first", () => {
     const older = session("older", ["completed"], { modified: "2026-01-01T00:00:00.000Z" });
     const newer = session("newer", ["completed"], { modified: "2026-02-01T00:00:00.000Z" });
