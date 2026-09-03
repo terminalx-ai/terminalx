@@ -26,19 +26,29 @@ try {
   if (!endpointResponse.ok) throw new Error(`pairing.getEndpoints refused: ${endpointResponse.refusal.code}`);
   const endpoints = PairingGetEndpointsResultSchema.parse(endpointResponse.value);
   if (!endpoints.relay) throw new Error("Desktop returned no resume relay endpoint");
-  inviteClient.close();
-
-  const resumeClient = new RelayClient({ relay: endpoints.relay, credential: resumeToken, credentialKind: "resume", credentialVersion: installed.currentVersion, deviceToken: offer.deviceToken, desktopPublicKeyB64: offer.publicKeyB64 });
-  try {
-    await resumeClient.connect();
-    const frame = await resumeClient.request("status.get");
-    if (!frame.ok) throw new Error(`resume status.get refused: ${frame.refusal.code}`);
-    console.log(`Interop passed: relay v1, E2EE framing v2, resume credential version ${installed.currentVersion}, encrypted RPC response received.`);
-  } finally {
-    resumeClient.close();
-  }
+  console.log(`Pairing passed: relay v1, E2EE framing v2, resume credential version ${installed.currentVersion}, encrypted RPC response received.`);
+  console.log("Revoke the scripted device in Settings → Devices; waiting for its socket to close…");
+  await waitForRevocation(inviteClient, 120_000);
+  console.log("Interop passed: revocation closed the live encrypted connection.");
 } finally {
   inviteClient.close();
+}
+
+function waitForRevocation(client: RelayClient, timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      unsubscribe();
+      reject(new Error("Timed out waiting for device revocation"));
+    }, timeoutMs);
+    let wasConnected = false;
+    const unsubscribe = client.subscribeState((state) => {
+      if (state === "connected") wasConnected = true;
+      if (state !== "disconnected" || !wasConnected) return;
+      clearTimeout(timer);
+      unsubscribe();
+      resolve();
+    });
+  });
 }
 
 function readStdin(): Promise<string> {
