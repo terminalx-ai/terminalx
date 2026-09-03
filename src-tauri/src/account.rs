@@ -60,6 +60,17 @@ pub struct AccountIdentity {
     organization: Option<String>,
 }
 
+#[derive(Clone)]
+pub(crate) struct AccountContext {
+    pub access_token: String,
+    pub user_id: String,
+    pub email: String,
+    pub display_name: String,
+    pub profile_id: String,
+    pub organization_id: String,
+    pub relay_entitled: bool,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DesktopSession {
@@ -165,6 +176,27 @@ impl AccountManager {
         }
 
         self.snapshot()
+    }
+
+    /// Return a native-only snapshot suitable for account-bound services.
+    /// Access tokens never cross the Tauri command boundary.
+    pub(crate) fn context(&self) -> Option<AccountContext> {
+        self.ensure_loaded();
+        self.refresh_if_needed();
+        let inner = self.inner.lock().unwrap();
+        inner.session.as_ref().map(|session| AccountContext {
+            access_token: session.access_token.clone(),
+            user_id: session.cloud.user_id.clone(),
+            email: session.cloud.email.clone(),
+            display_name: session
+                .cloud
+                .display_name
+                .clone()
+                .unwrap_or_else(|| session.cloud.email.clone()),
+            profile_id: session.cloud.cloud_profile_id.clone(),
+            organization_id: session.cloud.active_org_id.clone().unwrap_or_default(),
+            relay_entitled: session.capabilities.flags.get("relay.use") == Some(&true),
+        })
     }
 
     pub fn begin_sign_in(self: &Arc<Self>, app: &AppHandle) -> Result<AccountStatus> {

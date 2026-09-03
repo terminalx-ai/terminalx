@@ -66,6 +66,8 @@ describe("TerminalX account surfaces", () => {
     expect(openAccount).toHaveBeenCalledOnce();
 
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(screen.getByText(/QR and code pairings keep working/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm sign out" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("account_sign_out"));
   });
 });
