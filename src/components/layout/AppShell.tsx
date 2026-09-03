@@ -7,11 +7,12 @@ import { Sidebar } from "@/components/layout/Sidebar";
 import { NewSessionView } from "@/components/session/NewSessionView";
 import { IssuesView } from "@/components/issues/IssuesView";
 import { AgentDashboard } from "@/components/dashboard/AgentDashboard";
+import { SkillsView } from "@/components/skills/SkillsView";
 import { SessionView } from "@/components/session/SessionView";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
-import { bootSessions, openAgents, openIssues, selectSession, setSessionSearch, useSessionStore } from "@/lib/sessions";
+import { bootSessions, openAgents, openAutomations, openIssues, openSkills, selectSession, setSessionSearch, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
 import { agent } from "@/lib/api";
 import { loadModels } from "@/lib/models";
@@ -24,7 +25,6 @@ import { WorkspaceDeleteDialog } from "@/components/session/WorkspaceDeleteDialo
 import { bootStatus, useStatus } from "@/lib/status";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
-import { openAutomations } from "@/lib/sessions";
 import { RightPanel } from "@/components/layout/RightPanel";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
@@ -67,6 +67,7 @@ export function AppShell() {
   const newSession = useCallback(() => selectSession(null), []);
   const showIssues = useCallback(() => openIssues(), []);
   const showAgents = useCallback(() => openAgents(), []);
+  const showSkills = useCallback(() => openSkills(), []);
   const showAutomations = useCallback(() => openAutomations(), []);
 
   useHotkey("mod+b", toggleSidebar);
@@ -75,6 +76,7 @@ export function AppShell() {
   useHotkey("mod+n", newSession);
   useHotkey("mod+i", showIssues);
   useHotkey("mod+shift+a", showAgents);
+  useHotkey("mod+shift+k", showSkills);
   useHotkey("mod+shift+r", showAutomations);
   useHotkey("mod+k", setSessionSearch);
 
@@ -88,7 +90,17 @@ export function AppShell() {
       <SettleDialog />
       <WorkspaceDeleteDialog />
       <div className="flex min-h-0 flex-1">
-        {sidebarOpen && <Sidebar onToggle={toggleSidebar} onOpenSettings={openSettings} onOpenIssues={showIssues} onOpenAgents={showAgents} onOpenAutomations={showAutomations} onSearch={setSessionSearch} />}
+        {sidebarOpen && (
+          <Sidebar
+            onToggle={toggleSidebar}
+            onOpenSettings={openSettings}
+            onOpenIssues={showIssues}
+            onOpenAgents={showAgents}
+            onOpenAutomations={showAutomations}
+            onOpenSkills={showSkills}
+            onSearch={setSessionSearch}
+          />
+        )}
 
         {selected ? (
           <main className="flex h-full min-w-0 flex-1 flex-col">
@@ -164,7 +176,13 @@ function UnselectedWorkspace({
           )}
           {/* The dashboard draws its own title, so the strip stays quiet for it. */}
           <span className="min-w-0 flex-1 truncate px-1 text-sm text-muted-foreground">
-            {store.view === "issues" ? "Issues" : store.view === "agents" ? "" : store.view === "automations" ? "Automations" : "New session"}
+            {store.view === "issues"
+              ? "Issues"
+              : store.view === "agents" || store.view === "skills"
+                ? ""
+                : store.view === "automations"
+                  ? "Automations"
+                  : "New session"}
           </span>
           {panelAvailable && (
             <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} keys={keycaps("mod+e")}>
@@ -186,6 +204,12 @@ function UnselectedWorkspace({
             <AgentDashboard />
           ) : store.view === "automations" ? (
             <AutomationsView />
+          ) : store.view === "skills" ? (
+            <SkillsView
+              key={`${store.skillsFilter?.projectPath ?? store.selectedProject ?? "home"}:${store.skillsFilter?.agent ?? "all"}`}
+              projectPath={store.skillsFilter?.projectPath ?? store.selectedProject}
+              initialAgent={store.skillsFilter?.agent ?? null}
+            />
           ) : (
             <NewSessionView onCreated={onCreated} useWorktree={useWorktree} onUseWorktreeChange={setUseWorktree} />
           )}

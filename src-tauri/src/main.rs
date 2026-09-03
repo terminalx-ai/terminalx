@@ -8,5 +8,8 @@ fn main() {
     if raccoon_lib::hooks::run_statusline_cli() || raccoon_lib::hooks::run_hook_cli() {
         return;
     }
+    if let Some(code) = raccoon_lib::cli::run_cli() {
+        std::process::exit(code);
+    }
     raccoon_lib::run()
 }

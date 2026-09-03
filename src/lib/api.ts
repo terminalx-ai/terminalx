@@ -14,6 +14,7 @@ import type {
   WorkStatus,
   WorktreeDisposition,
 } from "@/types/session";
+import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationRun, AutomationRef } from "@/types/automations";
 
 export interface NewTab {
@@ -85,6 +86,12 @@ export const api = {
   // harnesses
   listHarnesses: () => invoke<HarnessInfo[]>("list_harnesses"),
 
+  // first-party command line tool and discovery skill
+  cliToolStatus: () => invoke<CliToolStatus>("cli_tool_status"),
+  installCliTool: () => invoke<CliToolStatus>("install_cli_tool"),
+  cliSkillStatus: () => invoke<SkillInstallStatus>("cli_skill_status"),
+  installCliSkill: () => invoke<SkillInstallStatus>("install_cli_skill"),
+
   // git
   workStatus: (cwd: string) => invoke<WorkStatus>("work_status", { cwd }),
   listBranches: (cwd: string) => invoke<BranchInfo[]>("list_branches", { cwd }),
@@ -97,6 +104,22 @@ export const api = {
   logCommits: (cwd: string, range?: string | null, limit?: number) =>
     invoke<CommitInfo[]>("log_commits", { cwd, range: range ?? null, limit: limit ?? 100 }),
 };
+
+export interface CliToolStatus {
+  installed: boolean;
+  directory: string;
+  commands: string[];
+}
+
+export interface SkillTargetStatus {
+  path: string;
+  installed: boolean;
+}
+
+export interface SkillInstallStatus {
+  installed: boolean;
+  targets: SkillTargetStatus[];
+}
 
 export const automationsApi = {
   list: () => invoke<Automation[]>("automations_list"),
@@ -297,6 +320,12 @@ export const files = {
   invalidate: (cwd: string) => invoke<void>("invalidate_file_index", { cwd }),
   readImage: (path: string) => invoke<{ mediaType: string; data: string; name: string } | null>("read_image_file", { path }),
   slashCommands: (cwd: string, harness: string) => invoke<SlashCommand[]>("list_slash_commands", { cwd, harness }),
+};
+
+export const skills = {
+  list: (projectPath?: string | null, refresh = false) =>
+    invoke<DiscoveredSkill[]>("list_skills", { projectPath: projectPath ?? null, refresh }),
+  detail: (dirPath: string) => invoke<SkillDetail>("skill_detail", { dirPath }),
 };
 
 // ---- git actions & pull requests

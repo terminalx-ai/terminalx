@@ -40,7 +40,9 @@ const { sessionStore } = vi.hoisted(() => ({
 vi.mock("@/lib/sessions", () => ({
   bootSessions: vi.fn(),
   openAgents: vi.fn(),
+  openAutomations: vi.fn(),
   openIssues: vi.fn(),
+  openSkills: vi.fn(),
   selectSession: vi.fn(),
   setSessionSearch: vi.fn(),
   useSessionStore: () => sessionStore,
@@ -49,6 +51,7 @@ vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn() }));
 vi.mock("@/lib/agentEvents", () => ({ applyEvent: vi.fn(), subscribeAgentEvents: vi.fn() }));
 vi.mock("@/lib/api", () => ({ agent: { send: vi.fn() } }));
 vi.mock("@/lib/models", () => ({ loadModels: vi.fn() }));
+vi.mock("@/lib/automations", () => ({ bootAutomations: vi.fn() }));
 vi.mock("@/lib/notify", () => ({ startNotifications: vi.fn() }));
 vi.mock("@/lib/tabViews", () => ({ subscribeTabPty: vi.fn() }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
@@ -56,6 +59,8 @@ vi.mock("@/components/layout/Sidebar", () => ({ Sidebar: () => <div data-testid=
 vi.mock("@/components/session/NewSessionView", () => ({ NewSessionView: () => <div data-testid="new-session" /> }));
 vi.mock("@/components/issues/IssuesView", () => ({ IssuesView: () => <div data-testid="issues" /> }));
 vi.mock("@/components/dashboard/AgentDashboard", () => ({ AgentDashboard: () => <div data-testid="agents" /> }));
+vi.mock("@/components/automations/AutomationsView", () => ({ AutomationsView: () => <div data-testid="automations" /> }));
+vi.mock("@/components/skills/SkillsView", () => ({ SkillsView: () => <div data-testid="skills" /> }));
 vi.mock("@/components/session/SessionView", () => ({ SessionView: () => <div data-testid="session" /> }));
 vi.mock("@/components/layout/RightPanel", () => ({
   RightPanel: ({ cwd, branch }: { cwd: string; branch?: string | null }) => <div data-testid="right-panel" data-cwd={cwd} data-branch={branch ?? ""} />,

@@ -1,6 +1,8 @@
 mod automations;
 mod binpath;
+pub mod cli;
 mod commands;
+mod control;
 mod dictation;
 mod transcription;
 mod events;
@@ -10,10 +12,12 @@ mod github;
 mod harness;
 pub mod hooks;
 mod issues;
+mod installation;
 mod models;
 mod names;
 mod pty;
 mod session;
+pub mod skills;
 mod store;
 mod status;
 mod summaries;
@@ -67,12 +71,21 @@ pub fn run() {
         .manage(state)
         .setup(move |app| {
             status::install_menu(app)?;
-            let manager = session::SessionManager::new(app.handle().clone(), host.clone(), terminals.clone(), codex_models.clone(), status_state.clone());
+            let control_endpoint = hooks::prepare_control()?;
+            let manager = session::SessionManager::new(
+                app.handle().clone(),
+                host.clone(),
+                terminals.clone(),
+                codex_models.clone(),
+                status_state.clone(),
+                control_endpoint.clone(),
+            );
             *app.state::<AppState>().manager.lock().unwrap() = Some(manager.clone());
             // The agent CLIs' hooks reach the app through this socket; without
             // it a PTY-first tab still runs, it just cannot report or ask.
             let hooked = manager.clone();
-            match hooks::serve(move |frame| hooked.on_hook(frame)) {
+            let service = control::ControlService::new(app.handle().clone(), manager.clone(), control_endpoint.clone());
+            match hooks::serve(control_endpoint, move |frame| hooked.on_hook(frame), move |request| service.handle(request)) {
                 Ok(path) => log::info!("hook socket at {}", path.display()),
                 Err(e) => log::warn!("hook socket: {e:#}"),
             }
@@ -119,6 +132,8 @@ pub fn run() {
             commands::set_active_tab,
             commands::delete_session,
             commands::list_harnesses,
+            commands::list_skills,
+            commands::skill_detail,
             commands::work_status,
             commands::list_branches,
             commands::worktree_disposition,
@@ -201,6 +216,10 @@ pub fn run() {
             commands::status_resource_overview,
             commands::status_resource_sample,
             commands::status_resource_kill,
+            installation::cli_tool_status,
+            installation::install_cli_tool,
+            installation::cli_skill_status,
+            installation::install_cli_skill,
         ])
         .on_menu_event(|app, event| {
             if event.id().as_ref() == status::MENU_ID {

@@ -101,6 +101,7 @@ release mode, and writes to `src-tauri/target/release/bundle/`:
 | Path | What |
 | --- | --- |
 | `macos/Raccoon.app` | The app, ad-hoc signed (`signingIdentity: "-"`) |
+| `macos/Raccoon.app/Contents/MacOS/terminalx-next` | A tiny launcher for the app's built-in CLI command family |
 | `dmg/Raccoon_<version>_aarch64.dmg` | Disk image for distribution |
 | `macos/Raccoon.app.tar.gz` | Updater artifact |
 | `macos/Raccoon.app.tar.gz.sig` | Its signature, made with the private key |

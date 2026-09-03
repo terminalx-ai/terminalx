@@ -53,6 +53,8 @@ src-tauri/src
     acp/             generic Agent Client Protocol adapter — hidden
     opencode/        local HTTP+SSE adapter — hidden
   hooks.rs           the hook bridge: unix socket, parked permission requests
+  control.rs         authenticated CLI RPC over the same unix socket
+  cli.rs             terminalx-next command parsing and embedded skill guide
   pty.rs             terminal PTYs with 8ms/32KB output coalescing
   git.rs             worktrees, snapshots (temp-index write-tree), diffs, commit, push
   workspaces.rs      every checkout a project has, whoever made it
@@ -211,6 +213,14 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] GitHub issues through `gh` (repo from origin; open, assigned-to-me, search) and Linear through its GraphQL API with a stored key (teams, assigned-to-me, search).
 - [x] Issues view (⌘I) with detail column; Start session creates a worktree named after the issue (`raccoon/eng-42-fix-login`) and sends the issue as the first prompt; the session header links back.
 - [x] Settings → Integrations: Linear key (validated, stored owner-only), GitHub CLI status.
+
+### TerminalX Next CLI ✅
+- [x] The hook socket also serves authenticated JSON-lines control requests,
+      using a per-launch token stored owner-only and injected into agent tabs.
+- [x] `terminalx-next` / `tnx` cover project, session, tab, transcript,
+      permission, worktree and issue workflows through the app's real services.
+- [x] The first-party discovery skill installs from Settings; its complete
+      version-matched guide is embedded in the binary at build time.
 
 ### PTY-first tabs (Claude) ✅
 - [x] A Claude tab is one process: the interactive CLI in a PTY. The chat is a
