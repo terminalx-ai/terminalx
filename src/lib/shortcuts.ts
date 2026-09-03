@@ -10,6 +10,7 @@ export const SHORTCUTS: Shortcut[] = [
   { chord: "mod+i", label: "Issues", group: "App" },
   { chord: "mod+shift+a", label: "Agent dashboard", group: "App" },
   { chord: "mod+shift+r", label: "Automations", group: "App" },
+  { chord: "mod+shift+k", label: "Skills", group: "App" },
   { chord: "mod+,", label: "Settings", group: "App" },
   { chord: "mod+b", label: "Toggle sidebar", group: "App" },
   { chord: "mod+e", label: "Toggle right panel", group: "App" },

@@ -108,6 +108,7 @@ release mode, and writes to `src-tauri/target/release/bundle/`:
 | Path | What |
 | --- | --- |
 | `macos/TerminalX Next.app` | The app, ad-hoc signed (`signingIdentity: "-"`) |
+| `macos/TerminalX Next.app/Contents/MacOS/terminalx-next` | A tiny launcher for the app's built-in CLI command family |
 | `dmg/TerminalX Next_<version>_aarch64.dmg` | Disk image for distribution |
 | `macos/TerminalX Next.app.tar.gz` | Updater artifact |
 | `macos/TerminalX Next.app.tar.gz.sig` | Its signature, made with the private key |

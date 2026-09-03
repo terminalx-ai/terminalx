@@ -54,9 +54,11 @@ The rest of the command line is `--model`, `--effort`, `--permission-mode`,
 
 The pane's environment carries `RACCOON_TAB_ID`, `RACCOON_SESSION_ID`,
 `RACCOON_HOOK_SOCKET` and `RACCOON_HOOK_TOKEN`, all of which the CLI passes on
-to every hook it runs. The token is minted per launch of the tab's CLI; the
-server drops any frame whose token does not match the live tab, and only
-accepts a `transcript_path` under that tab's own transcript directory.
+to every hook it runs. It also carries `TERMINALX_NEXT_SOCKET` and
+`TERMINALX_NEXT_TOKEN`, the app-launch credential that lets an agent call the
+authenticated control API. The hook token is minted per launch of the tab's
+CLI; the server drops any frame whose token does not match the live tab, and
+only accepts a `transcript_path` under that tab's own transcript directory.
 
 Opening a Claude tab starts its CLI (`ensure_tab_started`); it does not wait for
 a first prompt, because in this model the tab *is* the CLI.

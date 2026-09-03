@@ -132,7 +132,7 @@ pub async fn session_summaries(session_ids: Option<Vec<String>>) -> CmdResult<Ve
         .map_err(err)?
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewTab {
     pub harness: String,
@@ -144,7 +144,7 @@ pub struct NewTab {
     pub permission_mode: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSession {
     pub project_path: String,
@@ -415,6 +415,22 @@ pub async fn delete_session(app: AppHandle, session_id: String, remove_worktree:
 #[tauri::command]
 pub async fn list_harnesses() -> CmdResult<Vec<harness::HarnessInfo>> {
     tauri::async_runtime::spawn_blocking(harness::offered).await.map_err(err)
+}
+
+// ------------------------------------------------------------------ skills
+
+#[tauri::command]
+pub async fn list_skills(project_path: Option<String>, refresh: bool) -> CmdResult<Vec<crate::skills::DiscoveredSkill>> {
+    tauri::async_runtime::spawn_blocking(move || crate::skills::discover(project_path.as_deref(), refresh).map_err(err))
+        .await
+        .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn skill_detail(dir_path: String) -> CmdResult<crate::skills::SkillDetail> {
+    tauri::async_runtime::spawn_blocking(move || crate::skills::detail(Path::new(&dir_path)).map_err(err))
+        .await
+        .map_err(err)?
 }
 
 // ------------------------------------------------------------------ git

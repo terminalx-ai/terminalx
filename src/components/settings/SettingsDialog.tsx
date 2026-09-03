@@ -16,7 +16,7 @@ import { repoFile } from "@/lib/repo";
 import { keycaps } from "@/lib/hotkeys";
 import { SHORTCUTS } from "@/lib/shortcuts";
 import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
-import { errorMessage, gh, issues, type LinearStatus } from "@/lib/api";
+import { api, errorMessage, gh, issues, type CliToolStatus, type LinearStatus, type SkillInstallStatus } from "@/lib/api";
 import changelog from "../../../CHANGELOG.md?raw";
 import { TranscriptionTab } from "./TranscriptionTab";
 
@@ -74,8 +74,40 @@ export function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
 
 function GeneralTab() {
   const prefs = usePrefs();
+  const [cli, setCli] = useState<CliToolStatus | null>(null);
+  const [cliBusy, setCliBusy] = useState(false);
+  const [cliError, setCliError] = useState<string | null>(null);
+  useEffect(() => {
+    api.cliToolStatus().then(setCli).catch((error) => setCliError(errorMessage(error)));
+  }, []);
+  const installCli = async () => {
+    setCliBusy(true);
+    setCliError(null);
+    try {
+      setCli(await api.installCliTool());
+    } catch (error) {
+      setCliError(errorMessage(error));
+    } finally {
+      setCliBusy(false);
+    }
+  };
   return (
     <div className="flex flex-col">
+      <SettingRow
+        label="Command line tool"
+        description={
+          cli?.installed
+            ? `terminalx-next and tnx are installed in ${cli.directory}.`
+            : "Install terminalx-next and its tnx alias in ~/.local/bin so shells and agents can control this app."
+        }
+        control={
+          <Button size="sm" variant="outline" disabled={cliBusy || cli?.installed} onClick={() => void installCli()}>
+            {cliBusy ? <Loader2 className="animate-spin" /> : cli?.installed ? <Check /> : null}
+            {cli?.installed ? "Installed" : "Install"}
+          </Button>
+        }
+      />
+      {cliError && <div className="-mt-2 mb-3 text-xs text-destructive">{cliError}</div>}
       <SettingRow
         label="Sounds"
         description="A short tone when a session finishes or asks for you. Silent while another app has focus; the desktop notification makes its own noise there."
@@ -206,8 +238,38 @@ function AppearanceTab() {
 function AgentsTab() {
   const store = useSessionStore();
   const [busy, setBusy] = useState(false);
+  const [skill, setSkill] = useState<SkillInstallStatus | null>(null);
+  const [skillBusy, setSkillBusy] = useState(false);
+  const [skillError, setSkillError] = useState<string | null>(null);
+  useEffect(() => {
+    api.cliSkillStatus().then(setSkill).catch((error) => setSkillError(errorMessage(error)));
+  }, []);
+  const installSkill = async () => {
+    setSkillBusy(true);
+    setSkillError(null);
+    try {
+      setSkill(await api.installCliSkill());
+    } catch (error) {
+      setSkillError(errorMessage(error));
+    } finally {
+      setSkillBusy(false);
+    }
+  };
   return (
     <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-between gap-3 rounded-lg bg-well px-3 py-2.5">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">TerminalX Next agent skill</div>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Install the discovery stub for Claude Code and Codex. The CLI serves the complete version-matched guide.
+          </p>
+          {skillError && <div className="mt-1 text-xs text-destructive">{skillError}</div>}
+        </div>
+        <Button size="sm" variant="outline" disabled={skillBusy || skill?.installed} onClick={() => void installSkill()}>
+          {skillBusy ? <Loader2 className="animate-spin" /> : skill?.installed ? <Check /> : null}
+          {skill?.installed ? "Installed" : "Install skill"}
+        </Button>
+      </div>
       <div className="flex items-center justify-between">
         <p className="text-xs text-muted-foreground">TerminalX Next runs the agent CLIs you already have. Log in to each one in a terminal first.</p>
         <Button

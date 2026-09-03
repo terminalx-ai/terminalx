@@ -35,9 +35,30 @@ use crate::{git, pty, store};
 
 pub struct PendingAsk {
     pub tool_use_id: String,
+    pub tool_name: String,
     pub input: Value,
     /// Suggestion payloads keyed by option id ("suggest:N").
     pub suggestions: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPermission {
+    pub session_id: String,
+    pub tab_id: String,
+    pub request_id: String,
+    pub tool_name: String,
+    pub input: Value,
+    pub options: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningTab {
+    pub session_id: String,
+    pub tab_id: String,
+    pub harness: String,
+    pub status: TabStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +170,7 @@ pub struct SessionManager {
     host: Arc<Host>,
     terminals: Arc<pty::Terminals>,
     codex_models: Arc<codex::models::Cache>,
+    control: crate::hooks::ControlEndpoint,
     tabs: Arc<Mutex<HashMap<String, Arc<Mutex<TabRuntime>>>>>,
     /// One lock per pane, so two prompts sent in quick succession cannot
     /// interleave their paste and their Enter.
@@ -265,12 +287,19 @@ pub fn pty_first(harness: &str) -> Option<CliKind> {
 }
 
 impl SessionManager {
-    pub fn new(app: AppHandle, host: Arc<Host>, terminals: Arc<pty::Terminals>, codex_models: Arc<codex::models::Cache>) -> Self {
+    pub fn new(
+        app: AppHandle,
+        host: Arc<Host>,
+        terminals: Arc<pty::Terminals>,
+        codex_models: Arc<codex::models::Cache>,
+        control: crate::hooks::ControlEndpoint,
+    ) -> Self {
         Self {
             app,
             host,
             terminals,
             codex_models,
+            control,
             tabs: Arc::new(Mutex::new(HashMap::new())),
             writers: Arc::new(Mutex::new(HashMap::new())),
             starts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -378,6 +407,55 @@ impl SessionManager {
         self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).map(|r| r.lock().unwrap().status).unwrap_or(TabStatus::Idle)
     }
 
+    pub fn is_running(&self, session_id: &str, tab_id: &str) -> bool {
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
+        runtime.is_some_and(|runtime| {
+            let runtime = runtime.lock().unwrap();
+            runtime.child.is_some()
+                || matches!(&runtime.engine, Engine::Cli(cli) if self.terminals.is_running(&cli.pane_id))
+        })
+    }
+
+    pub fn running_tabs(&self) -> Vec<RunningTab> {
+        let runtimes: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
+        runtimes
+            .into_iter()
+            .filter_map(|runtime| {
+                let runtime = runtime.lock().unwrap();
+                let running = runtime.child.is_some()
+                    || matches!(&runtime.engine, Engine::Cli(cli) if self.terminals.is_running(&cli.pane_id));
+                running.then(|| RunningTab {
+                    session_id: runtime.session_id.clone(),
+                    tab_id: runtime.tab_id.clone(),
+                    harness: runtime.harness.clone(),
+                    status: runtime.status,
+                })
+            })
+            .collect()
+    }
+
+    pub fn pending_permissions(&self) -> Vec<PendingPermission> {
+        let runtimes: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
+        let mut out = Vec::new();
+        for runtime in runtimes {
+            let runtime = runtime.lock().unwrap();
+            for (request_id, pending) in &runtime.pending {
+                let mut options = vec!["allow".to_string(), "deny".to_string()];
+                options.extend((0..pending.suggestions.len()).map(|index| format!("suggest:{index}")));
+                out.push(PendingPermission {
+                    session_id: runtime.session_id.clone(),
+                    tab_id: runtime.tab_id.clone(),
+                    request_id: request_id.clone(),
+                    tool_name: pending.tool_name.clone(),
+                    input: pending.input.clone(),
+                    options,
+                });
+            }
+        }
+        out.sort_by(|a, b| a.request_id.cmp(&b.request_id));
+        out
+    }
+
     pub fn queued(&self, session_id: &str, tab_id: &str) -> Vec<QueuedMessage> {
         self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).map(|r| r.lock().unwrap().queued.clone()).unwrap_or_default()
     }
@@ -405,7 +483,12 @@ impl SessionManager {
 
     fn spawn_child(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, program: &Path, args: &[String], cwd: &str) -> Result<()> {
         let sink = Arc::new(TabSink { manager: self.clone(), rt: rt_arc.clone() });
-        let env = vec![("RACCOON_SESSION_ID".to_string(), rt.session_id.clone()), ("RACCOON_TAB_ID".to_string(), rt.tab_id.clone())];
+        let env = vec![
+            ("RACCOON_SESSION_ID".to_string(), rt.session_id.clone()),
+            ("RACCOON_TAB_ID".to_string(), rt.tab_id.clone()),
+            (crate::hooks::CONTROL_SOCKET_ENV.to_string(), self.control.socket.to_string_lossy().into_owned()),
+            (crate::hooks::CONTROL_TOKEN_ENV.to_string(), self.control.token.clone()),
+        ];
         let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env }, sink)?;
         rt.child_pid = Some(child.pid);
         rt.child = Some(child);
@@ -869,6 +952,8 @@ impl SessionManager {
         let mut env = vec![
             ("RACCOON_SESSION_ID".to_string(), rt.session_id.clone()),
             ("RACCOON_TAB_ID".to_string(), rt.tab_id.clone()),
+            (crate::hooks::CONTROL_SOCKET_ENV.to_string(), self.control.socket.to_string_lossy().into_owned()),
+            (crate::hooks::CONTROL_TOKEN_ENV.to_string(), self.control.token.clone()),
         ];
         // A fresh secret per launch, per tab: the socket path is inherited by
         // every process the agent starts, so what keeps one tab's hooks from
@@ -1533,7 +1618,10 @@ impl SessionManager {
                     input: input.clone(),
                 }
             };
-            rt.pending.insert(request_id.clone(), PendingAsk { tool_use_id: String::new(), input: input.clone(), suggestions });
+            rt.pending.insert(
+                request_id.clone(),
+                PendingAsk { tool_use_id: String::new(), tool_name: tool_name.clone(), input: input.clone(), suggestions },
+            );
             self.apply(&mut rt, payload, None);
         }
         let wait = match kind {
@@ -1618,8 +1706,13 @@ impl SessionManager {
                     });
                 });
             }
-            Payload::PermissionRequested { request_id, tool_use_id, input, .. } => {
-                rt.pending.entry(request_id.clone()).or_insert_with(|| PendingAsk { tool_use_id: tool_use_id.clone(), input: input.clone(), suggestions: Vec::new() });
+            Payload::PermissionRequested { request_id, tool_use_id, tool_name, input, .. } => {
+                rt.pending.entry(request_id.clone()).or_insert_with(|| PendingAsk {
+                    tool_use_id: tool_use_id.clone(),
+                    tool_name: tool_name.clone(),
+                    input: input.clone(),
+                    suggestions: Vec::new(),
+                });
                 self.set_status(rt, TabStatus::Waiting);
             }
             Payload::QuestionsAsked { .. } => self.set_status(rt, TabStatus::Waiting),
