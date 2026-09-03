@@ -126,8 +126,11 @@ pub struct RelayStatus {
 pub struct HostMetadata {
     pub host_id: String,
     pub public_key: String,
+    pub binding_generation: u64,
     pub display_name: String,
     pub platform: String,
+    pub environment_kind: String,
+    pub capabilities: Vec<String>,
     pub app_version: String,
     pub last_seen_at: Option<String>,
 }

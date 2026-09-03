@@ -236,8 +236,11 @@ export interface PairingCodeStatus {
 export interface PairingHostMetadata {
   hostId: string;
   publicKey: string;
+  bindingGeneration: number;
   displayName: string;
   platform: string;
+  environmentKind: string;
+  capabilities: string[];
   appVersion: string;
   lastSeenAt: string | null;
 }

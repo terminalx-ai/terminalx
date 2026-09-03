@@ -6,7 +6,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
-use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
+use tokio_tungstenite::tungstenite::{
+    client::IntoClientRequest, http::HeaderValue, protocol::WebSocketConfig, Message,
+};
 
 use crate::account::AccountContext;
 
@@ -408,10 +410,16 @@ async fn open_control(
         "authorization",
         HeaderValue::from_str(&format!("Bearer {relay_jwt}"))?,
     );
-    let (mut socket, _) =
-        tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(request))
-            .await
-            .map_err(|_| anyhow!("relay control connection timed out"))??;
+    let (mut socket, _) = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        tokio_tungstenite::connect_async_with_config(
+            request,
+            Some(relay_websocket_config()),
+            false,
+        ),
+    )
+    .await
+    .map_err(|_| anyhow!("relay control connection timed out"))??;
     socket
         .send(Message::Text(
             serde_json::to_string(&HostHello {
@@ -428,7 +436,12 @@ async fn open_control(
     let challenge_value = next_control_json(&mut socket).await?;
     let challenge: HostChallenge = serde_json::from_value(challenge_value)
         .context("relay returned an invalid host challenge")?;
-    if challenge.kind != "host-challenge" {
+    if challenge.kind != "host-challenge"
+        || !valid_opaque_id(&challenge.challenge_id)
+        || challenge.ciphertext_b64.is_empty()
+        || challenge.ciphertext_b64.len() > 16 * 1024
+        || challenge.expires_at < 0
+    {
         bail!("relay did not challenge the host key");
     }
     let proof = answer_relay_challenge(
@@ -465,7 +478,7 @@ async fn open_control(
     if ack.kind != "host-hello-ack"
         || ack.v != 1
         || ack.generation == 0
-        || ack.control_resume_secret.len() != 43
+        || !valid_base64url_32(&ack.control_resume_secret)
         || ack.lease_expires_at <= now_ms()
         || ack.active_conn_ids.len() > 8
         || ack.pending_conns.len() > 8
@@ -473,7 +486,7 @@ async fn open_control(
         bail!("relay returned an invalid host acknowledgement");
     }
     for pending in &ack.pending_conns {
-        if pending.conn_id.is_empty() || pending.conn_ticket.len() != 43 {
+        if !valid_opaque_id(&pending.conn_id) || !valid_base64url_32(&pending.conn_ticket) {
             bail!("relay returned an invalid pending connection");
         }
     }
@@ -584,7 +597,7 @@ async fn control_loop(
                     }
                     Some("invite-created") => {
                         let invite: InviteCreated = serde_json::from_value(value)?;
-                        if invite.kind != "invite-created" || invite.invite_token.len() != 43 || invite.expires_at <= now_ms() || invite.max_attempts == 0 || invite.max_attempts > 16 {
+                        if invite.kind != "invite-created" || !valid_opaque_id(&invite.req_id) || !valid_base64url_32(&invite.invite_token) || invite.expires_at <= now_ms() || invite.max_attempts == 0 || invite.max_attempts > 16 {
                             bail!("invalid relay invite response");
                         }
                         if let Some(respond) = pending_invites.remove(&invite.req_id) { let _ = respond.send(Ok(invite)); }
@@ -620,7 +633,7 @@ async fn control_loop(
                     }
                     Some("conn-open") => {
                         let connection: ConnectionOpen = serde_json::from_value(value)?;
-                        if connection.kind_name != "conn-open" || !matches!(connection.kind.as_str(), "invite" | "resume") || connection.attach_deadline_ms == 0 || connection.attach_deadline_ms > 60_000 {
+                        if connection.kind_name != "conn-open" || !valid_opaque_id(&connection.conn_id) || !valid_base64url_32(&connection.conn_ticket) || !matches!(connection.kind.as_str(), "invite" | "resume") || !valid_opaque_id(&connection.relay_device_id) || connection.attach_deadline_ms == 0 || connection.attach_deadline_ms > 60_000 {
                             bail!("invalid relay connection request");
                         }
                         let manager = manager.clone();
@@ -684,7 +697,18 @@ fn request_is_pending<A, B, C, D, E>(
 }
 
 fn valid_request_id(value: &str) -> bool {
+    valid_opaque_id(value)
+}
+
+fn valid_opaque_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= 128
+}
+
+fn valid_base64url_32(value: &str) -> bool {
+    value.len() == 43
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn validate_installed(value: &CredentialInstalled, require_wire_type: bool) -> Result<()> {
@@ -743,10 +767,16 @@ pub(super) async fn open_data_socket(
     let url = websocket_url(cell_url, &format!("/v1/host/data/{}", connection.conn_id))?;
     let request = url.into_client_request()?;
     let attach_timeout = Duration::from_millis(connection.attach_deadline_ms);
-    let (mut socket, _) =
-        tokio::time::timeout(attach_timeout, tokio_tungstenite::connect_async(request))
-            .await
-            .map_err(|_| anyhow!("relay data connection timed out"))??;
+    let (mut socket, _) = tokio::time::timeout(
+        attach_timeout,
+        tokio_tungstenite::connect_async_with_config(
+            request,
+            Some(relay_websocket_config()),
+            false,
+        ),
+    )
+    .await
+    .map_err(|_| anyhow!("relay data connection timed out"))??;
     tokio::time::timeout(
         attach_timeout,
         socket.send(Message::Text(
@@ -777,6 +807,15 @@ fn websocket_url(origin: &str, path: &str) -> Result<String> {
     url.set_query(None);
     url.set_fragment(None);
     Ok(url.into())
+}
+
+fn relay_websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .read_buffer_size(64 * 1024)
+        .write_buffer_size(64 * 1024)
+        .max_write_buffer_size(512 * 1024)
+        .max_message_size(Some(64 * 1024))
+        .max_frame_size(Some(64 * 1024))
 }
 
 fn now_ms() -> i64 {

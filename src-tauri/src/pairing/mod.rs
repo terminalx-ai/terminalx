@@ -21,7 +21,10 @@ use serde::Deserialize;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
+use tokio_tungstenite::{
+    tungstenite::{protocol::WebSocketConfig, Message},
+    WebSocketStream,
+};
 use uuid::Uuid;
 
 use crate::account::{AccountContext, AccountManager};
@@ -451,8 +454,11 @@ impl PairingManager {
             inner.host = Some(HostMetadata {
                 host_id: keypair.host_id(),
                 public_key: keypair.public_key_b64(),
+                binding_generation: generation,
                 display_name,
-                platform: "macOS".into(),
+                platform: "darwin".into(),
+                environment_kind: "native".into(),
+                capabilities: vec![CAPABILITY.into()],
                 app_version: env!("CARGO_PKG_VERSION").into(),
                 last_seen_at: Some(Utc::now().to_rfc3339()),
             });
@@ -691,7 +697,11 @@ impl PairingManager {
                 let manager = manager.clone();
                 tauri::async_runtime::spawn(async move {
                     let result = async {
-                        let socket = tokio_tungstenite::accept_async(stream).await?;
+                        let socket = tokio_tungstenite::accept_async_with_config(
+                            stream,
+                            Some(e2ee_websocket_config()),
+                        )
+                        .await?;
                         manager
                             .handle_e2ee_socket(
                                 socket,
@@ -1149,12 +1159,45 @@ fn advertised_ipv4() -> Option<std::net::Ipv4Addr> {
     if_addrs::get_if_addrs()
         .ok()?
         .into_iter()
-        .find_map(|interface| {
+        .filter_map(|interface| {
             let std::net::IpAddr::V4(address) = interface.ip() else {
                 return None;
             };
-            (!address.is_loopback() && !address.is_link_local()).then_some(address)
+            (!address.is_loopback() && !address.is_link_local() && !is_proxy_fake_ipv4(address))
+                .then_some((interface.name, address))
         })
+        .min_by_key(|(name, address)| interface_rank(name, *address))
+        .map(|(_, address)| address)
+}
+
+fn is_proxy_fake_ipv4(address: std::net::Ipv4Addr) -> bool {
+    let octets = address.octets();
+    octets[0] == 198 && matches!(octets[1], 18 | 19)
+}
+
+fn interface_rank(name: &str, address: std::net::Ipv4Addr) -> u8 {
+    let octets = address.octets();
+    if octets[0] == 100 && octets[1] & 0xc0 == 0x40 {
+        return 0;
+    }
+    let name = name.to_ascii_lowercase();
+    if ["bridge", "docker", "veth", "vmnet", "vbox", "virbr"]
+        .iter()
+        .any(|marker| name.contains(marker))
+    {
+        3
+    } else {
+        1
+    }
+}
+
+fn e2ee_websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .read_buffer_size(64 * 1024)
+        .write_buffer_size(64 * 1024)
+        .max_write_buffer_size(512 * 1024)
+        .max_message_size(Some(64 * 1024))
+        .max_frame_size(Some(64 * 1024))
 }
 
 fn text_frame_bytes(message: Message) -> Result<Vec<u8>> {
@@ -1326,5 +1369,13 @@ mod tests {
         assert!(encode_pairing_offer(&offer)
             .unwrap()
             .starts_with("terminalx://pair?code="));
+    }
+
+    #[test]
+    fn direct_pairing_prefers_tailnet_and_avoids_proxy_fake_addresses() {
+        assert_eq!(interface_rank("utun4", "100.86.2.3".parse().unwrap()), 0);
+        assert_eq!(interface_rank("en0", "192.168.1.2".parse().unwrap()), 1);
+        assert_eq!(interface_rank("vmnet8", "172.16.1.2".parse().unwrap()), 3);
+        assert!(is_proxy_fake_ipv4("198.18.2.3".parse().unwrap()));
     }
 }
