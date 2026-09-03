@@ -24,6 +24,7 @@ import type { Project } from "@/types/session";
 import { MASCOTS, PROJECT_COLORS, PixelMascot, colorCss } from "./PixelMascot";
 import { TITLEBAR_INSET } from "./AppShell";
 import { useAutomationStore } from "@/lib/automations";
+import { AccountSidebarEntry } from "@/components/account/AccountSidebarEntry";
 
 /**
  * The left rail: one row per attached project, pinned ones first, each with
@@ -32,6 +33,7 @@ import { useAutomationStore } from "@/lib/automations";
  */
 export function ProjectRail({
   onOpenSettings,
+  onOpenAccount,
   onOpenIssues,
   onOpenAgents,
   onOpenAutomations,
@@ -39,6 +41,7 @@ export function ProjectRail({
   onSearch,
 }: {
   onOpenSettings: () => void;
+  onOpenAccount: () => void;
   onOpenIssues: () => void;
   onOpenAgents: () => void;
   onOpenAutomations: () => void;
@@ -178,6 +181,7 @@ export function ProjectRail({
       </div>
 
       <div className="border-t border-hairline p-2">
+        <AccountSidebarEntry onOpenAccount={onOpenAccount} />
         <Button variant="ghost" className="w-full justify-start gap-2 px-2" onClick={onOpenSettings}>
           <Settings />
           Settings

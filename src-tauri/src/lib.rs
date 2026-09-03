@@ -1,3 +1,4 @@
+mod account;
 mod automations;
 mod binpath;
 pub mod cli;
@@ -33,6 +34,7 @@ fn supports_deep_link_scheme(scheme: &str) -> bool {
 }
 
 pub struct AppState {
+    pub account: Arc<account::AccountManager>,
     pub host: Arc<harness::host::Host>,
     pub terminals: Arc<pty::Terminals>,
     pub dictation: Arc<dictation::Dictation>,
@@ -56,7 +58,9 @@ pub fn run() {
     let codex_models = Arc::new(harness::codex::models::Cache::default());
     let terminals = Arc::new(pty::Terminals::new());
     let status_state = Arc::new(status::StatusState::default());
+    let account = Arc::new(account::AccountManager::default());
     let state = AppState {
+        account: account.clone(),
         host: host.clone(),
         terminals: terminals.clone(),
         dictation: Arc::new(dictation::Dictation::default()),
@@ -77,15 +81,25 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(state)
         .setup(move |app| {
+            account.configure(&app.config().identifier)?;
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
-                app.deep_link().on_open_url(|event| {
+                let app_handle = app.handle().clone();
+                let account = account.clone();
+                app.deep_link().on_open_url(move |event| {
                     for url in event.urls() {
                         if supports_deep_link_scheme(url.scheme()) {
-                            log::info!("received deep link: {url}");
+                            account::focus_main_window(&app_handle);
+                            if account::is_launch_link(&url) {
+                                log::info!("received TerminalX launch link");
+                            } else if account.handle_deep_link(&app_handle, &url) {
+                                log::info!("received TerminalX account callback");
+                            } else {
+                                log::warn!("ignored unrecognized TerminalX deep link");
+                            }
                         } else {
-                            log::warn!("ignored deep link with unsupported scheme: {url}");
+                            log::warn!("ignored deep link with unsupported scheme");
                         }
                     }
                 });
@@ -132,6 +146,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_projects,
+            commands::account_status,
+            commands::account_sign_in,
+            commands::account_sign_out,
             commands::add_project,
             commands::remove_project,
             commands::select_project,

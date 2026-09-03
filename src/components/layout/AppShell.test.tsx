@@ -52,6 +52,7 @@ vi.mock("@/lib/agentEvents", () => ({ applyEvent: vi.fn(), subscribeAgentEvents:
 vi.mock("@/lib/api", () => ({ agent: { send: vi.fn() } }));
 vi.mock("@/lib/models", () => ({ loadModels: vi.fn() }));
 vi.mock("@/lib/automations", () => ({ bootAutomations: vi.fn() }));
+vi.mock("@/lib/account", () => ({ bootAccount: vi.fn() }));
 vi.mock("@/lib/notify", () => ({ startNotifications: vi.fn() }));
 vi.mock("@/lib/tabViews", () => ({ subscribeTabPty: vi.fn() }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));

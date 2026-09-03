@@ -55,11 +55,13 @@ drives the `claude` and `codex` CLIs you are already logged into.
 ## What leaves your machine
 
 TerminalX has **no telemetry, no analytics and no crash reporting**.
-There is no account, no sign-in, and nothing is phoned home about how you use it. The only
-outbound connections it makes are these five, all of them things you asked for:
+An optional TerminalX account is used only when you choose Sign in, and nothing is
+phoned home about how you use the app. The only outbound connections it makes are
+these six, all of them things you asked for:
 
 | To | When | Carrying |
 | --- | --- | --- |
+| TerminalX account | You press Sign in, a session is refreshed, or you sign out | PKCE authorization values and the account session credentials issued by `login.terminalx.ai`; no prompts, transcripts, files or workspace metadata |
 | GitHub | You open the Issues view or a PR panel | Nothing of TerminalX's own — it shells out to your `gh`, which uses your existing credentials |
 | Linear | You open the Issues view with a Linear key configured | A GraphQL query to `api.linear.app`, authorized with the key you pasted |
 | Anthropic usage | The focused status bar lacks a Claude model limit, no more than once every 15 minutes | A GET to `api.anthropic.com/api/oauth/usage`, authorized with the OAuth token Claude Code already stores; no prompts, transcripts or files |
@@ -68,6 +70,14 @@ outbound connections it makes are these five, all of them things you asked for:
 
 Some detail on each:
 
+- **TerminalX account.** Sign-in opens the deployed TerminalX console in your
+  default browser, returns through `terminalx://auth/callback`, and exchanges the
+  one-time code with `login.terminalx.ai`. Access and refresh tokens stay in the
+  native process and are stored in macOS Keychain under the app's own
+  `com.terminalx.next.account` service (or the corresponding development app
+  service); they are never written to TerminalX's files. The session refreshes near
+  expiry, and sign-out clears the Keychain item before its best-effort logout call.
+  An account is optional and the app remains fully usable without one.
 - **The agents themselves.** `claude` and `codex` talk to Anthropic and OpenAI
   the same way they do in your terminal, under your own login. TerminalX
   does not proxy, inspect or re-send any of it; it reads the transcript files

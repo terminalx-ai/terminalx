@@ -26,6 +26,7 @@ import { bootStatus, useStatus } from "@/lib/status";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
 import { RightPanel } from "@/components/layout/RightPanel";
+import { bootAccount } from "@/lib/account";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const statusBarFallback = <div aria-hidden className="h-[22px] shrink-0 border-t border-hairline bg-background/70" />;
@@ -52,6 +53,7 @@ export function AppShell() {
     void loadModels();
     startNotifications();
     void bootStatus();
+    void bootAccount();
   }, []);
 
   // The first prompt of a new session is sent right after the worktree exists.
@@ -66,6 +68,10 @@ export function AppShell() {
   const togglePanel = useCallback(() => setPrefs({ panelOpen: !prefs.panelOpen }), [prefs.panelOpen]);
   const openSettings = useCallback(() => {
     setSettingsTab("general");
+    setSettingsOpen(true);
+  }, []);
+  const openAccountSettings = useCallback(() => {
+    setSettingsTab("account");
     setSettingsOpen(true);
   }, []);
   const openAgentSettings = useCallback(() => {
@@ -102,6 +108,7 @@ export function AppShell() {
           <Sidebar
             onToggle={toggleSidebar}
             onOpenSettings={openSettings}
+            onOpenAccount={openAccountSettings}
             onOpenIssues={showIssues}
             onOpenAgents={showAgents}
             onOpenAutomations={showAutomations}

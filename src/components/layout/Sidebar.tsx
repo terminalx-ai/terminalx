@@ -15,6 +15,7 @@ import { WorkspaceColumn } from "./WorkspaceColumn";
 export function Sidebar({
   onToggle,
   onOpenSettings,
+  onOpenAccount,
   onOpenIssues,
   onOpenAgents,
   onOpenAutomations,
@@ -23,6 +24,7 @@ export function Sidebar({
 }: {
   onToggle: () => void;
   onOpenSettings: () => void;
+  onOpenAccount: () => void;
   onOpenIssues: () => void;
   onOpenAgents: () => void;
   onOpenAutomations: () => void;
@@ -45,6 +47,7 @@ export function Sidebar({
     <aside className="relative flex h-full shrink-0">
       <ProjectRail
         onOpenSettings={onOpenSettings}
+        onOpenAccount={onOpenAccount}
         onOpenIssues={onOpenIssues}
         onOpenAgents={onOpenAgents}
         onOpenAutomations={onOpenAutomations}

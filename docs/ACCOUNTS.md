@@ -10,6 +10,16 @@ TerminalX reuses the deployed TerminalX identity, account-pairing, and relay
 services. It is a client of `login.terminalx.ai` and `relay.terminalx.ai`; this
 plan does not require a change to those services.
 
+## Delivery phases
+
+1. **Desktop account sign-in and session lifecycle** ✅ — sign-in from the
+   sidebar or Settings, PKCE through the deployed console, the
+   `terminalx://auth/callback` return, Keychain persistence, refresh, identity,
+   and sign-out are implemented by [#42](https://github.com/terminalx-ai/raccoon/issues/42).
+2. **Mobile account sign-in and installation registration** — planned.
+3. **Host account binding and one-time pairing grants** — planned.
+4. **Direct and relayed account-paired sessions** — planned.
+
 ## Reuse boundary
 
 **Contract:** `docs/reference/cloud-endpoints.md` § “Scope” and §
@@ -44,16 +54,18 @@ delegates `/v1/desktop/auth/authorize`, `/session`, `/refresh`,
 `apps/api/src/controllers/desktop/authorize.ts` and
 `apps/api/src/lib/cloudAuthContract.ts`.
 
-The Rust desktop client copies the shipped desktop flow exactly:
+The Rust desktop client uses the shipped desktop exchange contract with the
+scheme the app already owns:
 
-1. Bind a one-shot HTTP listener to `127.0.0.1:0` and use the resulting
-   `http://127.0.0.1:<port>/auth/callback` URL.
+1. Generate fresh `state`, `nonce`, and a PKCE S256 challenge, and use the
+   registered `terminalx://auth/callback` redirect.
 2. Open `/v1/desktop/auth/authorize` in the system browser with client id
    `terminalx-desktop`, response type `code`, scope
    `openid profile email offline_access`, a fresh `state`, `nonce`, and PKCE
    S256 challenge, plus TerminalX's local profile id.
-3. Accept only the exact callback path and matching `state`; ignore unrelated
-   loopback probes. Close the listener after success, denial, or five minutes.
+3. Accept only that exact deep-link callback and matching `state`; ignore
+   unrelated launch links or callbacks. Expire the pending attempt after five
+   minutes.
 4. Exchange the code at `/v1/desktop/auth/session` using the original verifier,
    nonce, redirect URI, state, and local profile id.
 
