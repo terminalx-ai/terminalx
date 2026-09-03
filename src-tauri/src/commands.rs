@@ -895,9 +895,22 @@ pub fn status_usage_snapshot(state: State<'_, AppState>) -> CmdResult<crate::sta
 pub async fn status_usage_refresh(app: AppHandle, state: State<'_, AppState>, manual: Option<bool>) -> CmdResult<crate::status::usage::UsageSnapshot> {
     let status = state.status.clone();
     let manager = state.manager().ok_or("not ready")?;
-    tauri::async_runtime::spawn_blocking(move || status.usage.refresh_codex(manual.unwrap_or(false)).map_err(err))
-        .await
-        .map_err(err)??;
+    let manual = manual.unwrap_or(false);
+    let failures = tauri::async_runtime::spawn_blocking(move || {
+        let mut failures = Vec::new();
+        if let Err(error) = status.usage.refresh_claude() {
+            failures.push(format!("Claude usage refresh: {error:#}"));
+        }
+        if let Err(error) = status.usage.refresh_codex(manual) {
+            failures.push(format!("Codex usage refresh: {error:#}"));
+        }
+        failures
+    })
+    .await
+    .map_err(err)?;
+    for failure in failures {
+        log::warn!("{failure}");
+    }
     let snapshot = manager.usage_snapshot();
     let _ = app.emit(crate::status::usage::EVENT, &snapshot);
     Ok(snapshot)

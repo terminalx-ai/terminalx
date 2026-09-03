@@ -435,12 +435,24 @@ Usage belongs to the window, not to the active transcript. Claude Code
 `seven_day` windows, `used_percentage`, and epoch-second `resets_at` values.
 Raccoon's launch settings point that command at `raccoon statusline`; the
 short-lived command forwards the block through the tab's existing authenticated
-hook socket and prints nothing. There is no usage request, hidden PTY, durable
-cache, or second transport. A pane may contribute at most one non-empty update
-per 15 seconds. Both the documented percentage and the fractional
+hook socket and prints nothing. A pane may contribute at most one non-empty
+update per 15 seconds. Both the documented percentage and the fractional
 `utilization` form are accepted because installed CLI builds have emitted both.
 Additive `model_scoped` entries use their server-supplied model label; a Fable
 entry becomes its distinct 10,080-minute window in the same snapshot.
+
+Claude Code 2.1.259 on a Pro account was then found to send only `five_hour`
+and `seven_day` through that status line. While the window is focused, a
+read-only fallback therefore polls `https://api.anthropic.com/api/oauth/usage`
+for missing model-scoped windows, never more than once every 15 minutes. It
+reads the OAuth token Claude Code already keeps in the macOS Keychain item
+`Claude Code-credentials`, or `~/.claude/.credentials.json` when the item is
+absent; it never writes or refreshes credentials and never retains the token.
+Recent status-line windows win per key, while the OAuth response fills Fable
+and any other weekly model scopes using their server-supplied display names.
+Results and exponential failure backoff are memory-only, and 401, 429 and
+network failures leave the last snapshot intact. There is still no hidden PTY
+or durable cache.
 
 Codex 0.152.0 answers `account/rateLimits/read` on the same one-shot app-server
 client already used for model discovery. A 300-minute primary window is `5h`,

@@ -1,8 +1,8 @@
 //! App-wide account usage, kept in memory only.
 //!
-//! Claude arrives for free in the status-line payload the CLI already builds
-//! after a turn. Codex is one read-only question to a short-lived app-server.
-//! Neither path introduces an HTTP client or persists account data.
+//! Claude's status-line payload is the live source after a turn. A read-only
+//! OAuth usage request fills model-scoped windows that payload omits. Codex is
+//! one read-only question to a short-lived app-server. Nothing is persisted.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -12,12 +12,15 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
 
+mod claude_oauth;
+
 pub const EVENT: &str = "status_usage";
 const STATUSLINE_THROTTLE_MS: i64 = 15_000;
 const BACKGROUND_REFRESH_MS: i64 = 15 * 60_000;
 const MANUAL_REFRESH_MS: i64 = 5 * 60_000;
 const STALE_MS: i64 = 30 * 60_000;
 const MAX_BACKOFF_MS: i64 = 15 * 60_000;
+const CLAUDE_MAX_BACKOFF_MS: i64 = 4 * 60 * 60_000;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +46,7 @@ pub struct UsageSnapshot {
 #[derive(Default)]
 struct PollState {
     last_success: Option<i64>,
+    last_attempt: Option<i64>,
     last_manual: Option<i64>,
     retry_at: Option<i64>,
     failures: u32,
@@ -53,6 +57,8 @@ struct PollState {
 struct Inner {
     windows: HashMap<(String, String), UsageWindow>,
     statusline_by_tab: HashMap<String, i64>,
+    claude_statusline_by_key: HashMap<String, i64>,
+    claude: PollState,
     codex: PollState,
 }
 
@@ -84,6 +90,14 @@ fn reset_ms(value: &Value) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(raw).ok().map(|timestamp| timestamp.timestamp_millis())
 }
 
+fn claude_used_percent(raw: &Value) -> Option<f32> {
+    if let Some(value) = raw.get("used_percentage").and_then(numeric).or_else(|| raw.get("percent").and_then(numeric)) {
+        return Some(value.clamp(0.0, 100.0));
+    }
+    let utilization = raw.get("utilization").and_then(numeric)?;
+    Some(if utilization <= 1.0 { utilization * 100.0 } else { utilization }.clamp(0.0, 100.0))
+}
+
 fn claude_label(key: &str) -> (String, Option<u32>) {
     match key {
         "five_hour" => ("5h".into(), Some(300)),
@@ -112,20 +126,12 @@ fn classify_codex(minutes: u32) -> (String, String) {
 }
 
 fn parse_claude_window(key: &str, raw: &Value, updated_at: i64) -> Option<UsageWindow> {
-    let usage = raw.get("used_percentage").or_else(|| raw.get("utilization"))?;
-    let utilization = numeric(usage)?;
-    let used_percent = if raw.get("used_percentage").is_none() && utilization <= 1.0 {
-        utilization * 100.0
-    } else {
-        utilization
-    }
-    .clamp(0.0, 100.0);
     let (label, window_minutes) = claude_label(key);
     Some(UsageWindow {
         agent: "claude".into(),
         key: key.into(),
         label,
-        used_percent,
+        used_percent: claude_used_percent(raw)?,
         resets_at: raw.get("resets_at").and_then(reset_ms),
         window_minutes,
         updated_at,
@@ -134,25 +140,66 @@ fn parse_claude_window(key: &str, raw: &Value, updated_at: i64) -> Option<UsageW
     })
 }
 
+fn scoped_model_key(display_name: &str) -> String {
+    if display_name.eq_ignore_ascii_case("Fable") {
+        return "fable_weekly".into();
+    }
+    let mut slug = String::new();
+    let mut separator = false;
+    for character in display_name.chars() {
+        if character.is_alphanumeric() {
+            if separator && !slug.is_empty() {
+                slug.push('_');
+            }
+            slug.extend(character.to_lowercase());
+            separator = false;
+        } else {
+            separator = true;
+        }
+    }
+    format!("model_scoped_{}", slug.trim_matches('_'))
+}
+
+fn parse_scoped_claude_window(raw: &Value, updated_at: i64) -> Option<UsageWindow> {
+    let display_name = raw
+        .get("display_name")
+        .and_then(Value::as_str)
+        .or_else(|| raw.pointer("/scope/model/display_name").and_then(Value::as_str))?
+        .trim();
+    if display_name.is_empty() {
+        return None;
+    }
+    let mut window = parse_claude_window(&scoped_model_key(display_name), raw, updated_at)?;
+    window.label = display_name.to_string();
+    window.window_minutes = Some(10_080);
+    Some(window)
+}
+
+fn upsert_window(windows: &mut Vec<UsageWindow>, window: UsageWindow) {
+    windows.retain(|current| current.key != window.key);
+    windows.push(window);
+}
+
 fn parse_claude(payload: &Value, updated_at: i64) -> Vec<UsageWindow> {
     let Some(rate_limits) = payload.get("rate_limits").and_then(Value::as_object) else { return Vec::new() };
     let mut windows: Vec<_> = rate_limits
         .iter()
         .filter_map(|(key, raw)| parse_claude_window(key, raw, updated_at))
         .collect();
-    let fable = rate_limits.get("model_scoped").and_then(Value::as_array).and_then(|scoped| {
-        scoped.iter().find_map(|raw| {
-            raw.get("display_name")
-                .and_then(Value::as_str)
-                .filter(|name| name.eq_ignore_ascii_case("Fable"))
-                .and_then(|_| parse_claude_window("fable_weekly", raw, updated_at))
-        })
-    });
-    if let Some(fable) = fable {
-        windows.retain(|window| window.key != "fable_weekly");
-        windows.push(fable);
+    if let Some(scoped) = rate_limits.get("model_scoped").and_then(Value::as_array) {
+        for window in scoped.iter().filter_map(|raw| parse_scoped_claude_window(raw, updated_at)) {
+            upsert_window(&mut windows, window);
+        }
     }
     windows
+}
+
+fn merge_claude_windows(oauth: Vec<UsageWindow>, statusline: Vec<UsageWindow>) -> Vec<UsageWindow> {
+    let mut merged: HashMap<String, UsageWindow> = oauth.into_iter().map(|window| (window.key.clone(), window)).collect();
+    for window in statusline {
+        merged.insert(window.key.clone(), window);
+    }
+    merged.into_values().collect()
 }
 
 fn parse_codex(result: &Value, updated_at: i64) -> Vec<UsageWindow> {
@@ -195,6 +242,7 @@ impl UsageStore {
         }
         inner.statusline_by_tab.insert(tab_id.to_string(), now);
         for window in windows {
+            inner.claude_statusline_by_key.insert(window.key.clone(), now);
             inner.windows.insert((window.agent.clone(), window.key.clone()), window);
         }
         true
@@ -216,6 +264,69 @@ impl UsageStore {
             .collect();
         windows.sort_by(|a, b| b.used_percent.total_cmp(&a.used_percent).then_with(|| a.agent.cmp(&b.agent)).then_with(|| a.key.cmp(&b.key)));
         UsageSnapshot { windows }
+    }
+
+    /// Fill Claude windows that the status line has not supplied recently.
+    /// Credentials are read for this request only, and even a manual refresh
+    /// cannot call the endpoint more than once every fifteen minutes.
+    pub fn refresh_claude(&self) -> Result<()> {
+        let now = now_ms();
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let fable_is_live = inner
+                .claude_statusline_by_key
+                .get("fable_weekly")
+                .is_some_and(|last| now.saturating_sub(*last) < BACKGROUND_REFRESH_MS);
+            let poll = &mut inner.claude;
+            if fable_is_live
+                || poll.in_flight
+                || poll.retry_at.is_some_and(|at| now < at)
+                || poll.last_attempt.is_some_and(|at| now.saturating_sub(at) < BACKGROUND_REFRESH_MS)
+            {
+                return Ok(());
+            }
+            poll.in_flight = true;
+            poll.last_attempt = Some(now);
+        }
+
+        let answer = claude_oauth::read_token()
+            .context("Claude Code OAuth credentials were not found")
+            .and_then(|token| claude_oauth::fetch(&token, now));
+
+        let mut inner = self.inner.lock().unwrap();
+        inner.claude.in_flight = false;
+        match answer {
+            Ok(oauth) => {
+                let live_statusline = inner
+                    .windows
+                    .values()
+                    .filter(|window| window.agent == "claude")
+                    .filter(|window| {
+                        inner
+                            .claude_statusline_by_key
+                            .get(&window.key)
+                            .is_some_and(|seen| now.saturating_sub(*seen) < BACKGROUND_REFRESH_MS)
+                    })
+                    .cloned()
+                    .collect();
+                let windows = merge_claude_windows(oauth, live_statusline);
+                inner.windows.retain(|(agent, _), _| agent != "claude");
+                for window in windows {
+                    inner.windows.insert((window.agent.clone(), window.key.clone()), window);
+                }
+                inner.claude.last_success = Some(now);
+                inner.claude.retry_at = None;
+                inner.claude.failures = 0;
+                Ok(())
+            }
+            Err(error) => {
+                inner.claude.failures = inner.claude.failures.saturating_add(1);
+                let shift = inner.claude.failures.saturating_sub(1).min(4);
+                let backoff = (BACKGROUND_REFRESH_MS.saturating_mul(1_i64 << shift)).min(CLAUDE_MAX_BACKOFF_MS);
+                inner.claude.retry_at = Some(now.saturating_add(backoff));
+                Err(error)
+            }
+        }
     }
 
     /// Refresh through the local Codex app-server. Ordinary calls are cached
@@ -335,5 +446,43 @@ mod tests {
         assert_eq!(fable.used_percent, 82.0);
         assert_eq!(fable.window_minutes, Some(10_080));
         assert_eq!(fable.resets_at, Some(1_788_789_600_000));
+    }
+
+    #[test]
+    fn statusline_windows_win_while_oauth_fills_missing_windows() {
+        let oauth = claude_oauth::parse_response(
+            &json!({
+                "five_hour": {"utilization": 12},
+                "seven_day": {"utilization": 44},
+                "limits": [
+                    {
+                        "kind": "weekly_scoped",
+                        "percent": 82,
+                        "scope": {"model": {"display_name": "Fable"}}
+                    },
+                    {
+                        "kind": "weekly_scoped",
+                        "percent": 24,
+                        "scope": {"model": {"display_name": "Sonnet 4.5"}}
+                    }
+                ]
+            }),
+            100,
+        );
+        let statusline = parse_claude(
+            &json!({"rate_limits": {
+                "five_hour": {"used_percentage": 23, "resets_at": 1788757220}
+            }}),
+            200,
+        );
+
+        let merged = merge_claude_windows(oauth, statusline);
+        assert_eq!(merged.len(), 4);
+        let five_hour = merged.iter().find(|window| window.key == "five_hour").unwrap();
+        assert_eq!(five_hour.used_percent, 23.0);
+        assert_eq!(five_hour.updated_at, 200);
+        assert_eq!(merged.iter().find(|window| window.key == "seven_day").unwrap().used_percent, 44.0);
+        assert_eq!(merged.iter().find(|window| window.key == "fable_weekly").unwrap().used_percent, 82.0);
+        assert_eq!(merged.iter().find(|window| window.key == "model_scoped_sonnet_4_5").unwrap().label, "Sonnet 4.5");
     }
 }
