@@ -203,8 +203,23 @@ TerminalX Next is the native successor to TerminalX. It carries forward the
 app, its workflow, and its community while the new implementation grows toward
 feature parity.
 
-The broader agent-tooling ecosystem also helped make this category familiar
-and useful.
+TerminalX Next also exists because other people built this category first and
+built it well. Each of these shaped how it thinks, and any of them may suit you
+better:
+
+- [Conductor](https://conductor.build) — the idea that a workspace is a git
+  worktree and that parallel agents each deserve their own.
+- [MonoCode](https://www.usemono.dev) — a desktop UI over the agent CLIs you
+  already have, rather than a service that resells them.
+- [Cursor](https://cursor.com) — the shape of an agent conversation sitting
+  next to an editor and a diff, and the polish that made it feel ordinary.
+- [Orca](https://www.onorca.dev) — an agent development environment: terminals,
+  editor, git and review gathered around the agents instead of beside them.
+- [Superset](https://superset.sh) — running many agents at once without
+  ceremony, and treating the terminal as a first-class surface rather than an
+  escape hatch.
+- [Dray](https://www.drayhq.com) — one app for Claude Code and Codex together,
+  with issues and pull requests where the work already is.
 
 Built on [Tauri](https://tauri.app), [React](https://react.dev) and
 [xterm.js](https://xtermjs.org), and it drives
