@@ -41,7 +41,17 @@ export function issuePrompt(issue: Issue): string {
  * detail column shows the body so the reader can judge before an agent
  * spends a worktree on it.
  */
-export function IssuesView({ onCreated }: { onCreated?: (sessionId: string, tabId: string, firstPrompt: string) => void }) {
+export function IssuesView({
+  onCreated,
+  useWorktree: controlledUseWorktree,
+  onUseWorktreeChange,
+  onTargetProjectChange,
+}: {
+  onCreated?: (sessionId: string, tabId: string, firstPrompt: string) => void;
+  useWorktree?: boolean;
+  onUseWorktreeChange?: (value: boolean) => void;
+  onTargetProjectChange?: (projectPath: string | null) => void;
+}) {
   const store = useSessionStore();
   const prefs = usePrefs();
   const [provider, setProvider] = useState<Provider>(prefs.issueProvider);
@@ -59,12 +69,19 @@ export function IssuesView({ onCreated }: { onCreated?: (sessionId: string, tabI
   const [ghOk, setGhOk] = useState<boolean | null>(null);
   const [repo, setRepo] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
-  const [useWorktree, setUseWorktree] = useState(prefs.useWorktree);
+  const [localUseWorktree, setLocalUseWorktree] = useState(prefs.useWorktree);
   const [status, setStatus] = useState<WorkStatus | null>(null);
   const [tick, setTick] = useState(0);
+  const useWorktree = controlledUseWorktree ?? localUseWorktree;
+  const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
 
   const project = store.projects.find((p) => p.path === prefs.lastProject) ?? store.projects[0] ?? null;
   const harness = store.harnesses.find((h) => h.id === prefs.lastAgent) ?? store.harnesses[0] ?? null;
+
+  useEffect(() => {
+    onTargetProjectChange?.(selected && project ? project.path : null);
+  }, [onTargetProjectChange, project?.path, selected?.provider, selected?.id]);
+  useEffect(() => () => onTargetProjectChange?.(null), [onTargetProjectChange]);
 
   useEffect(() => {
     setPrefs({ issueProvider: provider });
@@ -215,6 +232,7 @@ export function IssuesView({ onCreated }: { onCreated?: (sessionId: string, tabI
                 <DropdownMenuItem
                   key={p.path}
                   onSelect={() => {
+                    setSelected(null);
                     setPrefs({ lastProject: p.path });
                     void selectProject(p.path);
                   }}

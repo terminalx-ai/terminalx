@@ -26,7 +26,20 @@ import type { TabEntry } from "@/types/session";
 function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
   const log = useTabLog(session.id, tab.id);
   const live = tab.status === "in_progress" || tab.status === "waiting";
-  return <RightPanel session={session} events={log.events} version={log.version} live={live} />;
+  return (
+    <RightPanel
+      cwd={session.cwd}
+      branch={session.branch ?? null}
+      baseRef={session.baseRef}
+      events={log.events}
+      version={log.version}
+      live={live}
+      sessionId={session.id}
+      mentionTabId={session.activeTab ?? session.tabs[0]?.id ?? null}
+      statusKey={session.tabs.map((item) => item.status).join(",")}
+      settleSessionId={session.worktreeName && !session.worktreeRemoved ? session.id : undefined}
+    />
+  );
 }
 
 /**
