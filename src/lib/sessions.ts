@@ -31,8 +31,6 @@ interface State {
   workspacesLoading: Record<string, boolean>;
   /** A new-session form pre-filled from a workspace row. */
   newSessionPreset: { projectPath: string; cwd: string | null } | null;
-  /** Bumped by ⌘K so the workspace column focuses its search box. */
-  sessionSearch: number;
   /** Pre-normalized command-palette documents, rebuilt only when source data changes. */
   paletteIndex: PaletteIndex;
 }
@@ -51,7 +49,6 @@ let state: State = {
   workspaces: {},
   workspacesLoading: {},
   newSessionPreset: null,
-  sessionSearch: 0,
   paletteIndex: buildPaletteIndex([], [], {}, []),
 };
 
@@ -201,11 +198,6 @@ export function openWorkspace(projectPath: string, cwd: string): Promise<Session
     .finally(() => openingWorkspaces.delete(key));
   openingWorkspaces.set(key, request);
   return request;
-}
-
-export function setSessionSearch() {
-  set({ sessionSearch: state.sessionSearch + 1 });
-  requestAnimationFrame(() => (document.querySelector("[data-session-search]") as HTMLInputElement | null)?.focus());
 }
 
 export function clearNewSessionPreset() {

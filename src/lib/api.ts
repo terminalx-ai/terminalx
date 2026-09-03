@@ -426,6 +426,7 @@ export const git = {
 export const gh = {
   available: () => invoke<boolean>("gh_available"),
   list: (cwd: string, branch: string) => invoke<PullRequest[]>("pr_list", { cwd, branch }),
+  details: (cwd: string, number: number) => invoke<PullRequest>("pr_details", { cwd, number }),
   create: (cwd: string, title: string, body: string, base: string | null, draft: boolean) =>
     invoke<string>("pr_create", { cwd, title, body, base, draft }),
   merge: (cwd: string, number: number, method: "merge" | "squash" | "rebase") => invoke<void>("pr_merge", { cwd, number, method }),

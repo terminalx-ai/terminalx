@@ -12,7 +12,7 @@ import { SessionView } from "@/components/session/SessionView";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
-import { bootSessions, openAgents, openAutomations, openIssues, openSkills, openStats, selectSession, setSessionSearch, useSessionStore } from "@/lib/sessions";
+import { bootSessions, openAgents, openAutomations, openIssues, openSkills, openStats, selectSession, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
 import { agent } from "@/lib/api";
 import { loadModels } from "@/lib/models";
@@ -26,6 +26,7 @@ import { bootStatus, useStatus } from "@/lib/status";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
 import { RightPanel } from "@/components/layout/RightPanel";
+import { CommandPalette } from "@/components/command/CommandPalette";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
@@ -45,6 +46,7 @@ export function AppShell() {
   const store = useSessionStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
   useEffect(() => {
     void subscribeAgentEvents();
@@ -66,8 +68,8 @@ export function AppShell() {
 
   const toggleSidebar = useCallback(() => setPrefs({ sidebarOpen: !prefs.sidebarOpen }), [prefs.sidebarOpen]);
   const togglePanel = useCallback(() => setPrefs({ panelOpen: !prefs.panelOpen }), [prefs.panelOpen]);
-  const openSettings = useCallback(() => {
-    setSettingsTab("general");
+  const openSettings = useCallback((tab: SettingsTab = "general") => {
+    setSettingsTab(tab);
     setSettingsOpen(true);
   }, []);
   const openAgentSettings = useCallback(() => {
@@ -83,14 +85,14 @@ export function AppShell() {
 
   useHotkey("mod+b", toggleSidebar);
   useHotkey("mod+e", togglePanel);
-  useHotkey("mod+,", openSettings);
+  useHotkey("mod+,", () => openSettings());
   useHotkey("mod+n", newSession);
   useHotkey("mod+i", showIssues);
   useHotkey("mod+shift+a", showAgents);
   useHotkey("mod+shift+u", showStats);
   useHotkey("mod+shift+k", showSkills);
   useHotkey("mod+shift+r", showAutomations);
-  useHotkey("mod+k", setSessionSearch);
+  useHotkey("mod+k", () => setPaletteOpen(true), { global: true });
 
   const sidebarOpen = prefs.sidebarOpen;
   const selected = store.sessions.find((s) => s.id === store.selectedSessionId) ?? null;
@@ -111,7 +113,7 @@ export function AppShell() {
             onOpenStats={showStats}
             onOpenAutomations={showAutomations}
             onOpenSkills={showSkills}
-            onSearch={setSessionSearch}
+            onSearch={() => setPaletteOpen(true)}
           />
         )}
 
@@ -141,6 +143,7 @@ export function AppShell() {
       ) : null}
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} initialTab={settingsTab} />
+      {paletteOpen ? <CommandPalette open onOpenChange={setPaletteOpen} onOpenSettings={openSettings} onCreated={onCreated} /> : null}
     </div>
   );
 }

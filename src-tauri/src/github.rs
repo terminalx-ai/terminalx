@@ -105,6 +105,13 @@ pub fn prs_for_branch(cwd: &Path, branch: &str) -> Result<Vec<PullRequest>> {
     Ok(prs)
 }
 
+/// One pull request by number, for command-palette task URLs.
+pub fn pr_details(cwd: &Path, number: u64) -> Result<PullRequest> {
+    let out = run(cwd, &["pr", "view", &number.to_string(), "--json", FIELDS])?;
+    let value: Value = serde_json::from_str(&out)?;
+    Ok(parse_pr(&value))
+}
+
 pub fn create_pr(cwd: &Path, title: &str, body: &str, base: Option<&str>, draft: bool) -> Result<String> {
     let mut args = vec!["pr", "create", "--title", title, "--body", body];
     if let Some(b) = base {

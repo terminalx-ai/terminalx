@@ -1062,6 +1062,11 @@ pub async fn pr_list(cwd: String, branch: String) -> CmdResult<Vec<crate::github
 }
 
 #[tauri::command]
+pub async fn pr_details(cwd: String, number: u64) -> CmdResult<crate::github::PullRequest> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::pr_details(Path::new(&cwd), number).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn pr_create(cwd: String, title: String, body: String, base: Option<String>, draft: bool) -> CmdResult<String> {
     tauri::async_runtime::spawn_blocking(move || crate::github::create_pr(Path::new(&cwd), &title, &body, base.as_deref(), draft).map_err(err))
         .await

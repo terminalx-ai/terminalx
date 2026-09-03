@@ -2,7 +2,7 @@ import type { HarnessInfo, Project, SessionEntry, Workspace } from "@/types/sess
 
 export type PaletteEntityGroup = "sessions" | "workspaces" | "projects";
 
-interface SearchField {
+export interface SearchField {
   text: string;
   normalized: string;
   target: "primary" | "secondary" | "keywords";
@@ -11,7 +11,7 @@ interface SearchField {
 
 export interface PaletteEntityBase {
   id: string;
-  group: PaletteEntityGroup;
+  group: string;
   primary: string;
   secondary: string;
   recentAt: number;
@@ -24,6 +24,7 @@ export interface PaletteSessionItem extends PaletteEntityBase {
   projectPath: string;
   branch: string | null;
   agents: string[];
+  agentIds: string[];
   modified: string;
 }
 
@@ -99,6 +100,11 @@ function searchFields(primary: string, secondary: string, keywords: string[]): S
   ];
 }
 
+/** Index a small dynamic row (a file or command) with the same matcher as store entities. */
+export function indexPaletteItem<T extends Omit<PaletteEntityBase, "searchFields">>(item: T, keywords: string[] = []): T & PaletteEntityBase {
+  return { ...item, searchFields: searchFields(item.primary, item.secondary, keywords) };
+}
+
 /** Build normalized palette documents when the shared store changes, never per keystroke. */
 export function buildPaletteIndex(
   sessions: SessionEntry[],
@@ -127,6 +133,7 @@ export function buildPaletteIndex(
           session.tabs.map((tab) => harnessById.get(tab.harness) ?? tab.harness),
         ),
       ];
+      const agentIds = [...new Set(session.tabs.map((tab) => tab.harness))];
       const agentLabel = agents.length ? agents.join(", ") : "Workspace";
       const location = branch ?? workspace?.name ?? session.cwd.split("/").pop() ?? session.cwd;
       const secondary = `${projectName} · ${location} · ${agentLabel}`;
@@ -137,6 +144,7 @@ export function buildPaletteIndex(
         projectPath: session.projectPath,
         branch,
         agents,
+        agentIds,
         modified: session.modified,
         primary: session.title,
         secondary,
