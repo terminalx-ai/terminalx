@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronDown, CircleDot, ExternalLink, FolderGit2, GitBranch, Loader2, RefreshCw, Search, Settings2, UserRound } from "lucide-react";
+import { ChevronDown, ExternalLink, FolderGit2, GitBranch, Loader2, RefreshCw, Search, Settings2, UserRound } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { Segmented, Switch } from "@/components/ui/controls";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/menu";
+import { AutomationEditor, type AutomationEditorPrefill } from "@/components/automations/AutomationEditor";
+import { IssueListItem } from "@/components/issues/IssueListItem";
 import { AgentMark } from "@/components/AgentMark";
 import { Markdown } from "@/components/chat/Markdown";
 import { api, errorMessage, gh, issues as issuesApi, type Issue, type IssueTeam, type LinearStatus } from "@/lib/api";
@@ -12,7 +15,6 @@ import { selectProject, selectSession, upsertSession, useSessionStore } from "@/
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { PERMISSION_MODES } from "@/lib/models";
 import { chooseMode } from "@/lib/dialogs";
-import { relativeTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
 import type { WorkStatus } from "@/types/session";
 
@@ -72,11 +74,16 @@ export function IssuesView({
   const [localUseWorktree, setLocalUseWorktree] = useState(prefs.useWorktree);
   const [status, setStatus] = useState<WorkStatus | null>(null);
   const [tick, setTick] = useState(0);
+  const [automationPrefill, setAutomationPrefill] = useState<AutomationEditorPrefill | null>(null);
   const useWorktree = controlledUseWorktree ?? localUseWorktree;
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
 
   const project = store.projects.find((p) => p.path === prefs.lastProject) ?? store.projects[0] ?? null;
   const harness = store.harnesses.find((h) => h.id === prefs.lastAgent) ?? store.harnesses[0] ?? null;
+  const linkedIssueUrls = useMemo(
+    () => new Set(store.sessions.flatMap((session) => session.issue?.url ? [session.issue.url] : [])),
+    [store.sessions],
+  );
 
   useEffect(() => {
     onTargetProjectChange?.(selected && project ? project.path : null);
@@ -213,6 +220,9 @@ export function IssuesView({
   }, [project, provider, ghOk, repo, linear]);
 
   const mode = PERMISSION_MODES.find((m) => m.id === prefs.lastMode);
+  const linkedSession = selected
+    ? store.sessions.find((session) => session.issue?.url === selected.url)
+    : null;
 
   return (
     <div className="flex h-full min-h-0">
@@ -320,36 +330,34 @@ export function IssuesView({
             <ul className="px-2 pb-4">
               {list.map((i) => (
                 <li key={`${i.provider}:${i.id}`}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelected(i);
-                      setUseWorktree(prefs.useWorktree);
-                    }}
-                    className={cn(
-                      "flex w-full items-start gap-2.5 rounded-md px-2 py-2 text-left transition-colors",
-                      selected?.id === i.id && selected.provider === i.provider ? "bg-selected" : "hover:bg-selected/50",
-                    )}
-                  >
-                    <CircleDot className={cn("mt-0.5 size-3.5 shrink-0", i.stateType === "started" ? "text-warning" : "text-add")} />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-baseline gap-2">
-                        <span className="shrink-0 font-mono text-[11px] text-faint">{i.identifier}</span>
-                        <span className="truncate text-[13px] text-foreground">{i.title}</span>
-                      </div>
-                      <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-faint">
-                        <span>{i.state}</span>
-                        {i.labels.slice(0, 4).map((l) => (
-                          <span key={l.name} className="flex items-center gap-1">
-                            <span className="size-2 rounded-full" style={{ background: l.color ? `#${l.color}` : "var(--ink-faint)" }} />
-                            {l.name}
-                          </span>
-                        ))}
-                        {i.assignee && <span>· {i.assignee.name}</span>}
-                        {i.updatedAt && <span>· {relativeTime(i.updatedAt)}</span>}
-                      </div>
-                    </div>
-                  </button>
+                  <ContextMenu>
+                    <ContextMenuTrigger className="block">
+                      <IssueListItem
+                        issue={i}
+                        selected={selected?.id === i.id && selected.provider === i.provider}
+                        linked={linkedIssueUrls.has(i.url)}
+                        onSelect={() => {
+                          setSelected(i);
+                          setUseWorktree(prefs.useWorktree);
+                        }}
+                      />
+                    </ContextMenuTrigger>
+                    <ContextMenuContent>
+                      {i.provider === "github" && i.labels.length > 0 ? i.labels.map((label) => (
+                        <ContextMenuItem
+                          key={label.name}
+                          onSelect={() => setAutomationPrefill({
+                            projectPath: project?.path ?? "",
+                            repo: repo ?? "",
+                            query: `label:${label.name}`,
+                            label: label.name,
+                          })}
+                        >
+                          Automate this label: {label.name}…
+                        </ContextMenuItem>
+                      )) : <ContextMenuItem disabled>Add a label before automating</ContextMenuItem>}
+                    </ContextMenuContent>
+                  </ContextMenu>
                 </li>
               ))}
             </ul>
@@ -427,6 +435,11 @@ export function IssuesView({
                     )}
                   </span>
                 </label>
+                {linkedSession && (
+                  <Button variant="secondary" size="sm" onClick={() => selectSession(linkedSession.id)}>
+                    Open session
+                  </Button>
+                )}
                 <Button size="sm" variant="accent" className="ml-auto shrink-0" disabled={starting || !harness?.available || detailLoading} onClick={() => void start()}>
                   {starting ? <Loader2 className="animate-spin" /> : null}
                   Start session
@@ -440,6 +453,15 @@ export function IssuesView({
           </>
         )}
       </div>
+      <AutomationEditor
+        open={automationPrefill != null}
+        automation={null}
+        prefill={automationPrefill ?? undefined}
+        onOpenChange={(open) => {
+          if (!open) setAutomationPrefill(null);
+        }}
+        onSaved={() => setAutomationPrefill(null)}
+      />
     </div>
   );
 }

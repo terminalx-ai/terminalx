@@ -128,6 +128,8 @@ pub fn run() {
             commands::list_sessions,
             commands::automations_list,
             commands::automation_runs,
+            commands::automation_issue_states,
+            commands::automation_issue_preview,
             commands::automation_create,
             commands::automation_update,
             commands::automation_delete,

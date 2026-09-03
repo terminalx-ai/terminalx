@@ -48,6 +48,10 @@ pub struct Issue {
     pub provider: String,
     /// The provider's own id: the number for GitHub, the UUID for Linear.
     pub id: String,
+    /// GitHub's stable GraphQL node id. Automation searches request it while
+    /// the ordinary Issues view keeps using the issue number as `id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
     /// What people call it: `#123` or `ENG-42`.
     pub identifier: String,
     pub number: i64,
@@ -141,6 +145,7 @@ pub fn parse_github_issue(v: &Value) -> Issue {
     Issue {
         provider: "github".into(),
         id: number.to_string(),
+        node_id: v["id"].as_str().map(String::from),
         identifier: format!("#{number}"),
         number,
         title: v["title"].as_str().unwrap_or("").into(),
@@ -186,6 +191,35 @@ pub fn github_details(cwd: &Path, number: &str) -> Result<Issue> {
     let out = run_gh(cwd, &["issue", "view", number, "--repo", &repo, "--json", GH_VIEW_FIELDS])?;
     let v: Value = serde_json::from_str(&out).context("parse gh issue view")?;
     Ok(parse_github_issue(&v))
+}
+
+const GH_AUTOMATION_FIELDS: &str = "number,id,title,body,updatedAt,labels,url,state";
+
+/// Run an automation's raw GitHub search through the same `gh` authority and
+/// error surface as the Issues view.
+pub fn github_search(cwd: &Path, repo: &str, query: &str, limit: usize) -> Result<Vec<Issue>> {
+    let limit = limit.min(50).to_string();
+    let out = run_gh(cwd, &["issue", "list", "--repo", repo, "--search", query, "--json", GH_AUTOMATION_FIELDS, "--limit", &limit])?;
+    let value: Value = serde_json::from_str(&out).context("parse gh issue list")?;
+    Ok(parse_github_issues(&value))
+}
+
+pub fn github_comment(cwd: &Path, repo: &str, number: i64, body: &str) -> Result<String> {
+    let output = run_gh(cwd, &["issue", "comment", &number.to_string(), "--repo", repo, "--body", body])?;
+    Ok(output.trim().lines().last().unwrap_or("").to_string())
+}
+
+pub fn github_edit_labels(cwd: &Path, repo: &str, number: i64, add: &[String], remove: &[String]) -> Result<()> {
+    let number = number.to_string();
+    if !add.is_empty() {
+        let labels = add.join(",");
+        run_gh(cwd, &["issue", "edit", &number, "--repo", repo, "--add-label", &labels])?;
+    }
+    if !remove.is_empty() {
+        let labels = remove.join(",");
+        run_gh(cwd, &["issue", "edit", &number, "--repo", repo, "--remove-label", &labels])?;
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------ Linear
@@ -264,6 +298,7 @@ fn parse_linear_issue(n: &Value) -> Option<Issue> {
     Some(Issue {
         provider: "linear".into(),
         id: id.into(),
+        node_id: None,
         identifier: n["identifier"].as_str().unwrap_or("").into(),
         number: n["number"].as_i64().unwrap_or(0),
         title: n["title"].as_str().unwrap_or("").into(),

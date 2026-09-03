@@ -1,0 +1,22 @@
+[
+  {
+    "number": 41,
+    "id": "I_kwDOExample41",
+    "title": "Repair the login timeout",
+    "body": "The session expires while a command is running.",
+    "updatedAt": "2026-09-02T10:00:00Z",
+    "labels": [{ "name": "raccoon", "color": "1D76DB" }],
+    "url": "https://github.com/acme/widgets/issues/41",
+    "state": "OPEN"
+  },
+  {
+    "number": 42,
+    "id": "I_kwDOExample42",
+    "title": "Keep the selected workspace",
+    "body": "The workspace selection resets after refresh.",
+    "updatedAt": "2026-09-02T11:00:00Z",
+    "labels": [{ "name": "raccoon", "color": "1D76DB" }],
+    "url": "https://github.com/acme/widgets/issues/42",
+    "state": "OPEN"
+  }
+]
