@@ -54,7 +54,7 @@ pub struct PaneInfo {
     pub cwd: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PtyData {
     pub id: String,

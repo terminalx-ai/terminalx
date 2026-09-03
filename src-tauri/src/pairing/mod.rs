@@ -5,6 +5,7 @@
 
 mod cloud;
 mod crypto;
+mod mobile;
 mod model;
 mod registry;
 mod relay;
@@ -18,7 +19,7 @@ use base64::{engine::general_purpose, Engine};
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Listener};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
@@ -65,6 +66,7 @@ pub struct PairingManager {
     stopped: AtomicBool,
     suspended_account_token: Mutex<Option<String>>,
     connections: Mutex<HashMap<String, Vec<mpsc::UnboundedSender<()>>>>,
+    mobile: Arc<mobile::MobileRuntime>,
 }
 
 #[derive(Clone, Debug)]
@@ -91,6 +93,7 @@ impl PairingManager {
             stopped: AtomicBool::new(false),
             suspended_account_token: Mutex::new(None),
             connections: Mutex::new(HashMap::new()),
+            mobile: Arc::new(mobile::MobileRuntime::new()),
         }
     }
 
@@ -102,6 +105,15 @@ impl PairingManager {
         self.app
             .set(app.clone())
             .map_err(|_| anyhow!("pairing manager was already configured"))?;
+        self.mobile.configure(app)?;
+        let events = self.clone();
+        app.listen("agent_event", move |event| {
+            events.mobile.capture_agent_event(&events, event.payload());
+        });
+        let statuses = self.clone();
+        app.listen("tab_status", move |_| {
+            statuses.mobile.broadcast_sessions_changed();
+        });
         let manager = self.clone();
         tauri::async_runtime::spawn(async move { relay::supervise(manager).await });
         Ok(())
@@ -816,6 +828,11 @@ impl PairingManager {
             "transcriptHashB64": session.transcript_hash_b64,
         });
         send_encrypted_text(&mut socket, &mut session, &authenticated.to_string()).await?;
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let mobile_connection = Arc::new(mobile::MobileConnection::new(
+            self.mobile.clone(),
+            outbound_tx,
+        ));
         let (cancel_tx, mut cancel_rx) = mpsc::unbounded_channel();
         self.connections
             .lock()
@@ -827,18 +844,29 @@ impl PairingManager {
         loop {
             tokio::select! {
                 _ = cancel_rx.recv() => {
+                    mobile_connection.close(self);
                     let _ = socket.close(None).await;
                     return Ok(());
                 }
+                outgoing = outbound_rx.recv() => {
+                    let Some(outgoing) = outgoing else {
+                        mobile_connection.close(self);
+                        return Ok(());
+                    };
+                    send_encrypted_text(&mut socket, &mut session, &outgoing.to_string()).await?;
+                }
                 incoming = socket.next() => {
-                    let Some(incoming) = incoming else { return Ok(()); };
+                    let Some(incoming) = incoming else {
+                        mobile_connection.close(self);
+                        return Ok(());
+                    };
                     let incoming = incoming?;
                     match incoming {
                         Message::Text(text) => {
                             let bytes = decode_canonical_base64(&text)?;
                             let plaintext = session.open(&bytes, PayloadKind::Text)?;
                             let request: serde_json::Value = serde_json::from_slice(&plaintext)?;
-                            let response = self.rpc_response(&request, &device, &connection).await;
+                            let response = self.rpc_response(&request, &device, &connection, &mobile_connection).await;
                             send_encrypted_text(&mut socket, &mut session, &response.to_string()).await?;
                         }
                         Message::Binary(bytes) => {
@@ -847,7 +875,10 @@ impl PairingManager {
                             // fail closed and the socket remains usable for RPC refusals.
                             let _ = session.open(&bytes, PayloadKind::Binary)?;
                         }
-                        Message::Close(_) => return Ok(()),
+                        Message::Close(_) => {
+                            mobile_connection.close(self);
+                            return Ok(());
+                        },
                         Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await?,
                         Message::Pong(_) | Message::Frame(_) => {}
                     }
@@ -861,6 +892,7 @@ impl PairingManager {
         request: &serde_json::Value,
         device: &DeviceEntry,
         connection: &PairingConnectionContext,
+        mobile_connection: &Arc<mobile::MobileConnection>,
     ) -> serde_json::Value {
         let id = request
             .get("id")
@@ -879,6 +911,12 @@ impl PairingManager {
             "pairing.getEndpoints" if allowed_method(device.scope, method) => {
                 self.get_pairing_endpoints(device, connection, request.get("params"))
                     .await
+            }
+            method if allowed_method(device.scope, method) => {
+                match mobile::dispatch(self, mobile_connection, request, device).await {
+                    Some(result) => result,
+                    None => return static_rpc_response(request, device.scope),
+                }
             }
             _ => return static_rpc_response(request, device.scope),
         };
@@ -1099,6 +1137,14 @@ impl PairingManager {
     fn is_epoch(&self, epoch: u64) -> bool {
         !self.is_stopped() && self.epoch.load(Ordering::SeqCst) == epoch
     }
+
+    pub fn desktop_terminal_input_allowed(&self, pane_id: &str) -> bool {
+        !self.mobile.is_mobile_driven(pane_id)
+    }
+
+    pub fn mobile_driven_tabs(&self) -> Vec<String> {
+        self.mobile.driven_tab_ids()
+    }
 }
 
 #[derive(Deserialize)]
@@ -1295,12 +1341,19 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "presence.list",
         "chat.post",
         "chat.list",
+        "sessions.summaries",
+        "session.tail",
+        "session.subscribe",
+        "session.unsubscribe",
         "session.status",
         "session.roster",
         "session.tabs.list",
         "terminal.read",
         "terminal.subscribe",
         "terminal.unsubscribe",
+        "notifications.missedSince",
+        "notifications.subscribe",
+        "notifications.unsubscribe",
     ];
     const DRIVER: &[&str] = &[
         "pairing.getEndpoints",
@@ -1313,6 +1366,8 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "steerLease.acquire",
         "steerLease.release",
         "steerLease.queueInput",
+        "chat.promoteToAgent",
+        "session.send",
     ];
     VIEWER.contains(&method) || (scope == DeviceScope::Driver && DRIVER.contains(&method))
 }
@@ -1324,8 +1379,12 @@ mod tests {
     #[test]
     fn paired_device_scopes_are_deny_by_default() {
         assert!(allowed_method(DeviceScope::Viewer, "terminal.read"));
+        assert!(allowed_method(DeviceScope::Viewer, "sessions.summaries"));
+        assert!(allowed_method(DeviceScope::Viewer, "session.tail"));
         assert!(!allowed_method(DeviceScope::Viewer, "terminal.send"));
+        assert!(!allowed_method(DeviceScope::Viewer, "session.send"));
         assert!(allowed_method(DeviceScope::Driver, "terminal.send"));
+        assert!(allowed_method(DeviceScope::Driver, "session.send"));
         assert!(allowed_method(
             DeviceScope::Driver,
             "pairing.provisionRelay"
@@ -1336,6 +1395,7 @@ mod tests {
             "settings.update",
             "session.create",
             "terminal.create",
+            "permission.respond",
         ] {
             assert!(!allowed_method(DeviceScope::Driver, denied), "{denied}");
         }

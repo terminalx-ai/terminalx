@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Plus, Sparkles, Terminal, X } from "lucide-react";
+import { Lock, Plus, Sparkles, Terminal, X } from "lucide-react";
 import { useTabViews } from "@/lib/tabViews";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -21,6 +21,7 @@ import { addTab, openSkills, removeTab, setActiveTab, useSessionStore } from "@/
 import { skills as skillsApi } from "@/lib/api";
 import { getPrefs } from "@/lib/prefs";
 import { closeEditor, useEditors } from "@/lib/editors";
+import { useMobileDrivenTabs } from "@/lib/mobileDriver";
 import type { SessionEntry, TabEntry } from "@/types/session";
 import type { DiscoveredSkill } from "@/types/skills";
 
@@ -37,6 +38,7 @@ export function TabStrip({ session, activeTab }: { session: SessionEntry; active
   const activeEditor = ed.active[session.id] ?? null;
   const [pickerOpen, setPickerOpen] = useState(false);
   const [reachableSkills, setReachableSkills] = useState<DiscoveredSkill[]>([]);
+  const mobileDriven = useMobileDrivenTabs();
   const tabs = session.tabs;
 
   useEffect(() => {
@@ -118,6 +120,7 @@ export function TabStrip({ session, activeTab }: { session: SessionEntry; active
                 />
                 <AgentMark id={t.harness} className="size-3.5 shrink-0" />
                 <span className="max-w-[9rem] truncate">{name}</span>
+                {mobileDriven.has(t.id) && <Lock className="size-3 shrink-0 text-warning" aria-label="Mobile is driving this terminal" />}
                 {tabViews.views[t.id] === "terminal" && <Terminal className="size-3 shrink-0 text-faint" aria-label="In terminal view" />}
                 <button
                   type="button"

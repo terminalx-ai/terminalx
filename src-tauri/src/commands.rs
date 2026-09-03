@@ -1155,12 +1155,23 @@ pub fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, cwd: St
 
 #[tauri::command]
 pub fn pty_write(state: State<'_, AppState>, id: String, data: String) -> CmdResult<()> {
+    if !state.pairing.desktop_terminal_input_allowed(&id) {
+        return Ok(());
+    }
     state.terminals.write(&id, data.as_bytes()).map_err(err)
 }
 
 #[tauri::command]
 pub fn pty_resize(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> CmdResult<()> {
+    if !state.pairing.desktop_terminal_input_allowed(&id) {
+        return Ok(());
+    }
     state.terminals.resize(&id, cols.max(2), rows.max(1)).map_err(err)
+}
+
+#[tauri::command]
+pub fn mobile_terminal_drivers(state: State<'_, AppState>) -> Vec<String> {
+    state.pairing.mobile_driven_tabs()
 }
 
 #[tauri::command]
