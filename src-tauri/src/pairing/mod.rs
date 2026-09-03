@@ -39,7 +39,7 @@ use self::model::{
     HostBindingPayload, HostMetadata, PairingCode, PairingOffer, PairingTransport, RelayStatus,
     CAPABILITY, OFFER_TTL_MS,
 };
-pub use self::model::{PairingStatus, RelayPhase};
+pub use self::model::{PairingConnectionMode, PairingStatus, RelayPhase};
 use self::registry::{DeviceRegistry, PairingSecrets};
 use self::relay::{ConnectionOpen, DeviceCredentialInstallAuthorization, RelayLive};
 
@@ -124,12 +124,27 @@ impl PairingManager {
         self.snapshot()
     }
 
-    pub async fn generate_pairing(self: &Arc<Self>) -> Result<PairingStatus> {
+    pub async fn generate_pairing(
+        self: &Arc<Self>,
+        connection_mode: PairingConnectionMode,
+    ) -> Result<PairingStatus> {
+        let previous = self.inner.lock().unwrap().pending_pairing_device.clone();
+        if let Some(previous) = previous {
+            self.discard_unclaimed_pairing(&previous)?;
+            if let Some(relay) = self.current_relay() {
+                relay.revoke(previous);
+            }
+        }
+        let relay = match connection_mode {
+            PairingConnectionMode::Automatic => Some(self.current_relay().ok_or_else(|| {
+                anyhow!(
+                    "TerminalX Relay is not connected. Use LAN (this Wi-Fi or Tailscale), or try Relay again."
+                )
+            })?),
+            PairingConnectionMode::LocalOnly => None,
+        };
         let endpoint = self.ensure_direct_listener().await?;
         let keypair = self.host_key(true)?;
-        if let Some(previous) = self.inner.lock().unwrap().pending_pairing_device.take() {
-            self.revoke_local(&previous)?;
-        }
         let device_id = Uuid::new_v4().simple().to_string();
         let token = random_token();
         self.secrets.save_device_token(&device_id, &token)?;
@@ -153,17 +168,17 @@ impl PairingManager {
             let _ = self.secrets.delete_device_token(&device_id);
             return Err(error);
         }
-        let relay = self.current_relay();
-        let relay_offer = if let Some(relay) = relay {
-            match relay.create_invite(device_id.clone()).await {
+        let relay_offer = match relay.as_ref() {
+            Some(relay) => match relay.create_invite(device_id.clone()).await {
                 Ok(offer) => Some(offer),
                 Err(error) => {
-                    log::warn!("could not add relay reachability to pairing code: {error:#}");
-                    None
+                    let _ = self.discard_unclaimed_pairing(&device_id);
+                    return Err(error).context(
+                        "TerminalX Relay could not create a pairing invite; use LAN or retry Relay",
+                    );
                 }
-            }
-        } else {
-            None
+            },
+            None => None,
         };
         let expires_at = relay_offer
             .as_ref()
@@ -180,13 +195,23 @@ impl PairingManager {
             identity_mode: "inherit".into(),
             relay: relay_offer,
         };
+        let pairing_url = match encode_pairing_offer(&offer) {
+            Ok(pairing_url) => pairing_url,
+            Err(error) => {
+                if let Some(relay) = relay {
+                    relay.revoke(device_id.clone());
+                }
+                let _ = self.discard_unclaimed_pairing(&device_id);
+                return Err(error);
+            }
+        };
         let pairing = PairingCode {
-            pairing_url: encode_pairing_offer(&offer)?,
+            pairing_url,
             expires_at,
-            transport: if offer.relay.is_some() {
-                PairingTransport::Relay
-            } else {
-                PairingTransport::Direct
+            connection_mode,
+            transport: match connection_mode {
+                PairingConnectionMode::Automatic => PairingTransport::Relay,
+                PairingConnectionMode::LocalOnly => PairingTransport::Direct,
             },
         };
         {
@@ -1047,6 +1072,17 @@ impl PairingManager {
         let _ = self.registry.revoke(device_id)?;
         self.secrets.delete_device_token(device_id)?;
         self.cancel_connections(device_id);
+        let mut inner = self.inner.lock().unwrap();
+        if inner.pending_pairing_device.as_deref() == Some(device_id) {
+            inner.pending_pairing_device = None;
+            inner.active_pairing = None;
+        }
+        Ok(())
+    }
+
+    fn discard_unclaimed_pairing(&self, device_id: &str) -> Result<()> {
+        let _ = self.registry.discard_unclaimed(device_id)?;
+        self.secrets.delete_device_token(device_id)?;
         let mut inner = self.inner.lock().unwrap();
         if inner.pending_pairing_device.as_deref() == Some(device_id) {
             inner.pending_pairing_device = None;

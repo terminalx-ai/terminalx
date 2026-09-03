@@ -61,6 +61,7 @@ export interface AccountPairingEnvelopeV1 {
 }
 
 export type MobileE2EETransport = "direct" | "relay";
+export type PairingConnectionMode = "automatic" | "local-only";
 
 export interface MobileE2EEContext {
   protocol: "terminalx-mobile-e2ee";
@@ -230,6 +231,7 @@ export interface PairedDevice {
 export interface PairingCodeStatus {
   pairingUrl: string;
   expiresAt: number;
+  connectionMode: PairingConnectionMode;
   transport: MobileE2EETransport;
 }
 

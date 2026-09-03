@@ -222,6 +222,16 @@ account. Its offer is version 2 and uses only the deployed fields: `endpoint`,
 `mobile`, an identity mode, and the optional version-1 relay offer. It does not
 invent viewer/driver scopes or another envelope.
 
+Settings presents the same two explicit connection policies as the shipped
+desktop. **TerminalX Relay** requires sign-in and mints an offer containing both
+the direct endpoint and the relay invite. The companion races both candidates,
+with direct winning an exact tie, so nearby devices use LAN/Tailscale while the
+relay remains the fallback away from the Mac. **LAN** mints a direct-only offer,
+does not ask the relay for an invite, and remains available without an account.
+Relay mint failure is surfaced as a refusal with a LAN alternative; it never
+silently produces a direct-only code under the Relay label. Changing policies
+rotates the pending credential, invalidating the code made for the old policy.
+
 Both direct and relay transports then run the same E2EE v2 state machine. The
 mobile `e2ee_hello` offers framing 2 and text/binary payload kinds with context
 `terminalx-mobile-e2ee`; `e2ee_ready` selects those exact values. The transcript
@@ -327,18 +337,21 @@ id, never credentials or payload content.
 
 `scripts/pairing-interop.mjs` is a small scripted counterpart derived from the
 shipped mobile E2EE and relay contracts. With a fresh code visible in Settings
-→ Devices, copy the fallback code and run:
+→ Devices, copy the fallback code and force the path being checked:
 
 ```sh
-pbpaste | pnpm interop:pairing
+pbpaste | pnpm interop:pairing -- --transport direct
+pbpaste | pnpm interop:pairing -- --transport relay
 ```
 
-The script prints no credential material. It validates the offer and pinned
-host key, redeems the one-time relay invite, completes E2EE framing v2, exchanges
-an encrypted `status.get` frame, installs a hashed resume credential, and
-reconciles that idempotent install through `pairing.getEndpoints`, and waits.
-The newly authenticated device then appears in Settings → Devices; use Revoke
-to remove the row, close its live connection, and let the script finish.
+Use a LAN code for the direct command and a fresh TerminalX Relay code for the
+relay command. Without `--transport`, the probe uses Relay when the offer has an
+invite and direct otherwise. The script prints no credential material. It
+validates the offer and pinned host key, completes E2EE framing v2, exchanges an
+encrypted `status.get` frame and, when a relay invite is present, installs and
+reconciles a hashed resume credential through `pairing.getEndpoints`. The newly
+authenticated device then appears in Settings → Devices; use Revoke to remove
+the row, close its live connection, and let the script finish.
 
 ## Would require a server change (out of scope)
 

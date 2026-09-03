@@ -12,8 +12,12 @@ import WebSocket from "ws";
 const input = (await readStdin()).trim();
 if (!input) throw new Error("Pass a TerminalX pairing URL or code on stdin");
 const offer = parseOffer(input);
-const relay = offer.relay;
-const transport = relay ? "relay" : "direct";
+const requestedTransport = parseTransport(process.argv.slice(2));
+const transport = requestedTransport === "auto" ? (offer.relay ? "relay" : "direct") : requestedTransport;
+if (transport === "relay" && !offer.relay) {
+  throw new Error("This is a LAN-only offer and contains no Relay invite");
+}
+const relay = transport === "relay" ? offer.relay : undefined;
 const endpoint = relay ? relaySocketUrl(relay) : offer.endpoint;
 const socket = await openSocket(endpoint);
 
@@ -86,7 +90,7 @@ if (!status.ok || status.result?.protocolVersion !== 2 || status.result?.product
 }
 
 let installMode = "not requested";
-if (relay) {
+if (offer.relay) {
   const reqId = randomUUID();
   const resumeToken = randomBytes(32);
   const installed = await rpc(socket, session, "pairing.provisionRelay", {
@@ -100,7 +104,7 @@ if (relay) {
   if (
     !endpoints.ok ||
     endpoints.result?.installStatus?.state !== "committed" ||
-    endpoints.result?.relay?.relayHostId !== relay.relayHostId
+    endpoints.result?.relay?.relayHostId !== offer.relay.relayHostId
   ) {
     throw new Error("Relay credential install could not be reconciled");
   }
@@ -112,6 +116,28 @@ console.log(`Pairing passed over ${transport}: pinned host key, E2EE frame, stat
 console.log("Revoke the scripted device in Settings → Devices; waiting for its socket to close…");
 await waitForClose(socket, 120_000);
 console.log("Interop passed: revocation closed the live encrypted connection.");
+
+function parseTransport(args) {
+  let value = "auto";
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--") {
+      continue;
+    }
+    if (arg === "--transport") {
+      value = args[index + 1];
+      index += 1;
+    } else if (arg.startsWith("--transport=")) {
+      value = arg.slice("--transport=".length);
+    } else {
+      throw new Error(`Unknown argument: ${arg}`);
+    }
+  }
+  if (!["auto", "direct", "relay"].includes(value)) {
+    throw new Error("--transport must be auto, direct, or relay");
+  }
+  return value;
+}
 
 async function rpc(socket, session, method, params) {
   const id = randomUUID();

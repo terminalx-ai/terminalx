@@ -87,11 +87,13 @@ Some detail on each:
 - **Pairing and relay.** This Mac has a stable Curve25519 identity only after
   sign-in or after you explicitly create a pairing code. Its private key and
   raw per-device credentials stay in macOS Keychain. Account binding synchronizes
-  machine authority, not terminal contents. Pairing codes are made locally and
-  carry a short-lived, single-use relay invite; traffic after the pinned-key
-  handshake uses end-to-end authenticated encryption whether it travels directly
-  over LAN/Tailscale or through `relay.terminalx.ai`. Revoking a device removes
-  its local authority and drops its live socket immediately.
+  machine authority, not terminal contents. Pairing codes are made locally.
+  **TerminalX Relay** codes carry both a direct endpoint and a short-lived,
+  single-use relay invite, so a nearby phone tries LAN/Tailscale first and can
+  fall back to `relay.terminalx.ai`; **LAN** codes contain no relay invite and
+  require no account. Traffic after the pinned-key handshake uses end-to-end
+  authenticated encryption on either path. Revoking a device removes its local
+  authority and drops its live socket immediately.
 - **The agents themselves.** `claude` and `codex` talk to Anthropic and OpenAI
   the same way they do in your terminal, under your own login. TerminalX
   does not proxy, inspect or re-send any of it; it reads the transcript files

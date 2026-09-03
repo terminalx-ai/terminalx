@@ -93,7 +93,16 @@ pub struct PairingOffer {
 pub struct PairingCode {
     pub pairing_url: String,
     pub expires_at: i64,
+    pub connection_mode: PairingConnectionMode,
     pub transport: PairingTransport,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PairingConnectionMode {
+    #[default]
+    Automatic,
+    LocalOnly,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -248,5 +257,15 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(entry.provenance, DeviceProvenance::Explicit);
+    }
+
+    #[test]
+    fn pairing_connection_mode_is_closed_and_defaults_to_relay_capable() {
+        assert_eq!(PairingConnectionMode::default(), PairingConnectionMode::Automatic);
+        assert_eq!(
+            serde_json::from_str::<PairingConnectionMode>("\"local-only\"").unwrap(),
+            PairingConnectionMode::LocalOnly
+        );
+        assert!(serde_json::from_str::<PairingConnectionMode>("\"direct\"").is_err());
     }
 }
