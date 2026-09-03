@@ -1,8 +1,9 @@
-import { act, cleanup, fireEvent, render, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UsageSnapshot } from "@/lib/api";
 
-const { resetCodexUsage, statusState } = vi.hoisted(() => ({
+const { openStats, resetCodexUsage, statusState } = vi.hoisted(() => ({
+  openStats: vi.fn(),
   resetCodexUsage: vi.fn(async () => {}),
   statusState: {
     settings: { visible: true, usage: true, resources: false, percent: "used" as "used" | "remaining", usageMode: "detailed" as "detailed" | "compact" },
@@ -127,6 +128,13 @@ describe("status bar usage", () => {
     expect(within(claude as HTMLElement).queryByText("Claude")).toBeNull();
     expect(claude?.querySelector("i")?.className).toContain("bg-destructive");
     expect(getByRole("button", { name: /Claude Fable 82% used, resets 4d 2h/ })).toBeTruthy();
+  });
+
+  it("opens the full stats view from the usage popover footer", () => {
+    render(<StatusBar onOpenUsageDetails={openStats} />);
+    fireEvent.click(screen.getByRole("button", { name: /Claude 5h 12% used/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Open Stats & Usage" }));
+    expect(openStats).toHaveBeenCalledOnce();
   });
 
   it("shows one detailed row per agent and opens every window in its detail panel", () => {

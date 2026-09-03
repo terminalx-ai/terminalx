@@ -12,7 +12,7 @@ import { SessionView } from "@/components/session/SessionView";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
-import { bootSessions, openAgents, openAutomations, openIssues, openSkills, selectSession, setSessionSearch, useSessionStore } from "@/lib/sessions";
+import { bootSessions, openAgents, openAutomations, openIssues, openSkills, openStats, selectSession, setSessionSearch, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
 import { agent } from "@/lib/api";
 import { loadModels } from "@/lib/models";
@@ -29,7 +29,9 @@ import { RightPanel } from "@/components/layout/RightPanel";
 import { bootAccount } from "@/lib/account";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
+const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
 const statusBarFallback = <div aria-hidden className="h-[22px] shrink-0 border-t border-hairline bg-background/70" />;
+const viewFallback = <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-faint">Loading view…</div>;
 
 export const TITLEBAR_INSET = 78; // traffic-light clearance, px
 
@@ -81,6 +83,7 @@ export function AppShell() {
   const newSession = useCallback(() => selectSession(null), []);
   const showIssues = useCallback(() => openIssues(), []);
   const showAgents = useCallback(() => openAgents(), []);
+  const showStats = useCallback(() => openStats(), []);
   const showSkills = useCallback(() => openSkills(), []);
   const showAutomations = useCallback(() => openAutomations(), []);
 
@@ -90,6 +93,7 @@ export function AppShell() {
   useHotkey("mod+n", newSession);
   useHotkey("mod+i", showIssues);
   useHotkey("mod+shift+a", showAgents);
+  useHotkey("mod+shift+u", showStats);
   useHotkey("mod+shift+k", showSkills);
   useHotkey("mod+shift+r", showAutomations);
   useHotkey("mod+k", setSessionSearch);
@@ -111,6 +115,7 @@ export function AppShell() {
             onOpenAccount={openAccountSettings}
             onOpenIssues={showIssues}
             onOpenAgents={showAgents}
+            onOpenStats={showStats}
             onOpenAutomations={showAutomations}
             onOpenSkills={showSkills}
             onSearch={setSessionSearch}
@@ -137,7 +142,7 @@ export function AppShell() {
       {status.settings.visible ? (
         <ErrorBoundary label="the status bar" fallback={null}>
           <Suspense fallback={statusBarFallback}>
-            <StatusBar onOpenAgentSettings={openAgentSettings} />
+            <StatusBar onOpenAgentSettings={openAgentSettings} onOpenUsageDetails={showStats} />
           </Suspense>
         </ErrorBoundary>
       ) : null}
@@ -193,7 +198,7 @@ function UnselectedWorkspace({
           <span className="min-w-0 flex-1 truncate px-1 text-sm text-muted-foreground">
             {store.view === "issues"
               ? "Issues"
-              : store.view === "agents" || store.view === "skills"
+              : store.view === "agents" || store.view === "skills" || store.view === "stats"
                 ? ""
                 : store.view === "automations"
                   ? "Automations"
@@ -217,6 +222,10 @@ function UnselectedWorkspace({
             />
           ) : store.view === "agents" ? (
             <AgentDashboard />
+          ) : store.view === "stats" ? (
+            <Suspense fallback={viewFallback}>
+              <StatsUsageView />
+            </Suspense>
           ) : store.view === "automations" ? (
             <AutomationsView />
           ) : store.view === "skills" ? (

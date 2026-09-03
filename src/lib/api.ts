@@ -34,6 +34,51 @@ export interface SessionSummary {
   updatedAt: string;
 }
 
+export interface AppStats {
+  agentsSpawned: number;
+  agentTimeMs: number;
+  prsCreated: number;
+  trackingSince: string | null;
+}
+
+export interface UsageDay {
+  day: string;
+  totalTokens: number;
+  claudeTokens: number;
+  codexTokens: number;
+}
+
+export interface ProviderUsage {
+  id: string;
+  label: string;
+  enabled: boolean;
+  hasData: boolean;
+  lastModel: string | null;
+  lastProject: string | null;
+  totalTokens: number;
+  sessions: number;
+  activityCount: number;
+  activityLabel: string;
+  estimatedCostUsd: number | null;
+  hasPartialCost: boolean;
+}
+
+export interface StatsUsageSnapshot {
+  app: AppStats;
+  totalTokens: number;
+  estimatedCostUsd: number | null;
+  hasPartialCost: boolean;
+  activeDays: number;
+  cacheShare: number | null;
+  newInputTokens: number;
+  outputTokens: number;
+  cacheTokens: number;
+  reasoningTokens: number;
+  daily: UsageDay[];
+  providers: ProviderUsage[];
+  updatedAt: number;
+}
+
 export interface NewSession {
   projectPath: string;
   /** Run in this existing workspace instead of creating a worktree. */
@@ -73,6 +118,7 @@ export const api = {
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
   /** Card snippets for the agent dashboard; every session when no ids are given. */
   sessionSummaries: (sessionIds?: string[]) => invoke<SessionSummary[]>("session_summaries", { sessionIds: sessionIds ?? null }),
+  statsUsageSnapshot: () => invoke<StatsUsageSnapshot>("stats_usage_snapshot"),
   createSession: (req: NewSession) => invoke<SessionEntry>("create_session", { req }),
   addTab: (sessionId: string, tab: NewTab) => invoke<TabEntry>("add_tab", { sessionId, tab }),
   removeTab: (sessionId: string, tabId: string) => invoke<void>("remove_tab", { sessionId, tabId }),

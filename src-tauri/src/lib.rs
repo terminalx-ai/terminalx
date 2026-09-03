@@ -21,6 +21,7 @@ mod session;
 pub mod skills;
 mod store;
 mod status;
+mod stats;
 mod summaries;
 mod workspaces;
 
@@ -42,6 +43,7 @@ pub struct AppState {
     /// Which Codex models this account may run, read from the CLI once.
     pub codex_models: Arc<harness::codex::models::Cache>,
     pub status: Arc<status::StatusState>,
+    pub stats_usage: Arc<stats::StatsUsageStore>,
     manager: std::sync::Mutex<Option<session::SessionManager>>,
 }
 
@@ -67,6 +69,7 @@ pub fn run() {
         transcription: Arc::new(transcription::Transcription::default()),
         codex_models: codex_models.clone(),
         status: status_state.clone(),
+        stats_usage: Arc::new(stats::StatsUsageStore::default()),
         manager: std::sync::Mutex::new(None),
     };
 
@@ -162,6 +165,7 @@ pub fn run() {
             commands::automation_delete,
             commands::automation_run_now,
             commands::session_summaries,
+            commands::stats_usage_snapshot,
             commands::create_session,
             commands::add_tab,
             commands::remove_tab,
