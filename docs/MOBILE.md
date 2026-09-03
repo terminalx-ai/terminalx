@@ -64,10 +64,10 @@ mobile token for a desktop session or vice versa.
 
 **Contract:** `apps/api/docs/account-bound-host-pairing.md` § “Security
 boundary” and § “Discovery and installation APIs”. **Server:**
-`apps/api/src/routes/accountPairing.ts` implements `GET /v1/account/hosts`,
-`GET /v1/account/client-installations`, installation registration, logout, and
-revocation through `apps/api/src/controllers/accountPairing/account.ts`;
-`apps/api/src/routes/desktop.ts` implements host bindings and heartbeats through
+`apps/api/src/app.ts` mounts `/v1/account`; host discovery, installation
+listing, registration, logout, and revocation are handled by
+`apps/api/src/controllers/accountPairing/account.ts`;
+`apps/api/src/routes/desktop.ts` wires host bindings and heartbeats to
 `apps/api/src/controllers/accountPairing/host.ts`.
 
 On first sign-in the Expo app creates a P-256 signing key and random client
@@ -94,10 +94,11 @@ device when the cloud account signs out.
 **Contract:** `apps/api/docs/account-bound-host-pairing.md` § “One-time
 grant broker” and § “Revocation and generation fences”; the offer shape is in
 `src/shared/mobile-relay-pairing-offer.ts`. **Server:** grant request, read,
-consume, and revoke routes are in `apps/api/src/routes/accountPairing.ts`;
-host polling, envelope publication/rejection, and revocation acknowledgement
-are in `apps/api/src/routes/desktop.ts`, backed by
-`apps/api/src/controllers/accountPairing/account.ts` and `host.ts`.
+consume, and revoke operations are handled by
+`apps/api/src/controllers/accountPairing/account.ts`; host polling, envelope
+publication/rejection, and revocation acknowledgement are wired by
+`apps/api/src/routes/desktop.ts` to
+`apps/api/src/controllers/accountPairing/host.ts`.
 
 Tapping an eligible machine performs the deployed grant flow:
 
@@ -261,8 +262,8 @@ local activity record. It is not implied by terminal steering.
 authentication”, `apps/api/docs/account-bound-host-pairing.md` § “Revocation
 and generation fences”, and `docs/reference/relay-server-contract.md` §
 “Trust boundary”. **Server:** installation logout/revocation and pairing-grant
-cleanup are in `apps/api/src/routes/accountPairing.ts`; relay credential
-revocation is handled over host control in
+cleanup are handled by `apps/api/src/controllers/accountPairing/account.ts`;
+relay credential revocation is handled over host control in
 `apps/relay/src/cell/cell-server.ts`.
 
 Expo SecureStore holds the cloud session, installation key/id, host device
@@ -309,7 +310,9 @@ pairing, relay demand, or host authorization.
 `docs/reference/relay-server-contract.md` § “Lifecycle”, and
 `docs/reference/remote-wire-compatibility.md` § “Enforcement”. **Server:**
 conformance targets are `apps/api/src/routes/cloudAuth.ts`,
-`apps/api/src/routes/accountPairing.ts`, `apps/api/src/routes/desktop.ts`,
+`apps/api/src/routes/desktop.ts`,
+`apps/api/src/controllers/accountPairing/account.ts`,
+`apps/api/src/controllers/accountPairing/host.ts`,
 `apps/relay/src/director/director-server.ts`, and
 `apps/relay/src/cell/cell-server.ts`.
 
@@ -334,11 +337,23 @@ SecureStore persistence.
 authentication” and `docs/reference/relay-server-contract.md` § “Versioning”.
 **Server:** accepted OAuth clients/redirects are in
 `apps/api/src/lib/cloudAuthContract.ts`; current account and relay surfaces are
-in `apps/api/src/routes/accountPairing.ts`,
+implemented by `apps/api/src/controllers/accountPairing/account.ts`,
+`apps/api/src/controllers/accountPairing/host.ts`,
 `apps/relay/src/director/director-server.ts`, and
 `apps/relay/src/cell/cell-server.ts`.
 
-The baseline above requires no server change. The following are not part of it:
+Reusing `terminalx-mobile` with the exact `terminalx://auth/callback` redirect
+means the Next mobile app must claim the `terminalx://` scheme on the phone.
+It therefore cannot be installed alongside the existing TerminalX mobile app.
+The owner must choose between the two no-server-change options for this plan:
+
+1. the Next mobile app replaces the existing mobile app; or
+2. mobile sign-in waits until a distinct server-side client/redirect entry is
+   available.
+
+This is an owner decision, not something the client implementation can resolve.
+The baseline above otherwise requires no server change. The following are not
+part of it:
 
 - a new mobile client id or redirect such as `terminalx-next://...`; the
   deployed API accepts `terminalx-mobile` with exactly

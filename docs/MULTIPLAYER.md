@@ -121,6 +121,34 @@ The relay sees routing metadata and plaintext handshake frames, but not device
 tokens, RPC bodies, notes, transcript rows, terminal output, or input. Direct
 and relay paths therefore have the same application security and host policy.
 
+An unreachable direct endpoint in the Tailscale IPv4 range `100.64.0.0/10` or
+under `*.ts.net` adds a hint to check Tailscale on both devices. That
+classification is only a connection hint; it never weakens host-key pinning,
+credential checks, E2EE, or session authorization.
+
+### Local network permission
+
+macOS Sequoia and iOS require Local Network authorization for direct LAN
+pairing and sharing. The iOS app includes `NSLocalNetworkUsageDescription` with
+copy explaining that it connects to a Mac the user explicitly pairs. The Mac
+can also show a separate incoming-connections firewall prompt when the host
+listener first accepts traffic.
+
+The first-run flow is explicit:
+
+1. Before triggering either system prompt, Raccoon explains that the requested
+   pairing, join, or share will connect directly to another device on the local
+   network.
+2. It asks for Local Network access only after the user chooses that action,
+   never at app launch, sign-in, or directory browsing.
+3. After authorization, the Mac starts its single host listener and explains
+   that the incoming-connections firewall prompt must also be allowed. A
+   denial produces a visible direct-unavailable state with System Settings and
+   Retry actions, never a false successful connection.
+4. A joining iPhone requests access only after the user taps Pair or Join. If
+   denied, the invite or grant remains unconsumed while valid and the UI shows
+   how to enable access in Settings before retrying.
+
 ## Scoped RPC and tab identifiers
 
 **Contract:** `docs/reference/remote-wire-compatibility.md` § “Rule 1 — a

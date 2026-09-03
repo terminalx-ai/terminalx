@@ -39,7 +39,8 @@ failure, not a value Raccoon may accept speculatively. Times named `expiresAt`,
 and § “JSON endpoints”. **Server:** `apps/api/src/routes/desktop.ts`
 delegates `/v1/desktop/auth/authorize`, `/session`, `/refresh`,
 `/capabilities`, `/org`, `/profile`, `/logout`, and `/relay-token` to
-`apps/api/src/controllers/desktop/*`; redirect validation is in
+`apps/api/src/controllers/desktop/auth.ts` and
+`apps/api/src/controllers/desktop/relayToken.ts`; redirect validation is in
 `apps/api/src/controllers/desktop/authorize.ts` and
 `apps/api/src/lib/cloudAuthContract.ts`.
 
@@ -142,12 +143,12 @@ heartbeat cadence and fences every operation with `bindingGeneration`.
 
 **Contract:** `apps/api/docs/account-bound-host-pairing.md` § “Discovery and
 installation APIs”, § “One-time grant broker”, and § “Revocation and
-generation fences”. **Server:** `apps/api/src/routes/accountPairing.ts`
-implements `GET /v1/account/hosts`, client-installation registration/logout,
-and pairing-grant request/read/consume/revoke routes;
-`apps/api/src/routes/desktop.ts` implements host grant polling,
-envelope/reject, and revocation acknowledgement through
-`apps/api/src/controllers/accountPairing/account.ts` and `host.ts`.
+generation fences”. **Server:** `apps/api/src/app.ts` mounts `/v1/account`,
+whose host discovery, client-installation, and pairing-grant operations are
+handled by `apps/api/src/controllers/accountPairing/account.ts`;
+`apps/api/src/routes/desktop.ts` wires host grant polling, envelope/reject, and
+revocation acknowledgement to
+`apps/api/src/controllers/accountPairing/host.ts`.
 
 The Expo app creates a P-256 installation signing key and UUID in device secure
 storage. It registers the JWK, exact sorted capability list, and P1363
@@ -213,6 +214,29 @@ counter with a 24-byte nonce. A duplicate, reordered, injected, or skipped
 frame fails the channel. RPC and terminal bytes never appear outside this
 framing.
 
+### Local network permission
+
+macOS Sequoia and iOS require Local Network authorization for direct LAN
+pairing and sharing. The iOS app includes `NSLocalNetworkUsageDescription` with
+copy explaining that it connects to a Mac the user explicitly pairs. The Mac
+can also show a separate incoming-connections firewall prompt when the host
+listener first accepts traffic.
+
+The first-run flow is explicit:
+
+1. Before triggering either system prompt, Raccoon explains that the requested
+   pairing, join, or share will connect directly to another device on the local
+   network.
+2. It asks for Local Network access only after the user chooses that action,
+   never at app launch, sign-in, or directory browsing.
+3. After authorization, the Mac starts its single host listener and explains
+   that the incoming-connections firewall prompt must also be allowed. A
+   denial produces a visible direct-unavailable state with System Settings and
+   Retry actions, never a false successful connection.
+4. A joining iPhone requests access only after the user taps Pair or Join. If
+   denied, the invite or grant remains unconsumed while valid and the UI shows
+   how to enable access in Settings before retrying.
+
 ## Relay director and cell
 
 **Contract:** `docs/reference/relay-server-contract.md` § “HTTP”, §
@@ -254,7 +278,8 @@ E2EE v2.
 **Server:** schema enforcement occurs in
 `apps/api/src/controllers/desktop/auth.ts`,
 `apps/api/src/controllers/cloud/auth.ts`,
-`apps/api/src/controllers/accountPairing/*`,
+`apps/api/src/controllers/accountPairing/account.ts`,
+`apps/api/src/controllers/accountPairing/host.ts`,
 `apps/relay/src/director/director-server.ts`, and
 `apps/relay/src/cell/cell-server.ts`.
 
@@ -275,8 +300,9 @@ id, never credentials or payload content.
 **Contract:** `docs/reference/cloud-endpoints.md` § “User-scoped
 authentication” and `docs/reference/relay-server-contract.md` §
 “Versioning”. **Server:** the current allowlist is
-`apps/api/src/lib/cloudAuthContract.ts`; current account and relay schemas are
-in `apps/api/src/routes/accountPairing.ts`,
+`apps/api/src/lib/cloudAuthContract.ts`; current account handlers and relay
+schemas are in `apps/api/src/controllers/accountPairing/account.ts`,
+`apps/api/src/controllers/accountPairing/host.ts`,
 `apps/relay/src/director/director-server.ts`, and
 `apps/relay/src/cell/cell-server.ts`.
 
