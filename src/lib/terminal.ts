@@ -197,12 +197,26 @@ export async function toggleDock(sessionId: string, cwd: string) {
     setDockOpen(sessionId, false);
     return;
   }
-  setDockOpen(sessionId, true);
-  if (!state.panes.some((p) => p.sessionId === sessionId && !p.hidden)) await openTerminal(sessionId, cwd);
+  await openDock(sessionId, cwd);
 }
 
 export function setDockOpen(sessionId: string, open: boolean) {
   set({ open: { ...state.open, [sessionId]: open } });
+}
+
+const dockOpenings = new Map<string, Promise<void>>();
+
+/** Show a session's dock and start its login shell exactly once. */
+export function openDock(sessionId: string, cwd: string): Promise<void> {
+  setDockOpen(sessionId, true);
+  if (state.panes.some((p) => p.sessionId === sessionId && !p.hidden)) return Promise.resolve();
+  const pending = dockOpenings.get(sessionId);
+  if (pending) return pending;
+  const request = openTerminal(sessionId, cwd)
+    .then(() => undefined)
+    .finally(() => dockOpenings.delete(sessionId));
+  dockOpenings.set(sessionId, request);
+  return request;
 }
 
 export function renameTerminal(id: string, title: string) {

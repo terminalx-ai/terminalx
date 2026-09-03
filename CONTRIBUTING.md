@@ -9,7 +9,7 @@ run what you change.
 
 - **Rust**, stable toolchain, with `clippy` and `rustfmt`. `rust-toolchain.toml`
   asks for all of it, so `rustup` installs it on the first build.
-- **Node** 20 or newer (`.nvmrc`) and **pnpm** (`corepack enable`, which reads
+- **Node** 24 or newer (`.nvmrc`) and **pnpm** (`corepack enable`, which reads
   the `packageManager` field and gets the right version).
 - **Xcode command line tools** for a dev build. A *full* Xcode install is
   needed for `pnpm tauri build`: the build script links clang's builtins
