@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
  * A render crash inside one pane must not blank the window. The boundary
  * draws the error where the pane was, with the stack for a bug report.
  */
-export class ErrorBoundary extends Component<{ children: ReactNode; label?: string }, { error: Error | null }> {
+export class ErrorBoundary extends Component<{ children: ReactNode; label?: string; fallback?: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null };
 
   static getDerivedStateFromError(error: Error) {
@@ -19,6 +19,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode; label?: stri
 
   render() {
     if (this.state.error) {
+      if (this.props.fallback !== undefined) return this.props.fallback;
       return (
         <div className="m-4 select-text rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
           <div className="font-medium">Something went wrong in {this.props.label ?? "this pane"}.</div>

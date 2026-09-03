@@ -109,6 +109,12 @@ pub fn resolve(name: &str) -> Option<PathBuf> {
     found
 }
 
+/// Availability is user-controlled and can change while the app is open.
+/// Settings' Re-check clears prior hits and misses before probing again.
+pub fn invalidate() {
+    cache().lock().unwrap().clear();
+}
+
 fn resolve_uncached(name: &str) -> Option<PathBuf> {
     if name.contains('/') {
         let p = PathBuf::from(name);

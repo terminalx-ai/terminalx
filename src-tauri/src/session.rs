@@ -170,6 +170,7 @@ pub struct SessionManager {
     host: Arc<Host>,
     terminals: Arc<pty::Terminals>,
     codex_models: Arc<codex::models::Cache>,
+    status: Arc<crate::status::StatusState>,
     control: crate::hooks::ControlEndpoint,
     tabs: Arc<Mutex<HashMap<String, Arc<Mutex<TabRuntime>>>>>,
     /// One lock per pane, so two prompts sent in quick succession cannot
@@ -292,6 +293,7 @@ impl SessionManager {
         host: Arc<Host>,
         terminals: Arc<pty::Terminals>,
         codex_models: Arc<codex::models::Cache>,
+        status: Arc<crate::status::StatusState>,
         control: crate::hooks::ControlEndpoint,
     ) -> Self {
         Self {
@@ -299,6 +301,7 @@ impl SessionManager {
             host,
             terminals,
             codex_models,
+            status,
             control,
             tabs: Arc::new(Mutex::new(HashMap::new())),
             writers: Arc::new(Mutex::new(HashMap::new())),
@@ -407,6 +410,22 @@ impl SessionManager {
         self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).map(|r| r.lock().unwrap().status).unwrap_or(TabStatus::Idle)
     }
 
+    fn running_agents(&self) -> std::collections::HashSet<String> {
+        self.tabs
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(|runtime| {
+                let runtime = runtime.lock().unwrap();
+                let Engine::Cli(cli) = &runtime.engine else { return None };
+                self.terminals.is_running(&cli.pane_id).then(|| match cli.harness {
+                    CliKind::Claude => "claude".to_string(),
+                    CliKind::Codex => "codex".to_string(),
+                })
+            })
+            .collect()
+    }
+
     pub fn is_running(&self, session_id: &str, tab_id: &str) -> bool {
         let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
         runtime.is_some_and(|runtime| {
@@ -432,6 +451,14 @@ impl SessionManager {
                 })
             })
             .collect()
+    }
+
+    pub fn usage_snapshot(&self) -> crate::status::usage::UsageSnapshot {
+        self.status.usage.snapshot(&self.running_agents())
+    }
+
+    fn emit_usage(&self) {
+        let _ = self.app.emit(crate::status::usage::EVENT, self.usage_snapshot());
     }
 
     pub fn pending_permissions(&self) -> Vec<PendingPermission> {
@@ -1417,6 +1444,12 @@ impl SessionManager {
         // answering it would let one tab decide another tab's permissions.
         if !origin.accepts(&frame) {
             log::warn!("hook {} for {}/{} refused: not this tab's token", frame.event, frame.session, frame.tab);
+            return HookReply::default();
+        }
+        if frame.event == "StatusLine" {
+            if kind == CliKind::Claude && self.status.usage.ingest_claude(&frame.tab, &frame.payload) {
+                self.emit_usage();
+            }
             return HookReply::default();
         }
         // Claude's transcript path is a guess made before the CLI ran and

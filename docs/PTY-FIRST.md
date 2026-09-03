@@ -427,6 +427,42 @@ where Claude's has to say `*` or it is never called. Codex clamps hook timeouts
 per event — the two that park on a person get 600 s, `SessionEnd` and
 `Interrupt` are clamped to 3 s, which is why neither ever waits on anything.
 
+## Status bar feeds
+
+Usage belongs to the window, not to the active transcript. Claude Code
+2.1.258 was probed again on 2026-09-03: after an API response its configured
+`statusLine` command received top-level `rate_limits` with `five_hour` and
+`seven_day` windows, `used_percentage`, and epoch-second `resets_at` values.
+Raccoon's launch settings point that command at `raccoon statusline`; the
+short-lived command forwards the block through the tab's existing authenticated
+hook socket and prints nothing. There is no usage request, hidden PTY, durable
+cache, or second transport. A pane may contribute at most one non-empty update
+per 15 seconds. Both the documented percentage and the fractional
+`utilization` form are accepted because installed CLI builds have emitted both.
+
+Codex 0.152.0 answers `account/rateLimits/read` on the same one-shot app-server
+client already used for model discovery. A 300-minute primary window is `5h`,
+a 10,080-minute secondary window is `weekly`, and `resetsAt` seconds become
+milliseconds at the boundary. The client only runs while the macOS window is
+visible, focused, and not minimized: once on focus, then no more than every 15
+minutes, with provider-local failure backoff. The status bar keeps the
+composer's per-tab context ring; only app-wide account limits moved.
+
+Resources start from the PTY registry rather than inferring ownership from
+process names. The sampler runs `LC_ALL=C ps -eo pid=,ppid=,pcpu=,rss=`, builds
+the parent tree once, and claims descendants once across panes. Twenty local
+samples took 1.21 seconds in the 2026-09-03 probe (about 60 ms each), so a
+subprocess every two seconds is acceptable only while the popover is open.
+With it closed there is no interval: spawn/exit events maintain the agent count
+and window focus takes one memory snapshot. The App and host rows use native
+host queries so the total includes Raccoon's main and webview processes.
+
+A tab-bound agent pane is never killable here; closing its tab owns the ordered
+shutdown. Only a childless terminal-dock shell can be stopped immediately.
+An orphan or any shell whose idleness cannot be proved requires confirmation
+naming the process and the work that will be lost. The backend recomputes that
+rule at click time rather than trusting the rendered row.
+
 ## Limitations
 
 - **Message-granularity streaming.** The transcript is written per message, not
@@ -453,8 +489,9 @@ per event — the two that park on a person get 600 s, `SessionEnd` and
   or `codex` process, and it stays up until the tab, the session or the app is
   closed —
   that is the point of the model, but it does mean a long afternoon of clicking
-  through sessions leaves several running. They are killed together when the
-  window closes, and individually when a tab or session is removed.
+  through sessions leaves several running. The status bar names and measures
+  them; they are killed together when the window closes, and individually when
+  a tab or session is removed.
 - **The hook socket is a unix socket**, so the Raccoon home has to sit inside
   the platform's path limit (about 104 bytes on macOS). A path too long to bind
   is logged and the tab runs without status or permission cards.

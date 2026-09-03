@@ -1,8 +1,8 @@
 //! One question for a throwaway `codex app-server`.
 //!
-//! Two things the app needs are only knowable by asking the CLI itself: which
-//! models this account may run, and the hash Codex computes for a hook (which
-//! is what its config has to hold for that hook to be trusted). Both are
+//! Three things the app needs are only knowable by asking the CLI itself:
+//! which models this account may run, the hash Codex computes for a hook, and
+//! the signed-in account's rate-limit windows. All are
 //! read-only questions with an answer that changes when Codex is upgraded, so
 //! neither is worth reimplementing — the same binary is asked, over the
 //! JSON-RPC it already speaks on stdio, and the child is killed as soon as it

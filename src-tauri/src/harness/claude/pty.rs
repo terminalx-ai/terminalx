@@ -71,7 +71,13 @@ pub fn settings_json(exe: &Path) -> Value {
         }
         hooks.insert((*event).to_string(), json!([group]));
     }
-    json!({ "hooks": hooks })
+    json!({
+        "hooks": hooks,
+        "statusLine": {
+            "type": "command",
+            "command": crate::hooks::statusline_command(exe),
+        }
+    })
 }
 
 pub struct LaunchOptions<'a> {
@@ -156,6 +162,8 @@ mod tests {
         // A person answers the permission card; the rest only report.
         assert_eq!(hooks["PermissionRequest"][0]["hooks"][0]["timeout"], 600);
         assert_eq!(hooks["Stop"][0]["hooks"][0]["timeout"], 10);
+        assert_eq!(v["statusLine"]["type"], "command");
+        assert_eq!(v["statusLine"]["command"], "'/opt/raccoon' statusline");
     }
 
 

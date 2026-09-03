@@ -136,6 +136,96 @@ export function errorMessage(e: unknown): string {
   return String(e);
 }
 
+// ---- status bar
+export interface StatusBarSettings {
+  visible: boolean;
+  usage: boolean;
+  resources: boolean;
+  percent: "used" | "remaining";
+}
+
+export interface UsageWindow {
+  agent: "claude" | "codex";
+  key: string;
+  label: string;
+  usedPercent: number;
+  resetsAt: number | null;
+  windowMinutes: number | null;
+  updatedAt: number;
+  plan?: string;
+  stale: boolean;
+}
+
+export interface UsageSnapshot {
+  windows: UsageWindow[];
+}
+
+export interface ResourceOverview {
+  agentCount: number;
+  orphanCount: number;
+  rssBytes: number | null;
+  pressure: number | null;
+}
+
+export interface ProcSample {
+  paneId: string;
+  tabId: string | null;
+  tabTitle: string;
+  sessionId: string | null;
+  sessionTitle: string | null;
+  projectPath: string | null;
+  projectName: string | null;
+  cwd: string;
+  kind: "agent" | "shell";
+  harness: "claude" | "codex" | null;
+  orphaned: boolean;
+  pid: number | null;
+  cpuPercent: number | null;
+  rssBytes: number | null;
+  childCount: number | null;
+  killRule: "none" | "idle" | "confirm";
+}
+
+export interface AppSample {
+  mainPid: number;
+  mainCpuPercent: number | null;
+  mainRssBytes: number | null;
+  webviewCpuPercent: number | null;
+  webviewRssBytes: number | null;
+  webviewProcessCount: number;
+}
+
+export interface HostSample {
+  totalBytes: number | null;
+  availableBytes: number | null;
+  cores: number;
+}
+
+export interface ResourceSnapshot {
+  processes: ProcSample[];
+  app: AppSample;
+  host: HostSample;
+  totalCpuPercent: number | null;
+  totalRssBytes: number | null;
+  sampledAt: number;
+}
+
+export interface KillResult {
+  killed: boolean;
+  confirmation: string | null;
+}
+
+export const statusBar = {
+  settings: () => invoke<StatusBarSettings>("status_bar_settings"),
+  setSettings: (patch: Partial<StatusBarSettings>) =>
+    invoke<StatusBarSettings>("set_status_bar_settings", { patch }),
+  usage: () => invoke<UsageSnapshot>("status_usage_snapshot"),
+  refreshUsage: (manual = false) => invoke<UsageSnapshot>("status_usage_refresh", { manual }),
+  resourceOverview: () => invoke<ResourceOverview>("status_resource_overview"),
+  sampleResources: () => invoke<ResourceSnapshot>("status_resource_sample"),
+  killResource: (paneId: string, confirmed = false) => invoke<KillResult>("status_resource_kill", { paneId, confirmed }),
+};
+
 // ---- agent tabs
 import type { AgentEvent } from "@/types/events";
 

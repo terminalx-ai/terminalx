@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { PanelLeft, PanelRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -22,9 +22,13 @@ import { Toasts } from "@/components/ui/Toasts";
 import { BypassDialog } from "@/components/session/BypassDialog";
 import { SettleDialog } from "@/components/session/SettleDialog";
 import { WorkspaceDeleteDialog } from "@/components/session/WorkspaceDeleteDialog";
+import { bootStatus, useStatus } from "@/lib/status";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
 import { RightPanel } from "@/components/layout/RightPanel";
+
+const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
+const statusBarFallback = <div aria-hidden className="h-[22px] shrink-0 border-t border-hairline bg-background/70" />;
 
 export const TITLEBAR_INSET = 78; // traffic-light clearance, px
 
@@ -35,6 +39,7 @@ export const TITLEBAR_INSET = 78; // traffic-light clearance, px
  */
 export function AppShell() {
   const prefs = usePrefs();
+  const status = useStatus();
   const store = useSessionStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -45,6 +50,7 @@ export function AppShell() {
     void bootAutomations();
     void loadModels();
     startNotifications();
+    void bootStatus();
   }, []);
 
   // The first prompt of a new session is sent right after the worktree exists.
@@ -78,38 +84,48 @@ export function AppShell() {
   const selected = store.sessions.find((s) => s.id === store.selectedSessionId) ?? null;
 
   return (
-    <div className="flex h-full w-full">
+    <div className="flex h-full w-full flex-col">
       <Toasts />
       <BypassDialog />
       <SettleDialog />
       <WorkspaceDeleteDialog />
-      {sidebarOpen && (
-        <Sidebar
-          onToggle={toggleSidebar}
-          onOpenSettings={openSettings}
-          onOpenIssues={showIssues}
-          onOpenAgents={showAgents}
-          onOpenAutomations={showAutomations}
-          onOpenSkills={showSkills}
-          onSearch={setSessionSearch}
-        />
-      )}
+      <div className="flex min-h-0 flex-1">
+        {sidebarOpen && (
+          <Sidebar
+            onToggle={toggleSidebar}
+            onOpenSettings={openSettings}
+            onOpenIssues={showIssues}
+            onOpenAgents={showAgents}
+            onOpenAutomations={showAutomations}
+            onOpenSkills={showSkills}
+            onSearch={setSessionSearch}
+          />
+        )}
 
-      {selected ? (
-        <main className="flex h-full min-w-0 flex-1 flex-col">
-          <ErrorBoundary key={selected.id} label="the session">
-            <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
-          </ErrorBoundary>
-        </main>
-      ) : (
-        <UnselectedWorkspace
-          key={store.view}
-          sidebarOpen={sidebarOpen}
-          onToggleSidebar={toggleSidebar}
-          onTogglePanel={togglePanel}
-          onCreated={onCreated}
-        />
-      )}
+        {selected ? (
+          <main className="flex h-full min-w-0 flex-1 flex-col">
+            <ErrorBoundary key={selected.id} label="the session">
+              <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+            </ErrorBoundary>
+          </main>
+        ) : (
+          <UnselectedWorkspace
+            key={store.view}
+            sidebarOpen={sidebarOpen}
+            onToggleSidebar={toggleSidebar}
+            onTogglePanel={togglePanel}
+            onCreated={onCreated}
+          />
+        )}
+      </div>
+
+      {status.settings.visible ? (
+        <ErrorBoundary label="the status bar" fallback={null}>
+          <Suspense fallback={statusBarFallback}>
+            <StatusBar />
+          </Suspense>
+        </ErrorBoundary>
+      ) : null}
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
     </div>
