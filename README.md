@@ -56,12 +56,13 @@ drives the `claude` and `codex` CLIs you are already logged into.
 
 TerminalX Next has **no telemetry, no analytics and no crash reporting**.
 There is no account, no sign-in, and nothing is phoned home about how you use it. The only
-outbound connections it makes are these four, all of them things you asked for:
+outbound connections it makes are these five, all of them things you asked for:
 
 | To | When | Carrying |
 | --- | --- | --- |
 | GitHub | You open the Issues view or a PR panel | Nothing of TerminalX Next's own — it shells out to your `gh`, which uses your existing credentials |
 | Linear | You open the Issues view with a Linear key configured | A GraphQL query to `api.linear.app`, authorized with the key you pasted |
+| Anthropic usage | The focused status bar lacks a Claude model limit, no more than once every 15 minutes | A GET to `api.anthropic.com/api/oauth/usage`, authorized with the OAuth token Claude Code already stores; no prompts, transcripts or files |
 | Hugging Face | You press Download on a transcription model | A plain GET for the weights, at a pinned revision |
 | The update endpoint | You press "Check for updates" | The current version and your channel |
 
@@ -71,6 +72,12 @@ Some detail on each:
   the same way they do in your terminal, under your own login. TerminalX Next
   does not proxy, inspect or re-send any of it; it reads the transcript files
   the CLIs write on disk.
+- **Claude usage.** Claude's status line is the live usage feed. When it omits
+  a model-scoped limit, TerminalX Next reads the existing OAuth credential from
+  the macOS Keychain item `Claude Code-credentials`, falling back to
+  `~/.claude/.credentials.json`, and makes the usage GET above. It never writes
+  or refreshes credentials, never stores the token, and keeps usage results in
+  memory only. Failures back off without clearing the last result.
 - **Linear.** The API key is yours, entered in Settings → Integrations. It is
   stored in `$RACCOON_HOME/settings.json` (default `~/.raccoon/settings.json`),
   which is written `0600` inside a `0700` directory. It is never sent anywhere
