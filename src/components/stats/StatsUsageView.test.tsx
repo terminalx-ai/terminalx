@@ -39,6 +39,9 @@ describe("StatsUsageView", () => {
   it("renders the transcript-backed overview and provider totals", async () => {
     render(<StatsUsageView />);
 
+    expect(
+      screen.getByText("TerminalX activity plus local Claude and Codex token analytics."),
+    ).toBeTruthy();
     expect(await screen.findByText("12.7B")).toBeTruthy();
     expect(screen.getByText("98%")).toBeTruthy();
     expect(screen.getByText("423 sessions")).toBeTruthy();
