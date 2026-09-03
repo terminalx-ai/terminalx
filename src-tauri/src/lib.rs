@@ -14,6 +14,7 @@ mod models;
 mod names;
 mod pty;
 mod session;
+pub mod skills;
 mod store;
 mod summaries;
 mod workspaces;
@@ -114,6 +115,8 @@ pub fn run() {
             commands::set_active_tab,
             commands::delete_session,
             commands::list_harnesses,
+            commands::list_skills,
+            commands::skill_detail,
             commands::work_status,
             commands::list_branches,
             commands::worktree_disposition,
