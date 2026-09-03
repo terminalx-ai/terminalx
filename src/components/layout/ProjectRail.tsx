@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Archive, CalendarClock, CircleDot, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
+import { Archive, BarChart3, CalendarClock, CircleDot, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -34,6 +34,7 @@ export function ProjectRail({
   onOpenSettings,
   onOpenIssues,
   onOpenAgents,
+  onOpenStats,
   onOpenAutomations,
   onOpenSkills,
   onSearch,
@@ -41,6 +42,7 @@ export function ProjectRail({
   onOpenSettings: () => void;
   onOpenIssues: () => void;
   onOpenAgents: () => void;
+  onOpenStats: () => void;
   onOpenAutomations: () => void;
   onOpenSkills: () => void;
   onSearch: () => void;
@@ -111,6 +113,17 @@ export function ProjectRail({
             <LayoutGrid />
             <span className="truncate">Agent Dashboard</span>
             <AttentionDots needs={needsYou} unread={unread} />
+          </Button>
+        </WithTooltip>
+        <WithTooltip label="Stats & Usage" keys={keycaps("mod+shift+u")}>
+          <Button
+            variant="ghost"
+            className={cn("justify-start gap-2 px-2", store.view === "stats" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+            onClick={onOpenStats}
+          >
+            <BarChart3 />
+            <span className="truncate">Stats &amp; Usage</span>
+            <Keys chord="mod+shift+u" />
           </Button>
         </WithTooltip>
         <WithTooltip label="Automations" keys={keycaps("mod+shift+r")}>

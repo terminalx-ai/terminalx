@@ -1,8 +1,9 @@
-import { cleanup, render, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UsageSnapshot } from "@/lib/api";
 
-const { statusState } = vi.hoisted(() => ({
+const { openStats, statusState } = vi.hoisted(() => ({
+  openStats: vi.fn(),
   statusState: {
     settings: { visible: true, usage: true, resources: false, percent: "used" as "used" | "remaining" },
     usage: { windows: [] } as UsageSnapshot,
@@ -22,6 +23,7 @@ vi.mock("@/lib/status", () => ({
   useStatus: () => statusState,
 }));
 vi.mock("@/lib/sessions", () => ({
+  openStats,
   selectSession: vi.fn(),
   setActiveTab: vi.fn(),
   useSessionStore: () => ({
@@ -42,10 +44,12 @@ class ResizeObserverStub {
   observe(target: Element) {
     this.callback([{ target, contentRect: { width: statusBarWidth } } as ResizeObserverEntry], this as unknown as ResizeObserver);
   }
+  unobserve() {}
   disconnect() {}
 }
 
 beforeEach(() => {
+  openStats.mockReset();
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-09-03T12:00:00.000Z"));
   vi.stubGlobal("ResizeObserver", ResizeObserverStub);
@@ -118,5 +122,12 @@ describe("status bar usage", () => {
     expect(within(claude as HTMLElement).queryByText("Claude")).toBeNull();
     expect(claude?.querySelector("i")?.className).toContain("bg-destructive");
     expect(getByRole("button", { name: /Claude Fable 82% used, resets 4d 2h/ })).toBeTruthy();
+  });
+
+  it("opens the full stats view from the usage popover footer", () => {
+    render(<StatusBar />);
+    fireEvent.click(screen.getByRole("button", { name: /Claude 5h 12% used/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Open Stats & Usage" }));
+    expect(openStats).toHaveBeenCalledOnce();
   });
 });

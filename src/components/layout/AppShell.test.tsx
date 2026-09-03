@@ -43,6 +43,7 @@ vi.mock("@/lib/sessions", () => ({
   openAutomations: vi.fn(),
   openIssues: vi.fn(),
   openSkills: vi.fn(),
+  openStats: vi.fn(),
   selectSession: vi.fn(),
   setSessionSearch: vi.fn(),
   useSessionStore: () => sessionStore,

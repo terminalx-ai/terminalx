@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Popover as PopoverPrimitive } from "radix-ui";
-import { Cpu, RefreshCw, SquareTerminal, Trash2, TriangleAlert } from "lucide-react";
+import { ChevronRight, Cpu, RefreshCw, SquareTerminal, Trash2, TriangleAlert } from "lucide-react";
 import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -19,7 +19,7 @@ import {
   setStatusSettings,
   useStatus,
 } from "@/lib/status";
-import { selectSession, setActiveTab, useSessionStore } from "@/lib/sessions";
+import { openStats, selectSession, setActiveTab, useSessionStore } from "@/lib/sessions";
 import { formatResetCountdown, useCountdownNow } from "@/lib/statusTime";
 import { useResourceSampling } from "@/lib/statusPolling";
 import { errorMessage, statusBar, type ProcSample, type StatusBarSettings, type UsageWindow } from "@/lib/api";
@@ -534,6 +534,18 @@ function UsageCluster({ tier }: { tier: StatusTier }) {
               Usage appears after a Claude turn or a Codex refresh.
             </div>
           )}
+          <div className="mt-2 border-t border-hairline pt-2">
+            <PopoverPrimitive.Close asChild>
+              <button
+                type="button"
+                onClick={openStats}
+                className="flex w-full items-center rounded-md px-2 py-1.5 text-left text-[11px] font-medium text-muted-foreground outline-none hover:bg-veil-raised hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring/50"
+              >
+                Open Stats &amp; Usage
+                <ChevronRight className="ml-auto size-3.5" />
+              </button>
+            </PopoverPrimitive.Close>
+          </div>
         </PopoverPrimitive.Content>
       </PopoverPrimitive.Portal>
     </PopoverPrimitive.Root>
