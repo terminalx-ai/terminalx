@@ -154,6 +154,19 @@ impl DeviceRegistry {
             .any(|device| device.id == device_id && device.last_seen_at.is_none()))
     }
 
+    pub fn discard_unclaimed(&self, device_id: &str) -> Result<bool> {
+        let mut inner = self.inner.lock().unwrap();
+        let file = ensure_loaded(&mut inner)?;
+        let before = file.devices.len();
+        file.devices
+            .retain(|device| device.id != device_id || device.last_seen_at.is_some());
+        let discarded = file.devices.len() != before;
+        if discarded {
+            save(file)?;
+        }
+        Ok(discarded)
+    }
+
     pub fn find_by_token(
         &self,
         token: &str,
@@ -334,6 +347,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(registry.remove_unclaimed().unwrap(), ["pending"]);
+        assert_eq!(registry.list().unwrap()[0].id, "connected");
+    }
+
+    #[test]
+    fn failed_pairing_discards_only_an_unclaimed_device() {
+        let _home = crate::store::temp_home();
+        let registry = DeviceRegistry::default();
+        let mut connected = device("connected", "one", DeviceProvenance::Explicit);
+        connected.last_seen_at = Some(Utc::now().to_rfc3339());
+        registry.add(connected).unwrap();
+        registry
+            .add(device("pending", "two", DeviceProvenance::Explicit))
+            .unwrap();
+
+        assert!(registry.discard_unclaimed("pending").unwrap());
+        assert!(!registry.discard_unclaimed("connected").unwrap());
         assert_eq!(registry.list().unwrap()[0].id, "connected");
     }
 }

@@ -59,9 +59,15 @@ pub fn pairing_status(state: tauri::State<'_, crate::AppState>) -> crate::pairin
 
 #[tauri::command]
 pub async fn pairing_generate(
+    connection_mode: Option<crate::pairing::PairingConnectionMode>,
     state: tauri::State<'_, crate::AppState>,
 ) -> CmdResult<crate::pairing::PairingStatus> {
-    state.pairing.clone().generate_pairing().await.map_err(err)
+    state
+        .pairing
+        .clone()
+        .generate_pairing(connection_mode.unwrap_or_default())
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]

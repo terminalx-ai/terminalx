@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, errorMessage } from "@/lib/api";
-import type { PairingStatus } from "@/types/pairing";
+import type { PairingConnectionMode, PairingStatus } from "@/types/pairing";
 
 interface PairingState {
   status: PairingStatus;
@@ -52,12 +52,18 @@ export function bootPairing(): Promise<void> {
   })());
 }
 
-export async function generatePairing(): Promise<void> {
+export async function generatePairing(connectionMode: PairingConnectionMode): Promise<void> {
   set({ busy: true, status: { ...state.status, lastError: null } });
   try {
-    applyStatus(await api.pairingGenerate());
+    applyStatus(await api.pairingGenerate(connectionMode));
   } catch (error) {
-    set({ status: { ...state.status, lastError: errorMessage(error) } });
+    const message = errorMessage(error);
+    try {
+      const status = await api.pairingStatus();
+      set({ status: { ...status, lastError: message }, ready: true });
+    } catch {
+      set({ status: { ...state.status, lastError: message } });
+    }
   } finally {
     set({ busy: false });
   }

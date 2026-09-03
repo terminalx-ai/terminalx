@@ -16,7 +16,7 @@ import type {
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
-import type { PairingStatus } from "@/types/pairing";
+import type { PairingConnectionMode, PairingStatus } from "@/types/pairing";
 
 export interface NewTab {
   harness: string;
@@ -105,7 +105,7 @@ export const api = {
 
   // opt-in device pairing
   pairingStatus: () => invoke<PairingStatus>("pairing_status"),
-  pairingGenerate: () => invoke<PairingStatus>("pairing_generate"),
+  pairingGenerate: (connectionMode: PairingConnectionMode) => invoke<PairingStatus>("pairing_generate", { connectionMode }),
   pairingRevoke: (deviceId: string) => invoke<PairingStatus>("pairing_revoke", { deviceId }),
   pairingSetHostName: (displayName: string) => invoke<PairingStatus>("pairing_set_host_name", { displayName }),
 
