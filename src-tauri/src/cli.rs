@@ -1,4 +1,4 @@
-//! Argument parsing and output for the `terminalx-next` thin client.
+//! Argument parsing and output for the `terminalx` thin client.
 
 use std::path::Path;
 use std::time::Duration;
@@ -9,36 +9,36 @@ use crate::control::{self, ControlError, ControlResponse};
 
 pub const GUIDE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../skill-guides/terminalx-next-cli.md"
+    "/../skill-guides/terminalx-cli.md"
 ));
 pub const SKILL_STUB: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../skills/terminalx-next-cli/SKILL.md"
+    "/../skills/terminalx-cli/SKILL.md"
 ));
 
-const HELP: &str = r#"terminalx-next — control a running TerminalX app
+const HELP: &str = r#"terminalx — control a running TerminalX app
 
 Usage:
-  terminalx-next status [--json]
-  terminalx-next projects list [--json]
-  terminalx-next sessions list [--project PROJECT] [--json]
-  terminalx-next sessions create --project PROJECT --agent AGENT --prompt TEXT
+  terminalx status [--json]
+  terminalx projects list [--json]
+  terminalx sessions list [--project PROJECT] [--json]
+  terminalx sessions create --project PROJECT --agent AGENT --prompt TEXT
       [--worktree|--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
-  terminalx-next sessions show SESSION [--json]
-  terminalx-next tabs list SESSION [--json]
-  terminalx-next send SESSION_OR_TAB TEXT [--json]
-  terminalx-next read SESSION_OR_TAB [--since SEQ] [--tail COUNT] [--json]
-  terminalx-next wait SESSION_OR_TAB [--timeout SECONDS] [--json]
-  terminalx-next permissions list [--json]
-  terminalx-next permissions allow REQUEST [--option OPTION] [--json]
-  terminalx-next permissions deny REQUEST [--json]
-  terminalx-next worktrees list [--project PROJECT] [--json]
-  terminalx-next worktrees delete WORKTREE [--project PROJECT] --yes [--json]
-  terminalx-next issues list --project PROJECT [--provider github|linear]
+  terminalx sessions show SESSION [--json]
+  terminalx tabs list SESSION [--json]
+  terminalx send SESSION_OR_TAB TEXT [--json]
+  terminalx read SESSION_OR_TAB [--since SEQ] [--tail COUNT] [--json]
+  terminalx wait SESSION_OR_TAB [--timeout SECONDS] [--json]
+  terminalx permissions list [--json]
+  terminalx permissions allow REQUEST [--option OPTION] [--json]
+  terminalx permissions deny REQUEST [--json]
+  terminalx worktrees list [--project PROJECT] [--json]
+  terminalx worktrees delete WORKTREE [--project PROJECT] --yes [--json]
+  terminalx issues list --project PROJECT [--provider github|linear]
       [--assigned-to-me] [--team ID] [--search TEXT] [--json]
-  terminalx-next skills get terminalx-next-cli [--full] [--json]
+  terminalx skills get terminalx-cli [--full] [--json]
 
-Use `terminalx-next skills get terminalx-next-cli` for the complete guide."#;
+Use `terminalx skills get terminalx-cli` for the complete guide."#;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Action {
@@ -67,11 +67,11 @@ pub fn run_cli() -> Option<i32> {
         .and_then(|arg| Path::new(arg).file_name())
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    let offset = if matches!(invoked, "terminalx-next" | "tnx") {
+    let offset = if matches!(invoked, "terminalx" | "tnx") {
         1
     } else if all
         .get(1)
-        .is_some_and(|arg| matches!(arg.as_str(), "terminalx-next" | "tnx"))
+        .is_some_and(|arg| matches!(arg.as_str(), "terminalx" | "tnx"))
     {
         2
     } else {
@@ -120,7 +120,7 @@ fn run(args: &[String]) -> i32 {
                 print_response(
                     &ControlResponse::success(
                         "local",
-                        json!({"name": "terminalx-next-cli", "version": env!("CARGO_PKG_VERSION"), "guide": GUIDE}),
+                        json!({"name": "terminalx-cli", "version": env!("CARGO_PKG_VERSION"), "guide": GUIDE}),
                     ),
                     true,
                 );
@@ -250,11 +250,11 @@ fn parse(args: &[String]) -> Result<Parsed, ControlError> {
         "skills" => {
             expect_word(&mut tokens, "get", "skills")?;
             let name = tokens.required_front("skill name")?;
-            if name != "terminalx-next-cli" {
+            if name != "terminalx-cli" {
                 return Err(ControlError::new(
                     "not_found",
                     format!("This binary does not embed a guide named {name}."),
-                    Some("Use terminalx-next-cli exactly.".into()),
+                    Some("Use terminalx-cli exactly.".into()),
                 ));
             }
             let _full = tokens.flag("--full")?;
@@ -383,7 +383,7 @@ fn invalid(message: impl Into<String>) -> ControlError {
     ControlError::new(
         "invalid_arguments",
         message,
-        Some("Run terminalx-next --help and correct the named argument.".into()),
+        Some("Run terminalx --help and correct the named argument.".into()),
     )
 }
 
@@ -575,15 +575,15 @@ mod tests {
 
     #[test]
     fn skills_get_is_local_and_version_matched() {
-        let parsed = parse(&args(&["skills", "get", "terminalx-next-cli", "--full"])).unwrap();
+        let parsed = parse(&args(&["skills", "get", "terminalx-cli", "--full"])).unwrap();
         assert_eq!(parsed.action, Action::Guide);
         assert!(GUIDE.contains("TERMINALX_NEXT_SOCKET"));
         assert!(SKILL_STUB.contains("discovery stub"));
     }
 
     #[test]
-    fn public_copy_uses_the_terminalx_next_identity() {
-        assert!(HELP.starts_with("terminalx-next — control a running TerminalX app"));
+    fn public_copy_uses_the_terminalx_identity() {
+        assert!(HELP.starts_with("terminalx — control a running TerminalX app"));
         for copy in [HELP, GUIDE, SKILL_STUB] {
             assert!(!copy.contains("Raccoon app"));
             assert!(!copy.contains("Raccoon →"));

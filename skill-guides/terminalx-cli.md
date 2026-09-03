@@ -1,21 +1,21 @@
 # TerminalX CLI
 
-`terminalx-next` is the authenticated command-line surface of a running TerminalX app. The alias
+`terminalx` is the authenticated command-line surface of a running TerminalX app. The alias
 `tnx` is equivalent. It drives the app's real projects, sessions, PTY-first agent tabs,
 transcripts, permission cards, worktrees, and issue integrations; it does not maintain a second
 copy of that state.
 
 The guide is embedded at build time. If this text came from
-`terminalx-next skills get terminalx-next-cli`, it matches the command parser and protocol in
+`terminalx skills get terminalx-cli`, it matches the command parser and protocol in
 that binary.
 
 ## Start here
 
 Choose the executable once:
 
-1. Use `terminalx-next` when it is on `PATH`.
+1. Use `terminalx` when it is on `PATH`.
 2. Otherwise use `tnx` when it is on `PATH`.
-3. Otherwise use `/Applications/TerminalX.app/Contents/MacOS/terminalx-next` when
+3. Otherwise use `/Applications/TerminalX.app/Contents/MacOS/terminalx` when
    TerminalX is installed there.
 
 If none exists, install it from TerminalX → Settings → General. Do not guess command names or
@@ -24,7 +24,7 @@ flags. Agents should pass `--json`; human-readable output is intended for intera
 Confirm the connection first:
 
 ```text
-terminalx-next status --json
+terminalx status --json
 ```
 
 The app listens at `$RACCOON_HOME/run/hooks.sock` and writes its per-launch credential to
@@ -45,11 +45,11 @@ When automation passes ids between commands, copy the full ids from JSON output.
 ### App and discovery
 
 ```text
-terminalx-next status --json
-terminalx-next projects list --json
-terminalx-next sessions list [--project <project>] --json
-terminalx-next sessions show <session> --json
-terminalx-next tabs list <session> --json
+terminalx status --json
+terminalx projects list --json
+terminalx sessions list [--project <project>] --json
+terminalx sessions show <session> --json
+terminalx tabs list <session> --json
 ```
 
 `status` reports the app version, process id, socket path, attached projects, and tabs whose
@@ -58,7 +58,7 @@ agent process is running.
 ### Start a session
 
 ```text
-terminalx-next sessions create \
+terminalx sessions create \
   --project <project> \
   --agent <claude|codex> \
   --prompt <text> \
@@ -76,9 +76,9 @@ returns both ids. Valid modes are `plan`, `manual`, `auto`, `acceptEdits`, and
 ### Send, read, and wait
 
 ```text
-terminalx-next send <session-or-tab> <text> --json
-terminalx-next read <session-or-tab> [--since <seq>] [--tail <count>] --json
-terminalx-next wait <session-or-tab> [--timeout <seconds>] --json
+terminalx send <session-or-tab> <text> --json
+terminalx read <session-or-tab> [--since <seq>] [--tail <count>] --json
+terminalx wait <session-or-tab> [--timeout <seconds>] --json
 ```
 
 `send` types into the live agent TUI through the composer path. `read` returns normalized,
@@ -92,9 +92,9 @@ that sequence. Do not scrape terminal escape sequences.
 ### Permissions
 
 ```text
-terminalx-next permissions list --json
-terminalx-next permissions allow <request-id> [--option <option-id>] --json
-terminalx-next permissions deny <request-id> --json
+terminalx permissions list --json
+terminalx permissions allow <request-id> [--option <option-id>] --json
+terminalx permissions deny <request-id> --json
 ```
 
 Use the request ids and option ids returned by `permissions list`. `allow` defaults to the
@@ -105,8 +105,8 @@ already raised.
 ### Worktrees
 
 ```text
-terminalx-next worktrees list [--project <project>] --json
-terminalx-next worktrees delete <path-or-name> [--project <project>] --yes --json
+terminalx worktrees list [--project <project>] --json
+terminalx worktrees delete <path-or-name> [--project <project>] --yes --json
 ```
 
 Deletion always requires `--yes`, refuses a project's main checkout, stops affected tabs, and
@@ -116,7 +116,7 @@ worktree's uncommitted and unpushed counts from `worktrees list` before deleting
 ### Issues
 
 ```text
-terminalx-next issues list --project <project> [--provider github|linear] \
+terminalx issues list --project <project> [--provider github|linear] \
   [--assigned-to-me] [--team <id>] [--search <text>] --json
 ```
 
@@ -126,8 +126,8 @@ Settings → Integrations. The default provider is GitHub.
 ### This guide
 
 ```text
-terminalx-next skills get terminalx-next-cli [--full]
-terminalx-next skills get terminalx-next-cli [--full] --json
+terminalx skills get terminalx-cli [--full]
+terminalx skills get terminalx-cli [--full] --json
 ```
 
 The non-JSON form prints this Markdown directly. `--full` is accepted for callers that always

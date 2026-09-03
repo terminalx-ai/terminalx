@@ -37,7 +37,7 @@ fn cli_dir(home: &Path) -> PathBuf {
 
 fn cli_status_at(home: &Path, target: &Path) -> CliToolStatus {
     let directory = cli_dir(home);
-    let commands: Vec<String> = ["terminalx-next", "tnx"]
+    let commands: Vec<String> = ["terminalx", "tnx"]
         .iter()
         .map(|name| directory.join(name).to_string_lossy().into_owned())
         .collect();
@@ -75,7 +75,7 @@ fn install_cli_links(home: &Path, target: &Path) -> Result<()> {
     let directory = cli_dir(home);
     std::fs::create_dir_all(&directory)
         .with_context(|| format!("create {}", directory.display()))?;
-    for name in ["terminalx-next", "tnx"] {
+    for name in ["terminalx", "tnx"] {
         let link = directory.join(name);
         if let Ok(metadata) = std::fs::symlink_metadata(&link) {
             if !metadata.file_type().is_symlink() {
@@ -83,7 +83,7 @@ fn install_cli_links(home: &Path, target: &Path) -> Result<()> {
             }
         }
     }
-    for name in ["terminalx-next", "tnx"] {
+    for name in ["terminalx", "tnx"] {
         let link = directory.join(name);
         match std::fs::symlink_metadata(&link) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -109,8 +109,8 @@ fn install_cli_links(_home: &Path, _target: &Path) -> Result<()> {
 
 fn skill_targets(home: &Path) -> [PathBuf; 2] {
     [
-        home.join(".claude/skills/terminalx-next-cli/SKILL.md"),
-        home.join(".agents/skills/terminalx-next-cli/SKILL.md"),
+        home.join(".claude/skills/terminalx-cli/SKILL.md"),
+        home.join(".agents/skills/terminalx-cli/SKILL.md"),
     ]
 }
 
@@ -167,13 +167,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn installs_both_cli_aliases_without_replacing_a_regular_file() {
+    fn installs_terminalx_and_tnx_without_replacing_a_regular_file() {
         let home = tempfile::tempdir().unwrap();
         let target = home.path().join("Raccoon.app/Contents/MacOS/raccoon");
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::write(&target, "binary").unwrap();
         install_cli_links(home.path(), &target).unwrap();
-        assert!(cli_status_at(home.path(), &target).installed);
+        let status = cli_status_at(home.path(), &target);
+        assert!(status.installed);
+        assert_eq!(
+            status.commands,
+            ["terminalx", "tnx"]
+                .map(|name| cli_dir(home.path()).join(name).to_string_lossy().into_owned())
+        );
 
         let tnx = cli_dir(home.path()).join("tnx");
         std::fs::remove_file(&tnx).unwrap();
@@ -190,6 +196,7 @@ mod tests {
         assert!(status.installed);
         assert_eq!(status.targets.len(), 2);
         for path in skill_targets(home.path()) {
+            assert!(path.to_string_lossy().contains("/terminalx-cli/SKILL.md"));
             assert_eq!(
                 std::fs::read_to_string(path).unwrap(),
                 crate::cli::SKILL_STUB

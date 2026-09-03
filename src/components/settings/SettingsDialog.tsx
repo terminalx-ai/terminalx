@@ -98,8 +98,8 @@ function GeneralTab() {
         label="Command line tool"
         description={
           cli?.installed
-            ? `terminalx-next and tnx are installed in ${cli.directory}.`
-            : "Install terminalx-next and its tnx alias in ~/.local/bin so shells and agents can control this app."
+            ? `terminalx and tnx are installed in ${cli.directory}.`
+            : "Install terminalx and its tnx alias in ~/.local/bin so shells and agents can control this app."
         }
         control={
           <Button size="sm" variant="outline" disabled={cliBusy || cli?.installed} onClick={() => void installCli()}>

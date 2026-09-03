@@ -45,7 +45,7 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "binaries/terminalx-next"
+      "binaries/terminalx"
     ],
     "macOS": {
       "signingIdentity": "-",

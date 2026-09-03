@@ -6,7 +6,8 @@
   bundle identifier. It registers `terminalx://` and still recognizes
   `terminalx-next://` links in code for compatibility. Development builds use
   the separate TerminalX Dev identity and the existing "D" badge; the release
-  keeps its badged icon too.
+  keeps its badged icon too. The command-line tool and first-party skill now
+  install as `terminalx` and `terminalx-cli`; `tnx` remains an alias.
 
 - Claude tabs now run the real interactive CLI in a terminal, and the chat is a
   view of that one process: the transcript is read from the CLI's own session

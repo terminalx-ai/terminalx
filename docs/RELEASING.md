@@ -111,10 +111,14 @@ release mode, and writes to `src-tauri/target/release/bundle/`:
 | Path | What |
 | --- | --- |
 | `macos/TerminalX.app` | The app, ad-hoc signed (`signingIdentity: "-"`) |
-| `macos/TerminalX.app/Contents/MacOS/terminalx-next` | A tiny launcher for the app's built-in CLI command family |
+| `macos/TerminalX.app/Contents/MacOS/terminalx` | A tiny launcher for the app's built-in CLI command family |
 | `dmg/TerminalX_<version>_aarch64.dmg` | Disk image for distribution |
 | `macos/TerminalX.app.tar.gz` | Updater artifact |
 | `macos/TerminalX.app.tar.gz.sig` | Its signature, made with the private key |
+
+Tauri derives the `.app`, `.dmg`, updater archive, and signature names from
+`productName`. The matching signature source and artifact URL inside
+`latest.json` must use these exact TerminalX filenames too.
 
 Building into a separate target directory keeps a running `pnpm tauri:dev`
 undisturbed: prefix the command with

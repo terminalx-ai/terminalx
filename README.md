@@ -45,7 +45,7 @@ drives the `claude` and `codex` CLIs you are already logged into.
 - **Projects and workspaces**: a projects rail with colours and logos, and
   every checkout — including worktrees made outside the app — listed with its
   sessions.
-- **A first-party command line interface**: `terminalx-next` (or `tnx`) drives
+- **A first-party command line interface**: `terminalx` (or `tnx`) drives
   projects, sessions, tabs, transcripts, permission cards, worktrees and
   issues through the running app's authenticated control socket.
 - **Notifications graded by attention** (banner, in-app notice, or just a
@@ -115,16 +115,16 @@ All of them, in full:
   `prompts` and `plugins` are links, so you stay on the same account and a
   refreshed token lands in your own file.
 - **`$RACCOON_HOME/run/hooks.sock`** — the unix control socket used by the
-  CLIs' hooks and by `terminalx-next`. Created `0600`, inside the `0700`
+  CLIs' hooks and by `terminalx`. Created `0600`, inside the `0700`
   `$RACCOON_HOME` directory, and removed when the app exits.
 - **`$RACCOON_HOME/run/control.token`** — a per-launch control credential,
   written `0600`. App-launched tabs receive the same value and socket path in
   `TERMINALX_NEXT_TOKEN` and `TERMINALX_NEXT_SOCKET`; normal shells read the
   file without printing it.
-- **`~/.local/bin/terminalx-next` and `~/.local/bin/tnx`** — symlinks to the
+- **`~/.local/bin/terminalx` and `~/.local/bin/tnx`** — symlinks to the
   app executable, only when you press Install under Settings → General.
-- **`~/.claude/skills/terminalx-next-cli` and
-  `~/.agents/skills/terminalx-next-cli`** — the first-party discovery stub,
+- **`~/.claude/skills/terminalx-cli` and
+  `~/.agents/skills/terminalx-cli`** — the first-party discovery stub,
   only when you install it under Settings → Agents. Its full version-matched
   guide stays embedded in the binary.
 - **`$RACCOON_HOME`** itself (default `~/.raccoon`) — projects, the session

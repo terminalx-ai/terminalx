@@ -1,5 +1,5 @@
 //! Authenticated JSON-lines control protocol shared by the desktop app and
-//! the `terminalx-next` command-line client.
+//! the `terminalx` command-line client.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -57,7 +57,7 @@ impl ControlError {
         Self::new(
             "invalid_arguments",
             message,
-            Some("Run terminalx-next --help and correct the named argument.".into()),
+            Some("Run terminalx --help and correct the named argument.".into()),
         )
     }
 
@@ -849,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_copy_uses_the_terminalx_next_identity() {
+    fn recovery_copy_uses_the_terminalx_identity() {
         assert_eq!(
             APP_UNAVAILABLE_RECOVERY,
             "Open TerminalX with the same RACCOON_HOME, then retry status once."

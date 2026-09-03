@@ -54,7 +54,7 @@ src-tauri/src
     opencode/        local HTTP+SSE adapter — hidden
   hooks.rs           the hook bridge: unix socket, parked permission requests
   control.rs         authenticated CLI RPC over the same unix socket
-  cli.rs             terminalx-next command parsing and embedded skill guide
+  cli.rs             terminalx command parsing and embedded skill guide
   pty.rs             terminal PTYs with 8ms/32KB output coalescing
   git.rs             worktrees, snapshots (temp-index write-tree), diffs, commit, push
   workspaces.rs      every checkout a project has, whoever made it
@@ -217,7 +217,7 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 ### TerminalX CLI ✅
 - [x] The hook socket also serves authenticated JSON-lines control requests,
       using a per-launch token stored owner-only and injected into agent tabs.
-- [x] `terminalx-next` / `tnx` cover project, session, tab, transcript,
+- [x] `terminalx` / `tnx` cover project, session, tab, transcript,
       permission, worktree and issue workflows through the app's real services.
 - [x] The first-party discovery skill installs from Settings; its complete
       version-matched guide is embedded in the binary at build time.
