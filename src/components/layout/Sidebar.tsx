@@ -17,6 +17,7 @@ export function Sidebar({
   onOpenSettings,
   onOpenIssues,
   onOpenAgents,
+  onOpenStats,
   onOpenAutomations,
   onOpenSkills,
   onSearch,
@@ -25,6 +26,7 @@ export function Sidebar({
   onOpenSettings: () => void;
   onOpenIssues: () => void;
   onOpenAgents: () => void;
+  onOpenStats: () => void;
   onOpenAutomations: () => void;
   onOpenSkills: () => void;
   onSearch: () => void;
@@ -47,6 +49,7 @@ export function Sidebar({
         onOpenSettings={onOpenSettings}
         onOpenIssues={onOpenIssues}
         onOpenAgents={onOpenAgents}
+        onOpenStats={onOpenStats}
         onOpenAutomations={onOpenAutomations}
         onOpenSkills={onOpenSkills}
         onSearch={onSearch}
