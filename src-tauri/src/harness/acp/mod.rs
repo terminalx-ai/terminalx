@@ -104,7 +104,7 @@ impl Acp {
         let params = json!({
             "protocolVersion": 1,
             "clientCapabilities": {"fs": {"readTextFile": true, "writeTextFile": true}, "terminal": false},
-            "clientInfo": {"name": "raccoon", "title": "TerminalX Next", "version": env!("CARGO_PKG_VERSION")},
+            "clientInfo": {"name": "raccoon", "title": "TerminalX", "version": env!("CARGO_PKG_VERSION")},
         });
         vec![Action::Write(self.request("initialize", params, Pending::Initialize))]
     }

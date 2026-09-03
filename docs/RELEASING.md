@@ -1,4 +1,4 @@
-# Releasing TerminalX Next
+# Releasing TerminalX
 
 ## One-time setup
 
@@ -30,25 +30,28 @@ a merge patch over `tauri.conf.json` — it changes three things and nothing els
 
 | Key | Dev value | What it moves |
 | --- | --- | --- |
-| `productName` | `TerminalX Next Dev` | The Dock label, the app menu, ⌘-Tab |
+| `productName` | `TerminalX Dev` | The Dock label, the app menu, ⌘-Tab |
 | `identifier` | `com.terminalx.next.dev` | macOS permission grants and per-app state |
 | `bundle.icon` | `icons-dev/*` | The Dock icon: the app icon with an amber "D" badge |
 
 So a dev build and an installed release can sit in the Dock together and stay
 apart at a glance.
 
-The release identity is deliberately `TerminalX Next` / `com.terminalx.next`,
-and it registers only `terminalx-next://`. Keep it separate from TerminalX's
-name, identifier, and URL scheme until the explicit parity cutover.
+The release identity is `TerminalX` / `com.terminalx.next`, and it registers
+`terminalx://`. The bundle identifier deliberately keeps its `.next` suffix
+because the predecessor owns `com.terminalx`; macOS cannot install two apps
+with the same identifier. The deep-link handler continues to recognize
+`terminalx-next://` URLs for compatibility, but the bundle no longer registers
+that scheme.
 
 The separate identifier is what keeps the two from stepping on each other in
 macOS itself. TCC keys microphone and speech-recognition consent by bundle
-identifier, so `TerminalX Next Dev` gets its own rows under Privacy & Security:
+identifier, so `TerminalX Dev` gets its own rows under Privacy & Security:
 revoking or re-prompting dev leaves the installed release alone, and vice
 versa. Anything else macOS scopes per identifier (saved window state, launch
 services registration) is likewise separate.
 
-What the identifier does *not* move is TerminalX Next's own data. The store still
+What the identifier does *not* move is TerminalX's own data. The store still
 lives in `~/.raccoon` for both builds, and `RACCOON_HOME` is still the only
 thing that points it elsewhere:
 
@@ -68,7 +71,7 @@ Two notes on the mechanics:
   the release build its own `CARGO_TARGET_DIR` (below) to avoid that.
 
 `pnpm tauri build` reads only `tauri.conf.json`, so the shipped bundle keeps
-the amber "N" badge, the `TerminalX Next` name, and the `com.terminalx.next`
+the amber "N" badge, the `TerminalX` name, and the `com.terminalx.next`
 identifier.
 
 ### Regenerating the badged icons
@@ -107,11 +110,15 @@ release mode, and writes to `src-tauri/target/release/bundle/`:
 
 | Path | What |
 | --- | --- |
-| `macos/TerminalX Next.app` | The app, ad-hoc signed (`signingIdentity: "-"`) |
-| `macos/TerminalX Next.app/Contents/MacOS/terminalx-next` | A tiny launcher for the app's built-in CLI command family |
-| `dmg/TerminalX Next_<version>_aarch64.dmg` | Disk image for distribution |
-| `macos/TerminalX Next.app.tar.gz` | Updater artifact |
-| `macos/TerminalX Next.app.tar.gz.sig` | Its signature, made with the private key |
+| `macos/TerminalX.app` | The app, ad-hoc signed (`signingIdentity: "-"`) |
+| `macos/TerminalX.app/Contents/MacOS/terminalx` | A tiny launcher for the app's built-in CLI command family |
+| `dmg/TerminalX_<version>_aarch64.dmg` | Disk image for distribution |
+| `macos/TerminalX.app.tar.gz` | Updater artifact |
+| `macos/TerminalX.app.tar.gz.sig` | Its signature, made with the private key |
+
+Tauri derives the `.app`, `.dmg`, updater archive, and signature names from
+`productName`. The matching signature source and artifact URL inside
+`latest.json` must use these exact TerminalX filenames too.
 
 Building into a separate target directory keeps a running `pnpm tauri:dev`
 undisturbed: prefix the command with
@@ -127,7 +134,7 @@ undisturbed: prefix the command with
 
 The updater fetches one JSON document and compares `version` with the
 running app. Attach it to the GitHub Release as `latest.json`, alongside
-`TerminalX Next.app.tar.gz` and the `.dmg`, and mark that release latest — the
+`TerminalX.app.tar.gz` and the `.dmg`, and mark that release latest — the
 endpoint's `/releases/latest/download/` resolves to whichever release that
 is:
 
@@ -138,8 +145,8 @@ is:
   "pub_date": "2026-09-02T00:00:00Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "<contents of TerminalX Next.app.tar.gz.sig>",
-      "url": "https://github.com/terminalx-ai/raccoon/releases/download/v0.2.0/TerminalX%20Next.app.tar.gz"
+      "signature": "<contents of TerminalX.app.tar.gz.sig>",
+      "url": "https://github.com/terminalx-ai/raccoon/releases/download/v0.2.0/TerminalX.app.tar.gz"
     }
   }
 }

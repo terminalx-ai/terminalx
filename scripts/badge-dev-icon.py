@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the TerminalX Next release and development icon masters.
+"""Generate the TerminalX release and development icon masters.
 
     python3 scripts/badge-dev-icon.py
 

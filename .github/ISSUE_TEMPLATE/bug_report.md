@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Something in TerminalX Next does not do what it says
+about: Something in TerminalX does not do what it says
 labels: bug
 ---
 
@@ -12,7 +12,7 @@ labels: bug
 3.
 
 **Versions**
-- TerminalX Next (Settings → About):
+- TerminalX (Settings → About):
 - macOS:
 - `claude --version` / `codex --version`, whichever tab it was:
 

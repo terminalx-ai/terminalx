@@ -1,6 +1,6 @@
-# Contributing to TerminalX Next
+# Contributing to TerminalX
 
-Thanks for wanting to help. TerminalX Next is a Tauri 2 (Rust) app with a
+Thanks for wanting to help. TerminalX is a Tauri 2 (Rust) app with a
 React 19 front end, and it drives the agent CLIs you already have installed. That means
 the interesting bugs usually live where the app meets a real process, so please
 run what you change.
@@ -17,7 +17,7 @@ run what you change.
   code, and the command line tools alone may not ship it. See
   [docs/RELEASING.md](docs/RELEASING.md).
 - The **`claude`** and **`codex`** CLIs, logged in, if you want to run agents.
-  TerminalX Next spawns them; it does not bundle or proxy them.
+  TerminalX spawns them; it does not bundle or proxy them.
 - macOS on Apple silicon is the only platform currently built and tested.
 
 ## Setup
@@ -27,7 +27,7 @@ pnpm install
 pnpm tauri:dev
 ```
 
-`pnpm tauri:dev` runs the badged dev build (`TerminalX Next Dev`, its own bundle
+`pnpm tauri:dev` runs the badged dev build (`TerminalX Dev`, its own bundle
 identifier and Dock icon), so it can sit beside an installed release without
 either one clobbering the other's macOS permission grants.
 
@@ -71,7 +71,7 @@ The same advice applies to release builds, and the reasoning is in
 
 ## Branches and worktrees
 
-Work on a branch off `main`. TerminalX Next is built with worktrees and it is a
+Work on a branch off `main`. TerminalX is built with worktrees and it is a
 pleasant way to develop it too:
 
 ```sh
@@ -113,7 +113,7 @@ A harness is one agent CLI. They live in `src-tauri/src/harness/`:
 - `acp/` and `opencode/` are **headless**: a peer driven over a pipe, where
   each inbound line becomes a list of `Action`s the session manager applies.
   That shape is testable on fixtures but hands a tab off when you switch to
-  the terminal view, which is why it is no longer what TerminalX Next offers.
+  the terminal view, which is why it is no longer what TerminalX offers.
 
 Which harnesses the UI offers is decided in exactly one place —
 `HIDDEN_HARNESSES` in `src-tauri/src/harness/mod.rs`. A hidden harness is not

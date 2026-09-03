@@ -10,7 +10,7 @@ fn main() {
 }
 
 fn embed_cli_skill() {
-    for source in ["../skill-guides/terminalx-next-cli.md", "../skills/terminalx-next-cli/SKILL.md"] {
+    for source in ["../skill-guides/terminalx-cli.md", "../skills/terminalx-cli/SKILL.md"] {
         println!("cargo:rerun-if-changed={source}");
         std::fs::read(source).unwrap_or_else(|e| panic!("read embedded file {source}: {e}"));
     }
