@@ -130,6 +130,30 @@ impl DeviceRegistry {
         save(file)
     }
 
+    pub fn remove_unclaimed(&self) -> Result<Vec<String>> {
+        let mut inner = self.inner.lock().unwrap();
+        let file = ensure_loaded(&mut inner)?;
+        let mut removed = Vec::new();
+        file.devices.retain(|device| {
+            let unclaimed = device.last_seen_at.is_none();
+            if unclaimed {
+                removed.push(device.id.clone());
+            }
+            !unclaimed
+        });
+        if !removed.is_empty() {
+            save(file)?;
+        }
+        Ok(removed)
+    }
+
+    pub fn is_unclaimed(&self, device_id: &str) -> Result<bool> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .any(|device| device.id == device_id && device.last_seen_at.is_none()))
+    }
+
     pub fn find_by_token(
         &self,
         token: &str,
@@ -296,5 +320,20 @@ mod tests {
         let removed = registry.revoke_automatic_for_user("user").unwrap();
         assert_eq!(removed.len(), 1);
         assert_eq!(registry.list().unwrap()[0].id, "e");
+    }
+
+    #[test]
+    fn startup_removes_only_credentials_that_never_authenticated() {
+        let _home = crate::store::temp_home();
+        let registry = DeviceRegistry::default();
+        let mut connected = device("connected", "one", DeviceProvenance::Explicit);
+        connected.last_seen_at = Some(Utc::now().to_rfc3339());
+        registry.add(connected).unwrap();
+        registry
+            .add(device("pending", "two", DeviceProvenance::Explicit))
+            .unwrap();
+
+        assert_eq!(registry.remove_unclaimed().unwrap(), ["pending"]);
+        assert_eq!(registry.list().unwrap()[0].id, "connected");
     }
 }

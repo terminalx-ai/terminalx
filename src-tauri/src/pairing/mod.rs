@@ -93,6 +93,9 @@ impl PairingManager {
 
     pub fn configure(self: &Arc<Self>, app: &AppHandle, app_identifier: &str) -> Result<()> {
         self.secrets.configure(app_identifier)?;
+        for device_id in self.registry.remove_unclaimed()? {
+            self.secrets.delete_device_token(&device_id)?;
+        }
         self.app
             .set(app.clone())
             .map_err(|_| anyhow!("pairing manager was already configured"))?;
@@ -174,10 +177,11 @@ impl PairingManager {
         {
             let mut inner = self.inner.lock().unwrap();
             inner.active_pairing = Some(pairing);
-            inner.pending_pairing_device = Some(device_id);
+            inner.pending_pairing_device = Some(device_id.clone());
             inner.last_error = None;
         }
         self.emit();
+        self.schedule_unclaimed_expiration(device_id, expires_at);
         Ok(self.snapshot())
     }
 
@@ -544,7 +548,7 @@ impl PairingManager {
     }
 
     async fn fulfill_grant(
-        &self,
+        self: &Arc<Self>,
         epoch: u64,
         context: &AccountContext,
         relay: &RelayLive,
@@ -569,6 +573,8 @@ impl PairingManager {
                 .await;
                 if !matches!(published, Ok(Ok(()))) || !self.is_epoch(epoch) {
                     let _ = self.revoke_local(&device_id);
+                } else if let Ok(expires_at) = DateTime::parse_from_rfc3339(&grant.expires_at) {
+                    self.schedule_unclaimed_expiration(device_id, expires_at.timestamp_millis());
                 }
             }
             Ok((device_id, _)) => {
@@ -1057,7 +1063,27 @@ impl PairingManager {
         };
         if let Some(device_id) = expired {
             let _ = self.revoke_local(&device_id);
+            if let Some(relay) = self.current_relay() {
+                relay.revoke(device_id);
+            }
         }
+    }
+
+    fn schedule_unclaimed_expiration(self: &Arc<Self>, device_id: String, expires_at: i64) {
+        let manager = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let wait_ms = expires_at
+                .saturating_sub(Utc::now().timestamp_millis())
+                .max(0) as u64;
+            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+            if manager.registry.is_unclaimed(&device_id).unwrap_or(false) {
+                let _ = manager.revoke_local(&device_id);
+                if let Some(relay) = manager.current_relay() {
+                    relay.revoke(device_id);
+                }
+                manager.emit();
+            }
+        });
     }
 
     fn is_epoch(&self, epoch: u64) -> bool {
@@ -1257,6 +1283,10 @@ mod tests {
         assert!(allowed_method(DeviceScope::Viewer, "terminal.read"));
         assert!(!allowed_method(DeviceScope::Viewer, "terminal.send"));
         assert!(allowed_method(DeviceScope::Driver, "terminal.send"));
+        assert!(allowed_method(
+            DeviceScope::Driver,
+            "pairing.provisionRelay"
+        ));
         for denied in [
             "files.read",
             "git.push",

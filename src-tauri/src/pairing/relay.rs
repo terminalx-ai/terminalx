@@ -806,4 +806,44 @@ mod tests {
         );
         assert!(websocket_url("http://relay.example", "/v1/host/control").is_err());
     }
+
+    #[test]
+    fn credential_install_authorization_matches_the_deployed_wire_shape() {
+        assert_eq!(
+            serde_json::to_value(DeviceCredentialInstallAuthorization::RelayBasis {
+                basis_conn_id: "connection-1".into(),
+            })
+            .unwrap(),
+            serde_json::json!({ "mode": "relay-basis", "basisConnId": "connection-1" })
+        );
+        assert_eq!(
+            serde_json::to_value(DeviceCredentialInstallAuthorization::AuthenticatedDirect {
+                direct_auth_id: "direct-1".into(),
+            })
+            .unwrap(),
+            serde_json::json!({ "mode": "authenticated-direct", "directAuthId": "direct-1" })
+        );
+    }
+
+    #[test]
+    fn committed_install_status_uses_the_result_shape_without_a_type_field() {
+        let status: CredentialInstallStatus = serde_json::from_value(serde_json::json!({
+            "type": "device-credential-install-status-result",
+            "v": 1,
+            "reqId": "install-1",
+            "state": "committed",
+            "result": {
+                "v": 1,
+                "reqId": "install-1",
+                "authorizationMode": "relay-basis",
+                "currentVersion": 1,
+                "resumeExpiresAt": 1
+            }
+        }))
+        .unwrap();
+        validate_install_status(&status).unwrap();
+        assert!(serde_json::to_value(status).unwrap()["result"]
+            .get("type")
+            .is_none());
+    }
 }
