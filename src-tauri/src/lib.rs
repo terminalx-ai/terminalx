@@ -215,6 +215,7 @@ pub fn run() {
             commands::git_checkout,
             commands::working_changes,
             commands::pr_list,
+            commands::pr_details,
             commands::pr_create,
             commands::pr_merge,
             commands::pr_ready,

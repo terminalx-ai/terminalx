@@ -16,26 +16,10 @@ import { setPrefs, usePrefs } from "@/lib/prefs";
 import { PERMISSION_MODES } from "@/lib/models";
 import { chooseMode } from "@/lib/dialogs";
 import { cn } from "@/lib/cn";
+import { issuePrompt, issueWorktreeName } from "@/lib/issueSession";
 import type { WorkStatus } from "@/types/session";
 
 type Provider = "github" | "linear";
-
-/** The worktree name a session gets from an issue: `eng-42-fix-login-timeout`. */
-export function issueWorktreeName(identifier: string, title: string): string {
-  return `${identifier} ${title}`
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 40)
-    .replace(/-+$/g, "");
-}
-
-/** The first prompt of a session started from an issue. */
-export function issuePrompt(issue: Issue): string {
-  const body = issue.body?.trim() ? `\n\n${issue.body.trim()}` : "";
-  const provider = issue.provider === "github" ? "GitHub" : "Linear";
-  return `Work on ${provider} issue ${issue.identifier}: ${issue.title}${body}\n\nIssue link: ${issue.url}\nWhen done, summarise what changed.`;
-}
 
 /**
  * Issues from the project's tracker, and a way to start a session on one.

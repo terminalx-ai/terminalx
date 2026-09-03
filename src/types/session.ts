@@ -76,6 +76,10 @@ export interface Workspace {
   additions: number;
   deletions: number;
   unpushed: number;
+  /** Commits ahead of this checkout's configured upstream. */
+  ahead: number;
+  /** Commits behind this checkout's configured upstream. */
+  behind: number;
 }
 
 export interface WorkspacePr {

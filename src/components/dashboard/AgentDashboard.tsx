@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { ListFilter, Search, X } from "lucide-react";
 import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
@@ -37,7 +37,6 @@ export function AgentDashboard() {
   const [filters, setFilters] = useState<DashboardFilters>(NO_FILTERS);
   const [doneLimit, setDoneLimit] = useState(DONE_PAGE);
   const [cursor, setCursor] = useState<{ column: ColumnId; row: number } | null>(null);
-  const searchRef = useRef<HTMLInputElement>(null);
 
   const live = useMemo(() => store.sessions.filter((s) => !s.archived && s.tabs.length > 0), [store.sessions]);
   const summaries = useSessionSummaries(live, store.loaded);
@@ -105,7 +104,6 @@ export function AgentDashboard() {
     [shown],
   );
 
-  useHotkey("mod+k", () => searchRef.current?.focus());
   useHotkey("down", () => move(0, 1));
   useHotkey("up", () => move(0, -1));
   useHotkey("right", () => move(1, 0));
@@ -130,7 +128,6 @@ export function AgentDashboard() {
           <div className="flex h-7 items-center gap-1.5 rounded-md bg-well px-2">
             <Search className="size-3.5 shrink-0 text-faint" />
             <input
-              ref={searchRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => {

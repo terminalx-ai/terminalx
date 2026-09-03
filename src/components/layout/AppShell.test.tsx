@@ -28,12 +28,13 @@ const { sessionStore } = vi.hoisted(() => ({
           additions: 3,
           deletions: 1,
           unpushed: 0,
+          ahead: 0,
+          behind: 0,
         },
       ],
     },
     workspacesLoading: {},
     newSessionPreset: { projectPath: "/repo", cwd: "/outside/feature" } as { projectPath: string; cwd: string | null } | null,
-    sessionSearch: 0,
   },
 }));
 
@@ -45,7 +46,6 @@ vi.mock("@/lib/sessions", () => ({
   openSkills: vi.fn(),
   openStats: vi.fn(),
   selectSession: vi.fn(),
-  setSessionSearch: vi.fn(),
   useSessionStore: () => sessionStore,
 }));
 vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn() }));
@@ -68,6 +68,7 @@ vi.mock("@/components/layout/RightPanel", () => ({
   RightPanel: ({ cwd, branch }: { cwd: string; branch?: string | null }) => <div data-testid="right-panel" data-cwd={cwd} data-branch={branch ?? ""} />,
 }));
 vi.mock("@/components/settings/SettingsDialog", () => ({ SettingsDialog: () => null }));
+vi.mock("@/components/command/CommandPalette", () => ({ CommandPalette: () => null }));
 vi.mock("@/components/ui/Toasts", () => ({ Toasts: () => null }));
 vi.mock("@/components/session/BypassDialog", () => ({ BypassDialog: () => null }));
 vi.mock("@/components/session/SettleDialog", () => ({ SettleDialog: () => null }));

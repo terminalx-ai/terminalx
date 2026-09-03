@@ -27,6 +27,10 @@ pub struct Workspace {
     pub deletions: u32,
     /// Commits on this branch that no remote has.
     pub unpushed: u32,
+    /// Commits ahead of this checkout's configured upstream.
+    pub ahead: u32,
+    /// Commits behind this checkout's configured upstream.
+    pub behind: u32,
 }
 
 fn shortstat(cwd: &Path) -> (u32, u32) {
@@ -75,6 +79,7 @@ pub fn list(project: &Path) -> Result<Vec<Workspace>> {
         let managed = p.parent().map(|parent| parent == managed_root).unwrap_or(false);
         let branch = branch.or_else(|| git::current_branch(&p));
         let (additions, deletions) = shortstat(&p);
+        let (ahead, behind) = git::upstream_counts(&p);
         out.push(Workspace {
             name: if is_main {
                 crate::store::projects::project_name(&root.to_string_lossy())
@@ -84,6 +89,8 @@ pub fn list(project: &Path) -> Result<Vec<Workspace>> {
             path: p.to_string_lossy().into_owned(),
             head: git::head_commit(&p),
             unpushed: unpushed(&p, branch.as_deref()),
+            ahead,
+            behind,
             branch,
             is_main,
             managed,
@@ -200,6 +207,8 @@ mod tests {
         assert_eq!(f.branch.as_deref(), Some("feature"));
         assert_eq!(f.additions, 1);
         assert_eq!(f.uncommitted, 1);
+        assert_eq!(f.ahead, 0);
+        assert_eq!(f.behind, 0);
         assert!(!f.managed);
         let d = disposition(p, &wt);
         assert_eq!(d.uncommitted, 1);

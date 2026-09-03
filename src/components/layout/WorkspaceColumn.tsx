@@ -45,10 +45,6 @@ export function WorkspaceColumn({ projectPath, onNewSession }: { projectPath: st
     if (!store.workspaces[projectPath]) void refreshWorkspaces(projectPath);
   }, [projectPath, store.workspaces]);
 
-  useEffect(() => {
-    if (store.sessionSearch) setQuery("");
-  }, [store.sessionSearch]);
-
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
     const sessions = sortSessions(store.sessions.filter((s) => s.projectPath === projectPath && s.archived === store.showArchived && (!q || s.title.toLowerCase().includes(q))));

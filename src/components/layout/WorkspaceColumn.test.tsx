@@ -26,6 +26,8 @@ const workspace: Workspace = {
   additions: 3,
   deletions: 1,
   unpushed: 0,
+  ahead: 0,
+  behind: 0,
 };
 const opened: SessionEntry = {
   id: "workspace-session",

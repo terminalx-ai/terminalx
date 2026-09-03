@@ -6,6 +6,7 @@ export interface Shortcut {
 }
 
 export const SHORTCUTS: Shortcut[] = [
+  { chord: "mod+k", label: "Command palette", group: "App" },
   { chord: "mod+n", label: "New session", group: "App" },
   { chord: "mod+i", label: "Issues", group: "App" },
   { chord: "mod+shift+a", label: "Agent dashboard", group: "App" },

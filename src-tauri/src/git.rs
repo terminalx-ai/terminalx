@@ -248,6 +248,19 @@ pub struct WorkStatus {
     pub head: Option<String>,
 }
 
+pub fn upstream_counts(cwd: &Path) -> (u32, u32) {
+    if run(cwd, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]).is_err() {
+        return (0, 0);
+    }
+    run(cwd, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
+        .ok()
+        .and_then(|s| {
+            let mut it = s.split_whitespace();
+            Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+        })
+        .unwrap_or((0, 0))
+}
+
 /// One command answering everything the header and handoff row need, so no
 /// button is drawn from one snapshot beside another from a different one.
 /// Infallible: a non-repo answers defaults.
@@ -258,14 +271,7 @@ pub fn work_status(cwd: &Path) -> WorkStatus {
     let branch = current_branch(cwd);
     let dirty = run(cwd, &["status", "--porcelain", "--untracked-files=normal", "--"]).map(|s| !s.trim().is_empty()).unwrap_or(false);
     let upstream = run(cwd, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]).ok().map(|s| s.trim().to_string());
-    let (ahead, behind) = upstream
-        .as_ref()
-        .and_then(|_| run(cwd, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]).ok())
-        .and_then(|s| {
-            let mut it = s.split_whitespace();
-            Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
-        })
-        .unwrap_or((0, 0));
+    let (ahead, behind) = upstream_counts(cwd);
     let default = default_branch(cwd);
     let ahead_of_base = default.as_ref().and_then(|d| {
         let base = if run_ok(cwd, &["show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{d}")]) {
