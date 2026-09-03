@@ -3542,6 +3542,7 @@ dependencies = [
  "parking_lot",
  "portable-pty",
  "regex",
+ "security-framework",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3562,6 +3563,7 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "transcribe-cpp",
  "ureq",
+ "url",
  "uuid",
  "which",
 ]

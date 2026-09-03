@@ -49,11 +49,13 @@ tauri-plugin-updater = "2.11.0"
 cpal = "0.17"
 sha2 = "0.10"
 toml = "0.9"
+url = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSWindow", "NSResponder", "NSView", "NSColor"] }
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "block2"] }
