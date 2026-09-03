@@ -26,12 +26,3 @@ export interface SkillDetail {
   files: SkillFile[];
   executableFiles: string[];
 }
-
-export interface BundledSkillInstall {
-  canonicalPath: string;
-  placements: Array<{
-    agent: string;
-    path: string;
-    outcome: "installed" | "alreadyInstalled" | "keptLocal";
-  }>;
-}

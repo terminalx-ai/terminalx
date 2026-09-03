@@ -103,7 +103,6 @@ pub fn run() {
             commands::list_harnesses,
             commands::list_skills,
             commands::skill_detail,
-            commands::install_raccoon_skill,
             commands::work_status,
             commands::list_branches,
             commands::worktree_disposition,

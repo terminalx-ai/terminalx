@@ -14,7 +14,7 @@ import type {
   WorkStatus,
   WorktreeDisposition,
 } from "@/types/session";
-import type { BundledSkillInstall, DiscoveredSkill, SkillDetail } from "@/types/skills";
+import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 
 export interface NewTab {
   harness: string;
@@ -42,8 +42,11 @@ export interface NewSession {
   baseRef?: string | null;
   /** A requested worktree name (an issue slug); sanitised and made unique. */
   worktreeName?: string | null;
+  /** Explicit acknowledgement that a requested worktree should be skipped. */
+  onMain?: boolean;
   issue?: IssueRef | null;
-  tab: NewTab;
+  /** The first agent conversation. Omit to open the checkout by itself. */
+  tab?: NewTab;
 }
 
 export const api = {
@@ -200,7 +203,6 @@ export const skills = {
   list: (projectPath?: string | null, refresh = false) =>
     invoke<DiscoveredSkill[]>("list_skills", { projectPath: projectPath ?? null, refresh }),
   detail: (dirPath: string) => invoke<SkillDetail>("skill_detail", { dirPath }),
-  installRaccoon: (agents: string[]) => invoke<BundledSkillInstall>("install_raccoon_skill", { agents }),
 };
 
 // ---- git actions & pull requests

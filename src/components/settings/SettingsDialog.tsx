@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, CircleAlert, ExternalLink, Loader2, RefreshCw, Sparkles } from "lucide-react";
+import { Check, CircleAlert, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -16,8 +16,7 @@ import { repoFile } from "@/lib/repo";
 import { keycaps } from "@/lib/hotkeys";
 import { SHORTCUTS } from "@/lib/shortcuts";
 import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
-import { errorMessage, gh, issues, skills as skillsApi, type LinearStatus } from "@/lib/api";
-import type { BundledSkillInstall } from "@/types/skills";
+import { errorMessage, gh, issues, type LinearStatus } from "@/lib/api";
 import changelog from "../../../CHANGELOG.md?raw";
 import { TranscriptionTab } from "./TranscriptionTab";
 
@@ -207,23 +206,6 @@ function AppearanceTab() {
 function AgentsTab() {
   const store = useSessionStore();
   const [busy, setBusy] = useState(false);
-  const [skillBusy, setSkillBusy] = useState(false);
-  const [skillAgents, setSkillAgents] = useState<string[]>(["claude", "codex"]);
-  const [skillResult, setSkillResult] = useState<BundledSkillInstall | null>(null);
-  const [skillError, setSkillError] = useState<string | null>(null);
-  const toggleSkillAgent = (agent: string) =>
-    setSkillAgents((current) => (current.includes(agent) ? current.filter((id) => id !== agent) : [...current, agent]));
-  const installSkill = async () => {
-    setSkillBusy(true);
-    setSkillError(null);
-    try {
-      setSkillResult(await skillsApi.installRaccoon(skillAgents));
-    } catch (error) {
-      setSkillError(errorMessage(error));
-    } finally {
-      setSkillBusy(false);
-    }
-  };
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
@@ -280,56 +262,6 @@ function AgentsTab() {
         ))}
         {!store.harnesses.length && <li className="px-3 py-3 text-xs text-faint">Looking for agents…</li>}
       </ul>
-      <section className="rounded-lg bg-well p-3">
-        <div className="flex items-start gap-3">
-          <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-veil-raised text-muted-foreground">
-            <Sparkles className="size-4" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium">Raccoon CLI skill</div>
-            <p className="mt-0.5 text-xs text-muted-foreground">
-              Install the thin discovery stub. It fetches its full, version-matched guide from this Raccoon binary.
-            </p>
-            <div className="mt-2 flex items-center gap-1.5">
-              {["claude", "codex"].map((agent) => {
-                const selected = skillAgents.includes(agent);
-                return (
-                  <button
-                    key={agent}
-                    type="button"
-                    aria-pressed={selected}
-                    onClick={() => toggleSkillAgent(agent)}
-                    className={cn(
-                      "flex h-7 items-center gap-1.5 rounded-md border px-2 text-xs capitalize outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-                      selected ? "border-ring/50 bg-selected text-foreground" : "border-border text-muted-foreground hover:bg-veil-raised",
-                    )}
-                  >
-                    <AgentMark id={agent} className="size-3.5" />
-                    {agent}
-                    {selected && <Check className="size-3" />}
-                  </button>
-                );
-              })}
-              <Button size="sm" className="ml-auto" disabled={skillBusy || skillAgents.length === 0} onClick={() => void installSkill()}>
-                {skillBusy && <Loader2 className="animate-spin" />} Install skill
-              </Button>
-            </div>
-            {skillResult && (
-              <ul className="mt-2 flex flex-col gap-1 text-[11px] text-muted-foreground">
-                {skillResult.placements.map((placement) => (
-                  <li key={placement.agent} className="flex items-center gap-1.5">
-                    {placement.outcome === "keptLocal" ? <CircleAlert className="size-3 text-warning" /> : <Check className="size-3 text-add" />}
-                    <span className="capitalize">{placement.agent}:</span>
-                    <span>{placement.outcome === "installed" ? "installed" : placement.outcome === "alreadyInstalled" ? "already installed" : "kept the existing skill"}</span>
-                    <span className="min-w-0 truncate font-mono text-faint" title={placement.path}>{placement.path}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-            {skillError && <div className="mt-2 text-xs text-destructive">{skillError}</div>}
-          </div>
-        </div>
-      </section>
     </div>
   );
 }

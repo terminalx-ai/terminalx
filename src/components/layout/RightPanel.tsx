@@ -10,8 +10,9 @@ import { RepoPanel } from "@/components/changes/RepoPanel";
 import { PrPanel } from "@/components/changes/PrPanel";
 import { FileTree } from "@/components/files/FileTree";
 import { openSettle } from "@/lib/dialogs";
+import { api } from "@/lib/api";
 import type { AgentEvent } from "@/types/events";
-import type { SessionEntry } from "@/types/session";
+import type { WorkStatus } from "@/types/session";
 
 export type PanelTab = "changes" | "repo" | "pr" | "files";
 const TABS: { id: PanelTab; label: string; chord: string }[] = [
@@ -26,11 +27,56 @@ const TABS: { id: PanelTab; label: string; chord: string }[] = [
  * unmount so scroll position and picked files survive the flip, and the
  * `active` prop keeps a hidden body from refetching.
  */
-export function RightPanel({ session, events, version, live }: { session: SessionEntry; events: AgentEvent[]; version: number; live: boolean }) {
+export function RightPanel({
+  cwd,
+  branch,
+  baseRef,
+  events = [],
+  version = 0,
+  live = false,
+  workingTree = false,
+  sessionId,
+  mentionTabId,
+  statusKey = "",
+  rootName,
+  labelMode,
+  settleSessionId,
+}: {
+  cwd: string;
+  /** Undefined asks the panel to resolve the checkout branch itself. */
+  branch?: string | null;
+  baseRef?: string | null;
+  events?: AgentEvent[];
+  version?: number;
+  live?: boolean;
+  workingTree?: boolean;
+  sessionId?: string;
+  mentionTabId?: string | null;
+  statusKey?: string;
+  rootName?: string;
+  labelMode?: "base" | "branch";
+  settleSessionId?: string;
+}) {
   const prefs = usePrefs();
   const [tab, setTab] = useState<PanelTab>("changes");
   const [refreshTick, setRefreshTick] = useState(0);
+  const [status, setStatus] = useState<WorkStatus | null>(null);
   const dragging = useRef<{ x: number; w: number } | null>(null);
+
+  useEffect(() => {
+    if (branch !== undefined && !labelMode) return;
+    let cancelled = false;
+    api
+      .workStatus(cwd)
+      .then((next) => !cancelled && setStatus(next))
+      .catch(() => !cancelled && setStatus(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, branch, labelMode, refreshTick]);
+
+  const resolvedBranch = branch === undefined ? (status?.branch ?? null) : branch;
+  const targetLabel = labelMode === "base" ? `base: ${status?.defaultBranch ?? "default"}` : labelMode === "branch" ? (resolvedBranch ?? "current branch") : null;
 
   useHotkey(TABS[0].chord, () => setTab("changes"));
   useHotkey(TABS[1].chord, () => setTab("repo"));
@@ -86,37 +132,52 @@ export function RightPanel({ session, events, version, live }: { session: Sessio
             </button>
           </WithTooltip>
         ))}
+        {targetLabel && (
+          <span className="ml-auto min-w-0 truncate px-1 font-mono text-[10px] text-faint" title={targetLabel}>
+            {targetLabel}
+          </span>
+        )}
         <WithTooltip label="Refresh">
-          <Button variant="ghost" size="icon-xs" aria-label="Refresh" className="ml-auto" onClick={() => setRefreshTick((t) => t + 1)}>
+          <Button variant="ghost" size="icon-xs" aria-label="Refresh" className={targetLabel ? undefined : "ml-auto"} onClick={() => setRefreshTick((t) => t + 1)}>
             <RefreshCw />
           </Button>
         </WithTooltip>
       </div>
       <div className="min-h-0 flex-1">
         <div className={cn("h-full", tab !== "changes" && "hidden")}>
-          <ChangesPanel key={refreshTick} cwd={session.cwd} events={events} version={version} baseRef={session.baseRef} active={tab === "changes"} live={live} />
+          <ChangesPanel
+            key={refreshTick}
+            cwd={cwd}
+            events={events}
+            version={version}
+            baseRef={baseRef}
+            active={tab === "changes"}
+            live={live}
+            workingTree={workingTree}
+          />
         </div>
         <div className={cn("h-full", tab !== "repo" && "hidden")}>
-          <RepoPanel key={refreshTick} cwd={session.cwd} active={tab === "repo"} />
+          <RepoPanel key={refreshTick} cwd={cwd} active={tab === "repo"} />
         </div>
         <div className={cn("h-full", tab !== "pr" && "hidden")}>
           <PrPanel
             key={refreshTick}
-            cwd={session.cwd}
-            branch={session.branch ?? null}
+            cwd={cwd}
+            branch={resolvedBranch}
             active={tab === "pr"}
             busy={live}
-            onSettle={session.worktreeName && !session.worktreeRemoved ? () => openSettle(session.id) : undefined}
+            onSettle={settleSessionId ? () => openSettle(settleSessionId) : undefined}
           />
         </div>
         <div className={cn("h-full", tab !== "files" && "hidden")}>
           <FileTree
             key={refreshTick}
-            sessionId={session.id}
-            root={session.cwd}
+            sessionId={sessionId ?? `checkout:${cwd}`}
+            root={cwd}
+            rootName={rootName}
             active={tab === "files"}
-            mentionTabId={session.activeTab ?? session.tabs[0]?.id ?? null}
-            statusKey={session.tabs.map((t) => t.status).join(",")}
+            mentionTabId={mentionTabId}
+            statusKey={statusKey}
           />
         </div>
       </div>

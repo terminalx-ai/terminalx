@@ -16,14 +16,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const RACCOON_CLI_GUIDE: &str = include_str!("../../docs/skills/raccoon-cli.md");
-pub const RACCOON_CLI_STUB: &str = include_str!("../../skills/raccoon-cli/SKILL.md");
-
-/// Append-only: installed discovery stubs can outlive a topic rename.
-pub const GUIDE_ALIASES: &[(&str, &str)] = &[("raccoon-cli", "raccoon-cli")];
-/// Append-only: every topic that has shipped as an installable stub.
-pub const STUB_TOPICS: &[&str] = &["raccoon-cli"];
-
 const SKILL_FILE_LIMIT: u64 = 256 * 1024;
 const PLUGIN_METADATA_LIMIT: u64 = 4 * 1024 * 1024;
 const SCAN_TTL: Duration = Duration::from_secs(10);
@@ -72,21 +64,6 @@ pub struct SkillDetail {
     pub markdown: String,
     pub files: Vec<SkillFile>,
     pub executable_files: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BundledPlacement {
-    pub agent: String,
-    pub path: String,
-    pub outcome: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BundledInstallResult {
-    pub canonical_path: String,
-    pub placements: Vec<BundledPlacement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -558,161 +535,6 @@ pub fn detail(dir: &Path) -> Result<SkillDetail> {
     })
 }
 
-fn guide(topic: &str) -> Option<&'static str> {
-    let canonical = GUIDE_ALIASES
-        .iter()
-        .find_map(|(alias, canonical)| (*alias == topic).then_some(*canonical))?;
-    match canonical {
-        "raccoon-cli" => Some(RACCOON_CLI_GUIDE),
-        _ => None,
-    }
-}
-
-fn transcript_tail(session_id: &str, tab_id: &str, limit: usize) -> Result<String> {
-    let path = crate::store::log_path(session_id, tab_id)?;
-    let rows = crate::store::read_lines::<Value>(&path)?;
-    let start = rows.len().saturating_sub(limit.min(500));
-    serde_json::to_string_pretty(&rows[start..]).map_err(Into::into)
-}
-
-fn dispatch_cli(args: &[String]) -> Result<Option<String>> {
-    match args {
-        [command, action, topic] if command == "skills" && action == "get" => guide(topic)
-            .map(|text| Some(text.to_string()))
-            .ok_or_else(|| anyhow!("unknown skill guide: {topic}")),
-        [command, action] if command == "sessions" && action == "list" => Ok(Some(
-            serde_json::to_string_pretty(&crate::store::index::load()?)?,
-        )),
-        [command, action, session, tab] if command == "transcript" && action == "tail" => {
-            transcript_tail(session, tab, 80).map(Some)
-        }
-        [command, action, session, tab, flag, limit]
-            if command == "transcript" && action == "tail" && flag == "--limit" =>
-        {
-            let limit = limit.parse::<usize>().context("--limit must be a number")?;
-            transcript_tail(session, tab, limit).map(Some)
-        }
-        [command, ..]
-            if command == "skills" || command == "sessions" || command == "transcript" =>
-        {
-            Err(anyhow!(
-                "unknown Raccoon CLI command; run `raccoon skills get raccoon-cli`"
-            ))
-        }
-        _ => Ok(None),
-    }
-}
-
-/// Answer the small command surface before Tauri starts. Unknown commands in
-/// this namespace fail closed instead of opening the desktop application.
-pub fn run_cli() -> bool {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match dispatch_cli(&args) {
-        Ok(Some(output)) => {
-            println!("{output}");
-            true
-        }
-        Ok(None) => false,
-        Err(error) => {
-            eprintln!("{error:#}");
-            std::process::exit(2);
-        }
-    }
-}
-
-fn relative_path(from: &Path, to: &Path) -> Result<PathBuf> {
-    let from: Vec<_> = from.components().collect();
-    let to: Vec<_> = to.components().collect();
-    let common = from
-        .iter()
-        .zip(&to)
-        .take_while(|(left, right)| left == right)
-        .count();
-    if common == 0 {
-        return Err(anyhow!("paths have no common root"));
-    }
-    let mut path = PathBuf::new();
-    for _ in common..from.len() {
-        path.push("..");
-    }
-    for component in &to[common..] {
-        path.push(component.as_os_str());
-    }
-    Ok(path)
-}
-
-fn place_bundled_skill(agent: &str, root: &Path, canonical: &Path) -> Result<BundledPlacement> {
-    let destination = root.join("raccoon-cli");
-    if fs::symlink_metadata(&destination).is_ok() {
-        let same = fs::canonicalize(&destination).is_ok_and(|path| path == canonical);
-        return Ok(BundledPlacement {
-            agent: agent.into(),
-            path: destination.to_string_lossy().into_owned(),
-            outcome: if same {
-                "alreadyInstalled"
-            } else {
-                "keptLocal"
-            }
-            .into(),
-        });
-    }
-    crate::store::ensure_dir(root.to_path_buf())?;
-    // `/var` is a link to `/private/var` on macOS. Compute from the physical
-    // parent so the relative link survives that alias as well as ordinary
-    // user-home paths.
-    let physical_root = fs::canonicalize(root)?;
-    let target = relative_path(&physical_root, canonical)?;
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&target, &destination)
-        .with_context(|| format!("link {} to {}", destination.display(), target.display()))?;
-    #[cfg(not(unix))]
-    {
-        fs::create_dir_all(&destination)?;
-        fs::copy(canonical.join("SKILL.md"), destination.join("SKILL.md"))?;
-    }
-    Ok(BundledPlacement {
-        agent: agent.into(),
-        path: destination.to_string_lossy().into_owned(),
-        outcome: "installed".into(),
-    })
-}
-
-fn install_bundled_at(
-    app_home: &Path,
-    user_home: &Path,
-    agents: &[String],
-) -> Result<BundledInstallResult> {
-    if agents.is_empty()
-        || agents
-            .iter()
-            .any(|agent| agent != "claude" && agent != "codex")
-    {
-        return Err(anyhow!("choose Claude, Codex, or both"));
-    }
-    let canonical = app_home.join("skills/bundled/raccoon-cli");
-    crate::store::ensure_dir(canonical.clone())?;
-    let canonical = fs::canonicalize(canonical)?;
-    crate::store::write_atomic(&canonical.join("SKILL.md"), RACCOON_CLI_STUB.as_bytes())?;
-    let mut placements = Vec::new();
-    for agent in ["claude", "codex"] {
-        if !agents.iter().any(|selected| selected == agent) {
-            continue;
-        }
-        let root = user_home.join(format!(".{agent}/skills"));
-        placements.push(place_bundled_skill(agent, &root, &canonical)?);
-    }
-    Ok(BundledInstallResult {
-        canonical_path: canonical.to_string_lossy().into_owned(),
-        placements,
-    })
-}
-
-pub fn install_bundled(agents: &[String]) -> Result<BundledInstallResult> {
-    let app_home = crate::store::root()?;
-    let user_home = dirs::home_dir().context("no home directory")?;
-    install_bundled_at(&app_home, &user_home, agents)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -815,39 +637,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bundled_stub_stays_thin_and_fetches_the_embedded_guide() {
-        assert!(RACCOON_CLI_STUB.lines().count() < 40);
-        assert!(RACCOON_CLI_STUB.contains("raccoon skills get raccoon-cli"));
-        assert_eq!(STUB_TOPICS, ["raccoon-cli"]);
-        let output = dispatch_cli(&["skills".into(), "get".into(), "raccoon-cli".into()])
-            .unwrap()
-            .unwrap();
-        assert_eq!(output, RACCOON_CLI_GUIDE);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn bundled_install_uses_one_copy_and_relative_links_without_overwriting() {
-        let app = tempfile::tempdir().unwrap();
-        let user = tempfile::tempdir().unwrap();
-        let agents = vec!["claude".into(), "codex".into()];
-        let installed = install_bundled_at(app.path(), user.path(), &agents).unwrap();
-        assert_eq!(installed.placements.len(), 2);
-        let canonical = PathBuf::from(&installed.canonical_path);
-        for placement in &installed.placements {
-            let path = PathBuf::from(&placement.path);
-            assert_eq!(placement.outcome, "installed");
-            assert!(fs::read_link(&path).unwrap().is_relative());
-            assert_eq!(fs::canonicalize(path).unwrap(), canonical);
-        }
-
-        let claude = user.path().join(".claude/skills/raccoon-cli");
-        fs::remove_file(&claude).unwrap();
-        fs::create_dir(&claude).unwrap();
-        fs::write(claude.join("SKILL.md"), "mine").unwrap();
-        let retried = install_bundled_at(app.path(), user.path(), &["claude".into()]).unwrap();
-        assert_eq!(retried.placements[0].outcome, "keptLocal");
-        assert_eq!(fs::read_to_string(claude.join("SKILL.md")).unwrap(), "mine");
-    }
 }

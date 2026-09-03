@@ -1,5 +1,4 @@
 fn main() {
-    compile_skill_stubs();
     // ggml's Metal backend uses `@available` checks, which compile to a call
     // into clang's builtins runtime. Rust links with `-nodefaultlibs`, so that
     // archive has to be named explicitly or release links fail on
@@ -7,29 +6,6 @@ fn main() {
     #[cfg(target_os = "macos")]
     link_clang_builtins();
     tauri_build::build()
-}
-
-/// Keep the checked-in installable skill thin while its full guide is compiled
-/// into the binary. The guide owns the frontmatter; the stub owns the body.
-fn compile_skill_stubs() {
-    let manifest = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
-    let root = manifest.parent().expect("repository root");
-    let guide_path = root.join("docs/skills/raccoon-cli.md");
-    let stub_path = root.join("skill-stubs/raccoon-cli.md");
-    let output_path = root.join("skills/raccoon-cli/SKILL.md");
-    println!("cargo:rerun-if-changed={}", guide_path.display());
-    println!("cargo:rerun-if-changed={}", stub_path.display());
-
-    let guide = std::fs::read_to_string(&guide_path).expect("read raccoon-cli guide");
-    let stub = std::fs::read_to_string(&stub_path).expect("read raccoon-cli stub");
-    let rest = guide.strip_prefix("---\n").expect("guide starts with YAML frontmatter");
-    let end = rest.find("\n---\n").expect("guide closes YAML frontmatter");
-    let generated = format!("---\n{}\n---\n{}", &rest[..end], stub.trim_start());
-
-    if std::fs::read_to_string(&output_path).ok().as_deref() != Some(&generated) {
-        std::fs::create_dir_all(output_path.parent().expect("skill folder")).expect("create skill folder");
-        std::fs::write(output_path, generated).expect("write installable raccoon-cli skill");
-    }
 }
 
 #[cfg(target_os = "macos")]
