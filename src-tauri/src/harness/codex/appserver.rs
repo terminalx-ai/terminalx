@@ -1,12 +1,11 @@
-//! One question for a throwaway `codex app-server`.
+//! One request to a throwaway `codex app-server`.
 //!
 //! Three things the app needs are only knowable by asking the CLI itself:
 //! which models this account may run, the hash Codex computes for a hook, and
-//! the signed-in account's rate-limit windows. All are
-//! read-only questions with an answer that changes when Codex is upgraded, so
-//! neither is worth reimplementing — the same binary is asked, over the
-//! JSON-RPC it already speaks on stdio, and the child is killed as soon as it
-//! has answered.
+//! the signed-in account's rate-limit windows. The usage surface also redeems
+//! a user-confirmed reset credit through the protocol. None is worth
+//! reimplementing — the same binary is asked over the JSON-RPC it already
+//! speaks on stdio, and the child is killed as soon as it has answered.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -31,6 +30,12 @@ pub struct Where<'a> {
 /// server ignores anything before `initialize` and answers in whatever order
 /// it likes — and the reply is matched by id.
 pub fn ask(place: Where<'_>, method: &str, params: Value) -> Result<Value> {
+    ask_with_timeout(place, method, params, TIMEOUT)
+}
+
+/// Ask one method with a caller-owned deadline. Interactive mutations can
+/// take longer than the short reads used by model and usage refreshes.
+pub fn ask_with_timeout(place: Where<'_>, method: &str, params: Value, timeout: Duration) -> Result<Value> {
     let program = crate::binpath::resolve("codex").context("codex is not installed")?;
     let mut cmd = Command::new(&program);
     cmd.arg("app-server")
@@ -73,11 +78,11 @@ pub fn ask(place: Where<'_>, method: &str, params: Value) -> Result<Value> {
         writeln!(stdin, "{}", json!({"id": 2, "method": method, "params": params}))?;
         stdin.flush()?;
 
-        let deadline = Instant::now() + TIMEOUT;
+        let deadline = Instant::now() + timeout;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                bail!("timed out after {}s", TIMEOUT.as_secs());
+                bail!("timed out after {}s", timeout.as_secs());
             }
             let line = rx.recv_timeout(left).map_err(|_| anyhow::anyhow!("codex app-server closed without answering"))?;
             let v: Value = match serde_json::from_str(&line) {

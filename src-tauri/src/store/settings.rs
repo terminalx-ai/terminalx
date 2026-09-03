@@ -40,6 +40,13 @@ pub enum StatusPercent {
     Remaining,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusUsageMode {
+    Detailed,
+    Compact,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct StatusBarSettings {
@@ -47,11 +54,12 @@ pub struct StatusBarSettings {
     pub usage: bool,
     pub resources: bool,
     pub percent: StatusPercent,
+    pub usage_mode: StatusUsageMode,
 }
 
 impl Default for StatusBarSettings {
     fn default() -> Self {
-        Self { visible: true, usage: true, resources: true, percent: StatusPercent::Used }
+        Self { visible: true, usage: true, resources: true, percent: StatusPercent::Used, usage_mode: StatusUsageMode::Detailed }
     }
 }
 
