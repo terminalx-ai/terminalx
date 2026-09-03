@@ -4,6 +4,7 @@ import { isPermissionGranted, requestPermission, sendNotification } from "@tauri
 import { getPrefs } from "@/lib/prefs";
 import { getSessions, selectSession, subscribeSessions } from "@/lib/sessions";
 import { sessionStatus, type SessionEntry, type TabEntry, type TabStatus } from "@/types/session";
+import type { AutomationRun } from "@/types/automations";
 
 /**
  * Attention, graded by where the reader is. A turn finishing or an agent
@@ -129,6 +130,30 @@ export function noteStatusChange(session: SessionEntry, tab: TabEntry, prev: Tab
   if (onScreen) return;
   const id = `${session.id}:${tab.id}:${Date.now()}`;
   notices = [...notices.filter((n) => !(n.sessionId === session.id && n.tabId === tab.id)), { id, sessionId: session.id, tabId: tab.id, kind, title, body, at: Date.now() }];
+  emit();
+  window.setTimeout(() => dismissNotice(id), 8000);
+}
+
+/** Automation failures use the same focus-aware path as agent attention. */
+export function noteAutomationFailure(name: string, run: AutomationRun) {
+  const title = `${name} failed`;
+  const body = run.error ?? `Run ${run.runNumber} did not finish.`;
+  if (!focused) {
+    void canNotify().then((ok) => ok && sendNotification({ title, body }));
+    return;
+  }
+  playSound("failed");
+  if (!run.sessionId || !run.tabId || getSessions().selectedSessionId === run.sessionId) return;
+  const id = `${run.sessionId}:${run.tabId}:${Date.now()}`;
+  notices = [...notices.filter((notice) => !(notice.sessionId === run.sessionId && notice.tabId === run.tabId)), {
+    id,
+    sessionId: run.sessionId,
+    tabId: run.tabId,
+    kind: "failed",
+    title,
+    body,
+    at: Date.now(),
+  }];
   emit();
   window.setTimeout(() => dismissNotice(id), 8000);
 }

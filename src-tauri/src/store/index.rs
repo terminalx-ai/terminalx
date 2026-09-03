@@ -72,6 +72,16 @@ pub struct IssueRef {
     pub url: String,
 }
 
+/// The automation run that created this ordinary session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationRef {
+    pub id: String,
+    pub name: String,
+    pub run_id: String,
+    pub run_number: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionEntry {
@@ -91,6 +101,8 @@ pub struct SessionEntry {
     /// Set when the session was started from a tracker issue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue: Option<IssueRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation: Option<AutomationRef>,
     pub title: String,
     pub created: String,
     pub modified: String,
@@ -191,6 +203,7 @@ mod tests {
             base_ref: None,
             worktree_removed: false,
             issue: None,
+            automation: None,
             title: "t".into(),
             created: now(),
             modified: now(),

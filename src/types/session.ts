@@ -1,3 +1,5 @@
+import type { AutomationRef } from "@/types/automations";
+
 export type TabStatus = "idle" | "in_progress" | "completed" | "waiting";
 
 export interface TabEntry {
@@ -32,6 +34,7 @@ export interface SessionEntry {
   baseRef?: string | null;
   worktreeRemoved: boolean;
   issue?: IssueRef | null;
+  automation?: AutomationRef | null;
   title: string;
   created: string;
   modified: string;

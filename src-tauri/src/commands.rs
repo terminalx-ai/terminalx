@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::store::index::{self, IssueRef, SessionEntry, TabEntry, TabStatus};
+use crate::store::index::{self, AutomationRef, IssueRef, SessionEntry, TabEntry, TabStatus};
 use crate::store::projects::{self, Project};
 use crate::{git, harness, names, store};
 
@@ -63,6 +63,65 @@ pub fn list_sessions() -> CmdResult<Vec<SessionEntry>> {
     index::load().map_err(err)
 }
 
+// ---------------------------------------------------------------- automations
+
+#[tauri::command]
+pub fn automations_list() -> CmdResult<Vec<crate::automations::Automation>> {
+    store::automations::list().map_err(err)
+}
+
+#[tauri::command]
+pub fn automation_runs(automation_id: String) -> CmdResult<Vec<crate::automations::AutomationRun>> {
+    store::automations::list_runs(&automation_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn automation_create(app: AppHandle, input: crate::automations::AutomationInput) -> CmdResult<crate::automations::Automation> {
+    let mut input = input;
+    input.project_path = projects::canonical(&input.project_path).map_err(err)?;
+    validate_automation_target(&input)?;
+    let automation = crate::automations::definition_from_input(input, None, chrono::Utc::now()).map_err(err)?;
+    let automation = store::automations::insert(automation).map_err(err)?;
+    crate::automations::emit_definitions(&app);
+    Ok(automation)
+}
+
+#[tauri::command]
+pub fn automation_update(app: AppHandle, id: String, input: crate::automations::AutomationInput) -> CmdResult<crate::automations::Automation> {
+    let existing = store::automations::get(&id).map_err(err)?;
+    let mut input = input;
+    input.project_path = projects::canonical(&input.project_path).map_err(err)?;
+    validate_automation_target(&input)?;
+    let automation = crate::automations::definition_from_input(input, Some(&existing), chrono::Utc::now()).map_err(err)?;
+    let automation = store::automations::replace(automation).map_err(err)?;
+    crate::automations::emit_definitions(&app);
+    Ok(automation)
+}
+
+#[tauri::command]
+pub fn automation_delete(app: AppHandle, id: String) -> CmdResult<()> {
+    store::automations::remove(&id).map_err(err)?;
+    crate::automations::emit_definitions(&app);
+    Ok(())
+}
+
+fn validate_automation_target(input: &crate::automations::AutomationInput) -> CmdResult<()> {
+    if input.workspace == crate::automations::AutomationWorkspace::Session {
+        let target = index::get(input.session_id.as_deref().ok_or("Choose a session for this automation.")?).map_err(err)?;
+        if projects::canonical(&target.project_path).map_err(err)? != input.project_path {
+            return Err("The selected session belongs to another project.".into());
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn automation_run_now(app: AppHandle, id: String) -> CmdResult<crate::automations::AutomationRun> {
+    tauri::async_runtime::spawn_blocking(move || crate::automations::dispatch(&app, &id, crate::automations::AutomationTrigger::Manual, None).map_err(err))
+        .await
+        .map_err(err)?
+}
+
 /// The snippets the agent dashboard draws on its cards. Reading tails off the
 /// disk is blocking work, and the dashboard asks for every session at once, so
 /// it runs off the UI thread.
@@ -102,6 +161,8 @@ pub struct NewSession {
     pub on_main: bool,
     #[serde(default)]
     pub issue: Option<IssueRef>,
+    #[serde(default)]
+    pub automation: Option<AutomationRef>,
     /// An existing workspace to run in instead of a new worktree.
     #[serde(default)]
     pub cwd: Option<String>,
@@ -176,7 +237,7 @@ pub async fn create_session(app: AppHandle, req: NewSession) -> CmdResult<Sessio
         .map_err(err)?
 }
 
-fn create_session_blocking(app: &AppHandle, req: NewSession) -> CmdResult<SessionEntry> {
+pub(crate) fn create_session_blocking(app: &AppHandle, req: NewSession) -> CmdResult<SessionEntry> {
     let entry = create_session_entry(req)?;
     let _ = app.emit("session_created", &entry);
     Ok(entry)
@@ -201,6 +262,7 @@ fn create_session_entry(req: NewSession) -> CmdResult<SessionEntry> {
         base_ref: None,
         worktree_removed: false,
         issue: req.issue.clone(),
+        automation: req.automation.clone(),
         title: String::new(),
         created: now.clone(),
         modified: now,
@@ -474,6 +536,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             base_ref: None,
             worktree_removed: false,
             issue: src.issue.clone(),
+            automation: src.automation.clone(),
             title: format!("{} (fork)", src.title),
             created: now.clone(),
             modified: now,
@@ -1103,6 +1166,7 @@ mod command_tests {
             base_ref: None,
             worktree_name: None,
             issue: None,
+            automation: None,
             cwd: Some(external.to_string_lossy().into_owned()),
             tab: None,
         })

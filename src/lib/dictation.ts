@@ -57,6 +57,8 @@ interface DictationEvent {
   kind: "partial" | "final" | "error" | "stopped" | "listening" | "transcribing";
   text?: string;
   message?: string;
+  /** Stable identity derived from Apple's transcription segment timestamps. */
+  segment?: number;
 }
 
 /**
@@ -68,11 +70,13 @@ interface DictationEvent {
 function trace(e: DictationEvent) {
   const text = e.text ?? "";
   const head = text.length > 40 ? `${text.slice(0, 40)}…` : text;
-  const detail = e.kind === "error" ? ` ${e.message ?? ""}` : ` len=${text.length} ${JSON.stringify(head)}`;
+  const segment = e.segment == null ? "" : ` segment=${e.segment}`;
+  const detail = e.kind === "error" ? ` ${e.message ?? ""}` : `${segment} len=${text.length} ${JSON.stringify(head)}`;
   void invoke("frontend_log", { level: "debug", message: `dictation ${e.kind}${detail}` }).catch(() => {});
 }
 
 let subscribed = false;
+let previousPartialAt: number | null = null;
 async function subscribe() {
   if (subscribed) return;
   subscribed = true;
@@ -88,17 +92,25 @@ async function subscribe() {
           set({ phase: "finishing" });
           break;
         case "partial":
-          buffer = applyPartial(buffer, p.text ?? "");
+          {
+            const now = performance.now();
+            const sincePreviousMs = previousPartialAt == null ? undefined : now - previousPartialAt;
+            buffer = applyPartial(buffer, p.text ?? "", { segment: p.segment, sincePreviousMs });
+            previousPartialAt = now;
+          }
           set({ text: spokenText(buffer) });
           break;
         case "final":
-          buffer = applyFinal(buffer, p.text ?? "");
+          buffer = applyFinal(buffer, p.text ?? "", { segment: p.segment });
+          previousPartialAt = null;
           set({ text: spokenText(buffer) });
           break;
         case "error":
+          previousPartialAt = null;
           set({ phase: "idle", error: p.message ?? "Dictation failed.", target: null });
           break;
         case "stopped":
+          previousPartialAt = null;
           set({ phase: "idle", target: null });
           break;
       }
@@ -143,6 +155,7 @@ export async function refreshDictationEngine() {
 export function startDictation(target: string): number | null {
   if (state.phase !== "idle") return null;
   buffer = EMPTY_BUFFER;
+  previousPartialAt = null;
   const session = state.session + 1;
   set({ phase: "starting", text: "", session, target, error: null });
   void (async () => {
