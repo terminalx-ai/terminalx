@@ -3,6 +3,7 @@ import type { RpcCallResult } from "@terminalx/portable/rpc";
 import { RECONNECT_DELAYS_MS, RECONNECT_TRICKLE_MS } from "../pairing/contracts";
 import { updateStoredHost, type HostCredential, type StoredHost } from "../store/hosts";
 import { RelayClient, type RelayEvent } from "./relay-client";
+import { rotateCredentialIfNeeded } from "./credential-rotation";
 
 export type ConnectionStage = "idle" | "connecting" | "connected" | "reconnecting" | "cant-connect" | "unreachable";
 export interface ConnectionLogEntry { id: string; at: number; level: "info" | "success" | "warning" | "error"; message: string; detail?: string }
@@ -89,27 +90,42 @@ export class HostConnection {
   private async connectOnce(generation: number): Promise<void> {
     if (!this.active) return;
     const { credential } = this.active;
-    const host = await resolveRelay(this.active.host, credential.current.token).catch(() => this.active!.host);
-    if (generation !== this.generation) return;
-    this.active.host = host;
-    const client = new RelayClient({ relay: host.relay, credential: credential.current.token, credentialKind: "resume", deviceToken: credential.deviceToken, desktopPublicKeyB64: host.publicKeyB64 });
-    this.client = client;
-    client.subscribe((event) => { for (const listener of this.eventListeners) listener(event); });
-    let wasConnected = false;
-    client.subscribeState((state) => {
-      if (generation !== this.generation) return;
-      if (state === "connected") {
-        wasConnected = true;
-        this.emitStage("connected", 0);
-        this.log("success", "Connected", host.label);
-      } else if (state === "disconnected" && wasConnected) {
+    const candidates = [credential.current, ...(credential.grace && credential.grace.expiresAt > Date.now() ? [credential.grace] : [])];
+    let lastError: unknown;
+    for (const candidate of candidates) {
+      try {
+        const host = await resolveRelay(this.active.host, candidate.token).catch(() => this.active!.host);
+        if (generation !== this.generation) return;
+        const client = new RelayClient({ relay: host.relay, credential: candidate.token, credentialKind: "resume", deviceToken: credential.deviceToken, desktopPublicKeyB64: host.publicKeyB64 });
+        this.client = client;
+        client.subscribe((event) => { for (const listener of this.eventListeners) listener(event); });
+        let wasConnected = false;
+        client.subscribeState((state) => {
+          if (generation !== this.generation) return;
+          if (state === "connected") {
+            wasConnected = true;
+            this.emitStage("connected", 0);
+            this.log("success", "Connected", host.label);
+          } else if (state === "disconnected" && wasConnected) {
+            this.client = null;
+            this.log("warning", "Connection lost", host.label);
+            void this.connectLoop(generation);
+          }
+        });
+        this.log("info", "Opening encrypted relay", redactEndpoint(host.relay.cellUrl));
+        await client.connect();
+        this.active.host = host;
+        void rotateCredentialIfNeeded({ client, host, credential: this.active.credential }).then((rotated) => {
+          if (generation === this.generation && this.active) this.active = rotated;
+        }).catch((error: unknown) => this.log("warning", "Credential rotation deferred", safeError(error)));
+        return;
+      } catch (error) {
+        lastError = error;
+        this.client?.close();
         this.client = null;
-        this.log("warning", "Connection lost", host.label);
-        void this.connectLoop(generation);
       }
-    });
-    this.log("info", "Opening encrypted relay", redactEndpoint(host.relay.cellUrl));
-    await client.connect();
+    }
+    throw lastError ?? new Error("No live resume credential");
   }
 
   private emitStage(stage: ConnectionStage, attempt: number): void {

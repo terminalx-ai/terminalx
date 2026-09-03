@@ -31,6 +31,7 @@ export async function pairFromOffer(args: {
     const provision = await client.request("pairing.provisionRelay", { reqId, newResumeTokenHash: resumeHash });
     if (!provision.ok) throw new Error(`${provision.refusal.code}: ${provision.refusal.message}`);
     const installed = DeviceCredentialInstalledSchema.parse(provision.value);
+    if (installed.reqId !== reqId || installed.authorizationMode !== "relay-basis") throw new Error("Relay credential install did not match this pairing attempt");
     const endpointsResponse = await client.request("pairing.getEndpoints", { installReqId: reqId });
     if (!endpointsResponse.ok) throw new Error(`${endpointsResponse.refusal.code}: ${endpointsResponse.refusal.message}`);
     const endpoints = PairingEndpointsResultSchema.parse(endpointsResponse.value);

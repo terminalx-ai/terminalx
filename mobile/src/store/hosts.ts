@@ -29,6 +29,7 @@ const credentialSchema = z.object({
   deviceToken: z.string().min(1),
   current: z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{43}$/), hash: z.string().regex(/^[A-Za-z0-9_-]{43}$/), version: z.number().int().positive(), expiresAt: z.number().int().nonnegative() }),
   grace: z.object({ token: z.string(), hash: z.string(), version: z.number().int().positive(), expiresAt: z.number().int().nonnegative() }).optional(),
+  pending: z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{43}$/), hash: z.string().regex(/^[A-Za-z0-9_-]{43}$/), reqId: z.string().min(1) }).optional(),
 });
 
 export type StoredHost = z.infer<typeof hostSchema>;
@@ -54,6 +55,10 @@ export async function savePairedHost(host: StoredHost, credential: HostCredentia
   await SecureStore.setItemAsync(credentialKey(host.id), JSON.stringify(validatedCredential), OPTIONS);
   const hosts = await readHosts();
   await AsyncStorage.setItem(HOSTS_KEY, JSON.stringify([...hosts.filter((item) => item.id !== host.id && item.publicKeyB64 !== host.publicKeyB64), validatedHost]));
+}
+
+export async function writeHostCredential(hostId: string, credential: HostCredential): Promise<void> {
+  await SecureStore.setItemAsync(credentialKey(hostId), JSON.stringify(credentialSchema.parse(credential)), OPTIONS);
 }
 
 export async function updateStoredHost(host: StoredHost): Promise<void> {

@@ -175,3 +175,10 @@ export type Payload =
   | { type: "unknown"; kind: string };
 
 export type PayloadType = Payload["type"];
+
+/** Merge paged tails and live appends without duplicating or reordering sequence numbers. */
+export function mergeAgentEvents(existing: readonly AgentEvent[], incoming: readonly AgentEvent[]): AgentEvent[] {
+  const bySequence = new Map(existing.map((event) => [event.seq, event]));
+  for (const event of incoming) bySequence.set(event.seq, event);
+  return [...bySequence.values()].sort((left, right) => left.seq - right.seq);
+}

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { bucketSessions, NO_FILTERS } from "@terminalx/portable/dashboard";
 import { buildTranscript } from "@terminalx/portable/transcript";
-import type { AgentEvent } from "@terminalx/portable/events";
+import { mergeAgentEvents, type AgentEvent } from "@terminalx/portable/events";
 
 describe("portable mobile folds", () => {
   it("uses the desktop three-bucket session rules", () => {
@@ -28,5 +28,6 @@ describe("portable mobile folds", () => {
     expect(transcript.turns).toHaveLength(1);
     expect(transcript.turns[0]?.prompt?.text).toBe("Check it");
     expect(transcript.turns[0]?.work).toContainEqual(expect.objectContaining({ kind: "text", text: "Done" }));
+    expect(mergeAgentEvents([events[1]!, events[2]!], [events[0]!, events[1]!]).map(({ seq }) => seq)).toEqual([1, 2, 3]);
   });
 });

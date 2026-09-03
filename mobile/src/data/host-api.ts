@@ -1,5 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import type { AgentEvent } from "@terminalx/portable/events";
+import { mergeAgentEvents, type AgentEvent } from "@terminalx/portable/events";
 import type { HostConnection } from "../transport/connection";
 
 export type SessionStatus = "idle" | "in_progress" | "completed" | "waiting";
@@ -78,9 +78,7 @@ export class HostApi {
 }
 
 export function mergeEvents(existing: AgentEvent[], incoming: AgentEvent[]): AgentEvent[] {
-  const bySequence = new Map(existing.map((event) => [event.seq, event]));
-  for (const event of incoming) bySequence.set(event.seq, event);
-  return [...bySequence.values()].sort((left, right) => left.seq - right.seq);
+  return mergeAgentEvents(existing, incoming);
 }
 
 export async function readTranscriptCache(hostId: string, sessionId: string, tabId: string): Promise<AgentEvent[]> {
