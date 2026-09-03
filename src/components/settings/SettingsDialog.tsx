@@ -22,7 +22,8 @@ import { TranscriptionTab } from "./TranscriptionTab";
 import { setStatusSettings, useStatus } from "@/lib/status";
 
 const TABS = ["general", "appearance", "agents", "transcription", "integrations", "shortcuts", "about"] as const;
-type Tab = (typeof TABS)[number];
+export type SettingsTab = (typeof TABS)[number];
+type Tab = SettingsTab;
 const TAB_LABEL: Record<Tab, string> = {
   general: "General",
   appearance: "Appearance",
@@ -33,11 +34,22 @@ const TAB_LABEL: Record<Tab, string> = {
   about: "About",
 };
 
-export function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
-  const [tab, setTab] = useState<Tab>("general");
+export function SettingsDialog({
+  open,
+  onOpenChange,
+  initialTab = "general",
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  initialTab?: SettingsTab;
+}) {
+  const [tab, setTab] = useState<Tab>(initialTab);
+  useEffect(() => {
+    if (open) setTab(initialTab);
+  }, [initialTab, open]);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent width="max-w-[42rem]" className="p-0" onCloseAutoFocus={() => setTab("general")}>
+      <DialogContent width="max-w-[42rem]" className="p-0">
         <div className="flex h-[34rem] max-h-[72vh]">
           <nav className="flex w-40 shrink-0 flex-col gap-0.5 border-r border-hairline p-3 pt-4">
             <DialogTitle className="mb-2 px-2 text-xs font-medium uppercase tracking-wide text-faint">
