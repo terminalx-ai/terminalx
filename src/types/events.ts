@@ -1,1 +1,1 @@
-export * from "../../packages/portable/src/events";
+export * from "@terminalx/portable/events";

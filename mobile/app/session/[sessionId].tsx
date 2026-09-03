@@ -10,6 +10,8 @@ import { useApp } from "@mobile/state/AppProvider";
 import { Button, Card, EmptyState } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
 
+const terminalModes = new Map<string, "direct" | "buffered">();
+
 export default function SessionScreen() {
   const params = useLocalSearchParams<{ sessionId: string; tabId?: string; title?: string }>();
   const sessionId = params.sessionId;
@@ -52,7 +54,6 @@ function ChatPane({ hostId, sessionId, tabId, connected }: { hostId: string; ses
       setHasMore(page.hasMore);
     }
     setNotes(await app.api.listNotes(sessionId));
-    await app.api.subscribeSession(tabId);
     setLoading(false);
   }, [app.api, connected, hostId, sessionId, tabId]);
 
@@ -62,13 +63,17 @@ function ChatPane({ hostId, sessionId, tabId, connected }: { hostId: string; ses
     return () => clearTimeout(timer);
   }, [cacheKey, load]);
   useEffect(() => { if (events.length) void writeTranscriptCache(hostId, sessionId, tabId, events); }, [events, hostId, sessionId, tabId]);
-  useEffect(() => app.connection.onEvent((message) => {
+  useEffect(() => {
+    const stream = app.api.subscribeSession(tabId, (event) => setEvents((existing) => mergeEvents(existing, [event])));
+    const events = app.connection.onEvent((message) => {
     if (message.method === "session.event") {
       const event = (message.params as { event?: unknown } | null)?.event;
       if (isAgentEvent(event) && event.tabId === tabId) setEvents((existing) => mergeEvents(existing, [event]));
     }
     if (message.method === "chat.changed") void app.api.listNotes(sessionId).then(setNotes);
-  }), [app.api, app.connection, sessionId, tabId]);
+    });
+    return () => { stream(); events(); };
+  }, [app.api, app.connection, sessionId, tabId]);
 
   const loadEarlier = async () => {
     const before = events[0]?.seq;
@@ -137,16 +142,22 @@ function TerminalPane({ sessionId, tabId, connected }: { sessionId: string; tabI
   const app = useApp();
   const { palette } = useTheme();
   const [output, setOutput] = useState("");
-  const [mode, setMode] = useState<"direct" | "buffered">("direct");
+  const [mode, setModeState] = useState<"direct" | "buffered">(() => terminalModes.get(tabId) ?? "direct");
   const [input, setInput] = useState("");
   const [inputEnabled, setInputEnabled] = useState(true);
   const outputRef = useRef("");
+  const setMode = (next: "direct" | "buffered") => { terminalModes.set(tabId, next); setModeState(next); };
 
   useEffect(() => {
     if (!connected) return;
     void app.api.readTerminal(sessionId, tabId).then((text) => { if (text !== null) { outputRef.current = text; setOutput(text); } });
-    void app.api.subscribeTerminal(sessionId, tabId);
-    return app.connection.onEvent((message) => {
+    const stream = app.api.subscribeTerminal(sessionId, tabId, (value) => {
+      const next = value.type === "scrollback" || value.type === "resized" ? value.serialized : value.type === "data" ? value.chunk : undefined;
+      if (typeof next !== "string") return;
+      outputRef.current = value.type === "data" ? `${outputRef.current}${next}`.slice(-100_000) : next.slice(-100_000);
+      setOutput(outputRef.current);
+    });
+    const events = app.connection.onEvent((message) => {
       if (message.method !== "terminal.output") return;
       const params = message.params as { tabId?: unknown; text?: unknown } | null;
       if (params?.tabId === tabId && typeof params.text === "string") {
@@ -154,7 +165,10 @@ function TerminalPane({ sessionId, tabId, connected }: { sessionId: string; tabI
         setOutput(outputRef.current);
       }
     });
+    return () => { stream(); events(); };
   }, [app.api, app.connection, connected, sessionId, tabId]);
+
+  useEffect(() => () => { void app.api.releaseInput(sessionId, tabId); }, [app.api, sessionId, tabId]);
 
   const write = async (text: string) => {
     if (!connected || !text) return false;
@@ -164,7 +178,7 @@ function TerminalPane({ sessionId, tabId, connected }: { sessionId: string; tabI
   };
 
   return <View style={styles.flex}><View style={[styles.terminalHeader, { borderColor: palette.border }]}><View><Text style={[styles.cardTitle, { color: palette.ink }]}>Live terminal</Text><Text style={[styles.detail, { color: connected ? palette.success : palette.warning }]}>{connected ? inputEnabled ? "Input available · mobile driving" : "Read-only · write refused" : "Offline · input retained"}</Text></View><View style={[styles.segment, { backgroundColor: palette.raised, marginHorizontal: 0, marginTop: 0 }]}><Segment label="Direct" selected={mode === "direct"} onPress={() => setMode("direct")} /><Segment label="Buffered" selected={mode === "buffered"} onPress={() => setMode("buffered")} /></View></View><FlatList data={output.split("\n")} keyExtractor={(_, index) => String(index)} renderItem={({ item }) => <Text selectable style={[styles.terminalText, { color: "#e6e3df" }]}>{item || " "}</Text>} style={{ backgroundColor: palette.terminal }} contentContainerStyle={styles.terminalOutput} automaticallyAdjustContentInsets contentInsetAdjustmentBehavior="automatic" />
-    <View style={[styles.terminalInputBar, { backgroundColor: palette.card, borderColor: palette.border }]}><TextInput value={input} onChangeText={(value) => { if (mode === "direct" && connected && inputEnabled) { const addition = value.startsWith(input) ? value.slice(input.length) : value; setInput(""); void write(addition); } else setInput(value); }} onSubmitEditing={() => { if (mode === "direct") void write("\r"); }} multiline={mode === "buffered"} autoCapitalize="none" autoCorrect={false} placeholder={mode === "direct" ? "Tap to type directly" : "Command"} placeholderTextColor={palette.faint} style={[styles.terminalInput, { color: palette.ink, borderColor: palette.border }]} />{mode === "buffered" || input.length > 0 ? <Pressable accessibilityRole="button" accessibilityLabel="Send terminal input" disabled={!connected || !inputEnabled || !input} onPress={() => void write(input).then((accepted) => { if (accepted) setInput(""); })} style={[styles.send, { backgroundColor: palette.accent, opacity: !connected || !inputEnabled || !input ? 0.38 : 1 }]}><ChevronUp size={19} color={palette.accentInk} /></Pressable> : null}</View>
+    <View style={[styles.terminalInputBar, { backgroundColor: palette.card, borderColor: palette.border }]}><TextInput value={input} onChangeText={(value) => { if (mode === "direct" && connected && inputEnabled) { const addition = value.startsWith(input) ? value.slice(input.length) : value; setInput(""); void write(addition); } else setInput(value); }} onKeyPress={({ nativeEvent }) => { if (mode === "direct" && connected && inputEnabled && nativeEvent.key === "Backspace" && input.length === 0) void write("\x7f"); }} onSubmitEditing={() => { if (mode === "direct") void write("\r"); }} multiline={mode === "buffered"} autoCapitalize="none" autoCorrect={false} placeholder={mode === "direct" ? "Tap to type directly" : "Command"} placeholderTextColor={palette.faint} style={[styles.terminalInput, { color: palette.ink, borderColor: palette.border }]} />{mode === "buffered" || input.length > 0 ? <Pressable accessibilityRole="button" accessibilityLabel="Send terminal input" disabled={!connected || !inputEnabled || !input} onPress={() => void write(input).then((accepted) => { if (accepted) setInput(""); })} style={[styles.send, { backgroundColor: palette.accent, opacity: !connected || !inputEnabled || !input ? 0.38 : 1 }]}><ChevronUp size={19} color={palette.accentInk} /></Pressable> : null}</View>
   </View>;
 }
 

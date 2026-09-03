@@ -1,5 +1,5 @@
 import type { SessionEntry } from "@/types/session";
-import type { Buckets as PortableBuckets } from "../../packages/portable/src/dashboard";
+import type { Buckets as PortableBuckets } from "@terminalx/portable/dashboard";
 
 export {
   bucketSessions,
@@ -13,7 +13,7 @@ export {
   sessionColumn,
   toggleFilter,
   workspaceName,
-} from "../../packages/portable/src/dashboard";
+} from "@terminalx/portable/dashboard";
 export type {
   BucketOptions,
   ColumnId,
@@ -21,6 +21,6 @@ export type {
   DashboardSession,
   DashboardTab,
   DashboardTabStatus,
-} from "../../packages/portable/src/dashboard";
+} from "@terminalx/portable/dashboard";
 
 export type Buckets = PortableBuckets<SessionEntry>;

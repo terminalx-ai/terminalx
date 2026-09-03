@@ -111,3 +111,31 @@ export const DeviceCredentialInstalledSchema = z
     graceExpiresAt: z.number().int().nonnegative().optional(),
   })
   .strict();
+
+export const DeviceResumeConfirmedSchema = z
+  .object({
+    v: z.literal(1),
+    reqId: z.string().min(1).max(128),
+    currentVersion: z.number().int().positive(),
+    acceptedAs: z.enum(["current", "grace"]),
+    renewed: z.boolean(),
+    resumeExpiresAt: z.number().int().nonnegative(),
+    graceExpiresAt: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+
+export type DeviceResumeConfirmed = z.infer<typeof DeviceResumeConfirmedSchema>;
+
+export const PairingGetEndpointsResultSchema = z
+  .object({
+    v: z.literal(1),
+    relay: PairingEndpointsResultSchema.shape.relay,
+    installStatus: z
+      .union([
+        z.object({ v: z.literal(1), reqId: z.string().min(1).max(128), state: z.literal("not-found") }).strict(),
+        z.object({ v: z.literal(1), reqId: z.string().min(1).max(128), state: z.literal("committed"), result: DeviceCredentialInstalledSchema }).strict(),
+      ])
+      .optional(),
+    resumeConfirmation: DeviceResumeConfirmedSchema.optional(),
+  })
+  .strict();

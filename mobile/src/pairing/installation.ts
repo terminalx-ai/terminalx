@@ -16,8 +16,12 @@ export interface InstallationIdentity {
   privateKey: string;
 }
 
+export async function readInstallation(): Promise<InstallationIdentity | null> {
+  return parseIdentity(await SecureStore.getItemAsync(KEY, OPTIONS).catch(() => null));
+}
+
 export async function loadOrCreateInstallation(userId: string): Promise<InstallationIdentity> {
-  const existing = parseIdentity(await SecureStore.getItemAsync(KEY, OPTIONS));
+  const existing = await readInstallation();
   if (existing?.userId === userId) return existing;
   if (existing) throw new Error("account_pairing_identity_account_switch_required");
   const seed = await Crypto.getRandomBytesAsync(48);

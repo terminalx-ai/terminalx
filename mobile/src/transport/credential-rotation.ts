@@ -1,6 +1,6 @@
 import { sha256 } from "@noble/hashes/sha256";
 import * as Crypto from "expo-crypto";
-import { DeviceCredentialInstalledSchema } from "../pairing/contracts";
+import { DeviceCredentialInstalledSchema, PairingGetEndpointsResultSchema } from "../pairing/contracts";
 import { base64Url, utf8 } from "../pairing/bytes";
 import { updateStoredHost, writeHostCredential, type HostCredential, type StoredHost } from "../store/hosts";
 import type { RelayClient } from "./relay-client";
@@ -44,13 +44,9 @@ function hashCredential(token: string): string { return base64Url(sha256(utf8(to
 async function getEndpoints(client: RelayClient, reqId: string): Promise<EndpointState> {
   const result = await client.request<unknown>("pairing.getEndpoints", { installReqId: reqId });
   if (!result.ok) throw new Error(`${result.refusal.code}: ${result.refusal.message}`);
-  if (!result.value || typeof result.value !== "object") throw new Error("Invalid relay endpoint state");
-  return result.value as EndpointState;
+  return PairingGetEndpointsResultSchema.parse(result.value);
 }
 
-interface EndpointState {
-  relay?: StoredHost["relay"] | null;
-  installStatus?: { state: string; result?: unknown };
-}
+type EndpointState = ReturnType<typeof PairingGetEndpointsResultSchema.parse>;
 
 const committed = (value: EndpointState): value is EndpointState & { installStatus: { state: "committed"; result: unknown } } => value.installStatus?.state === "committed";

@@ -86,6 +86,9 @@ importers:
       '@tauri-apps/plugin-updater':
         specifier: ^2.11.0
         version: 2.11.0
+      '@terminalx/portable':
+        specifier: workspace:*
+        version: link:packages/portable
       '@xterm/addon-fit':
         specifier: ^0.11.0
         version: 0.11.0

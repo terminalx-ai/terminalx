@@ -30,7 +30,7 @@ export default function MachinesScreen() {
 
   return <>
     <Screen refreshControl={<RefreshControl refreshing={app.loadingMachines} onRefresh={() => void app.refreshMachines()} tintColor={palette.accent} />}>
-      {app.error ? <Card style={[styles.errorCard, { borderColor: `${palette.danger}66` }]}><Text style={[styles.errorTitle, { color: palette.ink }]}>Couldn’t finish that</Text><Text style={[styles.detail, { color: palette.muted }]}>{app.error}</Text><View style={styles.actions}><Button label="Retry" kind="secondary" style={styles.flex} onPress={() => void app.refreshMachines()} /><Button label="Use QR code" kind="secondary" style={styles.flex} onPress={() => setPairingOpen(true)} /></View></Card> : null}
+      {app.error ? <Card style={[styles.errorPanel, { borderColor: `${palette.danger}66` }]}><Text style={[styles.errorTitle, { color: palette.ink }]}>Couldn’t finish that</Text><Text style={[styles.detail, { color: palette.muted }]}>{app.error}</Text><View style={styles.actions}><Button label="Retry" kind="secondary" style={styles.flex} onPress={() => void app.refreshMachines()} /><Button label="Use QR code" kind="secondary" style={styles.flex} onPress={() => setPairingOpen(true)} /></View></Card> : null}
       <View style={styles.heading}><View><Text style={[styles.account, { color: palette.ink }]}>{app.session.user.displayName ?? app.session.user.email}</Text><Text style={[styles.detail, { color: palette.muted }]}>One active Mac at a time</Text></View><Button label="Pair" kind="secondary" onPress={() => setPairingOpen(true)} /></View>
 
       <SectionTitle>Paired machines</SectionTitle>
@@ -101,7 +101,7 @@ const styles = StyleSheet.create({
   rowCopy: { flex: 1, gap: 3 },
   rowTitle: { fontSize: 16, fontWeight: "600" },
   pairLabel: { fontSize: 15, fontWeight: "700" },
-  errorCard: { padding: 16, gap: 8 },
+  errorPanel: { padding: 16, gap: 8 },
   errorTitle: { fontSize: 17, fontWeight: "700" },
   actions: { flexDirection: "row", gap: 8, marginTop: 4 },
   flex: { flex: 1 },

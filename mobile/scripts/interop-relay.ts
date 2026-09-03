@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { stdin } from "node:process";
 import { sha256 } from "@noble/hashes/sha256";
-import { DeviceCredentialInstalledSchema, PairingEndpointsResultSchema } from "../src/pairing/contracts";
+import { DeviceCredentialInstalledSchema, PairingGetEndpointsResultSchema } from "../src/pairing/contracts";
 import { base64Url, utf8 } from "../src/pairing/bytes";
 import { parsePairingCode } from "../src/pairing/parse";
 import { RelayClient } from "../src/transport/relay-client";
@@ -24,11 +24,11 @@ try {
   const installed = DeviceCredentialInstalledSchema.parse(provisioned.value);
   const endpointResponse = await inviteClient.request("pairing.getEndpoints", { installReqId: reqId });
   if (!endpointResponse.ok) throw new Error(`pairing.getEndpoints refused: ${endpointResponse.refusal.code}`);
-  const endpoints = PairingEndpointsResultSchema.parse(endpointResponse.value);
+  const endpoints = PairingGetEndpointsResultSchema.parse(endpointResponse.value);
   if (!endpoints.relay) throw new Error("Desktop returned no resume relay endpoint");
   inviteClient.close();
 
-  const resumeClient = new RelayClient({ relay: endpoints.relay, credential: resumeToken, credentialKind: "resume", deviceToken: offer.deviceToken, desktopPublicKeyB64: offer.publicKeyB64 });
+  const resumeClient = new RelayClient({ relay: endpoints.relay, credential: resumeToken, credentialKind: "resume", credentialVersion: installed.currentVersion, deviceToken: offer.deviceToken, desktopPublicKeyB64: offer.publicKeyB64 });
   try {
     await resumeClient.connect();
     const frame = await resumeClient.request("status.get");

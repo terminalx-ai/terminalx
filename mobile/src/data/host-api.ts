@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Crypto from "expo-crypto";
 import { mergeAgentEvents, type AgentEvent } from "@terminalx/portable/events";
 import type { HostConnection } from "../transport/connection";
 
@@ -18,6 +19,8 @@ export interface SessionSummary {
 export interface ChatNote { id: string; body: string; createdAt: number; author: { userId: string; displayName?: string } }
 
 export class HostApi {
+  private readonly clientId = `mobile-${Crypto.randomUUID()}`;
+
   constructor(private readonly connection: HostConnection) {}
 
   async summaries(): Promise<SessionSummary[] | null> {
@@ -35,8 +38,11 @@ export class HostApi {
     return { events: value.events.filter(isAgentEvent), hasMore: value.hasMore === true };
   }
 
-  async subscribeSession(tabId: string): Promise<boolean> {
-    return (await this.connection.request("session.subscribe", { tabId })).ok;
+  subscribeSession(tabId: string, listener: (event: AgentEvent) => void): () => void {
+    return this.connection.subscribe("session.subscribe", { tabId }, (result) => {
+      const event = result && typeof result === "object" && "event" in result ? (result as { event?: unknown }).event : result;
+      if (isAgentEvent(event) && event.tabId === tabId) listener(event);
+    });
   }
 
   async listNotes(sessionId: string): Promise<ChatNote[]> {
@@ -56,9 +62,19 @@ export class HostApi {
     return result.ok && result.value.status === "sent";
   }
 
-  async subscribeTerminal(sessionId: string, tabId: string): Promise<boolean> {
-    const result = await this.connection.request("terminal.subscribe", { worktreeId: sessionId, tabId });
-    return result.ok;
+  subscribeTerminal(sessionId: string, tabId: string, listener: (value: { type: string; chunk?: string; serialized?: string }) => void): () => void {
+    return this.connection.subscribe("terminal.subscribe", {
+      worktreeId: sessionId,
+      tabId,
+      attachMode: "observe",
+      client: { id: this.clientId, type: "mobile" },
+      capabilities: { terminalBinaryStream: 1, mobileInputLeaseOnly: 1, writeUnavailable: 1 },
+    }, (result) => {
+      if (!result || typeof result !== "object") return;
+      const value = result as { type?: unknown; chunk?: unknown; serialized?: unknown };
+      if (typeof value.type !== "string") return;
+      listener({ type: value.type, ...(typeof value.chunk === "string" ? { chunk: value.chunk } : {}), ...(typeof value.serialized === "string" ? { serialized: value.serialized } : {}) });
+    });
   }
 
   async readTerminal(sessionId: string, tabId: string): Promise<string | null> {
@@ -73,7 +89,7 @@ export class HostApi {
   }
 
   async releaseInput(sessionId: string, tabId: string): Promise<void> {
-    await this.connection.request("steerLease.release", { worktreeId: sessionId, tabId });
+    await this.connection.request("steerLease.release", { worktreeId: sessionId, tabId }).catch(() => undefined);
   }
 }
 

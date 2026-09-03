@@ -4,10 +4,10 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { beginSignIn, finishSignIn, readSession, signOut as revokeCloudSession } from "../auth/native";
 import { isAuthCallbackUrl, type CloudSession } from "../auth/protocol";
 import { HostApi, type SessionSummary } from "../data/host-api";
-import { handleNotificationEvent } from "../notifications/local";
+import { handleNotificationEvent, restoreLocalNotifications } from "../notifications/local";
 import { discoverMachines, pairDiscoveredMachine, signOutPairing, type InstallationState } from "../pairing/account";
 import type { AccountHost } from "../pairing/account-client";
-import { pairFromOffer } from "../pairing/pair";
+import { pairFromOffer, recoverPendingPairing } from "../pairing/pair";
 import { parsePairingCode } from "../pairing/parse";
 import { readHostCredential, readHosts, removeHost, type StoredHost } from "../store/hosts";
 import { HostConnection, type ConnectionLogEntry, type ConnectionStage } from "../transport/connection";
@@ -96,6 +96,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     void Promise.all([readSession(), readHosts(), AsyncStorage.getItem(LOG_KEY)]).then(async ([storedSession, storedHosts, rawLogs]) => {
       setSession(storedSession);
       setHosts(storedHosts);
+      void recoverPendingPairing().then(() => loadHosts()).catch(() => undefined);
       if (rawLogs) {
         try { setLogs((JSON.parse(rawLogs) as ConnectionLogEntry[]).slice(-200)); } catch { /* Ignore a corrupt redacted log. */ }
       }
@@ -109,7 +110,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       if (isAuthCallbackUrl(url)) void finishSignIn(url).then(setSession).catch((cause: unknown) => setError(readableError(cause)));
     });
     return () => linking.remove();
-  }, []);
+  }, [loadHosts]);
 
   useEffect(() => {
     const stage = connection.onStage((next, attempt) => {
@@ -117,7 +118,10 @@ export function AppProvider({ children }: PropsWithChildren) {
       setConnectionAttempt(attempt);
       if (next === "connected" && session) {
         void connection.request("session.authenticate", { accessToken: session.accessToken }).then((result) => {
-          if (result.ok) void refreshSessions();
+          if (result.ok) {
+            void refreshSessions();
+            if (activeHostRef.current) void restoreLocalNotifications(connection, activeHostRef.current.id);
+          }
           else setError("This Mac did not accept the current account session.");
         }).catch((cause: unknown) => setError(readableError(cause)));
       }

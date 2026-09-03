@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Alert, Pressable, StyleSheet, Switch, Text, View } from "react-native";
 import { Check, ChevronDown, ChevronUp, Trash2 } from "lucide-react-native";
-import { enableLocalNotifications } from "@mobile/notifications/local";
+import { disableLocalNotifications, enableLocalNotifications, localNotificationsEnabled } from "@mobile/notifications/local";
 import { useApp } from "@mobile/state/AppProvider";
 import { Button, Card, Screen, SectionTitle } from "@mobile/ui/primitives";
 import { useTheme, type ThemeName } from "@mobile/ui/theme";
@@ -14,8 +14,19 @@ export default function SettingsScreen() {
   const [notifications, setNotifications] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
 
+  useEffect(() => {
+    let current = true;
+    const enabled = app.activeHost ? localNotificationsEnabled(app.activeHost.id) : Promise.resolve(false);
+    void enabled.then((value) => { if (current) setNotifications(value); });
+    return () => { current = false; };
+  }, [app.activeHost]);
+
   const toggleNotifications = async (enabled: boolean) => {
-    if (!enabled) { setNotifications(false); return; }
+    if (!enabled) {
+      if (app.activeHost) await disableLocalNotifications(app.activeHost.id);
+      setNotifications(false);
+      return;
+    }
     if (!app.activeHost || app.connectionStage !== "connected") {
       Alert.alert("Connect a Mac", "Notifications are delivered over the active encrypted connection.");
       return;

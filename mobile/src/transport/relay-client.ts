@@ -1,7 +1,8 @@
 import type { RpcCallResult, RpcErrorData } from "@terminalx/portable/rpc";
-import { RelayPhoneHelloSchema, type PairingRelay } from "../pairing/contracts";
+import { PairingGetEndpointsResultSchema, RelayPhoneHelloSchema, type DeviceResumeConfirmed, type PairingRelay } from "../pairing/contracts";
 import { MobileE2EESession } from "./e2ee-session";
 import { secureRandom } from "./random";
+import { decodeTerminalFrame } from "./terminal-stream";
 
 export type RelayConnectionState = "connecting" | "handshaking" | "connected" | "disconnected";
 export type RelayEvent = { method: string; params?: unknown };
@@ -10,6 +11,13 @@ type PendingRequest = {
   resolve: (result: RpcCallResult<unknown>) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+};
+
+type StreamRecord = {
+  method: string;
+  listener: (result: unknown) => void;
+  streamIds: Set<number>;
+  subscriptionId?: string;
 };
 
 export class RelayOuterError extends Error {
@@ -26,18 +34,24 @@ export class RelayClient {
   private authenticated = false;
   private requestCounter = 0;
   private pending = new Map<string, PendingRequest>();
+  private streams = new Map<string, StreamRecord>();
+  private terminalStreams = new Map<number, (result: unknown) => void>();
+  private terminalSnapshots = new Map<number, { meta: Record<string, unknown>; chunks: string[] }>();
   private listeners = new Set<(event: RelayEvent) => void>();
   private stateListeners = new Set<(state: RelayConnectionState) => void>();
   private state: RelayConnectionState = "disconnected";
   private connectPromise: Promise<void> | null = null;
   private resolveConnect: (() => void) | null = null;
   private rejectConnect: ((error: Error) => void) | null = null;
+  private resumeConfirmation: DeviceResumeConfirmed | null = null;
+  private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly options: {
       relay: Omit<PairingRelay, "inviteToken" | "inviteExpiresAt">;
       credential: string;
       credentialKind: "invite" | "resume";
+      credentialVersion?: number;
       deviceToken: string;
       desktopPublicKeyB64: string;
       createSocket?: (url: string) => WebSocket;
@@ -51,6 +65,7 @@ export class RelayClient {
     this.outerReady = false;
     this.handshakeReady = false;
     this.authenticated = false;
+    this.resumeConfirmation = null;
     this.session = MobileE2EESession.create({
       desktopPublicKeyB64: this.options.desktopPublicKeyB64,
       transport: "relay",
@@ -64,6 +79,7 @@ export class RelayClient {
     const socket = (this.options.createSocket ?? ((url) => new WebSocket(url)))(relaySocketUrl(this.options.relay));
     socket.binaryType = "arraybuffer";
     this.socket = socket;
+    this.handshakeTimer = setTimeout(() => this.fail(new Error("Relay handshake timed out")), 15_000);
     socket.onopen = () => socket.send(JSON.stringify({ type: "relay-auth", v: 1, mode: "connect", credential: this.options.credential }));
     socket.onmessage = (event) => void this.handleMessage(event.data).catch((error: unknown) => this.fail(asError(error)));
     socket.onerror = () => this.fail(new RelayOuterError(1006));
@@ -82,8 +98,19 @@ export class RelayClient {
         reject(new Error(`RPC timed out: ${method}`));
       }, timeoutMs);
       this.pending.set(id, { resolve: (result) => resolve(result as RpcCallResult<T>), reject, timer });
-      this.socket!.send(this.session!.sealText(JSON.stringify({ id, deviceToken: this.options.deviceToken, method, ...(params === undefined ? {} : { params }) })));
+      this.sendRequestFrame(id, method, params);
     });
+  }
+
+  subscribeStream(method: string, params: unknown, listener: (result: unknown) => void): () => void {
+    if (!this.authenticated || !this.session || !this.socket || this.socket.readyState !== this.socket.OPEN) {
+      listener({ type: "error", message: "Relay connection unavailable" });
+      return () => undefined;
+    }
+    const id = `mobile-stream-${Date.now()}-${++this.requestCounter}`;
+    this.streams.set(id, { method, listener, streamIds: new Set() });
+    this.sendRequestFrame(id, method, params);
+    return () => this.cancelStream(id);
   }
 
   subscribe(listener: (event: RelayEvent) => void): () => void {
@@ -97,10 +124,11 @@ export class RelayClient {
     return () => this.stateListeners.delete(listener);
   }
 
+  getResumeConfirmation(): DeviceResumeConfirmed | null {
+    return this.resumeConfirmation;
+  }
+
   close(): void {
-    const socket = this.socket;
-    this.socket = null;
-    socket?.close();
     this.fail(new Error("Relay connection closed"));
   }
 
@@ -112,6 +140,7 @@ export class RelayClient {
       if (!parsed.success) throw new Error("Invalid relay hello");
       if (!parsed.data.ok) throw new RelayOuterError(parsed.data.code);
       if (parsed.data.credentialKind !== this.options.credentialKind) throw new Error("Unexpected relay credential kind");
+      if (parsed.data.credentialKind === "resume" && this.options.credentialVersion !== undefined && parsed.data.acceptedCredentialVersion !== this.options.credentialVersion) throw new Error("Relay resume credential version mismatch");
       this.outerReady = true;
       this.setState("handshaking");
       this.socket.send(JSON.stringify(this.session.hello));
@@ -125,11 +154,26 @@ export class RelayClient {
     }
     const plaintext = typeof raw === "string" ? this.session.openText(raw) : this.session.openBinary(await bytesFromSocket(raw));
     if (plaintext === null) throw new Error("Invalid or out-of-order E2EE frame");
-    const text = typeof plaintext === "string" ? plaintext : new TextDecoder().decode(plaintext);
+    if (typeof plaintext !== "string") {
+      this.handleTerminalBinary(plaintext);
+      return;
+    }
+    const text = plaintext;
     const value = parseJson(text);
     if (!this.authenticated) {
       if (!isAuthenticated(value, this.session.transcriptHashB64)) throw new Error("E2EE device authentication rejected");
       this.authenticated = true;
+      if (this.options.credentialKind === "resume") {
+        const reqId = `confirm-${encodeBase64Url(secureRandom.bytes(16))}`;
+        const result = await this.request<unknown>("pairing.getEndpoints", { resumeConfirmReqId: reqId });
+        if (!result.ok) throw new Error(`${result.refusal.code}: ${result.refusal.message}`);
+        const endpoints = PairingGetEndpointsResultSchema.parse(result.value);
+        const confirmation = endpoints.resumeConfirmation;
+        if (!confirmation || confirmation.reqId !== reqId || endpoints.relay?.relayHostId !== this.options.relay.relayHostId) throw new Error("Relay resume confirmation missing");
+        this.resumeConfirmation = confirmation;
+      }
+      if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
+      this.handshakeTimer = null;
       this.setState("connected");
       this.resolveConnect?.();
       this.connectPromise = null;
@@ -139,10 +183,13 @@ export class RelayClient {
     }
     if (isRpcResponse(value)) {
       const pending = this.pending.get(value.id);
-      if (!pending) return;
-      clearTimeout(pending.timer);
-      this.pending.delete(value.id);
-      pending.resolve(value.ok ? { ok: true, value: value.result } : { ok: false, refusal: value.error });
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pending.delete(value.id);
+        pending.resolve(value.ok ? { ok: true, value: value.result } : { ok: false, refusal: value.error });
+        return;
+      }
+      this.handleStreamResponse(value);
       return;
     }
     if (isEvent(value)) for (const listener of this.listeners) listener(value);
@@ -151,6 +198,10 @@ export class RelayClient {
   private fail(error: Error): void {
     if (this.state === "disconnected" && !this.connectPromise) return;
     this.setState("disconnected");
+    const socket = this.socket;
+    this.socket = null;
+    if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
+    this.handshakeTimer = null;
     this.rejectConnect?.(error);
     this.resolveConnect = null;
     this.rejectConnect = null;
@@ -160,6 +211,77 @@ export class RelayClient {
       pending.reject(error);
     }
     this.pending.clear();
+    this.streams.clear();
+    this.terminalStreams.clear();
+    this.terminalSnapshots.clear();
+    socket?.close();
+  }
+
+  private sendRequestFrame(id: string, method: string, params?: unknown): void {
+    this.socket!.send(this.session!.sealText(JSON.stringify({ id, deviceToken: this.options.deviceToken, method, ...(params === undefined ? {} : { params }) })));
+  }
+
+  private handleStreamResponse(value: RpcWireResponse): void {
+    const stream = this.streams.get(value.id);
+    if (!stream) return;
+    if (!value.ok) {
+      stream.listener({ type: "error", message: value.error.message, error: value.error });
+      this.removeStream(value.id);
+      return;
+    }
+    const result = value.result;
+    if (result && typeof result === "object") {
+      const metadata = result as Record<string, unknown>;
+      if (typeof metadata.subscriptionId === "string") stream.subscriptionId = metadata.subscriptionId;
+      if (typeof metadata.streamId === "number" && Number.isSafeInteger(metadata.streamId)) {
+        stream.streamIds.add(metadata.streamId);
+        this.terminalStreams.set(metadata.streamId, stream.listener);
+      }
+      stream.listener(result);
+      if (metadata.type === "end") this.removeStream(value.id);
+      return;
+    }
+    stream.listener(result);
+  }
+
+  private cancelStream(id: string): void {
+    const stream = this.streams.get(id);
+    if (!stream) return;
+    this.removeStream(id);
+    if (stream.subscriptionId && this.authenticated && this.socket) {
+      this.sendRequestFrame(`mobile-${Date.now()}-${++this.requestCounter}`, stream.method.replace(/\.subscribe$/, ".unsubscribe"), { subscriptionId: stream.subscriptionId });
+    }
+  }
+
+  private removeStream(id: string): void {
+    const stream = this.streams.get(id);
+    if (!stream) return;
+    for (const streamId of stream.streamIds) {
+      this.terminalStreams.delete(streamId);
+      this.terminalSnapshots.delete(streamId);
+    }
+    this.streams.delete(id);
+  }
+
+  private handleTerminalBinary(bytes: Uint8Array): void {
+    const frame = decodeTerminalFrame(bytes);
+    if (!frame) return;
+    const listener = this.terminalStreams.get(frame.streamId);
+    if (!listener) return;
+    if (frame.opcode === 1) listener({ type: "data", streamId: frame.streamId, seq: frame.seq, chunk: new TextDecoder().decode(frame.payload) });
+    else if (frame.opcode === 2) {
+      const meta = parseJson(new TextDecoder().decode(frame.payload));
+      if (meta && typeof meta === "object") this.terminalSnapshots.set(frame.streamId, { meta: meta as Record<string, unknown>, chunks: [] });
+    } else if (frame.opcode === 3) this.terminalSnapshots.get(frame.streamId)?.chunks.push(new TextDecoder().decode(frame.payload));
+    else if (frame.opcode === 4) {
+      const snapshot = this.terminalSnapshots.get(frame.streamId);
+      if (!snapshot) return;
+      this.terminalSnapshots.delete(frame.streamId);
+      listener({ ...snapshot.meta, type: snapshot.meta.kind === "resized" ? "resized" : "scrollback", streamId: frame.streamId, seq: frame.seq, serialized: snapshot.chunks.join("") });
+    } else if (frame.opcode === 5 || frame.opcode === 12) {
+      const meta = parseJson(new TextDecoder().decode(frame.payload));
+      if (meta && typeof meta === "object") listener({ ...(meta as Record<string, unknown>), type: frame.opcode === 5 ? "resized" : "metadata", streamId: frame.streamId, seq: frame.seq });
+    } else if (frame.opcode === 6) listener({ type: "error", streamId: frame.streamId, seq: frame.seq, message: new TextDecoder().decode(frame.payload) });
   }
 
   private setState(state: RelayConnectionState): void {
@@ -198,6 +320,8 @@ function isRpcResponse(value: unknown): value is { id: string; ok: true; result:
   return !!error && typeof error.code === "string" && typeof error.message === "string";
 }
 
+type RpcWireResponse = { id: string; ok: true; result: unknown } | { id: string; ok: false; error: RpcErrorData };
+
 function isEvent(value: unknown): value is RelayEvent {
   return !!value && typeof value === "object" && typeof (value as Record<string, unknown>).method === "string";
 }
@@ -210,3 +334,8 @@ async function bytesFromSocket(raw: unknown): Promise<Uint8Array> {
 }
 
 const asError = (value: unknown) => (value instanceof Error ? value : new Error(String(value)));
+function encodeBase64Url(value: Uint8Array): string {
+  let binary = "";
+  for (const byte of value) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}

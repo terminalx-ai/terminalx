@@ -1,8 +1,9 @@
 import { z } from "zod";
 import type { RpcCallResult } from "@terminalx/portable/rpc";
 import { RECONNECT_DELAYS_MS, RECONNECT_TRICKLE_MS } from "../pairing/contracts";
-import { updateStoredHost, type HostCredential, type StoredHost } from "../store/hosts";
+import { updateStoredHost, writeHostCredential, type HostCredential, type StoredHost } from "../store/hosts";
 import { RelayClient, type RelayEvent } from "./relay-client";
+import { applyResumeConfirmation } from "./credential-confirmation";
 import { rotateCredentialIfNeeded } from "./credential-rotation";
 
 export type ConnectionStage = "idle" | "connecting" | "connected" | "reconnecting" | "cant-connect" | "unreachable";
@@ -18,6 +19,8 @@ export class HostConnection {
   private stageListeners = new Set<(stage: ConnectionStage, attempt: number) => void>();
   private logListeners = new Set<(entry: ConnectionLogEntry) => void>();
   private refusedMethods = new Set<string>();
+  private streamCounter = 0;
+  private streams = new Map<number, { method: string; params: unknown; deliver: (result: unknown) => void; detach?: () => void }>();
 
   start(host: StoredHost, credential: HostCredential): void {
     this.stop();
@@ -31,6 +34,8 @@ export class HostConnection {
     this.active = null;
     this.client?.close();
     this.client = null;
+    for (const stream of this.streams.values()) stream.detach?.();
+    this.streams.clear();
     this.emitStage("idle", 0);
   }
 
@@ -58,6 +63,23 @@ export class HostConnection {
   onEvent(listener: (event: RelayEvent) => void): () => void {
     this.eventListeners.add(listener);
     return () => this.eventListeners.delete(listener);
+  }
+
+  subscribe(method: string, params: unknown, listener: (result: unknown) => void): () => void {
+    const id = ++this.streamCounter;
+    const deliver = (result: unknown) => {
+      if (isStreamRefusal(result) && !this.refusedMethods.has(method)) {
+        this.refusedMethods.add(method);
+        this.log("warning", "Host refused a method", `${method}: ${result.error.code}`);
+      }
+      listener(result);
+    };
+    const stream = { method, params, deliver, ...(this.client ? { detach: this.client.subscribeStream(method, params, deliver) } : {}) };
+    this.streams.set(id, stream);
+    return () => {
+      this.streams.get(id)?.detach?.();
+      this.streams.delete(id);
+    };
   }
 
   onStage(listener: (stage: ConnectionStage, attempt: number) => void): () => void {
@@ -96,7 +118,7 @@ export class HostConnection {
       try {
         const host = await resolveRelay(this.active.host, candidate.token).catch(() => this.active!.host);
         if (generation !== this.generation) return;
-        const client = new RelayClient({ relay: host.relay, credential: candidate.token, credentialKind: "resume", deviceToken: credential.deviceToken, desktopPublicKeyB64: host.publicKeyB64 });
+        const client = new RelayClient({ relay: host.relay, credential: candidate.token, credentialKind: "resume", credentialVersion: candidate.version, deviceToken: credential.deviceToken, desktopPublicKeyB64: host.publicKeyB64 });
         this.client = client;
         client.subscribe((event) => { for (const listener of this.eventListeners) listener(event); });
         let wasConnected = false;
@@ -114,8 +136,18 @@ export class HostConnection {
         });
         this.log("info", "Opening encrypted relay", redactEndpoint(host.relay.cellUrl));
         await client.connect();
-        this.active.host = host;
-        void rotateCredentialIfNeeded({ client, host, credential: this.active.credential }).then((rotated) => {
+        const confirmation = client.getResumeConfirmation();
+        const confirmedCredential = confirmation ? applyResumeConfirmation(this.active.credential, candidate.version, confirmation) : this.active.credential;
+        if (confirmedCredential !== this.active.credential) await writeHostCredential(host.id, confirmedCredential).catch(() => undefined);
+        const connectedHost = { ...host, lastConnectedAt: Date.now() };
+        await updateStoredHost(connectedHost).catch(() => undefined);
+        this.active.host = connectedHost;
+        this.active.credential = confirmedCredential;
+        for (const stream of this.streams.values()) {
+          stream.detach?.();
+          stream.detach = client.subscribeStream(stream.method, stream.params, stream.deliver);
+        }
+        void rotateCredentialIfNeeded({ client, host: connectedHost, credential: confirmedCredential }).then((rotated) => {
           if (generation === this.generation && this.active) this.active = rotated;
         }).catch((error: unknown) => this.log("warning", "Credential rotation deferred", safeError(error)));
         return;
@@ -158,3 +190,8 @@ async function resolveRelay(host: StoredHost, resumeToken: string): Promise<Stor
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 const safeError = (value: unknown) => value instanceof Error ? value.message.replace(/[A-Za-z0-9_-]{32,}/g, "[redacted]") : "Unknown connection error";
 const redactEndpoint = (value: string) => { try { return new URL(value).origin; } catch { return "relay endpoint"; } };
+const isStreamRefusal = (value: unknown): value is { type: "error"; error: { code: string } } => {
+  if (!value || typeof value !== "object") return false;
+  const error = (value as { error?: unknown }).error;
+  return (value as { type?: unknown }).type === "error" && !!error && typeof error === "object" && typeof (error as { code?: unknown }).code === "string";
+};
