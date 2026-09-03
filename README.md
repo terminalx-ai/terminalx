@@ -1,6 +1,6 @@
-# TerminalX Next
+# TerminalX
 
-TerminalX Next is a desktop workbench for the coding agents already installed
+TerminalX is a desktop workbench for the coding agents already installed
 on your machine. Every session is its own git worktree, and a session holds tabs — each
 tab an agent conversation against that same tree. A Claude Code or Codex tab
 *is* the real interactive CLI, running in a PTY: the chat you read is a
@@ -9,7 +9,7 @@ the hooks it runs, and ⌘⇧T flips between the chat and the terminal without
 stopping anything or waiting for a turn to end. One process, two views. See
 [docs/PTY-FIRST.md](docs/PTY-FIRST.md) for how that works and why.
 
-TerminalX Next is macOS-only today, and it brings no compute of its own: it
+TerminalX is macOS-only today, and it brings no compute of its own: it
 drives the `claude` and `codex` CLIs you are already logged into.
 
 ## What it does
@@ -54,13 +54,13 @@ drives the `claude` and `codex` CLIs you are already logged into.
 
 ## What leaves your machine
 
-TerminalX Next has **no telemetry, no analytics and no crash reporting**.
+TerminalX has **no telemetry, no analytics and no crash reporting**.
 There is no account, no sign-in, and nothing is phoned home about how you use it. The only
 outbound connections it makes are these five, all of them things you asked for:
 
 | To | When | Carrying |
 | --- | --- | --- |
-| GitHub | You open the Issues view or a PR panel | Nothing of TerminalX Next's own — it shells out to your `gh`, which uses your existing credentials |
+| GitHub | You open the Issues view or a PR panel | Nothing of TerminalX's own — it shells out to your `gh`, which uses your existing credentials |
 | Linear | You open the Issues view with a Linear key configured | A GraphQL query to `api.linear.app`, authorized with the key you pasted |
 | Anthropic usage | The focused status bar lacks a Claude model limit, no more than once every 15 minutes | A GET to `api.anthropic.com/api/oauth/usage`, authorized with the OAuth token Claude Code already stores; no prompts, transcripts or files |
 | Hugging Face | You press Download on a transcription model | A plain GET for the weights, at a pinned revision |
@@ -69,11 +69,11 @@ outbound connections it makes are these five, all of them things you asked for:
 Some detail on each:
 
 - **The agents themselves.** `claude` and `codex` talk to Anthropic and OpenAI
-  the same way they do in your terminal, under your own login. TerminalX Next
+  the same way they do in your terminal, under your own login. TerminalX
   does not proxy, inspect or re-send any of it; it reads the transcript files
   the CLIs write on disk.
 - **Claude usage.** Claude's status line is the live usage feed. When it omits
-  a model-scoped limit, TerminalX Next reads the existing OAuth credential from
+  a model-scoped limit, TerminalX reads the existing OAuth credential from
   the macOS Keychain item `Claude Code-credentials`, falling back to
   `~/.claude/.credentials.json`, and makes the usage GET above. It never writes
   or refreshes credentials, never stores the token, and keeps usage results in
@@ -96,7 +96,7 @@ Some detail on each:
   language supports it, and the optional local models run entirely in-process.
   Audio never leaves the machine.
 
-## What TerminalX Next touches outside your repo
+## What TerminalX touches outside your repo
 
 Driving somebody else's CLI means writing a few things outside your checkout.
 All of them, in full:
@@ -104,12 +104,12 @@ All of them, in full:
 - **`~/.claude.json`** — Claude Code asks "do you trust this folder?" the first
   time it runs anywhere new, and every session worktree is somewhere new. That
   dialog would swallow your first prompt where you could not see it, so
-  TerminalX Next sets `projects["<worktree>"].hasTrustDialogAccepted` for each worktree it
+  TerminalX sets `projects["<worktree>"].hasTrustDialogAccepted` for each worktree it
   creates, and changes nothing else in the file. It does nothing at all if the
   file does not exist yet — a first-ever run's dialog is yours to answer.
 - **`$RACCOON_HOME/codex`** — Codex reads hooks from `$CODEX_HOME/hooks.json`
   and only runs one whose hash is recorded in `$CODEX_HOME/config.toml`, so
-  TerminalX Next needs a Codex home it owns. It builds one here and points
+  TerminalX needs a Codex home it owns. It builds one here and points
   `CODEX_HOME` at it for the tabs it launches. **Your `~/.codex` is never edited.** Instead
   the managed home *symlinks* to it: `auth.json`, `AGENTS.md`, `skills`,
   `prompts` and `plugins` are links, so you stay on the same account and a
@@ -134,7 +134,7 @@ All of them, in full:
 
 ## Permission modes
 
-TerminalX Next's five modes are its own vocabulary; each maps onto flags the
+TerminalX's five modes are its own vocabulary; each maps onto flags the
 two CLIs already have. This is the whole mapping:
 
 | Mode | Claude Code | Codex |
@@ -150,7 +150,7 @@ Two things are worth knowing:
 - **Codex has fewer knobs than Claude.** codex-cli 0.152 accepts only
   `on-request` or `never` for `-a`, so Auto and Accept edits land on the same
   pair as Ask every time. What separates Ask every time is not a flag:
-  TerminalX Next gates every tool through the `PreToolUse` hook, which is the
+  TerminalX gates every tool through the `PreToolUse` hook, which is the
   only way to be asked about a tool Codex would otherwise have run without asking.
 - **Bypass means what it says** on both. No sandbox, no approvals, nothing
   asked. Use it only in a tree you would be happy to throw away.
@@ -162,9 +162,9 @@ every mode names something the CLI will accept.
 
 ## Install
 
-Download the `.dmg` from this repository's Releases page and drag TerminalX
-Next to Applications. You will also need `claude` and/or `codex` installed and
-logged in — TerminalX Next runs them, it does not replace them.
+Download the `.dmg` from this repository's Releases page and drag TerminalX to
+Applications. You will also need `claude` and/or `codex` installed and
+logged in — TerminalX runs them, it does not replace them.
 
 The build is ad-hoc signed rather than notarized, so on first launch macOS will
 warn that it cannot verify the developer. Open it once from the right-click
@@ -202,7 +202,7 @@ issue for a vulnerability.
 ## License
 
 MIT. See [LICENSE](LICENSE), and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)
-for the licences of everything TerminalX Next bundles or links against.
+for the licences of everything TerminalX bundles or links against.
 
 ## Acknowledgements
 

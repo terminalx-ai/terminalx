@@ -110,7 +110,7 @@ async function canNotify(): Promise<boolean> {
 function summarise(session: SessionEntry, tab: TabEntry, kind: NoticeKind): { title: string; body: string } {
   const agent = tab.title ?? getSessions().harnesses.find((h) => h.id === tab.harness)?.name ?? tab.harness;
   const status = kind === "waiting" ? `${agent} needs you` : kind === "failed" ? `${agent} hit a problem` : `${agent} finished`;
-  const title = `TerminalX Next — ${status}`;
+  const title = `TerminalX — ${status}`;
   return { title, body: session.title };
 }
 

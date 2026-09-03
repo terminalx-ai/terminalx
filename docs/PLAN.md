@@ -1,6 +1,6 @@
-# TerminalX Next — build plan
+# TerminalX — build plan
 
-TerminalX Next is a desktop workbench for coding agents. It wraps the agent CLIs you
+TerminalX is a desktop workbench for coding agents. It wraps the agent CLIs you
 already have installed (Claude Code, Codex, and others over time) in a native
 chat UI, gives every session its own git worktree, and lets one session hold
 several tabs, each running a different agent against the same tree.
@@ -214,7 +214,7 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Issues view (⌘I) with detail column; Start session creates a worktree named after the issue (`raccoon/eng-42-fix-login`) and sends the issue as the first prompt; the session header links back.
 - [x] Settings → Integrations: Linear key (validated, stored owner-only), GitHub CLI status.
 
-### TerminalX Next CLI ✅
+### TerminalX CLI ✅
 - [x] The hook socket also serves authenticated JSON-lines control requests,
       using a per-launch token stored owner-only and injected into agent tabs.
 - [x] `terminalx-next` / `tnx` cover project, session, tab, transcript,
@@ -238,7 +238,7 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
       Codex, ACP and OpenCode are unchanged; phase 2 is Codex, phase 3 the
       cleanup. Written up in [PTY-FIRST.md](PTY-FIRST.md).
 - [x] Phase 2: a Codex tab is the interactive `codex` TUI in the same PTY-first
-      shape — its rollout tailed, its hooks (in a `CODEX_HOME` TerminalX Next owns and
+      shape — its rollout tailed, its hooks (in a `CODEX_HOME` TerminalX owns and
       trusts) carrying status and approvals, `PreToolUse` gating every tool in
       "Ask every time" — and the headless Codex engine and its hand-off are
       gone. ACP and OpenCode stay headless; see the phases in
@@ -274,7 +274,7 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Local models: a compiled-in catalog (Parakeet, Nemotron, Canary, Whisper Small, Whisper Large v3 Turbo) downloaded from Hugging Face with checksum verification into `~/.raccoon/models`, run through transcribe-cpp with Metal; the loaded model stays warm between dictations.
 - [x] Settings → Transcription: model cards with speed/accuracy, download progress, delete; microphone device picker; mute while recording.
 ### Workspaces and projects ✅
-- [x] Sidebar is a project rail plus a workspace column: every checkout of a project (root, TerminalX Next worktrees, worktrees made elsewhere) with +/− and unpushed counts, sessions grouped under their workspace, Sessions | Explorer tabs.
+- [x] Sidebar is a project rail plus a workspace column: every checkout of a project (root, TerminalX worktrees, worktrees made elsewhere) with +/− and unpushed counts, sessions grouped under their workspace, Sessions | Explorer tabs.
 - [x] Sessions can start inside an existing workspace; the new-session form sits at the bottom with project, agent, model, effort and permission pills.
 - [x] Project menu: rename, logo, colour, pixel mascot, pin, reveal, refresh, archive, remove. Global and per-project refresh.
 - [x] Deleting a workspace checks uncommitted files, unpushed commits and the branch's pull request; merged and clean is called out as safe.
@@ -294,10 +294,10 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 
 ### Transition identity ✅
 
-- [x] Release builds are `TerminalX Next` / `com.terminalx.next`, with the
-      TerminalX icon carrying an amber "N" badge and the private
-      `terminalx-next://` scheme.
-- [x] Development builds are `TerminalX Next Dev` /
+- [x] Release builds are `TerminalX` / `com.terminalx.next`, with the
+      TerminalX icon carrying an amber "N" badge and the `terminalx://`
+      scheme. The handler also recognizes legacy `terminalx-next://` links.
+- [x] Development builds are `TerminalX Dev` /
       `com.terminalx.next.dev`, with the same source art carrying a "D" badge.
 - [x] The `raccoon` crate and binary, `RACCOON_HOME`, `~/.raccoon`, branch and
       socket names, and repository identity remain unchanged during the

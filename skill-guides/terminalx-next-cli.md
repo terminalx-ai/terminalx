@@ -1,6 +1,6 @@
-# TerminalX Next CLI
+# TerminalX CLI
 
-`terminalx-next` is the authenticated command-line surface of a running TerminalX Next app. The alias
+`terminalx-next` is the authenticated command-line surface of a running TerminalX app. The alias
 `tnx` is equivalent. It drives the app's real projects, sessions, PTY-first agent tabs,
 transcripts, permission cards, worktrees, and issue integrations; it does not maintain a second
 copy of that state.
@@ -15,10 +15,10 @@ Choose the executable once:
 
 1. Use `terminalx-next` when it is on `PATH`.
 2. Otherwise use `tnx` when it is on `PATH`.
-3. Otherwise use `/Applications/TerminalX Next.app/Contents/MacOS/terminalx-next` when
-   TerminalX Next is installed there.
+3. Otherwise use `/Applications/TerminalX.app/Contents/MacOS/terminalx-next` when
+   TerminalX is installed there.
 
-If none exists, install it from TerminalX Next → Settings → General. Do not guess command names or
+If none exists, install it from TerminalX → Settings → General. Do not guess command names or
 flags. Agents should pass `--json`; human-readable output is intended for interactive use.
 
 Confirm the connection first:
@@ -120,7 +120,7 @@ terminalx-next issues list --project <project> [--provider github|linear] \
   [--assigned-to-me] [--team <id>] [--search <text>] --json
 ```
 
-GitHub uses the reader's authenticated `gh` CLI. Linear uses the key configured in TerminalX Next →
+GitHub uses the reader's authenticated `gh` CLI. Linear uses the key configured in TerminalX →
 Settings → Integrations. The default provider is GitHub.
 
 ### This guide
@@ -141,7 +141,7 @@ JSON failures have this shape:
 {"ok":false,"error":{"code":"app_unavailable","message":"…","recovery":"…"}}
 ```
 
-- `app_unavailable`: open TerminalX Next with the same `RACCOON_HOME`, then retry `status` once.
+- `app_unavailable`: open TerminalX with the same `RACCOON_HOME`, then retry `status` once.
 - `unauthorized`: do not retry with the same credential. A human shell should remove stale
   `TERMINALX_NEXT_TOKEN` and let the CLI read `control.token`; an app tab should be restarted so
   it receives the new launch environment.

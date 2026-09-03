@@ -16,9 +16,9 @@ use crate::store::index::{self, SessionEntry, TabEntry, TabStatus};
 use crate::store::projects::{self, Project};
 
 const APP_UNAVAILABLE_RECOVERY: &str =
-    "Open TerminalX Next with the same RACCOON_HOME, then retry status once.";
+    "Open TerminalX with the same RACCOON_HOME, then retry status once.";
 const LINEAR_INTEGRATION_RECOVERY: &str =
-    "Add an API key in TerminalX Next Settings → Integrations.";
+    "Add an API key in TerminalX Settings → Integrations.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -852,11 +852,11 @@ mod tests {
     fn recovery_copy_uses_the_terminalx_next_identity() {
         assert_eq!(
             APP_UNAVAILABLE_RECOVERY,
-            "Open TerminalX Next with the same RACCOON_HOME, then retry status once."
+            "Open TerminalX with the same RACCOON_HOME, then retry status once."
         );
         assert_eq!(
             LINEAR_INTEGRATION_RECOVERY,
-            "Add an API key in TerminalX Next Settings → Integrations."
+            "Add an API key in TerminalX Settings → Integrations."
         );
     }
 }

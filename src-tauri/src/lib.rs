@@ -26,6 +26,12 @@ mod workspaces;
 use std::sync::Arc;
 use tauri::{Listener, Manager};
 
+const DEEP_LINK_SCHEMES: [&str; 2] = ["terminalx", "terminalx-next"];
+
+fn supports_deep_link_scheme(scheme: &str) -> bool {
+    DEEP_LINK_SCHEMES.contains(&scheme)
+}
+
 pub struct AppState {
     pub host: Arc<harness::host::Host>,
     pub terminals: Arc<pty::Terminals>,
@@ -76,7 +82,11 @@ pub fn run() {
                 use tauri_plugin_deep_link::DeepLinkExt;
                 app.deep_link().on_open_url(|event| {
                     for url in event.urls() {
-                        log::info!("received deep link: {url}");
+                        if supports_deep_link_scheme(url.scheme()) {
+                            log::info!("received deep link: {url}");
+                        } else {
+                            log::warn!("ignored deep link with unsupported scheme: {url}");
+                        }
                     }
                 });
             }
@@ -248,4 +258,16 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::supports_deep_link_scheme;
+
+    #[test]
+    fn accepts_current_and_legacy_deep_link_schemes() {
+        assert!(supports_deep_link_scheme("terminalx"));
+        assert!(supports_deep_link_scheme("terminalx-next"));
+        assert!(!supports_deep_link_scheme("https"));
+    }
 }

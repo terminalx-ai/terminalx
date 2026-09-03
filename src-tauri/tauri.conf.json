@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "TerminalX Next",
+  "productName": "TerminalX",
   "version": "0.1.0",
   "identifier": "com.terminalx.next",
   "build": {
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "TerminalX Next",
+        "title": "TerminalX",
         "width": 1360,
         "height": 860,
         "minWidth": 760,
@@ -65,7 +65,7 @@
     "deep-link": {
       "desktop": {
         "schemes": [
-          "terminalx-next"
+          "terminalx"
         ]
       }
     },

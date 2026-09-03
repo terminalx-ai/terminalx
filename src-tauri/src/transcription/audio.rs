@@ -203,7 +203,7 @@ fn run(device_name: Option<String>, out: Sender<Vec<f32>>, stop: Receiver<()>, r
         Ok(c) => c,
         // This is also what a denied microphone permission looks like: the
         // device is listed but its format cannot be read.
-        Err(e) => fail!("The microphone could not be opened ({e}). Check that TerminalX Next is allowed to use it under System Settings → Privacy & Security → Microphone."),
+        Err(e) => fail!("The microphone could not be opened ({e}). Check that TerminalX is allowed to use it under System Settings → Privacy & Security → Microphone."),
     };
     let rate = config.sample_rate();
     let channels = config.channels();
@@ -226,11 +226,11 @@ fn run(device_name: Option<String>, out: Sender<Vec<f32>>, stop: Receiver<()>, r
         F::U16 => build_stream::<u16>(&device, &stream_config, resampler, out),
         F::U32 => build_stream::<u32>(&device, &stream_config, resampler, out),
         F::U64 => build_stream::<u64>(&device, &stream_config, resampler, out),
-        other => fail!("The microphone uses a sample format TerminalX Next cannot read ({other}). Pick a different input under Settings → Transcription."),
+        other => fail!("The microphone uses a sample format TerminalX cannot read ({other}). Pick a different input under Settings → Transcription."),
     };
     let stream = match stream {
         Ok(s) => s,
-        Err(e) => fail!("The microphone could not be opened ({e}). Check that TerminalX Next is allowed to use it under System Settings → Privacy & Security → Microphone."),
+        Err(e) => fail!("The microphone could not be opened ({e}). Check that TerminalX is allowed to use it under System Settings → Privacy & Security → Microphone."),
     };
     if let Err(e) = stream.play() {
         fail!("The microphone would not start ({e}).");

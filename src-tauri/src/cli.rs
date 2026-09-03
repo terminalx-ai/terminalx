@@ -16,7 +16,7 @@ pub const SKILL_STUB: &str = include_str!(concat!(
     "/../skills/terminalx-next-cli/SKILL.md"
 ));
 
-const HELP: &str = r#"terminalx-next — control a running TerminalX Next app
+const HELP: &str = r#"terminalx-next — control a running TerminalX app
 
 Usage:
   terminalx-next status [--json]
@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn public_copy_uses_the_terminalx_next_identity() {
-        assert!(HELP.starts_with("terminalx-next — control a running TerminalX Next app"));
+        assert!(HELP.starts_with("terminalx-next — control a running TerminalX app"));
         for copy in [HELP, GUIDE, SKILL_STUB] {
             assert!(!copy.contains("Raccoon app"));
             assert!(!copy.contains("Raccoon →"));
