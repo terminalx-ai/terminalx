@@ -538,11 +538,11 @@ fn extract_model(value: &Value) -> Option<String> {
         .or_else(|| value.get("model_name"))
         .and_then(Value::as_str)
         .map(str::to_string)
-        .or_else(|| value.get("info").and_then(|info| extract_model(info)))
+        .or_else(|| value.get("info").and_then(extract_model))
         .or_else(|| {
             value
                 .get("metadata")
-                .and_then(|metadata| extract_model(metadata))
+                .and_then(extract_model)
         })
 }
 
