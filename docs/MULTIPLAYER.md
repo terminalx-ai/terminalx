@@ -6,10 +6,10 @@ Date: 2026-09-03
 
 Issue: [#5](https://github.com/terminalx-ai/raccoon/issues/5)
 
-Raccoon implements multiplayer on the client and host sides while reusing the
+TerminalX Next implements multiplayer on the client and host sides while reusing the
 deployed TerminalX identity and relay services. The services authenticate
 people, report organization membership and capabilities, and carry opaque E2EE
-bytes. They do not own Raccoon sessions, chat, presence, permissions, or
+bytes. They do not own TerminalX Next sessions, chat, presence, permissions, or
 terminal state.
 
 ## Product and service boundary
@@ -28,7 +28,7 @@ cloud room record or transcript store.
 The shared invariants are:
 
 - sharing is opt-in per session and exists only for the current host process;
-  restarting Raccoon returns every session to unshared;
+  restarting TerminalX Next returns every session to unshared;
 - a participant is one verified person and may have several connected surfaces;
   presence aggregates those surfaces;
 - notes are separate from agent input, and promotion to the agent is an explicit
@@ -49,7 +49,7 @@ implemented by the `/v1/desktop/orgs/:orgId/members` route in
 `apps/api/src/controllers/desktop/orgMembers.ts`.
 
 The host must have a valid cloud session, an active organization, and the exact
-cloud flag `multiplayer.use`. Raccoon reads that flag from the desktop session
+cloud flag `multiplayer.use`. TerminalX Next reads that flag from the desktop session
 or capabilities response and checks it both when rendering `Share session` and
 when opening a share. A hidden or stale UI cannot bypass the host check.
 
@@ -136,7 +136,7 @@ listener first accepts traffic.
 
 The first-run flow is explicit:
 
-1. Before triggering either system prompt, Raccoon explains that the requested
+1. Before triggering either system prompt, TerminalX Next explains that the requested
    pairing, join, or share will connect directly to another device on the local
    network.
 2. It asks for Local Network access only after the user chooses that action,
@@ -175,7 +175,7 @@ hatch. The first implementation uses the established method families:
   `steerLease.release`. The broader `get`, `acquire`, `takeOver`, and
   `forceTake` methods remain outside the session-scope allowlist.
 
-All Raccoon remote APIs accept a session/worktree id and public `tabId` only.
+All TerminalX Next remote APIs accept a session/worktree id and public `tabId` only.
 They never accept or disclose a PTY id, pane id, raw process handle, checkout
 path, or arbitrary filesystem path. Rust resolves `tabId` to the current local
 terminal under the session lock, checks that it is still live and still belongs
@@ -245,7 +245,7 @@ relay v1 schemas are enforced in
 `apps/relay/src/director/director-server.ts` and
 `apps/relay/src/cell/cell-server.ts`.
 
-Raccoon preserves the deployed names and meanings. The cloud gate is
+TerminalX Next preserves the deployed names and meanings. The cloud gate is
 `multiplayer.use`; account-bound host discovery is
 `account-bound-host-pairing.v1`; relevant runtime negotiations retain
 `remote-runtime.shared-control.v1`, `terminal.binary-stream.v1`,
@@ -276,7 +276,7 @@ or file contents. Retention is 30 days and cleanup is local.
 
 The hosted services receive only the identity, account-pairing, capability,
 relay-routing, and connection metadata their existing contracts require. They
-do not receive the activity log, Raccoon session index, tab list, transcript,
+do not receive the activity log, TerminalX Next session index, tab list, transcript,
 or terminal content.
 
 ## Verification plan
@@ -318,5 +318,5 @@ The baseline above requires no server change. These future ideas would:
 - new cloud capability flags, pairing scopes, relay protocol messages, or E2EE
   framing versions.
 
-They are separate service proposals. Raccoon does not emulate them with
+They are separate service proposals. TerminalX Next does not emulate them with
 undocumented fields or endpoints.

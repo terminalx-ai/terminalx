@@ -6,7 +6,7 @@ Date: 2026-09-03
 
 Issue: [#6](https://github.com/terminalx-ai/raccoon/issues/6)
 
-Raccoon reuses the deployed TerminalX identity, account-pairing, and relay
+TerminalX Next reuses the deployed TerminalX identity, account-pairing, and relay
 services. It is a client of `login.terminalx.ai` and `relay.terminalx.ai`; this
 plan does not require a change to those services.
 
@@ -17,7 +17,7 @@ plan does not require a change to those services.
 `/v1/desktop`, and `/v1/account`; `apps/relay/src/director/director-server.ts`
 and `apps/relay/src/cell/cell-server.ts` implement the relay surface.
 
-Raccoon implements only client behavior:
+TerminalX Next implements only client behavior:
 
 - the desktop/Tauri side implements OAuth, secure token persistence, host
   account binding, grant servicing, and relay control in Rust;
@@ -29,7 +29,7 @@ Authentication methods, account creation, token issuance, the machine
 directory, one-time grant coordination, relay placement, and relay cells remain
 owned by the deployed services. Auth JSON is normalized field by field and may
 ignore unknown fields. Relay JSON is strict: an unexpected field is a contract
-failure, not a value Raccoon may accept speculatively. Times named `expiresAt`,
+failure, not a value TerminalX Next may accept speculatively. Times named `expiresAt`,
 `refreshedAt`, or `...At` are epoch milliseconds.
 
 ## Desktop OAuth and session lifecycle
@@ -51,7 +51,7 @@ The Rust desktop client copies the shipped desktop flow exactly:
 2. Open `/v1/desktop/auth/authorize` in the system browser with client id
    `terminalx-desktop`, response type `code`, scope
    `openid profile email offline_access`, a fresh `state`, `nonce`, and PKCE
-   S256 challenge, plus Raccoon's local profile id.
+   S256 challenge, plus TerminalX Next's local profile id.
 3. Accept only the exact callback path and matching `state`; ignore unrelated
    loopback probes. Close the listener after success, denial, or five minutes.
 4. Exchange the code at `/v1/desktop/auth/session` using the original verifier,
@@ -96,7 +96,7 @@ as offline. On sign-out, automatic account pairings are removed before the app
 makes a best-effort `/v1/auth/logout` call.
 
 The server rotates refresh tokens with the already-deployed 30-day sliding
-lifetime and a 60-second replay/idempotency window. Raccoon treats each complete
+lifetime and a 60-second replay/idempotency window. TerminalX Next treats each complete
 refresh response as the only current token pair and never attempts to implement
 rotation policy locally.
 
@@ -133,7 +133,7 @@ the relay director, and registers this exact binding shape:
 }
 ```
 
-`environmentKind` is one of `native`, `wsl`, or `ssh`. Raccoon sends no
+`environmentKind` is one of `native`, `wsl`, or `ssh`. TerminalX Next sends no
 repository, folder, session, or terminal metadata. A `live` heartbeat is sent
 only with a fresh relay attestation; otherwise the host reports
 `unverifiable` or `exited`. The implementation follows the existing 30-second
@@ -195,7 +195,7 @@ is NOT safe; negotiate it”, and the v2 offer/handshake contracts in
 has no hosted route; relayed bytes use the cell routes in
 `apps/relay/src/cell/cell-server.ts`, which forward them verbatim.
 
-Raccoon keeps the existing explicit QR/code path for pairing without an
+TerminalX Next keeps the existing explicit QR/code path for pairing without an
 account. Its offer is version 2 and uses only the deployed fields: `endpoint`,
 `deviceToken`, `publicKeyB64`, optional `pairedDeviceId`, literal scope
 `mobile`, an identity mode, and the optional version-1 relay offer. It does not
@@ -224,7 +224,7 @@ listener first accepts traffic.
 
 The first-run flow is explicit:
 
-1. Before triggering either system prompt, Raccoon explains that the requested
+1. Before triggering either system prompt, TerminalX Next explains that the requested
    pairing, join, or share will connect directly to another device on the local
    network.
 2. It asks for Local Network access only after the user chooses that action,
@@ -262,7 +262,7 @@ uses the current and grace resume tokens. On stale placement it calls strict
 `POST /v1/resolve` without an Authorization header and follows only a director
 move with a strictly newer assignment epoch. Both clients honor `Retry-After`
 and deployed close codes. After `host-data-auth` or `relay-auth`/`relay-hello`,
-the cell is a byte pipe; Raccoon never expects or emits a relay status frame in
+the cell is a byte pipe; TerminalX Next never expects or emits a relay status frame in
 the E2EE byte stream.
 
 The relay may see identities, relay/device ids, routing metadata, socket
@@ -283,7 +283,7 @@ E2EE v2.
 `apps/relay/src/director/director-server.ts`, and
 `apps/relay/src/cell/cell-server.ts`.
 
-Raccoon persists only what a client needs: protected cloud sessions, the host
+TerminalX Next persists only what a client needs: protected cloud sessions, the host
 key and device registry on desktop, and the installation key plus paired-host
 records in Expo SecureStore. It keeps plaintext pairing secrets, HPKE private
 keys, authorization codes, relay invite credentials, and active E2EE session
@@ -319,5 +319,5 @@ None of the following is required by this plan:
   or push-notification delivery.
 
 If a future product requires one of these, it needs a separate server proposal,
-compatibility plan, rollout, and operational approval. Raccoon's baseline ships
+compatibility plan, rollout, and operational approval. TerminalX Next's baseline ships
 without it.
