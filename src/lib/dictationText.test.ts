@@ -118,10 +118,30 @@ describe("a dictated draft", () => {
     expect(applyPartial(short, "Goodbye", { sincePreviousMs: 1_500 })).toEqual({ committed: "Hello", live: "Goodbye" });
   });
 
-  it("trusts recogniser segment identities over the fallback heuristic", () => {
+  it("uses recogniser segment identities together with text and pauses", () => {
     const first = applyPartial(EMPTY_BUFFER, "Alpha beta gamma", { segment: 7 });
-    expect(applyPartial(first, "Entirely revised", { segment: 7, sincePreviousMs: 5_000 })).toEqual({ committed: "", live: "Entirely revised", segment: 7 });
+    expect(applyPartial(first, "Entirely revised", { segment: 7, sincePreviousMs: 1_499 })).toEqual({ committed: "", live: "Entirely revised", segment: 7 });
+    expect(applyPartial(first, "Entirely revised", { segment: 7, sincePreviousMs: 1_500 })).toEqual({ committed: "Alpha beta gamma", live: "Entirely revised", segment: 7 });
     expect(applyPartial(first, "Alpha starts again", { segment: 8, sincePreviousMs: 10 })).toEqual({ committed: "Alpha beta gamma", live: "Alpha starts again", segment: 8 });
+    expect(applyPartial(first, "Alpha beta gamma again", { segment: 8, sincePreviousMs: 5_000 })).toEqual({ committed: "", live: "Alpha beta gamma again", segment: 8 });
+  });
+
+  it("does not repeat text Apple carries across a timestamp boundary", () => {
+    const events: Event[] = [
+      { partial: "Green Light", at: 0, segment: 0 },
+      { partial: "Green lighthouse beam shine brightly beyond the quiet Harbour this morning", at: 200, segment: 0 },
+      // Apple repeats the settled phrase under the next timestamp range.
+      { partial: "Green lighthouse beam shine brightly beyond the quiet Harbour this morning", at: 2_200, segment: 1 },
+      // After silence, the next utterance can initially share that range.
+      { partial: "Silver lanterns glow softly beside the open window tonight", at: 4_000, segment: 1 },
+      // It too is repeated when Apple advances the timestamp range.
+      { partial: "Silver lanterns glow softly beside the open window tonight", at: 6_000, segment: 2 },
+      { final: "", segment: 2 },
+    ];
+    expect(end("", events)).toEqual({
+      text: "Green lighthouse beam shine brightly beyond the quiet Harbour this morning Silver lanterns glow softly beside the open window tonight",
+      caret: 133,
+    });
   });
 
   it("grows with cumulative partials rather than repeating them", () => {

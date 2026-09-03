@@ -110,7 +110,19 @@ export function revises(prev: string, next: string, sincePreviousMs?: number): b
 }
 
 function isRevision(buffer: DictationBuffer, next: string, result: DictationResult): boolean {
-  if (buffer.segment != null && result.segment != null) return buffer.segment === result.segment;
+  if (buffer.segment != null && result.segment != null) {
+    const repeatedOrRevised = revises(buffer.live, next);
+    if (buffer.segment !== result.segment) {
+      // Apple can repeat the last phrase once while advancing its timestamp
+      // range. Keep that correction live instead of committing it twice.
+      return repeatedOrRevised;
+    }
+    // A timestamp range can also survive across silence into the next spoken
+    // phrase. Only override its identity when the pause and unrelated text
+    // together make the boundary unambiguous.
+    const paused = result.sincePreviousMs != null && result.sincePreviousMs >= SEGMENT_PAUSE_MS;
+    return !paused || repeatedOrRevised;
+  }
   return revises(buffer.live, next, result.sincePreviousMs);
 }
 
