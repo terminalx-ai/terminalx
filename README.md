@@ -206,11 +206,11 @@ for the licences of everything TerminalX bundles or links against.
 
 ## Acknowledgements
 
-TerminalX Next is the native successor to TerminalX. It carries forward the
+TerminalX is the native successor to TerminalX Legacy. It carries forward the
 app, its workflow, and its community while the new implementation grows toward
 feature parity.
 
-TerminalX Next also exists because other people built this category first and
+TerminalX also exists because other people built this category first and
 built it well. Each of these shaped how it thinks, and any of them may suit you
 better:
 
