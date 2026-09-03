@@ -1,0 +1,37 @@
+{
+  "expo": {
+    "name": "TerminalX",
+    "slug": "terminalx-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "terminalx",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.terminalx.next.mobile",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-secure-store",
+        {
+          "configureAndroidBackup": false
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow TerminalX to scan a pairing code shown on your Mac."
+        }
+      ],
+      "expo-notifications"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

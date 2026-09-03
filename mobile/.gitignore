@@ -1,0 +1,9 @@
+.expo/
+dist/
+ios/
+*.jks
+*.mobileprovision
+*.p8
+*.p12
+*.key
+*.cer
