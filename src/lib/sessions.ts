@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { api } from "@/lib/api";
+import { buildPaletteIndex, type PaletteIndex } from "@/lib/commandPalette";
 import type {
   ProjectPatch,
   Workspace, HarnessInfo, Project, SessionEntry, TabEntry } from "@/types/session";
@@ -32,6 +33,8 @@ interface State {
   newSessionPreset: { projectPath: string; cwd: string | null } | null;
   /** Bumped by ⌘K so the workspace column focuses its search box. */
   sessionSearch: number;
+  /** Pre-normalized command-palette documents, rebuilt only when source data changes. */
+  paletteIndex: PaletteIndex;
 }
 
 let state: State = {
@@ -49,11 +52,21 @@ let state: State = {
   workspacesLoading: {},
   newSessionPreset: null,
   sessionSearch: 0,
+  paletteIndex: buildPaletteIndex([], [], {}, []),
 };
 
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
-  state = { ...state, ...patch };
+  const next = { ...state, ...patch };
+  if (
+    next.projects !== state.projects ||
+    next.sessions !== state.sessions ||
+    next.workspaces !== state.workspaces ||
+    next.harnesses !== state.harnesses
+  ) {
+    next.paletteIndex = buildPaletteIndex(next.sessions, next.projects, next.workspaces, next.harnesses);
+  }
+  state = next;
   for (const l of listeners) l();
 }
 

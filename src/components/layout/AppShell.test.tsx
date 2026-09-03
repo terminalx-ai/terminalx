@@ -28,6 +28,8 @@ const { sessionStore } = vi.hoisted(() => ({
           additions: 3,
           deletions: 1,
           unpushed: 0,
+          ahead: 0,
+          behind: 0,
         },
       ],
     },
