@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -34,10 +34,38 @@ pub struct UsageWindow {
     pub stale: bool,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexCredits {
+    pub has_credits: bool,
+    pub unlimited: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexResetCredits {
+    pub available_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexUsage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credits: Option<CodexCredits>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset_credits: Option<CodexResetCredits>,
+}
+
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSnapshot {
     pub windows: Vec<UsageWindow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex: Option<CodexUsage>,
 }
 
 #[derive(Default)]
@@ -54,6 +82,9 @@ struct Inner {
     windows: HashMap<(String, String), UsageWindow>,
     statusline_by_tab: HashMap<String, i64>,
     codex: PollState,
+    codex_usage: Option<CodexUsage>,
+    codex_reset_credit_id: Option<String>,
+    codex_reset_in_flight: bool,
 }
 
 #[derive(Default)]
@@ -155,15 +186,17 @@ fn parse_claude(payload: &Value, updated_at: i64) -> Vec<UsageWindow> {
     windows
 }
 
-fn parse_codex(result: &Value, updated_at: i64) -> Vec<UsageWindow> {
-    let limits = &result["rateLimits"];
+fn parse_codex_limit(limits: &Value, key_prefix: Option<&str>, updated_at: i64) -> Vec<UsageWindow> {
     let plan = limits["planType"].as_str().map(str::to_string);
+    let limit_name = limits["limitName"].as_str();
     ["primary", "secondary"]
         .into_iter()
         .filter_map(|slot| {
             let raw = limits.get(slot)?.as_object()?;
             let minutes = raw.get("windowDurationMins")?.as_u64()?.try_into().ok()?;
-            let (key, label) = classify_codex(minutes);
+            let (window_key, window_label) = classify_codex(minutes);
+            let key = key_prefix.map(|prefix| format!("{prefix}_{window_key}")).unwrap_or(window_key);
+            let label = limit_name.map(|name| format!("{name} {window_label}")).unwrap_or(window_label);
             Some(UsageWindow {
                 agent: "codex".into(),
                 key,
@@ -177,6 +210,76 @@ fn parse_codex(result: &Value, updated_at: i64) -> Vec<UsageWindow> {
             })
         })
         .collect()
+}
+
+fn parse_codex_windows(result: &Value, updated_at: i64) -> Vec<UsageWindow> {
+    let mut windows = parse_codex_limit(&result["rateLimits"], None, updated_at);
+    let mut additional: Vec<_> = result
+        .get("rateLimitsByLimitId")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|(limit_id, _)| limit_id.as_str() != "codex")
+        .flat_map(|(limit_id, limits)| parse_codex_limit(limits, Some(limit_id), updated_at))
+        .collect();
+    additional.sort_by(|a, b| a.key.cmp(&b.key));
+    windows.extend(additional);
+    windows
+}
+
+fn parse_codex_usage(result: &Value) -> (Option<CodexUsage>, Option<String>) {
+    let credits = result["rateLimits"].get("credits").and_then(Value::as_object).and_then(|raw| {
+        Some(CodexCredits {
+            has_credits: raw.get("hasCredits")?.as_bool()?,
+            unlimited: raw.get("unlimited").and_then(Value::as_bool).unwrap_or(false),
+            balance: raw.get("balance").and_then(Value::as_str).map(str::to_string),
+        })
+    });
+    let reset = result.get("rateLimitResetCredits").and_then(Value::as_object);
+    let reset_credits = reset.and_then(|raw| {
+        let available_count = raw.get("availableCount")?.as_u64()?;
+        let next_expires_at = raw
+            .get("credits")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|credit| credit.get("status").and_then(Value::as_str) == Some("available"))
+            .filter_map(|credit| credit.get("expiresAt").and_then(reset_ms))
+            .min();
+        Some(CodexResetCredits { available_count, next_expires_at })
+    });
+    let reset_credit_id = reset
+        .and_then(|raw| raw.get("credits"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|credit| credit.get("status").and_then(Value::as_str) == Some("available"))
+        .min_by_key(|credit| credit.get("expiresAt").and_then(reset_ms).unwrap_or(i64::MAX))
+        .and_then(|credit| credit.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let usage = (credits.is_some() || reset_credits.is_some()).then_some(CodexUsage { credits, reset_credits });
+    (usage, reset_credit_id)
+}
+
+fn read_codex() -> Result<Value> {
+    crate::harness::codex::appserver::ask(
+        crate::harness::codex::appserver::Where::default(),
+        "account/rateLimits/read",
+        serde_json::json!({}),
+    )
+    .context("read Codex rate limits")
+}
+
+fn apply_codex(inner: &mut Inner, result: &Value, updated_at: i64) {
+    let windows = parse_codex_windows(result, updated_at);
+    let (usage, reset_credit_id) = parse_codex_usage(result);
+    inner.windows.retain(|(agent, _), _| agent != "codex");
+    for window in windows {
+        inner.windows.insert((window.agent.clone(), window.key.clone()), window);
+    }
+    inner.codex_usage = usage;
+    inner.codex_reset_credit_id = reset_credit_id;
 }
 
 impl UsageStore {
@@ -215,7 +318,7 @@ impl UsageStore {
             })
             .collect();
         windows.sort_by(|a, b| b.used_percent.total_cmp(&a.used_percent).then_with(|| a.agent.cmp(&b.agent)).then_with(|| a.key.cmp(&b.key)));
-        UsageSnapshot { windows }
+        UsageSnapshot { windows, codex: inner.codex_usage.clone() }
     }
 
     /// Refresh through the local Codex app-server. Ordinary calls are cached
@@ -240,22 +343,13 @@ impl UsageStore {
             }
         }
 
-        let answer = crate::harness::codex::appserver::ask(
-            crate::harness::codex::appserver::Where::default(),
-            "account/rateLimits/read",
-            serde_json::json!({}),
-        )
-        .context("read Codex rate limits");
+        let answer = read_codex();
 
         let mut inner = self.inner.lock().unwrap();
         inner.codex.in_flight = false;
         match answer {
             Ok(result) => {
-                let windows = parse_codex(&result, now);
-                inner.windows.retain(|(agent, _), _| agent != "codex");
-                for window in windows {
-                    inner.windows.insert((window.agent.clone(), window.key.clone()), window);
-                }
+                apply_codex(&mut inner, &result, now);
                 inner.codex.last_success = Some(now);
                 inner.codex.retry_at = None;
                 inner.codex.failures = 0;
@@ -268,6 +362,82 @@ impl UsageStore {
                 inner.codex.retry_at = Some(now.saturating_add(backoff));
                 Err(error)
             }
+        }
+    }
+
+    /// Redeem the next available Codex reset credit through the same local
+    /// app-server that reported it. Only one attempt may be live at a time.
+    pub fn reset_codex(&self) -> Result<()> {
+        let credit_id = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.codex_reset_in_flight || inner.codex.in_flight {
+                anyhow::bail!("Codex usage is already refreshing or resetting.");
+            }
+            let available = inner
+                .codex_usage
+                .as_ref()
+                .and_then(|usage| usage.reset_credits.as_ref())
+                .is_some_and(|reset| reset.available_count > 0);
+            if !available {
+                anyhow::bail!("No Codex rate-limit reset is available.");
+            }
+            let credit_id = inner.codex_reset_credit_id.clone();
+            inner.codex_reset_in_flight = true;
+            credit_id
+        };
+        let mut params = serde_json::json!({"idempotencyKey": uuid::Uuid::new_v4().to_string()});
+        if let Some(credit_id) = credit_id {
+            params["creditId"] = Value::String(credit_id);
+        }
+        let answer = crate::harness::codex::appserver::ask_with_timeout(
+            crate::harness::codex::appserver::Where::default(),
+            "account/rateLimitResetCredit/consume",
+            params,
+            Duration::from_secs(30),
+        )
+        .context("reset Codex rate limits");
+
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.codex_reset_in_flight = false;
+        }
+
+        let answer = answer?;
+        let outcome = answer.get("outcome").and_then(Value::as_str).context("Codex returned no reset outcome")?;
+        match outcome {
+            "reset" => {
+                if let Ok(result) = read_codex() {
+                    let mut inner = self.inner.lock().unwrap();
+                    apply_codex(&mut inner, &result, now_ms());
+                    inner.codex.last_success = Some(now_ms());
+                    inner.codex.retry_at = None;
+                    inner.codex.failures = 0;
+                } else {
+                    // The consume succeeded, so do not offer the same opaque
+                    // credit again if the follow-up read happens to fail.
+                    let mut inner = self.inner.lock().unwrap();
+                    inner.codex_reset_credit_id = None;
+                    if let Some(reset) = inner.codex_usage.as_mut().and_then(|usage| usage.reset_credits.as_mut()) {
+                        reset.available_count = 0;
+                        reset.next_expires_at = None;
+                    }
+                }
+                Ok(())
+            }
+            "nothingToReset" => anyhow::bail!("Codex has no eligible usage window to reset."),
+            "noCredit" | "alreadyRedeemed" => {
+                let mut inner = self.inner.lock().unwrap();
+                inner.codex_reset_credit_id = None;
+                if let Some(reset) = inner.codex_usage.as_mut().and_then(|usage| usage.reset_credits.as_mut()) {
+                    reset.available_count = 0;
+                    reset.next_expires_at = None;
+                }
+                if outcome == "noCredit" {
+                    anyhow::bail!("No Codex rate-limit reset is available.");
+                }
+                anyhow::bail!("That Codex rate-limit reset was already used.");
+            }
+            other => anyhow::bail!("Codex returned an unknown reset outcome: {other}"),
         }
     }
 }
@@ -295,7 +465,7 @@ mod tests {
 
     #[test]
     fn codex_primary_and_secondary_parse_as_one_window_list() {
-        let windows = parse_codex(
+        let windows = parse_codex_windows(
             &json!({"rateLimits": {
                 "primary": {"usedPercent": 17, "windowDurationMins": 300, "resetsAt": 1788757220},
                 "secondary": {"usedPercent": 43, "windowDurationMins": 10080, "resetsAt": 1788981737},
@@ -308,6 +478,54 @@ mod tests {
         assert_eq!(windows[0].resets_at, Some(1_788_757_220_000));
         assert_eq!(windows[1].label, "weekly");
         assert_eq!(windows[1].plan.as_deref(), Some("pro"));
+    }
+
+    #[test]
+    fn codex_keeps_named_limit_windows_separate_from_the_account_windows() {
+        let windows = parse_codex_windows(
+            &json!({
+                "rateLimits": {
+                    "primary": {"usedPercent": 41, "windowDurationMins": 10080},
+                    "planType": "pro"
+                },
+                "rateLimitsByLimitId": {
+                    "codex": {
+                        "primary": {"usedPercent": 41, "windowDurationMins": 10080},
+                        "planType": "pro"
+                    },
+                    "codex_bengalfox": {
+                        "limitName": "GPT-5.3-Codex-Spark",
+                        "primary": {"usedPercent": 5, "windowDurationMins": 300},
+                        "secondary": {"usedPercent": 9, "windowDurationMins": 10080},
+                        "planType": "pro"
+                    }
+                }
+            }),
+            123,
+        );
+        assert_eq!(windows.len(), 3);
+        assert_eq!(windows[0].key, "weekly");
+        assert_eq!(windows[1].key, "codex_bengalfox_five_hour");
+        assert_eq!(windows[1].label, "GPT-5.3-Codex-Spark 5h");
+        assert_eq!(windows[2].key, "codex_bengalfox_weekly");
+    }
+
+    #[test]
+    fn codex_credits_and_next_available_reset_parse_from_the_rpc_payload() {
+        let (usage, credit_id) = parse_codex_usage(&json!({
+            "rateLimits": {"credits": {"hasCredits": true, "unlimited": false, "balance": "1652.0941250000"}},
+            "rateLimitResetCredits": {
+                "availableCount": 2,
+                "credits": [
+                    {"id": "later", "status": "available", "expiresAt": 1_800_000_000},
+                    {"id": "spent", "status": "redeemed", "expiresAt": 1_700_000_000},
+                    {"id": "sooner", "status": "available", "expiresAt": 1_790_000_000}
+                ]
+            }
+        }));
+        assert_eq!(credit_id.as_deref(), Some("sooner"));
+        assert_eq!(usage.as_ref().and_then(|value| value.credits.as_ref()).and_then(|value| value.balance.as_deref()), Some("1652.0941250000"));
+        assert_eq!(usage.and_then(|value| value.reset_credits).and_then(|value| value.next_expires_at), Some(1_790_000_000_000));
     }
 
     #[test]
