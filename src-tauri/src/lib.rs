@@ -61,6 +61,7 @@ pub fn run() {
     };
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -70,6 +71,15 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(state)
         .setup(move |app| {
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                app.deep_link().on_open_url(|event| {
+                    for url in event.urls() {
+                        log::info!("received deep link: {url}");
+                    }
+                });
+            }
             status::install_menu(app)?;
             let control_endpoint = hooks::prepare_control()?;
             let manager = session::SessionManager::new(

@@ -6,8 +6,8 @@
        on-device speech recogniser. Without these strings macOS refuses the
        capture outright instead of asking. -->
   <key>NSMicrophoneUsageDescription</key>
-  <string>Raccoon listens while you dictate a prompt. Audio stays on this Mac.</string>
+  <string>TerminalX Next listens while you dictate a prompt. Audio stays on this Mac.</string>
   <key>NSSpeechRecognitionUsageDescription</key>
-  <string>Raccoon turns your dictation into text for the composer.</string>
+  <string>TerminalX Next turns your dictation into text for the composer.</string>
 </dict>
 </plist>

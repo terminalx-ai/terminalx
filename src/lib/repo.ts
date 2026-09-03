@@ -1,4 +1,4 @@
-/// Where Raccoon's source lives. One constant so the About tab, and anything
+/// Where TerminalX Next's source lives. One constant so the About tab, and anything
 /// else that needs to point a reader at the repository, agree on it.
 export const REPO_URL = "https://github.com/terminalx-ai/raccoon";
 

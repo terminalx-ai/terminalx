@@ -1,4 +1,4 @@
-# Releasing Raccoon
+# Releasing TerminalX Next
 
 ## One-time setup
 
@@ -30,21 +30,25 @@ a merge patch over `tauri.conf.json` — it changes three things and nothing els
 
 | Key | Dev value | What it moves |
 | --- | --- | --- |
-| `productName` | `Raccoon Dev` | The Dock label, the app menu, ⌘-Tab |
-| `identifier` | `dev.raccoon.desktop.dev` | macOS permission grants and per-app state |
+| `productName` | `TerminalX Next Dev` | The Dock label, the app menu, ⌘-Tab |
+| `identifier` | `com.terminalx.next.dev` | macOS permission grants and per-app state |
 | `bundle.icon` | `icons-dev/*` | The Dock icon: the app icon with an amber "D" badge |
 
 So a dev build and an installed release can sit in the Dock together and stay
 apart at a glance.
 
+The release identity is deliberately `TerminalX Next` / `com.terminalx.next`,
+and it registers only `terminalx-next://`. Keep it separate from TerminalX's
+name, identifier, and URL scheme until the explicit parity cutover.
+
 The separate identifier is what keeps the two from stepping on each other in
 macOS itself. TCC keys microphone and speech-recognition consent by bundle
-identifier, so `Raccoon Dev` gets its own rows under Privacy & Security:
+identifier, so `TerminalX Next Dev` gets its own rows under Privacy & Security:
 revoking or re-prompting dev leaves the installed release alone, and vice
 versa. Anything else macOS scopes per identifier (saved window state, launch
 services registration) is likewise separate.
 
-What the identifier does *not* move is Raccoon's own data. The store still
+What the identifier does *not* move is TerminalX Next's own data. The store still
 lives in `~/.raccoon` for both builds, and `RACCOON_HOME` is still the only
 thing that points it elsewhere:
 
@@ -63,28 +67,31 @@ Two notes on the mechanics:
   in the same target directory therefore rebuilds the crate each time; give
   the release build its own `CARGO_TARGET_DIR` (below) to avoid that.
 
-`pnpm tauri build` is untouched: it reads only `tauri.conf.json`, so the
-shipped bundle keeps the plain icons, the `Raccoon` name, and the
-`dev.raccoon.desktop` identifier.
+`pnpm tauri build` reads only `tauri.conf.json`, so the shipped bundle keeps
+the amber "N" badge, the `TerminalX Next` name, and the `com.terminalx.next`
+identifier.
 
 ### Regenerating the badged icons
 
-`src-tauri/icons-dev/` is generated, and committed so a fresh clone runs
-`pnpm tauri:dev` without extra steps. To rebuild it (after the app icon
-changes, say):
+`src-tauri/icons/` and `src-tauri/icons-dev/` are generated and committed, so
+a fresh clone can build without the predecessor installed. To regenerate both
+sets from the installed TerminalX icon:
 
 ```sh
 python3 scripts/badge-dev-icon.py
-pnpm tauri icon src-tauri/icons-dev/app-icon-dev.png --output src-tauri/icons-dev
+pnpm tauri icon src-tauri/icons/app-icon-next.png --output src-tauri/icons
+pnpm tauri icon src-tauri/icons-dev/app-icon-next-dev.png --output src-tauri/icons-dev
 rm -rf src-tauri/icons-dev/android src-tauri/icons-dev/ios \
        src-tauri/icons-dev/Square*Logo.png src-tauri/icons-dev/StoreLogo.png
 ```
 
-The script needs Pillow (`pip install pillow`). It reads the 1024px master out
-of `src-tauri/icons/icon.icns`, composites the badge in the app's own amber
-accent, and writes `src-tauri/icons-dev/app-icon-dev.png`; same input, same
-bytes out. The third command drops the mobile and Windows Store output, which
-a macOS dev build never loads.
+The script needs Pillow (`pip install pillow`). It extracts the largest
+PNG-encoded entry from
+`/Applications/TerminalX.app/Contents/Resources/icon.icns`, composites "N" and
+"D" badges in the app's own amber accent, removes the source artwork's stray
+vertical highlight, and writes the two 1024px masters; the same source, fonts,
+and Pillow version produce the same bytes. The final command drops mobile and
+Windows Store output from the dev set, which a macOS dev build never loads.
 
 ## Build
 
@@ -100,11 +107,11 @@ release mode, and writes to `src-tauri/target/release/bundle/`:
 
 | Path | What |
 | --- | --- |
-| `macos/Raccoon.app` | The app, ad-hoc signed (`signingIdentity: "-"`) |
-| `macos/Raccoon.app/Contents/MacOS/terminalx-next` | A tiny launcher for the app's built-in CLI command family |
-| `dmg/Raccoon_<version>_aarch64.dmg` | Disk image for distribution |
-| `macos/Raccoon.app.tar.gz` | Updater artifact |
-| `macos/Raccoon.app.tar.gz.sig` | Its signature, made with the private key |
+| `macos/TerminalX Next.app` | The app, ad-hoc signed (`signingIdentity: "-"`) |
+| `macos/TerminalX Next.app/Contents/MacOS/terminalx-next` | A tiny launcher for the app's built-in CLI command family |
+| `dmg/TerminalX Next_<version>_aarch64.dmg` | Disk image for distribution |
+| `macos/TerminalX Next.app.tar.gz` | Updater artifact |
+| `macos/TerminalX Next.app.tar.gz.sig` | Its signature, made with the private key |
 
 Building into a separate target directory keeps a running `pnpm tauri:dev`
 undisturbed: prefix the command with
@@ -120,7 +127,7 @@ undisturbed: prefix the command with
 
 The updater fetches one JSON document and compares `version` with the
 running app. Attach it to the GitHub Release as `latest.json`, alongside
-`Raccoon.app.tar.gz` and the `.dmg`, and mark that release latest — the
+`TerminalX Next.app.tar.gz` and the `.dmg`, and mark that release latest — the
 endpoint's `/releases/latest/download/` resolves to whichever release that
 is:
 
@@ -131,8 +138,8 @@ is:
   "pub_date": "2026-09-02T00:00:00Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "<contents of Raccoon.app.tar.gz.sig>",
-      "url": "https://github.com/terminalx-ai/raccoon/releases/download/v0.2.0/Raccoon.app.tar.gz"
+      "signature": "<contents of TerminalX Next.app.tar.gz.sig>",
+      "url": "https://github.com/terminalx-ai/raccoon/releases/download/v0.2.0/TerminalX%20Next.app.tar.gz"
     }
   }
 }

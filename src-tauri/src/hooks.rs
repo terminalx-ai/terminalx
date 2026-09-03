@@ -372,8 +372,8 @@ mod tests {
 
     #[test]
     fn the_hook_command_is_this_binary_with_the_event() {
-        let c = hook_command(Path::new("/Applications/Raccoon.app/Contents/MacOS/raccoon"), "PreToolUse");
-        assert_eq!(c, "'/Applications/Raccoon.app/Contents/MacOS/raccoon' hook PreToolUse");
+        let c = hook_command(Path::new("/Applications/TerminalX Next.app/Contents/MacOS/raccoon"), "PreToolUse");
+        assert_eq!(c, "'/Applications/TerminalX Next.app/Contents/MacOS/raccoon' hook PreToolUse");
         // A quote in the path would otherwise end the quoting early.
         let c = hook_command(Path::new("/tmp/it's here/raccoon"), "Stop");
         assert_eq!(c, r#"'/tmp/it'\''s here/raccoon' hook Stop"#);

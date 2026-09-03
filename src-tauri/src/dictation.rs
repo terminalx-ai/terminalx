@@ -137,11 +137,11 @@ mod mac {
     /// Shown when the microphone was open but delivered nothing: no frames at
     /// all, or nothing but zeroes. That is what an unpermitted or muted input
     /// looks like from here, and it must never pass as a successful dictation.
-    const NO_AUDIO: &str = "The microphone delivered no audio. Check the input under Settings → Transcription and that Raccoon is allowed to use the microphone.";
+    const NO_AUDIO: &str = "The microphone delivered no audio. Check the input under Settings → Transcription and that TerminalX Next is allowed to use the microphone.";
     /// Shown when a local model heard real sound and still made no words of it.
     const NOT_RECOGNISED: &str = "Nothing was recognised. Try again, speak closer to the microphone, or pick another model under Settings → Transcription.";
     /// Shown when macOS will not let this app near the microphone at all.
-    const MIC_DENIED: &str = "Raccoon is not allowed to use the microphone. Enable it under System Settings → Privacy & Security → Microphone.";
+    const MIC_DENIED: &str = "TerminalX Next is not allowed to use the microphone. Enable it under System Settings → Privacy & Security → Microphone.";
     /// Timestamp movement smaller than this can be a recogniser correction,
     /// not a new spoken segment.
     const SEGMENT_TIMESTAMP_TOLERANCE: f64 = 0.05;
@@ -461,7 +461,7 @@ mod mac {
             let app2 = app.clone();
             let begin = move |status: SFSpeechRecognizerAuthorizationStatus| {
                 if status != SFSpeechRecognizerAuthorizationStatus::Authorized {
-                    emit(&app2, "error", None, Some("Speech recognition is not allowed. Enable it for Raccoon under System Settings → Privacy & Security → Speech Recognition, or pick a local model in Settings → Transcription.".into()));
+                    emit(&app2, "error", None, Some("Speech recognition is not allowed. Enable it for TerminalX Next under System Settings → Privacy & Security → Speech Recognition, or pick a local model in Settings → Transcription.".into()));
                     return;
                 }
                 let me = me.clone();

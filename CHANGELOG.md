@@ -1,6 +1,11 @@
-# Changelog
+# TerminalX Next changelog
 
 ## Unreleased
+
+- The app now ships as TerminalX Next (`com.terminalx.next`) with a badged
+  TerminalX icon and its own `terminalx-next://` URL scheme, so it can run
+  beside TerminalX throughout the transition. Development builds use the
+  separate TerminalX Next Dev identity and a "D" badge.
 
 - Claude tabs now run the real interactive CLI in a terminal, and the chat is a
   view of that one process: the transcript is read from the CLI's own session
@@ -8,13 +13,13 @@
   chat and terminal without stopping anything or waiting for a turn to end.
   ([docs/PTY-FIRST.md](docs/PTY-FIRST.md))
 - Codex tabs work the same way: the real `codex` TUI in the tab, its rollout
-  read into the chat, and its hooks — installed in a Codex home Raccoon manages
-  so your own `~/.codex` is never edited — carrying status and approvals, with
+  read into the chat, and its hooks — installed in a Codex home TerminalX Next
+  manages so your own `~/.codex` is never edited — carrying status and approvals, with
   "Ask every time" now asking about every tool rather than only the ones Codex
   would have stopped for.
-- Claude Code and Codex are the agents Raccoon offers; Cursor and OpenCode are
-  no longer listed in the pickers or in Settings → Agents. Sessions and tabs
-  already running on them open and work exactly as before.
+- Claude Code and Codex are the agents TerminalX Next offers; Cursor and
+  OpenCode are no longer listed in the pickers or in Settings → Agents.
+  Sessions and tabs already running on them open and work exactly as before.
 
 ## 0.1.0
 

@@ -1,11 +1,12 @@
 ---
 name: Feature request
-about: Something Raccoon should do and does not
+about: Something TerminalX Next should do and does not
 labels: enhancement
 ---
 
 **What are you trying to do?**
-The problem, not the solution — what you were doing when Raccoon got in the way.
+The problem, not the solution — what you were doing when TerminalX Next got in
+the way.
 
 **What would it look like?**
 
