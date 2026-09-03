@@ -14,7 +14,7 @@ let deliver: (payload: { kind: string; text?: string }) => void = () => {};
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async (cmd: string) => {
     if (cmd === "dictation_available") return true;
-    if (cmd === "transcription_settings") return { model: "apple" };
+    if (cmd === "transcription_preferences") return { model: "apple" };
     if (cmd === "transcription_models") return [];
     return undefined;
   }),

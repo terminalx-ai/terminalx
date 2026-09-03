@@ -30,18 +30,39 @@ pub struct ModelRow {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TranscriptionSettings {
+pub struct TranscriptionPreferences {
     /// "apple" or a catalog id.
     pub model: String,
     pub input_device: Option<String>,
     pub mute_while_recording: bool,
-    pub inputs: Vec<audio::InputDevice>,
 }
 
-#[derive(Default)]
+trait InputDeviceGateway: Send + Sync {
+    fn list_inputs(&self) -> Vec<audio::InputDevice>;
+}
+
+struct SystemInputDevices;
+
+impl InputDeviceGateway for SystemInputDevices {
+    fn list_inputs(&self) -> Vec<audio::InputDevice> {
+        audio::list_inputs()
+    }
+}
+
 pub struct Transcription {
     pub downloads: Arc<download::Downloads>,
     pub engine: Arc<engine::Engine>,
+    input_devices: Arc<dyn InputDeviceGateway>,
+}
+
+impl Default for Transcription {
+    fn default() -> Self {
+        Self {
+            downloads: Arc::new(download::Downloads::default()),
+            engine: Arc::new(engine::Engine::default()),
+            input_devices: Arc::new(SystemInputDevices),
+        }
+    }
 }
 
 impl Transcription {
@@ -58,14 +79,22 @@ impl Transcription {
             .collect()
     }
 
-    pub fn settings(&self) -> TranscriptionSettings {
+    /// Saved preferences only. This is safe to call while a page renders: it
+    /// never touches CoreAudio or either macOS privacy service.
+    pub fn preferences(&self) -> TranscriptionPreferences {
         let s = settings::load();
-        TranscriptionSettings {
+        TranscriptionPreferences {
             model: s.transcription_model.clone(),
             input_device: s.transcription_input_device.clone(),
             mute_while_recording: s.transcription_mute,
-            inputs: audio::list_inputs(),
         }
+    }
+
+    /// Discover devices only after an explicit request, such as opening the
+    /// picker. Some macOS/audio-driver combinations consult TCC even for this
+    /// otherwise read-only operation.
+    pub fn inputs(&self) -> Vec<audio::InputDevice> {
+        self.input_devices.list_inputs()
     }
 
     /// The engine dictation should use right now: the chosen model if its
@@ -110,5 +139,39 @@ impl Transcription {
         self.downloads.cancel(id);
         self.engine.unload_if(id);
         download::delete(spec)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct CountingInputDevices {
+        calls: AtomicUsize,
+    }
+
+    impl InputDeviceGateway for CountingInputDevices {
+        fn list_inputs(&self) -> Vec<audio::InputDevice> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn saved_preferences_do_not_enumerate_input_devices() {
+        let gateway = Arc::new(CountingInputDevices::default());
+        let transcription = Transcription {
+            downloads: Arc::new(download::Downloads::default()),
+            engine: Arc::new(engine::Engine::default()),
+            input_devices: gateway.clone(),
+        };
+
+        let _ = transcription.preferences();
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 0);
+
+        let _ = transcription.inputs();
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
     }
 }

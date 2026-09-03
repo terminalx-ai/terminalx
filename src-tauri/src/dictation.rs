@@ -27,6 +27,9 @@ pub struct DictationEvent {
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// The System Settings privacy pane that can resolve this error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings: Option<&'static str>,
     /// Stable within one Apple transcription segment and incremented at a
     /// timestamp boundary. Other engines leave it absent.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -56,9 +59,17 @@ fn emit(app: &AppHandle, kind: &'static str, text: Option<String>, message: Opti
     emit_segment(app, kind, text, message, None);
 }
 
+fn emit_privacy_error(app: &AppHandle, message: String, settings: &'static str) {
+    trace("error", None, Some(&message), None);
+    let _ = app.emit(
+        "dictation",
+        DictationEvent { kind: "error", text: None, message: Some(message), settings: Some(settings), segment: None },
+    );
+}
+
 fn emit_segment(app: &AppHandle, kind: &'static str, text: Option<String>, message: Option<String>, segment: Option<u64>) {
     trace(kind, text.as_deref(), message.as_deref(), segment);
-    let _ = app.emit("dictation", DictationEvent { kind, text, message, segment });
+    let _ = app.emit("dictation", DictationEvent { kind, text, message, settings: None, segment });
 }
 
 /// System output volume, read and written through AppleScript. Best effort:
@@ -86,7 +97,7 @@ mod mac {
     use objc2::AllocAnyThread;
     use objc2_avf_audio::{AVAudioFormat, AVAudioPCMBuffer};
     use objc2_foundation::NSError;
-    use objc2_speech::{SFSpeechAudioBufferRecognitionRequest, SFSpeechRecognitionResult, SFSpeechRecognitionTask, SFSpeechRecognizer, SFSpeechRecognizerAuthorizationStatus, SFTranscription};
+    use objc2_speech::{SFSpeechAudioBufferRecognitionRequest, SFSpeechRecognitionResult, SFSpeechRecognitionTask, SFSpeechRecognizer, SFTranscription};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     use std::sync::mpsc::Receiver;
@@ -142,6 +153,9 @@ mod mac {
     const NOT_RECOGNISED: &str = "Nothing was recognised. Try again, speak closer to the microphone, or pick another model under Settings → Transcription.";
     /// Shown when macOS will not let this app near the microphone at all.
     const MIC_DENIED: &str = "TerminalX is not allowed to use the microphone. Enable it under System Settings → Privacy & Security → Microphone.";
+    /// Shown when the system recogniser cannot be used, with a route to the
+    /// privacy pane that can change the decision.
+    const SPEECH_DENIED: &str = "Speech recognition is not allowed. Enable it for TerminalX under System Settings → Privacy & Security → Speech Recognition, or pick a local model in Settings → Transcription.";
     /// Timestamp movement smaller than this can be a recogniser correction,
     /// not a new spoken segment.
     const SEGMENT_TIMESTAMP_TOLERANCE: f64 = 0.05;
@@ -204,21 +218,41 @@ mod mac {
         samples.len() < TARGET_RATE as usize / 4 || samples.iter().all(|s| *s == 0.0)
     }
 
-    /// Microphone permission, as macOS sees it. Asking before opening the
-    /// device matters under the hardened runtime: without the audio-input
-    /// entitlement no prompt is ever raised and CoreAudio simply hands back
-    /// silence, so a refusal has to be recognised rather than recorded.
+    /// The two privacy services dictation can need. The gateway makes the
+    /// boundary injectable: passive app paths can be tested without touching
+    /// TCC, and a deliberate start can request both services in one flow.
     mod permission {
         use block2::RcBlock;
         use objc2::runtime::Bool;
         use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaType, AVMediaTypeAudio};
+        use objc2_speech::{SFSpeechRecognizer, SFSpeechRecognizerAuthorizationStatus};
+        use std::sync::{Arc, Mutex};
 
-        pub enum Mic {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum Status {
             Granted,
             Denied,
             /// Never asked; a prompt will be raised.
             Ask,
         }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum Kind {
+            Microphone,
+            SpeechRecognition,
+        }
+
+        type PermissionCallback = Box<dyn Fn(bool) + Send + 'static>;
+        type Completion = Box<dyn FnOnce(Result<(), Kind>) + Send + 'static>;
+
+        pub trait Gateway: Send + Sync {
+            fn microphone_status(&self) -> Status;
+            fn speech_status(&self) -> Status;
+            fn request_microphone(&self, then: PermissionCallback);
+            fn request_speech(&self, then: PermissionCallback);
+        }
+
+        pub struct SystemGateway;
 
         /// The audio media type constant, or `None` if AVFoundation did not
         /// load — in which case there is nothing to ask and nothing to refuse.
@@ -226,21 +260,16 @@ mod mac {
             unsafe { AVMediaTypeAudio }
         }
 
-        pub fn status() -> Mic {
-            let Some(media) = audio() else { return Mic::Granted };
-            let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(media) };
-            if status == AVAuthorizationStatus::Authorized {
-                Mic::Granted
-            } else if status == AVAuthorizationStatus::NotDetermined {
-                Mic::Ask
-            } else {
-                Mic::Denied
+        fn microphone_status() -> Status {
+            let Some(media) = audio() else { return Status::Granted };
+            match unsafe { AVCaptureDevice::authorizationStatusForMediaType(media) } {
+                AVAuthorizationStatus::Authorized => Status::Granted,
+                AVAuthorizationStatus::NotDetermined => Status::Ask,
+                _ => Status::Denied,
             }
         }
 
-        /// Raise the system prompt. `then` runs on an arbitrary thread once
-        /// the reader has answered.
-        pub fn request(then: impl Fn(bool) + 'static) {
+        fn request_microphone(then: PermissionCallback) {
             let Some(media) = audio() else {
                 then(true);
                 return;
@@ -248,6 +277,123 @@ mod mac {
             let block = RcBlock::new(move |granted: Bool| then(granted.as_bool()));
             unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(media, &block) };
         }
+
+        fn speech_status() -> Status {
+            match unsafe { SFSpeechRecognizer::authorizationStatus() } {
+                SFSpeechRecognizerAuthorizationStatus::Authorized => Status::Granted,
+                SFSpeechRecognizerAuthorizationStatus::NotDetermined => Status::Ask,
+                _ => Status::Denied,
+            }
+        }
+
+        fn request_speech(then: PermissionCallback) {
+            let block = RcBlock::new(move |status: SFSpeechRecognizerAuthorizationStatus| {
+                then(status == SFSpeechRecognizerAuthorizationStatus::Authorized);
+            });
+            unsafe { SFSpeechRecognizer::requestAuthorization(&block) };
+        }
+
+        impl Gateway for SystemGateway {
+            fn microphone_status(&self) -> Status {
+                microphone_status()
+            }
+
+            fn speech_status(&self) -> Status {
+                speech_status()
+            }
+
+            fn request_microphone(&self, then: PermissionCallback) {
+                request_microphone(then);
+            }
+
+            fn request_speech(&self, then: PermissionCallback) {
+                request_speech(then);
+            }
+        }
+
+        pub enum Start {
+            Ready,
+            Denied(Kind),
+            Pending,
+        }
+
+        struct Pending {
+            microphone: Option<bool>,
+            speech: Option<bool>,
+            complete: Option<Completion>,
+        }
+
+        fn record(pending: &Arc<Mutex<Pending>>, kind: Kind, granted: bool) {
+            let completion = {
+                let mut state = pending.lock().unwrap();
+                match kind {
+                    Kind::Microphone => state.microphone = Some(granted),
+                    Kind::SpeechRecognition => state.speech = Some(granted),
+                }
+                let result = if state.microphone == Some(false) {
+                    Some(Err(Kind::Microphone))
+                } else if state.speech == Some(false) {
+                    Some(Err(Kind::SpeechRecognition))
+                } else if state.microphone == Some(true) && state.speech == Some(true) {
+                    Some(Ok(()))
+                } else {
+                    None
+                };
+                if let Some(result) = result {
+                    state.complete.take().map(|complete| (complete, result))
+                } else {
+                    None
+                }
+            };
+            if let Some((complete, result)) = completion {
+                complete(result);
+            }
+        }
+
+        /// Check both services only in response to a dictation start. When both
+        /// are undecided their prompts are initiated together; the recogniser
+        /// starts only after both callbacks have granted access.
+        pub fn begin(
+            gateway: Arc<dyn Gateway>,
+            needs_speech: bool,
+            complete: impl FnOnce(Result<(), Kind>) + Send + 'static,
+        ) -> Start {
+            let microphone = gateway.microphone_status();
+            let speech = if needs_speech { gateway.speech_status() } else { Status::Granted };
+            if microphone == Status::Denied {
+                return Start::Denied(Kind::Microphone);
+            }
+            if speech == Status::Denied {
+                return Start::Denied(Kind::SpeechRecognition);
+            }
+            if microphone == Status::Granted && speech == Status::Granted {
+                return Start::Ready;
+            }
+
+            let pending = Arc::new(Mutex::new(Pending {
+                microphone: (microphone == Status::Granted).then_some(true),
+                speech: (speech == Status::Granted).then_some(true),
+                complete: Some(Box::new(complete)),
+            }));
+            if microphone == Status::Ask {
+                let state = pending.clone();
+                gateway.request_microphone(Box::new(move |granted| record(&state, Kind::Microphone, granted)));
+            }
+            if speech == Status::Ask {
+                let state = pending.clone();
+                gateway.request_speech(Box::new(move |granted| record(&state, Kind::SpeechRecognition, granted)));
+            }
+            Start::Pending
+        }
+    }
+
+    fn emit_permission_denied(app: &AppHandle, kind: permission::Kind) -> String {
+        let (message, settings) = match kind {
+            permission::Kind::Microphone => (MIC_DENIED, "microphone"),
+            permission::Kind::SpeechRecognition => (SPEECH_DENIED, "speechRecognition"),
+        };
+        emit_privacy_error(app, message.into(), settings);
+        message.into()
     }
 
     /// A recogniser request handed to the pump thread. The framework accepts
@@ -291,6 +437,7 @@ mod mac {
 
     pub struct Dictation {
         active: Mutex<Option<Active>>,
+        permissions: Arc<dyn permission::Gateway>,
         /// Bumped per start; a result handler from an older run is ignored.
         generation: Arc<AtomicU64>,
         stopping: Arc<AtomicBool>,
@@ -310,9 +457,16 @@ mod mac {
 
     impl Default for Dictation {
         fn default() -> Self {
+            Self::with_permissions(Arc::new(permission::SystemGateway))
+        }
+    }
+
+    impl Dictation {
+        fn with_permissions(permissions: Arc<dyn permission::Gateway>) -> Self {
             let now = Instant::now();
             Self {
                 active: Mutex::new(None),
+                permissions,
                 generation: Arc::new(AtomicU64::new(0)),
                 stopping: Arc::new(AtomicBool::new(false)),
                 heard: Arc::new(AtomicBool::new(false)),
@@ -355,31 +509,30 @@ mod mac {
                 emit(&app, "error", None, Some(msg.clone()));
                 return Err(msg);
             }
-            // And the microphone itself has to be allowed. Under the hardened
-            // runtime a refusal is silent — zeroes rather than an error — so
-            // settle it here instead of recording nothing.
-            match permission::status() {
-                permission::Mic::Granted => self.begin(app, &model),
-                permission::Mic::Denied => {
-                    emit(&app, "error", None, Some(MIC_DENIED.into()));
-                    Err(MIC_DENIED.into())
+            // Under the hardened runtime a microphone refusal is silent —
+            // zeroes rather than an error — so settle every privacy service
+            // this engine needs before opening the capture.
+            let needs_speech = model == APPLE;
+            let me = self.clone();
+            let continuation_app = app.clone();
+            let continuation_model = model.clone();
+            let continue_after_prompt = move |result: Result<(), permission::Kind>| match result {
+                Ok(()) => {
+                    if let Err(error) = me.begin(continuation_app.clone(), &continuation_model) {
+                        emit(&continuation_app, "error", None, Some(error));
+                    }
                 }
-                permission::Mic::Ask => {
-                    // The prompt is answered on another thread; the dictation
-                    // carries on from there, reporting through events because
-                    // the command that asked for it has long since returned.
-                    let me = self.clone();
-                    permission::request(move |granted| {
-                        if !granted {
-                            emit(&app, "error", None, Some(MIC_DENIED.into()));
-                            return;
-                        }
-                        if let Err(e) = me.begin(app.clone(), &model) {
-                            emit(&app, "error", None, Some(e));
-                        }
-                    });
-                    Ok(())
+                Err(kind) => {
+                    emit_permission_denied(&continuation_app, kind);
                 }
+            };
+            match permission::begin(self.permissions.clone(), needs_speech, continue_after_prompt) {
+                permission::Start::Ready => self.begin(app, &model),
+                permission::Start::Denied(kind) => {
+                    let message = emit_permission_denied(&app, kind);
+                    Err(message)
+                }
+                permission::Start::Pending => Ok(()),
             }
         }
 
@@ -458,29 +611,13 @@ mod mac {
 
         fn start_apple(self: &Arc<Self>, app: AppHandle) -> Result<(), String> {
             let me = self.clone();
-            let app2 = app.clone();
-            let begin = move |status: SFSpeechRecognizerAuthorizationStatus| {
-                if status != SFSpeechRecognizerAuthorizationStatus::Authorized {
-                    emit(&app2, "error", None, Some("Speech recognition is not allowed. Enable it for TerminalX under System Settings → Privacy & Security → Speech Recognition, or pick a local model in Settings → Transcription.".into()));
-                    return;
+            let app_on_main = app.clone();
+            app.run_on_main_thread(move || {
+                if let Err(error) = me.begin_apple_on_main(app_on_main.clone()) {
+                    emit(&app_on_main, "error", None, Some(error));
                 }
-                let me = me.clone();
-                let app3 = app2.clone();
-                let _ = app2.run_on_main_thread(move || {
-                    if let Err(e) = me.begin_apple_on_main(app3.clone()) {
-                        emit(&app3, "error", None, Some(e));
-                    }
-                });
-            };
-            unsafe {
-                let status = SFSpeechRecognizer::authorizationStatus();
-                if status == SFSpeechRecognizerAuthorizationStatus::Authorized {
-                    begin(status);
-                } else {
-                    let block = RcBlock::new(move |s: SFSpeechRecognizerAuthorizationStatus| begin(s));
-                    SFSpeechRecognizer::requestAuthorization(&block);
-                }
-            }
+            })
+            .map_err(|error| error.to_string())?;
             Ok(())
         }
 
@@ -792,12 +929,111 @@ mod mac {
     #[cfg(test)]
     mod tests {
         use super::{
-            is_no_speech_error, is_silent, restart_decision, AppleSegmentTracker, RestartDecision,
-            MAX_RESTARTS, NO_SPEECH_CODE, NO_SPEECH_DOMAIN, RESTART_INTERVAL, TARGET_RATE,
+            is_no_speech_error, is_silent, permission, restart_decision, AppleSegmentTracker,
+            Dictation, RestartDecision, MAX_RESTARTS, NO_SPEECH_CODE, NO_SPEECH_DOMAIN,
+            RESTART_INTERVAL, TARGET_RATE,
         };
+        use std::sync::{Arc, Mutex};
         use std::time::Duration;
 
         const SECOND: usize = TARGET_RATE as usize;
+
+        struct PermissionGateway {
+            microphone: permission::Status,
+            speech: permission::Status,
+            calls: Mutex<Vec<&'static str>>,
+        }
+
+        impl PermissionGateway {
+            fn asking() -> Self {
+                Self {
+                    microphone: permission::Status::Ask,
+                    speech: permission::Status::Ask,
+                    calls: Mutex::new(Vec::new()),
+                }
+            }
+
+            fn with_statuses(microphone: permission::Status, speech: permission::Status) -> Self {
+                Self { microphone, speech, calls: Mutex::new(Vec::new()) }
+            }
+        }
+
+        impl permission::Gateway for PermissionGateway {
+            fn microphone_status(&self) -> permission::Status {
+                self.calls.lock().unwrap().push("microphone_status");
+                self.microphone
+            }
+
+            fn speech_status(&self) -> permission::Status {
+                self.calls.lock().unwrap().push("speech_status");
+                self.speech
+            }
+
+            fn request_microphone(&self, then: Box<dyn Fn(bool) + Send + 'static>) {
+                self.calls.lock().unwrap().push("request_microphone");
+                then(true);
+            }
+
+            fn request_speech(&self, then: Box<dyn Fn(bool) + Send + 'static>) {
+                self.calls.lock().unwrap().push("request_speech");
+                then(true);
+            }
+        }
+
+        #[test]
+        fn creating_dictation_does_not_consult_the_permission_gateway() {
+            let gateway = Arc::new(PermissionGateway::asking());
+
+            let _dictation = Dictation::with_permissions(gateway.clone());
+
+            assert!(gateway.calls.lock().unwrap().is_empty());
+        }
+
+        #[test]
+        fn an_apple_dictation_start_requests_both_undecided_permissions() {
+            let gateway = Arc::new(PermissionGateway::asking());
+            let result = Arc::new(Mutex::new(None));
+            let reported = result.clone();
+
+            let start = permission::begin(gateway.clone(), true, move |outcome| {
+                *reported.lock().unwrap() = Some(outcome);
+            });
+
+            assert!(matches!(start, permission::Start::Pending));
+            assert_eq!(
+                gateway.calls.lock().unwrap().as_slice(),
+                ["microphone_status", "speech_status", "request_microphone", "request_speech"]
+            );
+            assert_eq!(*result.lock().unwrap(), Some(Ok(())));
+        }
+
+        #[test]
+        fn a_local_dictation_start_never_consults_speech_permission() {
+            let gateway = Arc::new(PermissionGateway::asking());
+
+            let start = permission::begin(gateway.clone(), false, |_| {});
+
+            assert!(matches!(start, permission::Start::Pending));
+            assert_eq!(gateway.calls.lock().unwrap().as_slice(), ["microphone_status", "request_microphone"]);
+        }
+
+        #[test]
+        fn either_denied_permission_stops_apple_dictation_before_a_request() {
+            for (microphone, speech, expected) in [
+                (permission::Status::Denied, permission::Status::Ask, permission::Kind::Microphone),
+                (permission::Status::Granted, permission::Status::Denied, permission::Kind::SpeechRecognition),
+            ] {
+                let gateway = Arc::new(PermissionGateway::with_statuses(microphone, speech));
+
+                let start = permission::begin(gateway.clone(), true, |_| panic!("a denied permission cannot complete successfully"));
+
+                match start {
+                    permission::Start::Denied(kind) => assert_eq!(kind, expected),
+                    _ => panic!("a denied permission must stop before prompting"),
+                }
+                assert!(!gateway.calls.lock().unwrap().iter().any(|call| call.starts_with("request_")));
+            }
+        }
 
         #[test]
         fn a_buffer_of_zeroes_is_silence() {
