@@ -24,18 +24,23 @@ import { formatResetCountdown, useCountdownNow } from "@/lib/statusTime";
 import { useResourceSampling } from "@/lib/statusPolling";
 import { errorMessage, statusBar, type ProcSample, type StatusBarSettings, type UsageWindow } from "@/lib/api";
 
-const NARROW_AT = 900;
+const COMPACT_AT = 900;
+const ICON_ONLY_AT = 500;
+type StatusTier = "full" | "compact" | "icon";
 
 /** The quiet, app-wide chrome beneath every column. */
 export function StatusBar() {
   const { settings } = useStatus();
   const ref = useRef<HTMLDivElement>(null);
-  const [narrow, setNarrow] = useState(false);
+  const [tier, setTier] = useState<StatusTier>("full");
 
   useEffect(() => {
     const element = ref.current;
     if (!element) return;
-    const observer = new ResizeObserver(([entry]) => setNarrow(entry.contentRect.width < NARROW_AT));
+    const observer = new ResizeObserver(([entry]) => {
+      const width = entry.contentRect.width;
+      setTier(width < ICON_ONLY_AT ? "icon" : width < COMPACT_AT ? "compact" : "full");
+    });
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
@@ -48,14 +53,14 @@ export function StatusBar() {
         <div
           ref={ref}
           data-status-bar
-          data-narrow={narrow || undefined}
-          className="flex h-[22px] shrink-0 items-center justify-between border-t border-hairline bg-background/70 px-2 text-[11px] leading-none text-muted-foreground"
+          data-tier={tier}
+          className="flex h-[22px] shrink-0 items-center justify-between gap-1 overflow-hidden border-t border-hairline bg-background/70 px-2 text-[11px] leading-none text-muted-foreground"
         >
-          <div className="flex min-w-0 items-center">
-            <UsageCluster narrow={narrow} />
+          <div className="flex min-w-0 flex-1 items-center overflow-hidden">
+            <UsageCluster tier={tier} />
           </div>
-          <div className="flex min-w-0 items-center">
-            <ResourceCluster narrow={narrow} />
+          <div className="flex shrink-0 items-center">
+            <ResourceCluster narrow={tier !== "full"} />
           </div>
         </div>
       </ContextMenuTrigger>
@@ -344,7 +349,46 @@ function shownPercent(window: UsageWindow, preference: StatusBarSettings["percen
   return preference === "remaining" ? 100 - window.usedPercent : window.usedPercent;
 }
 
-function UsageCluster({ narrow }: { narrow: boolean }) {
+type UsageAgent = UsageWindow["agent"];
+
+const AGENTS: UsageAgent[] = ["claude", "codex"];
+
+function agentName(agent: UsageAgent): string {
+  return agent === "claude" ? "Claude" : "Codex";
+}
+
+function windowKind(window: UsageWindow): "5h" | "7d" | null {
+  if (window.key === "five_hour" || window.windowMinutes != null && Math.abs(window.windowMinutes - 300) <= 1) return "5h";
+  if (window.key === "seven_day" || window.key === "weekly" || window.windowMinutes != null && Math.abs(window.windowMinutes - 10_080) <= 1) return "7d";
+  return null;
+}
+
+function windowLabel(window: UsageWindow): string {
+  if (window.key === "five_hour") return "5h";
+  if (window.key === "seven_day" || window.key === "weekly") return "7d";
+  return window.label;
+}
+
+function tightestWindow(windows: UsageWindow[]): UsageWindow {
+  return windows.reduce((tightest, window) => window.usedPercent > tightest.usedPercent ? window : tightest);
+}
+
+function canonicalWindow(windows: UsageWindow[], kind: "5h" | "7d", exactKeys: string[]): UsageWindow | null {
+  const candidates = windows.filter((window) => windowKind(window) === kind);
+  const exact = candidates.filter((window) => exactKeys.includes(window.key));
+  return candidates.length ? tightestWindow(exact.length ? exact : candidates) : null;
+}
+
+/** The full strip reserves one independent value for each canonical account window. */
+function barWindows(windows: UsageWindow[]): UsageWindow[] {
+  const canonical = [
+    canonicalWindow(windows, "5h", ["five_hour"]),
+    canonicalWindow(windows, "7d", ["seven_day", "weekly"]),
+  ].filter((window): window is UsageWindow => window != null);
+  return canonical.length ? canonical : [tightestWindow(windows)];
+}
+
+function UsageCluster({ tier }: { tier: StatusTier }) {
   const { settings, usage, usageRefreshing } = useStatus();
   const harnesses = useSessionStore().harnesses;
   const available = new Set(harnesses.filter((harness) => harness.available).map((harness) => harness.id));
@@ -353,43 +397,72 @@ function UsageCluster({ narrow }: { narrow: boolean }) {
     .filter((window) => providerProbePending || available.has(window.agent))
     .sort((a, b) => b.usedPercent - a.usedPercent);
   const now = useCountdownNow(windows.map((window) => window.resetsAt));
-  const worst = windows[0];
-  const pressuredProviders = new Set(windows.filter((window) => window.usedPercent >= 60).map((window) => window.agent));
   if (!settings.usage || (!providerProbePending && !available.has("claude") && !available.has("codex"))) return null;
 
-  const display = worst ? Math.round(shownPercent(worst, settings.percent)) : null;
-  const agent = worst?.agent === "claude" ? "Claude" : "Codex";
-  const countdown = worst ? formatResetCountdown(worst.resetsAt, now, worst.label) : null;
+  const groups = AGENTS.flatMap((agent) => {
+    const agentWindows = windows.filter((window) => window.agent === agent);
+    return agentWindows.length ? [{ agent, windows: agentWindows, tightest: tightestWindow(agentWindows) }] : [];
+  });
+  const usageLabel = groups.length
+    ? groups.flatMap(({ agent, windows: agentWindows }) => barWindows(agentWindows).map((window) =>
+      `${agentName(agent)} ${windowLabel(window)} ${Math.round(shownPercent(window, settings.percent))}% ${settings.percent}, resets ${formatResetCountdown(window.resetsAt, now, windowLabel(window))}`,
+    )).join("; ")
+    : "Usage unavailable";
+
   return (
     <PopoverPrimitive.Root>
       <PopoverPrimitive.Trigger asChild>
         <button
           type="button"
-          className={cn(
-            "relative h-[19px] min-w-0 rounded px-1.5 pb-px leading-[18px] outline-none hover:bg-veil-raised focus-visible:ring-1 focus-visible:ring-ring/50",
-            worst ? urgencyText(worst.usedPercent) : "text-muted-foreground",
-          )}
-          aria-label={worst ? `${agent} usage ${display}% ${settings.percent}` : "Usage unavailable"}
+          className="h-[19px] min-w-0 max-w-full overflow-hidden rounded px-1 leading-[18px] text-muted-foreground outline-none hover:bg-veil-raised focus-visible:ring-1 focus-visible:ring-ring/50"
+          aria-label={usageLabel}
         >
-          {worst ? (
-            <span className="flex min-w-0 items-center gap-1 tabular-nums">
-              <span>{agent} {display}%{settings.percent === "remaining" ? " remaining" : ""}</span>
-              {!narrow ? <span className="truncate text-faint">· resets {countdown}</span> : null}
-              {pressuredProviders.size > 1 ? (
-                <span aria-label="and one more agent near its limit" className="flex h-2.5 w-1 flex-col justify-center gap-px">
-                  <i className="size-1 rounded-full bg-current" />
-                  <i className="size-1 rounded-full bg-current" />
-                </span>
-              ) : null}
+          {groups.length ? (
+            <span className="flex min-w-0 items-center whitespace-nowrap tabular-nums">
+              {groups.map(({ agent, windows: agentWindows, tightest }, index) => {
+                const plan = agentWindows.find((window) => window.plan)?.plan;
+                const shown = tier === "full" ? barWindows(agentWindows) : [tightest];
+                return (
+                  <span
+                    key={agent}
+                    data-usage-agent={agent}
+                    className={cn(
+                      "flex min-w-0 items-center gap-1.5",
+                      index < groups.length - 1 && "mr-1.5 border-r border-hairline pr-2",
+                    )}
+                  >
+                    <span className="flex shrink-0 items-center gap-1">
+                      <AgentMark id={agent} className="size-3 text-faint" />
+                      {tier !== "icon" ? <span className="font-medium text-foreground">{agentName(agent)}</span> : null}
+                      {tier === "full" && plan ? <span className="capitalize text-faint">· {plan}</span> : null}
+                    </span>
+                    {tier === "icon" ? (
+                      <i
+                        aria-hidden
+                        className={cn("size-1.5 shrink-0 rounded-full", urgency(tightest.usedPercent))}
+                      />
+                    ) : shown.map((window, windowIndex) => (
+                      <span
+                        key={window.key}
+                        data-usage-window={windowKind(window) ?? window.key}
+                        className={cn(
+                          "flex shrink-0 items-center gap-1",
+                          urgencyText(window.usedPercent),
+                          tier === "full" && windowIndex > 0 && "border-l border-hairline pl-1.5",
+                        )}
+                      >
+                        {window.stale ? <TriangleAlert className="size-3" aria-label="Stale usage data" /> : null}
+                        <span className="font-medium">{windowLabel(window)} {Math.round(shownPercent(window, settings.percent))}%</span>
+                        {tier === "full" ? <span className="text-faint">· {formatResetCountdown(window.resetsAt, now, windowLabel(window))}</span> : null}
+                      </span>
+                    ))}
+                  </span>
+                );
+              })}
             </span>
           ) : (
             "Usage —"
           )}
-          {worst ? (
-            <span className="absolute inset-x-1.5 bottom-0 h-0.5 overflow-hidden rounded-full bg-hairline-strong">
-              <span className={cn("block h-full rounded-full", urgency(worst.usedPercent))} style={{ width: `${shownPercent(worst, settings.percent)}%` }} />
-            </span>
-          ) : null}
         </button>
       </PopoverPrimitive.Trigger>
       <PopoverPrimitive.Portal>
@@ -435,7 +508,7 @@ function UsageCluster({ narrow }: { narrow: boolean }) {
                   <li key={`${window.agent}:${window.key}`} className="grid grid-cols-[16px_72px_1fr_auto] items-center gap-2 rounded-lg bg-well/60 px-2 py-2">
                     <AgentMark id={window.agent} className="size-3.5 text-faint" />
                     <div className="min-w-0">
-                      <div className="truncate text-[11px] font-medium">{window.label}</div>
+                      <div className="truncate text-[11px] font-medium">{windowLabel(window)}</div>
                       <div className="capitalize text-[9.5px] text-faint">{window.agent}{window.plan ? ` · ${window.plan}` : ""}</div>
                     </div>
                     <div className="h-1 overflow-hidden rounded-full bg-hairline-strong">
@@ -446,7 +519,7 @@ function UsageCluster({ narrow }: { narrow: boolean }) {
                         {window.stale ? <TriangleAlert className="size-3" aria-label="Stale usage data" /> : null}
                         {percent}%
                       </span>
-                      <span className="text-[9.5px] text-faint">resets {formatResetCountdown(window.resetsAt, now, window.label)}</span>
+                      <span className="text-[9.5px] text-faint">resets {formatResetCountdown(window.resetsAt, now, windowLabel(window))}</span>
                     </div>
                   </li>
                 );

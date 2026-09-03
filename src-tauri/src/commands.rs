@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::store::index::{self, IssueRef, SessionEntry, TabEntry, TabStatus};
+use crate::store::index::{self, AutomationRef, IssueRef, SessionEntry, TabEntry, TabStatus};
 use crate::store::projects::{self, Project};
 use crate::{git, harness, names, store};
 
@@ -63,6 +63,65 @@ pub fn list_sessions() -> CmdResult<Vec<SessionEntry>> {
     index::load().map_err(err)
 }
 
+// ---------------------------------------------------------------- automations
+
+#[tauri::command]
+pub fn automations_list() -> CmdResult<Vec<crate::automations::Automation>> {
+    store::automations::list().map_err(err)
+}
+
+#[tauri::command]
+pub fn automation_runs(automation_id: String) -> CmdResult<Vec<crate::automations::AutomationRun>> {
+    store::automations::list_runs(&automation_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn automation_create(app: AppHandle, input: crate::automations::AutomationInput) -> CmdResult<crate::automations::Automation> {
+    let mut input = input;
+    input.project_path = projects::canonical(&input.project_path).map_err(err)?;
+    validate_automation_target(&input)?;
+    let automation = crate::automations::definition_from_input(input, None, chrono::Utc::now()).map_err(err)?;
+    let automation = store::automations::insert(automation).map_err(err)?;
+    crate::automations::emit_definitions(&app);
+    Ok(automation)
+}
+
+#[tauri::command]
+pub fn automation_update(app: AppHandle, id: String, input: crate::automations::AutomationInput) -> CmdResult<crate::automations::Automation> {
+    let existing = store::automations::get(&id).map_err(err)?;
+    let mut input = input;
+    input.project_path = projects::canonical(&input.project_path).map_err(err)?;
+    validate_automation_target(&input)?;
+    let automation = crate::automations::definition_from_input(input, Some(&existing), chrono::Utc::now()).map_err(err)?;
+    let automation = store::automations::replace(automation).map_err(err)?;
+    crate::automations::emit_definitions(&app);
+    Ok(automation)
+}
+
+#[tauri::command]
+pub fn automation_delete(app: AppHandle, id: String) -> CmdResult<()> {
+    store::automations::remove(&id).map_err(err)?;
+    crate::automations::emit_definitions(&app);
+    Ok(())
+}
+
+fn validate_automation_target(input: &crate::automations::AutomationInput) -> CmdResult<()> {
+    if input.workspace == crate::automations::AutomationWorkspace::Session {
+        let target = index::get(input.session_id.as_deref().ok_or("Choose a session for this automation.")?).map_err(err)?;
+        if projects::canonical(&target.project_path).map_err(err)? != input.project_path {
+            return Err("The selected session belongs to another project.".into());
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn automation_run_now(app: AppHandle, id: String) -> CmdResult<crate::automations::AutomationRun> {
+    tauri::async_runtime::spawn_blocking(move || crate::automations::dispatch(&app, &id, crate::automations::AutomationTrigger::Manual, None).map_err(err))
+        .await
+        .map_err(err)?
+}
+
 /// The snippets the agent dashboard draws on its cards. Reading tails off the
 /// disk is blocking work, and the dashboard asks for every session at once, so
 /// it runs off the UI thread.
@@ -97,12 +156,19 @@ pub struct NewSession {
     /// A requested worktree name (an issue slug); sanitised and made unique.
     #[serde(default)]
     pub worktree_name: Option<String>,
+    /// Explicit acknowledgement that a requested worktree should be skipped.
+    #[serde(default)]
+    pub on_main: bool,
     #[serde(default)]
     pub issue: Option<IssueRef>,
+    #[serde(default)]
+    pub automation: Option<AutomationRef>,
     /// An existing workspace to run in instead of a new worktree.
     #[serde(default)]
     pub cwd: Option<String>,
-    pub tab: NewTab,
+    /// The first agent conversation. Omitted when a checkout is opened directly.
+    #[serde(default)]
+    pub tab: Option<NewTab>,
 }
 
 /// A worktree name the reader asked for, made safe for a branch and a folder:
@@ -133,6 +199,14 @@ fn requested_worktree_name(requested: &str, taken: &[String]) -> Option<String> 
     (2..1000).map(|n| format!("{base}-{n}")).find(|c| !taken.iter().any(|t| t == c))
 }
 
+fn validate_session_target(req: &NewSession) -> CmdResult<()> {
+    let requested_worktree = req.worktree_name.as_deref().is_some_and(|name| !name.trim().is_empty());
+    if !req.use_worktree && requested_worktree && !req.on_main {
+        return Err("A requested worktree can only be skipped when onMain is explicitly true.".into());
+    }
+    Ok(())
+}
+
 fn new_tab_entry(t: &NewTab) -> TabEntry {
     TabEntry {
         id: uuid::Uuid::now_v7().to_string(),
@@ -152,9 +226,10 @@ fn new_tab_entry(t: &NewTab) -> TabEntry {
     }
 }
 
-/// Create a session: a worktree (unless opted out), an index entry, and its
-/// first tab. The index entry lands before anything else can fail after it, so
-/// a session whose agent never starts is still visible and deletable.
+/// Create a session: an index entry around an existing checkout, or a new
+/// worktree and its first tab. The index entry lands before anything else can
+/// fail after it, so a session whose agent never starts is still visible and
+/// deletable.
 #[tauri::command]
 pub async fn create_session(app: AppHandle, req: NewSession) -> CmdResult<SessionEntry> {
     tauri::async_runtime::spawn_blocking(move || create_session_blocking(&app, req))
@@ -162,12 +237,21 @@ pub async fn create_session(app: AppHandle, req: NewSession) -> CmdResult<Sessio
         .map_err(err)?
 }
 
-fn create_session_blocking(app: &AppHandle, req: NewSession) -> CmdResult<SessionEntry> {
+pub(crate) fn create_session_blocking(app: &AppHandle, req: NewSession) -> CmdResult<SessionEntry> {
+    let entry = create_session_entry(req)?;
+    let _ = app.emit("session_created", &entry);
+    Ok(entry)
+}
+
+fn create_session_entry(req: NewSession) -> CmdResult<SessionEntry> {
+    validate_session_target(&req)?;
     let project = projects::canonical(&req.project_path).map_err(err)?;
     let project_path = Path::new(&project);
     let id = uuid::Uuid::now_v7().to_string();
     let now = index::now();
-    let title = req.title.clone().filter(|t| !t.trim().is_empty()).unwrap_or_else(|| "New session".into());
+    let requested_title = req.title.clone().filter(|t| !t.trim().is_empty());
+    let first_tab = req.tab.as_ref().map(new_tab_entry);
+    let has_agent = first_tab.is_some();
 
     let mut entry = SessionEntry {
         id: id.clone(),
@@ -178,22 +262,22 @@ fn create_session_blocking(app: &AppHandle, req: NewSession) -> CmdResult<Sessio
         base_ref: None,
         worktree_removed: false,
         issue: req.issue.clone(),
-        title,
+        automation: req.automation.clone(),
+        title: String::new(),
         created: now.clone(),
         modified: now,
         archived: false,
         pinned: false,
-        tabs: vec![new_tab_entry(&req.tab)],
-        active_tab: None,
+        active_tab: first_tab.as_ref().map(|tab| tab.id.clone()),
+        tabs: first_tab.into_iter().collect(),
         unknown: BTreeMap::new(),
     };
-    entry.active_tab = Some(entry.tabs[0].id.clone());
 
     if let Some(cwd) = req.cwd.as_deref().filter(|c| !c.is_empty()) {
         let cwd = projects::canonical(cwd).map_err(err)?;
         entry.branch = git::current_branch(Path::new(&cwd));
         entry.cwd = cwd;
-    } else if req.use_worktree {
+    } else if has_agent && req.use_worktree {
         let taken = index::load().map(|s| index::claimed_worktree_names(&s)).unwrap_or_default();
         let taken = git::taken_worktree_names(project_path, &taken);
         let name = req
@@ -208,12 +292,19 @@ fn create_session_blocking(app: &AppHandle, req: NewSession) -> CmdResult<Sessio
         entry.base_ref = Some(wt.base_tree);
     }
 
+    entry.title = requested_title.unwrap_or_else(|| {
+        if has_agent {
+            "New session".into()
+        } else {
+            entry.branch.clone().unwrap_or_else(|| projects::project_name(&entry.cwd))
+        }
+    });
+
     index::update(|sessions| {
         sessions.push(entry.clone());
         Ok(())
     })
     .map_err(err)?;
-    let _ = app.emit("session_created", &entry);
     Ok(entry)
 }
 
@@ -446,6 +537,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             base_ref: None,
             worktree_removed: false,
             issue: src.issue.clone(),
+            automation: src.automation.clone(),
             title: format!("{} (fork)", src.title),
             created: now.clone(),
             modified: now,
@@ -1111,15 +1203,77 @@ pub fn github_repo(project_path: String) -> Option<String> {
 }
 
 #[cfg(test)]
-mod issue_name_tests {
-    use super::requested_worktree_name;
+mod command_tests {
+    use std::path::Path;
+    use std::process::Command;
 
+    use super::{create_session_entry, requested_worktree_name, validate_session_target, NewSession};
+
+    fn git(cwd: &Path, args: &[&str]) -> String {
+        let output = Command::new("git").current_dir(cwd).args(args).output().unwrap();
+        assert!(output.status.success(), "git {}: {}", args.join(" "), String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
     #[test]
     fn requested_names_are_sanitised_and_unique() {
         assert_eq!(requested_worktree_name("ENG-42 Fix Login!", &[]).as_deref(), Some("eng-42-fix-login"));
         assert_eq!(requested_worktree_name("!!!", &[]), None);
         let taken = vec!["eng-42-fix-login".to_string(), "eng-42-fix-login-2".to_string()];
         assert_eq!(requested_worktree_name("eng-42-fix-login", &taken).as_deref(), Some("eng-42-fix-login-3"));
+    }
+
+    #[test]
+    fn create_session_opens_an_existing_worktree_without_a_tab() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let external = dir.path().join("external");
+        std::fs::create_dir(&project).unwrap();
+        git(&project, &["init", "-q", "-b", "main"]);
+        git(&project, &["config", "user.email", "t@example.com"]);
+        git(&project, &["config", "user.name", "T"]);
+        std::fs::write(project.join("README.md"), "project\n").unwrap();
+        git(&project, &["add", "."]);
+        git(&project, &["commit", "-q", "-m", "initial"]);
+        git(&project, &["worktree", "add", "-q", "-b", "feature/external", external.to_str().unwrap()]);
+        let before = git(&project, &["worktree", "list", "--porcelain"]);
+
+        let session = create_session_entry(NewSession {
+            project_path: project.to_string_lossy().into_owned(),
+            title: None,
+            use_worktree: true,
+            on_main: false,
+            base_ref: None,
+            worktree_name: None,
+            issue: None,
+            automation: None,
+            cwd: Some(external.to_string_lossy().into_owned()),
+            tab: None,
+        })
+        .unwrap();
+
+        assert_eq!(session.cwd, external.canonicalize().unwrap().to_string_lossy());
+        assert_eq!(session.branch.as_deref(), Some("feature/external"));
+        assert_eq!(session.title, "feature/external");
+        assert!(session.tabs.is_empty());
+        assert_eq!(session.active_tab, None);
+        assert_eq!(session.worktree_name, None);
+        assert_eq!(git(&project, &["worktree", "list", "--porcelain"]), before);
+        assert_eq!(crate::store::index::load().unwrap(), vec![session]);
+    }
+
+    #[test]
+    fn requested_worktree_cannot_be_silently_skipped() {
+        let req: NewSession = serde_json::from_value(serde_json::json!({
+            "projectPath": "/repo",
+            "useWorktree": false,
+            "worktreeName": "eng-42-fix-login",
+            "tab": { "harness": "claude" }
+        }))
+        .unwrap();
+
+        let error = validate_session_target(&req).unwrap_err();
+        assert!(error.contains("onMain"));
     }
 }
 

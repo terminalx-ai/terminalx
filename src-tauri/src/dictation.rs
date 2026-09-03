@@ -6,6 +6,13 @@
 //!
 //! Apple's objects are created and torn down on the main thread; the frame
 //! pump feeds the recogniser from its own thread, which the framework allows.
+//!
+//! Observed on macOS 26.3.1 (25D771280a), en-US, with Apple's on-device
+//! recogniser and the built-in microphone: after one phrase and six seconds
+//! of actual output silence, capture and the listening UI remained active but
+//! a second phrase produced no callback. A delivered final has task state
+//! `Completed` (4), so its request is spent; continuing dictation requires a
+//! new request and task rather than more buffers on the old request.
 
 use std::sync::Mutex;
 
@@ -20,6 +27,10 @@ pub struct DictationEvent {
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Stable within one Apple transcription segment and incremented at a
+    /// timestamp boundary. Other engines leave it absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment: Option<u64>,
 }
 
 /// Every event, into the log before it goes out. Dictation goes wrong in the
@@ -27,7 +38,8 @@ pub struct DictationEvent {
 /// expected — and the only way to tell that from a composer that mishandled it
 /// is a record of what was actually emitted. Run the binary with `RUST_LOG=debug`
 /// to see it, next to the webview's own line for the same event.
-fn trace(kind: &str, text: Option<&str>, message: Option<&str>) {
+fn trace(kind: &str, text: Option<&str>, message: Option<&str>, segment: Option<u64>) {
+    let segment = segment.map_or_else(String::new, |index| format!(" segment={index}"));
     let detail = match (text, message) {
         (Some(t), _) => {
             let head: String = t.chars().take(40).collect();
@@ -37,12 +49,16 @@ fn trace(kind: &str, text: Option<&str>, message: Option<&str>) {
         (None, Some(m)) => format!(" {m}"),
         (None, None) => String::new(),
     };
-    log::debug!("dictation emit {kind}{detail}");
+    log::debug!("dictation emit {kind}{segment}{detail}");
 }
 
 fn emit(app: &AppHandle, kind: &'static str, text: Option<String>, message: Option<String>) {
-    trace(kind, text.as_deref(), message.as_deref());
-    let _ = app.emit("dictation", DictationEvent { kind, text, message });
+    emit_segment(app, kind, text, message, None);
+}
+
+fn emit_segment(app: &AppHandle, kind: &'static str, text: Option<String>, message: Option<String>, segment: Option<u64>) {
+    trace(kind, text.as_deref(), message.as_deref(), segment);
+    let _ = app.emit("dictation", DictationEvent { kind, text, message, segment });
 }
 
 /// System output volume, read and written through AppleScript. Best effort:
@@ -70,11 +86,53 @@ mod mac {
     use objc2::AllocAnyThread;
     use objc2_avf_audio::{AVAudioFormat, AVAudioPCMBuffer};
     use objc2_foundation::NSError;
-    use objc2_speech::{SFSpeechAudioBufferRecognitionRequest, SFSpeechRecognitionResult, SFSpeechRecognitionTask, SFSpeechRecognizer, SFSpeechRecognizerAuthorizationStatus};
+    use objc2_speech::{SFSpeechAudioBufferRecognitionRequest, SFSpeechRecognitionResult, SFSpeechRecognitionTask, SFSpeechRecognizer, SFSpeechRecognizerAuthorizationStatus, SFTranscription};
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     use std::sync::mpsc::Receiver;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    const RESTART_INTERVAL: Duration = Duration::from_secs(2);
+    const MAX_RESTARTS: u32 = 30;
+    const RESTART_LIMIT: &str = "Dictation stopped because speech recognition repeatedly ended. Start dictation again to continue.";
+    const NO_SPEECH_DOMAIN: &str = "kAFAssistantErrorDomain";
+    const NO_SPEECH_CODE: isize = 1110;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum RestartDecision {
+        Ignore,
+        Finish,
+        Restart,
+        Fail,
+    }
+
+    fn restart_decision(
+        is_final: bool,
+        stopping: bool,
+        generation_matches: bool,
+        capture_present: bool,
+        restart_count: u32,
+        elapsed_since_restart: Duration,
+    ) -> RestartDecision {
+        if !is_final {
+            return RestartDecision::Ignore;
+        }
+        if stopping {
+            return RestartDecision::Finish;
+        }
+        if !generation_matches || !capture_present {
+            return RestartDecision::Ignore;
+        }
+        if restart_count >= MAX_RESTARTS || elapsed_since_restart < RESTART_INTERVAL {
+            return RestartDecision::Fail;
+        }
+        RestartDecision::Restart
+    }
+
+    fn is_no_speech_error(domain: &str, code: isize) -> bool {
+        domain == NO_SPEECH_DOMAIN && code == NO_SPEECH_CODE
+    }
 
     /// Shown when the microphone was open but delivered nothing: no frames at
     /// all, or nothing but zeroes. That is what an unpermitted or muted input
@@ -84,6 +142,60 @@ mod mac {
     const NOT_RECOGNISED: &str = "Nothing was recognised. Try again, speak closer to the microphone, or pick another model under Settings → Transcription.";
     /// Shown when macOS will not let this app near the microphone at all.
     const MIC_DENIED: &str = "Raccoon is not allowed to use the microphone. Enable it under System Settings → Privacy & Security → Microphone.";
+    /// Timestamp movement smaller than this can be a recogniser correction,
+    /// not a new spoken segment.
+    const SEGMENT_TIMESTAMP_TOLERANCE: f64 = 0.05;
+
+    #[derive(Debug, Clone, Copy)]
+    struct LiveSegment {
+        index: u64,
+        end: f64,
+    }
+
+    /// Turns Apple's shifting timestamp ranges into a stable identity that the
+    /// frontend can trust while the words inside the segment are revised.
+    #[derive(Debug, Default)]
+    struct AppleSegmentTracker {
+        next: u64,
+        live: Option<LiveSegment>,
+    }
+
+    impl AppleSegmentTracker {
+        fn observe(&mut self, bounds: Option<(f64, f64)>, is_final: bool) -> Option<u64> {
+            let Some((start, end)) = bounds.filter(|(start, end)| start.is_finite() && end.is_finite() && *start >= 0.0 && *end >= *start) else {
+                if is_final {
+                    self.live = None;
+                }
+                return None;
+            };
+            let current = match self.live {
+                Some(live) if start <= live.end + SEGMENT_TIMESTAMP_TOLERANCE => LiveSegment { index: live.index, end: live.end.max(end) },
+                _ => {
+                    let live = LiveSegment { index: self.next, end };
+                    self.next += 1;
+                    live
+                }
+            };
+            self.live = (!is_final).then_some(current);
+            Some(current.index)
+        }
+
+        /// A fresh Apple request restarts its timestamps at zero. Close any
+        /// live range without resetting `next`, so its results cannot look like
+        /// revisions of the request that just ended.
+        fn restart_request(&mut self) {
+            self.live = None;
+        }
+    }
+
+    fn apple_segment_bounds(transcription: &SFTranscription) -> Option<(f64, f64)> {
+        unsafe {
+            let segments = transcription.segments();
+            let first = segments.firstObject()?;
+            let last = segments.lastObject()?;
+            Some((first.timestamp(), last.timestamp() + last.duration()))
+        }
+    }
 
     /// Whether a captured buffer is worth handing to an engine. Anything under
     /// a quarter second cannot hold a word, and a buffer of exact zeroes is
@@ -143,9 +255,11 @@ mod mac {
     struct RequestHandle(Retained<SFSpeechAudioBufferRecognitionRequest>);
     unsafe impl Send for RequestHandle {}
 
+    type SharedRequest = Arc<Mutex<RequestHandle>>;
+
     enum Route {
         Apple {
-            request: Retained<SFSpeechAudioBufferRecognitionRequest>,
+            request: SharedRequest,
             task: Retained<SFSpeechRecognitionTask>,
             _recognizer: Retained<SFSpeechRecognizer>,
             _handler: RcBlock<dyn Fn(*mut SFSpeechRecognitionResult, *mut NSError)>,
@@ -175,7 +289,6 @@ mod mac {
     // `Dictation` just moves the bundle between commands.
     unsafe impl Send for Active {}
 
-    #[derive(Default)]
     pub struct Dictation {
         active: Mutex<Option<Active>>,
         /// Bumped per start; a result handler from an older run is ignored.
@@ -187,6 +300,28 @@ mod mac {
         heard: Arc<AtomicBool>,
         /// Set once the recogniser hands back a transcript with words in it.
         produced: Arc<AtomicBool>,
+        /// Stable Apple segment identities for the current dictation.
+        segments: Arc<Mutex<AppleSegmentTracker>>,
+        /// Number of recognition tasks rotated into this dictation session.
+        restarts: AtomicU32,
+        /// A recogniser that immediately completes every new task must not spin.
+        last_restart: Mutex<Instant>,
+    }
+
+    impl Default for Dictation {
+        fn default() -> Self {
+            let now = Instant::now();
+            Self {
+                active: Mutex::new(None),
+                generation: Arc::new(AtomicU64::new(0)),
+                stopping: Arc::new(AtomicBool::new(false)),
+                heard: Arc::new(AtomicBool::new(false)),
+                produced: Arc::new(AtomicBool::new(false)),
+                segments: Arc::new(Mutex::new(AppleSegmentTracker::default())),
+                restarts: AtomicU32::new(0),
+                last_restart: Mutex::new(now.checked_sub(RESTART_INTERVAL).unwrap_or(now)),
+            }
+        }
     }
 
     /// Whether the running binary declares a privacy usage string. Read from
@@ -349,31 +484,174 @@ mod mac {
             Ok(())
         }
 
+        unsafe fn configured_apple_request(recognizer: &SFSpeechRecognizer) -> Retained<SFSpeechAudioBufferRecognitionRequest> {
+            let request = SFSpeechAudioBufferRecognitionRequest::new();
+            request.setShouldReportPartialResults(true);
+            if recognizer.supportsOnDeviceRecognition() {
+                request.setRequiresOnDeviceRecognition(true);
+            }
+            request.setAddsPunctuation(true);
+            request
+        }
+
+        unsafe fn apple_result_handler(
+            self: &Arc<Self>,
+            app: AppHandle,
+            generation: u64,
+        ) -> RcBlock<dyn Fn(*mut SFSpeechRecognitionResult, *mut NSError)> {
+            let gen_ref = self.generation.clone();
+            let stopping = self.stopping.clone();
+            let produced = self.produced.clone();
+            let segments = self.segments.clone();
+            let me = self.clone();
+            RcBlock::new(move |result: *mut SFSpeechRecognitionResult, error: *mut NSError| {
+                if gen_ref.load(Ordering::SeqCst) != generation {
+                    return;
+                }
+                let mut handled_final = false;
+                if !result.is_null() {
+                    let result = &*result;
+                    let transcription = result.bestTranscription();
+                    let text = transcription.formattedString().to_string();
+                    let is_final = result.isFinal();
+                    let segment = segments.lock().unwrap().observe(apple_segment_bounds(&transcription), is_final);
+                    if !text.trim().is_empty() {
+                        produced.store(true, Ordering::SeqCst);
+                    }
+                    if is_final {
+                        handled_final = true;
+                        let is_stopping = stopping.load(Ordering::SeqCst);
+                        let task_state = me.active.lock().unwrap().as_ref().and_then(|active| match &active.route {
+                            Route::Apple { task, .. } => Some(task.state()),
+                            Route::Local { .. } => None,
+                        });
+                        log::debug!("dictation Apple final stopping={is_stopping} generation={generation} task_state={task_state:?}");
+                        emit_segment(&app, "final", Some(text), None, segment);
+                        if is_stopping {
+                            me.finish(&app);
+                        } else {
+                            me.schedule_apple_restart(app.clone(), generation);
+                        }
+                    } else {
+                        emit_segment(&app, "partial", Some(text), None, segment);
+                    }
+                }
+                if !error.is_null() && !handled_final {
+                    let err = &*error;
+                    let domain = err.domain().to_string();
+                    let code = err.code();
+                    let is_stopping = stopping.load(Ordering::SeqCst);
+                    log::debug!("dictation Apple error stopping={is_stopping} generation={generation} domain={domain:?} code={code}");
+                    if is_stopping {
+                        me.finish(&app);
+                    } else if is_no_speech_error(&domain, code) {
+                        me.schedule_apple_restart(app.clone(), generation);
+                    } else {
+                        emit(&app, "error", None, Some(err.localizedDescription().to_string()));
+                        me.finish(&app);
+                    }
+                }
+            })
+        }
+
+        fn schedule_apple_restart(self: &Arc<Self>, app: AppHandle, generation: u64) {
+            let me = self.clone();
+            let app_h = app.clone();
+            let fallback = self.clone();
+            let fallback_app = app.clone();
+            if let Err(error) = app.run_on_main_thread(move || unsafe { me.restart_apple_on_main(app_h, generation) }) {
+                emit(&fallback_app, "error", None, Some(format!("Speech recognition could not continue: {error}")));
+                fallback.finish(&fallback_app);
+            }
+        }
+
+        unsafe fn restart_apple_on_main(self: &Arc<Self>, app: AppHandle, generation: u64) {
+            let generation_matches = self.generation.load(Ordering::SeqCst) == generation;
+            let (capture_present, recognizer) = {
+                let active = self.active.lock().unwrap();
+                match active.as_ref() {
+                    Some(Active { capture, route: Route::Apple { _recognizer, .. }, .. }) => {
+                        (capture.is_some(), Some(_recognizer.clone()))
+                    }
+                    _ => (false, None),
+                }
+            };
+            let decision = restart_decision(
+                true,
+                self.stopping.load(Ordering::SeqCst),
+                generation_matches,
+                capture_present,
+                self.restarts.load(Ordering::SeqCst),
+                self.last_restart.lock().unwrap().elapsed(),
+            );
+            match decision {
+                RestartDecision::Ignore => return,
+                RestartDecision::Finish => {
+                    self.finish(&app);
+                    return;
+                }
+                RestartDecision::Fail => {
+                    emit(&app, "error", None, Some(RESTART_LIMIT.into()));
+                    self.finish(&app);
+                    return;
+                }
+                RestartDecision::Restart => {}
+            }
+
+            let Some(recognizer) = recognizer else { return };
+            self.restarts.fetch_add(1, Ordering::SeqCst);
+            *self.last_restart.lock().unwrap() = Instant::now();
+            self.segments.lock().unwrap().restart_request();
+            let request = Self::configured_apple_request(&recognizer);
+            let handler = self.apple_result_handler(app.clone(), generation);
+            let task = recognizer.recognitionTaskWithRequest_resultHandler(&request, &handler);
+
+            let mut guard = self.active.lock().unwrap();
+            if self.generation.load(Ordering::SeqCst) != generation || self.stopping.load(Ordering::SeqCst) {
+                task.cancel();
+                return;
+            }
+            let Some(active) = guard.as_mut() else {
+                task.cancel();
+                return;
+            };
+            if active.capture.is_none() {
+                task.cancel();
+                return;
+            }
+            let Route::Apple { request: current_request, task: current_task, _handler: current_handler, .. } = &mut active.route else {
+                task.cancel();
+                return;
+            };
+            let old_request = std::mem::replace(&mut current_request.lock().unwrap().0, request);
+            let old_task = std::mem::replace(current_task, task);
+            let old_handler = std::mem::replace(current_handler, handler);
+            let restart = self.restarts.load(Ordering::SeqCst);
+            drop(guard);
+            drop((old_request, old_task, old_handler));
+            log::debug!("dictation Apple recognition restarted generation={generation} restart={restart}");
+        }
+
         fn begin_apple_on_main(self: &Arc<Self>, app: AppHandle) -> Result<(), String> {
             unsafe {
                 let recognizer = SFSpeechRecognizer::new();
                 if !recognizer.isAvailable() {
                     return Err("Speech recognition is not available for your language right now.".into());
                 }
-                let request = SFSpeechAudioBufferRecognitionRequest::new();
-                request.setShouldReportPartialResults(true);
-                if recognizer.supportsOnDeviceRecognition() {
-                    request.setRequiresOnDeviceRecognition(true);
-                }
-                request.setAddsPunctuation(true);
+                let request = Self::configured_apple_request(&recognizer);
+                let shared_request = Arc::new(Mutex::new(RequestHandle(request.clone())));
 
                 let Opened { capture, frames, opening, restore_volume } = self.open_capture()?;
 
                 // Frames arrive on the capture thread; wrap them as PCM buffers
                 // in the recogniser's standard 16 kHz mono float layout.
-                let handle = RequestHandle(request.clone());
+                let pump_request = shared_request.clone();
                 self.heard.store(false, Ordering::SeqCst);
                 self.produced.store(false, Ordering::SeqCst);
                 let heard = self.heard.clone();
                 std::thread::Builder::new()
                     .name("dictation-pump".into())
                     .spawn(move || {
-                        let handle = handle;
                         let format = AVAudioFormat::initStandardFormatWithSampleRate_channels(AVAudioFormat::alloc(), TARGET_RATE as f64, 1);
                         let Some(format) = format else { return };
                         for chunk in frames {
@@ -391,51 +669,22 @@ mod mac {
                             let ch0 = (*channels).as_ptr();
                             std::ptr::copy_nonoverlapping(chunk.as_ptr(), ch0, chunk.len());
                             buffer.setFrameLength(chunk.len() as u32);
-                            handle.0.appendAudioPCMBuffer(&buffer);
+                            pump_request.lock().unwrap().0.appendAudioPCMBuffer(&buffer);
                         }
                     })
                     .map_err(|e| e.to_string())?;
 
                 let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
                 self.stopping.store(false, Ordering::SeqCst);
-                let gen_ref = self.generation.clone();
-                let stopping = self.stopping.clone();
-                let produced = self.produced.clone();
-                let app_h = app.clone();
-                let me = self.clone();
-                let handler = RcBlock::new(move |result: *mut SFSpeechRecognitionResult, error: *mut NSError| {
-                    if gen_ref.load(Ordering::SeqCst) != generation {
-                        return;
-                    }
-                    if !result.is_null() {
-                        let result = &*result;
-                        let text = result.bestTranscription().formattedString().to_string();
-                        if !text.trim().is_empty() {
-                            produced.store(true, Ordering::SeqCst);
-                        }
-                        if result.isFinal() {
-                            emit(&app_h, "final", Some(text), None);
-                            if stopping.load(Ordering::SeqCst) {
-                                me.finish(&app_h);
-                            }
-                        } else {
-                            emit(&app_h, "partial", Some(text), None);
-                        }
-                    }
-                    if !error.is_null() {
-                        let err = &*error;
-                        // Ending the audio on purpose surfaces as a cancellation
-                        // or "no speech"; neither is a failure worth showing.
-                        if !stopping.load(Ordering::SeqCst) {
-                            emit(&app_h, "error", None, Some(err.localizedDescription().to_string()));
-                        }
-                        me.finish(&app_h);
-                    }
-                });
+                *self.segments.lock().unwrap() = AppleSegmentTracker::default();
+                self.restarts.store(0, Ordering::SeqCst);
+                let now = Instant::now();
+                *self.last_restart.lock().unwrap() = now.checked_sub(RESTART_INTERVAL).unwrap_or(now);
+                let handler = self.apple_result_handler(app.clone(), generation);
                 let task = recognizer.recognitionTaskWithRequest_resultHandler(&request, &handler);
                 *self.active.lock().unwrap() = Some(Active {
                     capture: Some(capture),
-                    route: Route::Apple { request, task, _recognizer: recognizer, _handler: handler },
+                    route: Route::Apple { request: shared_request, task, _recognizer: recognizer, _handler: handler },
                     restore_volume,
                 });
                 emit(&app, "listening", None, None);
@@ -492,7 +741,7 @@ mod mac {
             let _ = app.run_on_main_thread(move || {
                 if let Some(a) = me.active.lock().unwrap().as_ref() {
                     if let Route::Apple { request, .. } = &a.route {
-                        unsafe { request.endAudio() };
+                        unsafe { request.lock().unwrap().0.endAudio() };
                     }
                 }
                 // The final result normally lands within a moment; if the
@@ -542,7 +791,11 @@ mod mac {
 
     #[cfg(test)]
     mod tests {
-        use super::{is_silent, TARGET_RATE};
+        use super::{
+            is_no_speech_error, is_silent, restart_decision, AppleSegmentTracker, RestartDecision,
+            MAX_RESTARTS, NO_SPEECH_CODE, NO_SPEECH_DOMAIN, RESTART_INTERVAL, TARGET_RATE,
+        };
+        use std::time::Duration;
 
         const SECOND: usize = TARGET_RATE as usize;
 
@@ -571,6 +824,90 @@ mod mac {
         #[test]
         fn a_quarter_second_of_speech_is_not_silence() {
             assert!(!is_silent(&vec![0.2; SECOND / 4]));
+        }
+
+        #[test]
+        fn timestamp_revisions_keep_the_same_segment() {
+            let mut segments = AppleSegmentTracker::default();
+            assert_eq!(segments.observe(Some((0.20, 0.75)), false), Some(0));
+            assert_eq!(segments.observe(Some((0.18, 1.40)), false), Some(0));
+        }
+
+        #[test]
+        fn a_timestamp_after_the_live_range_starts_a_new_segment() {
+            let mut segments = AppleSegmentTracker::default();
+            assert_eq!(segments.observe(Some((0.20, 1.40)), false), Some(0));
+            assert_eq!(segments.observe(Some((2.95, 3.60)), false), Some(1));
+        }
+
+        #[test]
+        fn a_final_result_closes_its_segment() {
+            let mut segments = AppleSegmentTracker::default();
+            assert_eq!(segments.observe(Some((0.20, 1.40)), true), Some(0));
+            assert_eq!(segments.observe(Some((0.25, 0.90)), false), Some(1));
+        }
+
+        #[test]
+        fn a_restarted_request_continues_segment_numbering() {
+            let mut segments = AppleSegmentTracker::default();
+            assert_eq!(segments.observe(Some((4.20, 5.10)), false), Some(0));
+
+            segments.restart_request();
+
+            assert_eq!(segments.observe(Some((0.10, 0.80)), false), Some(1));
+        }
+
+        #[test]
+        fn an_early_final_restarts_recognition() {
+            assert_eq!(restart_decision(true, false, true, true, 0, RESTART_INTERVAL), RestartDecision::Restart);
+        }
+
+        #[test]
+        fn a_partial_result_does_not_restart() {
+            assert_eq!(restart_decision(false, false, true, true, 0, RESTART_INTERVAL), RestartDecision::Ignore);
+        }
+
+        #[test]
+        fn a_final_requested_by_stop_finishes() {
+            assert_eq!(restart_decision(true, true, true, true, 0, RESTART_INTERVAL), RestartDecision::Finish);
+        }
+
+        #[test]
+        fn an_old_generation_cannot_restart() {
+            assert_eq!(restart_decision(true, false, false, true, 0, RESTART_INTERVAL), RestartDecision::Ignore);
+        }
+
+        #[test]
+        fn a_closed_capture_cannot_restart() {
+            assert_eq!(restart_decision(true, false, true, false, 0, RESTART_INTERVAL), RestartDecision::Ignore);
+        }
+
+        #[test]
+        fn a_restart_inside_the_rate_limit_fails_visible() {
+            assert_eq!(
+                restart_decision(true, false, true, true, 1, RESTART_INTERVAL - Duration::from_millis(1)),
+                RestartDecision::Fail
+            );
+        }
+
+        #[test]
+        fn a_session_at_the_restart_limit_fails_visible() {
+            assert_eq!(restart_decision(true, false, true, true, MAX_RESTARTS, RESTART_INTERVAL), RestartDecision::Fail);
+        }
+
+        #[test]
+        fn thirty_spaced_restarts_are_bounded_by_the_session_cap() {
+            for completed in 0..MAX_RESTARTS {
+                assert_eq!(restart_decision(true, false, true, true, completed, RESTART_INTERVAL), RestartDecision::Restart);
+            }
+            assert_eq!(restart_decision(true, false, true, true, MAX_RESTARTS, RESTART_INTERVAL), RestartDecision::Fail);
+        }
+
+        #[test]
+        fn the_no_speech_error_is_restartable() {
+            assert!(is_no_speech_error(NO_SPEECH_DOMAIN, NO_SPEECH_CODE));
+            assert!(!is_no_speech_error("NSURLErrorDomain", NO_SPEECH_CODE));
+            assert!(!is_no_speech_error(NO_SPEECH_DOMAIN, 1));
         }
     }
 }

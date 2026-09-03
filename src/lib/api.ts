@@ -14,6 +14,7 @@ import type {
   WorkStatus,
   WorktreeDisposition,
 } from "@/types/session";
+import type { Automation, AutomationInput, AutomationRun, AutomationRef } from "@/types/automations";
 
 export interface NewTab {
   harness: string;
@@ -41,8 +42,12 @@ export interface NewSession {
   baseRef?: string | null;
   /** A requested worktree name (an issue slug); sanitised and made unique. */
   worktreeName?: string | null;
+  /** Explicit acknowledgement that a requested worktree should be skipped. */
+  onMain?: boolean;
   issue?: IssueRef | null;
-  tab: NewTab;
+  automation?: AutomationRef | null;
+  /** The first agent conversation. Omit to open the checkout by itself. */
+  tab?: NewTab;
 }
 
 export const api = {
@@ -91,6 +96,15 @@ export const api = {
     invoke<{ before: string | null; after: string | null }>("file_contents_at", { cwd, path, base, head }),
   logCommits: (cwd: string, range?: string | null, limit?: number) =>
     invoke<CommitInfo[]>("log_commits", { cwd, range: range ?? null, limit: limit ?? 100 }),
+};
+
+export const automationsApi = {
+  list: () => invoke<Automation[]>("automations_list"),
+  runs: (automationId: string) => invoke<AutomationRun[]>("automation_runs", { automationId }),
+  create: (input: AutomationInput) => invoke<Automation>("automation_create", { input }),
+  update: (id: string, input: AutomationInput) => invoke<Automation>("automation_update", { id, input }),
+  remove: (id: string) => invoke<void>("automation_delete", { id }),
+  runNow: (id: string) => invoke<AutomationRun>("automation_run_now", { id }),
 };
 
 export function errorMessage(e: unknown): string {

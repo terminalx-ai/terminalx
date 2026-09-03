@@ -849,6 +849,25 @@ impl SessionManager {
         Self::pane_event(&rt)
     }
 
+    /// The CLI process in a PTY pane exited. Hooks normally close the turn
+    /// first; when they do not, the process death is a failed automation run.
+    pub fn pane_exited(&self, pane_id: &str, code: Option<i32>) {
+        let Some(tab_id) = pane_id.strip_prefix("tab:") else { return };
+        let Some(entry) = index::load().ok().and_then(|sessions| sessions.into_iter().find(|session| session.tab(tab_id).is_some())) else { return };
+        let Ok(rt_arc) = self.runtime(&entry.id, tab_id) else { return };
+        let mut rt = rt_arc.lock().unwrap();
+        let turn_was_open = rt.turn_open;
+        if turn_was_open {
+            self.close_open_turn(&mut rt, TurnStatus::Error, None);
+        }
+        self.set_status(&mut rt, TabStatus::Idle);
+        drop(rt);
+        if turn_was_open {
+            let detail = code.map(|value| format!(" with exit code {value}")).unwrap_or_else(|| " from a signal".into());
+            crate::automations::fail_from_hook(&self.app, &entry.id, tab_id, &format!("The agent process exited{detail} before the automation turn completed."));
+        }
+    }
+
     fn pane_event(rt: &TabRuntime) -> Option<TabPtyEvent> {
         let Engine::Cli(p) = &rt.engine else { return None };
         Some(TabPtyEvent {
@@ -1400,6 +1419,10 @@ impl SessionManager {
                 if rt.pending.is_empty() {
                     self.set_status(&mut rt, TabStatus::InProgress);
                 }
+                drop(rt);
+                if frame.event == "UserPromptSubmit" {
+                    crate::automations::mark_running_from_hook(&self.app, &frame.session, &frame.tab);
+                }
             }
             // The CLI is asking in its own TUI, which means our permission
             // hook did not answer in time. The reader has to go and look.
@@ -1418,17 +1441,36 @@ impl SessionManager {
                 rt.last_activity = Instant::now();
                 self.forget_tool_answers(&mut rt);
                 self.close_open_turn(&mut rt, TurnStatus::Ok, final_text);
+                drop(rt);
+                crate::automations::complete_from_hook(
+                    &self.app,
+                    &frame.session,
+                    &frame.tab,
+                    frame.payload["last_assistant_message"].as_str().map(String::from),
+                );
             }
             // Codex only: the reader pressed Escape in the TUI.
             "Interrupt" => {
                 let mut rt = rt_arc.lock().unwrap();
                 self.forget_tool_answers(&mut rt);
                 self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
+                drop(rt);
+                crate::automations::fail_from_hook(&self.app, &frame.session, &frame.tab, "The automation turn was interrupted.");
             }
             "SessionEnd" => {
                 let mut rt = rt_arc.lock().unwrap();
+                let turn_was_open = rt.turn_open;
                 self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
                 self.set_status(&mut rt, TabStatus::Idle);
+                drop(rt);
+                if turn_was_open {
+                    crate::automations::fail_from_hook(
+                        &self.app,
+                        &frame.session,
+                        &frame.tab,
+                        "The agent session ended before the automation turn completed.",
+                    );
+                }
             }
             _ => {}
         }

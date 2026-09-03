@@ -86,7 +86,9 @@ export type Buckets = Record<ColumnId, SessionEntry[]>;
 export function bucketSessions(sessions: SessionEntry[], opts: BucketOptions): Buckets {
   const out: Buckets = { needs: [], working: [], done: [] };
   for (const s of sessions) {
-    if (s.archived) continue;
+    // A checkout opened without an agent belongs in the workspace column, not
+    // on an agent dashboard where it would become an empty Done card.
+    if (s.archived || !s.tabs.length) continue;
     if (!matchesFilters(s, opts.filters)) continue;
     if (!matchesQuery(s, opts.projectName(s.projectPath), opts.query)) continue;
     out[sessionColumn(s)].push(s);

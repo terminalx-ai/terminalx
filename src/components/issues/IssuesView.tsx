@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronDown, CircleDot, ExternalLink, FolderGit2, Loader2, RefreshCw, Search, Settings2, UserRound } from "lucide-react";
+import { ChevronDown, CircleDot, ExternalLink, FolderGit2, GitBranch, Loader2, RefreshCw, Search, Settings2, UserRound } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
-import { Segmented } from "@/components/ui/controls";
+import { Segmented, Switch } from "@/components/ui/controls";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
 import { AgentMark } from "@/components/AgentMark";
@@ -14,6 +14,7 @@ import { PERMISSION_MODES } from "@/lib/models";
 import { chooseMode } from "@/lib/dialogs";
 import { relativeTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
+import type { WorkStatus } from "@/types/session";
 
 type Provider = "github" | "linear";
 
@@ -40,7 +41,17 @@ export function issuePrompt(issue: Issue): string {
  * detail column shows the body so the reader can judge before an agent
  * spends a worktree on it.
  */
-export function IssuesView({ onCreated }: { onCreated?: (sessionId: string, tabId: string, firstPrompt: string) => void }) {
+export function IssuesView({
+  onCreated,
+  useWorktree: controlledUseWorktree,
+  onUseWorktreeChange,
+  onTargetProjectChange,
+}: {
+  onCreated?: (sessionId: string, tabId: string, firstPrompt: string) => void;
+  useWorktree?: boolean;
+  onUseWorktreeChange?: (value: boolean) => void;
+  onTargetProjectChange?: (projectPath: string | null) => void;
+}) {
   const store = useSessionStore();
   const prefs = usePrefs();
   const [provider, setProvider] = useState<Provider>(prefs.issueProvider);
@@ -58,10 +69,19 @@ export function IssuesView({ onCreated }: { onCreated?: (sessionId: string, tabI
   const [ghOk, setGhOk] = useState<boolean | null>(null);
   const [repo, setRepo] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [localUseWorktree, setLocalUseWorktree] = useState(prefs.useWorktree);
+  const [status, setStatus] = useState<WorkStatus | null>(null);
   const [tick, setTick] = useState(0);
+  const useWorktree = controlledUseWorktree ?? localUseWorktree;
+  const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
 
   const project = store.projects.find((p) => p.path === prefs.lastProject) ?? store.projects[0] ?? null;
   const harness = store.harnesses.find((h) => h.id === prefs.lastAgent) ?? store.harnesses[0] ?? null;
+
+  useEffect(() => {
+    onTargetProjectChange?.(selected && project ? project.path : null);
+  }, [onTargetProjectChange, project?.path, selected?.provider, selected?.id]);
+  useEffect(() => () => onTargetProjectChange?.(null), [onTargetProjectChange]);
 
   useEffect(() => {
     setPrefs({ issueProvider: provider });
@@ -80,6 +100,15 @@ export function IssuesView({ onCreated }: { onCreated?: (sessionId: string, tabI
     let live = true;
     if (!project) return setRepo(null);
     issuesApi.githubRepo(project.path).then((r) => live && setRepo(r)).catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [project]);
+  useEffect(() => {
+    let live = true;
+    if (!project) return setStatus(null);
+    setStatus(null);
+    api.workStatus(project.path).then((s) => live && setStatus(s)).catch(() => {});
     return () => {
       live = false;
     };
@@ -151,7 +180,8 @@ export function IssuesView({ onCreated }: { onCreated?: (sessionId: string, tabI
       const s = await api.createSession({
         projectPath: project.path,
         title: `${issue.identifier} ${issue.title}`.slice(0, 80),
-        useWorktree: prefs.useWorktree,
+        useWorktree,
+        onMain: !useWorktree,
         worktreeName: issueWorktreeName(issue.identifier, issue.title),
         issue: { provider: issue.provider, id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url },
         tab: {
@@ -169,7 +199,7 @@ export function IssuesView({ onCreated }: { onCreated?: (sessionId: string, tabI
     } finally {
       setStarting(false);
     }
-  }, [detail, selected, project, harness, prefs, onCreated]);
+  }, [detail, selected, project, harness, prefs, useWorktree, onCreated]);
 
   const emptyReason = useMemo(() => {
     if (!project) return "Add a project to see its issues.";
@@ -202,6 +232,7 @@ export function IssuesView({ onCreated }: { onCreated?: (sessionId: string, tabI
                 <DropdownMenuItem
                   key={p.path}
                   onSelect={() => {
+                    setSelected(null);
                     setPrefs({ lastProject: p.path });
                     void selectProject(p.path);
                   }}
@@ -291,7 +322,10 @@ export function IssuesView({ onCreated }: { onCreated?: (sessionId: string, tabI
                 <li key={`${i.provider}:${i.id}`}>
                   <button
                     type="button"
-                    onClick={() => setSelected(i)}
+                    onClick={() => {
+                      setSelected(i);
+                      setUseWorktree(prefs.useWorktree);
+                    }}
                     className={cn(
                       "flex w-full items-start gap-2.5 rounded-md px-2 py-2 text-left transition-colors",
                       selected?.id === i.id && selected.provider === i.provider ? "bg-selected" : "hover:bg-selected/50",
@@ -375,13 +409,28 @@ export function IssuesView({ onCreated }: { onCreated?: (sessionId: string, tabI
                     ))}
                   </DropdownMenuContent>
                 </DropdownMenu>
-                <Button size="sm" variant="accent" className="ml-auto" disabled={starting || !harness?.available || detailLoading} onClick={() => void start()}>
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="flex min-w-0 items-center gap-2 text-[11px] text-faint">
+                  <Switch aria-label="Start issue in a new worktree" size="sm" checked={useWorktree} onCheckedChange={setUseWorktree} />
+                  <span className={cn("flex min-w-0 items-center gap-1", !useWorktree && "text-warning")}>
+                    <GitBranch className="size-3.5 shrink-0" />
+                    {useWorktree ? (
+                      <>
+                        in new worktree <span className="truncate font-mono text-foreground">{issueWorktreeName(selected.identifier, selected.title)}</span> from{" "}
+                        <span className="font-mono text-foreground">{status?.defaultBranch ?? "default"}</span>
+                      </>
+                    ) : (
+                      <>
+                        on <span className="font-mono">{status?.branch ?? "main"}</span>
+                      </>
+                    )}
+                  </span>
+                </label>
+                <Button size="sm" variant="accent" className="ml-auto shrink-0" disabled={starting || !harness?.available || detailLoading} onClick={() => void start()}>
                   {starting ? <Loader2 className="animate-spin" /> : null}
                   Start session
                 </Button>
-              </div>
-              <div className="text-[11px] text-faint">
-                Branch <span className="font-mono">raccoon/{issueWorktreeName(selected.identifier, selected.title)}</span>
               </div>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 scrollbar-thin">

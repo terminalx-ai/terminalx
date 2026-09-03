@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Archive, ArrowUp, ChevronDown, FolderOpen, GitBranch, GitFork, Pin, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
+import { Archive, ArrowUp, CalendarClock, ChevronDown, FolderOpen, GitBranch, GitFork, PanelsTopLeft, Pin, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
@@ -14,7 +14,9 @@ import {
   archiveSession,
   deleteSession,
   forkSession,
+  openWorkspace,
   pinSession,
+  openAutomations,
   refreshWorkspaces,
   selectSession,
   sortSessions,
@@ -149,17 +151,36 @@ function WorkspaceGroup({
   const [open, setOpen] = useState(true);
   const name = ws?.name ?? path.split("/").pop() ?? path;
   const kind = ws ? (ws.isMain ? "main" : ws.managed ? "" : "external") : "missing";
+  const displayName = ws?.branch ?? name;
+  const openWorkspaceSession = () => {
+    if (ws) void openWorkspace(projectPath, ws.path).catch((e) => console.error(errorMessage(e)));
+  };
   return (
     <div className="mb-1.5">
       <div className="group/ws relative flex h-7 items-center gap-1.5 rounded-md px-1.5 text-[11px] text-muted-foreground hover:bg-selected/40" title={path}>
-        <button type="button" onClick={() => setOpen((v) => !v)} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+        <button
+          type="button"
+          aria-label={`${open ? "Collapse" : "Expand"} ${displayName}`}
+          onClick={() => setOpen((v) => !v)}
+          className="shrink-0 rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+        >
           <ChevronDown className={cn("size-3 shrink-0 text-faint transition-transform", !open && "-rotate-90")} />
-          <GitBranch className="size-3 shrink-0" />
-          <span className="truncate font-mono text-foreground/90">{ws?.branch ?? name}</span>
-          {kind && <span className="shrink-0 rounded-sm bg-veil-raised px-1 text-[10px] text-faint">{kind}</span>}
         </button>
+        <GitBranch className="size-3 shrink-0" />
+        {ws ? (
+          <button
+            type="button"
+            onClick={openWorkspaceSession}
+            className="min-w-0 truncate rounded-sm font-mono text-foreground/90 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring/40"
+          >
+            {displayName}
+          </button>
+        ) : (
+          <span className="min-w-0 truncate font-mono text-foreground/90">{displayName}</span>
+        )}
+        {kind && <span className="shrink-0 rounded-sm bg-veil-raised px-1 text-[10px] text-faint">{kind}</span>}
         {ws && (
-          <span className="flex shrink-0 items-center gap-1 tabular-nums group-hover/ws:opacity-0 group-has-[[data-state=open]]/ws:opacity-0">
+          <span className="ml-auto flex shrink-0 items-center gap-1 tabular-nums group-hover/ws:opacity-0 group-has-[[data-state=open]]/ws:opacity-0">
             {ws.additions > 0 && <span className="text-add">+{ws.additions}</span>}
             {ws.deletions > 0 && <span className="text-destructive">−{ws.deletions}</span>}
             {ws.unpushed > 0 && (
@@ -184,6 +205,9 @@ function WorkspaceGroup({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={openWorkspaceSession}>
+                  <PanelsTopLeft /> Open
+                </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => void revealItemInDir(ws.path)}>
                   <FolderOpen /> Reveal in Finder
                 </DropdownMenuItem>
@@ -235,6 +259,7 @@ async function confirmDelete(session: SessionEntry) {
 export function SessionRow({ session, selected }: { session: SessionEntry; selected: boolean }) {
   const status = sessionStatus(session);
   const harnesses = [...new Set(session.tabs.map((t) => t.harness))];
+  const branchBadge = session.issue && !session.worktreeName && !session.worktreeRemoved ? session.branch : null;
   return (
     <DropdownMenu>
       <div
@@ -265,8 +290,23 @@ export function SessionRow({ session, selected }: { session: SessionEntry; selec
           <div className="flex items-center gap-1">
             {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
             <span className="truncate text-[13px]">{session.title}</span>
+            {branchBadge && <span className="shrink-0 rounded-sm bg-veil-raised px-1 font-mono text-[10px] text-faint">{branchBadge}</span>}
           </div>
-          {session.tabs.length > 1 && <div className="truncate text-[11px] text-faint">{session.tabs.length} tabs</div>}
+          {session.automation ? (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                openAutomations();
+              }}
+              className="flex max-w-full items-center gap-1 truncate text-[11px] text-faint hover:text-muted-foreground"
+            >
+              <CalendarClock className="size-3 shrink-0" />
+              <span className="truncate">Automation · {session.automation.name} #{session.automation.runNumber}</span>
+            </button>
+          ) : session.tabs.length > 1 ? (
+            <div className="truncate text-[11px] text-faint">{session.tabs.length} tabs</div>
+          ) : null}
         </div>
         <span className="text-[11px] text-faint tabular-nums group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0">{relativeTime(session.modified)}</span>
         <DropdownMenuTrigger asChild>

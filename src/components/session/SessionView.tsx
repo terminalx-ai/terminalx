@@ -1,18 +1,19 @@
-import { CircleDot, FolderTree, GitBranch, MessageSquare, PanelLeft, PanelRight, Terminal, TerminalSquare } from "lucide-react";
+import { useEffect } from "react";
+import { CalendarClock, CircleDot, FolderTree, GitBranch, MessageSquare, PanelLeft, PanelRight, Terminal, TerminalSquare } from "lucide-react";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
-import { setPrefs, usePrefs } from "@/lib/prefs";
-import { useSessionStore } from "@/lib/sessions";
+import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
+import { openAutomations, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
 import { TabView } from "./TabView";
 import { TabStrip } from "./TabStrip";
 import { TerminalDock } from "@/components/terminal/TerminalDock";
-import { toggleDock } from "@/lib/terminal";
+import { openDock, toggleDock } from "@/lib/terminal";
 import { setLastFocused, useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
 import { QuickOpen } from "@/components/editor/QuickOpen";
@@ -26,7 +27,20 @@ import type { TabEntry } from "@/types/session";
 function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
   const log = useTabLog(session.id, tab.id);
   const live = tab.status === "in_progress" || tab.status === "waiting";
-  return <RightPanel session={session} events={log.events} version={log.version} live={live} />;
+  return (
+    <RightPanel
+      cwd={session.cwd}
+      branch={session.branch ?? null}
+      baseRef={session.baseRef}
+      events={log.events}
+      version={log.version}
+      live={live}
+      sessionId={session.id}
+      mentionTabId={session.activeTab ?? session.tabs[0]?.id ?? null}
+      statusKey={session.tabs.map((item) => item.status).join(",")}
+      settleSessionId={session.worktreeName && !session.worktreeRemoved ? session.id : undefined}
+    />
+  );
 }
 
 /**
@@ -56,6 +70,12 @@ export function SessionView({
   const hasEditors = ed.editors.some((e) => e.sessionId === session.id);
   // Agents change files when their status changes; the explorer re-reads git then.
   const statusKey = session.tabs.map((t) => t.status).join(",");
+
+  useEffect(() => {
+    if (session.tabs.length) return;
+    if (!getPrefs().panelOpen) setPrefs({ panelOpen: true });
+    void openDock(session.id, session.cwd).catch((e) => console.error("terminal open failed", e));
+  }, [session.id, session.cwd, session.tabs.length]);
 
   useHotkey("mod+shift+e", () => setPrefs({ explorerOpen: !prefs.explorerOpen }));
 
@@ -92,6 +112,18 @@ export function SessionView({
                 >
                   <CircleDot className="size-3" />
                   {session.issue.identifier}
+                </button>
+              </WithTooltip>
+            )}
+            {session.automation && (
+              <WithTooltip label={`Open ${session.automation.name} in Automations`}>
+                <button
+                  type="button"
+                  onClick={openAutomations}
+                  className="ml-1 flex shrink-0 items-center gap-1 rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+                >
+                  <CalendarClock className="size-3" />
+                  {session.automation.name} #{session.automation.runNumber}
                 </button>
               </WithTooltip>
             )}
@@ -167,7 +199,10 @@ export function SessionView({
                 </div>
               ))}
               {!session.tabs.length && (
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">No tabs.</div>
+                <div className="flex flex-1 flex-col items-center justify-center gap-1 text-sm text-muted-foreground">
+                  <span>Workspace open</span>
+                  <span className="text-xs text-faint">Use the terminal below, or add an agent with +.</span>
+                </div>
               )}
             </div>
             {hasEditors && <EditorSplit sessionId={session.id} active />}
@@ -176,7 +211,19 @@ export function SessionView({
         </section>
       </div>
 
-      {prefs.panelOpen && activeTab && <PanelHost session={session} tab={activeTab} />}
+      {prefs.panelOpen &&
+        (activeTab ? (
+          <PanelHost session={session} tab={activeTab} />
+        ) : (
+          <RightPanel
+            cwd={session.cwd}
+            branch={session.branch ?? null}
+            workingTree
+            sessionId={session.id}
+            statusKey={statusKey}
+            rootName={project?.name ?? "project"}
+          />
+        ))}
       <QuickOpen sessionId={session.id} root={session.cwd} />
       <ProjectSearch sessionId={session.id} root={session.cwd} />
     </div>
