@@ -158,6 +158,57 @@ describe("status bar usage", () => {
     expect(within(detail).getByText("82% used")).toBeTruthy();
   });
 
+  it("uses an opaque surface for the usage popover, agent details, and reset confirmation", () => {
+    const { getByRole } = render(<StatusBar />);
+    fireEvent.click(getByRole("button", { name: /Codex 5h 23% used/ }));
+
+    const popover = document.querySelector("[data-usage-popover]") as HTMLElement;
+    expect(popover.className).toContain("bg-(--surface-card)");
+    fireEvent.click(within(popover).getByRole("button", { name: "Codex, Resets in 3h 5m" }));
+
+    const detail = document.querySelector('[data-usage-detail="codex"]') as HTMLElement;
+    expect(detail.className).toContain("bg-(--surface-card)");
+    fireEvent.click(within(detail).getByRole("button", { name: "Reset now" }));
+
+    expect(getByRole("dialog", { name: "Reset Codex limits?" }).className).toContain("bg-(--surface-card)");
+  });
+
+  it("omits reset copy for a window without a reset timestamp", () => {
+    statusState.settings.usageMode = "compact";
+    const fable = statusState.usage.windows.find((window) => window.key === "fable_weekly");
+    if (fable) fable.resetsAt = null;
+    const { getByRole } = render(<StatusBar />);
+
+    const trigger = getByRole("button", { name: /Claude Fable 82% used/ });
+    expect(trigger.getAttribute("aria-label")).not.toContain("resets Fable");
+    fireEvent.click(trigger);
+
+    const row = document.querySelector('[data-usage-compact-window="claude:fable_weekly"]') as HTMLElement;
+    expect(row).not.toBeNull();
+    expect(row.textContent).not.toContain("resets");
+    fireEvent.click(row);
+    const detail = document.querySelector('[data-usage-detail="claude"]') as HTMLElement;
+    expect(within(detail).getByText("Fable").parentElement?.textContent).not.toContain("Resets in");
+  });
+
+  it("hides empty OAuth windows while keeping every data-bearing window", () => {
+    const now = Date.now();
+    statusState.settings.usageMode = "compact";
+    statusState.usage.windows.push(
+      { agent: "claude", key: "nimbus_quill", label: "Nimbus Quill", usedPercent: 0, resetsAt: null, windowMinutes: null, updatedAt: now, stale: false },
+      { agent: "claude", key: "spend", label: "Spend", usedPercent: 0, resetsAt: null, windowMinutes: null, updatedAt: now, stale: false },
+      { agent: "claude", key: "sonnet_weekly", label: "Sonnet", usedPercent: 17, resetsAt: null, windowMinutes: 10_080, updatedAt: now, stale: false },
+    );
+    const { getByRole } = render(<StatusBar />);
+    fireEvent.click(getByRole("button", { name: /Claude 5h 12% used/ }));
+
+    const popover = document.querySelector("[data-usage-popover]") as HTMLElement;
+    expect(within(popover).queryByText("Nimbus Quill")).toBeNull();
+    expect(within(popover).queryByText("Spend")).toBeNull();
+    expect(within(popover).getByText("Fable")).toBeTruthy();
+    expect(within(popover).getByText("Sonnet")).toBeTruthy();
+  });
+
   it("shows Codex credits and reset availability without combining its windows", () => {
     const { getByRole } = render(<StatusBar />);
     fireEvent.click(getByRole("button", { name: /Codex 5h 23% used/ }));
