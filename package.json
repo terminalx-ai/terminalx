@@ -1,6 +1,6 @@
 {
   "name": "raccoon",
-  "description": "TerminalX Next — a desktop workbench for coding agents",
+  "description": "TerminalX — a desktop workbench for coding agents",
   "private": true,
   "license": "MIT",
   "version": "0.1.0",

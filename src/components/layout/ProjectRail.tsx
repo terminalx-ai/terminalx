@@ -397,7 +397,7 @@ function ProjectRow({ project, selected }: { project: Project; selected: boolean
           <Archive /> {project.archived ? "Unarchive" : "Archive"}
         </DropdownMenuItem>
         <DropdownMenuItem destructive onSelect={() => void removeProject(project.path)}>
-          <Trash2 /> Remove from TerminalX Next
+          <Trash2 /> Remove from TerminalX
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

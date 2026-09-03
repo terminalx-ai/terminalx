@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "TerminalX Next Dev",
+  "productName": "TerminalX Dev",
   "identifier": "com.terminalx.next.dev",
   "bundle": {
     "icon": [

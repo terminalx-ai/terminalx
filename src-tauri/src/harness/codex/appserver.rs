@@ -72,7 +72,7 @@ pub fn ask_with_timeout(place: Where<'_>, method: &str, params: Value, timeout: 
             }
         })?;
 
-        let hello = json!({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "raccoon", "title": "TerminalX Next", "version": env!("CARGO_PKG_VERSION")}}});
+        let hello = json!({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "raccoon", "title": "TerminalX", "version": env!("CARGO_PKG_VERSION")}}});
         writeln!(stdin, "{hello}")?;
         writeln!(stdin, "{}", json!({"method": "initialized", "params": {}}))?;
         writeln!(stdin, "{}", json!({"id": 2, "method": method, "params": params}))?;

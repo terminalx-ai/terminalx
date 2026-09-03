@@ -6,7 +6,7 @@ Date: 2026-09-03
 
 Issue: [#7](https://github.com/terminalx-ai/raccoon/issues/7)
 
-The TerminalX Next companion is an Expo client of the deployed TerminalX account,
+The TerminalX companion is an Expo client of the deployed TerminalX account,
 pairing, relay, and runtime contracts. The Mac remains the source of truth for
 sessions and terminal state. The phone does not need a new hosted backend.
 
@@ -221,7 +221,7 @@ read/subscription methods, and the session-scoped steering methods documented
 in [MULTIPLAYER.md](./MULTIPLAYER.md). Refusals are protocol data and render as
 unavailable/forbidden states instead of falling through to broader RPC.
 
-The TerminalX Next mobile API carries public `tabId` values only. It never stores,
+The TerminalX mobile API carries public `tabId` values only. It never stores,
 accepts, or displays a PTY id, pane id, process handle, host path, or arbitrary
 filesystem path. The Rust host resolves each tab id under the session lock and
 rechecks that mapping at the point of use.
@@ -343,11 +343,11 @@ implemented by `apps/api/src/controllers/accountPairing/account.ts`,
 `apps/relay/src/cell/cell-server.ts`.
 
 Reusing `terminalx-mobile` with the exact `terminalx://auth/callback` redirect
-means the TerminalX Next mobile app must claim the `terminalx://` scheme on the phone.
+means the TerminalX mobile app must claim the `terminalx://` scheme on the phone.
 It therefore cannot be installed alongside the existing TerminalX mobile app.
 The owner must choose between the two no-server-change options for this plan:
 
-1. the TerminalX Next mobile app replaces the existing mobile app; or
+1. the TerminalX mobile app replaces the existing mobile app; or
 2. mobile sign-in waits until a distinct server-side client/redirect entry is
    available.
 

@@ -110,8 +110,8 @@ function GeneralTab() {
         label="Command line tool"
         description={
           cli?.installed
-            ? `terminalx-next and tnx are installed in ${cli.directory}.`
-            : "Install terminalx-next and its tnx alias in ~/.local/bin so shells and agents can control this app."
+            ? `terminalx and tnx are installed in ${cli.directory}.`
+            : "Install terminalx and its tnx alias in ~/.local/bin so shells and agents can control this app."
         }
         control={
           <Button size="sm" variant="outline" disabled={cliBusy || cli?.installed} onClick={() => void installCli()}>
@@ -307,7 +307,7 @@ function AgentsTab() {
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between gap-3 rounded-lg bg-well px-3 py-2.5">
         <div className="min-w-0">
-          <div className="text-sm font-medium">TerminalX Next agent skill</div>
+          <div className="text-sm font-medium">TerminalX agent skill</div>
           <p className="mt-0.5 text-xs text-muted-foreground">
             Install the discovery stub for Claude Code and Codex. The CLI serves the complete version-matched guide.
           </p>
@@ -319,7 +319,7 @@ function AgentsTab() {
         </Button>
       </div>
       <div className="flex items-center justify-between">
-        <p className="text-xs text-muted-foreground">TerminalX Next runs the agent CLIs you already have. Log in to each one in a terminal first.</p>
+        <p className="text-xs text-muted-foreground">TerminalX runs the agent CLIs you already have. Log in to each one in a terminal first.</p>
         <Button
           size="xs"
           variant="ghost"
@@ -422,7 +422,7 @@ function IntegrationsTab() {
       <div>
         <div className="text-sm font-medium">Linear</div>
         <p className="mt-0.5 text-xs text-muted-foreground">
-          A personal API key from Linear → Settings → Security &amp; access. It is stored in TerminalX Next's settings file, readable only by you, and sent only to api.linear.app.
+          A personal API key from Linear → Settings → Security &amp; access. It is stored in TerminalX's settings file, readable only by you, and sent only to api.linear.app.
         </p>
         <div className="mt-2 flex items-center gap-2 text-xs">
           {linear?.connected ? (
@@ -528,7 +528,7 @@ function AboutTab() {
   return (
     <div className="flex flex-col gap-4 text-sm">
       <div>
-        <div className="text-base font-semibold">TerminalX Next</div>
+        <div className="text-base font-semibold">TerminalX</div>
         <div className="text-muted-foreground">Version {version || "…"}</div>
         <p className="mt-1 text-muted-foreground">A workbench for coding agents. Every session is a git worktree; every tab is an agent.</p>
         <p className="mt-2 text-xs text-faint">
@@ -578,7 +578,7 @@ function AboutTab() {
       <div>
         <div className="mb-1 text-xs font-medium uppercase tracking-wide text-faint">What's new</div>
         <div className="prose-chat rounded-lg bg-well px-3 py-2 text-[13px]">
-          <Markdown text={changelog.replace(/^# TerminalX Next changelog\s*/m, "")} />
+          <Markdown text={changelog.replace(/^# TerminalX changelog\s*/m, "")} />
         </div>
       </div>
     </div>

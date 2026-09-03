@@ -230,7 +230,7 @@ which is once per checkout, before that checkout's CLI has started.
 
 ### Nested-session stamps are stripped
 
-If TerminalX Next itself was started from inside an agent's session — a `tauri dev` an
+If TerminalX itself was started from inside an agent's session — a `tauri dev` an
 agent ran — then `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`,
 `CLAUDE_CODE_CHILD_SESSION` and `CLAUDE_CODE_BRIDGE_SESSION_ID` are in its
 environment. A CLI that inherits them believes it is a nested child and **stops
@@ -270,7 +270,7 @@ byte-level tail, and the `TurnTail` that keeps a reply from being drawn twice.
 What differs is not the shape but four facts about the CLI, each read out of
 codex-cli 0.152.0 rather than assumed.
 
-### A home TerminalX Next owns
+### A home TerminalX owns
 
 There is no `--settings`. Codex reads hooks from `$CODEX_HOME/hooks.json`, and
 it runs a hook only if `$CODEX_HOME/config.toml` holds a `trusted_hash` for it:
@@ -280,27 +280,27 @@ it runs a hook only if `$CODEX_HOME/config.toml` holds a `trusted_hash` for it:
 trusted_hash = "sha256:764f7e14…"
 ```
 
-Installing that in the reader's `~/.codex` would edit two files TerminalX Next
+Installing that in the reader's `~/.codex` would edit two files TerminalX
 does not own and would fire our hooks at every `codex` they run in their own
 terminal. So `home.rs` keeps a home at `$RACCOON_HOME/codex` and points
 `CODEX_HOME` at it. A separate home must not become a separate Codex, so it
 gets the reader's account (`auth.json` **symlinked**, never copied, so a
 refreshed token is shared), their `skills`, `prompts`, `plugins` and
-`AGENTS.md` (symlinked too — TerminalX Next writes nothing into their home,
+`AGENTS.md` (symlinked too — TerminalX writes nothing into their home,
 but Codex goes on keeping its own house there through the links, exactly as it would if
 they had run `codex` themselves), and an explicit list of their `config.toml`
 keys —
 model, effort, `[features]`, `[mcp_servers]`, `[plugins]`, `[marketplaces]` and
 a few more. Two keys are deliberately *not* mirrored: `notify`, which runs the
 reader's own desktop helper and has nothing to do with a tab, and `projects`,
-because TerminalX Next trusts only the checkouts it opened
+because TerminalX trusts only the checkouts it opened
 (`trust_level = "trusted"` for the session's worktree, which is what stops the TUI asking).
 
 The hash is **asked of Codex, not computed**. `codex app-server` answers
 `hooks/list` with a `key` and a `currentHash` per hook, which is the same pair
 the TUI's own "Trust all" writes; reimplementing the digest would be one more
 thing to get wrong on every upgrade. The answer is cached against a digest of
-`hooks.json`, so the short-lived child runs when TerminalX Next moves or is
+`hooks.json`, so the short-lived child runs when TerminalX moves or is
 upgraded, not on every tab.
 
 Two startup dialogs would otherwise eat the first prompt, and both are handled
@@ -518,7 +518,7 @@ rule at click time rather than trusting the rendered row.
   `/effort` at all. Mid-turn, the restart waits for the turn to end.
 - **A Codex tab has no fork.** `codex fork` exists but nothing is wired to it.
 - **The managed Codex home mirrors an allowlist**, so a `config.toml` key the
-  reader adds that is not on that list does not reach a TerminalX Next tab.
+  reader adds that is not on that list does not reach a TerminalX tab.
 - **ACP and OpenCode are unchanged, and hidden**: still headless, still handing
   off to a terminal, but no longer offered for a new session or a new tab. A
   tab already on one opens and runs exactly as before; its model picker is
