@@ -129,8 +129,8 @@ describe("a dictated draft", () => {
   it("does not repeat text Apple carries across a timestamp boundary", () => {
     const events: Event[] = [
       { partial: "Green Light", at: 0, segment: 0 },
-      { partial: "Green lighthouse beam shine brightly beyond the quiet Harbour this morning", at: 200, segment: 0 },
-      // Apple repeats the settled phrase under the next timestamp range.
+      { partial: "Green lighthouse beam shine bright brightly beyond the quiet Harbour this morning", at: 200, segment: 0 },
+      // Apple corrects the settled phrase while advancing its timestamp range.
       { partial: "Green lighthouse beam shine brightly beyond the quiet Harbour this morning", at: 2_200, segment: 1 },
       // After silence, the next utterance can initially share that range.
       { partial: "Silver lanterns glow softly beside the open window tonight", at: 4_000, segment: 1 },

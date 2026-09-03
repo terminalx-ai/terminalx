@@ -75,6 +75,20 @@ function words(text: string): string[] {
     .filter(Boolean);
 }
 
+/** How many words from `prev` still occur in `next`, including duplicates. */
+function survivingWordCount(prev: string[], next: string[]): number {
+  const available = new Map<string, number>();
+  for (const word of next) available.set(word, (available.get(word) ?? 0) + 1);
+  let count = 0;
+  for (const word of prev) {
+    const left = available.get(word) ?? 0;
+    if (left === 0) continue;
+    count += 1;
+    available.set(word, left - 1);
+  }
+  return count;
+}
+
 /** What the recogniser knows about a result beyond its text. */
 export interface DictationResult {
   /** Stable within one recogniser segment and different after a real boundary. */
@@ -106,7 +120,9 @@ export function revises(prev: string, next: string, sincePreviousMs?: number): b
   // be a correction than a new utterance. A long enough gap restores the old
   // text-only distinction for engines that cannot identify their segments.
   if (recent && (a.length < SHORT_PARTIAL_WORDS || a[0] === b[0])) return true;
-  return shared * 2 >= a.length;
+  // Inserted or removed guesses can move the matching tail out of prefix
+  // position. If at least half the old words survived, it is still a rewrite.
+  return survivingWordCount(a, b) * 2 >= a.length;
 }
 
 function isRevision(buffer: DictationBuffer, next: string, result: DictationResult): boolean {
