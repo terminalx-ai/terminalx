@@ -23,6 +23,34 @@ fn kill_tab(state: &tauri::State<'_, crate::AppState>, session_id: &str, tab_id:
     state.terminals.kill(&crate::session::SessionManager::pane_id(tab_id));
 }
 
+// ------------------------------------------------------------------ account
+
+#[tauri::command]
+pub async fn account_status(
+    app: AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::account::AccountStatus> {
+    let account = state.account.clone();
+    tauri::async_runtime::spawn_blocking(move || account.status(&app)).await.map_err(err)
+}
+
+#[tauri::command]
+pub fn account_sign_in(
+    app: AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::account::AccountStatus> {
+    state.account.clone().begin_sign_in(&app).map_err(err)
+}
+
+#[tauri::command]
+pub async fn account_sign_out(
+    app: AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::account::AccountStatus> {
+    let account = state.account.clone();
+    tauri::async_runtime::spawn_blocking(move || account.sign_out(&app)).await.map_err(err)
+}
+
 // ------------------------------------------------------------------ projects
 
 #[derive(Serialize)]
