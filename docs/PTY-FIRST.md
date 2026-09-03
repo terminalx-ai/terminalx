@@ -439,6 +439,8 @@ hook socket and prints nothing. There is no usage request, hidden PTY, durable
 cache, or second transport. A pane may contribute at most one non-empty update
 per 15 seconds. Both the documented percentage and the fractional
 `utilization` form are accepted because installed CLI builds have emitted both.
+Additive `model_scoped` entries use their server-supplied model label; a Fable
+entry becomes its distinct 10,080-minute window in the same snapshot.
 
 Codex 0.152.0 answers `account/rateLimits/read` on the same one-shot app-server
 client already used for model discovery. A 300-minute primary window is `5h`,

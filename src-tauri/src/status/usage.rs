@@ -74,8 +74,14 @@ fn numeric(value: &Value) -> Option<f32> {
 }
 
 fn reset_ms(value: &Value) -> Option<i64> {
-    let seconds = value.as_i64().or_else(|| value.as_f64().map(|n| n as i64)).or_else(|| value.as_str()?.parse().ok())?;
-    seconds_to_ms(seconds)
+    if let Some(seconds) = value.as_i64().or_else(|| value.as_f64().map(|n| n as i64)) {
+        return seconds_to_ms(seconds);
+    }
+    let raw = value.as_str()?.trim();
+    if let Ok(seconds) = raw.parse() {
+        return seconds_to_ms(seconds);
+    }
+    chrono::DateTime::parse_from_rfc3339(raw).ok().map(|timestamp| timestamp.timestamp_millis())
 }
 
 fn claude_label(key: &str) -> (String, Option<u32>) {
@@ -84,6 +90,7 @@ fn claude_label(key: &str) -> (String, Option<u32>) {
         "seven_day" => ("7d".into(), Some(10_080)),
         "seven_day_opus" => ("7d Opus".into(), Some(10_080)),
         "seven_day_sonnet" => ("7d Sonnet".into(), Some(10_080)),
+        "fable_weekly" => ("Fable".into(), Some(10_080)),
         _ => {
             let label = key.split('_').filter(|part| !part.is_empty()).map(|part| {
                 let mut chars = part.chars();
@@ -104,33 +111,48 @@ fn classify_codex(minutes: u32) -> (String, String) {
     }
 }
 
+fn parse_claude_window(key: &str, raw: &Value, updated_at: i64) -> Option<UsageWindow> {
+    let usage = raw.get("used_percentage").or_else(|| raw.get("utilization"))?;
+    let utilization = numeric(usage)?;
+    let used_percent = if raw.get("used_percentage").is_none() && utilization <= 1.0 {
+        utilization * 100.0
+    } else {
+        utilization
+    }
+    .clamp(0.0, 100.0);
+    let (label, window_minutes) = claude_label(key);
+    Some(UsageWindow {
+        agent: "claude".into(),
+        key: key.into(),
+        label,
+        used_percent,
+        resets_at: raw.get("resets_at").and_then(reset_ms),
+        window_minutes,
+        updated_at,
+        plan: None,
+        stale: false,
+    })
+}
+
 fn parse_claude(payload: &Value, updated_at: i64) -> Vec<UsageWindow> {
     let Some(rate_limits) = payload.get("rate_limits").and_then(Value::as_object) else { return Vec::new() };
-    rate_limits
+    let mut windows: Vec<_> = rate_limits
         .iter()
-        .filter_map(|(key, raw)| {
-            let usage = raw.get("used_percentage").or_else(|| raw.get("utilization"))?;
-            let utilization = numeric(usage)?;
-            let used_percent = if raw.get("used_percentage").is_none() && utilization <= 1.0 {
-                utilization * 100.0
-            } else {
-                utilization
-            }
-            .clamp(0.0, 100.0);
-            let (label, window_minutes) = claude_label(key);
-            Some(UsageWindow {
-                agent: "claude".into(),
-                key: key.clone(),
-                label,
-                used_percent,
-                resets_at: raw.get("resets_at").and_then(reset_ms),
-                window_minutes,
-                updated_at,
-                plan: None,
-                stale: false,
-            })
+        .filter_map(|(key, raw)| parse_claude_window(key, raw, updated_at))
+        .collect();
+    let fable = rate_limits.get("model_scoped").and_then(Value::as_array).and_then(|scoped| {
+        scoped.iter().find_map(|raw| {
+            raw.get("display_name")
+                .and_then(Value::as_str)
+                .filter(|name| name.eq_ignore_ascii_case("Fable"))
+                .and_then(|_| parse_claude_window("fable_weekly", raw, updated_at))
         })
-        .collect()
+    });
+    if let Some(fable) = fable {
+        windows.retain(|window| window.key != "fable_weekly");
+        windows.push(fable);
+    }
+    windows
 }
 
 fn parse_codex(result: &Value, updated_at: i64) -> Vec<UsageWindow> {
@@ -293,13 +315,25 @@ mod tests {
         let windows = parse_claude(
             &json!({"rate_limits": {
                 "five_hour": {"used_percentage": 62, "resets_at": 1788757220},
-                "seven_day_opus": {"utilization": 0.9, "resets_at": 1788981737}
+                "seven_day_opus": {"utilization": 0.9, "resets_at": 1788981737},
+                "model_scoped": [{
+                    "display_name": "Fable",
+                    "utilization": 82,
+                    "resets_at": "2026-09-07T14:00:00.000Z"
+                }]
             }}),
             456,
         );
-        assert_eq!(windows.len(), 2);
-        assert_eq!(windows[0].used_percent, 62.0);
-        assert_eq!(windows[1].label, "7d Opus");
-        assert_eq!(windows[1].used_percent, 90.0);
+        assert_eq!(windows.len(), 3);
+        let five_hour = windows.iter().find(|window| window.key == "five_hour").unwrap();
+        assert_eq!(five_hour.used_percent, 62.0);
+        let opus = windows.iter().find(|window| window.key == "seven_day_opus").unwrap();
+        assert_eq!(opus.label, "7d Opus");
+        assert_eq!(opus.used_percent, 90.0);
+        let fable = windows.iter().find(|window| window.key == "fable_weekly").unwrap();
+        assert_eq!(fable.label, "Fable");
+        assert_eq!(fable.used_percent, 82.0);
+        assert_eq!(fable.window_minutes, Some(10_080));
+        assert_eq!(fable.resets_at, Some(1_788_789_600_000));
     }
 }

@@ -357,7 +357,10 @@ function agentName(agent: UsageAgent): string {
   return agent === "claude" ? "Claude" : "Codex";
 }
 
-function windowKind(window: UsageWindow): "5h" | "7d" | null {
+type CanonicalWindowKind = "5h" | "7d" | "fable";
+
+function windowKind(window: UsageWindow): CanonicalWindowKind | null {
+  if (window.key === "fable_weekly") return "fable";
   if (window.key === "five_hour" || window.windowMinutes != null && Math.abs(window.windowMinutes - 300) <= 1) return "5h";
   if (window.key === "seven_day" || window.key === "weekly" || window.windowMinutes != null && Math.abs(window.windowMinutes - 10_080) <= 1) return "7d";
   return null;
@@ -373,7 +376,7 @@ function tightestWindow(windows: UsageWindow[]): UsageWindow {
   return windows.reduce((tightest, window) => window.usedPercent > tightest.usedPercent ? window : tightest);
 }
 
-function canonicalWindow(windows: UsageWindow[], kind: "5h" | "7d", exactKeys: string[]): UsageWindow | null {
+function canonicalWindow(windows: UsageWindow[], kind: CanonicalWindowKind, exactKeys: string[]): UsageWindow | null {
   const candidates = windows.filter((window) => windowKind(window) === kind);
   const exact = candidates.filter((window) => exactKeys.includes(window.key));
   return candidates.length ? tightestWindow(exact.length ? exact : candidates) : null;
@@ -384,6 +387,7 @@ function barWindows(windows: UsageWindow[]): UsageWindow[] {
   const canonical = [
     canonicalWindow(windows, "5h", ["five_hour"]),
     canonicalWindow(windows, "7d", ["seven_day", "weekly"]),
+    canonicalWindow(windows, "fable", ["fable_weekly"]),
   ].filter((window): window is UsageWindow => window != null);
   return canonical.length ? canonical : [tightestWindow(windows)];
 }
