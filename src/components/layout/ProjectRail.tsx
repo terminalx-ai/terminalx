@@ -123,7 +123,6 @@ export function ProjectRail({
           >
             <BarChart3 />
             <span className="truncate">Stats &amp; Usage</span>
-            <Keys chord="mod+shift+u" />
           </Button>
         </WithTooltip>
         <WithTooltip label="Automations" keys={keycaps("mod+shift+r")}>
