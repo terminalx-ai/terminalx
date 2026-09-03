@@ -321,6 +321,9 @@ pub(super) async fn dispatch(
         "session.send" => {
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| send_session(manager, device, params)))
         }
+        "permission.respond" => {
+            require_driver(device).and_then(|_| parse_params(params).and_then(|params| respond_permission(manager, params)))
+        }
         "chat.list" => parse_params(params).and_then(|params| list_notes(manager, params)),
         "chat.post" => parse_params(params).and_then(|params| post_note(manager, device, params)),
         "chat.promoteToAgent" => {
@@ -546,6 +549,29 @@ struct SessionSendParams {
 fn send_session(manager: &PairingManager, device: &DeviceEntry, params: SessionSendParams) -> Result<Value> {
     let (session, _) = find_tab(&params.tab_id)?;
     send_attributed(manager, device, &session.id, &params.tab_id, &params.text)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PermissionRespondParams {
+    session_id: String,
+    tab_id: String,
+    request_id: String,
+    option_id: String,
+}
+
+fn respond_permission(manager: &PairingManager, params: PermissionRespondParams) -> Result<Value> {
+    validate_session_tab(&params.session_id, &params.tab_id)?;
+    app_state(manager)?
+        .manager()
+        .context("session manager is unavailable")?
+        .respond_permission(
+            &params.session_id,
+            &params.tab_id,
+            &params.request_id,
+            &params.option_id,
+        )?;
+    Ok(json!({ "status": "answered" }))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -982,5 +1008,28 @@ mod tests {
         assert!(!collapsed.contains('\n'));
         assert!(collapsed.chars().count() <= 160);
         assert!(collapsed.ends_with('…'));
+    }
+
+    #[test]
+    fn permission_response_params_are_closed_and_session_scoped() {
+        let parsed: PermissionRespondParams = serde_json::from_value(json!({
+            "sessionId": "session",
+            "tabId": "tab",
+            "requestId": "request",
+            "optionId": "allow",
+        }))
+        .unwrap();
+        assert_eq!(parsed.session_id, "session");
+        assert_eq!(parsed.tab_id, "tab");
+        assert_eq!(parsed.request_id, "request");
+        assert_eq!(parsed.option_id, "allow");
+        assert!(serde_json::from_value::<PermissionRespondParams>(json!({
+            "sessionId": "session",
+            "tabId": "tab",
+            "requestId": "request",
+            "optionId": "allow",
+            "paneId": "not accepted",
+        }))
+        .is_err());
     }
 }

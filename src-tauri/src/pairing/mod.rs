@@ -1404,6 +1404,7 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "steerLease.queueInput",
         "chat.promoteToAgent",
         "session.send",
+        "permission.respond",
     ];
     VIEWER.contains(&method) || (scope == DeviceScope::Driver && DRIVER.contains(&method))
 }
@@ -1421,6 +1422,8 @@ mod tests {
         assert!(!allowed_method(DeviceScope::Viewer, "session.send"));
         assert!(allowed_method(DeviceScope::Driver, "terminal.send"));
         assert!(allowed_method(DeviceScope::Driver, "session.send"));
+        assert!(allowed_method(DeviceScope::Driver, "permission.respond"));
+        assert!(!allowed_method(DeviceScope::Viewer, "permission.respond"));
         assert!(allowed_method(
             DeviceScope::Driver,
             "pairing.provisionRelay"
@@ -1431,7 +1434,6 @@ mod tests {
             "settings.update",
             "session.create",
             "terminal.create",
-            "permission.respond",
         ] {
             assert!(!allowed_method(DeviceScope::Driver, denied), "{denied}");
         }

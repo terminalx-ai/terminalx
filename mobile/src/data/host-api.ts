@@ -62,6 +62,12 @@ export class HostApi {
     return result.ok && result.value.status === "sent";
   }
 
+  async respondPermission(sessionId: string, tabId: string, requestId: string, optionId: string): Promise<{ answered: true } | { answered: false; message: string }> {
+    const result = await this.connection.request<{ status?: string }>("permission.respond", { sessionId, tabId, requestId, optionId });
+    if (result.ok && result.value.status === "answered") return { answered: true };
+    return { answered: false, message: result.ok ? "The host did not answer this request." : result.refusal.message };
+  }
+
   subscribeTerminal(sessionId: string, tabId: string, listener: (value: { type: string; chunk?: string; serialized?: string }) => void): () => void {
     return this.connection.subscribe("terminal.subscribe", {
       worktreeId: sessionId,

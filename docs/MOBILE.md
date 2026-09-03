@@ -250,11 +250,15 @@ Stopping a share, revoking the device, losing the verified identity, entering
 Bypass mode, or closing the tab cancels or refuses pending writes. No reconnect
 may replay input whose result is unknown.
 
-Permission requests are read-only on mobile in the baseline. There is no
-general permission-answer RPC in the allowlist. A future
-`permission.respond` operation must use a separately negotiated capability also
-named `permission.respond`, revalidate host/session authority, and generate a
-local activity record. It is not implied by terminal steering.
+Permission requests use the same structured decision path as desktop. A driver
+device may call `permission.respond` with the public session id, tab id, request
+id, and one of the option ids emitted by the pending permission event. The host
+resolves the session and tab again, verifies that the request is still pending,
+and lets the session manager validate the option before returning the decision
+to the parked hook. Viewer devices are refused, terminal bytes are never
+written, and a lapsed request remains visible as a terminal fallback. The
+resulting `permission_decided` event is the local activity record and removes
+the card on every subscribed surface.
 
 ## Persistence, sign-out, and privacy
 
