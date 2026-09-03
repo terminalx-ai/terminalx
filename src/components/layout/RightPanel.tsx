@@ -145,7 +145,16 @@ export function RightPanel({
       </div>
       <div className="min-h-0 flex-1">
         <div className={cn("h-full", tab !== "changes" && "hidden")}>
-          <ChangesPanel key={refreshTick} cwd={cwd} events={events} version={version} baseRef={baseRef} active={tab === "changes"} live={live} workingTree={workingTree} />
+          <ChangesPanel
+            key={refreshTick}
+            cwd={cwd}
+            events={events}
+            version={version}
+            baseRef={baseRef}
+            active={tab === "changes"}
+            live={live}
+            workingTree={workingTree}
+          />
         </div>
         <div className={cn("h-full", tab !== "repo" && "hidden")}>
           <RepoPanel key={refreshTick} cwd={cwd} active={tab === "repo"} />

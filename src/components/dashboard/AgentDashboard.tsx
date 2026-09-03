@@ -39,7 +39,7 @@ export function AgentDashboard() {
   const [cursor, setCursor] = useState<{ column: ColumnId; row: number } | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
-  const live = useMemo(() => store.sessions.filter((s) => !s.archived), [store.sessions]);
+  const live = useMemo(() => store.sessions.filter((s) => !s.archived && s.tabs.length > 0), [store.sessions]);
   const summaries = useSessionSummaries(live, store.loaded);
 
   const projectName = useCallback(
