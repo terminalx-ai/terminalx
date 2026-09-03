@@ -15,6 +15,11 @@ use crate::session::{PendingPermission, SessionManager};
 use crate::store::index::{self, SessionEntry, TabEntry, TabStatus};
 use crate::store::projects::{self, Project};
 
+const APP_UNAVAILABLE_RECOVERY: &str =
+    "Open TerminalX Next with the same RACCOON_HOME, then retry status once.";
+const LINEAR_INTEGRATION_RECOVERY: &str =
+    "Add an API key in TerminalX Next Settings → Integrations.";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlRequest {
@@ -127,7 +132,7 @@ pub fn call(
         return Err(ControlError::new(
             "app_unavailable",
             format!("No running app is listening at {}.", socket.display()),
-            Some("Open Raccoon with the same RACCOON_HOME, then retry status once.".into()),
+            Some(APP_UNAVAILABLE_RECOVERY.into()),
         ));
     }
     let token = std::env::var(crate::hooks::CONTROL_TOKEN_ENV)
@@ -151,7 +156,7 @@ pub fn call(
         ControlError::new(
             "app_unavailable",
             format!("Could not connect to {}: {e}", socket.display()),
-            Some("Open Raccoon with the same RACCOON_HOME, then retry status once.".into()),
+            Some(APP_UNAVAILABLE_RECOVERY.into()),
         )
     })?;
     stream
@@ -572,7 +577,7 @@ impl ControlService {
                         ControlError::new(
                             "integration_unavailable",
                             "Linear is not connected.",
-                            Some("Add an API key in Raccoon Settings → Integrations.".into()),
+                            Some(LINEAR_INTEGRATION_RECOVERY.into()),
                         )
                     })?;
                 crate::issues::linear_list(&key, &filter)
@@ -840,6 +845,18 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ControlResponse>(&encoded).unwrap(),
             response
+        );
+    }
+
+    #[test]
+    fn recovery_copy_uses_the_terminalx_next_identity() {
+        assert_eq!(
+            APP_UNAVAILABLE_RECOVERY,
+            "Open TerminalX Next with the same RACCOON_HOME, then retry status once."
+        );
+        assert_eq!(
+            LINEAR_INTEGRATION_RECOVERY,
+            "Add an API key in TerminalX Next Settings → Integrations."
         );
     }
 }
