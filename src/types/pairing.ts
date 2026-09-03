@@ -102,6 +102,33 @@ export interface MobileE2EEAuthenticatedV2 {
   transcriptHashB64: string;
 }
 
+export type RelayCredentialInstallAuthorization =
+  | { mode: "relay-basis"; basisConnId: string }
+  | { mode: "authenticated-direct"; directAuthId: string };
+
+export interface RelayCredentialInstalledV1 {
+  v: 1;
+  reqId: string;
+  authorizationMode: RelayCredentialInstallAuthorization["mode"];
+  currentVersion: number;
+  resumeExpiresAt: number;
+  graceExpiresAt?: number;
+}
+
+export type RelayCredentialInstallStatusV1 =
+  | { v: 1; reqId: string; state: "not-found" }
+  | { v: 1; reqId: string; state: "committed"; result: RelayCredentialInstalledV1 };
+
+export interface RelayResumeConfirmedV1 {
+  v: 1;
+  reqId: string;
+  currentVersion: number;
+  acceptedAs: "current" | "grace";
+  renewed: boolean;
+  resumeExpiresAt: number;
+  graceExpiresAt?: number;
+}
+
 export type RelayHostControlInbound =
   | {
       type: "host-challenge";
@@ -132,6 +159,9 @@ export type RelayHostControlInbound =
   | { type: "drain"; graceMs: number; recovery: "resolve-director" }
   | { type: "invite-created"; reqId: string; inviteToken: string; expiresAt: number; maxAttempts: number }
   | { type: "device-revoked"; reqId: string }
+  | ({ type: "device-credential-installed" } & RelayCredentialInstalledV1)
+  | ({ type: "device-credential-install-status-result" } & RelayCredentialInstallStatusV1)
+  | ({ type: "device-resume-confirmed" } & RelayResumeConfirmedV1)
   | { type: "control-error"; reqId?: string; code: string };
 
 export type RelayHostControlOutbound =
@@ -149,7 +179,18 @@ export type RelayHostControlOutbound =
   | { type: "pong"; t: number }
   | { type: "auth-refresh"; relayJwt: string }
   | { type: "invite-create"; reqId: string; relayDeviceId: string }
-  | { type: "device-revoke"; reqId: string; relayDeviceId: string };
+  | { type: "device-revoke"; reqId: string; relayDeviceId: string }
+  | {
+      type: "device-credential-install";
+      v: 1;
+      reqId: string;
+      relayDeviceId: string;
+      newResumeTokenHash: string;
+      expectedCurrentHash?: string;
+      authorization: RelayCredentialInstallAuthorization;
+    }
+  | { type: "device-credential-install-status"; v: 1; reqId: string; relayDeviceId: string }
+  | { type: "device-resume-confirm"; v: 1; reqId: string; basisConnId: string };
 
 export interface RelayHostDataAuth {
   type: "host-data-auth";
@@ -167,3 +208,48 @@ export interface RelayPhoneAuth {
 
 export const RECONNECT_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000] as const;
 export const RECONNECT_TRICKLE_DELAY_MS = 90_000 as const;
+
+export type PairedDeviceScope = "viewer" | "driver";
+export type PairedDeviceProvenance = "automatic" | "explicit";
+
+export interface PairedDevice {
+  id: string;
+  label: string;
+  platform: string;
+  token: string;
+  scope: PairedDeviceScope;
+  provenance: PairedDeviceProvenance;
+  boundUserId?: string;
+  bindingGeneration: number;
+  publicKey: string;
+  createdAt: string;
+  lastSeenAt?: string;
+  revokedAt?: string;
+}
+
+export interface PairingCodeStatus {
+  pairingUrl: string;
+  expiresAt: number;
+  transport: MobileE2EETransport;
+}
+
+export interface PairingHostMetadata {
+  hostId: string;
+  publicKey: string;
+  displayName: string;
+  platform: string;
+  appVersion: string;
+  lastSeenAt: string | null;
+}
+
+export interface PairingStatus {
+  relay: {
+    phase: "off" | "connecting" | "connected" | "offline";
+    message: string | null;
+    attempt: number;
+  };
+  host: PairingHostMetadata | null;
+  devices: PairedDevice[];
+  activePairing: PairingCodeStatus | null;
+  lastError: string | null;
+}
