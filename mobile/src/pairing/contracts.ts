@@ -128,6 +128,8 @@ export const DeviceCredentialInstalledSchema = z
   })
   .strict();
 
+export type DeviceCredentialInstalled = z.infer<typeof DeviceCredentialInstalledSchema>;
+
 export const DeviceResumeConfirmedSchema = z
   .object({
     v: z.literal(1),

@@ -33,6 +33,7 @@ interface AppContextValue {
   refreshMachines(): Promise<void>;
   pairAvailable(host: AccountHost): Promise<void>;
   pairCode(code: string): Promise<void>;
+  retryPairing(): Promise<void>;
   connectHost(host: StoredHost): Promise<void>;
   disconnectHost(): void;
   forgetHost(hostId: string): Promise<void>;
@@ -126,7 +127,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       }
       setSession(effectiveSession);
       setHosts(storedHosts);
-      void recoverPendingPairing().then(() => loadHosts()).catch(() => undefined);
+      void recoverPendingPairing().then(() => loadHosts()).catch((cause: unknown) => setError(readableError(cause)));
       if (rawLogs) {
         try { setLogs((JSON.parse(rawLogs) as ConnectionLogEntry[]).slice(-200)); } catch { /* Ignore a corrupt redacted log. */ }
       }
@@ -229,6 +230,20 @@ export function AppProvider({ children }: PropsWithChildren) {
     }
   }, [loadHosts]);
 
+  const retryPairing = useCallback(async () => {
+    setLoadingMachines(true);
+    setError(null);
+    try {
+      await recoverPendingPairing();
+      await loadHosts();
+    } catch (cause) {
+      setError(readableError(cause));
+      throw cause;
+    } finally {
+      setLoadingMachines(false);
+    }
+  }, [loadHosts]);
+
   const connectHost = useCallback(async (host: StoredHost) => {
     setError(null);
     const credential = await readHostCredential(host.id);
@@ -255,7 +270,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     await loadHosts();
   }, [disconnectHost, loadHosts]);
 
-  const value = useMemo<AppContextValue>(() => ({ ready, session, hosts, availableHosts, installationState, activeHost, connectionStage, connectionAttempt, sessions, loadingMachines, loadingSessions, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, connectHost, disconnectHost, forgetHost, refreshSessions, clearError: () => setError(null) }), [ready, session, hosts, availableHosts, installationState, activeHost, connectionStage, connectionAttempt, sessions, loadingMachines, loadingSessions, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, connectHost, disconnectHost, forgetHost, refreshSessions]);
+  const value = useMemo<AppContextValue>(() => ({ ready, session, hosts, availableHosts, installationState, activeHost, connectionStage, connectionAttempt, sessions, loadingMachines, loadingSessions, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, retryPairing, connectHost, disconnectHost, forgetHost, refreshSessions, clearError: () => setError(null) }), [ready, session, hosts, availableHosts, installationState, activeHost, connectionStage, connectionAttempt, sessions, loadingMachines, loadingSessions, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, retryPairing, connectHost, disconnectHost, forgetHost, refreshSessions]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

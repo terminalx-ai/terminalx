@@ -35,6 +35,7 @@ type RelayClientOptions =
       credentialVersion?: number;
       deviceToken: string;
       desktopPublicKeyB64: string;
+      clientSecretKey?: Uint8Array;
       createSocket?: (url: string) => WebSocket;
     }
   | {
@@ -42,6 +43,7 @@ type RelayClientOptions =
       endpoint: string;
       deviceToken: string;
       desktopPublicKeyB64: string;
+      clientSecretKey?: Uint8Array;
       createSocket?: (url: string) => WebSocket;
     };
 
@@ -85,6 +87,7 @@ export class RelayClient {
       transport: direct ? "direct" : "relay",
       ...(!direct ? { relayHostId: this.options.relay.relayHostId } : {}),
       random: secureRandom,
+      ...(this.options.clientSecretKey ? { clientSecretKey: this.options.clientSecretKey } : {}),
     });
     this.connectPromise = new Promise<void>((resolve, reject) => {
       this.resolveConnect = resolve;

@@ -1,12 +1,28 @@
 import { describe, expect, it } from "vitest";
 import { encodeHandshakeTranscript, validateHandshake, type MobileE2EEHello, type MobileE2EEReady } from "./e2ee-contract";
 import { openFrame, sealFrame } from "./e2ee-framing";
-import { deriveKeySchedule } from "./e2ee-session";
+import { deriveKeySchedule, MobileE2EESession } from "./e2ee-session";
 
 const hex = (bytes: Uint8Array) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 const repeated = (byte: number) => btoa(String.fromCharCode(...new Uint8Array(32).fill(byte)));
 
 describe("relay E2EE v2 framing", () => {
+  it("reuses the device client key while generating a fresh nonce per connection", () => {
+    let nonce = 10;
+    const random = { bytes: (length: number) => new Uint8Array(length).fill(nonce++) };
+    const create = () => MobileE2EESession.create({
+      desktopPublicKeyB64: repeated(3),
+      transport: "direct",
+      random,
+      clientSecretKey: new Uint8Array(32).fill(9),
+    }).hello;
+
+    const first = create();
+    const second = create();
+    expect(first.clientPublicKeyB64).toBe(second.clientPublicKeyB64);
+    expect(first.clientNonceB64).not.toBe(second.clientNonceB64);
+  });
+
   it("matches the legacy normative transcript and key schedule", () => {
     const context = { protocol: "terminalx-mobile-e2ee" as const, initiator: "mobile" as const, responder: "desktop" as const, transport: "relay" as const, relayHostId: "AbCdEf0123_-xyZ9" };
     const hello: MobileE2EEHello = { type: "e2ee_hello", v: 2, clientPublicKeyB64: repeated(1), clientNonceB64: repeated(2), capabilities: { framing: [2], payloadKinds: ["text", "binary"] }, context };

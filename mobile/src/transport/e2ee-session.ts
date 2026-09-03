@@ -25,11 +25,11 @@ export class MobileE2EESession {
     this.hello = hello;
   }
 
-  static create(args: { desktopPublicKeyB64: string; transport: MobileE2EETransport; relayHostId?: string; random: RandomSource }): MobileE2EESession {
-    const secretKey = new Uint8Array(args.random.bytes(32));
-    const publicKey = nacl.scalarMult.base(secretKey);
+  static create(args: { desktopPublicKeyB64: string; transport: MobileE2EETransport; relayHostId?: string; random: RandomSource; clientSecretKey?: Uint8Array }): MobileE2EESession {
+    const secretKey = new Uint8Array(args.clientSecretKey ?? args.random.bytes(32));
     const clientNonce = new Uint8Array(args.random.bytes(32));
     if (secretKey.length !== 32 || clientNonce.length !== 32) throw new Error("Secure random source returned an invalid length");
+    const publicKey = nacl.scalarMult.base(secretKey);
     const desktopKey = decodeCanonicalBase64(args.desktopPublicKeyB64, 32);
     if (!desktopKey) throw new Error("Invalid desktop public key");
     const context = {

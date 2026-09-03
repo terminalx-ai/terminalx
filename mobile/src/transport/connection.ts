@@ -3,6 +3,7 @@ import type { RpcCallResult } from "@terminalx/portable/rpc";
 import { RECONNECT_DELAYS_MS, RECONNECT_TRICKLE_MS } from "../pairing/contracts";
 import { updateStoredHost, writeHostCredential, type HostCredential, type StoredHost } from "../store/hosts";
 import { RelayClient, type RelayEvent } from "./relay-client";
+import { loadOrCreateE2EESecretKey } from "./e2ee-keypair";
 import { applyResumeConfirmation } from "./credential-confirmation";
 import { rotateCredentialIfNeeded } from "./credential-rotation";
 
@@ -112,9 +113,10 @@ export class HostConnection {
   private async connectOnce(generation: number): Promise<void> {
     if (!this.active) return;
     const { host: storedHost, credential } = this.active;
+    const clientSecretKey = await loadOrCreateE2EESecretKey();
     const clients = new Set<RelayClient>();
     const openDirect = async (): Promise<ConnectionCandidate> => {
-      const client = new RelayClient({ transport: "direct", endpoint: storedHost.endpoint, deviceToken: credential.deviceToken, desktopPublicKeyB64: storedHost.publicKeyB64 });
+      const client = new RelayClient({ transport: "direct", endpoint: storedHost.endpoint, deviceToken: credential.deviceToken, desktopPublicKeyB64: storedHost.publicKeyB64, clientSecretKey });
       clients.add(client);
       this.log("info", "Opening encrypted direct connection", redactEndpoint(storedHost.endpoint));
       await client.connect();
@@ -127,7 +129,7 @@ export class HostConnection {
         attempts.push((async () => {
           const host = await resolveRelay({ ...storedHost, relay: storedHost.relay! }, resume.token).catch(() => storedHost);
           if (!host.relay) throw new Error("Relay endpoint unavailable");
-          const client = new RelayClient({ relay: host.relay, credential: resume.token, credentialKind: "resume", credentialVersion: resume.version, deviceToken: credential.deviceToken, desktopPublicKeyB64: host.publicKeyB64 });
+          const client = new RelayClient({ relay: host.relay, credential: resume.token, credentialKind: "resume", credentialVersion: resume.version, deviceToken: credential.deviceToken, desktopPublicKeyB64: host.publicKeyB64, clientSecretKey });
           clients.add(client);
           this.log("info", "Opening encrypted relay", redactEndpoint(host.relay.cellUrl));
           await client.connect();
