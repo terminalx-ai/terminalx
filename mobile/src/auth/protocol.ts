@@ -38,7 +38,7 @@ export function buildAuthorizeUrl(config: AuthConfig, challenge: string, state: 
 
 export function isAuthCallbackUrl(value: string): boolean {
   const path = value.split("?")[0]?.replace(/\/+$/, "") ?? "";
-  return path === MOBILE_REDIRECT_URI || path === "terminalx://auth";
+  return path === MOBILE_REDIRECT_URI;
 }
 
 export function parseCallbackUrl(value: string): { code: string | null; state: string | null; error: string | null } {
@@ -55,6 +55,7 @@ export async function exchangeAuthorizationCode(args: {
   nonce: string | null;
   fetchImpl?: typeof fetch;
 }): Promise<{ ok: true; session: CloudSession } | { ok: false; reason: string }> {
+  if (!isAuthCallbackUrl(args.callbackUrl)) return { ok: false, reason: "invalid_callback_uri" };
   const callback = parseCallbackUrl(args.callbackUrl);
   if (callback.error) return { ok: false, reason: callback.error };
   if (!callback.code || !args.verifier || !args.nonce) return { ok: false, reason: "missing_authorization_code" };
@@ -75,9 +76,21 @@ export async function exchangeAuthorizationCode(args: {
   }
 }
 
-export async function refreshSession(config: AuthConfig, session: CloudSession, fetchImpl: typeof fetch = fetch): Promise<CloudSession | null> {
-  const response = await postJson(config.refreshEndpoint, { refreshToken: session.refreshToken, clientId: config.clientId }, fetchImpl);
-  return response.ok ? parseSession(await response.json()) : null;
+export type RefreshOutcome =
+  | { status: "refreshed"; session: CloudSession }
+  | { status: "rejected" }
+  | { status: "unavailable"; reason: string };
+
+export async function refreshSession(config: AuthConfig, session: CloudSession, fetchImpl: typeof fetch = fetch): Promise<RefreshOutcome> {
+  try {
+    const response = await postJson(config.refreshEndpoint, { refreshToken: session.refreshToken, clientId: config.clientId }, fetchImpl);
+    if ([400, 401, 403].includes(response.status)) return { status: "rejected" };
+    if (!response.ok) return { status: "unavailable", reason: `refresh_failed_${response.status}` };
+    const refreshed = parseSession(await response.json());
+    return refreshed ? { status: "refreshed", session: refreshed } : { status: "unavailable", reason: "invalid_refresh_response" };
+  } catch (error) {
+    return { status: "unavailable", reason: error instanceof Error ? error.message : "refresh_failed" };
+  }
 }
 
 export async function revokeSession(config: AuthConfig, session: CloudSession, fetchImpl: typeof fetch = fetch): Promise<void> {

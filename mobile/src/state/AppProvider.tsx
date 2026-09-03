@@ -1,7 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { AppState, Linking } from "react-native";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from "react";
-import { beginSignIn, finishSignIn, readSession, signOut as revokeCloudSession } from "../auth/native";
+import { beginSignIn, finishSignIn, readSession, refreshStoredSession, signOut as revokeCloudSession } from "../auth/native";
 import { isAuthCallbackUrl, type CloudSession } from "../auth/protocol";
 import { HostApi, type SessionSummary } from "../data/host-api";
 import { handleNotificationEvent, restoreLocalNotifications } from "../notifications/local";
@@ -63,12 +63,31 @@ export function AppProvider({ children }: PropsWithChildren) {
 
   const loadHosts = useCallback(async () => setHosts(await readHosts()), []);
 
+  const refreshCloudSession = useCallback(async (stored: CloudSession): Promise<CloudSession | null> => {
+    const outcome = await refreshStoredSession(stored);
+    if (outcome.status === "rejected") {
+      connection.stop();
+      activeHostRef.current = null;
+      setActiveHost(null);
+      setSessions([]);
+      setAvailableHosts([]);
+      await signOutPairing(stored);
+      setSession(null);
+      await loadHosts();
+      return null;
+    }
+    if (outcome.status === "refreshed") setSession(outcome.session);
+    return outcome.session;
+  }, [connection, loadHosts]);
+
   const refreshMachines = useCallback(async () => {
     if (!session) return;
     setLoadingMachines(true);
     setError(null);
     try {
-      const result = await discoverMachines(session);
+      const currentSession = await refreshCloudSession(session);
+      if (!currentSession) return;
+      const result = await discoverMachines(currentSession);
       setAvailableHosts(result.hosts);
       setInstallationState(result.installationState);
       await loadHosts();
@@ -77,7 +96,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     } finally {
       setLoadingMachines(false);
     }
-  }, [loadHosts, session]);
+  }, [loadHosts, refreshCloudSession, session]);
 
   const refreshSessions = useCallback(async () => {
     if (!activeHostRef.current) return;
@@ -94,14 +113,25 @@ export function AppProvider({ children }: PropsWithChildren) {
 
   useEffect(() => {
     void Promise.all([readSession(), readHosts(), AsyncStorage.getItem(LOG_KEY)]).then(async ([storedSession, storedHosts, rawLogs]) => {
-      setSession(storedSession);
+      let effectiveSession = storedSession;
+      if (storedSession) {
+        const outcome = await refreshStoredSession(storedSession);
+        if (outcome.status === "rejected") {
+          await signOutPairing(storedSession);
+          effectiveSession = null;
+          storedHosts = await readHosts();
+        } else {
+          effectiveSession = outcome.session;
+        }
+      }
+      setSession(effectiveSession);
       setHosts(storedHosts);
       void recoverPendingPairing().then(() => loadHosts()).catch(() => undefined);
       if (rawLogs) {
         try { setLogs((JSON.parse(rawLogs) as ConnectionLogEntry[]).slice(-200)); } catch { /* Ignore a corrupt redacted log. */ }
       }
       const initialUrl = await Linking.getInitialURL();
-      if (!storedSession && initialUrl && isAuthCallbackUrl(initialUrl)) {
+      if (!effectiveSession && initialUrl && isAuthCallbackUrl(initialUrl)) {
         try { setSession(await finishSignIn(initialUrl)); } catch (cause) { setError(readableError(cause)); }
       }
       setReady(true);
@@ -137,10 +167,12 @@ export function AppProvider({ children }: PropsWithChildren) {
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
-      if (state === "active" && activeHostRef.current && connectionStage !== "connected") connection.restart();
+      if (state !== "active") return;
+      if (session) void refreshCloudSession(session).catch((cause: unknown) => setError(readableError(cause)));
+      if (activeHostRef.current && connectionStage !== "connected") connection.restart();
     });
     return () => subscription.remove();
-  }, [connection, connectionStage]);
+  }, [connection, connectionStage, refreshCloudSession, session]);
 
   const signIn = useCallback(async () => {
     setError(null);
@@ -170,14 +202,16 @@ export function AppProvider({ children }: PropsWithChildren) {
     setLoadingMachines(true);
     setError(null);
     try {
-      await pairDiscoveredMachine(session, host);
+      const currentSession = await refreshCloudSession(session);
+      if (!currentSession) return;
+      await pairDiscoveredMachine(currentSession, host);
       await refreshMachines();
     } catch (cause) {
       setError(readableError(cause));
     } finally {
       setLoadingMachines(false);
     }
-  }, [refreshMachines, session]);
+  }, [refreshCloudSession, refreshMachines, session]);
 
   const pairCode = useCallback(async (code: string) => {
     setLoadingMachines(true);

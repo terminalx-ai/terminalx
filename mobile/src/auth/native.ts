@@ -1,13 +1,20 @@
 import * as Crypto from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
 import * as WebBrowser from "expo-web-browser";
-import { AUTH_CONFIG, buildAuthorizeUrl, exchangeAuthorizationCode, parseStoredSession, revokeSession, type CloudSession } from "./protocol";
+import { AUTH_CONFIG, buildAuthorizeUrl, exchangeAuthorizationCode, parseStoredSession, refreshSession, revokeSession, type CloudSession } from "./protocol";
 
 const OPTIONS: SecureStore.SecureStoreOptions = { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY };
 const SESSION_KEY = "terminalx.cloud.session.v1";
 const VERIFIER_KEY = "terminalx.cloud.pkce.verifier";
 const STATE_KEY = "terminalx.cloud.pkce.state";
 const NONCE_KEY = "terminalx.cloud.pkce.nonce";
+const REFRESH_SKEW_MS = 60_000;
+let refreshInFlight: Promise<StoredRefreshOutcome> | null = null;
+
+export type StoredRefreshOutcome =
+  | { status: "fresh" | "refreshed"; session: CloudSession }
+  | { status: "rejected" }
+  | { status: "unavailable"; session: CloudSession; reason: string };
 
 export async function beginSignIn(): Promise<CloudSession | null> {
   const verifier = base64Url(await Crypto.getRandomBytesAsync(32));
@@ -40,6 +47,23 @@ export async function finishSignIn(callbackUrl: string): Promise<CloudSession> {
 export async function readSession(): Promise<CloudSession | null> {
   const value = await SecureStore.getItemAsync(SESSION_KEY, OPTIONS).catch(() => null);
   return value ? parseStoredSession(value) : null;
+}
+
+export function refreshStoredSession(session: CloudSession): Promise<StoredRefreshOutcome> {
+  if (session.expiresAt > Date.now() + REFRESH_SKEW_MS) return Promise.resolve({ status: "fresh", session });
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = refreshSession(AUTH_CONFIG, session).then(async (outcome): Promise<StoredRefreshOutcome> => {
+    if (outcome.status === "refreshed") {
+      await SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(outcome.session), OPTIONS);
+      return outcome;
+    }
+    if (outcome.status === "rejected") {
+      await SecureStore.deleteItemAsync(SESSION_KEY, OPTIONS).catch(() => undefined);
+      return outcome;
+    }
+    return { ...outcome, session };
+  }).finally(() => { refreshInFlight = null; });
+  return refreshInFlight;
 }
 
 export async function signOut(session: CloudSession): Promise<void> {
