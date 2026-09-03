@@ -116,8 +116,9 @@ impl PairingManager {
         self: &Arc<Self>,
         connection_mode: PairingConnectionMode,
     ) -> Result<PairingStatus> {
-        if let Some(previous) = self.inner.lock().unwrap().pending_pairing_device.take() {
-            self.revoke_local(&previous)?;
+        let previous = self.inner.lock().unwrap().pending_pairing_device.clone();
+        if let Some(previous) = previous {
+            self.discard_unclaimed_pairing(&previous)?;
             if let Some(relay) = self.current_relay() {
                 relay.revoke(previous);
             }
