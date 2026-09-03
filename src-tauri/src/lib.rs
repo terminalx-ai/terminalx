@@ -19,6 +19,7 @@ mod pty;
 mod session;
 pub mod skills;
 mod store;
+mod status;
 mod summaries;
 mod workspaces;
 
@@ -32,6 +33,7 @@ pub struct AppState {
     pub transcription: Arc<transcription::Transcription>,
     /// Which Codex models this account may run, read from the CLI once.
     pub codex_models: Arc<harness::codex::models::Cache>,
+    pub status: Arc<status::StatusState>,
     manager: std::sync::Mutex<Option<session::SessionManager>>,
 }
 
@@ -47,12 +49,14 @@ pub fn run() {
     let host = Arc::new(harness::host::Host::new());
     let codex_models = Arc::new(harness::codex::models::Cache::default());
     let terminals = Arc::new(pty::Terminals::new());
+    let status_state = Arc::new(status::StatusState::default());
     let state = AppState {
         host: host.clone(),
         terminals: terminals.clone(),
         dictation: Arc::new(dictation::Dictation::default()),
         transcription: Arc::new(transcription::Transcription::default()),
         codex_models: codex_models.clone(),
+        status: status_state.clone(),
         manager: std::sync::Mutex::new(None),
     };
 
@@ -76,12 +80,14 @@ pub fn run() {
                     }
                 });
             }
+            status::install_menu(app)?;
             let control_endpoint = hooks::prepare_control()?;
             let manager = session::SessionManager::new(
                 app.handle().clone(),
                 host.clone(),
                 terminals.clone(),
                 codex_models.clone(),
+                status_state.clone(),
                 control_endpoint.clone(),
             );
             *app.state::<AppState>().manager.lock().unwrap() = Some(manager.clone());
@@ -213,11 +219,23 @@ pub fn run() {
             commands::transcription_settings,
             commands::transcription_set_input,
             commands::transcription_set_mute,
+            commands::status_bar_settings,
+            commands::set_status_bar_settings,
+            commands::status_usage_snapshot,
+            commands::status_usage_refresh,
+            commands::status_resource_overview,
+            commands::status_resource_sample,
+            commands::status_resource_kill,
             installation::cli_tool_status,
             installation::install_cli_tool,
             installation::cli_skill_status,
             installation::install_cli_skill,
         ])
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == status::MENU_ID {
+                status::toggle_from_menu(app);
+            }
+        })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(state) = window.try_state::<AppState>() {

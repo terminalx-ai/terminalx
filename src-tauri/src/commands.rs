@@ -414,6 +414,7 @@ pub async fn delete_session(app: AppHandle, session_id: String, remove_worktree:
 
 #[tauri::command]
 pub async fn list_harnesses() -> CmdResult<Vec<harness::HarnessInfo>> {
+    crate::binpath::invalidate();
     tauri::async_runtime::spawn_blocking(harness::offered).await.map_err(err)
 }
 
@@ -812,6 +813,85 @@ pub fn frontend_log(level: String, message: String) {
         "debug" => log::debug!("[webview] {message}"),
         _ => log::info!("[webview] {message}"),
     }
+}
+
+// ------------------------------------------------------------------ status bar
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusBarPatch {
+    pub visible: Option<bool>,
+    pub usage: Option<bool>,
+    pub resources: Option<bool>,
+    pub percent: Option<crate::store::settings::StatusPercent>,
+}
+
+#[tauri::command]
+pub fn status_bar_settings() -> crate::store::settings::StatusBarSettings {
+    store::settings::load().status_bar
+}
+
+#[tauri::command]
+pub fn set_status_bar_settings(app: AppHandle, patch: StatusBarPatch) -> CmdResult<crate::store::settings::StatusBarSettings> {
+    let mut settings = store::settings::load();
+    if let Some(value) = patch.visible {
+        settings.status_bar.visible = value;
+    }
+    if let Some(value) = patch.usage {
+        settings.status_bar.usage = value;
+    }
+    if let Some(value) = patch.resources {
+        settings.status_bar.resources = value;
+    }
+    if let Some(value) = patch.percent {
+        settings.status_bar.percent = value;
+    }
+    store::settings::save(&settings).map_err(err)?;
+    crate::status::set_menu_checked(&app, settings.status_bar.visible);
+    let _ = app.emit(crate::status::SETTINGS_EVENT, &settings.status_bar);
+    Ok(settings.status_bar)
+}
+
+#[tauri::command]
+pub fn status_usage_snapshot(state: State<'_, AppState>) -> CmdResult<crate::status::usage::UsageSnapshot> {
+    Ok(state.manager().ok_or("not ready")?.usage_snapshot())
+}
+
+#[tauri::command]
+pub async fn status_usage_refresh(app: AppHandle, state: State<'_, AppState>, manual: Option<bool>) -> CmdResult<crate::status::usage::UsageSnapshot> {
+    let status = state.status.clone();
+    let manager = state.manager().ok_or("not ready")?;
+    tauri::async_runtime::spawn_blocking(move || status.usage.refresh_codex(manual.unwrap_or(false)).map_err(err))
+        .await
+        .map_err(err)??;
+    let snapshot = manager.usage_snapshot();
+    let _ = app.emit(crate::status::usage::EVENT, &snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub fn status_resource_overview(state: State<'_, AppState>) -> crate::status::resources::ResourceOverview {
+    state.status.resources.overview(&state.terminals)
+}
+
+#[tauri::command]
+pub async fn status_resource_sample(state: State<'_, AppState>) -> CmdResult<crate::status::resources::ResourceSnapshot> {
+    let status = state.status.clone();
+    let terminals = state.terminals.clone();
+    tauri::async_runtime::spawn_blocking(move || status.resources.sample(&terminals).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn status_resource_kill(
+    state: State<'_, AppState>,
+    pane_id: String,
+    confirmed: Option<bool>,
+) -> CmdResult<crate::status::resources::KillResult> {
+    let status = state.status.clone();
+    let terminals = state.terminals.clone();
+    tauri::async_runtime::spawn_blocking(move || status.resources.kill(&terminals, &pane_id, confirmed.unwrap_or(false)).map_err(err))
+        .await
+        .map_err(err)?
 }
 
 // ------------------------------------------------------------------ files & commands

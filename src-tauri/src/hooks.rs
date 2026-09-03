@@ -179,6 +179,13 @@ pub fn hook_command(exe: &Path, event: &str) -> String {
     format!("{quoted} hook {event}")
 }
 
+/// The status-line command is the same authenticated forwarder, but it prints
+/// no line back into the TUI.
+pub fn statusline_command(exe: &Path) -> String {
+    let quoted = format!("'{}'", exe.to_string_lossy().replace('\'', "'\\''"));
+    format!("{quoted} statusline")
+}
+
 // ---------------------------------------------------------------- the app end
 
 #[cfg(unix)]
@@ -313,6 +320,19 @@ pub fn run_hook_cli() -> bool {
     true
 }
 
+/// The `statusline` subcommand. Claude sends its ordinary status JSON on
+/// stdin; the app takes only `rate_limits`, and silence keeps the CLI's own
+/// terminal view free of a second status line.
+pub fn run_statusline_cli() -> bool {
+    if std::env::args().nth(1).as_deref() != Some("statusline") {
+        return false;
+    }
+    let mut stdin = String::new();
+    let _ = std::io::stdin().read_to_string(&mut stdin);
+    let _ = ask_app("StatusLine", &stdin);
+    true
+}
+
 /// Send one frame and wait for the reply. `None` on any failure, so the CLI
 /// carries on exactly as it would with no hook installed.
 #[cfg(unix)]
@@ -357,6 +377,7 @@ mod tests {
         // A quote in the path would otherwise end the quoting early.
         let c = hook_command(Path::new("/tmp/it's here/raccoon"), "Stop");
         assert_eq!(c, r#"'/tmp/it'\''s here/raccoon' hook Stop"#);
+        assert_eq!(statusline_command(Path::new("/opt/raccoon")), "'/opt/raccoon' statusline");
     }
 
     #[test]
