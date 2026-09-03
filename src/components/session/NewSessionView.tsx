@@ -17,7 +17,7 @@ import { AgentMark } from "@/components/AgentMark";
 import { DictationStatus, MicButton, NEW_SESSION_TARGET, useDictationInto } from "@/components/chat/Dictation";
 import { RaccoonScene } from "@/components/raccoon/Raccoon";
 import { api, errorMessage } from "@/lib/api";
-import { addProject, clearNewSessionPreset, selectProject, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
+import { addProject, clearNewSessionPreset, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { EFFORT_LABEL, PERMISSION_MODES, refreshModels, upgradeHint, useModels } from "@/lib/models";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { chooseMode } from "@/lib/dialogs";
@@ -31,15 +31,25 @@ import type { WorkStatus } from "@/types/session";
  * will be once the session exists, so the first prompt and every follow-up
  * are typed in the same place; the raccoon keeps the empty space above.
  */
-export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, tabId: string, firstPrompt: string) => void }) {
+export function NewSessionView({
+  onCreated,
+  useWorktree: controlledUseWorktree,
+  onUseWorktreeChange,
+}: {
+  onCreated?: (sessionId: string, tabId: string, firstPrompt: string) => void;
+  useWorktree?: boolean;
+  onUseWorktreeChange?: (value: boolean) => void;
+}) {
   const store = useSessionStore();
   const prefs = usePrefs();
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<WorkStatus | null>(null);
-  const [useWorktree, setUseWorktree] = useState(prefs.useWorktree);
+  const [localUseWorktree, setLocalUseWorktree] = useState(prefs.useWorktree);
   const ref = useRef<HTMLTextAreaElement>(null);
+  const useWorktree = controlledUseWorktree ?? localUseWorktree;
+  const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
 
   const preset = store.newSessionPreset;
   // The rail is what the reader last pointed at, so it beats the project they
@@ -73,6 +83,7 @@ export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, 
       if (typeof dir === "string") {
         const p = await addProject(dir);
         setPrefs({ lastProject: p.path });
+        selectProjectInSidebar(p.path);
       }
     } catch (e) {
       setError(errorMessage(e));
@@ -153,6 +164,7 @@ export function NewSessionView({ onCreated }: { onCreated?: (sessionId: string, 
                     onSelect={() => {
                       clearNewSessionPreset();
                       setPrefs({ lastProject: p.path });
+                      selectProjectInSidebar(p.path);
                       void selectProject(p.path);
                     }}
                   >
