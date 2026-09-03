@@ -602,6 +602,7 @@ pub fn dispatch(
                 use_worktree: automation.workspace == AutomationWorkspace::NewWorktree,
                 base_ref: automation.base_ref.clone(),
                 worktree_name,
+                on_main: false,
                 issue: None,
                 automation: Some(index::AutomationRef {
                     id: automation.id.clone(),
@@ -610,12 +611,12 @@ pub fn dispatch(
                     run_number: run.run_number,
                 }),
                 cwd,
-                tab: crate::commands::NewTab {
+                tab: Some(crate::commands::NewTab {
                     harness: automation.harness.clone(),
                     model: automation.model.clone(),
                     effort: automation.effort.clone(),
                     permission_mode: Some(automation.mode.clone()),
-                },
+                }),
             },
         )
         .map_err(anyhow::Error::msg)?;
