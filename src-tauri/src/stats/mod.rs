@@ -19,7 +19,7 @@ use chrono::{DateTime, Days, Local};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-const CACHE_SCHEMA: u32 = 2;
+const CACHE_SCHEMA: u32 = 3;
 const CACHE_FILE: &str = "stats-usage-cache.json";
 const PR_FILE: &str = "stats-prs.json";
 const OVERVIEW_DAYS: u64 = 30;
@@ -199,7 +199,7 @@ impl StatsUsageStore {
             }
         }
 
-        current.sort_by(|left, right| left.path.cmp(&right.path));
+        current.sort_by(|left, right| lexical_path_cmp(&left.path, &right.path));
         let scope = usage_scope()?;
         let snapshot = aggregate(
             &current,
@@ -262,8 +262,12 @@ fn discover_sources_at(
     for (root, provider) in roots {
         discover_jsonl(&root, provider, &mut files, &mut seen);
     }
-    files.sort_by(|left, right| left.0.cmp(&right.0));
+    files.sort_by(|left, right| lexical_path_cmp(&left.0, &right.0));
     files
+}
+
+fn lexical_path_cmp(left: &Path, right: &Path) -> std::cmp::Ordering {
+    left.to_string_lossy().cmp(&right.to_string_lossy())
 }
 
 fn add_managed_codex_roots(root: &Path, roots: &mut Vec<(PathBuf, Provider)>) {
@@ -417,15 +421,6 @@ fn parse_claude(path: &Path) -> Result<Vec<UsageEvent>> {
                     .new_input_tokens
                     .saturating_add(prior.output_tokens)
                     .saturating_add(prior.cache_tokens);
-                if event.timestamp_ms >= prior.timestamp_ms {
-                    prior.timestamp = event.timestamp;
-                    prior.timestamp_ms = event.timestamp_ms;
-                    prior.day = event.day;
-                    prior.model = event.model;
-                    prior.cwd = event.cwd;
-                    prior.project = event.project;
-                    prior.session_id = event.session_id;
-                }
                 continue;
             }
             by_key.insert(key, events.len());
@@ -747,21 +742,37 @@ fn project_label(cwd: Option<&str>) -> String {
 
 #[derive(Debug, Default)]
 struct UsageScope {
-    roots: Vec<String>,
+    roots: Vec<UsageScopeRoot>,
+}
+
+#[derive(Debug)]
+struct UsageScopeRoot {
+    match_path: String,
+    identity: String,
 }
 
 impl UsageScope {
     fn from_paths(paths: impl IntoIterator<Item = PathBuf>) -> Self {
-        let mut roots = HashSet::new();
+        let mut roots = HashMap::new();
         for path in paths {
-            roots.insert(normalize_path(&path.to_string_lossy()));
-            if let Ok(canonical) = fs::canonicalize(&path) {
-                roots.insert(normalize_path(&canonical.to_string_lossy()));
+            let raw = normalize_path(&path.to_string_lossy());
+            if raw.is_empty() {
+                continue;
             }
+            let canonical = fs::canonicalize(&path)
+                .map(|path| normalize_path(&path.to_string_lossy()))
+                .unwrap_or_else(|_| raw.clone());
+            roots.insert(raw, canonical.clone());
+            roots.insert(canonical.clone(), canonical);
         }
-        roots.remove("");
-        let mut roots = roots.into_iter().collect::<Vec<_>>();
-        roots.sort_by_key(|path| std::cmp::Reverse(path.len()));
+        let mut roots = roots
+            .into_iter()
+            .map(|(match_path, identity)| UsageScopeRoot {
+                match_path,
+                identity,
+            })
+            .collect::<Vec<_>>();
+        roots.sort_by_key(|root| std::cmp::Reverse(root.match_path.len()));
         Self { roots }
     }
 
@@ -773,11 +784,11 @@ impl UsageScope {
         let cwd = cwd?;
         let cwd = normalize_path(cwd);
         self.roots.iter().find_map(|root| {
-            (cwd == *root
+            (cwd == root.match_path
                 || cwd
-                    .strip_prefix(root)
+                    .strip_prefix(&root.match_path)
                     .is_some_and(|rest| rest.starts_with('/')))
-            .then_some(root.as_str())
+            .then_some(root.identity.as_str())
         })
     }
 }
@@ -1293,6 +1304,22 @@ mod tests {
         assert!(!scope.contains(Some("/work/other")));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn canonical_path_aliases_share_one_scope_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("worktree");
+        let alias = dir.path().join("alias");
+        fs::create_dir(&worktree).unwrap();
+        std::os::unix::fs::symlink(&worktree, &alias).unwrap();
+        let scope = UsageScope::from_paths([worktree.clone(), alias.clone()]);
+
+        assert_eq!(
+            scope.attribution(worktree.to_str()),
+            scope.attribution(alias.to_str())
+        );
+    }
+
     #[test]
     fn recent_session_with_any_scoped_location_counts_once() {
         let scope = UsageScope::from_paths([PathBuf::from("/work/repo")]);
@@ -1374,6 +1401,21 @@ mod tests {
     }
 
     #[test]
+    fn transcript_paths_use_string_lexical_order() {
+        let root = tempfile::tempdir().unwrap();
+        let projects = root.path().join(".claude/projects");
+        let parent = projects.join("session.jsonl");
+        let child = projects.join("session/subagents/agent.jsonl");
+        fs::create_dir_all(child.parent().unwrap()).unwrap();
+        File::create(&parent).unwrap();
+        File::create(&child).unwrap();
+
+        let sources = discover_sources_at(root.path(), root.path(), None);
+        assert_eq!(sources[0].0, fs::canonicalize(parent).unwrap());
+        assert_eq!(sources[1].0, fs::canonicalize(child).unwrap());
+    }
+
+    #[test]
     fn claude_sidechain_turns_share_the_parent_session() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agent.jsonl");
@@ -1410,9 +1452,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         let mut file = File::create(&path).unwrap();
-        for output in [4, 9] {
+        for (index, output) in [4, 9].into_iter().enumerate() {
             writeln!(file, "{}", serde_json::json!({
-                "type": "assistant", "sessionId": "s1", "timestamp": "2026-09-03T10:00:00Z", "cwd": "/code/raccoon",
+                "type": "assistant", "sessionId": "s1", "timestamp": format!("2026-09-0{}T10:00:00Z", index + 2), "cwd": format!("/code/raccoon/{index}"),
                 "requestId": "r1", "message": { "id": "m1", "model": "claude-opus-5", "usage": {
                     "input_tokens": 2, "output_tokens": output, "cache_read_input_tokens": 20, "cache_creation_input_tokens": 3
                 }}
@@ -1421,6 +1463,8 @@ mod tests {
         let events = parse_claude(&path).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].total_tokens, 34);
+        assert_eq!(events[0].day, "2026-09-02");
+        assert_eq!(events[0].cwd.as_deref(), Some("/code/raccoon/0"));
     }
 
     #[test]
