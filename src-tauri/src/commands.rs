@@ -97,6 +97,9 @@ pub struct NewSession {
     /// A requested worktree name (an issue slug); sanitised and made unique.
     #[serde(default)]
     pub worktree_name: Option<String>,
+    /// Explicit acknowledgement that a requested worktree should be skipped.
+    #[serde(default)]
+    pub on_main: bool,
     #[serde(default)]
     pub issue: Option<IssueRef>,
     /// An existing workspace to run in instead of a new worktree.
@@ -133,6 +136,14 @@ fn requested_worktree_name(requested: &str, taken: &[String]) -> Option<String> 
         return Some(base);
     }
     (2..1000).map(|n| format!("{base}-{n}")).find(|c| !taken.iter().any(|t| t == c))
+}
+
+fn validate_session_target(req: &NewSession) -> CmdResult<()> {
+    let requested_worktree = req.worktree_name.as_deref().is_some_and(|name| !name.trim().is_empty());
+    if !req.use_worktree && requested_worktree && !req.on_main {
+        return Err("A requested worktree can only be skipped when onMain is explicitly true.".into());
+    }
+    Ok(())
 }
 
 fn new_tab_entry(t: &NewTab) -> TabEntry {
@@ -172,6 +183,7 @@ fn create_session_blocking(app: &AppHandle, req: NewSession) -> CmdResult<Sessio
 }
 
 fn create_session_entry(req: NewSession) -> CmdResult<SessionEntry> {
+    validate_session_target(&req)?;
     let project = projects::canonical(&req.project_path).map_err(err)?;
     let project_path = Path::new(&project);
     let id = uuid::Uuid::now_v7().to_string();
@@ -1052,14 +1064,13 @@ mod command_tests {
     use std::path::Path;
     use std::process::Command;
 
-    use super::{create_session_entry, requested_worktree_name, NewSession};
+    use super::{create_session_entry, requested_worktree_name, validate_session_target, NewSession};
 
     fn git(cwd: &Path, args: &[&str]) -> String {
         let output = Command::new("git").current_dir(cwd).args(args).output().unwrap();
         assert!(output.status.success(), "git {}: {}", args.join(" "), String::from_utf8_lossy(&output.stderr));
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
-
     #[test]
     fn requested_names_are_sanitised_and_unique() {
         assert_eq!(requested_worktree_name("ENG-42 Fix Login!", &[]).as_deref(), Some("eng-42-fix-login"));
@@ -1088,6 +1099,7 @@ mod command_tests {
             project_path: project.to_string_lossy().into_owned(),
             title: None,
             use_worktree: true,
+            on_main: false,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -1104,6 +1116,20 @@ mod command_tests {
         assert_eq!(session.worktree_name, None);
         assert_eq!(git(&project, &["worktree", "list", "--porcelain"]), before);
         assert_eq!(crate::store::index::load().unwrap(), vec![session]);
+    }
+
+    #[test]
+    fn requested_worktree_cannot_be_silently_skipped() {
+        let req: NewSession = serde_json::from_value(serde_json::json!({
+            "projectPath": "/repo",
+            "useWorktree": false,
+            "worktreeName": "eng-42-fix-login",
+            "tab": { "harness": "claude" }
+        }))
+        .unwrap();
+
+        let error = validate_session_target(&req).unwrap_err();
+        assert!(error.contains("onMain"));
     }
 }
 

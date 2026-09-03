@@ -31,7 +31,7 @@ export function ChangesPanel({
   baseRef?: string | null;
   active: boolean;
   live: boolean;
-  /** Show the checkout's uncommitted diff when no agent turn exists. */
+  /** Show the checkout's uncommitted diff outside an agent turn. */
   workingTree?: boolean;
 }) {
   if (workingTree) return <WorkingTreeChanges cwd={cwd} active={active} />;
