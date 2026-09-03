@@ -19,7 +19,7 @@ interface StatusState {
   ready: boolean;
 }
 
-const defaults: StatusBarSettings = { visible: true, usage: true, resources: true, percent: "used" };
+const defaults: StatusBarSettings = { visible: true, usage: true, resources: true, percent: "used", usageMode: "detailed" };
 let state: StatusState = {
   settings: defaults,
   usage: { windows: [] },
@@ -91,6 +91,15 @@ export function refreshUsage(manual = false): Promise<void> {
   })().finally(() => {
     usageFlight = null;
   }));
+}
+
+export async function resetCodexUsage(): Promise<void> {
+  set({ usageRefreshing: true });
+  try {
+    set({ usage: await statusBar.resetCodex() });
+  } finally {
+    set({ usageRefreshing: false });
+  }
 }
 
 export async function refreshResourceOverview() {

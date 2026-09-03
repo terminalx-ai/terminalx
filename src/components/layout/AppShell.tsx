@@ -2,7 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { PanelLeft, PanelRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { SettingsDialog } from "@/components/settings/SettingsDialog";
+import { SettingsDialog, type SettingsTab } from "@/components/settings/SettingsDialog";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { NewSessionView } from "@/components/session/NewSessionView";
 import { IssuesView } from "@/components/issues/IssuesView";
@@ -44,6 +44,7 @@ export function AppShell() {
   const status = useStatus();
   const store = useSessionStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
 
   useEffect(() => {
     void subscribeAgentEvents();
@@ -65,7 +66,14 @@ export function AppShell() {
 
   const toggleSidebar = useCallback(() => setPrefs({ sidebarOpen: !prefs.sidebarOpen }), [prefs.sidebarOpen]);
   const togglePanel = useCallback(() => setPrefs({ panelOpen: !prefs.panelOpen }), [prefs.panelOpen]);
-  const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const openSettings = useCallback(() => {
+    setSettingsTab("general");
+    setSettingsOpen(true);
+  }, []);
+  const openAgentSettings = useCallback(() => {
+    setSettingsTab("agents");
+    setSettingsOpen(true);
+  }, []);
   const newSession = useCallback(() => selectSession(null), []);
   const showIssues = useCallback(() => openIssues(), []);
   const showAgents = useCallback(() => openAgents(), []);
@@ -127,12 +135,12 @@ export function AppShell() {
       {status.settings.visible ? (
         <ErrorBoundary label="the status bar" fallback={null}>
           <Suspense fallback={statusBarFallback}>
-            <StatusBar />
+            <StatusBar onOpenAgentSettings={openAgentSettings} onOpenUsageDetails={showStats} />
           </Suspense>
         </ErrorBoundary>
       ) : null}
 
-      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} initialTab={settingsTab} />
     </div>
   );
 }

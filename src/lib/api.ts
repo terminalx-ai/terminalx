@@ -191,6 +191,7 @@ export interface StatusBarSettings {
   usage: boolean;
   resources: boolean;
   percent: "used" | "remaining";
+  usageMode: "detailed" | "compact";
 }
 
 export interface UsageWindow {
@@ -207,6 +208,17 @@ export interface UsageWindow {
 
 export interface UsageSnapshot {
   windows: UsageWindow[];
+  codex?: {
+    credits?: {
+      hasCredits: boolean;
+      unlimited: boolean;
+      balance?: string;
+    };
+    resetCredits?: {
+      availableCount: number;
+      nextExpiresAt?: number;
+    };
+  };
 }
 
 export interface ResourceOverview {
@@ -270,6 +282,7 @@ export const statusBar = {
     invoke<StatusBarSettings>("set_status_bar_settings", { patch }),
   usage: () => invoke<UsageSnapshot>("status_usage_snapshot"),
   refreshUsage: (manual = false) => invoke<UsageSnapshot>("status_usage_refresh", { manual }),
+  resetCodex: () => invoke<UsageSnapshot>("status_codex_reset"),
   resourceOverview: () => invoke<ResourceOverview>("status_resource_overview"),
   sampleResources: () => invoke<ResourceSnapshot>("status_resource_sample"),
   killResource: (paneId: string, confirmed = false) => invoke<KillResult>("status_resource_kill", { paneId, confirmed }),

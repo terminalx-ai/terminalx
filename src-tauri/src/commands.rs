@@ -858,6 +858,7 @@ pub struct StatusBarPatch {
     pub usage: Option<bool>,
     pub resources: Option<bool>,
     pub percent: Option<crate::store::settings::StatusPercent>,
+    pub usage_mode: Option<crate::store::settings::StatusUsageMode>,
 }
 
 #[tauri::command]
@@ -879,6 +880,9 @@ pub fn set_status_bar_settings(app: AppHandle, patch: StatusBarPatch) -> CmdResu
     }
     if let Some(value) = patch.percent {
         settings.status_bar.percent = value;
+    }
+    if let Some(value) = patch.usage_mode {
+        settings.status_bar.usage_mode = value;
     }
     store::settings::save(&settings).map_err(err)?;
     crate::status::set_menu_checked(&app, settings.status_bar.visible);
@@ -911,6 +915,16 @@ pub async fn status_usage_refresh(app: AppHandle, state: State<'_, AppState>, ma
     for failure in failures {
         log::warn!("{failure}");
     }
+    let snapshot = manager.usage_snapshot();
+    let _ = app.emit(crate::status::usage::EVENT, &snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub async fn status_codex_reset(app: AppHandle, state: State<'_, AppState>) -> CmdResult<crate::status::usage::UsageSnapshot> {
+    let status = state.status.clone();
+    let manager = state.manager().ok_or("not ready")?;
+    tauri::async_runtime::spawn_blocking(move || status.usage.reset_codex().map_err(err)).await.map_err(err)??;
     let snapshot = manager.usage_snapshot();
     let _ = app.emit(crate::status::usage::EVENT, &snapshot);
     Ok(snapshot)
