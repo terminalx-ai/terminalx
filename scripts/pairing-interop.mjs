@@ -121,6 +121,9 @@ function parseTransport(args) {
   let value = "auto";
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
+    if (arg === "--") {
+      continue;
+    }
     if (arg === "--transport") {
       value = args[index + 1];
       index += 1;
