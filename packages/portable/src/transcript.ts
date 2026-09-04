@@ -70,6 +70,22 @@ export interface Transcript {
 }
 
 const GROUPABLE = new Set(["Read", "Glob", "Grep", "LS", "Edit", "Write", "MultiEdit", "Bash", "shell", "apply_patch"]);
+const EFFECTIVE_USER_PREFIX = "[TerminalX Effective User v1] ";
+
+function visibleUserText(text: string): string {
+  if (!text.startsWith(EFFECTIVE_USER_PREFIX)) return text;
+  const lineEnd = text.indexOf("\n", EFFECTIVE_USER_PREFIX.length);
+  if (lineEnd < 0) return text;
+  try {
+    const envelope = JSON.parse(text.slice(EFFECTIVE_USER_PREFIX.length, lineEnd)) as { authority?: unknown; userId?: unknown };
+    if (envelope.authority === "host" && typeof envelope.userId === "string" && envelope.userId.length > 0) {
+      return text.slice(lineEnd + 1);
+    }
+  } catch {
+    // A user can type the prefix literally; only hide a structured envelope.
+  }
+  return text;
+}
 
 export function buildTranscript(events: AgentEvent[], live: boolean): Transcript {
   const turns: Turn[] = [];
@@ -100,15 +116,16 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
     const payload: Payload = event.payload;
     switch (payload.type) {
       case "user_message": {
+        const text = visibleUserText(payload.text);
         if (payload.queued && current && !current.completed) {
-          current.work.push({ kind: "queued", text: payload.text, key: `q${event.seq}`, seq: event.seq, images: payload.images });
+          current.work.push({ kind: "queued", text, key: `q${event.seq}`, seq: event.seq, images: payload.images });
           break;
         }
         for (const call of calls.values()) if (!call.result) call.abandoned = true;
         current = {
           key: `t${event.seq}`,
           seq: event.seq,
-          prompt: { text: payload.text, images: payload.images, ts: event.ts, seq: event.seq },
+          prompt: { text, images: payload.images, ts: event.ts, seq: event.seq },
           work: [],
           toolCount: 0,
           editedFiles: 0,

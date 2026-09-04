@@ -17,6 +17,7 @@ use tauri::{AppHandle, Emitter, EventId, Listener, Manager};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use super::model::{AccountMirror, DeviceProvenance};
 use super::{DeviceEntry, DeviceScope, PairingManager};
 use crate::events::{AgentEvent, Payload};
 use crate::pty::PtyData;
@@ -700,7 +701,13 @@ fn send_attributed(
     });
     let attributed = format!("[TerminalX Effective User v1] {envelope}\n{text}");
     let session_manager = app_state(manager)?.manager().context("session manager is unavailable")?;
-    let outcome = session_manager.send(session_id, tab_id, attributed, Vec::new())?;
+    let outcome = session_manager.send_with_display_text(
+        session_id,
+        tab_id,
+        attributed,
+        text,
+        Vec::new(),
+    )?;
     Ok(json!({ "status": "sent", "queued": outcome.queued }))
 }
 
@@ -713,7 +720,23 @@ fn validate_note(body: &str) -> Result<String> {
 }
 
 fn effective_user(device: &DeviceEntry) -> Result<NoteAuthor> {
-    let mirror = super::registry::load_account_mirror()?.context("host identity is unavailable")?;
+    effective_user_from_mirror(device, super::registry::load_account_mirror()?)
+}
+
+fn effective_user_from_mirror(device: &DeviceEntry, mirror: Option<AccountMirror>) -> Result<NoteAuthor> {
+    let Some(mirror) = mirror else {
+        if device.provenance != DeviceProvenance::Explicit || device.bound_user_id.is_some() {
+            bail!("host identity is unavailable");
+        }
+        return Ok(NoteAuthor {
+            user_id: device.id.clone(),
+            display_name: if device.label.trim().is_empty() {
+                "Paired mobile device".into()
+            } else {
+                device.label.clone()
+            },
+        });
+    };
     if device
         .bound_user_id
         .as_ref()
@@ -960,6 +983,35 @@ mod tests {
     use super::*;
     use crate::events::TurnStatus;
 
+    fn device(provenance: DeviceProvenance, bound_user_id: Option<&str>) -> DeviceEntry {
+        DeviceEntry {
+            id: "device-1".into(),
+            label: "Paresh's phone".into(),
+            platform: "ios".into(),
+            token: "token-hash".into(),
+            scope: DeviceScope::Driver,
+            provenance,
+            bound_user_id: bound_user_id.map(str::to_owned),
+            binding_generation: 0,
+            public_key: String::new(),
+            created_at: "2026-09-04T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+            installation_id: None,
+            created_request_id: None,
+        }
+    }
+
+    fn account() -> AccountMirror {
+        AccountMirror {
+            user_id: "user-1".into(),
+            email: "paresh@example.test".into(),
+            display_name: "Paresh".into(),
+            host_display_name: None,
+            binding_generation: 0,
+        }
+    }
+
     fn event(seq: u64, payload: Payload) -> AgentEvent {
         AgentEvent {
             id: format!("event-{seq}"),
@@ -1031,5 +1083,18 @@ mod tests {
             "paneId": "not accepted",
         }))
         .is_err());
+    }
+
+    #[test]
+    fn explicit_pairing_uses_its_authenticated_device_identity_without_an_account() {
+        let author = effective_user_from_mirror(&device(DeviceProvenance::Explicit, None), None).unwrap();
+        assert_eq!(author.user_id, "device-1");
+        assert_eq!(author.display_name, "Paresh's phone");
+    }
+
+    #[test]
+    fn account_pairing_still_requires_its_bound_account() {
+        assert!(effective_user_from_mirror(&device(DeviceProvenance::Automatic, Some("user-1")), None).is_err());
+        assert!(effective_user_from_mirror(&device(DeviceProvenance::Automatic, Some("other-user")), Some(account())).is_err());
     }
 }

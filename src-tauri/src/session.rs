@@ -215,6 +215,11 @@ pub struct SendOutcome {
     pub events: Vec<AgentEvent>,
 }
 
+struct PromptText {
+    agent: String,
+    display: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageInput {
@@ -535,7 +540,30 @@ impl SessionManager {
     }
 
     /// Send a prompt. A tab mid-turn queues it for the next boundary.
-    pub fn send(&self, session_id: &str, tab_id: &str, text: String, images: Vec<ImageInput>) -> Result<SendOutcome> {
+    pub fn send(
+        &self,
+        session_id: &str,
+        tab_id: &str,
+        text: String,
+        images: Vec<ImageInput>,
+    ) -> Result<SendOutcome> {
+        self.send_with_display_text(session_id, tab_id, text.clone(), text, images)
+    }
+
+    /// Send one prompt to the agent while publishing a different, user-facing
+    /// representation to the transcript.
+    pub(crate) fn send_with_display_text(
+        &self,
+        session_id: &str,
+        tab_id: &str,
+        text: String,
+        display_text: String,
+        images: Vec<ImageInput>,
+    ) -> Result<SendOutcome> {
+        let prompt = PromptText {
+            agent: text,
+            display: display_text,
+        };
         let rt_arc = self.runtime(session_id, tab_id)?;
         let entry = index::get(session_id)?;
         let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
@@ -543,13 +571,34 @@ impl SessionManager {
         let (refs, wire_images) = Self::archive_images(session_id, &images)?;
 
         if pty_first(&tab.harness).is_some() {
-            return self.send_to_cli(&mut rt, &rt_arc, &entry, &tab, text, refs);
+            return self.send_to_cli(
+                &mut rt,
+                &rt_arc,
+                &entry,
+                &tab,
+                prompt,
+                refs,
+            );
         }
 
         if rt.turn_open && rt.child.is_some() {
-            let q = QueuedMessage { id: uuid::Uuid::now_v7().to_string(), text: text.clone(), images: wire_images };
+            let q = QueuedMessage {
+                id: uuid::Uuid::now_v7().to_string(),
+                text: prompt.agent.clone(),
+                images: wire_images,
+            };
             rt.queued.push(q);
-            let ev = self.publish(&mut rt, Payload::UserMessage { text, images: refs, baseline: None, queued: true, cwd: Some(entry.cwd.clone()) }, None);
+            let ev = self.publish(
+                &mut rt,
+                Payload::UserMessage {
+                    text: prompt.display,
+                    images: refs,
+                    baseline: None,
+                    queued: true,
+                    cwd: Some(entry.cwd.clone()),
+                },
+                None,
+            );
             return Ok(SendOutcome { queued: true, events: vec![ev] });
         }
 
@@ -563,15 +612,33 @@ impl SessionManager {
         }
 
         let baseline = git::snapshot_tree(Path::new(&entry.cwd)).ok();
-        let events = vec![self.publish(&mut rt, Payload::UserMessage { text: text.clone(), images: refs, baseline, queued: false, cwd: Some(entry.cwd.clone()) }, None)];
+        let events = vec![self.publish(
+            &mut rt,
+            Payload::UserMessage {
+                text: prompt.display,
+                images: refs,
+                baseline,
+                queued: false,
+                cwd: Some(entry.cwd.clone()),
+            },
+            None,
+        )];
 
         match &mut rt.engine {
             Engine::Acp(a) => {
-                let actions = if a.ready { a.prompt(text.clone(), wire_images) } else { a.start(text.clone(), wire_images) };
+                let actions = if a.ready {
+                    a.prompt(prompt.agent.clone(), wire_images)
+                } else {
+                    a.start(prompt.agent.clone(), wire_images)
+                };
                 self.apply_actions(&mut rt, actions);
             }
             Engine::OpenCode(o) => {
-                let actions = if o.ready { o.prompt(text.clone(), wire_images) } else { o.start(text.clone(), wire_images) };
+                let actions = if o.ready {
+                    o.prompt(prompt.agent.clone(), wire_images)
+                } else {
+                    o.start(prompt.agent.clone(), wire_images)
+                };
                 self.apply_actions(&mut rt, actions);
             }
             Engine::Cli(_) | Engine::None => bail!("no engine"),
@@ -1314,7 +1381,7 @@ impl SessionManager {
         rt_arc: &Arc<Mutex<TabRuntime>>,
         entry: &index::SessionEntry,
         tab: &TabEntry,
-        text: String,
+        prompt: PromptText,
         images: Vec<ImageRef>,
     ) -> Result<SendOutcome> {
         self.start_cli(rt, rt_arc, entry, tab)?;
@@ -1327,12 +1394,22 @@ impl SessionManager {
         let paths: Vec<String> = images.iter().map(|i| i.url.clone()).collect();
         if !queued {
             if let Engine::Cli(p) = &mut rt.engine {
-                p.echoed.push_back(text.clone());
+                p.echoed.push_back(prompt.agent.clone());
                 p.turn_tail.opened();
             }
         }
-        let ev = self.publish(rt, Payload::UserMessage { text: text.clone(), images, baseline, queued, cwd: Some(entry.cwd.clone()) }, None);
-        self.type_prompt(rt_arc, &pane, text, paths, Some(ready));
+        let ev = self.publish(
+            rt,
+            Payload::UserMessage {
+                text: prompt.display,
+                images,
+                baseline,
+                queued,
+                cwd: Some(entry.cwd.clone()),
+            },
+            None,
+        );
+        self.type_prompt(rt_arc, &pane, prompt.agent, paths, Some(ready));
         if !queued {
             rt.turn_open = true;
             rt.turn_started_at = Some(Instant::now());

@@ -20,9 +20,10 @@ if (transport === "relay" && !offer.relay) {
 const relay = transport === "relay" ? offer.relay : undefined;
 const endpoint = relay ? relaySocketUrl(relay) : offer.endpoint;
 const socket = await openSocket(endpoint);
+const inbox = createTextInbox(socket);
 
 if (relay) {
-  const accepted = nextText(socket);
+  const accepted = inbox.next();
   socket.send(JSON.stringify({ type: "relay-auth", v: 1, mode: "connect", credential: relay.inviteToken }));
   const hello = JSON.parse(await accepted);
   requireExactKeys(hello, ["type", "ok", "credentialKind", "leaseExpiresAt"]);
@@ -48,7 +49,7 @@ const hello = {
   capabilities: { framing: [2], payloadKinds: ["text", "binary"] },
   context,
 };
-const readyFrame = nextText(socket);
+const readyFrame = inbox.next();
 socket.send(JSON.stringify(hello));
 const ready = JSON.parse(await readyFrame);
 validateReady(hello, ready, offer.publicKeyB64);
@@ -67,7 +68,7 @@ const session = {
   inbound: 0n,
 };
 
-const authenticatedFrame = nextText(socket);
+const authenticatedFrame = inbox.next();
 sendEncrypted(socket, session, {
   type: "e2ee_auth",
   v: 2,
@@ -112,10 +113,74 @@ if (offer.relay) {
   resumeToken.fill(0);
 }
 
+const summaries = await rpc(socket, session, "sessions.summaries");
+const target = selectSessionTab(summaries);
+const marker = `TerminalX mobile interop ${randomUUID()}`;
+const posted = await rpc(socket, session, "chat.post", { worktreeId: target.sessionId, body: marker });
+if (!posted.ok || posted.result?.status !== "sent" || posted.result?.message?.body !== marker || typeof posted.result.message.id !== "string") {
+  throw new Error(`Posting the interop note failed: ${rpcError(posted)}`);
+}
+const noteId = posted.result.message.id;
+const listed = await rpc(socket, session, "chat.list", { worktreeId: target.sessionId, limit: 100 });
+if (!listed.ok || !Array.isArray(listed.result?.messages) || !listed.result.messages.some((note) => note?.id === noteId && note.body === marker)) {
+  throw new Error(`The posted interop note did not appear in chat.list: ${rpcError(listed)}`);
+}
+const promoted = await rpc(socket, session, "chat.promoteToAgent", {
+  worktreeId: target.sessionId,
+  tabId: target.tabId,
+  messageIds: [noteId],
+});
+if (!promoted.ok || promoted.result?.status !== "sent" || typeof promoted.result.queued !== "boolean") {
+  throw new Error(`Promoting the interop note failed: ${rpcError(promoted)}`);
+}
+await waitForAgentInput(socket, session, target, marker, promoted.result.queued, 30_000);
+
 console.log(`Pairing passed over ${transport}: pinned host key, E2EE frame, status RPC, relay install ${installMode}.`);
+console.log(`Send passed: note listed and agent input ${promoted.result.queued ? "queued" : "delivered"}.`);
 console.log("Revoke the scripted device in Settings → Devices; waiting for its socket to close…");
 await waitForClose(socket, 120_000);
 console.log("Interop passed: revocation closed the live encrypted connection.");
+
+function selectSessionTab(response) {
+  if (!response.ok || !Array.isArray(response.result?.sessions)) {
+    throw new Error(`Listing sessions failed: ${rpcError(response)}`);
+  }
+  const candidates = response.result.sessions.flatMap((session) => {
+    if (!session || typeof session.id !== "string" || !Array.isArray(session.tabs)) return [];
+    return session.tabs
+      .filter((tab) => tab && typeof tab.id === "string")
+      .map((tab) => ({ sessionId: session.id, tabId: tab.id, status: tab.status }));
+  });
+  const target = candidates.find((candidate) => candidate.status !== "in_progress") ?? candidates[0];
+  if (!target) throw new Error("The host published no session tab for the send interop test");
+  return target;
+}
+
+async function waitForAgentInput(socket, session, target, marker, queued, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const tail = await rpc(socket, session, "session.tail", {
+      sessionId: target.sessionId,
+      tabId: target.tabId,
+      limit: 20,
+    });
+    if (!tail.ok || !Array.isArray(tail.result?.events)) {
+      throw new Error(`Reading the agent event tail failed: ${rpcError(tail)}`);
+    }
+    const published = tail.result.events.some((event) => (
+      event?.payload?.type === "user_message" &&
+      event.payload.text === marker &&
+      event.payload.queued === queued
+    ));
+    if (published) return;
+    await wait(250);
+  }
+  throw new Error("The promoted interop note did not reach the agent terminal before timeout");
+}
+
+function rpcError(response) {
+  return response?.error?.message ?? "invalid response";
+}
 
 function parseTransport(args) {
   let value = "auto";
@@ -141,11 +206,12 @@ function parseTransport(args) {
 
 async function rpc(socket, session, method, params) {
   const id = randomUUID();
-  const responseFrame = nextText(socket);
   sendEncrypted(socket, session, { id, deviceToken: offer.deviceToken, method, ...(params === undefined ? {} : { params }) });
-  const response = receiveEncrypted(await responseFrame, session);
-  if (response.id !== id) throw new Error("Desktop returned an RPC response for another request");
-  return response;
+  while (true) {
+    const response = receiveEncrypted(await inbox.next(), session);
+    if (response.id === id) return response;
+    if (typeof response.method !== "string") throw new Error("Desktop returned an RPC response for another request");
+  }
 }
 
 function sendEncrypted(socket, session, value) {
@@ -260,16 +326,43 @@ function openSocket(url) {
   });
 }
 
-function nextText(socket) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("WebSocket response timed out")), 30_000);
-    socket.once("message", (data, isBinary) => {
-      clearTimeout(timer);
-      if (isBinary) reject(new Error("Expected a text WebSocket frame"));
-      else resolve(data.toString());
-    });
-    socket.once("close", (code) => { clearTimeout(timer); reject(new Error(`WebSocket closed (${code})`)); });
+function createTextInbox(socket) {
+  const queued = [];
+  const waiting = [];
+  let closed;
+  const deliver = (outcome) => {
+    const reader = waiting.shift();
+    if (reader) {
+      clearTimeout(reader.timer);
+      if (outcome.error) reader.reject(outcome.error);
+      else reader.resolve(outcome.value);
+    } else {
+      queued.push(outcome);
+    }
+  };
+  socket.on("message", (data, isBinary) => {
+    deliver(isBinary ? { error: new Error("Expected a text WebSocket frame") } : { value: data.toString() });
   });
+  socket.once("close", (code) => {
+    closed = new Error(`WebSocket closed (${code})`);
+    while (waiting.length) deliver({ error: closed });
+  });
+  return {
+    next() {
+      const outcome = queued.shift();
+      if (outcome) return outcome.error ? Promise.reject(outcome.error) : Promise.resolve(outcome.value);
+      if (closed) return Promise.reject(closed);
+      return new Promise((resolve, reject) => {
+        const reader = { resolve, reject, timer: undefined };
+        reader.timer = setTimeout(() => {
+          const index = waiting.indexOf(reader);
+          if (index >= 0) waiting.splice(index, 1);
+          reject(new Error("WebSocket response timed out"));
+        }, 30_000);
+        waiting.push(reader);
+      });
+    },
+  };
 }
 
 function waitForClose(socket, timeoutMs) {
@@ -283,6 +376,10 @@ function waitForClose(socket, timeoutMs) {
       else resolve();
     });
   });
+}
+
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function requireExactKeys(value, keys) {
