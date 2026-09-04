@@ -55,10 +55,14 @@ export class HostConnection {
     return this.client.request<T>(method, params).then((result) => {
       if (!result.ok && !this.refusedMethods.has(method)) {
         this.refusedMethods.add(method);
-        this.log("warning", "Host refused a method", `${method}: ${result.refusal.code}`);
+        this.log("warning", "Host refused a method", `${method}: ${result.refusal.code} · ${safeError(result.refusal.message)}`);
       }
       return result;
     });
+  }
+
+  reportError(message: string, detail: unknown): void {
+    this.log("error", message, safeError(detail));
   }
 
   onEvent(listener: (event: RelayEvent) => void): () => void {
@@ -228,7 +232,10 @@ async function resolveRelay(host: StoredHost & { relay: NonNullable<StoredHost["
 }
 
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-const safeError = (value: unknown) => value instanceof Error ? value.message.replace(/[A-Za-z0-9_-]{32,}/g, "[redacted]") : "Unknown connection error";
+const safeError = (value: unknown) => {
+  const message = value instanceof Error ? value.message : typeof value === "string" ? value : "Unknown connection error";
+  return message.replace(/[A-Za-z0-9_-]{32,}/g, "[redacted]");
+};
 const redactEndpoint = (value: string) => { try { return new URL(value).origin; } catch { return "relay endpoint"; } };
 const isStreamRefusal = (value: unknown): value is { type: "error"; error: { code: string } } => {
   if (!value || typeof value !== "object") return false;

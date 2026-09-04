@@ -17,6 +17,8 @@ export interface SessionSummary {
 }
 
 export interface ChatNote { id: string; body: string; createdAt: number; author: { userId: string; displayName?: string } }
+export type PostNoteResult = { sent: true; note: ChatNote } | { sent: false; message: string };
+export type PromoteNoteResult = { sent: true; queued: boolean } | { sent: false; message: string };
 
 export class HostApi {
   private readonly clientId = `mobile-${Crypto.randomUUID()}`;
@@ -52,14 +54,18 @@ export class HostApi {
     return Array.isArray(messages) ? messages.filter(isChatNote).sort((left, right) => left.createdAt - right.createdAt) : [];
   }
 
-  async postNote(sessionId: string, text: string): Promise<boolean> {
-    const result = await this.connection.request<{ status?: string }>("chat.post", { worktreeId: sessionId, body: text });
-    return result.ok && result.value.status === "sent";
+  async postNote(sessionId: string, text: string): Promise<PostNoteResult> {
+    const result = await this.connection.request<{ status?: unknown; message?: unknown }>("chat.post", { worktreeId: sessionId, body: text });
+    if (!result.ok) return { sent: false, message: result.refusal.message };
+    if (result.value.status === "sent" && isChatNote(result.value.message)) return { sent: true, note: result.value.message };
+    return { sent: false, message: "The host did not add this note." };
   }
 
-  async promoteNote(sessionId: string, tabId: string, noteId: string): Promise<boolean> {
-    const result = await this.connection.request<{ status?: string }>("chat.promoteToAgent", { worktreeId: sessionId, tabId, messageIds: [noteId] });
-    return result.ok && result.value.status === "sent";
+  async promoteNote(sessionId: string, tabId: string, noteId: string): Promise<PromoteNoteResult> {
+    const result = await this.connection.request<{ status?: unknown; queued?: unknown }>("chat.promoteToAgent", { worktreeId: sessionId, tabId, messageIds: [noteId] });
+    if (!result.ok) return { sent: false, message: result.refusal.message };
+    if (result.value.status === "sent" && typeof result.value.queued === "boolean") return { sent: true, queued: result.value.queued };
+    return { sent: false, message: "The host did not send this note to the agent." };
   }
 
   async respondPermission(sessionId: string, tabId: string, requestId: string, optionId: string): Promise<{ answered: true } | { answered: false; message: string }> {

@@ -40,6 +40,7 @@ function ChatPane({ hostId, sessionId, tabId, connected }: { hostId: string; ses
   const [draft, setDraft] = useState("");
   const [sendToAgent, setSendToAgent] = useState(true);
   const [sending, setSending] = useState(false);
+  const [sendFeedback, setSendFeedback] = useState<{ kind: "error" | "success"; message: string } | null>(null);
   const [answeringPermission, setAnsweringPermission] = useState<string | null>(null);
   const [permissionErrors, setPermissionErrors] = useState<Record<string, string>>({});
   const cacheKey = `terminalx:draft:${hostId}:${sessionId}:${tabId}`;
@@ -91,17 +92,26 @@ function ChatPane({ hostId, sessionId, tabId, connected }: { hostId: string; ses
     const text = draft.trim();
     if (!text || !connected || sending) return;
     setSending(true);
+    setSendFeedback(null);
+    const showError = (message: string) => {
+      setSendFeedback({ kind: "error", message: `Message not sent: ${message}` });
+      app.connection.reportError("Session message failed", message);
+    };
     try {
-      const beforeIds = new Set(notes.map((note) => note.id));
-      if (!(await app.api.postNote(sessionId, text))) return;
-      const nextNotes = await app.api.listNotes(sessionId);
-      setNotes(nextNotes);
+      const posted = await app.api.postNote(sessionId, text);
+      if (!posted.sent) return showError(posted.message);
+      setNotes((current) => [...current.filter((note) => note.id !== posted.note.id), posted.note].sort((left, right) => left.createdAt - right.createdAt));
       if (sendToAgent) {
-        const created = [...nextNotes].reverse().find((note) => !beforeIds.has(note.id));
-        if (!created || !(await app.api.promoteNote(sessionId, tabId, created.id))) return;
+        const promoted = await app.api.promoteNote(sessionId, tabId, posted.note.id);
+        if (!promoted.sent) return showError(promoted.message);
+        setSendFeedback({ kind: "success", message: promoted.queued ? "Queued for the agent." : "Sent to the agent." });
+      } else {
+        setSendFeedback({ kind: "success", message: "Note added." });
       }
       setDraft("");
       await AsyncStorage.removeItem(cacheKey);
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "The host could not send this message.");
     } finally {
       setSending(false);
     }
@@ -126,7 +136,7 @@ function ChatPane({ hostId, sessionId, tabId, connected }: { hostId: string; ses
     }
   };
 
-  return <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={92}><FlatList data={items} keyExtractor={(item) => item.kind === "turn" ? item.turn.key : `note-${item.note.id}`} automaticallyAdjustContentInsets contentInsetAdjustmentBehavior="automatic" contentContainerStyle={styles.transcript} keyboardDismissMode="interactive" ListHeaderComponent={hasMore ? <Button label="Load earlier" kind="secondary" disabled={!connected} onPress={() => void loadEarlier()} /> : null} ListEmptyComponent={loading ? <EmptyState title="Loading transcript" detail="Reading the latest turns from your Mac." busy /> : <EmptyState title="No transcript yet" detail="This tab has not published any turns." />} renderItem={({ item }) => item.kind === "turn" ? <TurnCard turn={item.turn} /> : <NoteCard note={item.note} />} ListFooterComponent={<>{transcript.pendingAsks.map((ask) => <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission === ask.requestId} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><View style={[styles.composer, { backgroundColor: palette.card, borderColor: palette.border }]}><View style={styles.modeLine}><Pressable onPress={() => setSendToAgent(true)} style={[styles.modeChoice, sendToAgent && { backgroundColor: palette.selected }]}><Radio size={15} color={sendToAgent ? palette.accent : palette.muted} /><Text style={{ color: sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Send to agent</Text></Pressable><Pressable onPress={() => setSendToAgent(false)} style={[styles.modeChoice, !sendToAgent && { backgroundColor: palette.selected }]}><Text style={{ color: !sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Add note</Text></Pressable></View><View style={styles.composeLine}><TextInput value={draft} onChangeText={(value) => { setDraft(value); void AsyncStorage.setItem(cacheKey, value); }} multiline placeholder={connected ? "Message this session" : "Draft kept while offline"} placeholderTextColor={palette.faint} style={[styles.composeInput, { color: palette.ink }]} /><Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={!connected || !draft.trim() || sending} onPress={() => void send()} style={[styles.send, { backgroundColor: palette.accent, opacity: !connected || !draft.trim() || sending ? 0.38 : 1 }]}><Send size={18} color={palette.accentInk} /></Pressable></View></View></KeyboardAvoidingView>;
+  return <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={92}><FlatList data={items} keyExtractor={(item) => item.kind === "turn" ? item.turn.key : `note-${item.note.id}`} automaticallyAdjustContentInsets contentInsetAdjustmentBehavior="automatic" contentContainerStyle={styles.transcript} keyboardDismissMode="interactive" ListHeaderComponent={hasMore ? <Button label="Load earlier" kind="secondary" disabled={!connected} onPress={() => void loadEarlier()} /> : null} ListEmptyComponent={loading ? <EmptyState title="Loading transcript" detail="Reading the latest turns from your Mac." busy /> : <EmptyState title="No transcript yet" detail="This tab has not published any turns." />} renderItem={({ item }) => item.kind === "turn" ? <TurnCard turn={item.turn} /> : <NoteCard note={item.note} />} ListFooterComponent={<>{transcript.pendingAsks.map((ask) => <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission === ask.requestId} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><View style={[styles.composer, { backgroundColor: palette.card, borderColor: palette.border }]}><View style={styles.modeLine}><Pressable onPress={() => { setSendToAgent(true); setSendFeedback(null); }} style={[styles.modeChoice, sendToAgent && { backgroundColor: palette.selected }]}><Radio size={15} color={sendToAgent ? palette.accent : palette.muted} /><Text style={{ color: sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Send to agent</Text></Pressable><Pressable onPress={() => { setSendToAgent(false); setSendFeedback(null); }} style={[styles.modeChoice, !sendToAgent && { backgroundColor: palette.selected }]}><Text style={{ color: !sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Add note</Text></Pressable></View>{sendFeedback ? <Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: sendFeedback.kind === "error" ? palette.danger : palette.success }]}>{sendFeedback.message}</Text> : null}<View style={styles.composeLine}><TextInput value={draft} onChangeText={(value) => { setDraft(value); setSendFeedback(null); void AsyncStorage.setItem(cacheKey, value); }} multiline placeholder={connected ? "Message this session" : "Draft kept while offline"} placeholderTextColor={palette.faint} style={[styles.composeInput, { color: palette.ink }]} /><Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={!connected || !draft.trim() || sending} onPress={() => void send()} style={[styles.send, { backgroundColor: palette.accent, opacity: !connected || !draft.trim() || sending ? 0.38 : 1 }]}><Send size={18} color={palette.accentInk} /></Pressable></View></View></KeyboardAvoidingView>;
 }
 
 function PermissionCard({ ask, connected, answering, error, onRespond }: { ask: PendingAsk; connected: boolean; answering: boolean; error?: string; onRespond(optionId: string): void }) {
@@ -234,6 +244,7 @@ const styles = StyleSheet.create({
   composer: { borderTopWidth: StyleSheet.hairlineWidth, padding: 10, paddingBottom: 12, gap: 8 },
   modeLine: { flexDirection: "row", gap: 6 },
   modeChoice: { minHeight: 30, paddingHorizontal: 9, borderRadius: 8, flexDirection: "row", gap: 5, alignItems: "center" },
+  sendFeedback: { fontSize: 12, lineHeight: 17, paddingHorizontal: 3 },
   composeLine: { flexDirection: "row", alignItems: "flex-end", gap: 9 },
   composeInput: { flex: 1, maxHeight: 120, minHeight: 42, paddingHorizontal: 10, paddingVertical: 9, fontSize: 16 },
   send: { width: 40, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center" },
