@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 use crate::commands::{NewSession, NewTab};
 use crate::hooks::ControlEndpoint;
@@ -522,37 +522,21 @@ impl ControlService {
                 "A project's main checkout cannot be deleted.",
             ));
         }
-        let sessions = index::load().map_err(ControlError::internal)?;
-        let target = canonical_or_original(&worktree.path);
-        let affected: Vec<SessionEntry> = sessions
-            .into_iter()
-            .filter(|session| canonical_or_original(&session.cwd) == target)
-            .collect();
+        let affected = crate::commands::sessions_in_workspace(Path::new(&worktree.path))
+            .map_err(ControlError::internal)?;
         for session in &affected {
             for tab in &session.tabs {
                 let _ = self.manager.stop(&session.id, &tab.id);
             }
         }
-        crate::workspaces::delete(Path::new(&project.path), Path::new(&worktree.path), false)
-            .map_err(ControlError::internal)?;
-        let branch = crate::git::current_branch(Path::new(&project.path));
-        let mut moved = Vec::new();
-        for affected_session in affected {
-            let entry = index::update_session(&affected_session.id, |session| {
-                session.cwd = session.project_path.clone();
-                session.worktree_name = None;
-                session.worktree_removed = true;
-                session.branch = branch.clone();
-                session.base_ref = None;
-                for tab in &mut session.tabs {
-                    tab.status = TabStatus::Idle;
-                }
-                Ok(session.clone())
-            })
-            .map_err(ControlError::internal)?;
-            let _ = self.app.emit("session_updated", &entry);
-            moved.push(entry.id);
-        }
+        let entries = crate::commands::delete_workspace_entries(
+            &project.path,
+            &worktree.path,
+            false,
+        )
+        .map_err(ControlError::internal)?;
+        crate::commands::notify_workspace_deleted(&self.app, &project.path, &entries);
+        let moved: Vec<_> = entries.into_iter().map(|entry| entry.id).collect();
         Ok(json!({"deleted": worktree.path, "project": project.path, "movedSessions": moved}))
     }
 
@@ -799,6 +783,7 @@ mod tests {
             branch: Some("main".into()),
             base_ref: None,
             worktree_removed: false,
+            removed_workspace: None,
             issue: None,
             automation: None,
             title: "main".into(),

@@ -238,7 +238,7 @@ function UnselectedWorkspace({
                 <StatsUsageView />
               </Suspense>
             ) : store.view === "automations" ? (
-              <AutomationsView />
+              <AutomationsView initialAutomationId={store.selectedAutomationId} />
             ) : store.view === "skills" ? (
               <SkillsView
                 key={`${store.skillsFilter?.projectPath ?? store.selectedProject ?? "home"}:${store.skillsFilter?.agent ?? "all"}`}
@@ -260,6 +260,7 @@ function UnselectedWorkspace({
           workingTree
           rootName={project.name}
           labelMode={labelMode}
+          workspace={workspace?.managed && !workspace.isMain ? { projectPath: project.path, name: workspace.name } : undefined}
         />
       )}
     </>

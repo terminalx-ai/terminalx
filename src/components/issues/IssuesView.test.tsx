@@ -4,8 +4,9 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 
-const { invoke, sessionStore } = vi.hoisted(() => ({
+const { invoke, openAutomation, sessionStore } = vi.hoisted(() => ({
   invoke: vi.fn(),
+  openAutomation: vi.fn(),
   sessionStore: {
     projects: [{ path: "/repo", name: "Raccoon" }],
     harnesses: [
@@ -49,6 +50,7 @@ vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
 vi.mock("@/lib/sessions", () => ({
   addProject: vi.fn(),
   clearNewSessionPreset: vi.fn(),
+  openAutomation,
   selectProject: vi.fn(),
   selectSession: vi.fn(),
   upsertSession: vi.fn(),
@@ -102,6 +104,17 @@ function mockBackend() {
     }
     if (command === "issues_list") return issues;
     if (command === "automation_issue_preview") return issues;
+    if (command === "automation_create") {
+      return {
+        id: "automation-99",
+        ...((args as { input: Record<string, unknown> }).input),
+        nextRunAt: "2026-09-07T09:00:00Z",
+        lastRunAt: null,
+        lastOutcome: null,
+        created: "2026-09-04T00:00:00Z",
+        modified: "2026-09-04T00:00:00Z",
+      };
+    }
     if (command === "issue_details") return issues.find((issue) => issue.id === args?.id);
     if (command === "create_session") {
       const req = (args as { req: Record<string, unknown> }).req;
@@ -130,6 +143,7 @@ function issueSwitch() {
 
 beforeEach(() => {
   invoke.mockReset();
+  openAutomation.mockReset();
   mockBackend();
   setPrefs({
     lastProject: "/repo",
@@ -225,5 +239,23 @@ describe("issue session targets", () => {
     expect(screen.getByDisplayValue("terminalx-ai/raccoon")).toBeTruthy();
     expect(screen.getByDisplayValue("label:raccoon")).toBeTruthy();
     expect(await screen.findByText("2 matching issues")).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Start session" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to issues" }));
+    expect(await screen.findByRole("button", { name: /#11Fix login timeout/ })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "New automation" })).toBeNull();
+  });
+
+  it("opens the saved automation detail after creating from an issue", async () => {
+    render(<IssuesView />);
+    const row = (await screen.findByText("Fix login timeout")).closest("button")!;
+    fireEvent.contextMenu(row);
+    fireEvent.click(await screen.findByText("Automate this label: raccoon…"));
+
+    await screen.findByText("2 matching issues");
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() => expect(openAutomation).toHaveBeenCalledWith("automation-99"));
   });
 });

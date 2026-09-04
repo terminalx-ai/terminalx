@@ -11,7 +11,7 @@ import { IssueListItem } from "@/components/issues/IssueListItem";
 import { AgentMark } from "@/components/AgentMark";
 import { Markdown } from "@/components/chat/Markdown";
 import { api, errorMessage, gh, issues as issuesApi, type Issue, type IssueTeam, type LinearStatus } from "@/lib/api";
-import { selectProject, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
+import { openAutomation, selectProject, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { PERMISSION_MODES } from "@/lib/models";
 import { chooseMode } from "@/lib/dialogs";
@@ -207,6 +207,21 @@ export function IssuesView({
   const linkedSession = selected
     ? store.sessions.find((session) => session.issue?.url === selected.url)
     : null;
+
+  if (automationPrefill) {
+    return (
+      <AutomationEditor
+        open
+        automation={null}
+        prefill={automationPrefill}
+        backLabel="Issues"
+        onOpenChange={(open) => {
+          if (!open) setAutomationPrefill(null);
+        }}
+        onSaved={(automation) => openAutomation(automation.id)}
+      />
+    );
+  }
 
   return (
     <div className="flex h-full min-h-0">
@@ -437,15 +452,6 @@ export function IssuesView({
           </>
         )}
       </div>
-      <AutomationEditor
-        open={automationPrefill != null}
-        automation={null}
-        prefill={automationPrefill ?? undefined}
-        onOpenChange={(open) => {
-          if (!open) setAutomationPrefill(null);
-        }}
-        onSaved={() => setAutomationPrefill(null)}
-      />
     </div>
   );
 }

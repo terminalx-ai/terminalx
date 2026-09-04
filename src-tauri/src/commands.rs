@@ -4,13 +4,22 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::store::index::{self, AutomationRef, IssueRef, SessionEntry, TabEntry, TabStatus};
 use crate::store::projects::{self, Project};
 use crate::{git, harness, names, store};
 
 type CmdResult<T> = Result<T, String>;
+
+pub(crate) const WORKSPACES_CHANGED_EVENT: &str = "workspaces_changed";
+
+pub(crate) fn notify_workspace_deleted<R: Runtime>(app: &AppHandle<R>, project_path: &str, moved: &[SessionEntry]) {
+    for session in moved {
+        let _ = app.emit("session_updated", session);
+    }
+    let _ = app.emit(WORKSPACES_CHANGED_EVENT, project_path);
+}
 
 fn err<E: std::fmt::Display>(e: E) -> String {
     format!("{e:#}")
@@ -346,6 +355,7 @@ fn create_session_entry(req: NewSession) -> CmdResult<SessionEntry> {
         branch: git::current_branch(project_path),
         base_ref: None,
         worktree_removed: false,
+        removed_workspace: None,
         issue: req.issue.clone(),
         automation: req.automation.clone(),
         title: String::new(),
@@ -462,8 +472,15 @@ pub async fn delete_session(app: AppHandle, session_id: String, remove_worktree:
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
         let entry = index::get(&session_id).map_err(err)?;
-        for t in &entry.tabs {
-            kill_tab(&state, &entry.id, &t.id);
+        let attached = if remove_worktree && entry.worktree_name.is_some() {
+            sessions_in_workspace(Path::new(&entry.cwd))?
+        } else {
+            vec![entry.clone()]
+        };
+        for session in &attached {
+            for tab in &session.tabs {
+                kill_tab(&state, &session.id, &tab.id);
+            }
         }
         index::update(|sessions| {
             sessions.retain(|s| s.id != session_id);
@@ -480,6 +497,9 @@ pub async fn delete_session(app: AppHandle, session_id: String, remove_worktree:
             if let Some(name) = entry.worktree_name.as_deref() {
                 if let Err(e) = git::remove_worktree(Path::new(&entry.project_path), name) {
                     log::warn!("worktree cleanup for {session_id} failed: {e:#}");
+                } else {
+                    let moved = mark_workspace_sessions_removed(&entry.project_path, &attached)?;
+                    notify_workspace_deleted(&app, &entry.project_path, &moved);
                 }
             }
         }
@@ -538,66 +558,80 @@ pub async fn worktree_disposition(session_id: String) -> CmdResult<git::Worktree
     .map_err(err)?
 }
 
-/// Remove a session's worktree and point the session at the project root. The
-/// branch stays recorded so the PR panel can keep following it.
+/// Remove a session's worktree, retaining its origin while moving future work
+/// to the project root.
 #[tauri::command]
 pub async fn remove_session_worktree(app: AppHandle, session_id: String) -> CmdResult<SessionEntry> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
         let s = index::get(&session_id).map_err(err)?;
         let name = s.worktree_name.clone().ok_or("session has no worktree")?;
-        for t in &s.tabs {
-            kill_tab(&state, &s.id, &t.id);
+        let attached = sessions_in_workspace(Path::new(&s.cwd))?;
+        for session in &attached {
+            for tab in &session.tabs {
+                kill_tab(&state, &session.id, &tab.id);
+            }
         }
         git::remove_worktree(Path::new(&s.project_path), &name).map_err(err)?;
-        let out = index::update_session(&session_id, |s| {
-            s.cwd = s.project_path.clone();
-            s.worktree_name = None;
-            s.worktree_removed = true;
-            Ok(s.clone())
-        })
-        .map_err(err)?;
-        let _ = app.emit("session_updated", &out);
-        Ok(out)
+        let moved = mark_workspace_sessions_removed(&s.project_path, &attached)?;
+        notify_workspace_deleted(&app, &s.project_path, &moved);
+        moved
+            .into_iter()
+            .find(|entry| entry.id == session_id)
+            .ok_or_else(|| "session disappeared while removing its worktree".into())
     })
     .await
     .map_err(err)?
 }
 
 /// Settle a worktree session once its work has landed: `delete` removes the
-/// worktree and branch, `relocate` leaves them on disk; both move the session
-/// to the project root, stopping any agent first.
+/// worktree and records its provenance, while `relocate` leaves it on disk;
+/// both move future work to the project root and stop any agent first.
 #[tauri::command]
 pub async fn settle_session(app: AppHandle, session_id: String, action: String) -> CmdResult<SessionEntry> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
         let s = index::get(&session_id).map_err(err)?;
         let name = s.worktree_name.clone().ok_or("session has no worktree")?;
-        for t in &s.tabs {
-            kill_tab(&state, &s.id, &t.id);
-        }
-        let deleted = match action.as_str() {
+        let out = match action.as_str() {
             "delete" => {
+                let attached = sessions_in_workspace(Path::new(&s.cwd))?;
+                for session in &attached {
+                    for tab in &session.tabs {
+                        kill_tab(&state, &session.id, &tab.id);
+                    }
+                }
                 git::remove_worktree(Path::new(&s.project_path), &name).map_err(err)?;
-                true
+                let moved = mark_workspace_sessions_removed(&s.project_path, &attached)?;
+                notify_workspace_deleted(&app, &s.project_path, &moved);
+                moved
+                    .into_iter()
+                    .find(|entry| entry.id == session_id)
+                    .ok_or_else(|| "session disappeared while settling its worktree".to_string())?
             }
-            "relocate" => false,
+            "relocate" => {
+                for tab in &s.tabs {
+                    kill_tab(&state, &s.id, &tab.id);
+                }
+                let branch = git::current_branch(Path::new(&s.project_path));
+                let out = index::update_session(&session_id, |s| {
+                    s.cwd = s.project_path.clone();
+                    s.worktree_name = None;
+                    s.worktree_removed = false;
+                    s.removed_workspace = None;
+                    s.branch = branch.clone();
+                    s.base_ref = None;
+                    for t in &mut s.tabs {
+                        t.status = TabStatus::Idle;
+                    }
+                    Ok(s.clone())
+                })
+                .map_err(err)?;
+                let _ = app.emit("session_updated", &out);
+                out
+            }
             other => return Err(format!("unknown settle action {other}")),
         };
-        let branch = git::current_branch(Path::new(&s.project_path));
-        let out = index::update_session(&session_id, |s| {
-            s.cwd = s.project_path.clone();
-            s.worktree_name = None;
-            s.worktree_removed = deleted;
-            s.branch = branch.clone();
-            s.base_ref = None;
-            for t in &mut s.tabs {
-                t.status = TabStatus::Idle;
-            }
-            Ok(s.clone())
-        })
-        .map_err(err)?;
-        let _ = app.emit("session_updated", &out);
         Ok(out)
     })
     .await
@@ -631,6 +665,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             branch: src.branch.clone(),
             base_ref: None,
             worktree_removed: false,
+            removed_workspace: None,
             issue: src.issue.clone(),
             automation: src.automation.clone(),
             title: format!("{} (fork)", src.title),
@@ -1352,8 +1387,9 @@ mod command_tests {
     use std::process::Command;
 
     use super::{
-        create_session_entry, new_tab_entry, rename_workspace_entries, validate_session_target,
-        NewSession, NewTab,
+        create_session_entry, delete_workspace_entries, new_tab_entry,
+        notify_workspace_deleted, rename_workspace_entries, validate_session_target, NewSession,
+        NewTab,
     };
 
     fn git(cwd: &Path, args: &[&str]) -> String {
@@ -1478,6 +1514,159 @@ mod command_tests {
         assert_eq!(git(cwd, &["branch", "--show-current"]).trim(), "raccoon/better-workspace");
         assert!(!Path::new(&first.cwd).exists());
         assert_eq!(crate::store::index::load().unwrap(), renamed.sessions);
+    }
+
+    #[test]
+    fn deleting_a_workspace_relocates_attached_sessions_and_preserves_transcripts() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let worktree = dir.path().join("attached-worktree");
+        std::fs::create_dir(&project).unwrap();
+        git(&project, &["init", "-q", "-b", "main"]);
+        git(&project, &["config", "user.email", "t@example.com"]);
+        git(&project, &["config", "user.name", "T"]);
+        std::fs::write(project.join("README.md"), "project\n").unwrap();
+        git(&project, &["add", "."]);
+        git(&project, &["commit", "-q", "-m", "initial"]);
+        git(&project, &["worktree", "add", "-q", "-b", "feature/attached", worktree.to_str().unwrap()]);
+
+        let created = create_session_entry(NewSession {
+            project_path: project.to_string_lossy().into_owned(),
+            title: Some("Attached session".into()),
+            use_worktree: true,
+            on_main: false,
+            base_ref: None,
+            worktree_name: None,
+            issue: None,
+            automation: None,
+            cwd: Some(worktree.to_string_lossy().into_owned()),
+            tab: Some(NewTab {
+                harness: "codex".into(),
+                model: "gpt-5".into(),
+                effort: None,
+                permission_mode: None,
+            }),
+        })
+        .unwrap();
+        let attached = crate::store::index::update_session(&created.id, |session| {
+            session.worktree_name = Some("attached-worktree".into());
+            session.base_ref = Some("main".into());
+            Ok(session.clone())
+        })
+        .unwrap();
+        let companion = create_session_entry(NewSession {
+            project_path: project.to_string_lossy().into_owned(),
+            title: Some("Companion session".into()),
+            use_worktree: true,
+            on_main: false,
+            base_ref: None,
+            worktree_name: None,
+            issue: None,
+            automation: None,
+            cwd: Some(worktree.to_string_lossy().into_owned()),
+            tab: None,
+        })
+        .unwrap();
+        let tab_id = attached.active_tab.as_deref().unwrap();
+        let transcript = crate::store::log_path(&attached.id, tab_id).unwrap();
+        std::fs::write(&transcript, "{\"kind\":\"message\"}\n").unwrap();
+
+        let moved = delete_workspace_entries(
+            project.to_str().unwrap(),
+            worktree.to_str().unwrap(),
+            true,
+        )
+        .unwrap();
+
+        assert!(!worktree.exists());
+        assert_eq!(crate::workspaces::list(&project).unwrap().len(), 1);
+        assert_eq!(moved.len(), 2);
+        let relocated = moved.iter().find(|session| session.id == attached.id).unwrap();
+        assert_eq!(relocated.cwd, project.canonicalize().unwrap().to_string_lossy());
+        assert_eq!(relocated.worktree_name, None);
+        assert!(relocated.worktree_removed);
+        assert_eq!(relocated.branch.as_deref(), Some("main"));
+        assert_eq!(relocated.base_ref, None);
+        assert_eq!(relocated.removed_workspace.as_ref().unwrap().path, attached.cwd);
+        assert_eq!(relocated.removed_workspace.as_ref().unwrap().name, "attached-worktree");
+        assert_eq!(relocated.removed_workspace.as_ref().unwrap().branch, attached.branch);
+        assert_eq!(relocated.tabs, attached.tabs);
+        assert_eq!(relocated.active_tab, attached.active_tab);
+        assert!(moved.iter().any(|session| session.id == companion.id));
+        assert_eq!(std::fs::read_to_string(transcript).unwrap(), "{\"kind\":\"message\"}\n");
+        assert_eq!(crate::store::index::load().unwrap(), moved);
+    }
+
+    #[test]
+    fn deleting_a_workspace_without_sessions_removes_it_immediately() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let worktree = dir.path().join("empty-worktree");
+        std::fs::create_dir(&project).unwrap();
+        git(&project, &["init", "-q", "-b", "main"]);
+        git(&project, &["config", "user.email", "t@example.com"]);
+        git(&project, &["config", "user.name", "T"]);
+        git(&project, &["commit", "-q", "--allow-empty", "-m", "initial"]);
+        git(&project, &["worktree", "add", "-q", "-b", "feature/empty", worktree.to_str().unwrap()]);
+
+        let moved = delete_workspace_entries(
+            project.to_str().unwrap(),
+            worktree.to_str().unwrap(),
+            true,
+        )
+        .unwrap();
+
+        assert!(moved.is_empty());
+        assert!(!worktree.exists());
+        assert_eq!(crate::workspaces::list(&project).unwrap().len(), 1);
+        assert!(crate::store::index::load().unwrap().is_empty());
+    }
+
+    #[test]
+    fn workspace_deletion_notification_carries_moved_sessions_and_project() {
+        use std::sync::{Arc, Mutex};
+        use tauri::Listener;
+
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let session_events = Arc::new(Mutex::new(Vec::new()));
+        let workspace_events = Arc::new(Mutex::new(Vec::new()));
+        let captured_sessions = session_events.clone();
+        handle.listen("session_updated", move |event| {
+            captured_sessions.lock().unwrap().push(event.payload().to_string());
+        });
+        let captured_workspaces = workspace_events.clone();
+        handle.listen("workspaces_changed", move |event| {
+            captured_workspaces.lock().unwrap().push(event.payload().to_string());
+        });
+        let moved = crate::store::index::SessionEntry {
+            id: "moved-session".into(),
+            project_path: "/repo".into(),
+            cwd: "/repo".into(),
+            worktree_name: None,
+            branch: Some("main".into()),
+            base_ref: None,
+            worktree_removed: true,
+            removed_workspace: None,
+            issue: None,
+            automation: None,
+            title: "Moved".into(),
+            created: "now".into(),
+            modified: "now".into(),
+            archived: false,
+            pinned: false,
+            tabs: Vec::new(),
+            active_tab: None,
+            unknown: Default::default(),
+        };
+
+        notify_workspace_deleted(&handle, "/repo", &[moved]);
+
+        assert_eq!(session_events.lock().unwrap().len(), 1);
+        assert!(session_events.lock().unwrap()[0].contains("moved-session"));
+        assert_eq!(workspace_events.lock().unwrap().as_slice(), ["\"/repo\""]);
     }
 
     #[test]
@@ -1621,39 +1810,65 @@ pub async fn workspace_disposition(project_path: String, path: String) -> CmdRes
     tauri::async_runtime::spawn_blocking(move || crate::workspaces::disposition(Path::new(&project_path), Path::new(&path))).await.map_err(err)
 }
 
-/// Remove a worktree; sessions that lived there move to the project root
-/// and keep their transcripts.
+pub(crate) fn sessions_in_workspace(path: &Path) -> CmdResult<Vec<SessionEntry>> {
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    index::load()
+        .map(|sessions| {
+            sessions
+                .into_iter()
+                .filter(|session| {
+                    std::fs::canonicalize(&session.cwd)
+                        .map(|cwd| cwd == target)
+                        .unwrap_or_else(|_| Path::new(&session.cwd) == target)
+                })
+                .collect()
+        })
+        .map_err(err)
+}
+
+fn mark_workspace_sessions_removed(project_path: &str, affected: &[SessionEntry]) -> CmdResult<Vec<SessionEntry>> {
+    let project = std::fs::canonicalize(project_path).unwrap_or_else(|_| PathBuf::from(project_path));
+    let affected_ids: std::collections::HashSet<_> = affected.iter().map(|session| session.id.clone()).collect();
+    let branch = git::current_branch(&project);
+    index::update(|sessions| {
+        let mut moved = Vec::new();
+        for session in sessions {
+            if affected_ids.contains(&session.id) {
+                index::mark_workspace_removed(session, branch.clone());
+                session.modified = index::now();
+                moved.push(session.clone());
+            }
+        }
+        Ok(moved)
+    })
+    .map_err(err)
+}
+
+/// Delete a workspace and atomically retarget every session which used it.
+/// Transcript files are keyed by session and tab ids, so leaving those fields
+/// untouched preserves the conversation while recording its removed origin.
+pub(crate) fn delete_workspace_entries(project_path: &str, path: &str, delete_branch: bool) -> CmdResult<Vec<SessionEntry>> {
+    let project = std::fs::canonicalize(project_path).unwrap_or_else(|_| PathBuf::from(project_path));
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+    let affected = sessions_in_workspace(&target)?;
+    crate::workspaces::delete(&project, &target, delete_branch).map_err(err)?;
+    mark_workspace_sessions_removed(project_path, &affected)
+}
+
+/// Remove a worktree; sessions that lived there retain its provenance and
+/// keep their transcripts while future work moves to the project root.
 #[tauri::command]
 pub async fn delete_workspace(app: AppHandle, project_path: String, path: String, delete_branch: bool) -> CmdResult<Vec<SessionEntry>> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let target = std::fs::canonicalize(&path).unwrap_or_else(|_| PathBuf::from(&path));
-        let sessions = index::load().map_err(err)?;
-        let affected: Vec<SessionEntry> = sessions.into_iter().filter(|s| std::fs::canonicalize(&s.cwd).map(|c| c == target).unwrap_or(s.cwd == path)).collect();
+        let affected = sessions_in_workspace(Path::new(&path))?;
         for s in &affected {
             for t in &s.tabs {
                 kill_tab(&state, &s.id, &t.id);
             }
         }
-        crate::workspaces::delete(Path::new(&project_path), &target, delete_branch).map_err(err)?;
-        let branch = git::current_branch(Path::new(&project_path));
-        let mut moved = Vec::new();
-        for s in &affected {
-            let out = index::update_session(&s.id, |s| {
-                s.cwd = s.project_path.clone();
-                s.worktree_name = None;
-                s.worktree_removed = true;
-                s.branch = branch.clone();
-                s.base_ref = None;
-                for t in &mut s.tabs {
-                    t.status = TabStatus::Idle;
-                }
-                Ok(s.clone())
-            })
-            .map_err(err)?;
-            let _ = app.emit("session_updated", &out);
-            moved.push(out);
-        }
+        let moved = delete_workspace_entries(&project_path, &path, delete_branch)?;
+        notify_workspace_deleted(&app, &project_path, &moved);
         Ok(moved)
     })
     .await

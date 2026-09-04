@@ -25,6 +25,12 @@ export interface IssueRef {
   url: string;
 }
 
+export interface RemovedWorkspace {
+  path: string;
+  name: string;
+  branch?: string | null;
+}
+
 export interface SessionEntry {
   id: string;
   projectPath: string;
@@ -33,6 +39,7 @@ export interface SessionEntry {
   branch?: string | null;
   baseRef?: string | null;
   worktreeRemoved: boolean;
+  removedWorkspace?: RemovedWorkspace | null;
   issue?: IssueRef | null;
   automation?: AutomationRef | null;
   title: string;

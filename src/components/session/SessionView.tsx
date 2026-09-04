@@ -22,11 +22,18 @@ import { RightPanel } from "@/components/layout/RightPanel";
 import { useTabLog } from "@/lib/agentEvents";
 import type { TabEntry } from "@/types/session";
 import { WorkspaceNameEditor } from "./WorkspaceNameEditor";
+import { workspaceName } from "@/lib/dashboard";
+
+function managedWorkspaceFor(session: SessionEntry) {
+  if (!session.worktreeName || session.worktreeRemoved) return undefined;
+  return { projectPath: session.projectPath, name: session.worktreeName };
+}
 
 /** The right panel reads the active tab's log for the changes range. */
 function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
   const log = useTabLog(session.id, tab.id);
   const live = tab.status === "in_progress" || tab.status === "waiting";
+  const workspace = managedWorkspaceFor(session);
   return (
     <RightPanel
       cwd={session.cwd}
@@ -38,7 +45,8 @@ function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
       sessionId={session.id}
       mentionTabId={session.activeTab ?? session.tabs[0]?.id ?? null}
       statusKey={session.tabs.map((item) => item.status).join(",")}
-      settleSessionId={session.worktreeName && !session.worktreeRemoved ? session.id : undefined}
+      settleSessionId={workspace ? session.id : undefined}
+      workspace={workspace}
     />
   );
 }
@@ -63,7 +71,10 @@ export function SessionView({
   const tabViews = useTabViews();
   const activeInTerminal = !!activeTab && tabViews.views[activeTab.id] === "terminal";
   const switching = !!activeTab && !!tabViews.switching[activeTab.id];
+  const workspaceLabel = session.worktreeRemoved ? workspaceName(session) : session.branch;
+  const workspaceTitle = session.removedWorkspace?.path ?? session.cwd;
   const [renameError, setRenameError] = useState<string | null>(null);
+  const workspace = managedWorkspaceFor(session);
   useHotkey("mod+shift+t", () => {
     if (activeTab) void toggleTabView(session, activeTab);
   });
@@ -123,8 +134,8 @@ export function SessionView({
                 </button>
               </WithTooltip>
             )}
-            {session.branch && (
-              <span className="ml-1 flex min-w-0 max-w-[35%] items-center gap-1 overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground" title={session.cwd}>
+            {workspaceLabel && (
+              <span className="ml-1 flex min-w-0 max-w-[35%] items-center gap-1 overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground" title={workspaceTitle}>
                 <GitBranch className="size-3 shrink-0" />
                 {session.worktreeName && !session.worktreeRemoved ? (
                   <WorkspaceNameEditor
@@ -137,9 +148,9 @@ export function SessionView({
                     className="max-w-52 text-muted-foreground hover:text-foreground"
                   />
                 ) : (
-                  <span className="truncate">{session.branch}</span>
+                  <span className="truncate">{workspaceLabel}</span>
                 )}
-                {session.worktreeRemoved && <span className="text-faint">· in project</span>}
+                {session.worktreeRemoved && <span className="text-faint">· workspace removed</span>}
               </span>
             )}
             {renameError && (
@@ -225,6 +236,8 @@ export function SessionView({
             sessionId={session.id}
             statusKey={statusKey}
             rootName={project?.name ?? "project"}
+            settleSessionId={workspace ? session.id : undefined}
+            workspace={workspace}
           />
         ))}
       <QuickOpen sessionId={session.id} root={session.cwd} />

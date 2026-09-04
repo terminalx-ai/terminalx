@@ -36,6 +36,7 @@ import {
 import { WithTooltip } from "@/components/ui/tooltip";
 import { api, errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { workspaceName as sessionWorkspaceName } from "@/lib/dashboard";
 import { openSettle, openWorkspaceDelete } from "@/lib/dialogs";
 import { useMobileDrivenTabs } from "@/lib/mobileDriver";
 import { getPrefs } from "@/lib/prefs";
@@ -65,6 +66,7 @@ interface WorkspaceGroup {
   key: string;
   path: string;
   sessions: SessionEntry[];
+  removed: boolean;
 }
 
 const canon = (path: string) => path.replace(/\/+$/, "");
@@ -75,23 +77,28 @@ export function groupProjectWorkspaces(projectPath: string, workspaces: Workspac
   const visible = sortSessions(sessions.filter((session) => session.projectPath === projectPath && (session.archived === showArchived || session.id === selectedId)));
   const byPath = new Map<string, SessionEntry[]>();
   const missing = new Map<string, SessionEntry[]>();
+  const removed = new Map<string, SessionEntry[]>();
 
   for (const session of visible) {
-    const path = canon(session.cwd);
-    byPath.set(path, [...(byPath.get(path) ?? []), session]);
+    const path = canon(session.worktreeRemoved ? (session.removedWorkspace?.path ?? session.cwd) : session.cwd);
+    const target = session.worktreeRemoved ? removed : byPath;
+    target.set(path, [...(target.get(path) ?? []), session]);
   }
 
   const known = new Set(workspaces.map((workspace) => canon(workspace.path)));
   const groups: WorkspaceGroup[] = workspaces.map((workspace) => {
     const path = canon(workspace.path);
-    return { workspace, path, key: workspaceKey(projectPath, path), sessions: byPath.get(path) ?? [] };
+    return { workspace, path, key: workspaceKey(projectPath, path), sessions: byPath.get(path) ?? [], removed: false };
   });
 
   for (const [path, rows] of byPath) {
     if (!known.has(path)) missing.set(path, [...(missing.get(path) ?? []), ...rows]);
   }
   for (const [path, rows] of missing) {
-    groups.push({ workspace: null, path, key: `${workspaceKey(projectPath, path)}\0missing`, sessions: sortSessions(rows) });
+    groups.push({ workspace: null, path, key: `${workspaceKey(projectPath, path)}\0missing`, sessions: sortSessions(rows), removed: false });
+  }
+  for (const [path, rows] of removed) {
+    groups.push({ workspace: null, path, key: `${workspaceKey(projectPath, path)}\0removed`, sessions: sortSessions(rows), removed: true });
   }
   return groups;
 }
@@ -113,7 +120,9 @@ export function ProjectNavigation({ project, expanded }: { project: Project; exp
     () => groupProjectWorkspaces(project.path, workspaces, store.sessions, store.showArchived, store.selectedSessionId),
     [project.path, store.sessions, store.showArchived, store.selectedSessionId, workspaces],
   );
-  const activeWorkspaceKey = groups.find((group) => activeCwd && canon(group.path) === canon(activeCwd))?.key ?? null;
+  const activeWorkspaceKey = groups.find((group) => selectedSession
+    ? group.sessions.some((session) => session.id === selectedSession.id)
+    : !group.removed && activeCwd && canon(group.path) === canon(activeCwd))?.key ?? null;
 
   useEffect(() => {
     if (expanded && !attemptedLoad.current && !store.workspaces[project.path] && !store.workspacesLoading[project.path]) {
@@ -186,9 +195,10 @@ function WorkspaceNode({
 }) {
   const [renameError, setRenameError] = useState<string | null>(null);
   const workspace = group.workspace;
-  const name = workspace?.name ?? group.path.split("/").pop() ?? group.path;
-  const displayName = workspace?.managed ? name : (workspace?.branch ?? name);
-  const kind = !workspace ? "missing" : workspace.isMain ? "main" : workspace.managed ? "worktree" : "external";
+  const removedSession = group.sessions.find((session) => session.removedWorkspace) ?? group.sessions[0];
+  const name = group.removed && removedSession ? sessionWorkspaceName(removedSession) : (workspace?.name ?? group.path.split("/").pop() ?? group.path);
+  const displayName = group.removed ? name : workspace?.managed ? name : (workspace?.branch ?? name);
+  const kind = group.removed ? "removed" : !workspace ? "missing" : workspace.isMain ? "main" : workspace.managed ? "worktree" : "external";
   const openWorkspace = () => {
     if (workspace) startSessionIn(project.path, workspace.path);
     else if (group.sessions[0]) selectSession(group.sessions[0].id);

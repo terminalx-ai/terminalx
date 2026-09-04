@@ -70,7 +70,7 @@ export function WorkspaceDeleteDialog() {
                 on <span className="font-mono text-foreground">{disp.branch}</span>
               </>
             )}
-            . Sessions that ran here keep their transcripts and move to the project.
+            . Sessions that ran here keep their transcripts and remain identified with this removed workspace.
           </DialogDescription>
         </DialogHeader>
 

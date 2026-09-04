@@ -92,6 +92,47 @@ struct CliLaunch {
     transcript_root: PathBuf,
 }
 
+/// A composer prompt waiting for the CLI transcript to echo it. Codex adds
+/// `[Image #N]` labels to the echoed text, so attachment count is part of the
+/// identity even though the composer already published the archived images.
+struct ComposerEcho {
+    text: String,
+    image_count: usize,
+}
+
+impl ComposerEcho {
+    fn matches(&self, echoed: &str) -> bool {
+        if self.text == echoed {
+            return true;
+        }
+        if self.image_count == 0 {
+            return false;
+        }
+
+        let labels = (1..=self.image_count).map(|n| format!("[Image #{n}]")).collect::<Vec<_>>().join(" ");
+        if self.text.is_empty() {
+            echoed == labels
+        } else {
+            echoed == format!("{labels} {}", self.text)
+        }
+    }
+}
+
+fn cli_composer_message(prompt: &PromptText, images: Vec<ImageRef>, baseline: Option<String>, queued: bool, cwd: &str) -> (Payload, Option<ComposerEcho>) {
+    let echo = (!queued).then(|| ComposerEcho { text: prompt.agent.clone(), image_count: images.len() });
+    let payload = Payload::UserMessage { text: prompt.display.clone(), images, baseline, queued, cwd: Some(cwd.to_string()) };
+    (payload, echo)
+}
+
+fn consume_composer_echo(pending: &mut std::collections::VecDeque<ComposerEcho>, payload: &Payload) -> bool {
+    let Payload::UserMessage { text, .. } = payload else { return false };
+    if !pending.front().is_some_and(|prompt| prompt.matches(text)) {
+        return false;
+    }
+    pending.pop_front();
+    true
+}
+
 /// A PTY-first tab: the CLI in a pane, its transcript being followed, and the
 /// permission frames its hooks have parked here waiting for an answer.
 pub struct CliTab {
@@ -114,7 +155,7 @@ pub struct CliTab {
     pub tail: Arc<tui::Tail>,
     /// Prompts the composer already published, waiting for the transcript to
     /// echo them back so the reader is not shown the same message twice.
-    pub echoed: std::collections::VecDeque<String>,
+    echoed: std::collections::VecDeque<ComposerEcho>,
     /// Hook threads parked on a decision, by request id.
     pub decisions: HashMap<String, std::sync::mpsc::Sender<Decision>>,
     /// Keeps the turn's reply from being drawn twice when the `Stop` hook and
@@ -1299,9 +1340,8 @@ impl SessionManager {
         for payload in payloads {
             // A prompt sent from the composer was published when it was sent;
             // the transcript's copy of it would be the same message twice.
-            if let (Payload::UserMessage { text, .. }, Engine::Cli(p)) = (&payload, &mut rt.engine) {
-                if p.echoed.front().is_some_and(|q| q == text) {
-                    p.echoed.pop_front();
+            if let Engine::Cli(p) = &mut rt.engine {
+                if consume_composer_echo(&mut p.echoed, &payload) {
                     continue;
                 }
             }
@@ -1392,23 +1432,12 @@ impl SessionManager {
         let queued = rt.turn_open;
         let baseline = if queued { None } else { git::snapshot_tree(Path::new(&entry.cwd)).ok() };
         let paths: Vec<String> = images.iter().map(|i| i.url.clone()).collect();
-        if !queued {
-            if let Engine::Cli(p) = &mut rt.engine {
-                p.echoed.push_back(prompt.agent.clone());
-                p.turn_tail.opened();
-            }
+        let (message, echo) = cli_composer_message(&prompt, images, baseline, queued, &entry.cwd);
+        if let (Some(echo), Engine::Cli(p)) = (echo, &mut rt.engine) {
+            p.echoed.push_back(echo);
+            p.turn_tail.opened();
         }
-        let ev = self.publish(
-            rt,
-            Payload::UserMessage {
-                text: prompt.display,
-                images,
-                baseline,
-                queued,
-                cwd: Some(entry.cwd.clone()),
-            },
-            None,
-        );
+        let ev = self.publish(rt, message, None);
         self.type_prompt(rt_arc, &pane, prompt.agent, paths, Some(ready));
         if !queued {
             rt.turn_open = true;
@@ -1940,6 +1969,35 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
+
+    #[test]
+    fn codex_image_prompts_project_once_and_repeated_submissions_stay_distinct() {
+        let prompt = PromptText { agent: "describe this".into(), display: "describe this".into() };
+        let image = ImageRef { url: "attachments/session/proof.png".into(), media_type: Some("image/png".into()), name: Some("proof.png".into()) };
+        let mut pending = std::collections::VecDeque::new();
+        let mut projected = Vec::new();
+
+        for _ in 0..2 {
+            let (composer, echo) = cli_composer_message(&prompt, vec![image.clone()], None, false, "/workspace");
+            pending.push_back(echo.unwrap());
+            projected.push(composer);
+
+            let rollout = Payload::UserMessage { text: "[Image #1] describe this".into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
+            assert!(consume_composer_echo(&mut pending, &rollout));
+        }
+
+        assert_eq!(projected.len(), 2, "one projected record per real submission");
+        assert!(projected.iter().all(|p| matches!(p, Payload::UserMessage { text, images, .. } if text == "describe this" && images.as_slice() == std::slice::from_ref(&image))));
+    }
+
+    #[test]
+    fn composer_echo_matching_is_strict_about_attachments() {
+        assert!(ComposerEcho { text: "plain".into(), image_count: 0 }.matches("plain"));
+        assert!(!ComposerEcho { text: "plain".into(), image_count: 0 }.matches("[Image #1] plain"));
+        assert!(ComposerEcho { text: "compare".into(), image_count: 2 }.matches("[Image #1] [Image #2] compare"));
+        assert!(!ComposerEcho { text: "compare".into(), image_count: 2 }.matches("[Image #1] compare"));
+        assert!(ComposerEcho { text: String::new(), image_count: 1 }.matches("[Image #1]"));
+    }
 
     /// Two tab views mounting at once — React runs a mount effect twice in
     /// development — used to build a runtime each, so each held its own lock
