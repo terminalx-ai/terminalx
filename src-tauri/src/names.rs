@@ -44,6 +44,35 @@ pub fn unclaimed(taken: &[String]) -> String {
     format!("{}-{}", pick(&b.as_bytes()[..3]), b.as_bytes()[4])
 }
 
+/// A reader-provided worktree name made safe for a branch and folder.
+/// Names are lowercase ASCII slugs, limited to 40 characters, and receive a
+/// numeric suffix when the requested slug is already claimed.
+pub fn requested(requested: &str, taken: &[String]) -> Option<String> {
+    let mut base = String::new();
+    let mut last_dash = true;
+    for ch in requested.chars() {
+        let c = ch.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() {
+            base.push(c);
+            last_dash = false;
+        } else if !last_dash {
+            base.push('-');
+            last_dash = true;
+        }
+        if base.len() >= 40 {
+            break;
+        }
+    }
+    let base = base.trim_matches('-').to_string();
+    if base.is_empty() {
+        return None;
+    }
+    if !taken.iter().any(|taken| taken == &base) {
+        return Some(base);
+    }
+    (2..1000).map(|n| format!("{base}-{n}")).find(|candidate| !taken.iter().any(|taken| taken == candidate))
+}
+
 pub fn is_worktree_name(name: &str) -> bool {
     let parts: Vec<&str> = name.split('-').collect();
     parts.len() >= 3
@@ -71,5 +100,13 @@ mod tests {
         assert!(is_worktree_name("quiet-amber-fox"));
         assert!(!is_worktree_name("main"));
         assert!(!is_worktree_name("quiet-amber"));
+    }
+
+    #[test]
+    fn requested_names_are_sanitised_and_unique() {
+        assert_eq!(requested("ENG-42 Fix Login!", &[]).as_deref(), Some("eng-42-fix-login"));
+        assert_eq!(requested("!!!", &[]), None);
+        let taken = vec!["eng-42-fix-login".to_string(), "eng-42-fix-login-2".to_string()];
+        assert_eq!(requested("eng-42-fix-login", &taken).as_deref(), Some("eng-42-fix-login-3"));
     }
 }

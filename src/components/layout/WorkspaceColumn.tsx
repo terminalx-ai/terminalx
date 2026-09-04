@@ -10,6 +10,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { cn } from "@/lib/cn";
 import { api, errorMessage } from "@/lib/api";
 import { openSettle, openWorkspaceDelete } from "@/lib/dialogs";
+import { WorkspaceNameEditor } from "@/components/session/WorkspaceNameEditor";
 import {
   archiveSession,
   deleteSession,
@@ -18,6 +19,7 @@ import {
   pinSession,
   openAutomations,
   refreshWorkspaces,
+  renameWorkspace,
   selectSession,
   sortSessions,
   startSessionIn,
@@ -145,9 +147,10 @@ function WorkspaceGroup({
   selectedId: string | null;
 }) {
   const [open, setOpen] = useState(true);
+  const [renameError, setRenameError] = useState<string | null>(null);
   const name = ws?.name ?? path.split("/").pop() ?? path;
   const kind = ws ? (ws.isMain ? "main" : ws.managed ? "" : "external") : "missing";
-  const displayName = ws?.branch ?? name;
+  const displayName = ws?.managed ? name : (ws?.branch ?? name);
   const openWorkspaceSession = () => {
     if (ws) void openWorkspace(projectPath, ws.path).catch((e) => console.error(errorMessage(e)));
   };
@@ -164,13 +167,17 @@ function WorkspaceGroup({
         </button>
         <GitBranch className="size-3 shrink-0" />
         {ws ? (
-          <button
-            type="button"
-            onClick={openWorkspaceSession}
-            className="min-w-0 truncate rounded-sm font-mono text-foreground/90 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring/40"
-          >
-            {displayName}
-          </button>
+          <WorkspaceNameEditor
+            value={displayName}
+            editable={ws.managed && !ws.isMain}
+            onActivate={openWorkspaceSession}
+            onCommit={async (requested) => {
+              const renamed = await renameWorkspace(projectPath, ws.path, requested);
+              return renamed.name;
+            }}
+            onError={setRenameError}
+            className="flex-1 text-foreground/90 hover:underline"
+          />
         ) : (
           <span className="min-w-0 truncate font-mono text-foreground/90">{displayName}</span>
         )}
@@ -220,6 +227,11 @@ function WorkspaceGroup({
           </span>
         )}
       </div>
+      {renameError && (
+        <div role="alert" className="mx-6 mb-1 text-[11px] leading-tight text-destructive">
+          {renameError}
+        </div>
+      )}
       {open && sessions.map((s) => <SessionRow key={s.id} session={s} selected={selectedId === s.id} />)}
       {open && !sessions.length && ws?.isMain && <div className="px-6 py-1 text-[11px] text-faint">No sessions yet. Press + on a workspace to start one.</div>}
     </div>

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { CalendarClock, CircleDot, FolderTree, GitBranch, MessageSquare, PanelLeft, PanelRight, Terminal, TerminalSquare } from "lucide-react";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -7,7 +7,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
-import { openAutomations, useSessionStore } from "@/lib/sessions";
+import { openAutomations, renameWorkspace, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
 import { TabView } from "./TabView";
@@ -22,6 +22,7 @@ import { ExplorerPane } from "@/components/files/ExplorerPane";
 import { RightPanel } from "@/components/layout/RightPanel";
 import { useTabLog } from "@/lib/agentEvents";
 import type { TabEntry } from "@/types/session";
+import { WorkspaceNameEditor } from "./WorkspaceNameEditor";
 
 /** The right panel reads the active tab's log for the changes range. */
 function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
@@ -63,6 +64,7 @@ export function SessionView({
   const tabViews = useTabViews();
   const activeInTerminal = !!activeTab && tabViews.views[activeTab.id] === "terminal";
   const switching = !!activeTab && !!tabViews.switching[activeTab.id];
+  const [renameError, setRenameError] = useState<string | null>(null);
   useHotkey("mod+shift+t", () => {
     if (activeTab) void toggleTabView(session, activeTab);
   });
@@ -130,8 +132,25 @@ export function SessionView({
             {session.branch && (
               <span className="ml-1 flex shrink-0 items-center gap-1 rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground" title={session.cwd}>
                 <GitBranch className="size-3" />
-                {session.branch}
+                {session.worktreeName && !session.worktreeRemoved ? (
+                  <WorkspaceNameEditor
+                    value={session.worktreeName}
+                    onCommit={async (requested) => {
+                      const renamed = await renameWorkspace(session.projectPath, session.cwd, requested);
+                      return renamed.name;
+                    }}
+                    onError={setRenameError}
+                    className="max-w-52 text-muted-foreground hover:text-foreground"
+                  />
+                ) : (
+                  session.branch
+                )}
                 {session.worktreeRemoved && <span className="text-faint">· in project</span>}
+              </span>
+            )}
+            {renameError && (
+              <span role="alert" className="ml-1 max-w-64 truncate text-[11px] text-destructive" title={renameError}>
+                {renameError}
               </span>
             )}
           </div>

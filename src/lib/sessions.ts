@@ -216,6 +216,13 @@ export async function refreshWorkspaces(projectPath: string) {
   }
 }
 
+export async function renameWorkspace(projectPath: string, path: string, name: string) {
+  const renamed = await api.renameWorkspace(projectPath, path, name);
+  for (const session of renamed.sessions) upsertSession(session);
+  await refreshWorkspaces(projectPath);
+  return renamed;
+}
+
 /** The global refresh: projects, sessions and every project's workspaces. */
 export async function refreshEverything() {
   const [projects, sessions] = await Promise.all([api.listProjects(), api.listSessions()]);
