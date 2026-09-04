@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
-import { Check, CircleAlert, ExternalLink, Loader2, RefreshCw } from "lucide-react";
+import { ArrowLeft, Check, CircleAlert, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
 import { AgentMark } from "@/components/AgentMark";
@@ -38,43 +37,48 @@ const TAB_LABEL: Record<Tab, string> = {
   about: "About",
 };
 
-export function SettingsDialog({
-  open,
-  onOpenChange,
+export function SettingsPage({
+  onBack,
   initialTab = "general",
 }: {
-  open: boolean;
-  onOpenChange: (o: boolean) => void;
+  onBack: () => void;
   initialTab?: SettingsTab;
 }) {
   const [tab, setTab] = useState<Tab>(initialTab);
   useEffect(() => {
-    if (open) setTab(initialTab);
-  }, [initialTab, open]);
+    setTab(initialTab);
+  }, [initialTab]);
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent width="max-w-[42rem]" className="p-0">
-        <div className="flex h-[34rem] max-h-[72vh]">
-          <nav className="flex w-40 shrink-0 flex-col gap-0.5 border-r border-hairline p-3 pt-4">
-            <DialogTitle className="mb-2 px-2 text-xs font-medium uppercase tracking-wide text-faint">
-              Settings
-            </DialogTitle>
-            <DialogDescription className="sr-only">Application settings</DialogDescription>
-            {TABS.map((t) => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => setTab(t)}
-                className={cn(
-                  "rounded-md px-2 py-1.5 text-left text-[13px] transition-colors",
-                  tab === t ? "bg-selected text-foreground" : "text-muted-foreground hover:bg-veil-raised hover:text-foreground",
-                )}
-              >
-                {TAB_LABEL[t]}
-              </button>
-            ))}
-          </nav>
-          <div className="min-w-0 flex-1 overflow-y-auto scrollbar-thin p-5">
+    <main className="flex h-full min-w-0 flex-1 flex-col bg-background" aria-label="Settings">
+      <header data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-1 border-b border-hairline pl-[78px] pr-3">
+        <Button variant="ghost" size="icon-sm" aria-label="Back to previous page" onClick={onBack}>
+          <ArrowLeft />
+        </Button>
+        <h1 className="px-1 text-sm font-medium">Settings</h1>
+      </header>
+      <div className="flex min-h-0 flex-1">
+        <nav aria-label="Settings sections" className="flex w-48 shrink-0 flex-col gap-0.5 border-r border-hairline p-4">
+          {TABS.map((t) => (
+            <button
+              key={t}
+              type="button"
+              aria-current={tab === t ? "page" : undefined}
+              onClick={() => setTab(t)}
+              className={cn(
+                "rounded-md px-2.5 py-2 text-left text-[13px] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                tab === t ? "bg-selected text-foreground" : "text-muted-foreground hover:bg-veil-raised hover:text-foreground",
+              )}
+            >
+              {TAB_LABEL[t]}
+            </button>
+          ))}
+        </nav>
+        <section className="min-w-0 flex-1 overflow-y-auto scrollbar-thin" aria-labelledby="settings-section-title">
+          <div className="mx-auto w-full max-w-[48rem] p-6 pb-12">
+            <h2 id="settings-section-title" className="mb-5 text-xl font-semibold tracking-tight">
+              {TAB_LABEL[tab]}
+            </h2>
             {tab === "account" && <AccountTab />}
             {tab === "devices" && <DevicesTab />}
             {tab === "general" && <GeneralTab />}
@@ -85,9 +89,9 @@ export function SettingsDialog({
             {tab === "shortcuts" && <ShortcutsTab />}
             {tab === "about" && <AboutTab />}
           </div>
-        </div>
-      </DialogContent>
-    </Dialog>
+        </section>
+      </div>
+    </main>
   );
 }
 

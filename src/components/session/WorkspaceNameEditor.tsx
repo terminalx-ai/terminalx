@@ -105,7 +105,7 @@ export function WorkspaceNameEditor({
   return (
     <button
       type="button"
-      aria-label={editable ? `Workspace ${value}. Press Enter to rename` : value}
+      aria-label={editable ? `Workspace ${value}. Press F2 to rename` : value}
       title={editable ? "Double-click to rename workspace" : undefined}
       onClick={(event) => {
         if (!onActivate) return;
@@ -126,7 +126,11 @@ export function WorkspaceNameEditor({
         begin();
       }}
       onKeyDown={(event) => {
-        if (editable && (event.key === "Enter" || event.key === "F2")) {
+        if (event.key === "Enter" || event.key === " ") {
+          if (!onActivate) return;
+          event.preventDefault();
+          onActivate();
+        } else if (editable && event.key === "F2") {
           event.preventDefault();
           begin();
         }

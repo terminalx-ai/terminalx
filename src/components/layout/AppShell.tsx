@@ -2,7 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { PanelLeft, PanelRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { SettingsDialog, type SettingsTab } from "@/components/settings/SettingsDialog";
+import type { SettingsTab } from "@/components/settings/SettingsPage";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { NewSessionView } from "@/components/session/NewSessionView";
 import { IssuesView } from "@/components/issues/IssuesView";
@@ -29,16 +29,19 @@ import { RightPanel } from "@/components/layout/RightPanel";
 import { CommandPalette } from "@/components/command/CommandPalette";
 import { bootAccount } from "@/lib/account";
 import { bootPairing } from "@/lib/pairing";
+import { useEditors } from "@/lib/editors";
+import { EditorSplit } from "@/components/editor/EditorSplit";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
+const SettingsPage = lazy(() => import("@/components/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const statusBarFallback = <div aria-hidden className="h-[22px] shrink-0 border-t border-hairline bg-background/70" />;
 const viewFallback = <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-faint">Loading view…</div>;
 
 export const TITLEBAR_INSET = 78; // traffic-light clearance, px
 
 /**
- * Three columns under one drag strip: sidebar, workspace, optional right panel.
+ * Main content between one navigation sidebar and the optional right panel.
  * The title bar is ours (overlay style), so every column draws its own strip of
  * height --titlebar-h and the whole strip is a deep drag region.
  */
@@ -112,34 +115,42 @@ export function AppShell() {
       <SettleDialog />
       <WorkspaceDeleteDialog />
       <div className="flex min-h-0 flex-1">
-        {sidebarOpen && (
-          <Sidebar
-            onToggle={toggleSidebar}
-            onOpenSettings={openSettings}
-            onOpenAccount={openAccountSettings}
-            onOpenIssues={showIssues}
-            onOpenAgents={showAgents}
-            onOpenStats={showStats}
-            onOpenAutomations={showAutomations}
-            onOpenSkills={showSkills}
-            onSearch={() => setPaletteOpen(true)}
-          />
-        )}
-
-        {selected ? (
-          <main className="flex h-full min-w-0 flex-1 flex-col">
-            <ErrorBoundary key={selected.id} label="the session">
-              <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
-            </ErrorBoundary>
-          </main>
+        {settingsOpen ? (
+          <Suspense fallback={viewFallback}>
+            <SettingsPage initialTab={settingsTab} onBack={() => setSettingsOpen(false)} />
+          </Suspense>
         ) : (
-          <UnselectedWorkspace
-            key={store.view}
-            sidebarOpen={sidebarOpen}
-            onToggleSidebar={toggleSidebar}
-            onTogglePanel={togglePanel}
-            onCreated={onCreated}
-          />
+          <>
+            {sidebarOpen && (
+              <Sidebar
+                onToggle={toggleSidebar}
+                onOpenSettings={openSettings}
+                onOpenAccount={openAccountSettings}
+                onOpenIssues={showIssues}
+                onOpenAgents={showAgents}
+                onOpenStats={showStats}
+                onOpenAutomations={showAutomations}
+                onOpenSkills={showSkills}
+                onSearch={() => setPaletteOpen(true)}
+              />
+            )}
+
+            {selected ? (
+              <main className="flex h-full min-w-0 flex-1 flex-col">
+                <ErrorBoundary key={selected.id} label="the session">
+                  <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                </ErrorBoundary>
+              </main>
+            ) : (
+              <UnselectedWorkspace
+                key={store.view}
+                sidebarOpen={sidebarOpen}
+                onToggleSidebar={toggleSidebar}
+                onTogglePanel={togglePanel}
+                onCreated={onCreated}
+              />
+            )}
+          </>
         )}
       </div>
 
@@ -151,7 +162,6 @@ export function AppShell() {
         </ErrorBoundary>
       ) : null}
 
-      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} initialTab={settingsTab} />
       {paletteOpen ? <CommandPalette open onOpenChange={setPaletteOpen} onOpenSettings={openSettings} onCreated={onCreated} /> : null}
     </div>
   );
@@ -171,6 +181,7 @@ function UnselectedWorkspace({
 }) {
   const prefs = usePrefs();
   const store = useSessionStore();
+  const editors = useEditors();
   const [useWorktree, setUseWorktree] = useState(prefs.useWorktree);
   const [issueProjectPath, setIssueProjectPath] = useState<string | null>(null);
 
@@ -182,6 +193,8 @@ function UnselectedWorkspace({
   const cwd = store.view === "new" ? (preset?.cwd ?? project?.path ?? null) : project?.path ?? null;
   const workspace = cwd && project ? (store.workspaces[project.path] ?? []).find((item) => item.path === cwd) : null;
   const panelAvailable = !!cwd && !!project;
+  const checkoutEditorId = cwd ? `checkout:${cwd}` : null;
+  const hasCheckoutEditors = !!checkoutEditorId && editors.editors.some((editor) => editor.sessionId === checkoutEditorId);
   const labelMode = preset?.cwd && store.view === "new" ? "branch" : useWorktree ? "base" : "branch";
 
   return (
@@ -217,31 +230,34 @@ function UnselectedWorkspace({
             </WithTooltip>
           )}
         </header>
-        <section className="flex min-h-0 flex-1 flex-col">
-          {store.view === "issues" ? (
-            <IssuesView
-              onCreated={onCreated}
-              useWorktree={useWorktree}
-              onUseWorktreeChange={setUseWorktree}
-              onTargetProjectChange={setIssueProjectPath}
-            />
-          ) : store.view === "agents" ? (
-            <AgentDashboard />
-          ) : store.view === "stats" ? (
-            <Suspense fallback={viewFallback}>
-              <StatsUsageView />
-            </Suspense>
-          ) : store.view === "automations" ? (
-            <AutomationsView initialAutomationId={store.selectedAutomationId} />
-          ) : store.view === "skills" ? (
-            <SkillsView
-              key={`${store.skillsFilter?.projectPath ?? store.selectedProject ?? "home"}:${store.skillsFilter?.agent ?? "all"}`}
-              projectPath={store.skillsFilter?.projectPath ?? store.selectedProject}
-              initialAgent={store.skillsFilter?.agent ?? null}
-            />
-          ) : (
-            <NewSessionView onCreated={onCreated} useWorktree={useWorktree} onUseWorktreeChange={setUseWorktree} />
-          )}
+        <section className="@container/editor-host relative flex min-h-0 flex-1">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            {store.view === "issues" ? (
+              <IssuesView
+                onCreated={onCreated}
+                useWorktree={useWorktree}
+                onUseWorktreeChange={setUseWorktree}
+                onTargetProjectChange={setIssueProjectPath}
+              />
+            ) : store.view === "agents" ? (
+              <AgentDashboard />
+            ) : store.view === "stats" ? (
+              <Suspense fallback={viewFallback}>
+                <StatsUsageView />
+              </Suspense>
+            ) : store.view === "automations" ? (
+              <AutomationsView initialAutomationId={store.selectedAutomationId} />
+            ) : store.view === "skills" ? (
+              <SkillsView
+                key={`${store.skillsFilter?.projectPath ?? store.selectedProject ?? "home"}:${store.skillsFilter?.agent ?? "all"}`}
+                projectPath={store.skillsFilter?.projectPath ?? store.selectedProject}
+                initialAgent={store.skillsFilter?.agent ?? null}
+              />
+            ) : (
+              <NewSessionView onCreated={onCreated} useWorktree={useWorktree} onUseWorktreeChange={setUseWorktree} />
+            )}
+          </div>
+          {checkoutEditorId && hasCheckoutEditors ? <EditorSplit sessionId={checkoutEditorId} active /> : null}
         </section>
       </main>
       {prefs.panelOpen && panelAvailable && cwd && project && (

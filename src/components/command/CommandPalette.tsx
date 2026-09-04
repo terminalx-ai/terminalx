@@ -67,7 +67,7 @@ import { SHORTCUTS, type Shortcut } from "@/lib/shortcuts";
 import { setStatusSettings, useStatus } from "@/lib/status";
 import { THEMES, setMode, setTheme, useTheme } from "@/lib/theme";
 import { relativeTime } from "@/lib/time";
-import type { SettingsTab } from "@/components/settings/SettingsDialog";
+import type { SettingsTab } from "@/components/settings/SettingsPage";
 import type { Project, SessionEntry } from "@/types/session";
 
 const GROUP_CAPS: Record<string, number> = {

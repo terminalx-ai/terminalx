@@ -1,6 +1,6 @@
 [package]
 name = "raccoon"
-version = "0.1.0"
+version = "0.2.0"
 description = "TerminalX — a desktop workbench for coding agents"
 authors = ["Paresh Dudhat"]
 edition = "2021"

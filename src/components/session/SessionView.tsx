@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CalendarClock, CircleDot, FolderTree, GitBranch, MessageSquare, PanelLeft, PanelRight, Terminal, TerminalSquare } from "lucide-react";
+import { CalendarClock, CircleDot, GitBranch, MessageSquare, PanelLeft, PanelRight, Terminal, TerminalSquare } from "lucide-react";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
@@ -11,14 +11,14 @@ import { openAutomations, renameWorkspace, useSessionStore } from "@/lib/session
 import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
 import { TabView } from "./TabView";
-import { tabPanelId, TabStrip } from "./TabStrip";
+import { TabActions } from "./TabStrip";
+import { tabPanelId } from "@/lib/sessionTabs";
 import { activateLatestTerminal, useTerminals, type SelectedSessionTab } from "@/lib/terminal";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { setLastFocused, useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
 import { QuickOpen } from "@/components/editor/QuickOpen";
 import { ProjectSearch } from "@/components/editor/ProjectSearch";
-import { ExplorerPane } from "@/components/files/ExplorerPane";
 import { RightPanel } from "@/components/layout/RightPanel";
 import { useTabLog } from "@/lib/agentEvents";
 import type { TabEntry } from "@/types/session";
@@ -53,8 +53,8 @@ function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
 }
 
 /**
- * One session: a header naming the place, a peer strip for agent and shell
- * tabs, the selected tab's full-height body, and the right panel.
+ * One session: a header naming the place, the selected sidebar tab's
+ * full-height body, and the right panel.
  */
 export function SessionView({
   session,
@@ -106,21 +106,15 @@ export function SessionView({
   }, [session.id, session.cwd, session.tabs.length]);
 
   useHotkey("mod+j", () => void activateLatestTerminal(session.id, session.cwd));
-
-  useHotkey("mod+shift+e", () => setPrefs({ explorerOpen: !prefs.explorerOpen }));
-
   return (
     <div className="flex h-full min-w-0 flex-1">
-      {prefs.explorerOpen && (
-        <ExplorerPane sessionId={session.id} root={session.cwd} rootName={project?.name ?? "project"} mentionTabId={activeTab?.id ?? null} statusKey={statusKey} />
-      )}
       <div className="flex h-full min-w-0 flex-1 flex-col">
         <header
           data-tauri-drag-region="deep"
           className="flex h-(--titlebar-h) shrink-0 items-center gap-1 px-2"
-          style={{ paddingLeft: sidebarOpen || prefs.explorerOpen ? 8 : TITLEBAR_INSET }}
+          style={{ paddingLeft: sidebarOpen ? 8 : TITLEBAR_INSET }}
         >
-          {!sidebarOpen && !prefs.explorerOpen && (
+          {!sidebarOpen && (
             <WithTooltip label="Show sidebar" keys={keycaps("mod+b")}>
               <Button variant="ghost" size="icon-sm" aria-label="Show sidebar" onClick={onToggleSidebar}>
                 <PanelLeft />
@@ -128,7 +122,7 @@ export function SessionView({
             </WithTooltip>
           )}
           <div className="flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm">
-            <span className="shrink-0 text-muted-foreground">{project?.name ?? "project"}</span>
+            <span className="max-w-[30%] truncate text-muted-foreground" title={project?.name}>{project?.name ?? "project"}</span>
             <span className="text-faint">/</span>
             <span className="truncate text-foreground" title={session.title}>
               {session.title}
@@ -158,8 +152,8 @@ export function SessionView({
               </WithTooltip>
             )}
             {workspaceLabel && (
-              <span className="ml-1 flex shrink-0 items-center gap-1 rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground" title={workspaceTitle}>
-                <GitBranch className="size-3" />
+              <span className="ml-1 flex min-w-0 max-w-[35%] items-center gap-1 overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground" title={workspaceTitle}>
+                <GitBranch className="size-3 shrink-0" />
                 {session.worktreeName && !session.worktreeRemoved ? (
                   <WorkspaceNameEditor
                     value={session.worktreeName}
@@ -171,7 +165,7 @@ export function SessionView({
                     className="max-w-52 text-muted-foreground hover:text-foreground"
                   />
                 ) : (
-                  workspaceLabel
+                  <span className="truncate">{workspaceLabel}</span>
                 )}
                 {session.worktreeRemoved && <span className="text-faint">· workspace removed</span>}
               </span>
@@ -183,8 +177,8 @@ export function SessionView({
             )}
           </div>
 
-          <div className="ml-auto flex min-w-0 max-w-[70%] items-center gap-0.5">
-            <TabStrip session={session} selected={selected} />
+          <div className="ml-auto flex max-w-[70%] shrink-0 items-center gap-0.5">
+            <TabActions session={session} selected={selected} />
             {activeTab && (
               <WithTooltip label={activeInTerminal ? "Back to chat" : "Show terminal view"} keys={keycaps("mod+shift+t")}>
                 <Button
@@ -200,16 +194,6 @@ export function SessionView({
                 </Button>
               </WithTooltip>
             )}
-            <WithTooltip label={prefs.explorerOpen ? "Hide explorer" : "Show explorer"} keys={keycaps("mod+shift+e")}>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                aria-label="Toggle explorer"
-                onClick={() => setPrefs({ explorerOpen: !prefs.explorerOpen })}
-              >
-                <FolderTree />
-              </Button>
-            </WithTooltip>
             <WithTooltip label="Terminal" keys={keycaps("mod+j")}>
               <Button
                 variant="ghost"
@@ -234,7 +218,7 @@ export function SessionView({
         </header>
 
         <section className="flex min-h-0 flex-1 flex-col">
-          <div className="flex min-h-0 flex-1">
+          <div className="@container/editor-host relative flex min-h-0 flex-1">
             <div
               className="relative flex h-full min-w-0 flex-1 flex-col"
               onPointerDownCapture={() => setLastFocused("chat")}
