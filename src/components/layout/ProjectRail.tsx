@@ -1,10 +1,11 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Archive, BarChart3, CalendarClock, ChevronDown, CircleDot, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
+import { Archive, BarChart3, CalendarClock, ChevronDown, CircleDot, Ellipsis, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
+import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { cn } from "@/lib/cn";
 import { keycaps } from "@/lib/hotkeys";
@@ -344,7 +345,8 @@ function ProjectRow({
         <div
           data-tree-row
           className={cn(
-            "group relative flex h-8 cursor-default items-center gap-1 rounded-md px-1 outline-none",
+            actionRow,
+            "relative flex h-8 cursor-default items-center gap-1 rounded-md px-1 outline-none",
             selected ? "bg-selected" : active ? "bg-selected/50" : "hover:bg-selected/50",
           )}
           title={project.path}
@@ -368,33 +370,24 @@ function ProjectRow({
             {project.pinned && <Pin className="size-3 shrink-0 text-faint" />}
             {project.archived && <Archive className="size-3 shrink-0 text-faint" aria-label="Archived project" />}
             {main && (main.additions > 0 || main.deletions > 0) && (
-              <span className="shrink-0 text-[11px] tabular-nums group-hover:hidden group-focus-within:hidden group-has-[[data-state=open]]:hidden">
+              <span className={cn("shrink-0 text-[11px] tabular-nums", yieldsToRowActions)}>
                 {main.additions > 0 && <span className="text-add">+{main.additions}</span>}
                 {main.deletions > 0 && <span className="ml-1 text-destructive">−{main.deletions}</span>}
               </span>
             )}
           </button>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              aria-label={`Project menu for ${project.name}`}
-              className="absolute right-1 top-1/2 hidden -translate-y-1/2 group-hover:inline-flex group-focus-within:inline-flex data-[state=open]:inline-flex"
-            >
-              <span className="text-[13px] leading-none">…</span>
-            </Button>
-          </DropdownMenuTrigger>
-          <WithTooltip label={`New session in ${project.name}`}>
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              aria-label={`New session in ${project.name}`}
-              onClick={() => startSessionIn(project.path, null)}
-              className="absolute right-7 top-1/2 hidden -translate-y-1/2 group-hover:inline-flex group-focus-within:inline-flex"
-            >
-              <FolderPlus />
-            </Button>
-          </WithTooltip>
+          <RowActions>
+            <WithTooltip label={`New session in ${project.name}`}>
+              <Button variant="ghost" size="icon-xs" aria-label={`New session in ${project.name}`} onClick={() => startSessionIn(project.path, null)}>
+                <FolderPlus />
+              </Button>
+            </WithTooltip>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon-xs" aria-label={`Project menu for ${project.name}`}>
+                <Ellipsis />
+              </Button>
+            </DropdownMenuTrigger>
+          </RowActions>
         </div>
         {children}
       </div>
