@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowUp, AtSign, ChevronDown, FileText, Paperclip, SlashSquare, Square, X } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -33,6 +33,8 @@ export interface Attachment {
 }
 
 const commandCache = new Map<string, SlashCommand[]>();
+// Matches the textarea's max-h-60: about ten lines before it scrolls.
+const MAX_HEIGHT = 240;
 
 /**
  * The composer inside a session. Enter sends, Shift+Enter breaks a line.
@@ -92,13 +94,31 @@ export function Composer({
   const latest = useRef({ draft, onDraftChange });
   latest.current = { draft, onDraftChange };
 
-  // Grow with content, up to ~10 lines.
-  useEffect(() => {
+  // Grow with content, up to ~10 lines. Tabs that are not selected stay
+  // mounted under display: none, where scrollHeight reads 0; a measurement
+  // taken there must not stick, or the box collapses to its padding once the
+  // tab is shown. Keep the intrinsic one-row height instead and measure again
+  // when the textarea is actually laid out.
+  const fit = useCallback(() => {
     const el = ref.current;
     if (!el) return;
+    const previous = el.style.height;
     el.style.height = "0px";
-    el.style.height = Math.min(el.scrollHeight, 240) + "px";
-  }, [draft]);
+    const content = el.scrollHeight;
+    el.style.height = content > 0 ? Math.min(content, MAX_HEIGHT) + "px" : previous;
+  }, []);
+
+  useLayoutEffect(fit, [fit, draft]);
+
+  // A hidden textarea is laid out at 0×0. The observer fires when it gains a
+  // box (the tab was selected) and when its width changes (lines re-wrap).
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const observer = new ResizeObserver(fit);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [fit]);
 
   useEffect(() => {
     if (autoFocus) ref.current?.focus();

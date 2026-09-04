@@ -58,6 +58,73 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("composer height", () => {
+  // jsdom performs no layout, so scrollHeight is what the test says it is —
+  // 0 stands in for a textarea inside a display: none tab panel.
+  let scrollHeight = 0;
+  const observers: ResizeObserverCallback[] = [];
+  class CapturingResizeObserver {
+    constructor(callback: ResizeObserverCallback) {
+      observers.push(callback);
+    }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+  const layOut = () => observers.forEach((notify) => notify([], {} as ResizeObserver));
+
+  beforeEach(() => {
+    scrollHeight = 0;
+    observers.length = 0;
+    vi.stubGlobal("ResizeObserver", CapturingResizeObserver);
+    vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(() => scrollHeight);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("keeps the intrinsic height when measured while hidden", () => {
+    const { container } = render(<TestComposer onSend={vi.fn()} />);
+    const textarea = container.querySelector("textarea")!;
+
+    expect(textarea.style.height).toBe("");
+    expect(textarea.rows).toBe(1);
+  });
+
+  it("fits the content once the textarea is laid out", () => {
+    const { container } = render(<TestComposer onSend={vi.fn()} />);
+    const textarea = container.querySelector("textarea")!;
+
+    scrollHeight = 52;
+    layOut();
+
+    expect(textarea.style.height).toBe("52px");
+  });
+
+  it("does not shrink a fitted textarea back to nothing when hidden again", () => {
+    const { container } = render(<TestComposer onSend={vi.fn()} />);
+    const textarea = container.querySelector("textarea")!;
+    scrollHeight = 52;
+    layOut();
+
+    scrollHeight = 0;
+    fireEvent.change(textarea, { target: { value: "still hidden" } });
+
+    expect(textarea.style.height).toBe("52px");
+  });
+
+  it("caps the height at ten lines", () => {
+    const { container } = render(<TestComposer onSend={vi.fn()} />);
+    const textarea = container.querySelector("textarea")!;
+
+    scrollHeight = 900;
+    fireEvent.change(textarea, { target: { value: "a".repeat(2_000) } });
+
+    expect(textarea.style.height).toBe("240px");
+  });
+});
+
 describe("composer attachments", () => {
   it("selects files from the attach icon", async () => {
     openDialog.mockResolvedValue(["/tmp/proof.png"]);
