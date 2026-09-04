@@ -203,11 +203,12 @@ function parseTransport(args) {
 
 async function rpc(socket, session, method, params) {
   const id = randomUUID();
-  const responseFrame = nextText(socket);
   sendEncrypted(socket, session, { id, deviceToken: offer.deviceToken, method, ...(params === undefined ? {} : { params }) });
-  const response = receiveEncrypted(await responseFrame, session);
-  if (response.id !== id) throw new Error("Desktop returned an RPC response for another request");
-  return response;
+  while (true) {
+    const response = receiveEncrypted(await nextText(socket), session);
+    if (response.id === id) return response;
+    if (typeof response.method !== "string") throw new Error("Desktop returned an RPC response for another request");
+  }
 }
 
 function sendEncrypted(socket, session, value) {
