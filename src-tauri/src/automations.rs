@@ -146,6 +146,7 @@ pub struct Automation {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    #[serde(default = "default_mode")]
     pub mode: String,
     pub prompt: String,
     pub workspace: AutomationWorkspace,
@@ -212,8 +213,12 @@ fn yes() -> bool {
     true
 }
 
+/// The permission mode an automation gets when its input carries none.
+/// Automations run unattended, so this is the same "never stop to ask" mode
+/// new interactive tabs start in; a run that paused for approval would sit
+/// until someone noticed. An explicit mode in the input always wins.
 fn default_mode() -> String {
-    "auto".into()
+    index::DEFAULT_PERMISSION_MODE.into()
 }
 
 fn default_grace() -> u32 {
@@ -726,6 +731,19 @@ pub fn issue_prompt(template: &str, issue: &crate::issues::Issue) -> String {
         .replace("{{url}}", &issue.url)
 }
 
+/// The first tab of a run's session. Every trigger (scheduled, manual "Run
+/// now", and GitHub issue) goes through here, so a run always starts in the
+/// automation's own saved permission mode rather than the session store's
+/// default or whatever an interactive session last used.
+fn run_tab(automation: &Automation) -> crate::commands::NewTab {
+    crate::commands::NewTab {
+        harness: automation.harness.clone(),
+        model: automation.model.clone(),
+        effort: automation.effort.clone(),
+        permission_mode: Some(automation.mode.clone()),
+    }
+}
+
 fn start_run(
     app: &AppHandle,
     automation: &Automation,
@@ -778,12 +796,7 @@ fn start_run(
                     run_number: run.run_number,
                 }),
                 cwd,
-                tab: Some(crate::commands::NewTab {
-                    harness: automation.harness.clone(),
-                    model: automation.model.clone(),
-                    effort: automation.effort.clone(),
-                    permission_mode: Some(automation.mode.clone()),
-                }),
+                tab: Some(run_tab(automation)),
             },
         )
         .map_err(anyhow::Error::msg)?;
@@ -1747,5 +1760,129 @@ mod tests {
         assert!(prompt.contains("> The session expires while a command is running."));
         assert!(prompt.contains("Labels: raccoon"));
         assert!(prompt.contains(&issue.url));
+    }
+
+    fn input_json(mode: Option<&str>, issue_trigger: bool) -> AutomationInput {
+        let mut value = serde_json::json!({
+            "name": "Nightly audit",
+            "projectPath": "/project",
+            "harness": "claude",
+            "model": "sonnet",
+            "prompt": "Audit the repository.",
+            "workspace": "newWorktree",
+            "schedule": {
+                "kind": "preset",
+                "preset": "daily",
+                "hour": 9,
+                "minute": 0,
+                "weekdays": [],
+                "timezone": "UTC",
+                "dtstart": "2026-09-01T09:00:00Z"
+            }
+        });
+        if let Some(mode) = mode {
+            value["mode"] = serde_json::Value::String(mode.into());
+        }
+        if issue_trigger {
+            value["issueTrigger"] = serde_json::json!({
+                "provider": "github",
+                "repo": "acme/widgets",
+                "query": "label:raccoon state:open",
+                "pollIntervalMinutes": 5,
+                "maxRunsPerTick": 3,
+                "runOnExisting": false,
+                "report": {}
+            });
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn an_input_without_a_mode_defaults_to_bypass_for_both_triggers() {
+        let now = at("2026-09-05T12:00:00Z");
+        for issue_trigger in [false, true] {
+            let saved = definition_from_input(input_json(None, issue_trigger), None, now).unwrap();
+            assert_eq!(saved.mode, index::DEFAULT_PERMISSION_MODE);
+            assert_eq!(saved.mode, "bypassPermissions");
+        }
+    }
+
+    #[test]
+    fn an_explicit_mode_survives_create_edit_disable_and_re_enable() {
+        let now = at("2026-09-05T12:00:00Z");
+        for mode in ["manual", "auto", "acceptEdits", "plan"] {
+            let created = definition_from_input(input_json(Some(mode), false), None, now).unwrap();
+            assert_eq!(created.mode, mode);
+
+            // Editing keeps the saved mode; switching the trigger type does too.
+            let mut edited = input_json(Some(&created.mode), true);
+            edited.enabled = false;
+            let disabled =
+                definition_from_input(edited, Some(&created), now + chrono::TimeDelta::minutes(1))
+                    .unwrap();
+            assert_eq!(disabled.id, created.id);
+            assert!(!disabled.enabled);
+            assert_eq!(disabled.mode, mode);
+
+            let mut re_enabled = input_json(Some(&disabled.mode), true);
+            re_enabled.enabled = true;
+            let enabled = definition_from_input(
+                re_enabled,
+                Some(&disabled),
+                now + chrono::TimeDelta::minutes(2),
+            )
+            .unwrap();
+            assert!(enabled.enabled);
+            assert_eq!(
+                enabled.mode, mode,
+                "re-enabling must not touch the saved mode"
+            );
+        }
+    }
+
+    #[test]
+    fn a_saved_automation_without_a_mode_still_loads_in_bypass() {
+        // A definition written before the mode field existed, or with the
+        // field stripped, must not come back in a mode that stops to ask.
+        let mut value = serde_json::to_value(automation()).unwrap();
+        value.as_object_mut().unwrap().remove("mode");
+        let loaded: Automation = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.mode, index::DEFAULT_PERMISSION_MODE);
+
+        let mut explicit = serde_json::to_value(automation()).unwrap();
+        explicit["mode"] = serde_json::Value::String("manual".into());
+        let loaded: Automation = serde_json::from_value(explicit).unwrap();
+        assert_eq!(
+            loaded.mode, "manual",
+            "an explicit saved mode is never rewritten"
+        );
+    }
+
+    #[test]
+    fn every_run_starts_its_tab_in_the_automation_saved_mode() {
+        // `run_tab` is the one place a run's first tab is shaped, and every
+        // trigger (scheduled, manual "Run now", GitHub issue) reaches it.
+        let mut scheduled = automation();
+        scheduled.mode = "manual".into();
+        assert_eq!(
+            run_tab(&scheduled).permission_mode.as_deref(),
+            Some("manual")
+        );
+
+        let mut issue = automation();
+        issue.mode = "acceptEdits".into();
+        issue.issue_trigger = Some(issue_trigger(false, 3));
+        assert_eq!(
+            run_tab(&issue).permission_mode.as_deref(),
+            Some("acceptEdits")
+        );
+
+        let mut bypass = automation();
+        bypass.mode = index::DEFAULT_PERMISSION_MODE.into();
+        let tab = run_tab(&bypass);
+        assert_eq!(tab.permission_mode.as_deref(), Some("bypassPermissions"));
+        assert_eq!(tab.harness, bypass.harness);
+        assert_eq!(tab.model, bypass.model);
+        assert_eq!(tab.effort, bypass.effort);
     }
 }
