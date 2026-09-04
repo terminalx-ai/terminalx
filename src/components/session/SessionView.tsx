@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CalendarClock, CircleDot, GitBranch, MessageSquare, PanelLeft, PanelRight, Terminal, TerminalSquare } from "lucide-react";
+import { CalendarClock, CircleDot, GitBranch, MessageSquare, PanelLeft, PanelRight, Terminal } from "lucide-react";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
@@ -194,16 +194,6 @@ export function SessionView({
                 </Button>
               </WithTooltip>
             )}
-            <WithTooltip label="Terminal" keys={keycaps("mod+j")}>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                aria-label="Terminal"
-                onClick={() => void activateLatestTerminal(session.id, session.cwd)}
-              >
-                <TerminalSquare />
-              </Button>
-            </WithTooltip>
             <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} keys={keycaps("mod+e")}>
               <Button
                 variant="ghost"
