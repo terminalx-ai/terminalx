@@ -1,5 +1,5 @@
 import "@testing-library/dom";
-import type { ReactNode } from "react";
+import { StrictMode, type ReactNode } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "@/lib/prefs";
@@ -56,6 +56,7 @@ vi.mock("@/lib/sessions", () => ({
 }));
 
 const { NewSessionView } = await import("@/components/session/NewSessionView");
+const { clearNewSessionPreset } = await import("@/lib/sessions");
 const { IssuesView } = await import("./IssuesView");
 
 const issues = [
@@ -144,6 +145,13 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("issue session targets", () => {
+  it("does not clear the workspace destination during Strict Mode effect replay", async () => {
+    vi.mocked(clearNewSessionPreset).mockClear();
+    render(<StrictMode><NewSessionView /></StrictMode>);
+    await screen.findByRole("button", { name: /Workspace quiet-amber-fox/ });
+    expect(clearNewSessionPreset).not.toHaveBeenCalled();
+  });
+
   it("previews and customises the workspace name for a new session", async () => {
     render(<NewSessionView />);
 

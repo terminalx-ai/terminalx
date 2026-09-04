@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Archive, BarChart3, CalendarClock, CircleDot, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Archive, BarChart3, CalendarClock, ChevronDown, CircleDot, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -15,7 +15,9 @@ import {
   refreshWorkspaces,
   removeProject,
   selectProjectInSidebar,
+  setShowArchived as setSessionsArchived,
   setProjectLogo,
+  startSessionIn,
   updateProject,
   useSessionStore,
 } from "@/lib/sessions";
@@ -25,11 +27,12 @@ import { MASCOTS, PROJECT_COLORS, PixelMascot, colorCss } from "./PixelMascot";
 import { TITLEBAR_INSET } from "./AppShell";
 import { useAutomationStore } from "@/lib/automations";
 import { AccountSidebarEntry } from "@/components/account/AccountSidebarEntry";
+import { ProjectNavigation } from "./SidebarTree";
+import { navigateTree } from "./treeKeyboard";
 
 /**
- * The left rail: one row per attached project, pinned ones first, each with
- * its mascot or logo and how much of its main checkout is uncommitted. The
- * menu on a row is where a project is renamed, dressed and refreshed.
+ * The unified sidebar: global destinations followed by an expandable project
+ * tree. The project menu remains the home for naming, appearance and refresh.
  */
 export function ProjectRail({
   onOpenSettings,
@@ -55,9 +58,10 @@ export function ProjectRail({
   const [error, setError] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
   const [spinning, setSpinning] = useState(false);
+  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
 
   const projects = [...store.projects]
-    .filter((p) => !!p.archived === showArchived)
+    .filter((p) => !!p.archived === showArchived || store.sessions.some((s) => s.id === store.selectedSessionId && s.projectPath === p.path))
     .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || a.name.localeCompare(b.name));
   const archivedCount = store.projects.filter((p) => p.archived).length;
   // The two counts beside the dashboard entry, over every project at once.
@@ -66,6 +70,23 @@ export function ProjectRail({
   const unread = liveSessions.filter(isUnread).length;
   const automationRunning = automationStore.automations.some((automation) => automation.lastOutcome === "pending" || automation.lastOutcome === "running");
   const automationFailures = automationStore.automations.filter((automation) => automation.lastOutcome === "failed").length;
+  const selectedSession = store.sessions.find((session) => session.id === store.selectedSessionId) ?? null;
+  const focus = store.selectedProject ?? selectedSession?.projectPath ?? store.lastProject ?? store.projects[0]?.path ?? null;
+
+  useEffect(() => {
+    if (!store.selectedProject && focus) selectProjectInSidebar(focus);
+  }, [focus, store.selectedProject]);
+
+  useEffect(() => {
+    const path = focus;
+    if (!path) return;
+    setExpandedProjects((current) => {
+      if (current.has(path)) return current;
+      const next = new Set(current);
+      next.add(path);
+      return next;
+    });
+  }, [focus, store.navigationVersion]);
 
   const pickProject = async () => {
     try {
@@ -90,7 +111,7 @@ export function ProjectRail({
   };
 
   return (
-    <div className="flex h-full w-(--rail-w) shrink-0 flex-col border-r border-hairline">
+    <div className="flex h-full w-full shrink-0 flex-col border-r border-hairline">
       <div data-tauri-drag-region="deep" className="h-(--titlebar-h) shrink-0" style={{ paddingLeft: TITLEBAR_INSET }} />
       <div className="flex flex-col gap-0.5 px-2">
         <Button variant="ghost" className="justify-start gap-2 px-2" onClick={onSearch}>
@@ -167,6 +188,18 @@ export function ProjectRail({
           {showArchived ? "Archived" : "Projects"}
         </button>
         <div className="flex items-center">
+          <WithTooltip label={store.showArchived ? "Show active sessions" : "Show archived sessions"}>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label={store.showArchived ? "Show active sessions" : "Show archived sessions"}
+              aria-pressed={store.showArchived}
+              className={store.showArchived ? "bg-veil-strong text-foreground" : undefined}
+              onClick={() => setSessionsArchived(!store.showArchived)}
+            >
+              <Archive />
+            </Button>
+          </WithTooltip>
           <WithTooltip label="Refresh every project">
             <Button variant="ghost" size="icon-xs" aria-label="Refresh all" onClick={() => void refreshAll()}>
               <RefreshCw className={cn(spinning && "animate-spin")} />
@@ -181,15 +214,34 @@ export function ProjectRail({
       </div>
       {error && <div className="mx-2 mt-1 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
 
-      <div className="mt-1 flex-1 overflow-y-auto scrollbar-thin px-2">
+      <div className="mt-1 min-h-0 flex-1 overflow-y-auto scrollbar-thin px-2" role="tree" aria-label="Projects, workspaces, sessions, and tabs" onKeyDown={navigateTree}>
         {projects.length === 0 && (
           <div className="px-2 py-6 text-center text-xs text-muted-foreground">
             {showArchived ? "Nothing archived." : "Add a project to start."}
           </div>
         )}
-        {projects.map((p) => (
-          <ProjectRow key={p.path} project={p} selected={store.selectedProject === p.path} />
-        ))}
+        {projects.map((project) => {
+          const expanded = expandedProjects.has(project.path);
+          return (
+            <ProjectRow
+              key={project.path}
+              project={project}
+              selected={store.selectedProject === project.path}
+              active={selectedSession?.projectPath === project.path}
+              expanded={expanded}
+              onToggle={() =>
+                setExpandedProjects((current) => {
+                  const next = new Set(current);
+                  if (next.has(project.path)) next.delete(project.path);
+                  else next.add(project.path);
+                  return next;
+                })
+              }
+            >
+              <ProjectNavigation project={project} expanded={expanded} />
+            </ProjectRow>
+          );
+        })}
       </div>
 
       <div className="border-t border-hairline p-2">
@@ -249,7 +301,21 @@ export function ProjectGlyph({ project, size = 16 }: { project: Project; size?: 
   return <FolderOpen className="shrink-0" style={{ width: size, height: size, color: colorCss(project.color) }} />;
 }
 
-function ProjectRow({ project, selected }: { project: Project; selected: boolean }) {
+function ProjectRow({
+  project,
+  selected,
+  active,
+  expanded,
+  onToggle,
+  children,
+}: {
+  project: Project;
+  selected: boolean;
+  active: boolean;
+  expanded: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
   const store = useSessionStore();
   const main = store.workspaces[project.path]?.find((w) => w.isMain);
   const [name, setName] = useState(project.name);
@@ -274,37 +340,63 @@ function ProjectRow({ project, selected }: { project: Project; selected: boolean
 
   return (
     <DropdownMenu onOpenChange={(o) => o && setName(project.name)}>
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={() => selectProjectInSidebar(project.path)}
-        onKeyDown={(e) => e.key === "Enter" && selectProjectInSidebar(project.path)}
-        className={cn(
-          "group relative flex h-8 cursor-default items-center gap-2 rounded-md px-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-          selected ? "bg-selected" : "hover:bg-selected/50",
-        )}
-        title={project.path}
-      >
-        <ProjectGlyph project={project} />
-        <span className="min-w-0 flex-1 truncate text-[13px]">{project.name}</span>
-        {project.pinned && <Pin className="size-3 shrink-0 text-faint" />}
-        {main && (main.additions > 0 || main.deletions > 0) && (
-          <span className="shrink-0 text-[11px] tabular-nums group-hover:hidden group-has-[[data-state=open]]:hidden">
-            {main.additions > 0 && <span className="text-add">+{main.additions}</span>}
-            {main.deletions > 0 && <span className="ml-1 text-destructive">−{main.deletions}</span>}
-          </span>
-        )}
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            aria-label="Project menu"
-            className="absolute right-1 top-1/2 hidden -translate-y-1/2 group-hover:inline-flex data-[state=open]:inline-flex"
-            onClick={(e) => e.stopPropagation()}
+      <div role="treeitem" aria-label={project.name} aria-expanded={expanded} className="min-w-0">
+        <div
+          data-tree-row
+          className={cn(
+            "group relative flex h-8 cursor-default items-center gap-1 rounded-md px-1 outline-none",
+            selected ? "bg-selected" : active ? "bg-selected/50" : "hover:bg-selected/50",
+          )}
+          title={project.path}
+        >
+          <button
+            type="button"
+            data-tree-toggle
+            aria-label={`${expanded ? "Collapse" : "Expand"} ${project.name}`}
+            onClick={onToggle}
+            className="shrink-0 rounded-sm p-0.5 outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
-            <span className="text-[13px] leading-none">…</span>
-          </Button>
-        </DropdownMenuTrigger>
+            <ChevronDown className={cn("size-3 text-faint transition-transform", !expanded && "-rotate-90")} />
+          </button>
+          <button
+            type="button"
+            onClick={() => selectProjectInSidebar(project.path)}
+            className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          >
+            <ProjectGlyph project={project} />
+            <span className="min-w-0 flex-1 truncate text-[13px]">{project.name}</span>
+            {project.pinned && <Pin className="size-3 shrink-0 text-faint" />}
+            {project.archived && <Archive className="size-3 shrink-0 text-faint" aria-label="Archived project" />}
+            {main && (main.additions > 0 || main.deletions > 0) && (
+              <span className="shrink-0 text-[11px] tabular-nums group-hover:hidden group-focus-within:hidden group-has-[[data-state=open]]:hidden">
+                {main.additions > 0 && <span className="text-add">+{main.additions}</span>}
+                {main.deletions > 0 && <span className="ml-1 text-destructive">−{main.deletions}</span>}
+              </span>
+            )}
+          </button>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label={`Project menu for ${project.name}`}
+              className="absolute right-1 top-1/2 hidden -translate-y-1/2 group-hover:inline-flex group-focus-within:inline-flex data-[state=open]:inline-flex"
+            >
+              <span className="text-[13px] leading-none">…</span>
+            </Button>
+          </DropdownMenuTrigger>
+          <WithTooltip label={`New session in ${project.name}`}>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label={`New session in ${project.name}`}
+              onClick={() => startSessionIn(project.path, null)}
+              className="absolute right-7 top-1/2 hidden -translate-y-1/2 group-hover:inline-flex group-focus-within:inline-flex"
+            >
+              <FolderPlus />
+            </Button>
+          </WithTooltip>
+        </div>
+        {children}
       </div>
       <DropdownMenuContent align="start" className="w-[19rem] p-2">
         <input

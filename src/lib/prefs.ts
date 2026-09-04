@@ -10,8 +10,6 @@ export interface Prefs {
   sidebarWidth: number;
   panelOpen: boolean;
   panelWidth: number;
-  explorerOpen: boolean;
-  explorerWidth: number;
   editorPaneWidth: number;
   terminalHeight: number;
   updateChannel: "stable" | "beta";
@@ -36,8 +34,6 @@ const DEFAULTS: Prefs = {
   sidebarWidth: 268,
   panelOpen: false,
   panelWidth: 400,
-  explorerOpen: false,
-  explorerWidth: 240,
   editorPaneWidth: 520,
   terminalHeight: 260,
   updateChannel: "stable",

@@ -19,6 +19,8 @@ interface State {
   sessions: SessionEntry[];
   harnesses: HarnessInfo[];
   selectedSessionId: string | null;
+  /** Explicit navigation also reveals a destination that was collapsed. */
+  navigationVersion: number;
   /** What the workspace shows when no session is selected. */
   view: "new" | "issues" | "agents" | "automations" | "skills" | "stats";
   /** A tab menu can open Skills already narrowed to that tab's reach. */
@@ -42,6 +44,7 @@ let state: State = {
   sessions: [],
   harnesses: [],
   selectedSessionId: null,
+  navigationVersion: 0,
   view: "new",
   skillsFilter: null,
   showArchived: false,
@@ -55,6 +58,9 @@ let state: State = {
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
   const next = { ...state, ...patch };
+  // Clear the draft destination when navigating away, not in React cleanup
+  // (Strict Mode also runs cleanup when a workspace first mounts).
+  if ((patch.view && patch.view !== "new") || patch.selectedSessionId) next.newSessionPreset = null;
   if (
     next.projects !== state.projects ||
     next.sessions !== state.sessions ||
@@ -135,7 +141,7 @@ function focusProject(path: string | null, patch: Partial<State> = {}) {
 
 export function selectSession(id: string | null) {
   const selected = id ? state.sessions.find((session) => session.id === id) : null;
-  const patch: Partial<State> = { selectedSessionId: id, view: "new" };
+  const patch: Partial<State> = { selectedSessionId: id, view: "new", newSessionPreset: null, navigationVersion: state.navigationVersion + 1 };
   if (selected) focusProject(selected.projectPath, patch);
   else set(patch);
 }
@@ -166,12 +172,12 @@ export function openSkills(filter: State["skillsFilter"] = null) {
 }
 
 export function selectProjectInSidebar(path: string | null) {
-  focusProject(path);
+  focusProject(path, { navigationVersion: state.navigationVersion + 1, ...(!state.selectedSessionId && state.view === "new" ? { newSessionPreset: null } : {}) });
 }
 
 /** Open the new-session form for a project, optionally inside one of its workspaces. */
 export function startSessionIn(projectPath: string, cwd: string | null) {
-  set({ selectedSessionId: null, view: "new", newSessionPreset: { projectPath, cwd }, lastProject: projectPath });
+  focusProject(projectPath, { selectedSessionId: null, view: "new", newSessionPreset: { projectPath, cwd }, lastProject: projectPath, navigationVersion: state.navigationVersion + 1 });
 }
 
 const openingWorkspaces = new Map<string, Promise<SessionEntry>>();
@@ -225,6 +231,9 @@ export async function refreshWorkspaces(projectPath: string) {
 
 export async function renameWorkspace(projectPath: string, path: string, name: string) {
   const renamed = await api.renameWorkspace(projectPath, path, name);
+  if (state.newSessionPreset?.projectPath === projectPath && state.newSessionPreset.cwd === path) {
+    set({ newSessionPreset: { projectPath, cwd: renamed.path } });
+  }
   for (const session of renamed.sessions) upsertSession(session);
   await refreshWorkspaces(projectPath);
   return renamed;
@@ -251,6 +260,9 @@ export async function setProjectLogo(path: string, source: string | null) {
 
 export async function deleteWorkspace(projectPath: string, path: string, deleteBranch: boolean) {
   const moved = await api.deleteWorkspace(projectPath, path, deleteBranch);
+  if (state.newSessionPreset?.projectPath === projectPath && state.newSessionPreset.cwd === path) {
+    set({ newSessionPreset: { projectPath, cwd: projectPath } });
+  }
   for (const s of moved) upsertSession(s);
   await refreshWorkspaces(projectPath);
 }
@@ -352,6 +364,7 @@ export async function removeTab(sessionId: string, tabId: string) {
 
 export async function setActiveTab(sessionId: string, tabId: string) {
   patchSession(sessionId, { activeTab: tabId });
+  if (state.selectedSessionId === sessionId) set({ navigationVersion: state.navigationVersion + 1 });
   await api.setActiveTab(sessionId, tabId);
 }
 
