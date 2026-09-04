@@ -55,7 +55,7 @@ export function TabActions({ session, selected }: { session: SessionEntry; selec
       <DropdownMenuContent align="end">
         <DropdownMenuLabel>New agent tab with</DropdownMenuLabel>
         {store.harnesses.map((harness) => <DropdownMenuItem key={harness.id} disabled={!harness.available} onSelect={() => void add(harness.id)}>
-          <AgentMark id={harness.id} /><span>{harness.name}</span>
+          <AgentMark id={harness.id} decorative /><span>{harness.name}</span>
           {!harness.available ? <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span> : null}
         </DropdownMenuItem>)}
       </DropdownMenuContent>

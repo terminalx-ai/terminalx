@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { AgentMark } from "@/components/AgentMark";
+import { AgentMark, agentName } from "@/components/AgentMark";
 import { WorkspaceNameEditor } from "@/components/session/WorkspaceNameEditor";
 import { Button } from "@/components/ui/button";
 import {
@@ -435,6 +435,7 @@ function TabNode({
           id={tabNodeId({ kind: "agent", id: tab.id })}
           aria-controls={tabPanelId({ kind: "agent", id: tab.id })}
           aria-label={label}
+          aria-description={agentName(tab.harness)}
           aria-selected={active}
           tabIndex={0}
           onClick={open}
@@ -461,7 +462,7 @@ function TabNode({
               tab.status === "in_progress" && "bg-info animate-pulse-soft",
             )}
           />
-          <AgentMark id={tab.harness} className="size-3.5 shrink-0" />
+          <AgentMark id={tab.harness} className="size-3.5 shrink-0" decorative />
           <span className="min-w-0 flex-1 truncate text-[11px]">{label}</span>
           {mobileDriven ? <Lock className="size-3 shrink-0 text-warning" aria-label="Mobile is driving this terminal" /> : null}
           {terminal ? <Terminal className="size-3 shrink-0 text-faint" aria-label="In terminal view" /> : null}
@@ -524,7 +525,7 @@ function NewTabButton({ session }: { session: SessionEntry }) {
         <DropdownMenuItem onSelect={() => { selectSession(session.id); void openTerminal(session.id, session.cwd); }}><Terminal /> Shell terminal</DropdownMenuItem>
         {store.harnesses.map((harness) => (
           <DropdownMenuItem key={harness.id} disabled={!harness.available} onSelect={() => void add(harness.id)}>
-            <AgentMark id={harness.id} />
+            <AgentMark id={harness.id} decorative />
             <span>{harness.name}</span>
             {!harness.available ? <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span> : null}
           </DropdownMenuItem>

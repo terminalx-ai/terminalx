@@ -345,7 +345,7 @@ function AgentsTab() {
       <ul className="flex flex-col divide-y divide-hairline rounded-lg bg-well">
         {store.harnesses.map((h) => (
           <li key={h.id} className="flex items-start gap-3 px-3 py-2.5">
-            <AgentMark id={h.id} className="mt-0.5 size-4" />
+            <AgentMark id={h.id} className="mt-0.5 size-4" decorative />
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 text-sm">
                 <span className="font-medium">{h.name}</span>

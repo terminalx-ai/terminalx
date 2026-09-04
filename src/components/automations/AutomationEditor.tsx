@@ -445,7 +445,7 @@ export function AutomationEditor({
 
           {input.harness && (
             <div className="mt-3 flex items-center gap-1.5 text-[11px] text-faint">
-              <AgentMark id={input.harness} className="size-3.5" /> Runs use a real {store.harnesses.find((harness) => harness.id === input.harness)?.name ?? "agent"} session.
+              <AgentMark id={input.harness} className="size-3.5" decorative /> Runs use a real {store.harnesses.find((harness) => harness.id === input.harness)?.name ?? "agent"} session.
             </div>
           )}
           {error && <div className="mt-3 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
