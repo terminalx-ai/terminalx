@@ -4,25 +4,28 @@
  *
  * Apple's recogniser does not hand back one transcript that only grows. Inside
  * an utterance each partial result revises the last — a word corrected, a comma
- * added, more words on the end — but after a pause it starts a fresh segment
+ * added, more words on the end — but after a pause it starts a fresh utterance
  * whose text stands alone: the words from before the pause are simply not in it
  * any more. A draft rebuilt from the newest partial alone therefore loses
  * everything said before the pause, which is what "it replaces instead of
  * appending" looks like from the composer.
  *
  * So the stream is held as two parts. `committed` is what the recogniser has
- * moved on from; `live` is the segment it is still revising. Only `live` is
- * ever replaced. When a result turns out not to be a revision of `live`, the
- * old `live` is folded into `committed` first, so nothing is dropped.
+ * moved on from; `live` is the utterance it is still revising. Only `live` is
+ * ever replaced, and only by a result of the same utterance. When a result
+ * belongs to a new one, the old `live` is folded into `committed` first, so
+ * nothing is dropped. Whether two results are the same utterance is the
+ * recogniser's call where it says (see `DictationResult.segment`), and a
+ * guess from the words and the timing where it does not.
  *
  * Everything here is pure: the same results always make the same draft.
  */
 
 /** What has been heard so far, split into what has settled and what has not. */
 export interface DictationBuffer {
-  /** Segments the recogniser has moved on from, joined with single spaces. */
+  /** Utterances the recogniser has moved on from, joined with single spaces. */
   committed: string;
-  /** The segment still being revised; every partial replaces it wholesale. */
+  /** The utterance still being revised; every partial replaces it wholesale. */
   live: string;
   /** Recogniser-owned identity for `live`, when the engine can provide one. */
   segment?: number;
@@ -91,7 +94,11 @@ function survivingWordCount(prev: string[], next: string[]): number {
 
 /** What the recogniser knows about a result beyond its text. */
 export interface DictationResult {
-  /** Stable within one recogniser segment and different after a real boundary. */
+  /**
+   * Stable within one utterance and different for the next. Apple's is derived
+   * in Rust from its timestamps: a partial has placeholder ones, and an
+   * utterance ends when it comes back with real ones (see `dictation.rs`).
+   */
   segment?: number;
   /** Time since the preceding partial, for engines without segment metadata. */
   sincePreviousMs?: number;
@@ -105,7 +112,7 @@ const SEGMENT_PAUSE_MS = 1_500;
  * starting somewhere new. A revision extends or shortens an opening, keeps
  * most of the old head, or arrives quickly enough that a short guess or shared
  * first word is likelier to be a corrected tail. After 1.5 seconds the recent
- * result allowances stop applying, so a text-only engine can fold a new phrase.
+ * result allowances stop applying, so a new phrase after a pause is folded.
  */
 export function revises(prev: string, next: string, sincePreviousMs?: number): boolean {
   const a = words(prev);
@@ -125,20 +132,35 @@ export function revises(prev: string, next: string, sincePreviousMs?: number): b
   return survivingWordCount(a, b) * 2 >= a.length;
 }
 
+/**
+ * Whether `next` is `prev` said again — the same words, or nearly — rather
+ * than a phrase of its own. Stricter than `revises`: `next` carries every old
+ * word on word for word, or opens the same way with most of the old words
+ * surviving. A `next` that is only the start of `prev` is not a repeat: a new
+ * utterance's first guess is one word, and often the same one as last time.
+ */
+export function repeats(prev: string, next: string): boolean {
+  const a = words(prev);
+  const b = words(next);
+  if (a.length === 0) return true;
+  let shared = 0;
+  while (shared < a.length && shared < b.length && a[shared] === b[shared]) shared += 1;
+  if (shared === a.length) return true;
+  return a[0] === b[0] && survivingWordCount(a, b) * 4 >= a.length * 3;
+}
+
 function isRevision(buffer: DictationBuffer, next: string, result: DictationResult): boolean {
-  if (buffer.segment != null && result.segment != null) {
-    const repeatedOrRevised = revises(buffer.live, next);
-    if (buffer.segment !== result.segment) {
-      // Apple can repeat the last phrase once while advancing its timestamp
-      // range. Keep that correction live instead of committing it twice.
-      return repeatedOrRevised;
-    }
-    // A timestamp range can also survive across silence into the next spoken
-    // phrase. Only override its identity when the pause and unrelated text
-    // together make the boundary unambiguous.
-    const paused = result.sincePreviousMs != null && result.sincePreviousMs >= SEGMENT_PAUSE_MS;
-    return !paused || repeatedOrRevised;
+  if (buffer.segment != null && result.segment != null && buffer.segment !== result.segment) {
+    // The recogniser has moved on to a new utterance, whose text stands alone;
+    // what it said before is kept as well. Only the old utterance said again
+    // is taken as a revision — its settled form can come back under a fresh
+    // identity, and a hesitation short enough to be absorbed continues it.
+    return repeats(buffer.live, next);
   }
+  // The same utterance, or an engine that cannot tell. Apple can revise a
+  // whole short guess inside one utterance, so the words and the timing
+  // decide; but a phrase that shares nothing with the live one is a new
+  // utterance however soon it arrived, since results can land in a burst.
   return revises(buffer.live, next, result.sincePreviousMs);
 }
 
@@ -155,7 +177,7 @@ export function applyPartial(buffer: DictationBuffer, partial: string, result: D
 }
 
 /**
- * Take a final result: the segment is over either way. A final that is the
+ * Take a final result: the utterance is over either way. A final that is the
  * last partial said again (or tidied up) replaces it; one that stands on its
  * own is kept as well, so a phrase is never lost to a dedupe.
  */

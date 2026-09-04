@@ -161,17 +161,35 @@ mod mac {
     const SEGMENT_TIMESTAMP_TOLERANCE: f64 = 0.05;
 
     #[derive(Debug, Clone, Copy)]
-    struct LiveSegment {
+    struct SettledSegment {
         index: u64,
         end: f64,
     }
 
-    /// Turns Apple's shifting timestamp ranges into a stable identity that the
-    /// frontend can trust while the words inside the segment are revised.
+    /// Turns Apple's results into a stable utterance identity that the
+    /// frontend can trust while the words inside the utterance are revised.
+    ///
+    /// Observed on macOS 26.3.1 with the on-device recogniser: every partial
+    /// carries placeholder timestamps (`0.00+0.00` on every word), and about
+    /// two seconds after the speaker stops, the same utterance comes back once
+    /// more with real timestamps — its settled form, sometimes with a word
+    /// corrected. Anything spoken after that arrives as placeholder partials
+    /// again, and stands alone: the settled words are not in it. Hesitations
+    /// shorter than that settling window are absorbed into one cumulative
+    /// utterance instead.
+    ///
+    /// So an utterance is open from its first placeholder partial until it
+    /// settles, and a placeholder partial with no utterance open starts the
+    /// next one. Timestamps are only compared between settled results, where
+    /// they are real: a settled result that starts inside the previous settled
+    /// range is that utterance corrected again, not a new one.
     #[derive(Debug, Default)]
     struct AppleSegmentTracker {
         next: u64,
-        live: Option<LiveSegment>,
+        /// The utterance still being revised, known only by placeholder partials.
+        live: Option<u64>,
+        /// The last utterance that came back with real timestamps.
+        settled: Option<SettledSegment>,
     }
 
     impl AppleSegmentTracker {
@@ -182,23 +200,39 @@ mod mac {
                 }
                 return None;
             };
-            let current = match self.live {
-                Some(live) if start <= live.end + SEGMENT_TIMESTAMP_TOLERANCE => LiveSegment { index: live.index, end: live.end.max(end) },
-                _ => {
-                    let live = LiveSegment { index: self.next, end };
-                    self.next += 1;
-                    live
-                }
+            let placeholder = end <= 0.0;
+            let index = match (self.live, placeholder) {
+                (Some(live), _) => live,
+                (None, true) => self.fresh(),
+                (None, false) => match self.settled {
+                    Some(settled) if start + SEGMENT_TIMESTAMP_TOLERANCE < settled.end => settled.index,
+                    _ => self.fresh(),
+                },
             };
-            self.live = (!is_final).then_some(current);
-            Some(current.index)
+            if placeholder && !is_final {
+                self.live = Some(index);
+            } else {
+                self.live = None;
+            }
+            if !placeholder {
+                self.settled = Some(SettledSegment { index, end: self.settled.filter(|s| s.index == index).map_or(end, |s| s.end.max(end)) });
+            }
+            Some(index)
+        }
+
+        fn fresh(&mut self) -> u64 {
+            let index = self.next;
+            self.next += 1;
+            index
         }
 
         /// A fresh Apple request restarts its timestamps at zero. Close any
-        /// live range without resetting `next`, so its results cannot look like
-        /// revisions of the request that just ended.
+        /// open utterance and forget the settled range without resetting
+        /// `next`, so its results cannot look like revisions of the request
+        /// that just ended.
         fn restart_request(&mut self) {
             self.live = None;
+            self.settled = None;
         }
     }
 
@@ -1062,34 +1096,89 @@ mod mac {
             assert!(!is_silent(&vec![0.2; SECOND / 4]));
         }
 
+        /// What the on-device recogniser hands back: every partial has
+        /// placeholder timestamps; the settled form of an utterance follows
+        /// with real ones.
+        const PLACEHOLDER: Option<(f64, f64)> = Some((0.0, 0.0));
+
         #[test]
-        fn timestamp_revisions_keep_the_same_segment() {
+        fn placeholder_partials_share_one_utterance() {
             let mut segments = AppleSegmentTracker::default();
-            assert_eq!(segments.observe(Some((0.20, 0.75)), false), Some(0));
-            assert_eq!(segments.observe(Some((0.18, 1.40)), false), Some(0));
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
         }
 
         #[test]
-        fn a_timestamp_after_the_live_range_starts_a_new_segment() {
+        fn a_settled_result_closes_the_open_utterance_and_keeps_its_identity() {
+            let mut segments = AppleSegmentTracker::default();
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
+            assert_eq!(segments.observe(Some((0.0, 1.26)), false), Some(0));
+        }
+
+        #[test]
+        fn speech_after_a_settled_utterance_starts_a_new_one() {
+            // one.aiff: "Fix the build, please" [1.5 s] "Then run the test for it".
+            let mut segments = AppleSegmentTracker::default();
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
+            assert_eq!(segments.observe(Some((0.0, 1.26)), false), Some(0));
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(1));
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(1));
+            assert_eq!(segments.observe(Some((3.12, 4.23)), false), Some(1));
+        }
+
+        #[test]
+        fn a_burst_of_utterances_is_told_apart_without_timing() {
+            // two.aiff: three results in one tick after a cold start.
+            let mut segments = AppleSegmentTracker::default();
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
+            assert_eq!(segments.observe(Some((0.0, 6.72)), false), Some(0));
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(1));
+            assert_eq!(segments.observe(Some((7.14, 8.25)), false), Some(1));
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(2));
+        }
+
+        #[test]
+        fn a_settled_utterance_corrected_again_keeps_its_identity() {
+            let mut segments = AppleSegmentTracker::default();
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
+            assert_eq!(segments.observe(Some((0.20, 1.40)), false), Some(0));
+            assert_eq!(segments.observe(Some((0.18, 1.45)), false), Some(0));
+        }
+
+        #[test]
+        fn a_settled_result_after_the_previous_range_is_a_new_utterance() {
             let mut segments = AppleSegmentTracker::default();
             assert_eq!(segments.observe(Some((0.20, 1.40)), false), Some(0));
             assert_eq!(segments.observe(Some((2.95, 3.60)), false), Some(1));
         }
 
         #[test]
-        fn a_final_result_closes_its_segment() {
+        fn a_final_result_closes_its_utterance() {
             let mut segments = AppleSegmentTracker::default();
-            assert_eq!(segments.observe(Some((0.20, 1.40)), true), Some(0));
-            assert_eq!(segments.observe(Some((0.25, 0.90)), false), Some(1));
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
+            assert_eq!(segments.observe(PLACEHOLDER, true), Some(0));
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(1));
+        }
+
+        #[test]
+        fn an_empty_final_closes_the_open_utterance() {
+            let mut segments = AppleSegmentTracker::default();
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
+            assert_eq!(segments.observe(None, true), None);
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(1));
         }
 
         #[test]
         fn a_restarted_request_continues_segment_numbering() {
             let mut segments = AppleSegmentTracker::default();
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
             assert_eq!(segments.observe(Some((4.20, 5.10)), false), Some(0));
 
             segments.restart_request();
 
+            // Timestamps start over, so a range inside the old one is still new.
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(1));
             assert_eq!(segments.observe(Some((0.10, 0.80)), false), Some(1));
         }
 
