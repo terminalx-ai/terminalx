@@ -479,7 +479,7 @@ and window focus takes one memory snapshot. The App and host rows use native
 host queries so the total includes Raccoon's main and webview processes.
 
 A tab-bound agent pane is never killable here; closing its tab owns the ordered
-shutdown. Only a childless terminal-dock shell can be stopped immediately.
+shutdown. Only a childless standalone shell tab can be stopped immediately.
 An orphan or any shell whose idleness cannot be proved requires confirmation
 naming the process and the work that will be lost. The backend recomputes that
 rule at click time rather than trusting the rendered row.

@@ -358,7 +358,7 @@ export async function addTab(sessionId: string, harness: string, model: string, 
 
 export async function removeTab(sessionId: string, tabId: string) {
   const s = state.sessions.find((x) => x.id === sessionId);
-  if (!s || s.tabs.length <= 1) return;
+  if (!s) return;
   await api.removeTab(sessionId, tabId);
   const tabs = s.tabs.filter((t) => t.id !== tabId);
   const idx = s.tabs.findIndex((t) => t.id === tabId);
