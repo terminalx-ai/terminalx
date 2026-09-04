@@ -26,6 +26,7 @@ import {
   useSessionStore,
 } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
+import { workspaceName as sessionWorkspaceName } from "@/lib/dashboard";
 import { sessionStatus, type SessionEntry, type Workspace } from "@/types/session";
 
 /**
@@ -52,14 +53,21 @@ export function WorkspaceColumn({ projectPath, onNewSession }: { projectPath: st
     const sessions = sortSessions(store.sessions.filter((s) => s.projectPath === projectPath && s.archived === store.showArchived && (!q || s.title.toLowerCase().includes(q))));
     const canon = (p: string) => p.replace(/\/+$/, "");
     const byPath = new Map<string, SessionEntry[]>();
+    const removedByPath = new Map<string, SessionEntry[]>();
     for (const s of sessions) {
-      const key = canon(s.cwd);
-      byPath.set(key, [...(byPath.get(key) ?? []), s]);
+      const path = s.worktreeRemoved ? (s.removedWorkspace?.path ?? s.cwd) : s.cwd;
+      const key = canon(path);
+      const target = s.worktreeRemoved ? removedByPath : byPath;
+      target.set(key, [...(target.get(key) ?? []), s]);
     }
     const known = new Set(workspaces.map((w) => canon(w.path)));
-    const rows: { ws: Workspace | null; key: string; sessions: SessionEntry[] }[] = workspaces.map((w) => ({ ws: w, key: canon(w.path), sessions: byPath.get(canon(w.path)) ?? [] }));
+    const rows: { ws: Workspace | null; key: string; path: string; sessions: SessionEntry[]; removed: boolean }[] = workspaces.map((w) => ({ ws: w, key: canon(w.path), path: canon(w.path), sessions: byPath.get(canon(w.path)) ?? [], removed: false }));
     // Sessions whose checkout is gone still need a home in the list.
-    for (const [key, list] of byPath) if (!known.has(key)) rows.push({ ws: null, key, sessions: list });
+    for (const [key, list] of byPath) if (!known.has(key)) rows.push({ ws: null, key, path: key, sessions: list, removed: false });
+    // Deleted checkouts stay distinct even though future turns run on the
+    // project checkout. Older records without provenance share one fallback
+    // bucket instead of being misrepresented as main.
+    for (const [path, list] of removedByPath) rows.push({ ws: null, key: `removed:${path}`, path, sessions: list, removed: true });
     return q ? rows.filter((r) => r.sessions.length) : rows;
   }, [store.sessions, store.showArchived, projectPath, workspaces, query]);
 
@@ -120,7 +128,7 @@ export function WorkspaceColumn({ projectPath, onNewSession }: { projectPath: st
               <div className="px-2 py-6 text-center text-xs text-muted-foreground">{loading ? "Reading workspaces…" : query ? "No sessions match." : "No workspaces found."}</div>
             )}
             {groups.map((g) => (
-              <WorkspaceGroup key={g.key} projectPath={projectPath} ws={g.ws} path={g.key} sessions={g.sessions} selectedId={store.selectedSessionId} />
+              <WorkspaceGroup key={g.key} projectPath={projectPath} ws={g.ws} path={g.path} sessions={g.sessions} selectedId={store.selectedSessionId} removed={g.removed} />
             ))}
           </div>
         </>
@@ -139,18 +147,21 @@ function WorkspaceGroup({
   path,
   sessions,
   selectedId,
+  removed,
 }: {
   projectPath: string;
   ws: Workspace | null;
   path: string;
   sessions: SessionEntry[];
   selectedId: string | null;
+  removed: boolean;
 }) {
   const [open, setOpen] = useState(true);
   const [renameError, setRenameError] = useState<string | null>(null);
-  const name = ws?.name ?? path.split("/").pop() ?? path;
-  const kind = ws ? (ws.isMain ? "main" : ws.managed ? "" : "external") : "missing";
-  const displayName = ws?.managed ? name : (ws?.branch ?? name);
+  const removedSession = sessions.find((session) => session.removedWorkspace) ?? sessions[0];
+  const name = removed && removedSession ? sessionWorkspaceName(removedSession) : (ws?.name ?? path.split("/").pop() ?? path);
+  const kind = removed ? "removed" : ws ? (ws.isMain ? "main" : ws.managed ? "" : "external") : "missing";
+  const displayName = removed ? name : ws?.managed ? name : (ws?.branch ?? name);
   const openWorkspaceSession = () => {
     if (ws) void openWorkspace(projectPath, ws.path).catch((e) => console.error(errorMessage(e)));
   };

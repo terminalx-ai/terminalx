@@ -465,7 +465,7 @@ mod tests {
         };
         let session = index::SessionEntry {
             id: "s1".into(), project_path: "/work".into(), cwd: "/work".into(), worktree_name: None,
-            branch: None, base_ref: None, worktree_removed: false, issue: None, automation: None,
+            branch: None, base_ref: None, worktree_removed: false, removed_workspace: None, issue: None, automation: None,
             title: "Safe session".into(),
             created: String::new(), modified: String::new(), archived: false, pinned: false, tabs: vec![tab],
             active_tab: Some("t1".into()), unknown: Default::default(),

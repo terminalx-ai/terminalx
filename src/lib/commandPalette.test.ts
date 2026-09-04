@@ -86,6 +86,25 @@ describe("command palette index", () => {
     expect(matches[0].item.sessionId).toBe("older");
     expect(matches[0].primaryRanges).toEqual([{ start: 4, end: 9 }]);
   });
+
+  it("indexes removed sessions by their original workspace instead of main", () => {
+    const removed: SessionEntry = {
+      ...sessions[0],
+      id: "removed",
+      cwd: "/code/raccoon",
+      branch: "main",
+      worktreeRemoved: true,
+      removedWorkspace: { path: "/code/raccoon/.raccoon/worktrees/login", name: "login", branch: "feature/login" },
+    };
+    const item = buildPaletteIndex([removed], projects, { "/code/raccoon": [workspace] }, harnesses).sessions[0];
+
+    expect(item.secondary).toContain("login (removed)");
+    expect(searchPaletteIndex({ sessions: [item], projects: [], workspaces: [] }, "feature/login").sessions).toHaveLength(1);
+
+    const legacy = buildPaletteIndex([{ ...removed, removedWorkspace: null }], projects, { "/code/raccoon": [workspace] }, harnesses).sessions[0];
+    expect(legacy.secondary).toContain("Removed workspace (removed)");
+    expect(legacy.secondary).not.toContain("main");
+  });
 });
 
 describe("smart palette input", () => {

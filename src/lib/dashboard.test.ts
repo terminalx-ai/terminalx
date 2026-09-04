@@ -63,6 +63,16 @@ describe("search", () => {
     expect(workspaceName(session("b", [], { branch: "raccoon/thing" }))).toBe("raccoon/thing");
     expect(workspaceName(session("c", [], { cwd: "/repos/raccoon/" }))).toBe("raccoon");
   });
+
+  it("names a removed checkout from its preserved provenance", () => {
+    const removed = session("removed", [], {
+      branch: "main",
+      worktreeRemoved: true,
+      removedWorkspace: { path: "/repos/.raccoon/worktrees/old-feature", name: "old-feature", branch: "raccoon/old-feature" },
+    });
+    expect(workspaceName(removed)).toBe("old-feature");
+    expect(matchesQuery(removed, "Raccoon", "raccoon/old-feature")).toBe(true);
+  });
 });
 
 describe("bucketSessions", () => {
