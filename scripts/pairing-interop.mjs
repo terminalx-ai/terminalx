@@ -169,7 +169,7 @@ async function waitForAgentInput(socket, session, target, marker, queued, timeou
     }
     const published = tail.result.events.some((event) => (
       event?.payload?.type === "user_message" &&
-      event.payload.text?.endsWith(marker) &&
+      event.payload.text === marker &&
       event.payload.queued === queued
     ));
     if (published) return;

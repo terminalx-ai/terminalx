@@ -30,4 +30,22 @@ describe("portable mobile folds", () => {
     expect(transcript.turns[0]?.work).toContainEqual(expect.objectContaining({ kind: "text", text: "Done" }));
     expect(mergeAgentEvents([events[1]!, events[2]!], [events[0]!, events[1]!]).map(({ seq }) => seq)).toEqual([1, 2, 3]);
   });
+
+  it("shows only the human message from an attributed mobile prompt", () => {
+    const events: AgentEvent[] = [{
+      id: "event-1",
+      sessionId: "session",
+      tabId: "tab",
+      harness: "codex",
+      seq: 1,
+      ts: "2026-01-01T00:00:01Z",
+      payload: {
+        type: "user_message",
+        text: '[TerminalX Effective User v1] {"authority":"host","displayName":"Paresh","userId":"user-1"}\nHello',
+        queued: false,
+      },
+    }];
+
+    expect(buildTranscript(events, false).turns[0]?.prompt?.text).toBe("Hello");
+  });
 });

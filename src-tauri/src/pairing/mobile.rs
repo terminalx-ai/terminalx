@@ -701,7 +701,13 @@ fn send_attributed(
     });
     let attributed = format!("[TerminalX Effective User v1] {envelope}\n{text}");
     let session_manager = app_state(manager)?.manager().context("session manager is unavailable")?;
-    let outcome = session_manager.send(session_id, tab_id, attributed, Vec::new())?;
+    let outcome = session_manager.send_with_display_text(
+        session_id,
+        tab_id,
+        attributed,
+        text,
+        Vec::new(),
+    )?;
     Ok(json!({ "status": "sent", "queued": outcome.queued }))
 }
 
