@@ -164,8 +164,7 @@ fn consume_composer_echo(pending: &mut std::collections::VecDeque<ComposerEcho>,
 
 /// Forget prompts that have waited past the TTL. A prompt the transcript never
 /// echoes would otherwise sit at the head of the queue for the life of the tab.
-fn expire_composer_echoes(pending: &mut std::collections::VecDeque<ComposerEcho>) {
-    let now = Instant::now();
+fn expire_composer_echoes(pending: &mut std::collections::VecDeque<ComposerEcho>, now: Instant) {
     let before = pending.len();
     pending.retain(|prompt| !prompt.expired(now));
     if pending.len() < before {
@@ -1474,7 +1473,7 @@ impl SessionManager {
         let paths: Vec<String> = images.iter().map(|i| i.url.clone()).collect();
         let (message, echo) = cli_composer_message(&prompt, images, baseline, queued, &entry.cwd);
         if let (Some(echo), Engine::Cli(p)) = (echo, &mut rt.engine) {
-            expire_composer_echoes(&mut p.echoed);
+            expire_composer_echoes(&mut p.echoed, Instant::now());
             p.echoed.push_back(echo);
             p.turn_tail.opened();
         }
@@ -2072,9 +2071,14 @@ mod tests {
         assert!(consume_composer_echo(&mut pending, &user("second")));
         assert!(pending.is_empty(), "the missed echo ahead of the match is dropped with it");
 
-        pending.push_back(ComposerEcho { text: "stale".into(), image_count: 0, sent_at: Instant::now() - COMPOSER_ECHO_TTL - std::time::Duration::from_secs(1) });
-        pending.push_back(ComposerEcho::new("fresh".into(), 0));
-        expire_composer_echoes(&mut pending);
+        // The clock is moved forward rather than a send-time backward: an
+        // `Instant` cannot go before the monotonic clock's origin, and a
+        // freshly booted runner may not have two minutes behind it.
+        let sent = Instant::now();
+        let later = sent + COMPOSER_ECHO_TTL + std::time::Duration::from_secs(1);
+        pending.push_back(ComposerEcho { text: "stale".into(), image_count: 0, sent_at: sent });
+        pending.push_back(ComposerEcho { text: "fresh".into(), image_count: 0, sent_at: later });
+        expire_composer_echoes(&mut pending, later);
         assert_eq!(pending.len(), 1);
         assert!(consume_composer_echo(&mut pending, &user("fresh")));
     }
