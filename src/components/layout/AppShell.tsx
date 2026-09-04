@@ -28,6 +28,7 @@ import { bootAutomations } from "@/lib/automations";
 import { RightPanel } from "@/components/layout/RightPanel";
 import { CommandPalette } from "@/components/command/CommandPalette";
 import { bootAccount } from "@/lib/account";
+import { bootPairing } from "@/lib/pairing";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
@@ -58,6 +59,7 @@ export function AppShell() {
     startNotifications();
     void bootStatus();
     void bootAccount();
+    void bootPairing();
   }, []);
 
   // The first prompt of a new session is sent right after the worktree exists.

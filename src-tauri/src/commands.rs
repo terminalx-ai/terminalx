@@ -47,8 +47,43 @@ pub async fn account_sign_out(
     app: AppHandle,
     state: tauri::State<'_, crate::AppState>,
 ) -> CmdResult<crate::account::AccountStatus> {
+    state.pairing.sign_out().await;
     let account = state.account.clone();
     tauri::async_runtime::spawn_blocking(move || account.sign_out(&app)).await.map_err(err)
+}
+
+#[tauri::command]
+pub fn pairing_status(state: tauri::State<'_, crate::AppState>) -> crate::pairing::PairingStatus {
+    state.pairing.status()
+}
+
+#[tauri::command]
+pub async fn pairing_generate(
+    connection_mode: Option<crate::pairing::PairingConnectionMode>,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::pairing::PairingStatus> {
+    state
+        .pairing
+        .clone()
+        .generate_pairing(connection_mode.unwrap_or_default())
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn pairing_revoke(
+    device_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::pairing::PairingStatus> {
+    state.pairing.revoke_device(&device_id).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn pairing_set_host_name(
+    display_name: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::pairing::PairingStatus> {
+    state.pairing.set_host_name(&display_name).await.map_err(err)
 }
 
 // ------------------------------------------------------------------ projects

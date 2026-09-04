@@ -25,6 +25,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
@@ -36,11 +37,20 @@ portable-pty = "0.9"
 notify = "8"
 notify-debouncer-mini = "0.6"
 base64 = "0.22"
+crypto_box = { version = "0.9.1", features = ["std"] }
+crypto_secretbox = { version = "0.1.1", features = ["std"] }
+futures-util = "0.3"
+hkdf = "0.12.4"
+hmac = "0.12"
+hpke = { version = "0.14.0", default-features = false, features = ["alloc", "chacha", "getrandom", "hkdfsha2", "x25519"] }
+if-addrs = "0.15"
 parking_lot = "0.12"
+rand_core = { version = "0.6", features = ["getrandom"] }
 log = "0.4"
 env_logger = "0.11"
 which = "7"
 regex = "1"
+salsa20 = "0.10"
 ignore = "0.4"
 nucleo-matcher = "0.3"
 tauri-plugin-notification = "2.4.0"
@@ -48,8 +58,10 @@ ureq = { version = "2", features = ["json"] }
 tauri-plugin-updater = "2.11.0"
 cpal = "0.17"
 sha2 = "0.10"
+subtle = "2.6"
 toml = "0.9"
 url = "2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
