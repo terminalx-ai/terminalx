@@ -30,4 +30,12 @@ describe("mobile chat sends", () => {
 
     await expect(hostApi(request).promoteNote("session-1", "tab-1", "note-1")).resolves.toEqual({ sent: true, queued: true });
   });
+
+  it("forwards selected attachments with a session message", async () => {
+    const request = vi.fn().mockResolvedValue({ ok: true, value: { status: "sent", queued: false } });
+    const attachment = { mediaType: "application/pdf", data: "cGRm", name: "brief.pdf" };
+
+    await expect(hostApi(request).sendSession("tab-1", "", [attachment])).resolves.toEqual({ sent: true, queued: false });
+    expect(request).toHaveBeenCalledWith("session.send", { tabId: "tab-1", text: "", attachments: [attachment] });
+  });
 });
