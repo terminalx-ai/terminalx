@@ -20,9 +20,10 @@ if (transport === "relay" && !offer.relay) {
 const relay = transport === "relay" ? offer.relay : undefined;
 const endpoint = relay ? relaySocketUrl(relay) : offer.endpoint;
 const socket = await openSocket(endpoint);
+const inbox = createTextInbox(socket);
 
 if (relay) {
-  const accepted = nextText(socket);
+  const accepted = inbox.next();
   socket.send(JSON.stringify({ type: "relay-auth", v: 1, mode: "connect", credential: relay.inviteToken }));
   const hello = JSON.parse(await accepted);
   requireExactKeys(hello, ["type", "ok", "credentialKind", "leaseExpiresAt"]);
@@ -48,7 +49,7 @@ const hello = {
   capabilities: { framing: [2], payloadKinds: ["text", "binary"] },
   context,
 };
-const readyFrame = nextText(socket);
+const readyFrame = inbox.next();
 socket.send(JSON.stringify(hello));
 const ready = JSON.parse(await readyFrame);
 validateReady(hello, ready, offer.publicKeyB64);
@@ -67,7 +68,7 @@ const session = {
   inbound: 0n,
 };
 
-const authenticatedFrame = nextText(socket);
+const authenticatedFrame = inbox.next();
 sendEncrypted(socket, session, {
   type: "e2ee_auth",
   v: 2,
@@ -205,7 +206,7 @@ async function rpc(socket, session, method, params) {
   const id = randomUUID();
   sendEncrypted(socket, session, { id, deviceToken: offer.deviceToken, method, ...(params === undefined ? {} : { params }) });
   while (true) {
-    const response = receiveEncrypted(await nextText(socket), session);
+    const response = receiveEncrypted(await inbox.next(), session);
     if (response.id === id) return response;
     if (typeof response.method !== "string") throw new Error("Desktop returned an RPC response for another request");
   }
@@ -323,16 +324,43 @@ function openSocket(url) {
   });
 }
 
-function nextText(socket) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("WebSocket response timed out")), 30_000);
-    socket.once("message", (data, isBinary) => {
-      clearTimeout(timer);
-      if (isBinary) reject(new Error("Expected a text WebSocket frame"));
-      else resolve(data.toString());
-    });
-    socket.once("close", (code) => { clearTimeout(timer); reject(new Error(`WebSocket closed (${code})`)); });
+function createTextInbox(socket) {
+  const queued = [];
+  const waiting = [];
+  let closed;
+  const deliver = (outcome) => {
+    const reader = waiting.shift();
+    if (reader) {
+      clearTimeout(reader.timer);
+      if (outcome.error) reader.reject(outcome.error);
+      else reader.resolve(outcome.value);
+    } else {
+      queued.push(outcome);
+    }
+  };
+  socket.on("message", (data, isBinary) => {
+    deliver(isBinary ? { error: new Error("Expected a text WebSocket frame") } : { value: data.toString() });
   });
+  socket.once("close", (code) => {
+    closed = new Error(`WebSocket closed (${code})`);
+    while (waiting.length) deliver({ error: closed });
+  });
+  return {
+    next() {
+      const outcome = queued.shift();
+      if (outcome) return outcome.error ? Promise.reject(outcome.error) : Promise.resolve(outcome.value);
+      if (closed) return Promise.reject(closed);
+      return new Promise((resolve, reject) => {
+        const reader = { resolve, reject, timer: undefined };
+        reader.timer = setTimeout(() => {
+          const index = waiting.indexOf(reader);
+          if (index >= 0) waiting.splice(index, 1);
+          reject(new Error("WebSocket response timed out"));
+        }, 30_000);
+        waiting.push(reader);
+      });
+    },
+  };
 }
 
 function waitForClose(socket, timeoutMs) {
