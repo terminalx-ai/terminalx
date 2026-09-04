@@ -250,7 +250,7 @@ fn file_edits(changes: &Value) -> Vec<FileEdit> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::harness::tui::Streamer;
+    use crate::harness::tui::{Streamer, Tail};
 
     fn none() -> std::collections::HashSet<String> {
         std::collections::HashSet::new()
@@ -265,6 +265,21 @@ mod tests {
     /// timezone reads `UTC` and every `process_id` reads `0`. Every record,
     /// key and value the decoder actually reads is exactly as Codex wrote it.
     const FIXTURE: &str = include_str!("fixtures/rollout.jsonl");
+
+    /// The first turn of a fresh codex-cli 0.153.2 rollout, reduced to the
+    /// records the chat consumes and scrubbed of machine and account data.
+    /// Codex can write this whole turn before its `SessionStart` hook names
+    /// the rollout to the app.
+    const FRESH_TURN: &str = concat!(
+        r#"{"timestamp":"2026-09-04T10:51:57.841Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-04T10:51:58.335Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"user-1","content":[{"type":"text","text":"hello","text_elements":[]}]}}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-04T10:52:02.055Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"assistant-1","content":[{"type":"Text","text":"ready"}],"phase":"final_answer"}}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-04T10:52:02.106Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1","last_agent_message":"ready"}}"#,
+        "\n",
+    );
 
     fn kinds(payloads: &[Payload]) -> Vec<&'static str> {
         payloads
@@ -303,6 +318,20 @@ mod tests {
         );
         assert!(matches!(&p[1], Payload::UserMessage { text, .. } if text == "reply with the word ok"));
         assert!(matches!(&p[2], Payload::AssistantText { text, .. } if text == "ok"));
+    }
+
+    #[test]
+    fn a_fresh_turn_written_before_session_start_is_projected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let tail = Tail::unknown(decode_line);
+
+        std::fs::write(&path, FRESH_TURN).unwrap();
+        tail.retarget(&path);
+
+        let payloads = tail.drain();
+        assert_eq!(kinds(&payloads), vec!["start", "user", "text"]);
+        assert!(matches!(&payloads[2], Payload::AssistantText { text, .. } if text == "ready"));
     }
 
     /// Three turns end in this file, and none of them closes a turn here: the
