@@ -14,7 +14,7 @@ import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { bootSessions, openAgents, openAutomations, openIssues, openSkills, openStats, selectSession, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
-import { agent } from "@/lib/api";
+import { agent, type ImageInput } from "@/lib/api";
 import { loadModels } from "@/lib/models";
 import { startNotifications } from "@/lib/notify";
 import { subscribeTabPty } from "@/lib/tabViews";
@@ -66,9 +66,9 @@ export function AppShell() {
   }, []);
 
   // The first prompt of a new session is sent right after the worktree exists.
-  const onCreated = useCallback((sessionId: string, tabId: string, text: string) => {
+  const onCreated = useCallback((sessionId: string, tabId: string, text: string, images?: ImageInput[]) => {
     void agent
-      .send(sessionId, tabId, text)
+      .send(sessionId, tabId, text, images)
       .then((out) => out.events.forEach(applyEvent))
       .catch((e) => console.error("first send failed", e));
   }, []);
@@ -177,7 +177,7 @@ function UnselectedWorkspace({
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   onTogglePanel: () => void;
-  onCreated: (sessionId: string, tabId: string, text: string) => void;
+  onCreated: (sessionId: string, tabId: string, text: string, images?: ImageInput[]) => void;
 }) {
   const prefs = usePrefs();
   const store = useSessionStore();
