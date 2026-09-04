@@ -260,7 +260,7 @@ function ProviderCard({ provider, allTokens }: { provider: ProviderUsage; allTok
   return (
     <article className={cn("rounded-xl bg-background/30 p-4 hairline", !provider.enabled && "opacity-55")}>
       <div className="flex items-center gap-2">
-        <AgentMark id={provider.id} className="size-4" />
+        <AgentMark id={provider.id} className="size-4" decorative />
         <h4 className="text-sm font-semibold">{provider.label}</h4>
         <span className="rounded-full bg-veil-raised px-2 py-0.5 text-[10px] text-muted-foreground">
           {provider.enabled ? "Enabled" : "Off"}
