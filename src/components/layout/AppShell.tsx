@@ -232,7 +232,7 @@ function UnselectedWorkspace({
               <StatsUsageView />
             </Suspense>
           ) : store.view === "automations" ? (
-            <AutomationsView />
+            <AutomationsView initialAutomationId={store.selectedAutomationId} />
           ) : store.view === "skills" ? (
             <SkillsView
               key={`${store.skillsFilter?.projectPath ?? store.selectedProject ?? "home"}:${store.skillsFilter?.agent ?? "all"}`}

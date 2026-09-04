@@ -21,6 +21,8 @@ interface State {
   selectedSessionId: string | null;
   /** What the workspace shows when no session is selected. */
   view: "new" | "issues" | "agents" | "automations" | "skills" | "stats";
+  /** A cross-workspace navigation request can open one automation directly. */
+  selectedAutomationId: string | null;
   /** A tab menu can open Skills already narrowed to that tab's reach. */
   skillsFilter: { agent: string; projectPath: string } | null;
   showArchived: boolean;
@@ -43,6 +45,7 @@ let state: State = {
   harnesses: [],
   selectedSessionId: null,
   view: "new",
+  selectedAutomationId: null,
   skillsFilter: null,
   showArchived: false,
   selectedProject: null,
@@ -135,34 +138,39 @@ function focusProject(path: string | null, patch: Partial<State> = {}) {
 
 export function selectSession(id: string | null) {
   const selected = id ? state.sessions.find((session) => session.id === id) : null;
-  const patch: Partial<State> = { selectedSessionId: id, view: "new" };
+  const patch: Partial<State> = { selectedSessionId: id, view: "new", selectedAutomationId: null };
   if (selected) focusProject(selected.projectPath, patch);
   else set(patch);
 }
 
 /** The issues browser takes the workspace; no session stays selected. */
 export function openIssues() {
-  set({ selectedSessionId: null, view: "issues" });
+  set({ selectedSessionId: null, view: "issues", selectedAutomationId: null });
 }
 
 /** The agent dashboard, like the issues browser, replaces the whole workspace. */
 export function openAgents() {
-  set({ selectedSessionId: null, view: "agents" });
+  set({ selectedSessionId: null, view: "agents", selectedAutomationId: null });
 }
 
 /** Local app activity and transcript-backed token analytics. */
 export function openStats() {
-  set({ selectedSessionId: null, view: "stats" });
+  set({ selectedSessionId: null, view: "stats", selectedAutomationId: null });
 }
 
 /** Saved agent runs share the full workspace with issues and the dashboard. */
 export function openAutomations() {
-  set({ selectedSessionId: null, view: "automations" });
+  set({ selectedSessionId: null, view: "automations", selectedAutomationId: null });
+}
+
+/** Open a saved automation after creating it from another workspace. */
+export function openAutomation(id: string) {
+  set({ selectedSessionId: null, view: "automations", selectedAutomationId: id });
 }
 
 /** The filesystem-backed skills reader, optionally scoped to one agent tab. */
 export function openSkills(filter: State["skillsFilter"] = null) {
-  set({ selectedSessionId: null, view: "skills", skillsFilter: filter });
+  set({ selectedSessionId: null, view: "skills", skillsFilter: filter, selectedAutomationId: null });
 }
 
 export function selectProjectInSidebar(path: string | null) {
@@ -171,7 +179,7 @@ export function selectProjectInSidebar(path: string | null) {
 
 /** Open the new-session form for a project, optionally inside one of its workspaces. */
 export function startSessionIn(projectPath: string, cwd: string | null) {
-  set({ selectedSessionId: null, view: "new", newSessionPreset: { projectPath, cwd }, lastProject: projectPath });
+  set({ selectedSessionId: null, view: "new", newSessionPreset: { projectPath, cwd }, lastProject: projectPath, selectedAutomationId: null });
 }
 
 const openingWorkspaces = new Map<string, Promise<SessionEntry>>();

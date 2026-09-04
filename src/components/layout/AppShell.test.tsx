@@ -12,7 +12,8 @@ const { sessionStore } = vi.hoisted(() => ({
     sessions: [],
     harnesses: [],
     selectedSessionId: null,
-    view: "new" as const,
+    selectedAutomationId: null as string | null,
+    view: "new" as "new" | "issues" | "agents" | "stats" | "automations" | "skills",
     showArchived: false,
     selectedProject: "/repo" as string | null,
     workspaces: {
@@ -62,7 +63,11 @@ vi.mock("@/components/layout/Sidebar", () => ({ Sidebar: () => <div data-testid=
 vi.mock("@/components/session/NewSessionView", () => ({ NewSessionView: () => <div data-testid="new-session" /> }));
 vi.mock("@/components/issues/IssuesView", () => ({ IssuesView: () => <div data-testid="issues" /> }));
 vi.mock("@/components/dashboard/AgentDashboard", () => ({ AgentDashboard: () => <div data-testid="agents" /> }));
-vi.mock("@/components/automations/AutomationsView", () => ({ AutomationsView: () => <div data-testid="automations" /> }));
+vi.mock("@/components/automations/AutomationsView", () => ({
+  AutomationsView: ({ initialAutomationId }: { initialAutomationId?: string | null }) => (
+    <div data-testid="automations" data-automation-id={initialAutomationId ?? ""} />
+  ),
+}));
 vi.mock("@/components/skills/SkillsView", () => ({ SkillsView: () => <div data-testid="skills" /> }));
 vi.mock("@/components/session/SessionView", () => ({ SessionView: () => <div data-testid="session" /> }));
 vi.mock("@/components/layout/RightPanel", () => ({
@@ -82,6 +87,8 @@ beforeEach(() => {
   sessionStore.lastProject = "/repo";
   sessionStore.selectedProject = "/repo";
   sessionStore.newSessionPreset = { projectPath: "/repo", cwd: "/outside/feature" };
+  sessionStore.selectedAutomationId = null;
+  sessionStore.view = "new";
   setPrefs({ sidebarOpen: true, panelOpen: true, lastProject: "/repo", useWorktree: true });
 });
 
@@ -119,5 +126,16 @@ describe("new-session right panel", () => {
 
     expect(screen.queryByRole("button", { name: "Toggle panel" })).toBeNull();
     expect(screen.queryByTestId("right-panel")).toBeNull();
+  });
+});
+
+describe("automation navigation", () => {
+  it("opens the requested automation in the dedicated detail surface", () => {
+    sessionStore.view = "automations";
+    sessionStore.selectedAutomationId = "automation-99";
+
+    render(<AppShell />);
+
+    expect(screen.getByTestId("automations").getAttribute("data-automation-id")).toBe("automation-99");
   });
 });
