@@ -133,7 +133,7 @@ const promoted = await rpc(socket, session, "chat.promoteToAgent", {
 if (!promoted.ok || promoted.result?.status !== "sent" || typeof promoted.result.queued !== "boolean") {
   throw new Error(`Promoting the interop note failed: ${rpcError(promoted)}`);
 }
-await waitForAgentInput(socket, session, target, marker, 30_000);
+await waitForAgentInput(socket, session, target, marker, promoted.result.queued, 30_000);
 
 console.log(`Pairing passed over ${transport}: pinned host key, E2EE frame, status RPC, relay install ${installMode}.`);
 console.log(`Send passed: note listed and agent input ${promoted.result.queued ? "queued" : "delivered"}.`);
@@ -156,7 +156,7 @@ function selectSessionTab(response) {
   return target;
 }
 
-async function waitForAgentInput(socket, session, target, marker, timeoutMs) {
+async function waitForAgentInput(socket, session, target, marker, queued, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const tail = await rpc(socket, session, "session.tail", {
@@ -167,10 +167,12 @@ async function waitForAgentInput(socket, session, target, marker, timeoutMs) {
     if (!tail.ok || !Array.isArray(tail.result?.events)) {
       throw new Error(`Reading the agent event tail failed: ${rpcError(tail)}`);
     }
-    const published = tail.result.events.some((event) => event?.payload?.type === "user_message" && event.payload.text?.endsWith(marker));
-    const terminal = await rpc(socket, session, "terminal.read", { worktreeId: target.sessionId, tabId: target.tabId });
-    if (!terminal.ok) throw new Error(`Reading the agent terminal failed: ${rpcError(terminal)}`);
-    if (published && typeof terminal.result?.text === "string" && terminal.result.text.includes(marker)) return;
+    const published = tail.result.events.some((event) => (
+      event?.payload?.type === "user_message" &&
+      event.payload.text?.endsWith(marker) &&
+      event.payload.queued === queued
+    ));
+    if (published) return;
     await wait(250);
   }
   throw new Error("The promoted interop note did not reach the agent terminal before timeout");
