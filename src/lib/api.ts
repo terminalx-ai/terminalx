@@ -97,6 +97,13 @@ export interface NewSession {
   tab?: NewTab;
 }
 
+export interface WorkspaceRename {
+  name: string;
+  path: string;
+  branch: string;
+  sessions: SessionEntry[];
+}
+
 export const api = {
   // optional TerminalX account
   accountStatus: () => invoke<AccountStatus>("account_status"),
@@ -117,6 +124,10 @@ export const api = {
   updateProject: (path: string, patch: ProjectPatch) => invoke<Project>("update_project", { path, patch }),
   setProjectLogo: (path: string, source: string | null) => invoke<Project>("set_project_logo", { path, source }),
   listWorkspaces: (projectPath: string) => invoke<Workspace[]>("list_workspaces", { projectPath }),
+  previewWorkspaceName: (projectPath: string, requested?: string | null) =>
+    invoke<string>("preview_workspace_name", { projectPath, requested: requested ?? null }),
+  renameWorkspace: (projectPath: string, path: string, name: string) =>
+    invoke<WorkspaceRename>("rename_workspace", { projectPath, path, name }),
   workspaceDisposition: (projectPath: string, path: string) => invoke<WorkspaceDisposition>("workspace_disposition", { projectPath, path }),
   deleteWorkspace: (projectPath: string, path: string, deleteBranch: boolean) =>
     invoke<SessionEntry[]>("delete_workspace", { projectPath, path, deleteBranch }),

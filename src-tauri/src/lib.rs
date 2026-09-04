@@ -247,6 +247,8 @@ pub fn run() {
             commands::update_project,
             commands::set_project_logo,
             commands::list_workspaces,
+            commands::preview_workspace_name,
+            commands::rename_workspace,
             commands::workspace_disposition,
             commands::delete_workspace,
             commands::issues_list,

@@ -378,6 +378,54 @@ pub fn create_worktree(project: &Path, name: &str, base: Option<&str>) -> Result
     Ok(CreatedWorktree { name: name.to_string(), path: path.to_string_lossy().into_owned(), branch, base, base_tree })
 }
 
+/// Move a TerminalX-managed worktree and rename its matching branch. The
+/// checkout may be dirty; `git worktree move` preserves its contents.
+pub fn rename_worktree(project: &Path, path: &Path, name: &str) -> Result<CreatedWorktree> {
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+        bail!("bad worktree name");
+    }
+    let project = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if path == project {
+        bail!("the project's own checkout cannot be renamed here");
+    }
+    let managed_root = std::fs::canonicalize(worktree_root(&project)).unwrap_or_else(|_| worktree_root(&project));
+    if path.parent() != Some(managed_root.as_path()) {
+        bail!("only TerminalX-managed workspaces can be renamed");
+    }
+    let old_name = path.file_name().and_then(|part| part.to_str()).ok_or_else(|| anyhow::anyhow!("workspace has no usable name"))?;
+    let old_branch = worktree_branch(old_name);
+    let branch = current_branch(&path).ok_or_else(|| anyhow::anyhow!("workspace has no branch"))?;
+    if branch != old_branch {
+        bail!("workspace branch does not match its TerminalX name");
+    }
+    if old_name == name {
+        let base_tree = run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
+        return Ok(CreatedWorktree { name: name.to_string(), path: path.to_string_lossy().into_owned(), branch, base: "HEAD".into(), base_tree });
+    }
+    let destination = worktree_path(&project, name);
+    if destination.exists() {
+        bail!("workspace {name} already exists");
+    }
+    let new_branch = worktree_branch(name);
+    run(&project, &["worktree", "move", arg(&path)?, arg(&destination)?])?;
+    if let Err(rename_error) = run(&destination, &["branch", "-m", &new_branch]) {
+        let rollback = run(&project, &["worktree", "move", arg(&destination)?, arg(&path)?]);
+        if let Err(rollback_error) = rollback {
+            bail!("rename branch failed: {rename_error:#}; moving the workspace back also failed: {rollback_error:#}");
+        }
+        return Err(rename_error);
+    }
+    let base_tree = run(&destination, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
+    Ok(CreatedWorktree {
+        name: name.to_string(),
+        path: destination.to_string_lossy().into_owned(),
+        branch: new_branch,
+        base: "HEAD".into(),
+        base_tree,
+    })
+}
+
 /// Keep the worktree directory out of the project's own status without
 /// touching `.gitignore`: `.git/info/exclude` is local to this clone.
 fn ensure_worktree_dir_ignored(project: &Path) {

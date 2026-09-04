@@ -25,6 +25,7 @@ import { useHotkey } from "@/lib/hotkeys";
 import { stopDictation } from "@/lib/dictation";
 import { cn } from "@/lib/cn";
 import type { WorkStatus } from "@/types/session";
+import { WorkspaceNameEditor } from "./WorkspaceNameEditor";
 
 /**
  * Where a session is born. The box sits at the bottom, where the composer
@@ -46,6 +47,7 @@ export function NewSessionView({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<WorkStatus | null>(null);
+  const [workspaceName, setWorkspaceName] = useState<string | null>(null);
   const [localUseWorktree, setLocalUseWorktree] = useState(prefs.useWorktree);
   const ref = useRef<HTMLTextAreaElement>(null);
   const useWorktree = controlledUseWorktree ?? localUseWorktree;
@@ -78,6 +80,22 @@ export function NewSessionView({
     };
   }, [project, preset]);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (!project || preset?.cwd || !useWorktree) {
+      setWorkspaceName(null);
+      return;
+    }
+    setWorkspaceName(null);
+    api
+      .previewWorkspaceName(project.path)
+      .then((name) => !cancelled && setWorkspaceName(name))
+      .catch((cause) => !cancelled && setError(errorMessage(cause)));
+    return () => {
+      cancelled = true;
+    };
+  }, [project?.path, preset?.cwd, useWorktree]);
+
   const pickProject = async () => {
     try {
       const dir = await openDialog({ directory: true, multiple: false, title: "Choose a project" });
@@ -94,7 +112,10 @@ export function NewSessionView({
   const dictation = useDictationInto(NEW_SESSION_TARGET, text, setText, ref);
   useHotkey("mod+shift+d", dictation.toggle);
 
-  const canSend = useMemo(() => !!project && !!harness && available && text.trim().length > 0 && !busy, [project, harness, available, text, busy]);
+  const canSend = useMemo(
+    () => !!project && !!harness && available && text.trim().length > 0 && (!useWorktree || !!preset?.cwd || !!workspaceName) && !busy,
+    [project, harness, available, text, useWorktree, preset?.cwd, workspaceName, busy],
+  );
 
   const create = async () => {
     if (!project || !harness || !canSend) return;
@@ -108,6 +129,7 @@ export function NewSessionView({
         title,
         useWorktree: preset?.cwd ? false : useWorktree,
         onMain: !preset?.cwd && !useWorktree,
+        worktreeName: !preset?.cwd && useWorktree ? workspaceName : null,
         cwd: preset?.cwd ?? null,
         tab: { harness: harness.id, model: modelId, effort, permissionMode: prefs.lastMode },
       });
@@ -270,13 +292,28 @@ export function NewSessionView({
                 In workspace <span className="font-mono text-foreground">{workspace?.name ?? preset.cwd.split("/").pop()}</span>
               </span>
             ) : (
-              <label className="ml-1 flex items-center gap-2 text-xs text-muted-foreground">
+              <div className="ml-1 flex items-center gap-2 text-xs text-muted-foreground">
                 <Switch size="sm" checked={useWorktree} onCheckedChange={setUseWorktree} />
                 <span className="flex items-center gap-1">
                   <GitBranch className="size-3.5" />
                   {useWorktree ? (
                     <>
                       New worktree from <span className="text-foreground">{status?.defaultBranch ?? "default"}</span>
+                      {workspaceName && project && (
+                        <>
+                          <span className="text-faint">·</span>
+                          <WorkspaceNameEditor
+                            value={workspaceName}
+                            onCommit={async (requested) => {
+                              const canonical = await api.previewWorkspaceName(project.path, requested);
+                              setWorkspaceName(canonical);
+                              return canonical;
+                            }}
+                            onError={setError}
+                            className="max-w-48 text-foreground"
+                          />
+                        </>
+                      )}
                     </>
                   ) : (
                     <>
@@ -284,7 +321,7 @@ export function NewSessionView({
                     </>
                   )}
                 </span>
-              </label>
+              </div>
             )}
           </div>
 

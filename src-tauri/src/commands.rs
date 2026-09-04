@@ -268,40 +268,25 @@ pub struct NewSession {
     pub tab: Option<NewTab>,
 }
 
-/// A worktree name the reader asked for, made safe for a branch and a folder:
-/// lowercase, `[a-z0-9-]`, at most 40 chars, and suffixed when already taken.
-fn requested_worktree_name(requested: &str, taken: &[String]) -> Option<String> {
-    let mut base = String::new();
-    let mut last_dash = true;
-    for ch in requested.chars() {
-        let c = ch.to_ascii_lowercase();
-        if c.is_ascii_alphanumeric() {
-            base.push(c);
-            last_dash = false;
-        } else if !last_dash {
-            base.push('-');
-            last_dash = true;
-        }
-        if base.len() >= 40 {
-            break;
-        }
-    }
-    let base = base.trim_matches('-').to_string();
-    if base.is_empty() {
-        return None;
-    }
-    if !taken.iter().any(|t| t == &base) {
-        return Some(base);
-    }
-    (2..1000).map(|n| format!("{base}-{n}")).find(|c| !taken.iter().any(|t| t == c))
-}
-
 fn validate_session_target(req: &NewSession) -> CmdResult<()> {
     let requested_worktree = req.worktree_name.as_deref().is_some_and(|name| !name.trim().is_empty());
     if !req.use_worktree && requested_worktree && !req.on_main {
         return Err("A requested worktree can only be skipped when onMain is explicitly true.".into());
     }
     Ok(())
+}
+
+fn available_worktree_name(project: &Path, requested: Option<&str>, excluding: Option<&str>) -> CmdResult<String> {
+    let claimed = index::load().map(|sessions| index::claimed_worktree_names(&sessions)).unwrap_or_default();
+    let mut taken = git::taken_worktree_names(project, &claimed);
+    if let Some(excluding) = excluding {
+        taken.retain(|name| name != excluding);
+    }
+    match requested.filter(|name| !name.trim().is_empty()) {
+        Some(requested) => names::requested(requested, &taken)
+            .ok_or_else(|| "Workspace names must contain at least one letter or number.".into()),
+        None => Ok(names::unclaimed(&taken)),
+    }
 }
 
 fn new_tab_entry(t: &NewTab) -> TabEntry {
@@ -378,13 +363,7 @@ fn create_session_entry(req: NewSession) -> CmdResult<SessionEntry> {
         entry.branch = git::current_branch(Path::new(&cwd));
         entry.cwd = cwd;
     } else if has_agent && req.use_worktree {
-        let taken = index::load().map(|s| index::claimed_worktree_names(&s)).unwrap_or_default();
-        let taken = git::taken_worktree_names(project_path, &taken);
-        let name = req
-            .worktree_name
-            .as_deref()
-            .and_then(|r| requested_worktree_name(r, &taken))
-            .unwrap_or_else(|| names::unclaimed(&taken));
+        let name = available_worktree_name(project_path, req.worktree_name.as_deref(), None)?;
         let wt = git::create_worktree(project_path, &name, req.base_ref.as_deref()).map_err(err)?;
         entry.cwd = wt.path;
         entry.worktree_name = Some(wt.name);
@@ -1373,7 +1352,7 @@ mod command_tests {
     use std::process::Command;
 
     use super::{
-        create_session_entry, new_tab_entry, requested_worktree_name, validate_session_target,
+        create_session_entry, new_tab_entry, rename_workspace_entries, validate_session_target,
         NewSession, NewTab,
     };
 
@@ -1382,14 +1361,6 @@ mod command_tests {
         assert!(output.status.success(), "git {}: {}", args.join(" "), String::from_utf8_lossy(&output.stderr));
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
-    #[test]
-    fn requested_names_are_sanitised_and_unique() {
-        assert_eq!(requested_worktree_name("ENG-42 Fix Login!", &[]).as_deref(), Some("eng-42-fix-login"));
-        assert_eq!(requested_worktree_name("!!!", &[]), None);
-        let taken = vec!["eng-42-fix-login".to_string(), "eng-42-fix-login-2".to_string()];
-        assert_eq!(requested_worktree_name("eng-42-fix-login", &taken).as_deref(), Some("eng-42-fix-login-3"));
-    }
-
     #[test]
     fn new_tabs_use_the_default_permission_mode_when_unspecified() {
         let tab = new_tab_entry(&NewTab {
@@ -1446,6 +1417,70 @@ mod command_tests {
     }
 
     #[test]
+    fn renames_a_managed_workspace_and_every_attached_session() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        git(&project, &["init", "-q", "-b", "main"]);
+        git(&project, &["config", "user.email", "t@example.com"]);
+        git(&project, &["config", "user.name", "T"]);
+        std::fs::write(project.join("README.md"), "project\n").unwrap();
+        git(&project, &["add", "."]);
+        git(&project, &["commit", "-q", "-m", "initial"]);
+
+        let first = create_session_entry(NewSession {
+            project_path: project.to_string_lossy().into_owned(),
+            title: Some("First".into()),
+            use_worktree: true,
+            on_main: false,
+            base_ref: None,
+            worktree_name: Some("old-workspace".into()),
+            issue: None,
+            automation: None,
+            cwd: None,
+            tab: Some(NewTab {
+                harness: "codex".into(),
+                model: String::new(),
+                effort: None,
+                permission_mode: None,
+            }),
+        })
+        .unwrap();
+        let second = create_session_entry(NewSession {
+            project_path: project.to_string_lossy().into_owned(),
+            title: Some("Second".into()),
+            use_worktree: false,
+            on_main: false,
+            base_ref: None,
+            worktree_name: None,
+            issue: None,
+            automation: None,
+            cwd: Some(first.cwd.clone()),
+            tab: None,
+        })
+        .unwrap();
+        std::fs::write(Path::new(&first.cwd).join("dirty.txt"), "kept\n").unwrap();
+
+        let renamed = rename_workspace_entries(&first.project_path, &first.cwd, "Better Workspace").unwrap();
+        assert_eq!(renamed.name, "better-workspace");
+        assert_eq!(renamed.branch, "raccoon/better-workspace");
+        assert_eq!(renamed.sessions.len(), 2);
+        assert!(renamed.sessions.iter().any(|session| session.id == first.id));
+        assert!(renamed.sessions.iter().any(|session| session.id == second.id));
+        for session in &renamed.sessions {
+            assert!(session.cwd.ends_with("/.raccoon/worktrees/better-workspace"));
+            assert_eq!(session.worktree_name.as_deref(), Some("better-workspace"));
+            assert_eq!(session.branch.as_deref(), Some("raccoon/better-workspace"));
+        }
+        let cwd = Path::new(&renamed.path);
+        assert_eq!(std::fs::read_to_string(cwd.join("dirty.txt")).unwrap(), "kept\n");
+        assert_eq!(git(cwd, &["branch", "--show-current"]).trim(), "raccoon/better-workspace");
+        assert!(!Path::new(&first.cwd).exists());
+        assert_eq!(crate::store::index::load().unwrap(), renamed.sessions);
+    }
+
+    #[test]
     fn requested_worktree_cannot_be_silently_skipped() {
         let req: NewSession = serde_json::from_value(serde_json::json!({
             "projectPath": "/repo",
@@ -1499,6 +1534,86 @@ fn md5_like(s: &str) -> u64 {
 #[tauri::command]
 pub async fn list_workspaces(project_path: String) -> CmdResult<Vec<crate::workspaces::Workspace>> {
     tauri::async_runtime::spawn_blocking(move || crate::workspaces::list(Path::new(&project_path)).map_err(err)).await.map_err(err)?
+}
+
+/// Resolve the name shown before a new worktree-backed session is created.
+/// Supplying a requested name applies the same sanitising and collision rules
+/// as creation, so the preview is normally the name that lands on disk.
+#[tauri::command]
+pub async fn preview_workspace_name(project_path: String, requested: Option<String>) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let project = projects::canonical(&project_path).map_err(err)?;
+        available_worktree_name(Path::new(&project), requested.as_deref(), None)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRename {
+    pub name: String,
+    pub path: String,
+    pub branch: String,
+    pub sessions: Vec<SessionEntry>,
+}
+
+fn rename_workspace_entries(project_path: &str, path: &str, requested: &str) -> CmdResult<WorkspaceRename> {
+    let project = projects::canonical(project_path).map_err(err)?;
+    let target = std::fs::canonicalize(path).map_err(err)?;
+    let old_name = target
+        .file_name()
+        .and_then(|part| part.to_str())
+        .ok_or_else(|| "Workspace has no usable name.".to_string())?
+        .to_string();
+    let name = available_worktree_name(Path::new(&project), Some(requested), Some(&old_name))?;
+    let renamed = git::rename_worktree(Path::new(&project), &target, &name).map_err(err)?;
+    let new_path = renamed.path.clone();
+    let new_branch = renamed.branch.clone();
+    let update = index::update(|sessions| {
+        let mut affected = Vec::new();
+        for session in sessions {
+            // The old folder no longer exists after `git worktree move`, so
+            // compare its canonical path lexically instead of canonicalising
+            // the session cwd after the move.
+            let matches = Path::new(&session.cwd) == target || session.cwd == path;
+            if matches {
+                session.cwd = new_path.clone();
+                session.worktree_name = Some(name.clone());
+                session.branch = Some(new_branch.clone());
+                session.modified = index::now();
+                affected.push(session.clone());
+            }
+        }
+        Ok(affected)
+    });
+    match update {
+        Ok(sessions) => Ok(WorkspaceRename { name, path: renamed.path, branch: renamed.branch, sessions }),
+        Err(save_error) => {
+            let rollback = git::rename_worktree(Path::new(&project), Path::new(&renamed.path), &old_name);
+            match rollback {
+                Ok(_) => Err(err(save_error)),
+                Err(rollback_error) => Err(format!(
+                    "Workspace was renamed but its session metadata could not be saved ({save_error:#}); rollback also failed ({rollback_error:#})."
+                )),
+            }
+        }
+    }
+}
+
+/// Rename a managed workspace's folder and matching `raccoon/<name>` branch,
+/// then retarget every session that shares it.
+#[tauri::command]
+pub async fn rename_workspace(app: AppHandle, project_path: String, path: String, name: String) -> CmdResult<WorkspaceRename> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let renamed = rename_workspace_entries(&project_path, &path, &name)?;
+        for session in &renamed.sessions {
+            let _ = app.emit("session_updated", session);
+        }
+        Ok(renamed)
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]

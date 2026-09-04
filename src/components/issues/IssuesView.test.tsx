@@ -95,6 +95,10 @@ function mockBackend() {
     if (command === "work_status") {
       return { isRepo: true, dirty: false, branch: "main", upstream: "origin/main", ahead: 0, behind: 0, defaultBranch: "main", aheadOfBase: 0, head: "abc" };
     }
+    if (command === "preview_workspace_name") {
+      const requested = String(args?.requested ?? "").trim();
+      return requested ? requested.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") : "quiet-amber-fox";
+    }
     if (command === "issues_list") return issues;
     if (command === "automation_issue_preview") return issues;
     if (command === "issue_details") return issues.find((issue) => issue.id === args?.id);
@@ -140,6 +144,26 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("issue session targets", () => {
+  it("previews and customises the workspace name for a new session", async () => {
+    render(<NewSessionView />);
+
+    const preview = await screen.findByRole("button", { name: /Workspace quiet-amber-fox/ });
+    fireEvent.doubleClick(preview);
+    const input = screen.getByRole("textbox", { name: "Workspace name" });
+    fireEvent.change(input, { target: { value: "My Focused Workspace" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await screen.findByRole("button", { name: /Workspace my-focused-workspace/ });
+
+    fireEvent.change(screen.getByPlaceholderText("Describe the task. A worktree is created when you send."), {
+      target: { value: "Build the feature" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+
+    await waitFor(() => expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(true));
+    const [, args] = invoke.mock.calls.find(([command]) => command === "create_session") as [string, { req: Record<string, unknown> }];
+    expect(args.req).toMatchObject({ useWorktree: true, worktreeName: "my-focused-workspace" });
+  });
+
   it("ignores a composer's one-off choice and resets the choice for the next issue", async () => {
     const composer = render(<NewSessionView />);
     const composerSwitch = screen.getByRole("switch");
