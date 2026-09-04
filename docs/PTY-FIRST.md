@@ -353,6 +353,13 @@ record types matter:
   conversation, so `rollout.rs` skips it whole — and a test asserts that
   nothing decoded ever contains `tools.exec_command`.
 
+A composer prompt is published immediately with its archived image refs, then
+the rollout echoes the same prompt back. That echo is normally identical, but
+Codex prefixes attached prompts with `[Image #1]` (and one numbered label per
+image). The session keeps a FIFO of composer text plus attachment count and
+drops exactly one matching rollout echo. A later submission, even with the same
+text, creates its own FIFO entry and remains a distinct turn.
+
 `task_complete` and `turn_aborted` are the exception among the `event_msg`
 records: they say the turn ended, and they draw nothing. The `Stop` and
 `Interrupt` hooks say the same thing with the same reply, moments apart, and

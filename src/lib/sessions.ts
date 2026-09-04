@@ -83,6 +83,7 @@ export function getSessionStore() {
 }
 
 let booted = false;
+const workspaceRefreshVersions = new Map<string, number>();
 export async function bootSessions() {
   if (booted) return;
   booted = true;
@@ -94,6 +95,7 @@ export async function bootSessions() {
   try {
     await listen<SessionEntry>("session_created", (e) => upsertSession(e.payload));
     await listen<SessionEntry>("session_updated", (e) => upsertSession(e.payload));
+    await listen<string>("workspaces_changed", (e) => void refreshWorkspaces(e.payload));
   } catch {
     /* outside a webview */
   }
@@ -212,14 +214,20 @@ export function clearNewSessionPreset() {
 }
 
 export async function refreshWorkspaces(projectPath: string) {
+  const version = (workspaceRefreshVersions.get(projectPath) ?? 0) + 1;
+  workspaceRefreshVersions.set(projectPath, version);
   set({ workspacesLoading: { ...state.workspacesLoading, [projectPath]: true } });
   try {
     const list = await api.listWorkspaces(projectPath);
-    set({ workspaces: { ...state.workspaces, [projectPath]: list } });
+    if (workspaceRefreshVersions.get(projectPath) === version) {
+      set({ workspaces: { ...state.workspaces, [projectPath]: list } });
+    }
   } catch {
     /* not a repo, or gone; keep whatever was known */
   } finally {
-    set({ workspacesLoading: { ...state.workspacesLoading, [projectPath]: false } });
+    if (workspaceRefreshVersions.get(projectPath) === version) {
+      set({ workspacesLoading: { ...state.workspacesLoading, [projectPath]: false } });
+    }
   }
 }
 

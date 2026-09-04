@@ -25,10 +25,16 @@ import type { TabEntry } from "@/types/session";
 import { WorkspaceNameEditor } from "./WorkspaceNameEditor";
 import { workspaceName } from "@/lib/dashboard";
 
+function managedWorkspaceFor(session: SessionEntry) {
+  if (!session.worktreeName || session.worktreeRemoved) return undefined;
+  return { projectPath: session.projectPath, name: session.worktreeName };
+}
+
 /** The right panel reads the active tab's log for the changes range. */
 function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
   const log = useTabLog(session.id, tab.id);
   const live = tab.status === "in_progress" || tab.status === "waiting";
+  const workspace = managedWorkspaceFor(session);
   return (
     <RightPanel
       cwd={session.cwd}
@@ -40,7 +46,8 @@ function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
       sessionId={session.id}
       mentionTabId={session.activeTab ?? session.tabs[0]?.id ?? null}
       statusKey={session.tabs.map((item) => item.status).join(",")}
-      settleSessionId={session.worktreeName && !session.worktreeRemoved ? session.id : undefined}
+      settleSessionId={workspace ? session.id : undefined}
+      workspace={workspace}
     />
   );
 }
@@ -68,6 +75,7 @@ export function SessionView({
   const workspaceLabel = session.worktreeRemoved ? workspaceName(session) : session.branch;
   const workspaceTitle = session.removedWorkspace?.path ?? session.cwd;
   const [renameError, setRenameError] = useState<string | null>(null);
+  const workspace = managedWorkspaceFor(session);
   useHotkey("mod+shift+t", () => {
     if (activeTab) void toggleTabView(session, activeTab);
   });
@@ -244,6 +252,8 @@ export function SessionView({
             sessionId={session.id}
             statusKey={statusKey}
             rootName={project?.name ?? "project"}
+            settleSessionId={workspace ? session.id : undefined}
+            workspace={workspace}
           />
         ))}
       <QuickOpen sessionId={session.id} root={session.cwd} />
