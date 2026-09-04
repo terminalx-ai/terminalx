@@ -17,7 +17,8 @@ use crate::store::projects::{self, Project};
 
 const APP_UNAVAILABLE_RECOVERY: &str =
     "Open TerminalX with the same RACCOON_HOME, then retry status once.";
-const LINEAR_INTEGRATION_RECOVERY: &str = "Add an API key in TerminalX Settings → Integrations.";
+const LINEAR_INTEGRATION_RECOVERY: &str =
+    "Add an API key in TerminalX Settings → Integrations.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -528,9 +529,12 @@ impl ControlService {
                 let _ = self.manager.stop(&session.id, &tab.id);
             }
         }
-        let entries =
-            crate::commands::delete_workspace_entries(&project.path, &worktree.path, false)
-                .map_err(ControlError::internal)?;
+        let entries = crate::commands::delete_workspace_entries(
+            &project.path,
+            &worktree.path,
+            false,
+        )
+        .map_err(ControlError::internal)?;
         crate::commands::notify_workspace_deleted(&self.app, &project.path, &entries);
         let moved: Vec<_> = entries.into_iter().map(|entry| entry.id).collect();
         Ok(json!({"deleted": worktree.path, "project": project.path, "movedSessions": moved}))
