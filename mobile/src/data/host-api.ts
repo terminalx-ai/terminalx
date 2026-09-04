@@ -19,6 +19,7 @@ export interface SessionSummary {
 export interface ChatNote { id: string; body: string; createdAt: number; author: { userId: string; displayName?: string } }
 export type PostNoteResult = { sent: true; note: ChatNote } | { sent: false; message: string };
 export type PromoteNoteResult = { sent: true; queued: boolean } | { sent: false; message: string };
+export interface AttachmentInput { mediaType: string; data: string; name?: string }
 
 export class HostApi {
   private readonly clientId = `mobile-${Crypto.randomUUID()}`;
@@ -61,11 +62,27 @@ export class HostApi {
     return { sent: false, message: "The host did not add this note." };
   }
 
-  async promoteNote(sessionId: string, tabId: string, noteId: string): Promise<PromoteNoteResult> {
-    const result = await this.connection.request<{ status?: unknown; queued?: unknown }>("chat.promoteToAgent", { worktreeId: sessionId, tabId, messageIds: [noteId] });
+  async promoteNote(sessionId: string, tabId: string, noteId: string, attachments: AttachmentInput[] = []): Promise<PromoteNoteResult> {
+    const result = await this.connection.request<{ status?: unknown; queued?: unknown }>("chat.promoteToAgent", {
+      worktreeId: sessionId,
+      tabId,
+      messageIds: [noteId],
+      ...(attachments.length ? { attachments } : {}),
+    });
     if (!result.ok) return { sent: false, message: result.refusal.message };
     if (result.value.status === "sent" && typeof result.value.queued === "boolean") return { sent: true, queued: result.value.queued };
     return { sent: false, message: "The host did not send this note to the agent." };
+  }
+
+  async sendSession(tabId: string, text: string, attachments: AttachmentInput[] = []): Promise<PromoteNoteResult> {
+    const result = await this.connection.request<{ status?: unknown; queued?: unknown }>("session.send", {
+      tabId,
+      text,
+      ...(attachments.length ? { attachments } : {}),
+    });
+    if (!result.ok) return { sent: false, message: result.refusal.message };
+    if (result.value.status === "sent" && typeof result.value.queued === "boolean") return { sent: true, queued: result.value.queued };
+    return { sent: false, message: "The host did not send this message to the agent." };
   }
 
   async respondPermission(sessionId: string, tabId: string, requestId: string, optionId: string): Promise<{ answered: true } | { answered: false; message: string }> {

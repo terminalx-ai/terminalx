@@ -27,6 +27,8 @@ use crate::{store, summaries, AppState};
 const NOTES_LIMIT: usize = 1_000;
 const NOTE_BYTES_LIMIT: usize = 16 * 1024;
 const INPUT_BYTES_LIMIT: usize = 64 * 1024;
+const ATTACHMENT_BYTES_LIMIT: usize = 5 * 1024 * 1024;
+const ATTACHMENT_COUNT_LIMIT: usize = 8;
 const NOTIFICATION_LIMIT: usize = 512;
 const TAIL_EVENT_LIMIT: usize = 5_000;
 
@@ -542,14 +544,25 @@ struct UnsubscribeParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteAttachmentInput {
+    media_type: String,
+    data: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SessionSendParams {
     tab_id: String,
     text: String,
+    #[serde(default)]
+    attachments: Vec<RemoteAttachmentInput>,
 }
 
 fn send_session(manager: &PairingManager, device: &DeviceEntry, params: SessionSendParams) -> Result<Value> {
     let (session, _) = find_tab(&params.tab_id)?;
-    send_attributed(manager, device, &session.id, &params.tab_id, &params.text)
+    send_attributed(manager, device, &session.id, &params.tab_id, &params.text, params.attachments)
 }
 
 #[derive(Deserialize)]
@@ -660,6 +673,8 @@ struct ChatPromoteParams {
     worktree_id: String,
     tab_id: String,
     message_ids: Vec<String>,
+    #[serde(default)]
+    attachments: Vec<RemoteAttachmentInput>,
 }
 
 fn promote_notes(manager: &PairingManager, device: &DeviceEntry, params: ChatPromoteParams) -> Result<Value> {
@@ -681,7 +696,7 @@ fn promote_notes(manager: &PairingManager, device: &DeviceEntry, params: ChatPro
         text.push(note.body.clone());
     }
     drop(_guard);
-    send_attributed(manager, device, &params.worktree_id, &params.tab_id, &text.join("\n\n"))
+    send_attributed(manager, device, &params.worktree_id, &params.tab_id, &text.join("\n\n"), params.attachments)
 }
 
 fn send_attributed(
@@ -690,25 +705,94 @@ fn send_attributed(
     session_id: &str,
     tab_id: &str,
     text: &str,
+    attachments: Vec<RemoteAttachmentInput>,
 ) -> Result<Value> {
     validate_session_tab(session_id, tab_id)?;
-    let text = validate_note(text)?;
+    let text = text.trim();
+    if text.is_empty() && attachments.is_empty() {
+        bail!("message must contain text or an attachment");
+    }
+    if !text.is_empty() {
+        validate_note(text)?;
+    }
     let author = effective_user(device)?;
+    let (images, paths) = prepare_attachments(session_id, attachments)?;
+    let mut prompt = text.to_string();
+    for path in paths {
+        if !prompt.is_empty() {
+            prompt.push(' ');
+        }
+        prompt.push('@');
+        prompt.push_str(&path);
+    }
     let envelope = json!({
         "userId": author.user_id,
         "displayName": author.display_name,
         "authority": "host",
     });
-    let attributed = format!("[TerminalX Effective User v1] {envelope}\n{text}");
+    let attributed = format!("[TerminalX Effective User v1] {envelope}\n{prompt}");
     let session_manager = app_state(manager)?.manager().context("session manager is unavailable")?;
     let outcome = session_manager.send_with_display_text(
         session_id,
         tab_id,
         attributed,
-        text,
-        Vec::new(),
+        text.to_string(),
+        images,
     )?;
     Ok(json!({ "status": "sent", "queued": outcome.queued }))
+}
+
+fn prepare_attachments(session_id: &str, attachments: Vec<RemoteAttachmentInput>) -> Result<(Vec<crate::session::ImageInput>, Vec<String>)> {
+    let decoded = validate_attachment_payloads(&attachments)?;
+    let mut images = Vec::new();
+    let mut paths = Vec::new();
+    for (attachment, bytes) in attachments.into_iter().zip(decoded) {
+        if matches!(attachment.media_type.as_str(), "image/png" | "image/jpeg" | "image/gif" | "image/webp") {
+            images.push(crate::session::ImageInput { media_type: attachment.media_type, data: attachment.data, name: attachment.name });
+            continue;
+        }
+        let name = safe_attachment_name(attachment.name.as_deref());
+        let path = store::attachments_dir(session_id)?.join(format!("{}-{name}", Uuid::now_v7()));
+        std::fs::write(&path, bytes)?;
+        paths.push(path.to_string_lossy().into_owned());
+    }
+    Ok((images, paths))
+}
+
+fn validate_attachment_payloads(attachments: &[RemoteAttachmentInput]) -> Result<Vec<Vec<u8>>> {
+    if attachments.len() > ATTACHMENT_COUNT_LIMIT {
+        bail!("a message may contain at most {ATTACHMENT_COUNT_LIMIT} attachments");
+    }
+    let mut total = 0usize;
+    let mut decoded = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        if attachment.media_type.is_empty() || attachment.media_type.len() > 127 || !attachment.media_type.is_ascii() {
+            bail!("invalid attachment type");
+        }
+        if attachment.name.as_ref().is_some_and(|name| name.len() > 255) {
+            bail!("attachment name is too long");
+        }
+        let bytes = general_purpose::STANDARD
+            .decode(&attachment.data)
+            .context("attachment is not valid base64")?;
+        total = total.checked_add(bytes.len()).context("attachment size overflow")?;
+        if total > ATTACHMENT_BYTES_LIMIT {
+            bail!("attachments may total at most 5 MB");
+        }
+        decoded.push(bytes);
+    }
+    Ok(decoded)
+}
+
+fn safe_attachment_name(name: Option<&str>) -> String {
+    let name = name
+        .and_then(|name| Path::new(name).file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("attachment");
+    name.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') { ch } else { '_' })
+        .collect()
 }
 
 fn validate_note(body: &str) -> Result<String> {
@@ -1096,5 +1180,49 @@ mod tests {
     fn account_pairing_still_requires_its_bound_account() {
         assert!(effective_user_from_mirror(&device(DeviceProvenance::Automatic, Some("user-1")), None).is_err());
         assert!(effective_user_from_mirror(&device(DeviceProvenance::Automatic, Some("other-user")), Some(account())).is_err());
+    }
+
+    #[test]
+    fn session_send_attachments_are_optional_for_old_clients() {
+        let old: SessionSendParams = serde_json::from_value(json!({
+            "tabId": "tab",
+            "text": "hello",
+        }))
+        .unwrap();
+        assert!(old.attachments.is_empty());
+
+        let with_attachment: SessionSendParams = serde_json::from_value(json!({
+            "tabId": "tab",
+            "text": "hello",
+            "attachments": [{
+                "mediaType": "image/png",
+                "data": general_purpose::STANDARD.encode([1, 2, 3]),
+                "name": "proof.png",
+            }],
+        }))
+        .unwrap();
+        assert_eq!(with_attachment.attachments.len(), 1);
+        assert!(validate_attachment_payloads(&with_attachment.attachments).is_ok());
+    }
+
+    #[test]
+    fn remote_attachments_are_type_count_and_size_bounded() {
+        let attachment = |media_type: &str, data: String| RemoteAttachmentInput {
+            media_type: media_type.into(),
+            data,
+            name: Some("image.png".into()),
+        };
+        assert!(validate_attachment_payloads(&[attachment("application/pdf", general_purpose::STANDARD.encode([1]))]).is_ok());
+        assert!(validate_attachment_payloads(&[attachment("", general_purpose::STANDARD.encode([1]))]).is_err());
+        let too_many = (0..=ATTACHMENT_COUNT_LIMIT)
+            .map(|_| attachment("image/png", general_purpose::STANDARD.encode([1])))
+            .collect::<Vec<_>>();
+        assert!(validate_attachment_payloads(&too_many).is_err());
+        assert!(validate_attachment_payloads(&[attachment(
+            "image/png",
+            general_purpose::STANDARD.encode(vec![0; ATTACHMENT_BYTES_LIMIT + 1]),
+        )])
+        .is_err());
+        assert_eq!(safe_attachment_name(Some("../../design brief.pdf")), "design_brief.pdf");
     }
 }

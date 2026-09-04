@@ -82,6 +82,7 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
       } catch (e) {
         setError(errorMessage(e));
         setDraft(tab.id, getDraft(tab.id) || text);
+        throw e;
       }
     },
     [session.id, tab.id],

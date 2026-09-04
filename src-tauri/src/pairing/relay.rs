@@ -7,7 +7,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::{
-    client::IntoClientRequest, http::HeaderValue, protocol::WebSocketConfig, Message,
+    client::IntoClientRequest, http::HeaderValue, Message,
 };
 
 use crate::account::AccountContext;
@@ -15,7 +15,7 @@ use crate::account::AccountContext;
 use super::cloud::{self, RelayAssignment};
 use super::crypto::{answer_relay_challenge, HostKeypair, RelayProofContext};
 use super::model::RelayPairingOffer;
-use super::PairingManager;
+use super::{pairing_websocket_config, PairingManager};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const SILENCE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -414,7 +414,7 @@ async fn open_control(
         CONNECT_TIMEOUT,
         tokio_tungstenite::connect_async_with_config(
             request,
-            Some(relay_websocket_config()),
+            Some(pairing_websocket_config()),
             false,
         ),
     )
@@ -771,7 +771,7 @@ pub(super) async fn open_data_socket(
         attach_timeout,
         tokio_tungstenite::connect_async_with_config(
             request,
-            Some(relay_websocket_config()),
+            Some(pairing_websocket_config()),
             false,
         ),
     )
@@ -807,15 +807,6 @@ fn websocket_url(origin: &str, path: &str) -> Result<String> {
     url.set_query(None);
     url.set_fragment(None);
     Ok(url.into())
-}
-
-fn relay_websocket_config() -> WebSocketConfig {
-    WebSocketConfig::default()
-        .read_buffer_size(64 * 1024)
-        .write_buffer_size(64 * 1024)
-        .max_write_buffer_size(512 * 1024)
-        .max_message_size(Some(64 * 1024))
-        .max_frame_size(Some(64 * 1024))
 }
 
 fn now_ms() -> i64 {

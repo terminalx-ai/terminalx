@@ -736,7 +736,7 @@ impl PairingManager {
                     let result = async {
                         let socket = tokio_tungstenite::accept_async_with_config(
                             stream,
-                            Some(e2ee_websocket_config()),
+                            Some(pairing_websocket_config()),
                         )
                         .await?;
                         manager
@@ -1273,13 +1273,16 @@ fn interface_rank(name: &str, address: std::net::Ipv4Addr) -> u8 {
     }
 }
 
-fn e2ee_websocket_config() -> WebSocketConfig {
+pub(super) fn pairing_websocket_config() -> WebSocketConfig {
     WebSocketConfig::default()
         .read_buffer_size(64 * 1024)
         .write_buffer_size(64 * 1024)
-        .max_write_buffer_size(512 * 1024)
-        .max_message_size(Some(64 * 1024))
-        .max_frame_size(Some(64 * 1024))
+        // A 5 MB image is base64 encoded in JSON, then the encrypted frame is
+        // base64 encoded for the text websocket. Keep the authenticated
+        // pairing channel bounded while leaving room for that expansion.
+        .max_write_buffer_size(10 * 1024 * 1024)
+        .max_message_size(Some(10 * 1024 * 1024))
+        .max_frame_size(Some(10 * 1024 * 1024))
 }
 
 fn text_frame_bytes(message: Message) -> Result<Vec<u8>> {
