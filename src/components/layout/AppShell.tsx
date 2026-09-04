@@ -252,6 +252,7 @@ function UnselectedWorkspace({
           workingTree
           rootName={project.name}
           labelMode={labelMode}
+          workspace={workspace?.managed && !workspace.isMain ? { projectPath: project.path, name: workspace.name } : undefined}
         />
       )}
     </>

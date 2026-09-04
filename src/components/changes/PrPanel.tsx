@@ -10,7 +10,24 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
-import type { WorkStatus } from "@/types/session";
+import type { WorkspaceDisposition, WorkStatus } from "@/types/session";
+
+type WorkspaceCleanup = {
+  projectPath: string;
+  onDelete: () => void;
+};
+
+/** Only a confirmed merged PR with no local-only work is a safe cleanup shortcut. */
+export function canDeleteMergedWorkspace(disposition: WorkspaceDisposition | null): boolean {
+  return !!(
+    disposition?.exists &&
+    !disposition.isMain &&
+    disposition.uncommitted === 0 &&
+    disposition.unpushed === 0 &&
+    disposition.prChecked &&
+    disposition.pr?.state === "MERGED"
+  );
+}
 
 /** Readiness in one fixed order: state, then conflicts, then checks. */
 export function mergeReadiness(pr: PullRequest): { ok: boolean; label: string } {
@@ -32,6 +49,7 @@ export function PrPanel({
   active,
   busy,
   onSettle,
+  workspace,
 }: {
   cwd: string;
   branch: string | null;
@@ -39,10 +57,13 @@ export function PrPanel({
   busy: boolean;
   /** Offered when a PR from this branch has merged and a worktree remains. */
   onSettle?: () => void;
+  /** A managed workspace that can use the guarded workspace cleanup flow. */
+  workspace?: WorkspaceCleanup;
 }) {
   const [available, setAvailable] = useState<boolean | null>(null);
   const [prs, setPrs] = useState<PullRequest[]>([]);
   const [status, setStatus] = useState<WorkStatus | null>(null);
+  const [checkedWorkspace, setCheckedWorkspace] = useState<{ key: string; disposition: WorkspaceDisposition } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -51,6 +72,7 @@ export function PrPanel({
   const [draft, setDraft] = useState(false);
   const [working, setWorking] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
+  const workspaceKey = workspace ? `${workspace.projectPath}\0${cwd}\0${branch ?? ""}` : null;
 
   useEffect(() => {
     gh.available().then(setAvailable).catch(() => setAvailable(false));
@@ -60,19 +82,28 @@ export function PrPanel({
     if (!active || !branch || !available) return;
     let cancelled = false;
     setLoading(true);
-    Promise.all([gh.list(cwd, branch), api.workStatus(cwd)])
-      .then(([p, s]) => {
+    setCheckedWorkspace(null);
+    const dispositionRequest = workspace && workspaceKey
+      ? api.workspaceDisposition(workspace.projectPath, cwd).then((disposition) => ({ key: workspaceKey, disposition }))
+      : Promise.resolve(null);
+    Promise.all([gh.list(cwd, branch), api.workStatus(cwd), dispositionRequest])
+      .then(([pullRequests, workStatus, workspaceCheck]) => {
         if (cancelled) return;
-        setPrs(p);
-        setStatus(s);
+        setPrs(pullRequests);
+        setStatus(workStatus);
+        setCheckedWorkspace(workspaceCheck);
         setError(null);
       })
-      .catch((e) => !cancelled && setError(errorMessage(e)))
+      .catch((e) => {
+        if (cancelled) return;
+        setCheckedWorkspace(null);
+        setError(errorMessage(e));
+      })
       .finally(() => !cancelled && setLoading(false));
     return () => {
       cancelled = true;
     };
-  }, [cwd, branch, active, available, tick, busy]);
+  }, [cwd, branch, active, available, tick, busy, workspaceKey]);
 
   // Poll while something is in flight.
   useEffect(() => {
@@ -105,17 +136,25 @@ export function PrPanel({
 
   const open = prs.filter((p) => p.state === "OPEN");
   const canCreate = open.length === 0 && status && status.defaultBranch && status.branch !== status.defaultBranch;
+  const merged = prs.some((p) => p.state === "MERGED") && open.length === 0;
+  const canDelete = !!workspaceKey && checkedWorkspace?.key === workspaceKey && canDeleteMergedWorkspace(checkedWorkspace.disposition);
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-y-auto scrollbar-thin">
       {error && <div className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
-      {onSettle && prs.some((p) => p.state === "MERGED") && !prs.some((p) => p.state === "OPEN") && (
+      {(workspace || onSettle) && merged && (
         <div className="mx-3 mt-2 flex items-center gap-2 rounded-md bg-merged/10 px-2 py-1.5 text-xs">
           <GitMerge className="size-3.5 shrink-0 text-merged" />
           <span className="flex-1 text-foreground">This branch has been merged.</span>
-          <Button size="xs" variant="outline" onClick={onSettle}>
-            Settle worktree
-          </Button>
+          {canDelete ? (
+            <Button size="xs" variant="outline" onClick={workspace?.onDelete}>
+              Delete workspace
+            </Button>
+          ) : onSettle ? (
+            <Button size="xs" variant="outline" onClick={onSettle}>
+              Settle worktree
+            </Button>
+          ) : null}
         </div>
       )}
       {loading && prs.length === 0 && <div className="px-3 py-3 text-xs text-faint">Loading…</div>}
