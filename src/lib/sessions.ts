@@ -105,6 +105,7 @@ export async function bootSessions() {
   try {
     await listen<SessionEntry>("session_created", (e) => upsertSession(e.payload));
     await listen<SessionEntry>("session_updated", (e) => upsertSession(e.payload));
+    await listen<string>("session_deleted", (e) => removeSessions([e.payload]));
     await listen<string>("workspaces_changed", (e) => void refreshWorkspaces(e.payload));
   } catch {
     /* outside a webview */
@@ -126,6 +127,17 @@ export function upsertSession(s: SessionEntry) {
   const known = state.workspaces[s.projectPath] ?? [];
   const stale = !s.worktreeRemoved && !known.some((w) => w.path === s.cwd);
   if (stale && !state.workspacesLoading[s.projectPath]) void refreshWorkspaces(s.projectPath);
+}
+
+/** Forget sessions the backend has deleted, dropping the selection if it was one of them. */
+export function removeSessions(ids: string[]) {
+  const gone = new Set(ids);
+  const selectedGone = !!state.selectedSessionId && gone.has(state.selectedSessionId);
+  if (!selectedGone && !state.sessions.some((s) => gone.has(s.id))) return;
+  set({
+    sessions: state.sessions.filter((s) => !gone.has(s.id)),
+    selectedSessionId: selectedGone ? null : state.selectedSessionId,
+  });
 }
 
 export function patchSession(id: string, patch: Partial<SessionEntry>) {
@@ -275,12 +287,13 @@ export async function setProjectLogo(path: string, source: string | null) {
   return p;
 }
 
+/** Delete a workspace; the sessions that ran in it are removed with it. */
 export async function deleteWorkspace(projectPath: string, path: string, deleteBranch: boolean) {
-  const moved = await api.deleteWorkspace(projectPath, path, deleteBranch);
+  const removed = await api.deleteWorkspace(projectPath, path, deleteBranch);
   if (state.newSessionPreset?.projectPath === projectPath && state.newSessionPreset.cwd === path) {
     set({ newSessionPreset: { projectPath, cwd: projectPath } });
   }
-  for (const s of moved) upsertSession(s);
+  removeSessions(removed.map((s) => s.id));
   await refreshWorkspaces(projectPath);
 }
 
@@ -343,10 +356,8 @@ export async function renameSession(id: string, title: string) {
 
 export async function deleteSession(id: string, removeWorktree: boolean) {
   await api.deleteSession(id, removeWorktree);
-  set({
-    sessions: state.sessions.filter((s) => s.id !== id),
-    selectedSessionId: state.selectedSessionId === id ? null : state.selectedSessionId,
-  });
+  // Siblings taken along with a removed worktree arrive as session_deleted events.
+  removeSessions([id]);
 }
 
 export async function settleSession(id: string, action: "delete" | "relocate") {

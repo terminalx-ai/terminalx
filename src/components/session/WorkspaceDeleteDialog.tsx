@@ -13,7 +13,8 @@ import type { WorkspaceDisposition } from "@/types/session";
  * Deleting a workspace checks three things first: uncommitted files,
  * commits no remote has, and the pull request its branch is on. A merged
  * PR over a clean tree is the happy case and says so; anything else is
- * spelled out before the destructive button.
+ * spelled out before the destructive button. The sessions that ran in the
+ * workspace go with it, transcripts included, so their count is shown too.
  */
 export function WorkspaceDeleteDialog() {
   const { workspaceDelete } = useDialogs();
@@ -70,7 +71,7 @@ export function WorkspaceDeleteDialog() {
                 on <span className="font-mono text-foreground">{disp.branch}</span>
               </>
             )}
-            . Sessions that ran here keep their transcripts and remain identified with this removed workspace.
+            . Every session that ran here is stopped and removed, along with its transcripts.
           </DialogDescription>
         </DialogHeader>
 
@@ -82,6 +83,7 @@ export function WorkspaceDeleteDialog() {
           )}
           {disp && (
             <>
+              <SessionsRow count={disp.sessions} />
               <Row ok={disp.uncommitted === 0} text={disp.uncommitted === 0 ? "No uncommitted changes." : `${disp.uncommitted} file${disp.uncommitted === 1 ? "" : "s"} with uncommitted changes.`} />
               <Row ok={disp.unpushed === 0} text={disp.unpushed === 0 ? "Every commit is pushed." : `${disp.unpushed} commit${disp.unpushed === 1 ? "" : "s"} not pushed anywhere.`} />
               {pr ? (
@@ -127,6 +129,17 @@ export function WorkspaceDeleteDialog() {
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** How many sessions the deletion takes with it. Not a warning: it is what was asked for. */
+function SessionsRow({ count }: { count: number }) {
+  const text = count === 0 ? "No sessions ran here." : `${count} session${count === 1 ? "" : "s"} and ${count === 1 ? "its" : "their"} transcripts will be removed.`;
+  return (
+    <div className="flex items-start gap-2">
+      <Trash2 className={`mt-0.5 size-3.5 shrink-0 ${count === 0 ? "text-faint" : "text-muted-foreground"}`} />
+      <span>{text}</span>
+    </div>
   );
 }
 

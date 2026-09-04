@@ -84,24 +84,41 @@ beforeEach(async () => {
 });
 
 describe("worktree deletion events", () => {
-  it("relocates attached sessions, preserves transcript identity, and removes the cached workspace", async () => {
+  it("forgets sessions the backend deleted with their worktree and removes the cached workspace", async () => {
     expect(sessions.getSessionStore().workspaces[projectPath]).toEqual([main, worktree]);
+    sessions.selectSession(attached.id);
 
-    const relocated = { ...attached, cwd: projectPath, worktreeName: null, worktreeRemoved: true };
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "list_workspaces") return [main];
       if (command === "list_harnesses") return [];
       throw new Error(`Unexpected command: ${command}`);
     });
 
-    mocks.listeners.get("session_updated")?.({ payload: relocated });
+    mocks.listeners.get("session_deleted")?.({ payload: attached.id });
     mocks.listeners.get("workspaces_changed")?.({ payload: projectPath });
     await vi.waitFor(() => expect(sessions.getSessionStore().workspaces[projectPath]).toEqual([main]));
 
-    const stored = sessions.getSessionStore().sessions.find((session) => session.id === attached.id);
-    expect(stored?.cwd).toBe(projectPath);
-    expect(stored?.tabs).toEqual(attached.tabs);
-    expect(stored?.activeTab).toBe(attached.activeTab);
+    expect(sessions.getSessionStore().sessions).toEqual([]);
+    expect(sessions.getSessionStore().selectedSessionId).toBeNull();
+  });
+
+  it("removes the sessions a workspace deletion returns and keeps the rest", async () => {
+    const other: SessionEntry = { ...attached, id: "session-main", cwd: projectPath, worktreeName: null, branch: "main", title: "On main" };
+    sessions.upsertSession(other);
+    sessions.selectSession(other.id);
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "delete_workspace") return [attached];
+      if (command === "list_workspaces") return [main];
+      if (command === "list_harnesses") return [];
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    await sessions.deleteWorkspace(projectPath, worktreePath, true);
+
+    expect(mocks.invoke).toHaveBeenCalledWith("delete_workspace", { projectPath, path: worktreePath, deleteBranch: true });
+    expect(sessions.getSessionStore().sessions.map((session) => session.id)).toEqual([other.id]);
+    expect(sessions.getSessionStore().selectedSessionId).toBe(other.id);
+    expect(sessions.getSessionStore().workspaces[projectPath]).toEqual([main]);
   });
 
   it("removes the cached workspace when no session was attached", async () => {

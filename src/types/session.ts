@@ -106,6 +106,8 @@ export interface WorkspaceDisposition {
   aheadOfBase?: number | null;
   pr?: WorkspacePr | null;
   prChecked: boolean;
+  /** Sessions that ran here; deleting the workspace removes them and their transcripts. */
+  sessions: number;
 }
 
 export interface Capabilities {
