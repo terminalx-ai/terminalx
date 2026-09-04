@@ -58,6 +58,88 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("composer height", () => {
+  // jsdom performs no layout, so scrollHeight is what the test says it is —
+  // 0 stands in for a textarea inside a display: none tab panel.
+  let scrollHeight = 0;
+  const observers: ResizeObserverCallback[] = [];
+  class CapturingResizeObserver {
+    constructor(callback: ResizeObserverCallback) {
+      observers.push(callback);
+    }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+  const layOut = () => observers.forEach((notify) => notify([], {} as ResizeObserver));
+
+  beforeEach(() => {
+    scrollHeight = 0;
+    observers.length = 0;
+    vi.stubGlobal("ResizeObserver", CapturingResizeObserver);
+    vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(() => scrollHeight);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("keeps the intrinsic height when measured while hidden", () => {
+    const { container } = render(<TestComposer onSend={vi.fn()} />);
+    const textarea = container.querySelector("textarea")!;
+
+    expect(textarea.style.height).toBe("");
+    expect(textarea.rows).toBe(1);
+  });
+
+  it("fits the content once the textarea is laid out", async () => {
+    const { container } = render(<TestComposer onSend={vi.fn()} />);
+    const textarea = container.querySelector("textarea")!;
+
+    scrollHeight = 52;
+    layOut();
+
+    await waitFor(() => expect(textarea.style.height).toBe("52px"));
+  });
+
+  it("does not shrink a fitted textarea back to nothing when hidden again", async () => {
+    const { container } = render(<TestComposer onSend={vi.fn()} />);
+    const textarea = container.querySelector("textarea")!;
+    scrollHeight = 52;
+    layOut();
+    await waitFor(() => expect(textarea.style.height).toBe("52px"));
+
+    scrollHeight = 0;
+    fireEvent.change(textarea, { target: { value: "still hidden" } });
+
+    expect(textarea.style.height).toBe("52px");
+  });
+
+  it("measures again once the web fonts settle", async () => {
+    let fontsSettled!: () => void;
+    Object.defineProperty(document, "fonts", { configurable: true, value: { ready: new Promise<void>((resolve) => (fontsSettled = resolve)) } });
+    scrollHeight = 40;
+    const { container } = render(<TestComposer onSend={vi.fn()} />);
+    const textarea = container.querySelector("textarea")!;
+    expect(textarea.style.height).toBe("40px");
+
+    scrollHeight = 46;
+    fontsSettled();
+
+    await waitFor(() => expect(textarea.style.height).toBe("46px"));
+  });
+
+  it("caps the height at ten lines", () => {
+    const { container } = render(<TestComposer onSend={vi.fn()} />);
+    const textarea = container.querySelector("textarea")!;
+
+    scrollHeight = 900;
+    fireEvent.change(textarea, { target: { value: "a".repeat(2_000) } });
+
+    expect(textarea.style.height).toBe("240px");
+  });
+});
+
 describe("composer attachments", () => {
   it("selects files from the attach icon", async () => {
     openDialog.mockResolvedValue(["/tmp/proof.png"]);
