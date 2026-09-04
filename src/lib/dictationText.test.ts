@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { anchorAt, applyFinal, applyPartial, draftWithSpeech, EMPTY_BUFFER, joinSpoken, repeats, revises, type DictationAnchor, type DictationBuffer } from "@/lib/dictationText";
+import { anchorAt, applyFinal, applyPartial, draftWithSpeech, EMPTY_BUFFER, joinSpoken, revises, type DictationAnchor, type DictationBuffer } from "@/lib/dictationText";
 
 /** A recogniser event, as the store hands it over. */
 type Event = { partial: string; at?: number; segment?: number } | { final: string; segment?: number };
@@ -124,14 +124,29 @@ describe("a dictated draft", () => {
     const first = applyPartial(EMPTY_BUFFER, "Alpha beta gamma", { segment: 7 });
     expect(applyPartial(first, "Delta", { segment: 8, sincePreviousMs: 0 })).toEqual({ committed: "Alpha beta gamma", live: "Delta", segment: 8 });
     expect(applyPartial(first, "Alpha starts again", { segment: 8, sincePreviousMs: 10 })).toEqual({ committed: "Alpha beta gamma", live: "Alpha starts again", segment: 8 });
-    // A word-for-word continuation is the old utterance carried on, whatever its identity.
-    expect(applyPartial(first, "Alpha beta gamma again", { segment: 8, sincePreviousMs: 5_000 })).toEqual({ committed: "", live: "Alpha beta gamma again", segment: 8 });
+    // Even one that opens with every old word: the recogniser's identity is final.
+    expect(applyPartial(first, "Alpha beta gamma again", { segment: 8, sincePreviousMs: 5_000 })).toEqual({
+      committed: "Alpha beta gamma",
+      live: "Alpha beta gamma again",
+      segment: 8,
+    });
   });
 
-  it("revises inside one utterance by the words and the timing", () => {
+  it("keeps a one-word utterance when the next one opens with the same word", () => {
+    const okay = applyPartial(EMPTY_BUFFER, "Okay", { segment: 0 });
+    const again = applyPartial(okay, "Okay", { segment: 1 });
+    expect(again).toEqual({ committed: "Okay", live: "Okay", segment: 1 });
+    expect(applyPartial(again, "Okay now fix it", { segment: 1 })).toEqual({ committed: "Okay", live: "Okay now fix it", segment: 1 });
+  });
+
+  it("revises inside one utterance by the words alone, however late", () => {
     const first = applyPartial(EMPTY_BUFFER, "Alpha beta gamma", { segment: 7 });
     expect(applyPartial(first, "Alpha beta, gamma delta", { segment: 7, sincePreviousMs: 200 })).toEqual({ committed: "", live: "Alpha beta, gamma delta", segment: 7 });
     expect(applyPartial(first, "Alpha bitter gamma", { segment: 7, sincePreviousMs: 200 })).toEqual({ committed: "", live: "Alpha bitter gamma", segment: 7 });
+    // The settled form comes a couple of seconds later and can correct the first word.
+    expect(applyPartial(first, "Alfa beta gamma", { segment: 7, sincePreviousMs: 1_800 })).toEqual({ committed: "", live: "Alfa beta gamma", segment: 7 });
+    const short = applyPartial(EMPTY_BUFFER, "Shipped", { segment: 0 });
+    expect(applyPartial(short, "Ship", { segment: 0, sincePreviousMs: 1_800 })).toEqual({ committed: "", live: "Ship", segment: 0 });
     // Nothing in common is a new phrase, not a rewrite, even under the same identity.
     expect(applyPartial(first, "Entirely different", { segment: 7, sincePreviousMs: 200 })).toEqual({ committed: "Alpha beta gamma", live: "Entirely different", segment: 7 });
   });
@@ -154,13 +169,26 @@ describe("a dictated draft", () => {
     });
   });
 
-  it("does not repeat a settled utterance that comes back under a fresh identity", () => {
-    const first = applyPartial(EMPTY_BUFFER, "Green lighthouse beam shine bright brightly beyond the quiet Harbour", { segment: 0 });
-    expect(applyPartial(first, "Green lighthouse beam shine brightly beyond the quiet Harbour", { segment: 1 })).toEqual({
-      committed: "",
-      live: "Green lighthouse beam shine brightly beyond the quiet Harbour",
-      segment: 1,
-    });
+  it("ignores a late correction of an utterance it has already moved past", () => {
+    const first = applyPartial(EMPTY_BUFFER, "Fix the build, please", { segment: 0 });
+    const second = applyPartial(first, "Then", { segment: 1 });
+    expect(applyPartial(second, "Fix the build please.", { segment: 0 })).toBe(second);
+    expect(applyFinal(second, "Fix the build please.", { segment: 0 })).toBe(second);
+    expect(applyPartial(second, "Then run", { segment: 1 })).toEqual({ committed: "Fix the build, please", live: "Then run", segment: 1 });
+  });
+
+  it("carries on after an early final restarts recognition", () => {
+    // Apple can end its task with a final mid-dictation; Rust starts a new
+    // request and identities keep counting up.
+    const events: Event[] = [
+      { partial: "Fix the build", segment: 0 },
+      { final: "Fix the build.", segment: 0 },
+      { partial: "Then", segment: 1 },
+      { partial: "Then run the tests", segment: 1 },
+      { partial: "Then run the tests", segment: 1 },
+      { partial: "And ship it", segment: 2 },
+    ];
+    expect(end("", events)).toEqual({ text: "Fix the build. Then run the tests And ship it", caret: 45 });
   });
 
   it("grows with cumulative partials rather than repeating them", () => {
@@ -215,13 +243,6 @@ describe("a dictated draft", () => {
   it("keeps a phrase that shares only common words with the last one", () => {
     const first = applyPartial(EMPTY_BUFFER, "run the tests", { segment: 0 });
     expect(applyPartial(first, "run the build", { segment: 1 })).toEqual({ committed: "run the tests", live: "run the build", segment: 1 });
-  });
-
-  it("keeps the last utterance when the next one opens with the same word", () => {
-    const first = applyPartial(EMPTY_BUFFER, "Then run the test for it", { segment: 1 });
-    const second = applyPartial(first, "Then", { segment: 2 });
-    expect(second).toEqual({ committed: "Then run the test for it", live: "Then", segment: 2 });
-    expect(applyPartial(second, "Then ship it", { segment: 2 })).toEqual({ committed: "Then run the test for it", live: "Then ship it", segment: 2 });
   });
 
   it("inserts a whole dictation at a caret in the middle", () => {
@@ -332,24 +353,5 @@ describe("the stream observed from Apple", () => {
       expect(end("Draft:", [...events, { final: "", segment: 1 }]).text).toBe(heard);
       expect(heard.startsWith("Draft: I need a settings page")).toBe(true);
     }
-  });
-});
-
-describe("repeats", () => {
-  it("takes the same words, a word-for-word extension and a light correction as a repeat", () => {
-    expect(repeats("Ship it tomorrow", "Ship it tomorrow")).toBe(true);
-    expect(repeats("Then run", "Then run the tests")).toBe(true);
-    expect(repeats("Green lighthouse beam shine bright brightly", "Green lighthouse beam shine brightly")).toBe(true);
-  });
-
-  it("does not take a new phrase that shares an opening or common words as a repeat", () => {
-    expect(repeats("I need a settings page", "I also need unit tests")).toBe(false);
-    expect(repeats("run the tests", "run the build")).toBe(false);
-    expect(repeats("Fix the build, please", "Then")).toBe(false);
-  });
-
-  it("does not take the first word of a new utterance as a repeat of the last one", () => {
-    expect(repeats("Then run the test for it", "Then")).toBe(false);
-    expect(repeats("I need a settings page", "I")).toBe(false);
   });
 });

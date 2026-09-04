@@ -16,7 +16,8 @@
  * belongs to a new one, the old `live` is folded into `committed` first, so
  * nothing is dropped. Whether two results are the same utterance is the
  * recogniser's call where it says (see `DictationResult.segment`), and a
- * guess from the words and the timing where it does not.
+ * guess from the words and the timing where it does not; inside one
+ * utterance only the words say whether a result is a rewrite of the last.
  *
  * Everything here is pure: the same results always make the same draft.
  */
@@ -106,6 +107,15 @@ export interface DictationResult {
 
 const SHORT_PARTIAL_WORDS = 3;
 const SEGMENT_PAUSE_MS = 1_500;
+/** The share of the old words that must survive a rewrite for it to be a revision. */
+const REVISION_SURVIVAL = 1 / 2;
+
+/** How many words `a` and `b` open with in common. */
+function sharedPrefixLength(a: string[], b: string[]): number {
+  let shared = 0;
+  while (shared < a.length && shared < b.length && a[shared] === b[shared]) shared += 1;
+  return shared;
+}
 
 /**
  * Whether `next` is the recogniser thinking again about `prev` rather than
@@ -115,53 +125,47 @@ const SEGMENT_PAUSE_MS = 1_500;
  * result allowances stop applying, so a new phrase after a pause is folded.
  */
 export function revises(prev: string, next: string, sincePreviousMs?: number): boolean {
-  const a = words(prev);
-  const b = words(next);
-  if (a.length === 0) return true;
-  let shared = 0;
-  while (shared < a.length && shared < b.length && a[shared] === b[shared]) shared += 1;
-  // One is a word-for-word prefix of the other: plainly the same segment.
-  if (shared === a.length || shared === b.length) return true;
   const recent = sincePreviousMs != null && Number.isFinite(sincePreviousMs) && sincePreviousMs >= 0 && sincePreviousMs < SEGMENT_PAUSE_MS;
-  // With no pause, a short guess or a stable leading word is much likelier to
-  // be a correction than a new utterance. A long enough gap restores the old
-  // text-only distinction for engines that cannot identify their segments.
-  if (recent && (a.length < SHORT_PARTIAL_WORDS || a[0] === b[0])) return true;
-  // Inserted or removed guesses can move the matching tail out of prefix
-  // position. If at least half the old words survived, it is still a rewrite.
-  return survivingWordCount(a, b) * 2 >= a.length;
+  return rewrites(prev, next, recent);
 }
 
-/**
- * Whether `next` is `prev` said again — the same words, or nearly — rather
- * than a phrase of its own. Stricter than `revises`: `next` carries every old
- * word on word for word, or opens the same way with most of the old words
- * surviving. A `next` that is only the start of `prev` is not a repeat: a new
- * utterance's first guess is one word, and often the same one as last time.
- */
-export function repeats(prev: string, next: string): boolean {
+function rewrites(prev: string, next: string, recent: boolean): boolean {
   const a = words(prev);
   const b = words(next);
   if (a.length === 0) return true;
-  let shared = 0;
-  while (shared < a.length && shared < b.length && a[shared] === b[shared]) shared += 1;
-  if (shared === a.length) return true;
-  return a[0] === b[0] && survivingWordCount(a, b) * 4 >= a.length * 3;
+  const shared = sharedPrefixLength(a, b);
+  // One is a word-for-word prefix of the other: plainly the same utterance.
+  if (shared === a.length || shared === b.length) return true;
+  // With no pause, a short guess or a stable leading word is much likelier to
+  // be a correction than a new utterance. A long enough gap restores the old
+  // text-only distinction for engines that cannot identify their utterances.
+  if (recent && (a.length < SHORT_PARTIAL_WORDS || a[0] === b[0])) return true;
+  // Inserted or removed guesses can move the matching tail out of prefix
+  // position. If enough of the old words survived, it is still a rewrite.
+  return survivingWordCount(a, b) >= a.length * REVISION_SURVIVAL;
 }
 
 function isRevision(buffer: DictationBuffer, next: string, result: DictationResult): boolean {
-  if (buffer.segment != null && result.segment != null && buffer.segment !== result.segment) {
-    // The recogniser has moved on to a new utterance, whose text stands alone;
-    // what it said before is kept as well. Only the old utterance said again
-    // is taken as a revision — its settled form can come back under a fresh
-    // identity, and a hesitation short enough to be absorbed continues it.
-    return repeats(buffer.live, next);
+  if (buffer.segment != null && result.segment != null) {
+    // The recogniser's word is final: a changed identity is a new utterance,
+    // whose text stands alone, and what it said before is kept as well.
+    if (result.segment !== buffer.segment) return false;
+    // The same utterance. Its settled form arrives a couple of seconds after
+    // the last partial and can correct any word of it, so the gap between
+    // results must not tighten the test. The words alone still decide, since
+    // a phrase that shares nothing with the live one is not a rewrite of it.
+    return rewrites(buffer.live, next, true);
   }
-  // The same utterance, or an engine that cannot tell. Apple can revise a
-  // whole short guess inside one utterance, so the words and the timing
-  // decide; but a phrase that shares nothing with the live one is a new
-  // utterance however soon it arrived, since results can land in a burst.
   return revises(buffer.live, next, result.sincePreviousMs);
+}
+
+/**
+ * A result about an utterance the recogniser has already moved past: it has
+ * been committed as it stood, and folding a late correction in would repeat
+ * it after the words that followed. Identities only ever count up.
+ */
+function outOfOrder(buffer: DictationBuffer, result: DictationResult): boolean {
+  return buffer.segment != null && result.segment != null && result.segment < buffer.segment;
 }
 
 function withLive(committed: string, live: string, segment: number | undefined): DictationBuffer {
@@ -171,7 +175,7 @@ function withLive(committed: string, live: string, segment: number | undefined):
 /** Take a partial result. Blank ones say nothing and change nothing. */
 export function applyPartial(buffer: DictationBuffer, partial: string, result: DictationResult = {}): DictationBuffer {
   const next = partial.trim();
-  if (!next) return buffer;
+  if (!next || outOfOrder(buffer, result)) return buffer;
   if (isRevision(buffer, next, result)) return withLive(buffer.committed, next, result.segment);
   return withLive(joinSpoken(buffer.committed, buffer.live), next, result.segment);
 }
@@ -182,6 +186,7 @@ export function applyPartial(buffer: DictationBuffer, partial: string, result: D
  * own is kept as well, so a phrase is never lost to a dedupe.
  */
 export function applyFinal(buffer: DictationBuffer, final: string, result: DictationResult = {}): DictationBuffer {
+  if (outOfOrder(buffer, result)) return buffer;
   const text = final.trim();
   if (!text) return { committed: spokenText(buffer), live: "" };
   if (isRevision(buffer, text, result)) return { committed: joinSpoken(buffer.committed, text), live: "" };

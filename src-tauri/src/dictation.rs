@@ -201,21 +201,27 @@ mod mac {
                 return None;
             };
             let placeholder = end <= 0.0;
-            let index = match (self.live, placeholder) {
-                (Some(live), _) => live,
-                (None, true) => self.fresh(),
-                (None, false) => match self.settled {
-                    Some(settled) if start + SEGMENT_TIMESTAMP_TOLERANCE < settled.end => settled.index,
-                    _ => self.fresh(),
-                },
+            // Real timestamps inside the last settled range are that utterance
+            // corrected again, whether or not a newer one is open.
+            let corrects_settled = !placeholder && self.settled.is_some_and(|settled| start + SEGMENT_TIMESTAMP_TOLERANCE < settled.end);
+            let index = match (self.live, corrects_settled) {
+                (_, true) => self.settled.map(|settled| settled.index).unwrap_or_else(|| self.fresh()),
+                (Some(live), false) => live,
+                (None, false) => self.fresh(),
             };
-            if placeholder && !is_final {
+            if is_final {
+                self.live = None;
+            } else if placeholder {
                 self.live = Some(index);
-            } else {
+            } else if self.live == Some(index) {
                 self.live = None;
             }
             if !placeholder {
-                self.settled = Some(SettledSegment { index, end: self.settled.filter(|s| s.index == index).map_or(end, |s| s.end.max(end)) });
+                let settled_end = match self.settled {
+                    Some(settled) if settled.index == index => settled.end.max(end),
+                    _ => end,
+                };
+                self.settled = Some(SettledSegment { index, end: settled_end });
             }
             Some(index)
         }
@@ -1144,6 +1150,19 @@ mod mac {
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
             assert_eq!(segments.observe(Some((0.20, 1.40)), false), Some(0));
             assert_eq!(segments.observe(Some((0.18, 1.45)), false), Some(0));
+        }
+
+        #[test]
+        fn a_settled_utterance_corrected_again_keeps_its_identity_while_the_next_is_open() {
+            let mut segments = AppleSegmentTracker::default();
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
+            assert_eq!(segments.observe(Some((0.0, 1.26)), false), Some(0));
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(1));
+            assert_eq!(segments.observe(Some((0.0, 1.30)), false), Some(0));
+            // The open utterance is still open, and still the same one.
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(1));
+            assert_eq!(segments.observe(Some((3.12, 4.23)), false), Some(1));
+            assert_eq!(segments.observe(PLACEHOLDER, false), Some(2));
         }
 
         #[test]
