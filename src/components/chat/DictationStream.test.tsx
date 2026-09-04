@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
  * the reader spoke may go missing from the draft.
  */
 
-let deliver: (payload: { kind: string; text?: string }) => void = () => {};
+let deliver: (payload: { kind: string; text?: string; segment?: number }) => void = () => {};
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async (cmd: string) => {
@@ -28,6 +28,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 const { useDictationInto, NEW_SESSION_TARGET } = await import("./Dictation");
+const { getDraft, setDraft, useDraft } = await import("@/lib/drafts");
 
 /** Apple, within one utterance: every partial revises the one before it. */
 const SENTENCE_ONE = [
@@ -65,11 +66,25 @@ function Field({ initial = "", hold = false }: { initial?: string; hold?: boolea
   );
 }
 
+/** The session composer's wiring: the draft lives in the per-tab store. */
+function TabField({ tabId }: { tabId: string }) {
+  const text = useDraft(tabId);
+  const ref = useRef<HTMLTextAreaElement>(null);
+  const change = useCallback((v: string) => setDraft(tabId, v), [tabId]);
+  const dictation = useDictationInto(tabId, text, change, ref);
+  return (
+    <>
+      <textarea ref={ref} autoFocus value={text} onChange={(e) => change(e.target.value)} />
+      <button onClick={dictation.toggle}>mic</button>
+    </>
+  );
+}
+
 const box = () => screen.getByRole("textbox") as HTMLTextAreaElement;
 const mic = () => screen.getAllByRole("button")[0];
 const flush = () => screen.getAllByRole("button")[1];
 
-const send = async (...events: { kind: string; text?: string }[]) => {
+const send = async (...events: { kind: string; text?: string; segment?: number }[]) => {
   await act(async () => {
     for (const e of events) deliver(e);
   });
@@ -203,5 +218,103 @@ describe("when the plumbing misbehaves", () => {
     for (const partial of SENTENCE_TWO) await send({ kind: "partial", text: partial });
     await send({ kind: "final", text: SENTENCE_TWO[3] });
     expect(box().value).toBe(BOTH);
+  });
+});
+
+/**
+ * Apple's on-device recogniser on macOS 26.3.1, as observed: every partial has
+ * placeholder timestamps, an utterance comes back settled with real ones about
+ * two seconds after the speaker stops, and the next utterance stands alone.
+ * The identities are what `dictation.rs` derives for that stream. Results
+ * can land in one tick, so nothing here relies on the time between them.
+ */
+const OBSERVED = [
+  { kind: "partial", text: "Fix", segment: 0 },
+  { kind: "partial", text: "Fix the build", segment: 0 },
+  { kind: "partial", text: "Fix the build, please", segment: 0 },
+  // Settled: the same words again, with real timestamps behind them.
+  { kind: "partial", text: "Fix the build, please", segment: 0 },
+  // The pause. The next utterance stands alone.
+  { kind: "partial", text: "Then", segment: 1 },
+  { kind: "partial", text: "Then run the test for it", segment: 1 },
+  { kind: "partial", text: "Then run the test for it", segment: 1 },
+  // Another pause, then a phrase that shares its opening with the last one.
+  { kind: "partial", text: "Then", segment: 2 },
+  { kind: "partial", text: "Then shipped it", segment: 2 },
+  { kind: "partial", text: "Then ship it", segment: 2 },
+];
+const OBSERVED_TEXT = "Fix the build, please Then run the test for it Then ship it";
+const AFTER_FIRST_PAUSE = "Fix the build, please Then";
+
+describe("the utterances Apple hands over across pauses", () => {
+  it("appends the utterance after the pause instead of replacing the phrase before it", async () => {
+    await open();
+    await send(...OBSERVED.slice(0, 4));
+    expect(box().value).toBe("Fix the build, please");
+    await send(OBSERVED[4]);
+    expect(box().value).toBe(AFTER_FIRST_PAUSE);
+    await send(...OBSERVED.slice(5));
+    expect(box().value).toBe(OBSERVED_TEXT);
+  });
+
+  it("keeps the text typed before the mic opened in front of every utterance", async () => {
+    await open(<Field initial="Notes:" />);
+    await send(...OBSERVED);
+    expect(box().value).toBe(`Notes: ${OBSERVED_TEXT}`);
+  });
+
+  it("does the same in a session composer, whose draft lives in the tab store", async () => {
+    setDraft("tab-7", "Notes:");
+    render(<TabField tabId="tab-7" />);
+    await act(async () => {});
+    await click(mic());
+    await send({ kind: "listening" }, ...OBSERVED);
+    expect(box().value).toBe(`Notes: ${OBSERVED_TEXT}`);
+    expect(getDraft("tab-7")).toBe(`Notes: ${OBSERVED_TEXT}`);
+  });
+
+  it("keeps both halves of a draft split at the caret across every pause", async () => {
+    render(<Field initial="Before after" />);
+    await act(async () => {});
+    box().focus();
+    box().setSelectionRange(6, 6); // "Before| after"
+    fireEvent.mouseUp(box());
+    await click(mic());
+    await send({ kind: "listening" }, ...OBSERVED);
+    expect(box().value).toBe(`Before ${OBSERVED_TEXT} after`);
+    expect(box().selectionStart).toBe(7 + OBSERVED_TEXT.length);
+  });
+
+  it("replaces a selection with every utterance rather than the last one", async () => {
+    render(<Field initial="Keep this, drop that and keep this too" />);
+    await act(async () => {});
+    box().focus();
+    box().setSelectionRange(11, 20); // "drop that"
+    fireEvent.mouseUp(box());
+    await click(mic());
+    await send({ kind: "listening" }, ...OBSERVED);
+    expect(box().value).toBe(`Keep this, ${OBSERVED_TEXT} and keep this too`);
+  });
+
+  it.each([
+    ["before the pause", 4],
+    ["as the next utterance begins", 5],
+    ["after the second utterance", 7],
+    ["after the third", OBSERVED.length],
+  ])("keeps the whole draft when dictation stops %s", async (_when, cut) => {
+    await open(<Field initial="Draft:" />);
+    await send(...OBSERVED.slice(0, cut));
+    const shown = box().value;
+    expect(shown.startsWith("Draft: Fix the build")).toBe(true);
+    // Stopping delivers an empty final, as observed, then the stop itself.
+    await click(mic());
+    await send({ kind: "final", text: "", segment: OBSERVED[cut - 1].segment }, { kind: "stopped" });
+    expect(box().value).toBe(shown);
+  });
+
+  it("keeps every utterance when the whole stream lands in one tick", async () => {
+    await open(<Field initial="Notes:" />);
+    await send(...OBSERVED, { kind: "final", text: "", segment: 2 }, { kind: "stopped" });
+    expect(box().value).toBe(`Notes: ${OBSERVED_TEXT}`);
   });
 });

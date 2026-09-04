@@ -1,5 +1,14 @@
 # TerminalX changelog
 
+## Unreleased
+
+- Dictation keeps what was said before a pause. Apple's recogniser starts a
+  new utterance whose text stands alone after a pause, and the composer took
+  that for a revision of the phrase before it whenever it arrived within a
+  moment — which, after a cold start, everything does. Utterances are now told
+  apart by when the recogniser settles them, so speech after a pause is
+  appended after the earlier words rather than in their place. (#72)
+
 ## 0.2.0
 
 TerminalX gets a phone, a command palette, automations, and an honest view
