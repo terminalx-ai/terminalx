@@ -6,13 +6,14 @@ import { Segmented, Switch } from "@/components/ui/controls";
 import { IssueListItem } from "@/components/issues/IssueListItem";
 import { automationsApi, errorMessage, issues as issuesApi, type Issue } from "@/lib/api";
 import { createAutomation, updateAutomation } from "@/lib/automations";
-import { EFFORT_LABEL, PERMISSION_MODES, useModels } from "@/lib/models";
+import { BYPASS_MODE, DEFAULT_AUTOMATION_MODE, EFFORT_LABEL, PERMISSION_MODES, bypassEffect, useModels } from "@/lib/models";
 import { usePrefs } from "@/lib/prefs";
 import { useSessionStore } from "@/lib/sessions";
 import type { Automation, AutomationInput, AutomationIssueReport, AutomationIssueTrigger, AutomationSchedule, AutomationWorkspace, ScheduleKind, SchedulePreset } from "@/types/automations";
 
 const INPUT = "h-8 w-full rounded-md bg-well px-2.5 text-[13px] outline-none ring-offset-background focus:ring-2 focus:ring-ring/30";
 const LABEL = "flex flex-col gap-1.5 text-xs font-medium";
+const WARNING_NOTE = "col-span-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground";
 
 function localTimezone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -47,7 +48,13 @@ function defaultIssueTrigger(repo = "", query = "label:raccoon state:open"): Aut
   };
 }
 
-function initialInput(automation: Automation | null, projectPath: string, harness: string, model: string, mode: string, prefill?: AutomationEditorPrefill): AutomationInput {
+/**
+ * The editor's starting state. An existing automation is copied field for
+ * field, so a saved permission mode survives every edit untouched. A new one
+ * starts in DEFAULT_AUTOMATION_MODE whichever entry point opened the editor;
+ * the interactive-session preference is deliberately not consulted.
+ */
+function initialInput(automation: Automation | null, projectPath: string, harness: string, model: string, prefill?: AutomationEditorPrefill): AutomationInput {
   if (automation) {
     return {
       name: automation.name,
@@ -76,7 +83,7 @@ function initialInput(automation: Automation | null, projectPath: string, harnes
     harness,
     model,
     effort: null,
-    mode,
+    mode: DEFAULT_AUTOMATION_MODE,
     prompt: prefill
       ? "Work on GitHub issue #{{number}}: {{title}}\n\n{{body}}\n\nLabels: {{labels}}\nIssue: {{url}}\n\nImplement the requested change and summarise what changed."
       : "",
@@ -123,7 +130,7 @@ export function AutomationEditor({
   const defaultModel = firstHarness
     ? (prefs.lastModel[firstHarness.id] ?? allModels.find((model) => model.harness === firstHarness.id && model.isDefault)?.id ?? "")
     : "";
-  const [input, setInput] = useState(() => initialInput(automation, firstProject?.path ?? "", firstHarness?.id ?? "", defaultModel, prefs.lastMode, prefill));
+  const [input, setInput] = useState(() => initialInput(automation, firstProject?.path ?? "", firstHarness?.id ?? "", defaultModel, prefill));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<Issue[]>([]);
@@ -132,10 +139,10 @@ export function AutomationEditor({
 
   useEffect(() => {
     if (open) {
-      setInput(initialInput(automation, firstProject?.path ?? "", firstHarness?.id ?? "", defaultModel, prefs.lastMode, prefill));
+      setInput(initialInput(automation, firstProject?.path ?? "", firstHarness?.id ?? "", defaultModel, prefill));
       setError(null);
     }
-  }, [open, automation, prefill, firstProject?.path, firstHarness?.id, defaultModel, prefs.lastMode]);
+  }, [open, automation, prefill, firstProject?.path, firstHarness?.id, defaultModel]);
 
   const models = useMemo(() => allModels.filter((model) => model.harness === input.harness), [allModels, input.harness]);
   const sessions = useMemo(
@@ -195,9 +202,11 @@ export function AutomationEditor({
     };
   }, [open, input.projectPath, input.issueTrigger?.repo, input.issueTrigger?.query]);
 
+  // Switching trigger only touches trigger-shaped fields. The permission mode
+  // is the reader's choice and is never reset here.
   const setTriggerKind = (kind: "schedule" | "issues") => {
     if (kind === "schedule") patch({ issueTrigger: null });
-    else patch({ issueTrigger: defaultIssueTrigger(), workspace: "newWorktree", sessionId: null, reuseSession: false, mode: "auto" });
+    else patch({ issueTrigger: defaultIssueTrigger(), workspace: "newWorktree", sessionId: null, reuseSession: false });
   };
 
   const setHarness = (harness: string) => {
@@ -310,6 +319,11 @@ export function AutomationEditor({
               {PERMISSION_MODES.map((mode) => <option key={mode.id} value={mode.id}>{mode.label}</option>)}
             </select>
           </label>
+          {input.mode === BYPASS_MODE && (
+            <div role="note" aria-label="Bypass permissions warning" className={WARNING_NOTE}>
+              <span className="font-medium text-foreground">Runs bypass permissions.</span> {bypassEffect(input.harness).effect} Unattended runs never pause for approval; pick another mode above if this automation should ask.
+            </div>
+          )}
 
           <div className="col-span-2 border-t border-hairline pt-3">
             <div className="mb-2 text-xs font-medium">Trigger</div>
@@ -339,8 +353,8 @@ export function AutomationEditor({
                 New runs per tick
                 <input type="number" min={1} max={50} value={input.issueTrigger.maxRunsPerTick} onChange={(event) => patchIssueTrigger({ maxRunsPerTick: Math.max(1, Number(event.target.value)) })} className={INPUT} />
               </label>
-              <div className="col-span-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
-                Issue titles and descriptions can be untrusted. Descriptions are quoted as context, and issue automations start in Auto permissions.
+              <div className={WARNING_NOTE}>
+                Issue titles and descriptions can be untrusted. Descriptions are quoted as context, not followed as instructions, and each run uses the Permissions mode chosen above.
               </div>
               <div className="col-span-2 rounded-lg bg-well p-2">
                 <div className="flex items-center justify-between px-1 pb-1.5 text-[11px] text-muted-foreground">

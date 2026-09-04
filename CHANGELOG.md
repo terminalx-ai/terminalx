@@ -22,6 +22,13 @@
 - Claude Code and Codex are the agents TerminalX offers; Cursor and
   OpenCode are no longer listed in the pickers or in Settings → Agents.
   Sessions and tabs already running on them open and work exactly as before.
+- New automations start in "Bypass permissions" whether they are created from
+  Automations or from an issue label, and no longer inherit the mode last used
+  for an interactive session. Switching the trigger between Schedule and
+  GitHub issues keeps whatever mode is selected, and editing, pausing,
+  re-enabling or running an automation never rewrites its saved mode. The
+  editor shows what bypassing means for the chosen agent whenever that mode
+  is selected; issue descriptions are still quoted as untrusted context.
 
 ## 0.1.0
 

@@ -40,8 +40,15 @@ vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonScene: () => null }));
 vi.mock("@/lib/dictation", () => ({ stopDictation: vi.fn() }));
 vi.mock("@/lib/hotkeys", () => ({ useHotkey: vi.fn() }));
 vi.mock("@/lib/models", () => ({
+  BYPASS_MODE: "bypassPermissions",
+  DEFAULT_AUTOMATION_MODE: "bypassPermissions",
   EFFORT_LABEL: {},
-  PERMISSION_MODES: [{ id: "auto", label: "Auto", hint: "" }],
+  PERMISSION_MODES: [
+    { id: "manual", label: "Ask every time", hint: "" },
+    { id: "auto", label: "Auto", hint: "" },
+    { id: "bypassPermissions", label: "Bypass permissions", hint: "" },
+  ],
+  bypassEffect: () => ({ flag: "--permission-mode bypassPermissions", effect: "Claude Code stops asking about anything." }),
   refreshModels: vi.fn(),
   upgradeHint: () => null,
   useModels: () => [],
@@ -257,5 +264,43 @@ describe("issue session targets", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
 
     await waitFor(() => expect(openAutomation).toHaveBeenCalledWith("automation-99"));
+  });
+
+  it("defaults an issue automation to Bypass permissions, not the interactive-session mode, and says so", async () => {
+    // The interactive preference is "auto" (see beforeEach); it must not leak in.
+    render(<IssuesView />);
+    const row = (await screen.findByText("Fix login timeout")).closest("button")!;
+    fireEvent.contextMenu(row);
+    fireEvent.click(await screen.findByText("Automate this label: raccoon…"));
+    await screen.findByRole("heading", { name: "New automation" });
+
+    const permissions = screen.getByRole("combobox", { name: "Permissions" }) as HTMLSelectElement;
+    expect(permissions.value).toBe("bypassPermissions");
+    const warning = screen.getByRole("note", { name: "Bypass permissions warning" });
+    expect(warning.textContent).toContain("Claude Code stops asking about anything.");
+    expect(screen.getByText(/Issue titles and descriptions can be untrusted/).textContent).toContain("quoted as context");
+    expect(screen.queryByText(/start in Auto permissions/)).toBeNull();
+
+    await screen.findByText("2 matching issues");
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+    await waitFor(() => expect(openAutomation).toHaveBeenCalledWith("automation-99"));
+    const [, args] = invoke.mock.calls.find(([command]) => command === "automation_create") as [string, { input: Record<string, unknown> }];
+    expect(args.input).toMatchObject({ mode: "bypassPermissions", issueTrigger: expect.objectContaining({ repo: "terminalx-ai/raccoon", query: "label:raccoon" }) });
+  });
+
+  it("saves a different mode chosen for an issue automation", async () => {
+    render(<IssuesView />);
+    const row = (await screen.findByText("Fix login timeout")).closest("button")!;
+    fireEvent.contextMenu(row);
+    fireEvent.click(await screen.findByText("Automate this label: raccoon…"));
+    await screen.findByRole("heading", { name: "New automation" });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Permissions" }), { target: { value: "manual" } });
+    expect(screen.queryByRole("note", { name: "Bypass permissions warning" })).toBeNull();
+    await screen.findByText("2 matching issues");
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+    await waitFor(() => expect(openAutomation).toHaveBeenCalledWith("automation-99"));
+    const [, args] = invoke.mock.calls.find(([command]) => command === "automation_create") as [string, { input: Record<string, unknown> }];
+    expect(args.input).toMatchObject({ mode: "manual" });
   });
 });

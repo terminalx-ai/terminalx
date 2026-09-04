@@ -1,10 +1,10 @@
 import "@testing-library/dom";
 import type { ReactNode } from "react";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Automation, AutomationRun } from "@/types/automations";
 
-const { automationStore, createAutomation, updateAutomation, selectSession, openUrl } = vi.hoisted(() => ({
+const { automationStore, createAutomation, updateAutomation, runAutomationNow, selectSession, openUrl } = vi.hoisted(() => ({
   automationStore: {
     loaded: true,
     automations: [] as Automation[],
@@ -14,6 +14,7 @@ const { automationStore, createAutomation, updateAutomation, selectSession, open
   },
   createAutomation: vi.fn(),
   updateAutomation: vi.fn(),
+  runAutomationNow: vi.fn(),
   selectSession: vi.fn(),
   openUrl: vi.fn(),
 }));
@@ -28,17 +29,27 @@ vi.mock("@/lib/automations", () => ({
   deleteAutomation: vi.fn(),
   loadAutomationRuns: vi.fn(async () => []),
   refreshAutomations: vi.fn(async () => undefined),
-  runAutomationNow: vi.fn(),
+  runAutomationNow,
   updateAutomation,
   useAutomationStore: () => automationStore,
 }));
 vi.mock("@/lib/models", () => ({
+  BYPASS_MODE: "bypassPermissions",
+  DEFAULT_AUTOMATION_MODE: "bypassPermissions",
   EFFORT_LABEL: {},
-  PERMISSION_MODES: [{ id: "auto", label: "Auto" }],
+  PERMISSION_MODES: [
+    { id: "manual", label: "Ask every time" },
+    { id: "auto", label: "Auto" },
+    { id: "bypassPermissions", label: "Bypass permissions" },
+  ],
+  bypassEffect: () => ({ flag: "--permission-mode bypassPermissions", effect: "Claude Code stops asking about anything." }),
   useModels: () => [{ id: "sonnet", label: "Sonnet", harness: "claude", isDefault: true, efforts: [], defaultEffort: null }],
 }));
+// The interactive-session preference is deliberately "auto" (and "manual" in
+// one test) so a leak from prefs.lastMode into a new automation is visible.
+const prefs = vi.hoisted(() => ({ lastProject: "/repo", lastAgent: "claude", lastModel: {} as Record<string, string>, lastMode: "auto" }));
 vi.mock("@/lib/prefs", () => ({
-  usePrefs: () => ({ lastProject: "/repo", lastAgent: "claude", lastModel: {}, lastMode: "auto" }),
+  usePrefs: () => prefs,
 }));
 vi.mock("@/lib/sessions", () => ({
   selectSession,
@@ -120,10 +131,13 @@ beforeEach(() => {
   ];
   automationStore.runs = { "automation-1": [run()] };
   automationStore.loadingRuns = {};
+  prefs.lastMode = "auto";
   selectSession.mockReset();
   openUrl.mockReset();
   createAutomation.mockReset();
   updateAutomation.mockReset();
+  runAutomationNow.mockReset();
+  runAutomationNow.mockImplementation(async (id: string) => run({ runId: "run-8", runNumber: 8, automationId: id, trigger: "manual", status: "running", endedAt: null }));
   createAutomation.mockImplementation(async (input) => {
     const saved = { ...automation("automation-3", input.name), ...input };
     automationStore.automations.push(saved);
@@ -234,5 +248,99 @@ describe("automation workspace navigation", () => {
 
     expect(await screen.findByRole("heading", { name: "Nightly repository audit" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Back to automations" })).toBeTruthy();
+  });
+});
+
+describe("automation permission mode", () => {
+  const permissions = () => screen.getByRole("combobox", { name: "Permissions" }) as HTMLSelectElement;
+  const trigger = (name: string) => screen.getByRole("radio", { name });
+  const bypassWarning = () => screen.queryByRole("note", { name: "Bypass permissions warning" });
+
+  it.each(["auto", "manual"])("defaults a new scheduled automation to Bypass permissions when the interactive-session mode is %s", async (lastMode) => {
+    prefs.lastMode = lastMode;
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: "New automation" }));
+    await screen.findByRole("heading", { name: "New automation" });
+
+    expect(permissions().value).toBe("bypassPermissions");
+    expect(bypassWarning()).toBeTruthy();
+    expect(bypassWarning()!.textContent).toContain("Claude Code stops asking about anything.");
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Nightly audit" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Prompt" }), { target: { value: "Run the nightly audit." } });
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+    await screen.findByRole("heading", { name: "Nightly audit" });
+    expect(createAutomation).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "bypassPermissions", issueTrigger: null }));
+  });
+
+  it("keeps the chosen mode when the trigger changes in either direction", async () => {
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: "New automation" }));
+    await screen.findByRole("heading", { name: "New automation" });
+
+    // The default survives the switch to GitHub issues (it used to reset to Auto).
+    fireEvent.click(trigger("GitHub issues"));
+    expect(permissions().value).toBe("bypassPermissions");
+    expect(bypassWarning()).toBeTruthy();
+    expect(screen.getByText(/Issue titles and descriptions can be untrusted/).textContent).toContain("each run uses the Permissions mode chosen above");
+    expect(screen.queryByText(/start in Auto permissions/)).toBeNull();
+
+    // An explicit choice survives too, both ways, and the warning follows the mode.
+    fireEvent.change(permissions(), { target: { value: "manual" } });
+    expect(bypassWarning()).toBeNull();
+    fireEvent.click(trigger("Schedule"));
+    expect(permissions().value).toBe("manual");
+    fireEvent.click(trigger("GitHub issues"));
+    expect(permissions().value).toBe("manual");
+    expect(bypassWarning()).toBeNull();
+
+    fireEvent.change(permissions(), { target: { value: "bypassPermissions" } });
+    expect(bypassWarning()).toBeTruthy();
+    fireEvent.click(trigger("Schedule"));
+    expect(permissions().value).toBe("bypassPermissions");
+  });
+
+  it("preserves an explicitly configured non-bypass mode through edit, disable, re-enable and Run now", async () => {
+    automationStore.automations[0] = { ...automationStore.automations[0], mode: "manual" };
+    const { rerender } = render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+
+    // Edit: the saved mode is shown, not the interactive default, and is saved back untouched.
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await screen.findByRole("heading", { name: "Edit automation" });
+    expect(permissions().value).toBe("manual");
+    expect(bypassWarning()).toBeNull();
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Dependency audit (manual)" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await screen.findByRole("heading", { name: "Dependency audit (manual)" });
+    expect(updateAutomation).toHaveBeenLastCalledWith("automation-1", expect.objectContaining({ mode: "manual" }));
+
+    // Disable, then re-enable: only `enabled` changes. The mocked store has no
+    // subscription, so the view is re-rendered by hand to pick up the saved state.
+    fireEvent.click(screen.getByRole("switch", { name: "Disable automation" }));
+    await waitFor(() => expect(updateAutomation).toHaveBeenLastCalledWith("automation-1", expect.objectContaining({ enabled: false, mode: "manual" })));
+    rerender(<AutomationsView />);
+    fireEvent.click(screen.getByRole("switch", { name: "Enable automation" }));
+    await waitFor(() => expect(updateAutomation).toHaveBeenLastCalledWith("automation-1", expect.objectContaining({ enabled: true, mode: "manual" })));
+
+    // Run now: the view only names the automation; the backend launches with its saved mode.
+    fireEvent.click(screen.getByRole("button", { name: "Run now" }));
+    await waitFor(() => expect(runAutomationNow).toHaveBeenCalledWith("automation-1"));
+    expect(automationStore.automations[0].mode).toBe("manual");
+  });
+
+  it("does not rewrite a saved Bypass mode on edit or re-enable either", async () => {
+    automationStore.automations[0] = { ...automationStore.automations[0], mode: "bypassPermissions", enabled: false };
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await screen.findByRole("heading", { name: "Edit automation" });
+    expect(permissions().value).toBe("bypassPermissions");
+    expect(bypassWarning()).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    fireEvent.click(screen.getByRole("switch", { name: "Enable automation" }));
+    await waitFor(() => expect(updateAutomation).toHaveBeenLastCalledWith("automation-1", expect.objectContaining({ enabled: true, mode: "bypassPermissions" })));
   });
 });

@@ -70,6 +70,15 @@ export function modelLabel(harness: string, id: string): string {
 
 export const BYPASS_MODE = "bypassPermissions";
 
+/**
+ * Every new automation starts in "Bypass permissions". Automations run
+ * unattended, so any mode that stops to ask would leave a run parked until
+ * someone notices. The default is deliberately independent of the mode the
+ * reader last used for an interactive session (`prefs.lastMode`): the two
+ * choices answer different questions and must not leak into each other.
+ */
+export const DEFAULT_AUTOMATION_MODE = BYPASS_MODE;
+
 export const PERMISSION_MODES: { id: string; label: string; hint: string }[] = [
   { id: "plan", label: "Plan", hint: "Read and plan only; no edits or commands." },
   { id: "manual", label: "Ask every time", hint: "Every edit and command waits for you." },
