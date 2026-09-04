@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { Plus, TerminalSquare } from "lucide-react";
 import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { closeEditor, useEditors } from "@/lib/editors";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
@@ -44,13 +44,10 @@ export function TabActions({ session, selected }: { session: SessionEntry; selec
   useHotkey("mod+shift+]", () => step(1));
   useHotkey("mod+shift+[", () => step(-1));
 
-  return <>
-    <WithTooltip label="New terminal">
-      <Button variant="ghost" size="icon-sm" aria-label="New terminal" onClick={() => void openTerminal(session.id, session.cwd)}><TerminalSquare /></Button>
-    </WithTooltip>
+  return (
     <DropdownMenu open={pickerOpen} onOpenChange={setPickerOpen}>
       <DropdownMenuTrigger asChild>
-        <span><WithTooltip label="New agent tab" keys={keycaps("mod+t")}><Button variant="ghost" size="icon-sm" aria-label="New agent tab"><Plus /></Button></WithTooltip></span>
+        <span><WithTooltip label="New tab" keys={keycaps("mod+t")}><Button variant="ghost" size="icon-sm" aria-label="New tab"><Plus /></Button></WithTooltip></span>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         <DropdownMenuLabel>New agent tab with</DropdownMenuLabel>
@@ -58,7 +55,11 @@ export function TabActions({ session, selected }: { session: SessionEntry; selec
           <AgentMark id={harness.id} decorative /><span>{harness.name}</span>
           {!harness.available ? <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span> : null}
         </DropdownMenuItem>)}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => void openTerminal(session.id, session.cwd)}>
+          <TerminalSquare /><span>Terminal</span>
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
-  </>;
+  );
 }
