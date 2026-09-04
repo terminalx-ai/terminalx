@@ -17,6 +17,18 @@ interface Row {
   depth: number;
 }
 
+interface FileTreeViewProps {
+  sessionId: string;
+  root: string;
+  rootName: string;
+  active: boolean;
+  /** Tab whose draft "Mention in composer" appends to. */
+  mentionTabId?: string | null;
+  /** Any string that changes when an agent's status does; bumps the git refresh. */
+  statusKey?: string;
+  refreshTick?: number;
+}
+
 const BADGE: Record<ChangeStatus, string> = { added: "A", modified: "M", deleted: "D", renamed: "R" };
 const TINT: Record<ChangeStatus, string> = {
   added: "text-add",
@@ -33,7 +45,11 @@ const TINT: Record<ChangeStatus, string> = {
  * rows the way an editor's explorer does, and a right click offers the
  * usual file actions.
  */
-export function FileTreeView({
+export function FileTreeView(props: FileTreeViewProps) {
+  return <RootedFileTreeView key={props.root} {...props} />;
+}
+
+function RootedFileTreeView({
   sessionId,
   root,
   rootName,
@@ -41,17 +57,7 @@ export function FileTreeView({
   mentionTabId,
   statusKey = "",
   refreshTick = 0,
-}: {
-  sessionId: string;
-  root: string;
-  rootName: string;
-  active: boolean;
-  /** Tab whose draft "Mention in composer" appends to. */
-  mentionTabId?: string | null;
-  /** Any string that changes when an agent's status does; bumps the git refresh. */
-  statusKey?: string;
-  refreshTick?: number;
-}) {
+}: FileTreeViewProps) {
   const [children, setChildren] = useState<Record<string, DirEntry[] | undefined>>({});
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set([""]));
   const [error, setError] = useState<string | null>(null);
