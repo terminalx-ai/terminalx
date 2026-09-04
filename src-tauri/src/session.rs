@@ -92,45 +92,84 @@ struct CliLaunch {
     transcript_root: PathBuf,
 }
 
-/// A composer prompt waiting for the CLI transcript to echo it. Codex adds
-/// `[Image #N]` labels to the echoed text, so attachment count is part of the
-/// identity even though the composer already published the archived images.
+/// A composer prompt waiting for the CLI transcript to echo it. Both CLIs
+/// add an `[Image #N]` label per pasted image to the echoed text, so the
+/// attachment count is part of the identity even though the composer already
+/// published the archived images. Codex writes the labels with a space before
+/// the text; Claude Code writes them with nothing in between.
 struct ComposerEcho {
     text: String,
     image_count: usize,
+    sent_at: Instant,
 }
 
-impl ComposerEcho {
-    fn matches(&self, echoed: &str) -> bool {
-        if self.text == echoed {
-            return true;
-        }
-        if self.image_count == 0 {
-            return false;
-        }
+/// How long a composer prompt waits for its echo before the next send drops
+/// it. Longer than the ready wait, so a slow start is not mistaken for a miss.
+const COMPOSER_ECHO_TTL: std::time::Duration = std::time::Duration::from_secs(120);
 
-        let labels = (1..=self.image_count).map(|n| format!("[Image #{n}]")).collect::<Vec<_>>().join(" ");
-        if self.text.is_empty() {
-            echoed == labels
-        } else {
-            echoed == format!("{labels} {}", self.text)
-        }
+impl ComposerEcho {
+    fn new(text: String, image_count: usize) -> Self {
+        Self { text, image_count, sent_at: Instant::now() }
+    }
+
+    fn matches(&self, echoed: &str) -> bool {
+        let (labels, rest) = strip_image_labels(echoed);
+        labels == self.image_count && rest.trim() == self.text.trim()
+    }
+
+    fn expired(&self, now: Instant) -> bool {
+        now.duration_since(self.sent_at) > COMPOSER_ECHO_TTL
     }
 }
 
+/// Peel the run of `[Image #1] [Image #2] …` labels off the front of an echoed
+/// prompt: how many there were, and the text after them. The labels have to be
+/// numbered in order from one; anything else is prose and stays put.
+fn strip_image_labels(mut text: &str) -> (usize, &str) {
+    let mut count = 0;
+    loop {
+        let candidate = text.trim_start();
+        let Some(after_open) = candidate.strip_prefix("[Image #") else { break };
+        let digits = after_open.len() - after_open.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        let Some(rest) = after_open[digits..].strip_prefix(']') else { break };
+        if after_open[..digits].parse::<usize>().ok() != Some(count + 1) {
+            break;
+        }
+        count += 1;
+        text = rest;
+    }
+    (count, text)
+}
+
 fn cli_composer_message(prompt: &PromptText, images: Vec<ImageRef>, baseline: Option<String>, queued: bool, cwd: &str) -> (Payload, Option<ComposerEcho>) {
-    let echo = (!queued).then(|| ComposerEcho { text: prompt.agent.clone(), image_count: images.len() });
+    let echo = (!queued).then(|| ComposerEcho::new(prompt.agent.clone(), images.len()));
     let payload = Payload::UserMessage { text: prompt.display.clone(), images, baseline, queued, cwd: Some(cwd.to_string()) };
     (payload, echo)
 }
 
+/// Whether `payload` is the transcript's copy of a prompt the composer already
+/// published. The transcript replays user messages in the order they were
+/// sent, so a match further back in the queue means the entries ahead of it
+/// were missed: they are dropped with it rather than left to shift every later
+/// comparison by one.
 fn consume_composer_echo(pending: &mut std::collections::VecDeque<ComposerEcho>, payload: &Payload) -> bool {
     let Payload::UserMessage { text, .. } = payload else { return false };
-    if !pending.front().is_some_and(|prompt| prompt.matches(text)) {
-        return false;
+    let Some(at) = pending.iter().position(|prompt| prompt.matches(text)) else { return false };
+    if at > 0 {
+        log::warn!("{at} composer prompt(s) never echoed by the transcript; dropping them");
     }
-    pending.pop_front();
+    pending.drain(..=at);
     true
+}
+
+/// Forget prompts that have waited past the TTL. A prompt the transcript never
+/// echoes would otherwise sit at the head of the queue for the life of the tab.
+fn expire_composer_echoes(pending: &mut std::collections::VecDeque<ComposerEcho>, now: Instant) {
+    let before = pending.len();
+    pending.retain(|prompt| !prompt.expired(now));
+    if pending.len() < before {
+        log::warn!("{} composer prompt(s) expired without an echo", before - pending.len());
+    }
 }
 
 /// A PTY-first tab: the CLI in a pane, its transcript being followed, and the
@@ -1434,6 +1473,7 @@ impl SessionManager {
         let paths: Vec<String> = images.iter().map(|i| i.url.clone()).collect();
         let (message, echo) = cli_composer_message(&prompt, images, baseline, queued, &entry.cwd);
         if let (Some(echo), Engine::Cli(p)) = (echo, &mut rt.engine) {
+            expire_composer_echoes(&mut p.echoed, Instant::now());
             p.echoed.push_back(echo);
             p.turn_tail.opened();
         }
@@ -1992,11 +2032,55 @@ mod tests {
 
     #[test]
     fn composer_echo_matching_is_strict_about_attachments() {
-        assert!(ComposerEcho { text: "plain".into(), image_count: 0 }.matches("plain"));
-        assert!(!ComposerEcho { text: "plain".into(), image_count: 0 }.matches("[Image #1] plain"));
-        assert!(ComposerEcho { text: "compare".into(), image_count: 2 }.matches("[Image #1] [Image #2] compare"));
-        assert!(!ComposerEcho { text: "compare".into(), image_count: 2 }.matches("[Image #1] compare"));
-        assert!(ComposerEcho { text: String::new(), image_count: 1 }.matches("[Image #1]"));
+        assert!(ComposerEcho::new("plain".into(), 0).matches("plain"));
+        assert!(!ComposerEcho::new("plain".into(), 0).matches("[Image #1] plain"));
+        assert!(ComposerEcho::new("compare".into(), 2).matches("[Image #1] [Image #2] compare"));
+        assert!(!ComposerEcho::new("compare".into(), 2).matches("[Image #1] compare"));
+        assert!(!ComposerEcho::new("compare".into(), 1).matches("[Image #1] [Image #2] compare"));
+        assert!(ComposerEcho::new(String::new(), 1).matches("[Image #1]"));
+    }
+
+    /// Claude Code writes the pasted-image labels straight into the prompt
+    /// with nothing between the last label and the text; Codex leaves a
+    /// space. The echo is the same prompt either way.
+    #[test]
+    fn composer_echo_matching_tolerates_claude_label_spacing() {
+        let echo = ComposerEcho::new("create another issue".into(), 3);
+        assert!(echo.matches("[Image #1] [Image #2] [Image #3]create another issue"));
+        assert!(echo.matches("[Image #1][Image #2][Image #3] create another issue"));
+        assert!(echo.matches("[Image #1] [Image #2] [Image #3] create another issue\n"));
+        assert!(!echo.matches("[Image #1] [Image #3] [Image #2]create another issue"));
+        assert!(!ComposerEcho::new("[Image #1] literal".into(), 0).matches("[Image #1] literal"));
+        assert_eq!(strip_image_labels("[Image #1] [Image #12]x"), (1, " [Image #12]x"));
+        assert_eq!(strip_image_labels("[Image #] x"), (0, "[Image #] x"));
+        assert_eq!(strip_image_labels("[Image #1 x"), (0, "[Image #1 x"));
+    }
+
+    /// One echo the transcript never produces must not shift every later
+    /// comparison by one: a match further back drains the misses ahead of it,
+    /// and the next send drops anything that has waited past the TTL.
+    #[test]
+    fn missed_composer_echo_does_not_poison_later_matches() {
+        let mut pending = std::collections::VecDeque::new();
+        pending.push_back(ComposerEcho::new("first".into(), 0));
+        pending.push_back(ComposerEcho::new("second".into(), 0));
+        let user = |text: &str| Payload::UserMessage { text: text.into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
+
+        assert!(!consume_composer_echo(&mut pending, &user("typed in the pane")));
+        assert_eq!(pending.len(), 2);
+        assert!(consume_composer_echo(&mut pending, &user("second")));
+        assert!(pending.is_empty(), "the missed echo ahead of the match is dropped with it");
+
+        // The clock is moved forward rather than a send-time backward: an
+        // `Instant` cannot go before the monotonic clock's origin, and a
+        // freshly booted runner may not have two minutes behind it.
+        let sent = Instant::now();
+        let later = sent + COMPOSER_ECHO_TTL + std::time::Duration::from_secs(1);
+        pending.push_back(ComposerEcho { text: "stale".into(), image_count: 0, sent_at: sent });
+        pending.push_back(ComposerEcho { text: "fresh".into(), image_count: 0, sent_at: later });
+        expire_composer_echoes(&mut pending, later);
+        assert_eq!(pending.len(), 1);
+        assert!(consume_composer_echo(&mut pending, &user("fresh")));
     }
 
     /// Two tab views mounting at once — React runs a mount effect twice in
