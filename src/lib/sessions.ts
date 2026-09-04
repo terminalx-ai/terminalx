@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { api } from "@/lib/api";
+import { setSelectedAgent } from "@/lib/terminal";
 import { buildPaletteIndex, type PaletteIndex } from "@/lib/commandPalette";
 import type {
   ProjectPatch,
@@ -365,12 +366,13 @@ export async function addTab(sessionId: string, harness: string, model: string, 
   const tab = await api.addTab(sessionId, { harness, model, effort, permissionMode });
   const s = state.sessions.find((x) => x.id === sessionId);
   if (s) patchSession(sessionId, { tabs: [...s.tabs, tab], activeTab: tab.id });
+  setSelectedAgent(sessionId, tab.id);
   return tab;
 }
 
 export async function removeTab(sessionId: string, tabId: string) {
   const s = state.sessions.find((x) => x.id === sessionId);
-  if (!s || s.tabs.length <= 1) return;
+  if (!s) return;
   await api.removeTab(sessionId, tabId);
   const tabs = s.tabs.filter((t) => t.id !== tabId);
   const idx = s.tabs.findIndex((t) => t.id === tabId);
@@ -379,6 +381,7 @@ export async function removeTab(sessionId: string, tabId: string) {
 }
 
 export async function setActiveTab(sessionId: string, tabId: string) {
+  setSelectedAgent(sessionId, tabId);
   patchSession(sessionId, { activeTab: tabId });
   if (state.selectedSessionId === sessionId) set({ navigationVersion: state.navigationVersion + 1 });
   await api.setActiveTab(sessionId, tabId);

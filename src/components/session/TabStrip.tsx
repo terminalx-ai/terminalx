@@ -1,82 +1,64 @@
-import { useCallback, useState } from "react";
-import { Plus } from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
+import { Plus, TerminalSquare } from "lucide-react";
 import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuTrigger,
-} from "@/components/ui/menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { closeEditor, useEditors } from "@/lib/editors";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { getPrefs } from "@/lib/prefs";
-import { addTab, removeTab, setActiveTab, useSessionStore } from "@/lib/sessions";
-import type { SessionEntry, TabEntry } from "@/types/session";
+import { activatePeer, closePeer, peerOrder } from "@/lib/sessionTabs";
+import { addTab, useSessionStore } from "@/lib/sessions";
+import { openTerminal, useTerminals, type SelectedSessionTab } from "@/lib/terminal";
+import type { SessionEntry } from "@/types/session";
 
-/**
- * Header-level tab actions and shortcuts. Tab destinations themselves live in
- * the sidebar tree; this compact action preserves the existing creation flow.
- */
-export function TabActions({ session, activeTab }: { session: SessionEntry; activeTab: TabEntry | undefined }) {
+/** Creation and mixed-tab shortcuts; all destinations live in the sidebar. */
+export function TabActions({ session, selected }: { session: SessionEntry; selected: SelectedSessionTab | null }) {
   const store = useSessionStore();
+  const { panes } = useTerminals();
+  const tabs = useMemo(() => peerOrder(session, panes), [session, panes]);
   const editors = useEditors();
   const hasEditors = editors.editors.some((editor) => editor.sessionId === session.id);
   const activeEditor = editors.active[session.id] ?? null;
   const [pickerOpen, setPickerOpen] = useState(false);
-  const tabs = session.tabs;
-
-  const step = useCallback(
-    (direction: 1 | -1) => {
-      if (tabs.length < 2 || !activeTab) return;
-      const index = tabs.findIndex((tab) => tab.id === activeTab.id);
-      const next = tabs[(index + direction + tabs.length) % tabs.length];
-      void setActiveTab(session.id, next.id);
-    },
-    [activeTab, session.id, tabs],
-  );
-
+  const step = useCallback((direction: 1 | -1) => {
+    if (tabs.length < 2) return;
+    const current = tabs.findIndex((tab) => tab.kind === selected?.kind && tab.id === selected.id);
+    const next = current < 0 ? (direction === 1 ? 0 : tabs.length - 1) : (current + direction + tabs.length) % tabs.length;
+    activatePeer(session.id, tabs[next]);
+  }, [selected, session.id, tabs]);
   const closeActive = useCallback(() => {
-    if (editors.lastFocused === "editor" && hasEditors && activeEditor) void closeEditor(activeEditor);
-    else if (activeTab && tabs.length > 1) void removeTab(session.id, activeTab.id);
-  }, [activeEditor, activeTab, editors.lastFocused, hasEditors, session.id, tabs.length]);
-
-  const add = useCallback(
-    async (harness: string) => {
-      const prefs = getPrefs();
-      await addTab(session.id, harness, prefs.lastModel[harness] ?? "", prefs.lastEffort[harness] ?? null, prefs.lastMode);
-    },
-    [session.id],
-  );
-
+    if (editors.lastFocused === "editor" && hasEditors && activeEditor) {
+      void closeEditor(activeEditor);
+      return;
+    }
+    const active = tabs.find((tab) => tab.kind === selected?.kind && tab.id === selected.id);
+    if (active) void closePeer(session.id, active, tabs, selected);
+  }, [activeEditor, editors.lastFocused, hasEditors, selected, session.id, tabs]);
+  const add = async (harness: string) => {
+    const prefs = getPrefs();
+    await addTab(session.id, harness, prefs.lastModel[harness] ?? "", prefs.lastEffort[harness] ?? null, prefs.lastMode);
+  };
   useHotkey("mod+t", () => setPickerOpen(true));
   useHotkey("mod+w", closeActive);
   useHotkey("mod+shift+]", () => step(1));
   useHotkey("mod+shift+[", () => step(-1));
 
-  return (
+  return <>
+    <WithTooltip label="New terminal">
+      <Button variant="ghost" size="icon-sm" aria-label="New terminal" onClick={() => void openTerminal(session.id, session.cwd)}><TerminalSquare /></Button>
+    </WithTooltip>
     <DropdownMenu open={pickerOpen} onOpenChange={setPickerOpen}>
       <DropdownMenuTrigger asChild>
-        <span>
-          <WithTooltip label="New agent tab" keys={keycaps("mod+t")}>
-            <Button variant="ghost" size="icon-sm" aria-label="New agent tab">
-              <Plus />
-            </Button>
-          </WithTooltip>
-        </span>
+        <span><WithTooltip label="New agent tab" keys={keycaps("mod+t")}><Button variant="ghost" size="icon-sm" aria-label="New agent tab"><Plus /></Button></WithTooltip></span>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuLabel>New tab with</DropdownMenuLabel>
-        {store.harnesses.map((harness) => (
-          <DropdownMenuItem key={harness.id} disabled={!harness.available} onSelect={() => void add(harness.id)}>
-            <AgentMark id={harness.id} />
-            <span>{harness.name}</span>
-            {!harness.available ? <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span> : null}
-          </DropdownMenuItem>
-        ))}
+        <DropdownMenuLabel>New agent tab with</DropdownMenuLabel>
+        {store.harnesses.map((harness) => <DropdownMenuItem key={harness.id} disabled={!harness.available} onSelect={() => void add(harness.id)}>
+          <AgentMark id={harness.id} /><span>{harness.name}</span>
+          {!harness.available ? <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span> : null}
+        </DropdownMenuItem>)}
       </DropdownMenuContent>
     </DropdownMenu>
-  );
+  </>;
 }

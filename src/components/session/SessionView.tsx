@@ -12,8 +12,9 @@ import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
 import { TabView } from "./TabView";
 import { TabActions } from "./TabStrip";
-import { TerminalDock } from "@/components/terminal/TerminalDock";
-import { openDock, toggleDock } from "@/lib/terminal";
+import { tabPanelId } from "@/lib/sessionTabs";
+import { activateLatestTerminal, useTerminals, type SelectedSessionTab } from "@/lib/terminal";
+import { TerminalView } from "@/components/terminal/TerminalView";
 import { setLastFocused, useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
 import { QuickOpen } from "@/components/editor/QuickOpen";
@@ -52,8 +53,8 @@ function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
 }
 
 /**
- * One session: a header naming the place, a tab strip (one tab per agent
- * conversation), the active tab's body, and the right panel.
+ * One session: a header naming the place, the selected sidebar tab's
+ * full-height body, and the right panel.
  */
 export function SessionView({
   session,
@@ -67,7 +68,22 @@ export function SessionView({
   const prefs = usePrefs();
   const store = useSessionStore();
   const project = store.projects.find((p) => p.path === session.projectPath);
-  const activeTab = session.tabs.find((t) => t.id === session.activeTab) ?? session.tabs[0];
+  const terminals = useTerminals();
+  const shellPanes = terminals.panes.filter((pane) => pane.sessionId === session.id && !pane.hidden);
+  const requested = terminals.selected[session.id];
+  const persistedAgent = session.tabs.find((tab) => tab.id === session.activeTab) ?? session.tabs[0];
+  const selected: SelectedSessionTab | null =
+    requested?.kind === "agent" && session.tabs.some((tab) => tab.id === requested.id)
+      ? requested
+      : requested?.kind === "terminal" && shellPanes.some((pane) => pane.id === requested.id)
+        ? requested
+        : persistedAgent
+          ? { kind: "agent", id: persistedAgent.id }
+          : shellPanes.length
+            ? { kind: "terminal", id: shellPanes[0].id }
+            : null;
+  const activeTab = selected?.kind === "agent" ? session.tabs.find((tab) => tab.id === selected.id) : undefined;
+  const activeShell = selected?.kind === "terminal" ? shellPanes.find((pane) => pane.id === selected.id) : undefined;
   const tabViews = useTabViews();
   const activeInTerminal = !!activeTab && tabViews.views[activeTab.id] === "terminal";
   const switching = !!activeTab && !!tabViews.switching[activeTab.id];
@@ -86,9 +102,10 @@ export function SessionView({
   useEffect(() => {
     if (session.tabs.length) return;
     if (!getPrefs().panelOpen) setPrefs({ panelOpen: true });
-    void openDock(session.id, session.cwd).catch((e) => console.error("terminal open failed", e));
+    void activateLatestTerminal(session.id, session.cwd).catch((e) => console.error("terminal open failed", e));
   }, [session.id, session.cwd, session.tabs.length]);
 
+  useHotkey("mod+j", () => void activateLatestTerminal(session.id, session.cwd));
   return (
     <div className="flex h-full min-w-0 flex-1">
       <div className="flex h-full min-w-0 flex-1 flex-col">
@@ -161,7 +178,7 @@ export function SessionView({
           </div>
 
           <div className="ml-auto flex max-w-[70%] shrink-0 items-center gap-0.5">
-            <TabActions session={session} activeTab={activeTab} />
+            <TabActions session={session} selected={selected} />
             {activeTab && (
               <WithTooltip label={activeInTerminal ? "Back to chat" : "Show terminal view"} keys={keycaps("mod+shift+t")}>
                 <Button
@@ -182,7 +199,7 @@ export function SessionView({
                 variant="ghost"
                 size="icon-sm"
                 aria-label="Terminal"
-                onClick={() => void toggleDock(session.id, session.cwd)}
+                onClick={() => void activateLatestTerminal(session.id, session.cwd)}
               >
                 <TerminalSquare />
               </Button>
@@ -203,25 +220,48 @@ export function SessionView({
         <section className="flex min-h-0 flex-1 flex-col">
           <div className="@container/editor-host relative flex min-h-0 flex-1">
             <div
-              className="flex h-full min-w-0 flex-1 flex-col"
+              className="relative flex h-full min-w-0 flex-1 flex-col"
               onPointerDownCapture={() => setLastFocused("chat")}
               onFocusCapture={() => setLastFocused("chat")}
             >
               {session.tabs.map((t) => (
-                <div key={t.id} className={cn("flex min-h-0 flex-1 flex-col", t.id !== activeTab?.id && "hidden")}>
-                  <TabView session={session} tab={t} active={t.id === activeTab?.id} />
+                <div
+                  key={t.id}
+                  id={tabPanelId({ kind: "agent", id: t.id })}
+                  role="tabpanel"
+                  aria-labelledby={`session-agent-tab-${encodeURIComponent(t.id)}`}
+                  aria-hidden={selected?.kind !== "agent" || t.id !== selected.id}
+                  className={cn("flex min-h-0 flex-1 flex-col", (selected?.kind !== "agent" || t.id !== selected.id) && "hidden")}
+                >
+                  <TabView session={session} tab={t} active={selected?.kind === "agent" && t.id === selected.id} />
                 </div>
               ))}
-              {!session.tabs.length && (
+              {shellPanes.map((pane) => (
+                <div
+                  key={pane.id}
+                  id={tabPanelId({ kind: "terminal", id: pane.id })}
+                  role="tabpanel"
+                  aria-labelledby={`session-terminal-tab-${encodeURIComponent(pane.id)}`}
+                  aria-hidden={selected?.kind !== "terminal" || pane.id !== selected.id}
+                  className={cn("absolute inset-0", (selected?.kind !== "terminal" || pane.id !== selected.id) && "invisible")}
+                >
+                  <TerminalView id={pane.id} visible={pane.id === activeShell?.id} />
+                  {pane.exited && (
+                    <div className="absolute bottom-2 left-3 rounded-md bg-popover px-2 py-1 text-[11px] text-muted-foreground hairline">
+                      Process exited{pane.exitCode != null ? ` (${pane.exitCode})` : ""}.
+                    </div>
+                  )}
+                </div>
+              ))}
+              {!session.tabs.length && !shellPanes.length && (
                 <div className="flex flex-1 flex-col items-center justify-center gap-1 text-sm text-muted-foreground">
                   <span>Workspace open</span>
-                  <span className="text-xs text-faint">Use the terminal below, or add an agent with +.</span>
+                  <span className="text-xs text-faint">Open a new terminal or add an agent tab.</span>
                 </div>
               )}
             </div>
             {hasEditors && <EditorSplit sessionId={session.id} active />}
           </div>
-          <TerminalDock sessionId={session.id} cwd={session.cwd} active />
         </section>
       </div>
 

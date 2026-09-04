@@ -359,7 +359,7 @@
   padding: 10px 12px;
 }
 
-/* Terminal: the dock supplies the ground, xterm's own viewport stays clear. */
+/* Terminal panels supply the ground; xterm's own viewport stays clear. */
 .terminal-host .xterm,
 .terminal-host .xterm .xterm-viewport,
 .terminal-host .xterm .xterm-screen {

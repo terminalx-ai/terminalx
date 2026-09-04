@@ -20,7 +20,7 @@ export const SHORTCUTS: Shortcut[] = [
   { chord: "mod+w", label: "Close tab or file", group: "Session" },
   { chord: "mod+shift+]", label: "Next tab", group: "Session" },
   { chord: "mod+shift+[", label: "Previous tab", group: "Session" },
-  { chord: "mod+j", label: "Toggle terminal dock", group: "Session" },
+  { chord: "mod+j", label: "Activate latest shell tab", group: "Session" },
   { chord: "mod+shift+t", label: "Switch the tab between chat and terminal view", group: "Session" },
   { chord: "escape", label: "Stop the running turn", group: "Session" },
   { chord: "mod+alt+1", label: "Changes", group: "Panel" },

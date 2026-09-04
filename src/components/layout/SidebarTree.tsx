@@ -49,7 +49,6 @@ import {
   openSkills,
   pinSession,
   refreshWorkspaces,
-  removeTab,
   renameWorkspace,
   selectSession,
   setActiveTab,
@@ -59,6 +58,8 @@ import {
 } from "@/lib/sessions";
 import { useTabViews } from "@/lib/tabViews";
 import { relativeTime } from "@/lib/time";
+import { activatePeer, closePeer, peerOrder, selectedPeer, tabNodeId, tabPanelId, type PeerTab } from "@/lib/sessionTabs";
+import { openTerminal, useTerminals } from "@/lib/terminal";
 import { sessionStatus, type Project, type SessionEntry, type TabEntry, type Workspace } from "@/types/session";
 
 interface WorkspaceGroup {
@@ -113,6 +114,8 @@ export function ProjectNavigation({ project, expanded }: { project: Project; exp
   const presetCwd = !selectedSession && store.view === "new" && store.newSessionPreset?.projectPath === project.path ? store.newSessionPreset.cwd : null;
   const activeCwd = selectedSession?.projectPath === project.path ? selectedSession.cwd : presetCwd;
   const tabViews = useTabViews();
+  const terminals = useTerminals();
+  const selectedPeerId = selectedSession ? terminals.selected[selectedSession.id]?.id : null;
   const mobileDriven = useMobileDrivenTabs();
   const harnessNames = useMemo(() => new Map(store.harnesses.map((harness) => [harness.id, harness.name])), [store.harnesses]);
 
@@ -139,7 +142,7 @@ export function ProjectNavigation({ project, expanded }: { project: Project; exp
     if (selectedSession?.projectPath === project.path) {
       setExpandedSessions((current) => addToSet(current, selectedSession.id));
     }
-  }, [activeWorkspaceKey, project.path, selectedSession?.activeTab, selectedSession?.id, selectedSession?.projectPath, store.navigationVersion]);
+  }, [activeWorkspaceKey, project.path, selectedSession?.activeTab, selectedSession?.id, selectedSession?.projectPath, selectedPeerId, store.navigationVersion]);
 
   return (
     <div hidden={!expanded} className={cn("pb-1 pl-2", !expanded && "hidden")} role="group">
@@ -324,6 +327,9 @@ function SessionNode({
   harnessNames: Map<string, string>;
 }) {
   const status = sessionStatus(session);
+  const terminals = useTerminals();
+  const peers = peerOrder(session, terminals.panes);
+  const activePeer = selectedPeer(session, peers, terminals.selected[session.id]);
   const branchBadge = session.issue && !session.worktreeName && !session.worktreeRemoved ? session.branch : null;
 
   return (
@@ -380,18 +386,19 @@ function SessionNode({
           </button>
         ) : null}
         <div hidden={!expanded} className={cn("pl-5", !expanded && "hidden")} role="group">
-          {session.tabs.map((tab) => (
+          {peers.map((peer) => peer.kind === "agent" ? (
             <TabNode
-              key={tab.id}
+              key={peer.id}
               session={session}
-              tab={tab}
-              active={selected && tab.id === (session.activeTab ?? session.tabs[0]?.id)}
-              label={tab.title?.trim() || harnessNames.get(tab.harness) || tab.harness}
-              terminal={tabViews[tab.id] === "terminal"}
-              mobileDriven={mobileDriven.has(tab.id)}
+              tab={peer.tab}
+              active={selected && activePeer?.kind === "agent" && peer.id === activePeer.id}
+              label={peer.tab.title?.trim() || harnessNames.get(peer.tab.harness) || peer.tab.harness}
+              terminal={tabViews[peer.id] === "terminal"}
+              mobileDriven={mobileDriven.has(peer.id)}
+              onClose={() => void closePeer(session.id, peer, peers, activePeer)}
             />
-          ))}
-          {session.tabs.length === 0 ? <div className="px-3 py-1 text-[11px] text-faint">No agent tabs.</div> : null}
+          ) : <ShellNode key={peer.id} session={session} peer={peer} active={selected && activePeer?.kind === "terminal" && peer.id === activePeer.id} onClose={() => void closePeer(session.id, peer, peers, activePeer)} />)}
+          {peers.length === 0 ? <div className="px-3 py-1 text-[11px] text-faint">No tabs.</div> : null}
         </div>
       </div>
       <SessionMenu session={session} />
@@ -406,6 +413,7 @@ function TabNode({
   label,
   terminal,
   mobileDriven,
+  onClose,
 }: {
   session: SessionEntry;
   tab: TabEntry;
@@ -413,6 +421,7 @@ function TabNode({
   label: string;
   terminal: boolean;
   mobileDriven: boolean;
+  onClose: () => void;
 }) {
   const open = () => {
     selectSession(session.id);
@@ -423,6 +432,8 @@ function TabNode({
       <ContextMenuTrigger asChild>
         <div
           role="treeitem"
+          id={tabNodeId({ kind: "agent", id: tab.id })}
+          aria-controls={tabPanelId({ kind: "agent", id: tab.id })}
           aria-label={label}
           aria-selected={active}
           tabIndex={0}
@@ -434,7 +445,7 @@ function TabNode({
               open();
             }
           }}
-          onAuxClick={(event) => event.button === 1 && session.tabs.length > 1 && void removeTab(session.id, tab.id)}
+          onAuxClick={(event) => event.button === 1 && onClose()}
           className={cn(
             "group/tab relative flex h-6 min-w-0 cursor-default items-center gap-1.5 rounded-md px-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
             active ? "bg-(--surface-thumb) text-foreground shadow-button" : "text-muted-foreground hover:bg-selected/40 hover:text-foreground",
@@ -454,19 +465,19 @@ function TabNode({
           <span className="min-w-0 flex-1 truncate text-[11px]">{label}</span>
           {mobileDriven ? <Lock className="size-3 shrink-0 text-warning" aria-label="Mobile is driving this terminal" /> : null}
           {terminal ? <Terminal className="size-3 shrink-0 text-faint" aria-label="In terminal view" /> : null}
-          {session.tabs.length > 1 ? (
+          {(
             <button
               type="button"
               aria-label={`Close ${label}`}
               onClick={(event) => {
                 event.stopPropagation();
-                void removeTab(session.id, tab.id);
+                onClose();
               }}
               className="rounded-sm p-0.5 text-faint opacity-0 hover:bg-veil-strong hover:text-foreground group-hover/tab:opacity-100 focus-visible:opacity-100"
             >
               <X className="size-3" />
             </button>
-          ) : null}
+          )}
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
@@ -474,7 +485,7 @@ function TabNode({
           <Sparkles /> Skills for this tab
         </ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuItem destructive disabled={session.tabs.length <= 1} onSelect={() => void removeTab(session.id, tab.id)}>
+        <ContextMenuItem destructive onSelect={onClose}>
           <X /> Close tab
         </ContextMenuItem>
       </ContextMenuContent>
@@ -482,11 +493,24 @@ function TabNode({
   );
 }
 
+function ShellNode({ session, peer, active, onClose }: { session: SessionEntry; peer: Extract<PeerTab, { kind: "terminal" }>; active: boolean; onClose: () => void }) {
+  const open = () => { selectSession(session.id); activatePeer(session.id, peer); };
+  return <div role="treeitem" id={tabNodeId(peer)} aria-controls={tabPanelId(peer)} aria-label={`${peer.pane.title}${peer.pane.exited ? ", exited" : ""}`} aria-selected={active} tabIndex={0}
+    title={peer.pane.title} onClick={open} onAuxClick={(event) => event.button === 1 && onClose()}
+    onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); open(); } }}
+    className={cn("group/tab relative flex h-6 min-w-0 items-center gap-1.5 rounded-md px-2 text-[11px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40", active ? "bg-(--surface-thumb) text-foreground shadow-button" : "text-muted-foreground hover:bg-selected/40")}>
+    <Terminal className="size-3.5 shrink-0" />
+    <span className={cn("min-w-0 flex-1 truncate", peer.pane.exited && "text-faint line-through")}>{peer.pane.title}</span>
+    <button type="button" aria-label={`Close ${peer.pane.title} terminal tab`} onClick={(event) => { event.stopPropagation(); onClose(); }} className="rounded-sm p-0.5 text-faint opacity-0 hover:bg-veil-strong group-hover/tab:opacity-100 focus-visible:opacity-100"><X className="size-3" /></button>
+  </div>;
+}
+
 function NewTabButton({ session }: { session: SessionEntry }) {
   const store = useSessionStore();
   const add = async (harness: string) => {
     const prefs = getPrefs();
     await addTab(session.id, harness, prefs.lastModel[harness] ?? "", prefs.lastEffort[harness] ?? null, prefs.lastMode);
+    selectSession(session.id);
   };
   return (
     <DropdownMenu>
@@ -497,6 +521,7 @@ function NewTabButton({ session }: { session: SessionEntry }) {
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         <DropdownMenuLabel>New tab with</DropdownMenuLabel>
+        <DropdownMenuItem onSelect={() => { selectSession(session.id); void openTerminal(session.id, session.cwd); }}><Terminal /> Shell terminal</DropdownMenuItem>
         {store.harnesses.map((harness) => (
           <DropdownMenuItem key={harness.id} disabled={!harness.available} onSelect={() => void add(harness.id)}>
             <AgentMark id={harness.id} />

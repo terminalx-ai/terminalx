@@ -78,7 +78,7 @@ src
   components/editor    EditorPane, EditorSplit, QuickOpen, ProjectSearch
   components/dashboard AgentDashboard, AgentCard
   components/issues    IssuesView
-  components/terminal  TerminalView, TerminalDock
+  components/terminal  TerminalView
   components/settings  SettingsDialog, TranscriptionTab
   components/raccoon   pixel sprite + idle/busy scenes
   components/ui        button, dialog, menu, controls, tooltip, Toasts
@@ -151,7 +151,7 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 
 ### C9 — Terminal ✅
 - [x] PTY with coalesced output, xterm with fit + webgl, theme sync, OSC colour queries.
-- [x] Terminal tabs inside a session; session terminal dock (⌘J), panes survive session switches.
+- [x] Full-height shell tabs beside agent tabs (⌘J); panes survive tab and session switches.
 
 ### C10 — Files and editor ✅
 - [x] File tree in the right panel (Files, ⌘⌥4), fuzzy file search (⌘P), project text search (⌘⇧F).

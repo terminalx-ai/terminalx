@@ -16,6 +16,7 @@ vi.mock("@/lib/automations", () => ({ useAutomationStore: () => ({ automations: 
 
 const { ProjectRail } = await import("./ProjectRail");
 const store = await import("@/lib/sessions");
+const terminals = await import("@/lib/terminal");
 const { groupProjectWorkspaces } = await import("./SidebarTree");
 const projects: Project[] = [{ path: "/alpha", name: "Alpha" }, { path: "/beta", name: "Beta" }];
 const workspace = (path: string): Workspace => ({ path, name: path.slice(1), branch: "main", isMain: true, managed: false, head: "abc", additions: 0, deletions: 0, uncommitted: 0, unpushed: 0, ahead: 0, behind: 0 });
@@ -38,7 +39,7 @@ beforeEach(async () => {
     if (command === "list_sessions") return sessions;
     if (command === "list_workspaces") return workspaces[args!.projectPath] ?? [];
     if (command === "list_harnesses") return [];
-    if (command === "set_active_tab" || command === "delete_session") return;
+    if (command === "set_active_tab" || command === "delete_session" || command === "pty_spawn" || command === "pty_kill") return;
     throw new Error(`Unexpected command: ${command}`);
   });
   await act(async () => {
@@ -51,6 +52,32 @@ beforeEach(async () => {
 afterEach(cleanup);
 
 describe("complete navigation hierarchy", () => {
+  it("opens shell peers in the tree without exposing agent-owned panes", async () => {
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "Collapse Session one" }));
+    let shellId = "";
+    await act(async () => {
+      shellId = (await terminals.openTerminal("one", "/alpha", 80, 24, { title: "Shell peer" })).id;
+      await terminals.adoptPane({ id: "owned-test", sessionId: "one", title: "Agent PTY", hidden: true, owned: true });
+    });
+    const shell = screen.getByRole("treeitem", { name: "Shell peer", selected: true });
+    expect(screen.queryByRole("treeitem", { name: "Agent PTY" })).toBeNull();
+    shell.focus();
+    fireEvent.keyDown(shell, { key: "ArrowUp" });
+    const agent = screen.getByRole("treeitem", { name: "Conversation one" });
+    expect(document.activeElement).toBe(agent);
+    expect(terminals.getTerminalState().selected.one).toEqual({ kind: "terminal", id: shellId });
+    await act(async () => fireEvent.keyDown(agent, { key: "Enter" }));
+    expect(terminals.getTerminalState().selected.one).toEqual({ kind: "agent", id: "one-tab" });
+    fireEvent.click(shell);
+    expect(shell.getAttribute("aria-selected")).toBe("true");
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Close Shell peer terminal tab" })));
+    expect(screen.queryByRole("treeitem", { name: "Shell peer" })).toBeNull();
+    expect(screen.getByRole("treeitem", { name: "Conversation one", selected: true })).toBeTruthy();
+    expect(mocks.invoke).toHaveBeenCalledWith("pty_kill", { id: shellId });
+    expect(mocks.invoke).not.toHaveBeenCalledWith("pty_kill", { id: "owned-test" });
+  });
+
   it("opens the clicked project while preserving another project's conversation", async () => {
     mount();
     fireEvent.click(screen.getByRole("button", { name: "Beta" }));

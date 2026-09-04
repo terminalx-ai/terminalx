@@ -11,7 +11,6 @@ export interface Prefs {
   panelOpen: boolean;
   panelWidth: number;
   editorPaneWidth: number;
-  terminalHeight: number;
   updateChannel: "stable" | "beta";
   sounds: boolean;
   animations: boolean;
@@ -35,7 +34,6 @@ const DEFAULTS: Prefs = {
   panelOpen: false,
   panelWidth: 400,
   editorPaneWidth: 520,
-  terminalHeight: 260,
   updateChannel: "stable",
   sounds: true,
   animations: true,
