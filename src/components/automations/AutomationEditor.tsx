@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import { ArrowLeft } from "lucide-react";
 import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Segmented, Switch } from "@/components/ui/controls";
 import { IssueListItem } from "@/components/issues/IssueListItem";
 import { automationsApi, errorMessage, issues as issuesApi, type Issue } from "@/lib/api";
@@ -106,12 +106,14 @@ export function AutomationEditor({
   prefill,
   onOpenChange,
   onSaved,
+  backLabel = "Automations",
 }: {
   open: boolean;
   automation: Automation | null;
   prefill?: AutomationEditorPrefill;
   onOpenChange: (open: boolean) => void;
   onSaved: (automation: Automation) => void;
+  backLabel?: string;
 }) {
   const store = useSessionStore();
   const prefs = usePrefs();
@@ -239,15 +241,24 @@ export function AutomationEditor({
     && (input.workspace === "newWorktree" || !!input.sessionId)
     && (!input.issueTrigger || (!!input.issueTrigger.repo.trim() && !!input.issueTrigger.query.trim()));
 
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent width="max-w-[48rem]" className="max-h-[calc(100vh-3rem)] overflow-y-auto scrollbar-thin">
-        <DialogHeader>
-          <DialogTitle className="text-base font-semibold">{automation ? "Edit automation" : "New automation"}</DialogTitle>
-          <p className="text-xs text-muted-foreground">Save a prompt and run it manually or on this Mac while the app is open.</p>
-        </DialogHeader>
+  if (!open) return null;
 
-        <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+  return (
+    <div className="automation-workspace flex h-full min-h-0 min-w-0 flex-col">
+      <header className="flex shrink-0 items-center gap-2 border-b border-hairline px-4 py-3">
+        <Button variant="ghost" size="sm" aria-label={`Back to ${backLabel.toLowerCase()}`} onClick={() => onOpenChange(false)}>
+          <ArrowLeft /> {backLabel}
+        </Button>
+        <div className="mx-1 h-5 w-px bg-hairline" />
+        <div className="min-w-0 flex-1">
+          <h1 className="truncate text-base font-semibold">{automation ? "Edit automation" : "New automation"}</h1>
+          <p className="truncate text-xs text-muted-foreground">Save a prompt and run it manually or on this Mac while the app is open.</p>
+        </div>
+      </header>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 scrollbar-thin">
+        <div className="mx-auto max-w-5xl">
+          <div className="automation-editor-grid grid gap-x-4 gap-y-3">
           <label className={LABEL}>
             Name
             <input autoFocus value={input.name} onChange={(event) => patch({ name: event.target.value })} className={INPUT} placeholder="Weekday build check" />
@@ -430,19 +441,21 @@ export function AutomationEditor({
             </span>
             <Switch checked={input.enabled} onCheckedChange={(enabled) => patch({ enabled })} />
           </label>
-        </div>
-
-        {input.harness && (
-          <div className="mt-3 flex items-center gap-1.5 text-[11px] text-faint">
-            <AgentMark id={input.harness} className="size-3.5" /> Runs use a real {store.harnesses.find((harness) => harness.id === input.harness)?.name ?? "agent"} session.
           </div>
-        )}
-        {error && <div className="mt-3 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button variant="accent" disabled={!canSave || saving} onClick={() => void save()}>{saving ? "Saving…" : automation ? "Save changes" : "Create automation"}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+
+          {input.harness && (
+            <div className="mt-3 flex items-center gap-1.5 text-[11px] text-faint">
+              <AgentMark id={input.harness} className="size-3.5" /> Runs use a real {store.harnesses.find((harness) => harness.id === input.harness)?.name ?? "agent"} session.
+            </div>
+          )}
+          {error && <div className="mt-3 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
+        </div>
+      </div>
+
+      <footer className="flex shrink-0 justify-end gap-2 border-t border-hairline px-4 py-3">
+        <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
+        <Button variant="accent" disabled={!canSave || saving} onClick={() => void save()}>{saving ? "Saving…" : automation ? "Save changes" : "Create automation"}</Button>
+      </footer>
+    </div>
   );
 }
