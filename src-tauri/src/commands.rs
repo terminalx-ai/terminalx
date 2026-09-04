@@ -311,7 +311,10 @@ fn new_tab_entry(t: &NewTab) -> TabEntry {
         title: None,
         model: t.model.clone(),
         effort: t.effort.clone(),
-        permission_mode: t.permission_mode.clone().unwrap_or_else(|| "auto".into()),
+        permission_mode: t
+            .permission_mode
+            .clone()
+            .unwrap_or_else(|| index::DEFAULT_PERMISSION_MODE.into()),
         provider_session_id: None,
         status: TabStatus::Idle,
         created: index::now(),
@@ -1369,7 +1372,10 @@ mod command_tests {
     use std::path::Path;
     use std::process::Command;
 
-    use super::{create_session_entry, requested_worktree_name, validate_session_target, NewSession};
+    use super::{
+        create_session_entry, new_tab_entry, requested_worktree_name, validate_session_target,
+        NewSession, NewTab,
+    };
 
     fn git(cwd: &Path, args: &[&str]) -> String {
         let output = Command::new("git").current_dir(cwd).args(args).output().unwrap();
@@ -1382,6 +1388,21 @@ mod command_tests {
         assert_eq!(requested_worktree_name("!!!", &[]), None);
         let taken = vec!["eng-42-fix-login".to_string(), "eng-42-fix-login-2".to_string()];
         assert_eq!(requested_worktree_name("eng-42-fix-login", &taken).as_deref(), Some("eng-42-fix-login-3"));
+    }
+
+    #[test]
+    fn new_tabs_use_the_default_permission_mode_when_unspecified() {
+        let tab = new_tab_entry(&NewTab {
+            harness: "claude".into(),
+            model: String::new(),
+            effort: None,
+            permission_mode: None,
+        });
+
+        assert_eq!(
+            tab.permission_mode,
+            crate::store::index::DEFAULT_PERMISSION_MODE
+        );
     }
 
     #[test]

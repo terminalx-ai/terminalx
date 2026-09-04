@@ -68,19 +68,19 @@ export function modelLabel(harness: string, id: string): string {
   return m?.label ?? prettyModelId(id);
 }
 
+export const BYPASS_MODE = "bypassPermissions";
+
 export const PERMISSION_MODES: { id: string; label: string; hint: string }[] = [
   { id: "plan", label: "Plan", hint: "Read and plan only; no edits or commands." },
   { id: "manual", label: "Ask every time", hint: "Every edit and command waits for you." },
   { id: "auto", label: "Auto", hint: "Routine actions are approved; risky ones ask." },
   { id: "acceptEdits", label: "Accept edits", hint: "File edits go through; commands still ask." },
-  { id: "bypassPermissions", label: "Bypass permissions", hint: "Nothing asks. Only in a tree you can throw away." },
+  { id: BYPASS_MODE, label: "Bypass permissions", hint: "Nothing asks. Only in a tree you can throw away." },
 ];
 
 export function modeLabel(id: string): string {
-  return PERMISSION_MODES.find((m) => m.id === id)?.label ?? "Auto";
+  return PERMISSION_MODES.find((m) => m.id === id)?.label ?? "Bypass permissions";
 }
-
-export const BYPASS_MODE = "bypassPermissions";
 
 /**
  * What "Bypass permissions" comes down to for one agent: the flag its CLI is
