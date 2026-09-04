@@ -13,7 +13,6 @@ export interface Prefs {
   explorerOpen: boolean;
   explorerWidth: number;
   editorPaneWidth: number;
-  terminalHeight: number;
   updateChannel: "stable" | "beta";
   sounds: boolean;
   animations: boolean;
@@ -39,7 +38,6 @@ const DEFAULTS: Prefs = {
   explorerOpen: false,
   explorerWidth: 240,
   editorPaneWidth: 520,
-  terminalHeight: 260,
   updateChannel: "stable",
   sounds: true,
   animations: true,

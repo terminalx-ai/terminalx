@@ -37,8 +37,8 @@ drives the `claude` and `codex` CLIs you are already logged into.
 - **Changes, git and pull requests** in the right panel: the last turn's diff
   or the whole session's, repository status and history, and PRs through the
   GitHub CLI.
-- **A terminal dock** (⌘J) whose shells live in the session's checkout and
-  survive switching sessions.
+- **Full-height shell tabs** (⌘J) beside agent conversations, whose processes,
+  scrollback and working directories survive tab and session switches.
 - **Agent dashboard** (⌘⇧A): every session across every project in three
   columns — needs you, working, done — with search, filters and keyboard
   navigation.

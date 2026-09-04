@@ -141,7 +141,7 @@ export function TerminalView({ id, visible }: { id: string; visible: boolean }) 
     ro.observe(el);
     requestAnimationFrame(() => {
       refit();
-      inst.term.focus();
+      if (visible) inst.term.focus();
     });
     return () => {
       ro.disconnect();
