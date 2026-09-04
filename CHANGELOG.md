@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Deleting a workspace now stops and removes the sessions that ran in it,
+  the same way deleting a single session does: agents and terminal panes are
+  killed, and the index entries, transcripts and attachments go. Previously
+  those sessions were kept and filed under a "Removed workspace" group, which
+  piled up dead sessions after every cleanup. The delete dialog says so and
+  shows how many sessions will go; the CLI's `worktrees delete` reports them
+  as `removedSessions`. Settling a single session's worktree still keeps that
+  session and moves it to the project root. (#89)
 - Dictation keeps what was said before a pause. Apple's recogniser starts a
   new utterance whose text stands alone after a pause, and the composer took
   that for a revision of the phrase before it whenever it arrived within a

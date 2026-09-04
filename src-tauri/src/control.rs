@@ -536,8 +536,8 @@ impl ControlService {
         )
         .map_err(ControlError::internal)?;
         crate::commands::notify_workspace_deleted(&self.app, &project.path, &entries);
-        let moved: Vec<_> = entries.into_iter().map(|entry| entry.id).collect();
-        Ok(json!({"deleted": worktree.path, "project": project.path, "movedSessions": moved}))
+        let removed: Vec<_> = entries.into_iter().map(|entry| entry.id).collect();
+        Ok(json!({"deleted": worktree.path, "project": project.path, "removedSessions": removed}))
     }
 
     fn issues_list(&self, params: Value) -> Result<Value, ControlError> {

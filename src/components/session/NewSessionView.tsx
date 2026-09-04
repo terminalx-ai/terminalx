@@ -15,8 +15,9 @@ import {
 } from "@/components/ui/menu";
 import { AgentMark } from "@/components/AgentMark";
 import { DictationStatus, MicButton, NEW_SESSION_TARGET, useDictationInto } from "@/components/chat/Dictation";
+import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "@/components/chat/useImageAttachments";
 import { RaccoonScene } from "@/components/raccoon/Raccoon";
-import { api, errorMessage } from "@/lib/api";
+import { api, errorMessage, type ImageInput } from "@/lib/api";
 import { addProject, clearNewSessionPreset, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { EFFORT_LABEL, PERMISSION_MODES, refreshModels, upgradeHint, useModels } from "@/lib/models";
 import { setPrefs, usePrefs } from "@/lib/prefs";
@@ -37,7 +38,7 @@ export function NewSessionView({
   useWorktree: controlledUseWorktree,
   onUseWorktreeChange,
 }: {
-  onCreated?: (sessionId: string, tabId: string, firstPrompt: string) => void;
+  onCreated?: (sessionId: string, tabId: string, firstPrompt: string, images: ImageInput[]) => void;
   useWorktree?: boolean;
   onUseWorktreeChange?: (value: boolean) => void;
 }) {
@@ -109,10 +110,13 @@ export function NewSessionView({
 
   const dictation = useDictationInto(NEW_SESSION_TARGET, text, setText, ref);
   useHotkey("mod+shift+d", dictation.toggle);
+  const attach = useImageAttachments({ textareaRef: ref, draft: text, onDraftChange: setText });
+  const hasImages = attach.attachments.length > 0;
 
+  // A screenshot alone is a prompt, as it is in the session composer.
   const canSend = useMemo(
-    () => !!project && !!harness && available && text.trim().length > 0 && (!useWorktree || !!preset?.cwd || !!workspaceName) && !busy,
-    [project, harness, available, text, useWorktree, preset?.cwd, workspaceName, busy],
+    () => !!project && !!harness && available && (text.trim().length > 0 || hasImages) && (!useWorktree || !!preset?.cwd || !!workspaceName) && !busy,
+    [project, harness, available, text, hasImages, useWorktree, preset?.cwd, workspaceName, busy],
   );
 
   const create = async () => {
@@ -121,7 +125,10 @@ export function NewSessionView({
     setBusy(true);
     setError(null);
     try {
+      // The backend names an untitled session itself, so an image-only prompt
+      // sends an empty title rather than inventing one here.
       const title = text.trim().split("\n")[0].slice(0, 60);
+      const images = attach.images;
       const s = await api.createSession({
         projectPath: project.path,
         title,
@@ -133,8 +140,9 @@ export function NewSessionView({
       });
       upsertSession(s);
       setText("");
+      attach.clear();
       selectSession(s.id);
-      onCreated?.(s.id, s.tabs[0].id, text);
+      onCreated?.(s.id, s.tabs[0].id, text, images);
     } catch (e) {
       setError(errorMessage(e));
     } finally {
@@ -325,7 +333,9 @@ export function NewSessionView({
 
           <DictationStatus dictation={dictation} />
 
-          <div className="rounded-2xl bg-composer glass p-3 shadow-surface hairline">
+          <div className={cn("relative rounded-2xl bg-composer glass p-3 shadow-surface hairline", attach.dragging && "ring-2 ring-accent/60")} {...attach.dropZoneProps}>
+            <DropHint dragging={attach.dragging} />
+            <AttachmentThumbs attach={attach} />
             <textarea
               ref={ref}
               autoFocus
@@ -350,6 +360,7 @@ export function NewSessionView({
               className="w-full resize-none bg-transparent text-[15px] leading-relaxed outline-none placeholder:text-faint"
             />
             <div className="flex items-center gap-1 pt-1">
+              <AttachButton attach={attach} />
               <MicButton dictation={dictation} />
               <div className="min-w-0 text-xs text-faint">
                 {harness && !available ? (

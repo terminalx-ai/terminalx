@@ -128,6 +128,9 @@ pub struct WorkspaceDisposition {
     pub pr: Option<WorkspacePr>,
     /// `gh` was usable and a remote exists, so `pr: None` means "no PR".
     pub pr_checked: bool,
+    /// Sessions that ran in this checkout; deleting it removes them and
+    /// their transcripts. Filled in by the command layer, which owns the index.
+    pub sessions: usize,
 }
 
 pub fn disposition(project: &Path, path: &Path) -> WorkspaceDisposition {
@@ -147,6 +150,7 @@ pub fn disposition(project: &Path, path: &Path) -> WorkspaceDisposition {
         branch: branch.clone(),
         pr: None,
         pr_checked: false,
+        sessions: 0,
     };
     if let Some(b) = branch.as_deref() {
         if git::remote_url(&p).is_some() && crate::github::available() {

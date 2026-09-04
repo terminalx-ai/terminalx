@@ -62,8 +62,9 @@ vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { childr
 vi.mock("@/components/ui/menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => children,
   DropdownMenuContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DropdownMenuItem: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuItem: ({ children, onSelect }: { children: ReactNode; onSelect?: () => void }) => <div role="menuitem" onClick={onSelect}>{children}</div>,
   DropdownMenuLabel: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuSeparator: () => <hr />,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => children,
   ContextMenu: ({ children }: { children: ReactNode }) => children,
   ContextMenuContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -121,7 +122,9 @@ describe("mixed session tab actions", () => {
     render(<TabActions session={session} selected={{ kind: "terminal", id: "shell-1" }} />);
     expect(peerOrder(session, mocks.panes).map((tab) => tab.id)).toEqual(["agent-1", "shell-1", "agent-2"]);
     expect(screen.queryByRole("tablist", { name: "Session tabs" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "New terminal" }));
+    expect(screen.queryByRole("button", { name: "New terminal" })).toBeNull();
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Claude", "Codex", "Terminal"]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Terminal" }));
     expect(mocks.openTerminal).toHaveBeenCalledWith("session-1", "/repo");
   });
 

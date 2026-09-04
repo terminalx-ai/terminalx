@@ -117,26 +117,28 @@ describe("complete navigation hierarchy", () => {
     expect(groups[1].sessions).toEqual([relocated]);
   });
 
-  it("reveals deleted-workspace provenance and retains all its sessions after deletion", async () => {
+  it("removes every session of a deleted workspace from the tree and drops the selection", async () => {
     const path = "/alpha/deleted";
-    const before = [makeSession("one"), makeSession("other")].map((session) => ({ ...session, cwd: path }));
-    const removed = before.map((session) => ({ ...session, cwd: "/alpha", worktreeRemoved: true, removedWorkspace: { path, name: "deleted-feature", branch: "feature" } }));
-    workspaces["/alpha"].push({ ...workspace(path), isMain: false, managed: true });
-    await act(async () => { before.forEach(store.upsertSession); await store.refreshWorkspaces("/alpha"); });
+    const doomed = [makeSession("one"), makeSession("other")].map((session) => ({ ...session, cwd: path }));
+    const bystander = makeSession("kept");
+    workspaces["/alpha"].push({ ...workspace(path), name: "deleted-feature", isMain: false, managed: true });
+    await act(async () => { [...doomed, bystander].forEach(store.upsertSession); await store.refreshWorkspaces("/alpha"); });
     mount();
+    expect(screen.getByRole("treeitem", { name: "deleted-feature" })).toBeTruthy();
     mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "delete_workspace") return removed;
+      if (command === "delete_workspace") return doomed;
       if (command === "list_workspaces") return [workspace("/alpha")];
       throw new Error(`Unexpected command: ${command}`);
     });
     await act(async () => store.deleteWorkspace("/alpha", path, false));
+    expect(screen.queryByRole("treeitem", { name: "deleted-feature" })).toBeNull();
+    expect(screen.queryByText("Session one")).toBeNull();
+    expect(screen.queryByText("Session other")).toBeNull();
+    expect(screen.queryByText("removed")).toBeNull();
     const main = within(screen.getByRole("treeitem", { name: "Alpha" })).getByRole("treeitem", { name: "main" });
-    expect(within(main).queryByText("Session one")).toBeNull();
-    const historical = screen.getByRole("treeitem", { name: "deleted-feature" });
-    expect(within(historical).getByText("Session one")).toBeTruthy();
-    expect(within(historical).getByText("Session other")).toBeTruthy();
-    expect(within(historical).getByRole("treeitem", { name: "Conversation one", selected: true })).toBeTruthy();
-    expect(store.getSessionStore().selectedSessionId).toBe("one");
+    expect(within(main).getByText("Session kept")).toBeTruthy();
+    expect(store.getSessionStore().sessions.map((session) => session.id)).toEqual(["two", "kept"]);
+    expect(store.getSessionStore().selectedSessionId).toBeNull();
   });
 
   it("reopens the same selected session after its tabs were collapsed", async () => {

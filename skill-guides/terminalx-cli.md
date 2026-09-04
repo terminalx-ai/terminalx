@@ -109,8 +109,9 @@ terminalx worktrees list [--project <project>] --json
 terminalx worktrees delete <path-or-name> [--project <project>] --yes --json
 ```
 
-Deletion always requires `--yes`, refuses a project's main checkout, stops affected tabs, and
-moves their session records back to the project root. The branch is retained. Inspect the
+Deletion always requires `--yes` and refuses a project's main checkout. It stops every tab
+running in the worktree and removes the sessions that ran there, transcripts included; the
+response lists their ids under `removedSessions`. The branch is retained. Inspect the
 worktree's uncommitted and unpushed counts from `worktrees list` before deleting it.
 
 ### Issues
