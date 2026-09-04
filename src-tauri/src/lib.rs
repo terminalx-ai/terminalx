@@ -232,6 +232,7 @@ pub fn run() {
             commands::pty_spawn,
             commands::pty_write,
             commands::pty_resize,
+            commands::mobile_terminal_drivers,
             commands::pty_kill,
             commands::list_dir,
             commands::read_text_file,

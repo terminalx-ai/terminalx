@@ -384,8 +384,16 @@ impl SessionManager {
     pub fn load_events(&self, session_id: &str, tab_id: &str) -> Result<Vec<AgentEvent>> {
         let path = store::log_path(session_id, tab_id)?;
         let mut events: Vec<AgentEvent> = store::read_lines(&path)?;
+        self.reconcile_lapsed_events(session_id, tab_id, &mut events)?;
+        Ok(events)
+    }
+
+    /// Retire permission cards found in a bounded transcript window when the
+    /// process that asked is no longer parked on them. A backwards mobile
+    /// tail can use this without loading the entire append-only log.
+    pub fn reconcile_lapsed_events(&self, session_id: &str, tab_id: &str, events: &mut Vec<AgentEvent>) -> Result<()> {
         let mut open: Vec<(String, Option<String>)> = Vec::new();
-        for ev in &events {
+        for ev in events.iter() {
             match &ev.payload {
                 Payload::PermissionRequested { request_id, tool_use_id, .. } | Payload::QuestionsAsked { request_id, tool_use_id, .. } => {
                     open.push((request_id.clone(), Some(tool_use_id.clone())));
@@ -403,7 +411,7 @@ impl SessionManager {
                 events.push(ev);
             }
         }
-        Ok(events)
+        Ok(())
     }
 
     pub fn status_of(&self, session_id: &str, tab_id: &str) -> TabStatus {

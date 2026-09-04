@@ -183,8 +183,8 @@ the concrete v2 contracts in `src/shared/mobile-e2ee-v2-contract.ts` and
 application E2EE.
 
 Direct and relay connections run the same v2 exchange. Mobile sends
-`e2ee_hello` with an ephemeral Curve25519 public key, nonce, framing `[2]`,
-payload kinds `text` and `binary`, and the exact
+`e2ee_hello` with its device-bound Curve25519 public key, a fresh nonce,
+framing `[2]`, payload kinds `text` and `binary`, and the exact
 `terminalx-mobile-e2ee`/mobile/desktop context. It verifies `e2ee_ready`, pins
 the host key from the pairing offer, derives directional keys and session id,
 and sends the device token and client capabilities only inside encrypted
@@ -250,11 +250,15 @@ Stopping a share, revoking the device, losing the verified identity, entering
 Bypass mode, or closing the tab cancels or refuses pending writes. No reconnect
 may replay input whose result is unknown.
 
-Permission requests are read-only on mobile in the baseline. There is no
-general permission-answer RPC in the allowlist. A future
-`permission.respond` operation must use a separately negotiated capability also
-named `permission.respond`, revalidate host/session authority, and generate a
-local activity record. It is not implied by terminal steering.
+Permission requests use the same structured decision path as desktop. A driver
+device may call `permission.respond` with the public session id, tab id, request
+id, and one of the option ids emitted by the pending permission event. The host
+resolves the session and tab again, verifies that the request is still pending,
+and lets the session manager validate the option before returning the decision
+to the parked hook. Viewer devices are refused, terminal bytes are never
+written, and a lapsed request remains visible as a terminal fallback. The
+resulting `permission_decided` event is the local activity record and removes
+the card on every subscribed surface.
 
 ## Persistence, sign-out, and privacy
 
@@ -266,9 +270,9 @@ cleanup are handled by `apps/api/src/controllers/accountPairing/account.ts`;
 relay credential revocation is handled over host control in
 `apps/relay/src/cell/cell-server.ts`.
 
-Expo SecureStore holds the cloud session, installation key/id, host device
-credential, pinned host key, and relay resume bundle. AsyncStorage may hold
-non-secret UI preferences and redacted cache records. Authorization codes,
+Expo SecureStore holds the cloud session, installation key/id, device-bound
+E2EE client key, host device credential, and relay resume bundle. AsyncStorage
+may hold non-secret UI preferences and redacted cache records. Authorization codes,
 PKCE verifiers, HPKE private keys, invite credentials after exchange, E2EE
 session keys, and plaintext RPC payloads are never durable.
 
