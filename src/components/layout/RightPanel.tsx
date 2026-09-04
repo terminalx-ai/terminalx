@@ -9,7 +9,7 @@ import { ChangesPanel } from "@/components/changes/ChangesPanel";
 import { RepoPanel } from "@/components/changes/RepoPanel";
 import { PrPanel } from "@/components/changes/PrPanel";
 import { FileTree } from "@/components/files/FileTree";
-import { openSettle } from "@/lib/dialogs";
+import { openSettle, openWorkspaceDelete } from "@/lib/dialogs";
 import { api } from "@/lib/api";
 import type { AgentEvent } from "@/types/events";
 import type { WorkStatus } from "@/types/session";
@@ -41,6 +41,7 @@ export function RightPanel({
   rootName,
   labelMode,
   settleSessionId,
+  workspace,
 }: {
   cwd: string;
   /** Undefined asks the panel to resolve the checkout branch itself. */
@@ -56,6 +57,8 @@ export function RightPanel({
   rootName?: string;
   labelMode?: "base" | "branch";
   settleSessionId?: string;
+  /** Present only for a managed, non-main workspace. */
+  workspace?: { projectPath: string; name: string };
 }) {
   const prefs = usePrefs();
   const [tab, setTab] = useState<PanelTab>("changes");
@@ -167,6 +170,14 @@ export function RightPanel({
             active={tab === "pr"}
             busy={live}
             onSettle={settleSessionId ? () => openSettle(settleSessionId) : undefined}
+            workspace={
+              workspace
+                ? {
+                    projectPath: workspace.projectPath,
+                    onDelete: () => openWorkspaceDelete(workspace.projectPath, cwd, workspace.name),
+                  }
+                : undefined
+            }
           />
         </div>
         <div className={cn("h-full", tab !== "files" && "hidden")}>
