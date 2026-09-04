@@ -11,6 +11,8 @@ export interface DashboardSession {
   cwd: string;
   worktreeName?: string | null;
   branch?: string | null;
+  worktreeRemoved?: boolean;
+  removedWorkspace?: { path: string; name: string; branch?: string | null } | null;
   issue?: { identifier: string } | null;
   title: string;
   modified: string;
@@ -55,6 +57,9 @@ export function isUnread(session: DashboardSession): boolean {
 }
 
 export function workspaceName(session: DashboardSession): string {
+  if (session.worktreeRemoved) {
+    return session.removedWorkspace?.name ?? session.removedWorkspace?.branch ?? "Removed workspace";
+  }
   return session.worktreeName ?? session.branch ?? session.cwd.replace(/\/+$/, "").split("/").pop() ?? session.cwd;
 }
 
@@ -65,6 +70,8 @@ export function matchesQuery(session: DashboardSession, projectName: string, que
     session.title,
     workspaceName(session),
     session.branch ?? "",
+    session.removedWorkspace?.branch ?? "",
+    session.removedWorkspace?.path ?? "",
     projectName,
     session.issue?.identifier ?? "",
   ]

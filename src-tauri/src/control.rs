@@ -539,14 +539,7 @@ impl ControlService {
         let mut moved = Vec::new();
         for affected_session in affected {
             let entry = index::update_session(&affected_session.id, |session| {
-                session.cwd = session.project_path.clone();
-                session.worktree_name = None;
-                session.worktree_removed = true;
-                session.branch = branch.clone();
-                session.base_ref = None;
-                for tab in &mut session.tabs {
-                    tab.status = TabStatus::Idle;
-                }
+                index::mark_workspace_removed(session, branch.clone());
                 Ok(session.clone())
             })
             .map_err(ControlError::internal)?;
@@ -799,6 +792,7 @@ mod tests {
             branch: Some("main".into()),
             base_ref: None,
             worktree_removed: false,
+            removed_workspace: None,
             issue: None,
             automation: None,
             title: "main".into(),

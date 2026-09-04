@@ -1,4 +1,5 @@
 import type { HarnessInfo, Project, SessionEntry, Workspace } from "@/types/session";
+import { workspaceName } from "@terminalx/portable/dashboard";
 
 export type PaletteEntityGroup = "sessions" | "workspaces" | "projects";
 
@@ -126,8 +127,9 @@ export function buildPaletteIndex(
     .map((session): PaletteSessionItem => {
       const project = projectByPath.get(session.projectPath);
       const projectName = project?.name ?? session.projectPath.split("/").pop() ?? session.projectPath;
-      const workspace = workspaceByPath.get(cleanPath(session.cwd));
-      const branch = session.branch ?? workspace?.branch ?? null;
+      const removedWorkspace = session.worktreeRemoved ? session.removedWorkspace : null;
+      const workspace = session.worktreeRemoved ? undefined : workspaceByPath.get(cleanPath(session.cwd));
+      const branch = session.worktreeRemoved ? (removedWorkspace?.branch ?? null) : (session.branch ?? workspace?.branch ?? null);
       const agents = [
         ...new Set(
           session.tabs.map((tab) => harnessById.get(tab.harness) ?? tab.harness),
@@ -135,8 +137,10 @@ export function buildPaletteIndex(
       ];
       const agentIds = [...new Set(session.tabs.map((tab) => tab.harness))];
       const agentLabel = agents.length ? agents.join(", ") : "Workspace";
-      const location = branch ?? workspace?.name ?? session.cwd.split("/").pop() ?? session.cwd;
-      const secondary = `${projectName} · ${location} · ${agentLabel}`;
+      const location = session.worktreeRemoved
+        ? workspaceName(session)
+        : (branch ?? workspace?.name ?? session.cwd.split("/").pop() ?? session.cwd);
+      const secondary = `${projectName} · ${location}${session.worktreeRemoved ? " (removed)" : ""} · ${agentLabel}`;
       return {
         id: `session:${session.id}`,
         group: "sessions",
@@ -149,7 +153,7 @@ export function buildPaletteIndex(
         primary: session.title,
         secondary,
         recentAt: parseDate(session.modified),
-        searchFields: searchFields(session.title, secondary, [session.cwd, session.issue?.identifier ?? "", session.issue?.title ?? ""]),
+        searchFields: searchFields(session.title, secondary, [session.cwd, removedWorkspace?.path ?? "", removedWorkspace?.branch ?? "", session.issue?.identifier ?? "", session.issue?.title ?? ""]),
       };
     });
 

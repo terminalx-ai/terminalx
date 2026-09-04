@@ -23,6 +23,7 @@ import { RightPanel } from "@/components/layout/RightPanel";
 import { useTabLog } from "@/lib/agentEvents";
 import type { TabEntry } from "@/types/session";
 import { WorkspaceNameEditor } from "./WorkspaceNameEditor";
+import { workspaceName } from "@/lib/dashboard";
 
 /** The right panel reads the active tab's log for the changes range. */
 function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
@@ -64,6 +65,8 @@ export function SessionView({
   const tabViews = useTabViews();
   const activeInTerminal = !!activeTab && tabViews.views[activeTab.id] === "terminal";
   const switching = !!activeTab && !!tabViews.switching[activeTab.id];
+  const workspaceLabel = session.worktreeRemoved ? workspaceName(session) : session.branch;
+  const workspaceTitle = session.removedWorkspace?.path ?? session.cwd;
   const [renameError, setRenameError] = useState<string | null>(null);
   useHotkey("mod+shift+t", () => {
     if (activeTab) void toggleTabView(session, activeTab);
@@ -129,8 +132,8 @@ export function SessionView({
                 </button>
               </WithTooltip>
             )}
-            {session.branch && (
-              <span className="ml-1 flex shrink-0 items-center gap-1 rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground" title={session.cwd}>
+            {workspaceLabel && (
+              <span className="ml-1 flex shrink-0 items-center gap-1 rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground" title={workspaceTitle}>
                 <GitBranch className="size-3" />
                 {session.worktreeName && !session.worktreeRemoved ? (
                   <WorkspaceNameEditor
@@ -143,9 +146,9 @@ export function SessionView({
                     className="max-w-52 text-muted-foreground hover:text-foreground"
                   />
                 ) : (
-                  session.branch
+                  workspaceLabel
                 )}
-                {session.worktreeRemoved && <span className="text-faint">· in project</span>}
+                {session.worktreeRemoved && <span className="text-faint">· workspace removed</span>}
               </span>
             )}
             {renameError && (
