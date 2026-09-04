@@ -1,0 +1,13 @@
+{
+  "name": "@terminalx/portable",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./dashboard": "./src/dashboard.ts",
+    "./events": "./src/events.ts",
+    "./rpc": "./src/rpc.ts",
+    "./transcript": "./src/transcript.ts"
+  }
+}

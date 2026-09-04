@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TabStatus {
@@ -58,7 +60,7 @@ pub struct TabEntry {
 }
 
 fn default_mode() -> String {
-    "auto".into()
+    DEFAULT_PERMISSION_MODE.into()
 }
 
 /// The tracker issue a session was started from, enough to link back.
@@ -82,6 +84,17 @@ pub struct AutomationRef {
     pub run_number: u64,
 }
 
+/// Provenance for a session whose checkout has been deleted. Operationally
+/// the session moves to the project checkout, but the sidebar must not imply
+/// that its existing transcript was created there.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovedWorkspace {
+    pub path: String,
+    pub name: String,
+    pub branch: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionEntry {
@@ -98,6 +111,8 @@ pub struct SessionEntry {
     pub base_ref: Option<String>,
     #[serde(default)]
     pub worktree_removed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_workspace: Option<RemovedWorkspace>,
     /// Set when the session was started from a tracker issue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue: Option<IssueRef>,
@@ -186,7 +201,41 @@ pub fn now() -> String {
 
 /// Worktree names taken by sessions that still hold (or lazily expect) one.
 pub fn claimed_worktree_names(sessions: &[SessionEntry]) -> Vec<String> {
-    sessions.iter().filter_map(|s| s.worktree_name.clone()).collect()
+    sessions
+        .iter()
+        .filter(|s| !s.worktree_removed)
+        .filter_map(|s| s.worktree_name.clone())
+        .collect()
+}
+
+/// Retarget a session after its checkout is deleted while recording where
+/// the transcript was produced. All worktree-deletion entry points use this
+/// transition so none can silently file historical sessions under main.
+pub fn mark_workspace_removed(session: &mut SessionEntry, project_branch: Option<String>) {
+    if session.removed_workspace.is_none() {
+        let name = session
+            .worktree_name
+            .clone()
+            .or_else(|| {
+                PathBuf::from(&session.cwd)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "Removed workspace".into());
+        session.removed_workspace = Some(RemovedWorkspace {
+            path: session.cwd.clone(),
+            name,
+            branch: session.branch.clone(),
+        });
+    }
+    session.cwd = session.project_path.clone();
+    session.worktree_name = None;
+    session.worktree_removed = true;
+    session.branch = project_branch;
+    session.base_ref = None;
+    for tab in &mut session.tabs {
+        tab.status = TabStatus::Idle;
+    }
 }
 
 #[cfg(test)]
@@ -202,6 +251,7 @@ mod tests {
             branch: None,
             base_ref: None,
             worktree_removed: false,
+            removed_workspace: None,
             issue: None,
             automation: None,
             title: "t".into(),
@@ -230,6 +280,18 @@ mod tests {
     }
 
     #[test]
+    fn tabs_without_a_permission_mode_use_the_product_default() {
+        let tab: TabEntry = serde_json::from_value(serde_json::json!({
+            "id": "t1",
+            "harness": "claude",
+            "created": "x"
+        }))
+        .unwrap();
+
+        assert_eq!(tab.permission_mode, DEFAULT_PERMISSION_MODE);
+    }
+
+    #[test]
     fn update_session_touches_modified() {
         let _home = crate::store::temp_home();
         save(&[entry("a")]).unwrap();
@@ -240,5 +302,70 @@ mod tests {
         .unwrap();
         assert_eq!(get("a").unwrap().title, "renamed");
         assert!(get("zzz").is_err());
+    }
+
+    #[test]
+    fn removed_workspace_transition_preserves_provenance_and_transcripts() {
+        let mut session = entry("removed");
+        session.cwd = "/p/.raccoon/worktrees/feature-one".into();
+        session.worktree_name = Some("feature-one".into());
+        session.branch = Some("raccoon/feature-one".into());
+        session.base_ref = Some("base-sha".into());
+        session.tabs.push(TabEntry {
+            id: "tab-one".into(),
+            harness: "codex".into(),
+            title: None,
+            model: "gpt-5".into(),
+            effort: None,
+            permission_mode: DEFAULT_PERMISSION_MODE.into(),
+            provider_session_id: Some("provider-session".into()),
+            status: TabStatus::InProgress,
+            created: "now".into(),
+            modified: "now".into(),
+            context_used: None,
+            context_max: None,
+            fork_from: None,
+            unknown: BTreeMap::new(),
+        });
+
+        mark_workspace_removed(&mut session, Some("main".into()));
+
+        assert_eq!(session.cwd, "/p");
+        assert_eq!(session.branch.as_deref(), Some("main"));
+        assert_eq!(session.worktree_name, None);
+        assert!(session.worktree_removed);
+        assert_eq!(session.tabs.len(), 1);
+        assert_eq!(
+            session.tabs[0].provider_session_id.as_deref(),
+            Some("provider-session")
+        );
+        assert_eq!(session.tabs[0].status, TabStatus::Idle);
+        assert_eq!(
+            session.removed_workspace,
+            Some(RemovedWorkspace {
+                path: "/p/.raccoon/worktrees/feature-one".into(),
+                name: "feature-one".into(),
+                branch: Some("raccoon/feature-one".into()),
+            })
+        );
+        assert!(claimed_worktree_names(&[session]).is_empty());
+    }
+
+    #[test]
+    fn removed_workspace_transition_names_sessions_opened_in_an_existing_checkout() {
+        let mut session = entry("external");
+        session.cwd = "/worktrees/existing-feature".into();
+        session.branch = Some("feature/existing".into());
+
+        mark_workspace_removed(&mut session, Some("main".into()));
+
+        assert_eq!(
+            session.removed_workspace,
+            Some(RemovedWorkspace {
+                path: "/worktrees/existing-feature".into(),
+                name: "existing-feature".into(),
+                branch: Some("feature/existing".into()),
+            })
+        );
     }
 }

@@ -53,13 +53,25 @@ pub struct TailLines {
     /// Bytes read but not yet handed out, ending where the last line began.
     buf: Vec<u8>,
     scanned: u64,
+    max_scan: Option<u64>,
 }
 
 impl TailLines {
     pub fn open(path: &Path) -> io::Result<Self> {
+        Self::open_with_limit(path, Some(MAX_SCAN))
+    }
+
+    /// Transcript paging uses the same backwards block primitive without the
+    /// dashboard's scan cap: an explicit "load earlier" must be able to walk
+    /// all the way to the first turn.
+    pub fn open_unbounded(path: &Path) -> io::Result<Self> {
+        Self::open_with_limit(path, None)
+    }
+
+    fn open_with_limit(path: &Path, max_scan: Option<u64>) -> io::Result<Self> {
         let file = fs::File::open(path)?;
         let start = file.metadata()?.len();
-        Ok(Self { file, start, buf: Vec::new(), scanned: 0 })
+        Ok(Self { file, start, buf: Vec::new(), scanned: 0, max_scan })
     }
 
     /// The next line counting back from the end, or `None` at the start of the
@@ -74,7 +86,7 @@ impl TailLines {
                 }
                 return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
             }
-            if self.start == 0 || self.scanned >= MAX_SCAN {
+            if self.start == 0 || self.max_scan.is_some_and(|limit| self.scanned >= limit) {
                 if self.buf.is_empty() {
                     return Ok(None);
                 }
@@ -83,7 +95,8 @@ impl TailLines {
                 let line = std::mem::take(&mut self.buf);
                 return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
             }
-            let take = BLOCK.min(self.start);
+            let remaining = self.max_scan.map(|limit| limit.saturating_sub(self.scanned)).unwrap_or(self.start);
+            let take = BLOCK.min(self.start).min(remaining);
             self.start -= take;
             let mut block = vec![0u8; take as usize];
             self.file.seek(SeekFrom::Start(self.start))?;
@@ -455,6 +468,7 @@ mod tests {
             branch: None,
             base_ref: None,
             worktree_removed: false,
+            removed_workspace: None,
             issue: None,
             automation: None,
             title: "t".into(),

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, AtSign, ChevronDown, FileText, ImagePlus, SlashSquare, Square, X } from "lucide-react";
+import { ArrowUp, AtSign, ChevronDown, FileText, Paperclip, SlashSquare, Square, X } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import {
@@ -82,6 +83,7 @@ export function Composer({
   const [highlighted, setHighlighted] = useState(0);
   const [dismissedToken, setDismissedToken] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [sending, setSending] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   // The drag-drop subscription is per webview and must be registered once, so
@@ -183,13 +185,26 @@ export function Composer({
 
   const send = useCallback(async () => {
     const text = draft.trim();
-    if (!text && !attachments.length) return;
+    if ((!text && !attachments.length) || sending) return;
     const imgs = attachments.map((a) => ({ mediaType: a.mediaType, data: a.data, name: a.name }));
+    setSending(true);
+    try {
+      await onSend(text, imgs);
+    } catch {
+      // The owning tab renders the send error. Keep the draft and attachments
+      // here so the reader can retry without selecting them again.
+      return;
+    } finally {
+      setSending(false);
+    }
+    for (const attachment of attachments) {
+      if (attachment.previewUrl.startsWith("blob:")) URL.revokeObjectURL(attachment.previewUrl);
+    }
     onDraftChange("");
     setAttachments([]);
-    await onSend(text, imgs);
+    if (fileRef.current) fileRef.current.value = "";
     ref.current?.focus();
-  }, [draft, attachments, onSend, onDraftChange]);
+  }, [draft, attachments, sending, onSend, onDraftChange]);
 
   const addFiles = useCallback(async (list: File[]) => {
     const out: Attachment[] = [];
@@ -203,6 +218,43 @@ export function Composer({
       out.push({ id: crypto.randomUUID(), name: f.name, mediaType: f.type, data, previewUrl: URL.createObjectURL(f) });
     }
     if (out.length) setAttachments((a) => [...a, ...out]);
+  }, []);
+
+  const addPaths = useCallback(async (paths: string[]) => {
+    const mentions: string[] = [];
+    for (const path of paths) {
+      const img = await filesApi.readImage(path).catch(() => null);
+      if (img) {
+        setAttachments((current) => [...current, { id: crypto.randomUUID(), name: img.name, mediaType: img.mediaType, data: img.data, previewUrl: `data:${img.mediaType};base64,${img.data}` }]);
+      } else {
+        mentions.push(`@${path}`);
+      }
+    }
+    if (mentions.length) {
+      const { draft: current, onDraftChange: change } = latest.current;
+      const sep = current && !/\s$/.test(current) ? " " : "";
+      change(current + sep + mentions.join(" ") + " ");
+    }
+    ref.current?.focus();
+  }, []);
+
+  const chooseFiles = useCallback(async () => {
+    try {
+      const selected = await openDialog({ multiple: true, title: "Attach files" });
+      if (!selected) return;
+      await addPaths(Array.isArray(selected) ? selected : [selected]);
+    } catch {
+      // The hidden browser picker keeps the composer usable outside Tauri.
+      fileRef.current?.click();
+    }
+  }, [addPaths]);
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((list) => {
+      const removed = list.find((item) => item.id === id);
+      if (removed?.previewUrl.startsWith("blob:")) URL.revokeObjectURL(removed.previewUrl);
+      return list.filter((item) => item.id !== id);
+    });
   }, []);
 
   // Dropped paths arrive from the window, not the DOM: images attach, the
@@ -229,21 +281,7 @@ export function Composer({
           else if (p.type === "leave") setDragging(false);
           else if (p.type === "drop") {
             setDragging(false);
-            const mentions: string[] = [];
-            for (const path of p.paths) {
-              const img = await filesApi.readImage(path).catch(() => null);
-              if (img) {
-                setAttachments((a) => [...a, { id: crypto.randomUUID(), name: img.name, mediaType: img.mediaType, data: img.data, previewUrl: `data:${img.mediaType};base64,${img.data}` }]);
-              } else {
-                mentions.push(`@${path}`);
-              }
-            }
-            if (mentions.length) {
-              const { draft: current, onDraftChange: change } = latest.current;
-              const sep = current && !/\s$/.test(current) ? " " : "";
-              change(current + sep + mentions.join(" ") + " ");
-            }
-            ref.current?.focus();
+            await addPaths(p.paths);
           }
         });
         off = fn;
@@ -256,7 +294,7 @@ export function Composer({
       disposed = true;
       stop();
     };
-  }, []);
+  }, [addPaths]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (pickerOpen && items.length) {
@@ -306,6 +344,28 @@ export function Composer({
             void addFiles(list);
           }
         }}
+        onDragEnter={(e) => {
+          if (!e.dataTransfer.types.includes("Files")) return;
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragOver={(e) => {
+          if (!e.dataTransfer.types.includes("Files")) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+          setDragging(true);
+        }}
+        onDragLeave={(e) => {
+          if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+          setDragging(false);
+        }}
+        onDrop={(e) => {
+          const list = [...e.dataTransfer.files];
+          if (!list.length) return;
+          e.preventDefault();
+          setDragging(false);
+          void addFiles(list);
+        }}
       >
         {pickerOpen && (
           <PickerMenu
@@ -346,8 +406,8 @@ export function Composer({
                 <img src={a.previewUrl} alt={a.name} className="size-full object-cover" />
                 <button
                   type="button"
-                  aria-label="Remove"
-                  onClick={() => setAttachments((list) => list.filter((x) => x.id !== a.id))}
+                  aria-label={`Remove ${a.name}`}
+                  onClick={() => removeAttachment(a.id)}
                   className="absolute right-0.5 top-0.5 hidden rounded-full bg-black/60 p-0.5 text-white group-hover:block"
                 >
                   <X className="size-3" />
@@ -372,10 +432,23 @@ export function Composer({
           className="max-h-60 w-full resize-none bg-transparent px-1.5 py-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
         />
         <div className="mt-1 flex items-center gap-1">
-          <input ref={fileRef} type="file" accept="image/*" multiple hidden onChange={(e) => e.target.files && void addFiles([...e.target.files])} />
-          <WithTooltip label="Attach image">
-            <Button variant="ghost" size="icon-sm" aria-label="Attach image" onClick={() => fileRef.current?.click()}>
-              <ImagePlus />
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            multiple
+            hidden
+            onChange={(e) => {
+              const list = e.target.files ? [...e.target.files] : [];
+              // A cleared input lets the same file be selected again after a
+              // send or removal; browsers do not emit change otherwise.
+              e.target.value = "";
+              if (list.length) void addFiles(list);
+            }}
+          />
+          <WithTooltip label="Attach files">
+            <Button variant="ghost" size="icon-sm" aria-label="Attach files" onClick={() => void chooseFiles()}>
+              <Paperclip />
             </Button>
           </WithTooltip>
           <MicButton dictation={dictation} />
@@ -498,7 +571,7 @@ export function Composer({
                 size="icon-sm"
                 variant={draft.trim() || attachments.length ? "accent" : "secondary"}
                 aria-label="Send"
-                disabled={!draft.trim() && !attachments.length}
+                disabled={sending || (!draft.trim() && !attachments.length)}
                 onClick={() => void send()}
               >
                 <ArrowUp />

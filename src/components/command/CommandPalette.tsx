@@ -790,7 +790,7 @@ function PaletteResultRow({
       )}
     >
       <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-veil-raised text-muted-foreground">
-        {busy ? <Loader2 className="size-3.5 animate-spin" /> : row.agentId ? <AgentMark id={row.agentId} className="size-4" /> : row.project ? <ProjectGlyph project={row.project} /> : <Icon className="size-4" />}
+        {busy ? <Loader2 className="size-3.5 animate-spin" /> : row.agentId ? <AgentMark id={row.agentId} className="size-4" decorative /> : row.project ? <ProjectGlyph project={row.project} /> : <Icon className="size-4" />}
       </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-[13px] font-medium text-foreground">

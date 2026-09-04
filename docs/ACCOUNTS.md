@@ -1,6 +1,6 @@
 # Accounts, device pairing and cloud sessions
 
-Status: Approved integration plan
+Status: Desktop pairing foundation implemented
 
 Date: 2026-09-03
 
@@ -16,9 +16,15 @@ plan does not require a change to those services.
    sidebar or Settings, PKCE through the deployed console, the
    `terminalx://auth/callback` return, Keychain persistence, refresh, identity,
    and sign-out are implemented by [#42](https://github.com/terminalx-ai/raccoon/issues/42).
-2. **Mobile account sign-in and installation registration** — planned.
-3. **Host account binding and one-time pairing grants** — planned.
-4. **Direct and relayed account-paired sessions** — planned.
+2. **Mobile account sign-in and installation registration** — tracked by
+   [#7](https://github.com/terminalx-ai/raccoon/issues/7).
+3. **Host account binding and one-time pairing grants** ✅ — the desktop host
+   binds, heartbeats, services HPKE grants, and removes automatic credentials
+   on sign-out; the companion-side host directory and grant requester are #7.
+4. **Direct and relayed account-paired sessions** ✅ on desktop — QR/code
+   pairing, pinned-key E2EE v2, relay invites, resumable relay credentials,
+   device revocation, and reconnect status are implemented; the companion UI
+   remains #7.
 
 ## Reuse boundary
 
@@ -124,9 +130,10 @@ and `apps/api/docs/account-bound-host-pairing.md` § “Security boundary” and
 
 The Rust host creates one persistent Curve25519 E2EE keypair and uses it for the
 single runtime listener shared by direct and relay transports. It does not make
-a key or listener per share. The local key file is owner-only and follows the
-existing `terminalx-e2ee-keypair.json` versioned shape; the public key is safe
-to publish, while the secret key never leaves the host.
+a key or listener per share. The 32-byte private key is stored in macOS
+Keychain under the app's pairing service and never enters `$RACCOON_HOME`; the
+public key is safe to publish. The key is created lazily on the first sign-in or
+when the user explicitly creates an account-free QR/code pairing.
 
 The host derives
 `hostId = base64url(SHA-256(decoded 32-byte public key)).slice(0, 16)`. After
@@ -146,10 +153,12 @@ the relay director, and registers this exact binding shape:
 ```
 
 `environmentKind` is one of `native`, `wsl`, or `ssh`. TerminalX sends no
-repository, folder, session, or terminal metadata. A `live` heartbeat is sent
-only with a fresh relay attestation; otherwise the host reports
-`unverifiable` or `exited`. The implementation follows the existing 30-second
-heartbeat cadence and fences every operation with `bindingGeneration`.
+repository, folder, session, or terminal metadata. The Account tab lists the
+same fields and lets the user edit the display name. A `live` heartbeat is sent
+only while the relay proof and account binding are current. The implementation
+uses a 30-second heartbeat cadence and fences every operation with
+`bindingGeneration`; sign-out submits a strictly newer generation after local
+automatic-device cleanup.
 
 ## Account-bound installation and HPKE grant
 
@@ -182,8 +191,8 @@ For account-bound pairing the app:
    `HPKE-Base-X25519-HKDF-SHA256-ChaCha20Poly1305`, using the returned
    `associatedData` bytes exactly as supplied.
 
-The Rust host polls pending requests, compares the requested host key
-byte-for-byte with its own, and creates a fresh ordinary `mobile` device entry
+The Rust host polls pending requests, binds each request to the signed-in user,
+host id and current generation, and creates a fresh ordinary `mobile` device entry
 with `identityMode: authenticate`. It never copies another device's token. Its
 encrypted offer uses the existing version-2 pairing offer, including the
 direct endpoint and, when provisioned, the version-1 relay bundle with
@@ -192,10 +201,10 @@ directory key, completes local pairing, and only then consumes the grant. Any
 partial failure revokes the grant and deletes partial local credentials.
 
 Automatic pairing is generation-fenced. Account sign-out or installation
-revocation removes account-derived device entries, queues relay credential
-revocation idempotently, and acknowledges the server record only after local
-cleanup. Explicit QR/code pairings remain independent and survive account
-sign-out, matching the deployed contract.
+revocation removes account-derived device entries and their Keychain secrets,
+drops live sockets before any best-effort network cleanup, and acknowledges a
+server revocation only after local cleanup. Explicit QR/code pairings remain
+independent and survive account sign-out, matching the deployed contract.
 
 ## Direct pairing and E2EE framing v2
 
@@ -212,6 +221,16 @@ account. Its offer is version 2 and uses only the deployed fields: `endpoint`,
 `deviceToken`, `publicKeyB64`, optional `pairedDeviceId`, literal scope
 `mobile`, an identity mode, and the optional version-1 relay offer. It does not
 invent viewer/driver scopes or another envelope.
+
+Settings presents the same two explicit connection policies as the shipped
+desktop. **TerminalX Relay** requires sign-in and mints an offer containing both
+the direct endpoint and the relay invite. The companion races both candidates,
+with direct winning an exact tie, so nearby devices use LAN/Tailscale while the
+relay remains the fallback away from the Mac. **LAN** mints a direct-only offer,
+does not ask the relay for an invite, and remains available without an account.
+Relay mint failure is surfaced as a refusal with a LAN alternative; it never
+silently produces a direct-only code under the Relay label. Changing policies
+rotates the pending credential, invalidating the code made for the old policy.
 
 Both direct and relay transports then run the same E2EE v2 state machine. The
 mobile `e2ee_hello` offers framing 2 and text/binary payload kinds with context
@@ -263,19 +282,23 @@ assignment, resolve, attestation, and director moves are in
 The Rust host exchanges its desktop access token and key identity for a relay
 token, calls strict `POST /v1/assign`, and establishes the cell control socket.
 It implements the deployed 15-second challenge/ack deadline and exact 16-field
-host-proof transcript, generation fencing, relay-driven ping/pong, lease
-rotation, drain/reassignment, idempotent credential install/revoke request ids,
-and demand gating. It holds a control socket only while a paired phone, pending
-invite, queued revoke, or pairing operation needs it, with the existing
-ten-minute linger after demand disappears.
+host-proof transcript, generation fencing, relay-driven ping/pong, strict
+control frames, single-use invite creation, credential install/reconciliation,
+resume confirmation and device revocation. While the account is signed in it
+keeps the host control connection live so the sidebar can report connected or
+offline and so a phone can reach the Mac. Failure follows the
+0.5→1→2→4→8→15→30→60 second ladder for twelve attempts and then a 90-second
+trickle; the UI escalates after attempts three and twelve.
 
-The Expo app connects with the invite credential from the pairing offer, then
-uses the current and grace resume tokens. On stale placement it calls strict
-`POST /v1/resolve` without an Authorization header and follows only a director
-move with a strictly newer assignment epoch. Both clients honor `Retry-After`
-and deployed close codes. After `host-data-auth` or `relay-auth`/`relay-hello`,
-the cell is a byte pipe; TerminalX never expects or emits a relay status frame in
-the E2EE byte stream.
+The companion connects with the invite credential from the pairing offer,
+installs a hashed resume credential through the encrypted pairing RPC, and
+reconciles the idempotent install before persisting it. A relay invite connection
+authorizes installation by its cell connection id; an authenticated direct
+connection uses a fresh desktop-local id. Resume connections can confirm their
+accepted current or grace credential but cannot provision a replacement through
+the initial-install path. After `host-data-auth` or
+`relay-auth`/`relay-hello`, the cell is a byte pipe; TerminalX never expects or
+emits a relay status frame in the E2EE byte stream.
 
 The relay may see identities, relay/device ids, routing metadata, socket
 metadata, and plaintext E2EE handshake frames. It cannot see the device token,
@@ -295,17 +318,40 @@ E2EE v2.
 `apps/relay/src/director/director-server.ts`, and
 `apps/relay/src/cell/cell-server.ts`.
 
-TerminalX persists only what a client needs: protected cloud sessions, the host
-key and device registry on desktop, and the installation key plus paired-host
-records in Expo SecureStore. It keeps plaintext pairing secrets, HPKE private
-keys, authorization codes, relay invite credentials, and active E2EE session
-keys in memory only for their protocol lifetime.
+TerminalX persists only what a client needs: protected cloud sessions and the
+host private key in macOS Keychain, raw per-device credentials in separate
+Keychain items, credential hashes and device metadata in `devices.json`, and a
+non-secret identity/generation mirror in `account.json`. The companion keeps
+its installation key plus paired-host records in platform secure storage. Both
+sides keep HPKE ephemeral private keys, authorization codes, relay invite
+credentials, and active E2EE session keys in memory only for their protocol
+lifetime.
 
 Rust and Expo decoders accept auth extensions only where the auth contract does,
 but use exact strict relay schemas. Optional RPC JSON fields remain optional;
 new stream opcodes or behavior-changing payload content are sent only after a
 named capability is negotiated. Logs identify the stage and a redacted request
 id, never credentials or payload content.
+
+### Desktop/mobile protocol interop check
+
+`scripts/pairing-interop.mjs` is a small scripted counterpart derived from the
+shipped mobile E2EE and relay contracts. With a fresh code visible in Settings
+→ Devices, copy the fallback code and force the path being checked:
+
+```sh
+pbpaste | pnpm interop:pairing -- --transport direct
+pbpaste | pnpm interop:pairing -- --transport relay
+```
+
+Use a LAN code for the direct command and a fresh TerminalX Relay code for the
+relay command. Without `--transport`, the probe uses Relay when the offer has an
+invite and direct otherwise. The script prints no credential material. It
+validates the offer and pinned host key, completes E2EE framing v2, exchanges an
+encrypted `status.get` frame and, when a relay invite is present, installs and
+reconciles a hashed resume credential through `pairing.getEndpoints`. The newly
+authenticated device then appears in Settings → Devices; use Revoke to remove
+the row, close its live connection, and let the script finish.
 
 ## Would require a server change (out of scope)
 

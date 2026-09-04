@@ -1,11 +1,12 @@
 import "@testing-library/dom";
-import type { ReactNode } from "react";
+import { StrictMode, type ReactNode } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 
-const { invoke, sessionStore } = vi.hoisted(() => ({
+const { invoke, openAutomation, sessionStore } = vi.hoisted(() => ({
   invoke: vi.fn(),
+  openAutomation: vi.fn(),
   sessionStore: {
     projects: [{ path: "/repo", name: "Raccoon" }],
     harnesses: [
@@ -49,6 +50,7 @@ vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
 vi.mock("@/lib/sessions", () => ({
   addProject: vi.fn(),
   clearNewSessionPreset: vi.fn(),
+  openAutomation,
   selectProject: vi.fn(),
   selectSession: vi.fn(),
   upsertSession: vi.fn(),
@@ -56,6 +58,7 @@ vi.mock("@/lib/sessions", () => ({
 }));
 
 const { NewSessionView } = await import("@/components/session/NewSessionView");
+const { clearNewSessionPreset } = await import("@/lib/sessions");
 const { IssuesView } = await import("./IssuesView");
 
 const issues = [
@@ -95,8 +98,23 @@ function mockBackend() {
     if (command === "work_status") {
       return { isRepo: true, dirty: false, branch: "main", upstream: "origin/main", ahead: 0, behind: 0, defaultBranch: "main", aheadOfBase: 0, head: "abc" };
     }
+    if (command === "preview_workspace_name") {
+      const requested = String(args?.requested ?? "").trim();
+      return requested ? requested.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") : "quiet-amber-fox";
+    }
     if (command === "issues_list") return issues;
     if (command === "automation_issue_preview") return issues;
+    if (command === "automation_create") {
+      return {
+        id: "automation-99",
+        ...((args as { input: Record<string, unknown> }).input),
+        nextRunAt: "2026-09-07T09:00:00Z",
+        lastRunAt: null,
+        lastOutcome: null,
+        created: "2026-09-04T00:00:00Z",
+        modified: "2026-09-04T00:00:00Z",
+      };
+    }
     if (command === "issue_details") return issues.find((issue) => issue.id === args?.id);
     if (command === "create_session") {
       const req = (args as { req: Record<string, unknown> }).req;
@@ -125,6 +143,7 @@ function issueSwitch() {
 
 beforeEach(() => {
   invoke.mockReset();
+  openAutomation.mockReset();
   mockBackend();
   setPrefs({
     lastProject: "/repo",
@@ -140,6 +159,33 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("issue session targets", () => {
+  it("does not clear the workspace destination during Strict Mode effect replay", async () => {
+    vi.mocked(clearNewSessionPreset).mockClear();
+    render(<StrictMode><NewSessionView /></StrictMode>);
+    await screen.findByRole("button", { name: /Workspace quiet-amber-fox/ });
+    expect(clearNewSessionPreset).not.toHaveBeenCalled();
+  });
+
+  it("previews and customises the workspace name for a new session", async () => {
+    render(<NewSessionView />);
+
+    const preview = await screen.findByRole("button", { name: /Workspace quiet-amber-fox/ });
+    fireEvent.doubleClick(preview);
+    const input = screen.getByRole("textbox", { name: "Workspace name" });
+    fireEvent.change(input, { target: { value: "My Focused Workspace" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await screen.findByRole("button", { name: /Workspace my-focused-workspace/ });
+
+    fireEvent.change(screen.getByPlaceholderText("Describe the task. A worktree is created when you send."), {
+      target: { value: "Build the feature" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+
+    await waitFor(() => expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(true));
+    const [, args] = invoke.mock.calls.find(([command]) => command === "create_session") as [string, { req: Record<string, unknown> }];
+    expect(args.req).toMatchObject({ useWorktree: true, worktreeName: "my-focused-workspace" });
+  });
+
   it("ignores a composer's one-off choice and resets the choice for the next issue", async () => {
     const composer = render(<NewSessionView />);
     const composerSwitch = screen.getByRole("switch");
@@ -193,5 +239,23 @@ describe("issue session targets", () => {
     expect(screen.getByDisplayValue("terminalx-ai/raccoon")).toBeTruthy();
     expect(screen.getByDisplayValue("label:raccoon")).toBeTruthy();
     expect(await screen.findByText("2 matching issues")).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Start session" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to issues" }));
+    expect(await screen.findByRole("button", { name: /#11Fix login timeout/ })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "New automation" })).toBeNull();
+  });
+
+  it("opens the saved automation detail after creating from an issue", async () => {
+    render(<IssuesView />);
+    const row = (await screen.findByText("Fix login timeout")).closest("button")!;
+    fireEvent.contextMenu(row);
+    fireEvent.click(await screen.findByText("Automate this label: raccoon…"));
+
+    await screen.findByText("2 matching issues");
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() => expect(openAutomation).toHaveBeenCalledWith("automation-99"));
   });
 });

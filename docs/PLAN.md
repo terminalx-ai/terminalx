@@ -69,16 +69,16 @@ src-tauri/src
   transcription/     catalog.rs (models on offer), download.rs, engine.rs, audio.rs
 src
   App.tsx            routes the whole app off the session store
-  components/layout    AppShell, TitleBar, Sidebar, ProjectRail, WorkspaceColumn, RightPanel
-  components/session   SessionView, NewSessionView, TabStrip, TabView, settle/delete dialogs
+  components/layout    AppShell, Sidebar, ProjectRail, SidebarTree, RightPanel
+  components/session   SessionView, NewSessionView, TabActions, TabView, settle/delete dialogs
   components/chat      Chat, TurnBlock, ToolCallRow, Markdown, DiffBlock, Composer,
                        PickerMenu, AskCards, Dictation
   components/changes   ChangesPanel, DiffPane, FileList, RepoPanel, PrPanel
-  components/files     ExplorerPane, FileTree, FileTreeView, FileTypeIcon
+  components/files     FileTree, FileTreeView, FileTypeIcon
   components/editor    EditorPane, EditorSplit, QuickOpen, ProjectSearch
   components/dashboard AgentDashboard, AgentCard
   components/issues    IssuesView
-  components/terminal  TerminalView, TerminalDock
+  components/terminal  TerminalView
   components/settings  SettingsDialog, TranscriptionTab
   components/raccoon   pixel sprite + idle/busy scenes
   components/ui        button, dialog, menu, controls, tooltip, Toasts
@@ -151,7 +151,7 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 
 ### C9 — Terminal ✅
 - [x] PTY with coalesced output, xterm with fit + webgl, theme sync, OSC colour queries.
-- [x] Terminal tabs inside a session; session terminal dock (⌘J), panes survive session switches.
+- [x] Full-height shell tabs beside agent tabs (⌘J); panes survive tab and session switches.
 
 ### C10 — Files and editor ✅
 - [x] File tree in the right panel (Files, ⌘⌥4), fuzzy file search (⌘P), project text search (⌘⇧F).
@@ -238,11 +238,10 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Long-session stress: demo page `?turns=200&live=1&stream=1000` sustains ~830 deltas/s with ~1 long task/s (max 72 ms) after chunking the streaming preview; composer stays visible and typed text arrives intact.
 - [x] Light mode pass (session, editor, terminal), keyboard pass (focus rings on tabs, rows, composer); reduced motion honoured through `prefers-reduced-motion` in the raccoon scene and runner (code path, not toggled system-wide).
 
-### Explorer ✅
-- [x] Explorer column beside the transcript (⌘⇧E, header button, resizable, persisted), the checkout as a lazy tree with Material file and folder icons loaded after first paint.
+### Files ✅
+- [x] The right panel's Files tab is the single checkout browser, with a lazy tree and Material file and folder icons loaded after first paint.
 - [x] Git status in the tree: tinted names with A/M/D/R badges, a dot on folders holding changes, refreshed on agent status changes and a gentle poll.
 - [x] Keyboard walk (arrows, Home/End, Enter), right-click menu: Open, Reveal in Finder, Copy path, Copy relative path, Mention in composer.
-- [x] The right panel's Files tab uses the same tree.
 ### Editor pane ✅
 - [x] Files open in a pane beside the transcript (tab bar, resizable from its left edge, collapsible to a strip) instead of replacing the chat; the composer stays put.
 - [x] Markdown opens as a rendered preview with a Preview | Source toggle (⌘⇧P); jumps from search open source at the line. ⌘⌥W closes every file; ⌘W closes the file or the agent tab depending on which was last focused.
@@ -312,7 +311,7 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - [x] Local models: a compiled-in catalog (Parakeet, Nemotron, Canary, Whisper Small, Whisper Large v3 Turbo) downloaded from Hugging Face with checksum verification into `~/.raccoon/models`, run through transcribe-cpp with Metal; the loaded model stays warm between dictations.
 - [x] Settings → Transcription: model cards with speed/accuracy, download progress, delete; microphone device picker; mute while recording.
 ### Workspaces and projects ✅
-- [x] Sidebar is a project rail plus a workspace column: every checkout of a project (root, TerminalX worktrees, worktrees made elsewhere) with +/− and unpushed counts, sessions grouped under their workspace, Sessions | Explorer tabs.
+- [x] Sidebar is one expandable Projects → Workspaces → Sessions → Tabs tree: every checkout (root, TerminalX worktrees, worktrees made elsewhere, and missing historical checkouts) retains +/− and unpushed counts, status, actions, and menus.
 - [x] Sessions can start inside an existing workspace; the new-session form sits at the bottom with project, agent, model, effort and permission pills.
 - [x] Project menu: rename, logo, colour, pixel mascot, pin, reveal, refresh, archive, remove. Global and per-project refresh.
 - [x] Deleting a workspace checks uncommitted files, unpushed commits and the branch's pull request; merged and clean is called out as safe.

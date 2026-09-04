@@ -1,170 +1,64 @@
-import { useCallback, useEffect, useState } from "react";
-import { Plus, Sparkles, Terminal, X } from "lucide-react";
-import { useTabViews } from "@/lib/tabViews";
-import { Button } from "@/components/ui/button";
-import { WithTooltip } from "@/components/ui/tooltip";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuTrigger,
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuTrigger,
-} from "@/components/ui/menu";
+import { useCallback, useMemo, useState } from "react";
+import { Plus, TerminalSquare } from "lucide-react";
 import { AgentMark } from "@/components/AgentMark";
-import { cn } from "@/lib/cn";
-import { keycaps, useHotkey } from "@/lib/hotkeys";
-import { addTab, openSkills, removeTab, setActiveTab, useSessionStore } from "@/lib/sessions";
-import { skills as skillsApi } from "@/lib/api";
-import { getPrefs } from "@/lib/prefs";
+import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
+import { WithTooltip } from "@/components/ui/tooltip";
 import { closeEditor, useEditors } from "@/lib/editors";
-import type { SessionEntry, TabEntry } from "@/types/session";
-import type { DiscoveredSkill } from "@/types/skills";
+import { keycaps, useHotkey } from "@/lib/hotkeys";
+import { getPrefs } from "@/lib/prefs";
+import { activatePeer, closePeer, peerOrder } from "@/lib/sessionTabs";
+import { addTab, useSessionStore } from "@/lib/sessions";
+import { openTerminal, useTerminals, type SelectedSessionTab } from "@/lib/terminal";
+import type { SessionEntry } from "@/types/session";
 
-/**
- * One tab per agent conversation in a session. The strip sits in the header;
- * ⌘T opens the agent picker, ⌘W closes the active tab (never the last one),
- * ⌘⇧[ and ⌘⇧] step through them in drawn order.
- */
-export function TabStrip({ session, activeTab }: { session: SessionEntry; activeTab: TabEntry | undefined }) {
+/** Creation and mixed-tab shortcuts; all destinations live in the sidebar. */
+export function TabActions({ session, selected }: { session: SessionEntry; selected: SelectedSessionTab | null }) {
   const store = useSessionStore();
-  const tabViews = useTabViews();
-  const ed = useEditors();
-  const hasEditors = ed.editors.some((e) => e.sessionId === session.id);
-  const activeEditor = ed.active[session.id] ?? null;
+  const { panes } = useTerminals();
+  const tabs = useMemo(() => peerOrder(session, panes), [session, panes]);
+  const editors = useEditors();
+  const hasEditors = editors.editors.some((editor) => editor.sessionId === session.id);
+  const activeEditor = editors.active[session.id] ?? null;
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [reachableSkills, setReachableSkills] = useState<DiscoveredSkill[]>([]);
-  const tabs = session.tabs;
-
-  useEffect(() => {
-    let live = true;
-    skillsApi
-      .list(session.cwd)
-      .then((rows) => live && setReachableSkills(rows))
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, [session.cwd]);
-
-  const pickAgentTab = useCallback(
-    (id: string) => {
-      void setActiveTab(session.id, id);
-    },
-    [session.id],
-  );
-
-  const step = useCallback(
-    (dir: 1 | -1) => {
-      if (tabs.length < 2 || !activeTab) return;
-      const i = tabs.findIndex((t) => t.id === activeTab.id);
-      const next = tabs[(i + dir + tabs.length) % tabs.length];
-      void setActiveTab(session.id, next.id);
-    },
-    [tabs, activeTab, session.id],
-  );
-
-  // ⌘W closes whatever the reader last touched: a file in the editor pane
-  // or the agent tab in the chat.
+  const step = useCallback((direction: 1 | -1) => {
+    if (tabs.length < 2) return;
+    const current = tabs.findIndex((tab) => tab.kind === selected?.kind && tab.id === selected.id);
+    const next = current < 0 ? (direction === 1 ? 0 : tabs.length - 1) : (current + direction + tabs.length) % tabs.length;
+    activatePeer(session.id, tabs[next]);
+  }, [selected, session.id, tabs]);
   const closeActive = useCallback(() => {
-    if (ed.lastFocused === "editor" && hasEditors && activeEditor) void closeEditor(activeEditor);
-    else if (activeTab && tabs.length > 1) void removeTab(session.id, activeTab.id);
-  }, [ed.lastFocused, hasEditors, activeEditor, activeTab, tabs.length, session.id]);
-
-  const add = useCallback(
-    async (harness: string) => {
-      const prefs = getPrefs();
-      await addTab(session.id, harness, prefs.lastModel[harness] ?? "", prefs.lastEffort[harness] ?? null, prefs.lastMode);
-    },
-    [session.id],
-  );
-
+    if (editors.lastFocused === "editor" && hasEditors && activeEditor) {
+      void closeEditor(activeEditor);
+      return;
+    }
+    const active = tabs.find((tab) => tab.kind === selected?.kind && tab.id === selected.id);
+    if (active) void closePeer(session.id, active, tabs, selected);
+  }, [activeEditor, editors.lastFocused, hasEditors, selected, session.id, tabs]);
+  const add = async (harness: string) => {
+    const prefs = getPrefs();
+    await addTab(session.id, harness, prefs.lastModel[harness] ?? "", prefs.lastEffort[harness] ?? null, prefs.lastMode);
+  };
   useHotkey("mod+t", () => setPickerOpen(true));
   useHotkey("mod+w", closeActive);
   useHotkey("mod+shift+]", () => step(1));
   useHotkey("mod+shift+[", () => step(-1));
 
-  return (
-    <div className="flex min-w-0 items-center gap-0.5 overflow-hidden rounded-md bg-well p-0.5">
-      {tabs.map((t) => {
-        const active = t.id === activeTab?.id;
-        const name = t.title ?? store.harnesses.find((h) => h.id === t.harness)?.name ?? t.harness;
-        const skillCount = reachableSkills.filter((skill) => skill.agents.includes(t.harness)).length;
-        return (
-          <ContextMenu key={t.id}>
-            <ContextMenuTrigger asChild>
-              <div
-                role="tab"
-                aria-selected={active}
-                tabIndex={0}
-                onClick={() => pickAgentTab(t.id)}
-                onKeyDown={(e) => e.key === "Enter" && pickAgentTab(t.id)}
-                onAuxClick={(e) => e.button === 1 && tabs.length > 1 && removeTab(session.id, t.id)}
-                className={cn(
-                  "group/tab relative flex h-6 min-w-0 items-center gap-1.5 rounded-[5px] pl-2 pr-1 text-xs transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-                  active ? "bg-(--surface-thumb) text-foreground shadow-button" : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                <span
-                  className={cn(
-                    "absolute left-0.5 top-1/2 h-3 w-0.5 -translate-y-1/2 rounded-full",
-                    t.status === "waiting" && "bg-warning",
-                    t.status === "in_progress" && "bg-info animate-pulse-soft",
-                    t.status === "completed" && "bg-add",
-                  )}
-                />
-                <AgentMark id={t.harness} className="size-3.5 shrink-0" />
-                <span className="max-w-[9rem] truncate">{name}</span>
-                {tabViews.views[t.id] === "terminal" && <Terminal className="size-3 shrink-0 text-faint" aria-label="In terminal view" />}
-                <button
-                  type="button"
-                  aria-label="Close tab"
-                  disabled={tabs.length <= 1}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void removeTab(session.id, t.id);
-                  }}
-                  className={cn(
-                    "ml-0.5 rounded-sm p-0.5 text-faint opacity-0 hover:bg-veil-strong hover:text-foreground group-hover/tab:opacity-100 focus-visible:opacity-100",
-                    tabs.length <= 1 && "hidden",
-                  )}
-                >
-                  <X className="size-3" />
-                </button>
-              </div>
-            </ContextMenuTrigger>
-            <ContextMenuContent>
-              <ContextMenuItem onSelect={() => openSkills({ agent: t.harness, projectPath: session.cwd })}>
-                <Sparkles /> {skillCount} {skillCount === 1 ? "skill" : "skills"} for this tab
-              </ContextMenuItem>
-            </ContextMenuContent>
-          </ContextMenu>
-        );
-      })}
-      <DropdownMenu open={pickerOpen} onOpenChange={setPickerOpen}>
-        <DropdownMenuTrigger asChild>
-          <span>
-            <WithTooltip label="New tab" keys={keycaps("mod+t")}>
-              <Button variant="ghost" size="icon-xs" aria-label="New tab">
-                <Plus />
-              </Button>
-            </WithTooltip>
-          </span>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          <DropdownMenuLabel>New tab with</DropdownMenuLabel>
-          {store.harnesses.map((h) => (
-            <DropdownMenuItem key={h.id} disabled={!h.available} onSelect={() => void add(h.id)}>
-              <AgentMark id={h.id} />
-              <span>{h.name}</span>
-              {!h.available && <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span>}
-            </DropdownMenuItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </div>
-  );
+  return <>
+    <WithTooltip label="New terminal">
+      <Button variant="ghost" size="icon-sm" aria-label="New terminal" onClick={() => void openTerminal(session.id, session.cwd)}><TerminalSquare /></Button>
+    </WithTooltip>
+    <DropdownMenu open={pickerOpen} onOpenChange={setPickerOpen}>
+      <DropdownMenuTrigger asChild>
+        <span><WithTooltip label="New agent tab" keys={keycaps("mod+t")}><Button variant="ghost" size="icon-sm" aria-label="New agent tab"><Plus /></Button></WithTooltip></span>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuLabel>New agent tab with</DropdownMenuLabel>
+        {store.harnesses.map((harness) => <DropdownMenuItem key={harness.id} disabled={!harness.available} onSelect={() => void add(harness.id)}>
+          <AgentMark id={harness.id} decorative /><span>{harness.name}</span>
+          {!harness.available ? <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span> : null}
+        </DropdownMenuItem>)}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  </>;
 }

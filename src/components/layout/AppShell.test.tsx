@@ -1,6 +1,6 @@
 import "@testing-library/dom";
 import type { ReactNode } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 
@@ -12,7 +12,8 @@ const { sessionStore } = vi.hoisted(() => ({
     sessions: [],
     harnesses: [],
     selectedSessionId: null,
-    view: "new" as "new" | "issues" | "agents" | "automations" | "skills" | "stats",
+    selectedAutomationId: null as string | null,
+    view: "new" as "new" | "issues" | "agents" | "stats" | "automations" | "skills",
     showArchived: false,
     selectedProject: "/repo" as string | null,
     workspaces: {
@@ -54,6 +55,7 @@ vi.mock("@/lib/api", () => ({ agent: { send: vi.fn() } }));
 vi.mock("@/lib/models", () => ({ loadModels: vi.fn() }));
 vi.mock("@/lib/automations", () => ({ bootAutomations: vi.fn() }));
 vi.mock("@/lib/account", () => ({ bootAccount: vi.fn() }));
+vi.mock("@/lib/pairing", () => ({ bootPairing: vi.fn() }));
 vi.mock("@/lib/notify", () => ({ startNotifications: vi.fn() }));
 vi.mock("@/lib/tabViews", () => ({ subscribeTabPty: vi.fn() }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
@@ -67,9 +69,14 @@ vi.mock("@/components/layout/Sidebar", () => ({
 vi.mock("@/components/session/NewSessionView", () => ({ NewSessionView: () => <div data-testid="new-session" /> }));
 vi.mock("@/components/issues/IssuesView", () => ({ IssuesView: () => <div data-testid="issues" /> }));
 vi.mock("@/components/dashboard/AgentDashboard", () => ({ AgentDashboard: () => <div data-testid="agents" /> }));
-vi.mock("@/components/automations/AutomationsView", () => ({ AutomationsView: () => <div data-testid="automations" /> }));
+vi.mock("@/components/automations/AutomationsView", () => ({
+  AutomationsView: ({ initialAutomationId }: { initialAutomationId?: string | null }) => (
+    <div data-testid="automations" data-automation-id={initialAutomationId ?? ""} />
+  ),
+}));
 vi.mock("@/components/skills/SkillsView", () => ({ SkillsView: () => <div data-testid="skills" /> }));
 vi.mock("@/components/session/SessionView", () => ({ SessionView: () => <div data-testid="session" /> }));
+vi.mock("@/components/editor/EditorSplit", () => ({ EditorSplit: ({ sessionId }: { sessionId: string }) => <div data-testid="editor-split" data-session-id={sessionId} /> }));
 vi.mock("@/components/layout/RightPanel", () => ({
   RightPanel: ({ cwd, branch }: { cwd: string; branch?: string | null }) => <div data-testid="right-panel" data-cwd={cwd} data-branch={branch ?? ""} />,
 }));
@@ -87,6 +94,7 @@ vi.mock("@/components/session/SettleDialog", () => ({ SettleDialog: () => null }
 vi.mock("@/components/session/WorkspaceDeleteDialog", () => ({ WorkspaceDeleteDialog: () => null }));
 
 const { AppShell } = await import("./AppShell");
+const { closeAllEditors, openFile } = await import("@/lib/editors");
 
 beforeEach(() => {
   sessionStore.projects = [{ path: "/repo", name: "Raccoon" }];
@@ -94,11 +102,15 @@ beforeEach(() => {
   sessionStore.selectedProject = "/repo";
   sessionStore.newSessionPreset = { projectPath: "/repo", cwd: "/outside/feature" };
   sessionStore.selectedSessionId = null;
+  sessionStore.selectedAutomationId = null;
   sessionStore.view = "new";
   setPrefs({ sidebarOpen: true, panelOpen: true, lastProject: "/repo", useWorktree: true });
 });
 
-afterEach(cleanup);
+afterEach(async () => {
+  cleanup();
+  await closeAllEditors("checkout:/outside/feature");
+});
 
 describe("new-session right panel", () => {
   it("renders the preset checkout in the persisted open panel", () => {
@@ -132,6 +144,27 @@ describe("new-session right panel", () => {
 
     expect(screen.queryByRole("button", { name: "Toggle panel" })).toBeNull();
     expect(screen.queryByTestId("right-panel")).toBeNull();
+  });
+
+  it("shows files opened from a pre-session workspace in the editor pane", async () => {
+    render(<AppShell />);
+
+    act(() => openFile("checkout:/outside/feature", "/outside/feature", "README.md"));
+
+    const editor = await screen.findByTestId("editor-split");
+    expect(editor.getAttribute("data-session-id")).toBe("checkout:/outside/feature");
+    expect(screen.getByTestId("right-panel").getAttribute("data-cwd")).toBe("/outside/feature");
+  });
+});
+
+describe("automation navigation", () => {
+  it("opens the requested automation in the dedicated detail surface", () => {
+    sessionStore.view = "automations";
+    sessionStore.selectedAutomationId = "automation-99";
+
+    render(<AppShell />);
+
+    expect(screen.getByTestId("automations").getAttribute("data-automation-id")).toBe("automation-99");
   });
 });
 

@@ -507,7 +507,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                     )}
                   >
                     <span className="flex shrink-0 items-center gap-1">
-                      <AgentMark id={agent} className="size-3 text-faint" />
+                      <AgentMark id={agent} className="size-3 text-faint" decorative />
                       {tier !== "icon" ? <span className="font-medium text-foreground">{agentName(agent)}</span> : null}
                       {tier === "full" && plan ? <span className="capitalize text-faint">· {plan}</span> : null}
                     </span>
@@ -603,7 +603,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                           detailAgent === agent && "bg-selected",
                         )}
                       >
-                        <AgentMark id={agent} className="size-4 shrink-0 text-faint" />
+                        <AgentMark id={agent} className="size-4 shrink-0 text-faint" decorative />
                         <div className="min-w-0 flex-1">
                           <div className="flex items-baseline gap-2">
                             <span className="text-[12px] font-medium">{agentName(agent)}</span>
@@ -651,7 +651,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                         onClick={() => setDetailAgent(window.agent)}
                         className="grid w-full grid-cols-[16px_72px_1fr_auto] items-center gap-2 rounded-lg bg-well/60 px-2 py-2 text-left outline-none hover:bg-veil-raised focus-visible:ring-1 focus-visible:ring-ring/50"
                       >
-                        <AgentMark id={window.agent} className="size-3.5 text-faint" />
+                        <AgentMark id={window.agent} className="size-3.5 text-faint" decorative />
                         <div className="min-w-0">
                           <div className="truncate text-[11px] font-medium">{windowLabel(window)}</div>
                           <div className="capitalize text-[9.5px] text-faint">{window.agent}{window.plan ? ` · ${window.plan}` : ""}</div>
@@ -755,7 +755,7 @@ function AgentUsageDetail({
   return (
     <aside data-usage-detail={agent} className="absolute bottom-0 left-[calc(100%+6px)] w-[300px] rounded-xl bg-(--surface-card) p-3 text-popover-foreground shadow-surface hairline max-[760px]:static max-[760px]:mt-2 max-[760px]:w-full">
       <div className="flex items-center gap-2">
-        <AgentMark id={agent} className="size-4 text-muted-foreground" />
+        <AgentMark id={agent} className="size-4 text-muted-foreground" decorative />
         <span className="text-[13px] font-medium">{agentName(agent)}</span>
       </div>
       <div className="mt-0.5 text-[10.5px] text-faint">{formatUpdatedAgo(updatedAt, now)}</div>

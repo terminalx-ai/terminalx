@@ -3,7 +3,7 @@
 //! flood of tiny reads (a build log, `yes`) is thousands per second, which
 //! freezes input. Chunks are gathered for up to 8ms or 32KB and sent once.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -16,6 +16,9 @@ use tauri::{AppHandle, Emitter};
 
 const COALESCE: Duration = Duration::from_millis(8);
 const MAX_CHUNK: usize = 32 * 1024;
+/// Enough raw output to reconstruct a useful terminal tail on a newly attached
+/// mobile reader without retaining an unbounded command history in memory.
+const SCROLLBACK_BYTES: usize = 512 * 1024;
 /// How long a pane gets to exit on its own before it is killed outright.
 const TERM_GRACE: Duration = Duration::from_millis(400);
 
@@ -28,6 +31,7 @@ struct Pane {
     /// program rather than talk to it uses the gap since the last byte as its
     /// only sign that the program has finished drawing and is listening.
     last_output: Arc<Mutex<Option<Instant>>>,
+    scrollback: Arc<Mutex<VecDeque<u8>>>,
     cwd: String,
 }
 
@@ -50,7 +54,7 @@ pub struct PaneInfo {
     pub cwd: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PtyData {
     pub id: String,
@@ -84,6 +88,20 @@ fn shell() -> String {
             "/bin/bash".into()
         }
     })
+}
+
+fn append_scrollback(scrollback: &Mutex<VecDeque<u8>>, bytes: &[u8]) {
+    let mut scrollback = scrollback.lock().unwrap();
+    if bytes.len() >= SCROLLBACK_BYTES {
+        scrollback.clear();
+        scrollback.extend(bytes[bytes.len() - SCROLLBACK_BYTES..].iter().copied());
+        return;
+    }
+    let overflow = scrollback.len().saturating_add(bytes.len()).saturating_sub(SCROLLBACK_BYTES);
+    if overflow > 0 {
+        scrollback.drain(..overflow);
+    }
+    scrollback.extend(bytes.iter().copied());
 }
 
 impl Terminals {
@@ -149,12 +167,14 @@ impl Terminals {
         let writer = pair.master.take_writer().map_err(|e| anyhow!("pty writer: {e}"))?;
         let alive = Arc::new(Mutex::new(true));
         let last_output = Arc::new(Mutex::new(None));
+        let scrollback = Arc::new(Mutex::new(VecDeque::with_capacity(SCROLLBACK_BYTES)));
 
         {
             let app = app.clone();
             let id = id.to_string();
             let alive = alive.clone();
             let last_output = last_output.clone();
+            let scrollback = scrollback.clone();
             std::thread::Builder::new().name(format!("pty-read-{id}")).spawn(move || {
                 let mut buf = vec![0u8; 16 * 1024];
                 let mut acc: Vec<u8> = Vec::with_capacity(MAX_CHUNK);
@@ -172,6 +192,7 @@ impl Terminals {
                                 continue;
                             }
                             let data = base64::engine::general_purpose::STANDARD.encode(&acc);
+                            append_scrollback(&scrollback, &acc);
                             *last_output.lock().unwrap() = Some(Instant::now());
                             let _ = app.emit("pty_data", PtyData { id: id.clone(), data });
                             acc.clear();
@@ -181,6 +202,7 @@ impl Terminals {
                 }
                 if !acc.is_empty() {
                     let data = base64::engine::general_purpose::STANDARD.encode(&acc);
+                    append_scrollback(&scrollback, &acc);
                     let _ = app.emit("pty_data", PtyData { id: id.clone(), data });
                 }
                 *alive.lock().unwrap() = false;
@@ -195,7 +217,7 @@ impl Terminals {
                 let _ = app.emit("pty_exit", PtyExit { id, code });
             })?;
         }
-        self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, writer, pid, alive, last_output, cwd: cwd.to_string() });
+        self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, writer, pid, alive, last_output, scrollback, cwd: cwd.to_string() });
         self.changed();
         Ok(())
     }
@@ -206,6 +228,12 @@ impl Terminals {
         pane.writer.write_all(data)?;
         pane.writer.flush()?;
         Ok(())
+    }
+
+    pub fn read_output(&self, id: &str) -> Option<Vec<u8>> {
+        let scrollback = self.panes.lock().unwrap().get(id)?.scrollback.clone();
+        let bytes = scrollback.lock().unwrap().iter().copied().collect();
+        Some(bytes)
     }
 
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
@@ -298,5 +326,20 @@ impl Terminals {
         if let Some(app) = self.app.lock().unwrap().as_ref() {
             let _ = app.emit(crate::status::resources::CHANGED_EVENT, ());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrollback_retains_only_the_newest_bounded_bytes() {
+        let scrollback = Mutex::new(VecDeque::new());
+        append_scrollback(&scrollback, &[1, 2, 3]);
+        append_scrollback(&scrollback, &vec![4; SCROLLBACK_BYTES]);
+        let bytes: Vec<_> = scrollback.lock().unwrap().iter().copied().collect();
+        assert_eq!(bytes.len(), SCROLLBACK_BYTES);
+        assert!(bytes.iter().all(|byte| *byte == 4));
     }
 }

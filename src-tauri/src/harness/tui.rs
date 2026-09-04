@@ -228,16 +228,20 @@ impl Tail {
 
     /// Point at the file the CLI actually opened. Hooks carry
     /// `transcript_path`, which is authoritative; anything derived before the
-    /// CLI started is only a guess.
+    /// CLI started is only a guess. A previously unknown path belongs to a
+    /// fresh conversation, so everything already written to it is new. When
+    /// replacing a known path, the new file is a resumed conversation whose
+    /// existing records are history.
     pub fn retarget(&self, path: &Path) {
         let mut current = self.path.lock().unwrap();
         if *current == path {
             return;
         }
+        let was_unknown = current.as_os_str().is_empty();
         *current = path.to_path_buf();
-        let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let offset = if was_unknown { 0 } else { std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) };
         let mut stream = self.stream.lock().unwrap();
-        *stream = Streamer::skipping(len, self.decode, stream.carried().clone());
+        *stream = Streamer::skipping(offset, self.decode, stream.carried().clone());
     }
 
     /// Read whatever has been appended since the last call.
@@ -561,15 +565,15 @@ mod tests {
 
 
     #[test]
-    fn a_tail_with_no_file_yet_reads_nothing_until_it_is_named() {
+    fn a_tail_with_no_file_yet_reads_everything_once_it_is_named() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("later.jsonl");
         let tail = Tail::unknown(echo);
         assert!(tail.drain().is_empty());
         std::fs::write(&path, "first\n").unwrap();
         tail.retarget(&path);
-        // What the file already held when it was named is history.
-        assert!(tail.drain().is_empty());
+        // This is a newly minted conversation, not resumed history.
+        assert!(matches!(&tail.drain()[0], Payload::Status { text } if text == "first"));
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
         f.write_all(b"second\n").unwrap();

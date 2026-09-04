@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { api } from "@/lib/api";
+import { setSelectedAgent } from "@/lib/terminal";
 import { buildPaletteIndex, type PaletteIndex } from "@/lib/commandPalette";
 import type {
   ProjectPatch,
@@ -19,8 +20,12 @@ interface State {
   sessions: SessionEntry[];
   harnesses: HarnessInfo[];
   selectedSessionId: string | null;
+  /** Explicit navigation also reveals a destination that was collapsed. */
+  navigationVersion: number;
   /** What the workspace shows when no session is selected. */
   view: "new" | "issues" | "agents" | "automations" | "skills" | "stats";
+  /** A cross-workspace navigation request can open one automation directly. */
+  selectedAutomationId: string | null;
   /** A tab menu can open Skills already narrowed to that tab's reach. */
   skillsFilter: { agent: string; projectPath: string } | null;
   showArchived: boolean;
@@ -42,7 +47,9 @@ let state: State = {
   sessions: [],
   harnesses: [],
   selectedSessionId: null,
+  navigationVersion: 0,
   view: "new",
+  selectedAutomationId: null,
   skillsFilter: null,
   showArchived: false,
   selectedProject: null,
@@ -55,6 +62,9 @@ let state: State = {
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
   const next = { ...state, ...patch };
+  // Clear the draft destination when navigating away, not in React cleanup
+  // (Strict Mode also runs cleanup when a workspace first mounts).
+  if ((patch.view && patch.view !== "new") || patch.selectedSessionId) next.newSessionPreset = null;
   if (
     next.projects !== state.projects ||
     next.sessions !== state.sessions ||
@@ -83,6 +93,7 @@ export function getSessionStore() {
 }
 
 let booted = false;
+const workspaceRefreshVersions = new Map<string, number>();
 export async function bootSessions() {
   if (booted) return;
   booted = true;
@@ -94,6 +105,7 @@ export async function bootSessions() {
   try {
     await listen<SessionEntry>("session_created", (e) => upsertSession(e.payload));
     await listen<SessionEntry>("session_updated", (e) => upsertSession(e.payload));
+    await listen<string>("workspaces_changed", (e) => void refreshWorkspaces(e.payload));
   } catch {
     /* outside a webview */
   }
@@ -128,43 +140,55 @@ export function patchTab(sessionId: string, tabId: string, patch: Partial<TabEnt
   });
 }
 
+function focusProject(path: string | null, patch: Partial<State> = {}) {
+  set({ ...patch, selectedProject: path });
+  if (path) void refreshWorkspaces(path);
+}
+
 export function selectSession(id: string | null) {
-  set({ selectedSessionId: id, view: "new" });
+  const selected = id ? state.sessions.find((session) => session.id === id) : null;
+  const patch: Partial<State> = { selectedSessionId: id, view: "new", newSessionPreset: null, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null };
+  if (selected) focusProject(selected.projectPath, patch);
+  else set(patch);
 }
 
 /** The issues browser takes the workspace; no session stays selected. */
 export function openIssues() {
-  set({ selectedSessionId: null, view: "issues" });
+  set({ selectedSessionId: null, view: "issues", selectedAutomationId: null });
 }
 
 /** The agent dashboard, like the issues browser, replaces the whole workspace. */
 export function openAgents() {
-  set({ selectedSessionId: null, view: "agents" });
+  set({ selectedSessionId: null, view: "agents", selectedAutomationId: null });
 }
 
 /** Local app activity and transcript-backed token analytics. */
 export function openStats() {
-  set({ selectedSessionId: null, view: "stats" });
+  set({ selectedSessionId: null, view: "stats", selectedAutomationId: null });
 }
 
 /** Saved agent runs share the full workspace with issues and the dashboard. */
 export function openAutomations() {
-  set({ selectedSessionId: null, view: "automations" });
+  set({ selectedSessionId: null, view: "automations", selectedAutomationId: null });
+}
+
+/** Open a saved automation after creating it from another workspace. */
+export function openAutomation(id: string) {
+  set({ selectedSessionId: null, view: "automations", selectedAutomationId: id });
 }
 
 /** The filesystem-backed skills reader, optionally scoped to one agent tab. */
 export function openSkills(filter: State["skillsFilter"] = null) {
-  set({ selectedSessionId: null, view: "skills", skillsFilter: filter });
+  set({ selectedSessionId: null, view: "skills", skillsFilter: filter, selectedAutomationId: null });
 }
 
 export function selectProjectInSidebar(path: string | null) {
-  set({ selectedProject: path });
-  if (path) void refreshWorkspaces(path);
+  focusProject(path, { navigationVersion: state.navigationVersion + 1, ...(!state.selectedSessionId && state.view === "new" ? { newSessionPreset: null } : {}) });
 }
 
 /** Open the new-session form for a project, optionally inside one of its workspaces. */
 export function startSessionIn(projectPath: string, cwd: string | null) {
-  set({ selectedSessionId: null, view: "new", newSessionPreset: { projectPath, cwd }, lastProject: projectPath });
+  focusProject(projectPath, { selectedSessionId: null, view: "new", newSessionPreset: { projectPath, cwd }, lastProject: projectPath, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
 }
 
 const openingWorkspaces = new Map<string, Promise<SessionEntry>>();
@@ -205,15 +229,31 @@ export function clearNewSessionPreset() {
 }
 
 export async function refreshWorkspaces(projectPath: string) {
+  const version = (workspaceRefreshVersions.get(projectPath) ?? 0) + 1;
+  workspaceRefreshVersions.set(projectPath, version);
   set({ workspacesLoading: { ...state.workspacesLoading, [projectPath]: true } });
   try {
     const list = await api.listWorkspaces(projectPath);
-    set({ workspaces: { ...state.workspaces, [projectPath]: list } });
+    if (workspaceRefreshVersions.get(projectPath) === version) {
+      set({ workspaces: { ...state.workspaces, [projectPath]: list } });
+    }
   } catch {
     /* not a repo, or gone; keep whatever was known */
   } finally {
-    set({ workspacesLoading: { ...state.workspacesLoading, [projectPath]: false } });
+    if (workspaceRefreshVersions.get(projectPath) === version) {
+      set({ workspacesLoading: { ...state.workspacesLoading, [projectPath]: false } });
+    }
   }
+}
+
+export async function renameWorkspace(projectPath: string, path: string, name: string) {
+  const renamed = await api.renameWorkspace(projectPath, path, name);
+  if (state.newSessionPreset?.projectPath === projectPath && state.newSessionPreset.cwd === path) {
+    set({ newSessionPreset: { projectPath, cwd: renamed.path } });
+  }
+  for (const session of renamed.sessions) upsertSession(session);
+  await refreshWorkspaces(projectPath);
+  return renamed;
 }
 
 /** The global refresh: projects, sessions and every project's workspaces. */
@@ -237,6 +277,9 @@ export async function setProjectLogo(path: string, source: string | null) {
 
 export async function deleteWorkspace(projectPath: string, path: string, deleteBranch: boolean) {
   const moved = await api.deleteWorkspace(projectPath, path, deleteBranch);
+  if (state.newSessionPreset?.projectPath === projectPath && state.newSessionPreset.cwd === path) {
+    set({ newSessionPreset: { projectPath, cwd: projectPath } });
+  }
   for (const s of moved) upsertSession(s);
   await refreshWorkspaces(projectPath);
 }
@@ -315,7 +358,7 @@ export async function settleSession(id: string, action: "delete" | "relocate") {
 export async function forkSession(id: string, tabId: string) {
   const s = await api.forkSession(id, tabId);
   upsertSession(s);
-  set({ selectedSessionId: s.id });
+  selectSession(s.id);
   return s;
 }
 
@@ -323,12 +366,13 @@ export async function addTab(sessionId: string, harness: string, model: string, 
   const tab = await api.addTab(sessionId, { harness, model, effort, permissionMode });
   const s = state.sessions.find((x) => x.id === sessionId);
   if (s) patchSession(sessionId, { tabs: [...s.tabs, tab], activeTab: tab.id });
+  setSelectedAgent(sessionId, tab.id);
   return tab;
 }
 
 export async function removeTab(sessionId: string, tabId: string) {
   const s = state.sessions.find((x) => x.id === sessionId);
-  if (!s || s.tabs.length <= 1) return;
+  if (!s) return;
   await api.removeTab(sessionId, tabId);
   const tabs = s.tabs.filter((t) => t.id !== tabId);
   const idx = s.tabs.findIndex((t) => t.id === tabId);
@@ -337,7 +381,9 @@ export async function removeTab(sessionId: string, tabId: string) {
 }
 
 export async function setActiveTab(sessionId: string, tabId: string) {
+  setSelectedAgent(sessionId, tabId);
   patchSession(sessionId, { activeTab: tabId });
+  if (state.selectedSessionId === sessionId) set({ navigationVersion: state.navigationVersion + 1 });
   await api.setActiveTab(sessionId, tabId);
 }
 

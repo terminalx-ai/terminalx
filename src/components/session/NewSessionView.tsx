@@ -25,6 +25,7 @@ import { useHotkey } from "@/lib/hotkeys";
 import { stopDictation } from "@/lib/dictation";
 import { cn } from "@/lib/cn";
 import type { WorkStatus } from "@/types/session";
+import { WorkspaceNameEditor } from "./WorkspaceNameEditor";
 
 /**
  * Where a session is born. The box sits at the bottom, where the composer
@@ -46,6 +47,7 @@ export function NewSessionView({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<WorkStatus | null>(null);
+  const [workspaceName, setWorkspaceName] = useState<string | null>(null);
   const [localUseWorktree, setLocalUseWorktree] = useState(prefs.useWorktree);
   const ref = useRef<HTMLTextAreaElement>(null);
   const useWorktree = controlledUseWorktree ?? localUseWorktree;
@@ -62,10 +64,9 @@ export function NewSessionView({
   const modelId = harness ? (prefs.lastModel[harness.id] ?? models.find((m) => m.isDefault)?.id ?? models[0]?.id ?? "") : "";
   const model = models.find((m) => m.id === modelId) ?? null;
   const effort = harness ? (prefs.lastEffort[harness.id] ?? model?.defaultEffort ?? null) : null;
-  const mode = PERMISSION_MODES.find((m) => m.id === prefs.lastMode) ?? PERMISSION_MODES[0];
+  const mode = PERMISSION_MODES.find((m) => m.id === prefs.lastMode)
+    ?? PERMISSION_MODES.find((m) => m.id === "bypassPermissions")!;
   const workspace = preset?.cwd ? (store.workspaces[preset.projectPath] ?? []).find((w) => w.path === preset.cwd) ?? null : null;
-
-  useEffect(() => () => clearNewSessionPreset(), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,6 +77,22 @@ export function NewSessionView({
       cancelled = true;
     };
   }, [project, preset]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!project || preset?.cwd || !useWorktree) {
+      setWorkspaceName(null);
+      return;
+    }
+    setWorkspaceName(null);
+    api
+      .previewWorkspaceName(project.path)
+      .then((name) => !cancelled && setWorkspaceName(name))
+      .catch((cause) => !cancelled && setError(errorMessage(cause)));
+    return () => {
+      cancelled = true;
+    };
+  }, [project?.path, preset?.cwd, useWorktree]);
 
   const pickProject = async () => {
     try {
@@ -93,7 +110,10 @@ export function NewSessionView({
   const dictation = useDictationInto(NEW_SESSION_TARGET, text, setText, ref);
   useHotkey("mod+shift+d", dictation.toggle);
 
-  const canSend = useMemo(() => !!project && !!harness && available && text.trim().length > 0 && !busy, [project, harness, available, text, busy]);
+  const canSend = useMemo(
+    () => !!project && !!harness && available && text.trim().length > 0 && (!useWorktree || !!preset?.cwd || !!workspaceName) && !busy,
+    [project, harness, available, text, useWorktree, preset?.cwd, workspaceName, busy],
+  );
 
   const create = async () => {
     if (!project || !harness || !canSend) return;
@@ -107,6 +127,7 @@ export function NewSessionView({
         title,
         useWorktree: preset?.cwd ? false : useWorktree,
         onMain: !preset?.cwd && !useWorktree,
+        worktreeName: !preset?.cwd && useWorktree ? workspaceName : null,
         cwd: preset?.cwd ?? null,
         tab: { harness: harness.id, model: modelId, effort, permissionMode: prefs.lastMode },
       });
@@ -180,7 +201,7 @@ export function NewSessionView({
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="secondary" size="sm" className={pill}>
-                  {harness && <AgentMark id={harness.id} className="size-3.5" />}
+                  {harness && <AgentMark id={harness.id} className="size-3.5" decorative />}
                   {harness?.name ?? "Agent"}
                   <ChevronDown className="text-faint" />
                 </Button>
@@ -189,7 +210,7 @@ export function NewSessionView({
                 <DropdownMenuLabel>Agent</DropdownMenuLabel>
                 {store.harnesses.map((h) => (
                   <DropdownMenuItem key={h.id} disabled={!h.available} onSelect={() => setPrefs({ lastAgent: h.id })}>
-                    <AgentMark id={h.id} />
+                    <AgentMark id={h.id} decorative />
                     <span>{h.name}</span>
                     {!h.available && <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span>}
                   </DropdownMenuItem>
@@ -269,13 +290,28 @@ export function NewSessionView({
                 In workspace <span className="font-mono text-foreground">{workspace?.name ?? preset.cwd.split("/").pop()}</span>
               </span>
             ) : (
-              <label className="ml-1 flex items-center gap-2 text-xs text-muted-foreground">
+              <div className="ml-1 flex items-center gap-2 text-xs text-muted-foreground">
                 <Switch size="sm" checked={useWorktree} onCheckedChange={setUseWorktree} />
                 <span className="flex items-center gap-1">
                   <GitBranch className="size-3.5" />
                   {useWorktree ? (
                     <>
                       New worktree from <span className="text-foreground">{status?.defaultBranch ?? "default"}</span>
+                      {workspaceName && project && (
+                        <>
+                          <span className="text-faint">·</span>
+                          <WorkspaceNameEditor
+                            value={workspaceName}
+                            onCommit={async (requested) => {
+                              const canonical = await api.previewWorkspaceName(project.path, requested);
+                              setWorkspaceName(canonical);
+                              return canonical;
+                            }}
+                            onError={setError}
+                            className="max-w-48 text-foreground"
+                          />
+                        </>
+                      )}
                     </>
                   ) : (
                     <>
@@ -283,7 +319,7 @@ export function NewSessionView({
                     </>
                   )}
                 </span>
-              </label>
+              </div>
             )}
           </div>
 

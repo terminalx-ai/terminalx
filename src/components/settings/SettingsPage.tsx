@@ -20,12 +20,14 @@ import changelog from "../../../CHANGELOG.md?raw";
 import { TranscriptionTab } from "./TranscriptionTab";
 import { setStatusSettings, useStatus } from "@/lib/status";
 import { AccountTab } from "./AccountTab";
+import { DevicesTab } from "./DevicesTab";
 
-const TABS = ["account", "general", "appearance", "agents", "transcription", "integrations", "shortcuts", "about"] as const;
+const TABS = ["account", "devices", "general", "appearance", "agents", "transcription", "integrations", "shortcuts", "about"] as const;
 export type SettingsTab = (typeof TABS)[number];
 type Tab = SettingsTab;
 const TAB_LABEL: Record<Tab, string> = {
   account: "Account",
+  devices: "Devices",
   general: "General",
   appearance: "Appearance",
   agents: "Agents",
@@ -78,6 +80,7 @@ export function SettingsPage({
               {TAB_LABEL[tab]}
             </h2>
             {tab === "account" && <AccountTab />}
+            {tab === "devices" && <DevicesTab />}
             {tab === "general" && <GeneralTab />}
             {tab === "appearance" && <AppearanceTab />}
             {tab === "agents" && <AgentsTab />}
@@ -346,7 +349,7 @@ function AgentsTab() {
       <ul className="flex flex-col divide-y divide-hairline rounded-lg bg-well">
         {store.harnesses.map((h) => (
           <li key={h.id} className="flex items-start gap-3 px-3 py-2.5">
-            <AgentMark id={h.id} className="mt-0.5 size-4" />
+            <AgentMark id={h.id} className="mt-0.5 size-4" decorative />
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 text-sm">
                 <span className="font-medium">{h.name}</span>

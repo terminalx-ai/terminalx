@@ -181,6 +181,42 @@
 .animate-pulse-soft {
   animation: pulse-soft 1.6s ease-in-out infinite;
 }
+
+/* Automations own the available workspace and adapt to its width, not the
+   outer window (which may also contain both sidebar columns). */
+.automation-workspace {
+  container-type: inline-size;
+}
+.automation-summary-grid {
+  grid-template-columns: minmax(0, 1.2fr) minmax(18rem, 0.8fr);
+}
+.automation-editor-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+@container (max-width: 800px) {
+  .automation-summary-grid,
+  .automation-editor-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .automation-editor-grid > .col-span-2 {
+    grid-column: 1 / -1;
+  }
+  .automation-table {
+    min-width: 34rem;
+  }
+  .automation-table .automation-column-workspace,
+  .automation-table .automation-column-result {
+    display: none;
+  }
+}
+@container (max-width: 600px) {
+  .automation-table {
+    min-width: 28rem;
+  }
+  .automation-table .automation-column-timing {
+    display: none;
+  }
+}
 .text-shimmer {
   background: linear-gradient(90deg, var(--ink-muted) 0%, var(--ink-strong) 50%, var(--ink-muted) 100%);
   background-size: 200% 100%;
@@ -323,7 +359,7 @@
   padding: 10px 12px;
 }
 
-/* Terminal: the dock supplies the ground, xterm's own viewport stays clear. */
+/* Terminal panels supply the ground; xterm's own viewport stays clear. */
 .terminal-host .xterm,
 .terminal-host .xterm .xterm-viewport,
 .terminal-host .xterm .xterm-screen {

@@ -11,7 +11,7 @@ import { IssueListItem } from "@/components/issues/IssueListItem";
 import { AgentMark } from "@/components/AgentMark";
 import { Markdown } from "@/components/chat/Markdown";
 import { api, errorMessage, gh, issues as issuesApi, type Issue, type IssueTeam, type LinearStatus } from "@/lib/api";
-import { selectProject, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
+import { openAutomation, selectProject, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { PERMISSION_MODES } from "@/lib/models";
 import { chooseMode } from "@/lib/dialogs";
@@ -208,6 +208,21 @@ export function IssuesView({
     ? store.sessions.find((session) => session.issue?.url === selected.url)
     : null;
 
+  if (automationPrefill) {
+    return (
+      <AutomationEditor
+        open
+        automation={null}
+        prefill={automationPrefill}
+        backLabel="Issues"
+        onOpenChange={(open) => {
+          if (!open) setAutomationPrefill(null);
+        }}
+        onSaved={(automation) => openAutomation(automation.id)}
+      />
+    );
+  }
+
   return (
     <div className="flex h-full min-h-0">
       <div className="flex min-w-0 flex-1 flex-col border-r border-hairline">
@@ -371,7 +386,7 @@ export function IssuesView({
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button variant="secondary" size="sm" className="gap-1.5">
-                      {harness && <AgentMark id={harness.id} className="size-3.5" />}
+                      {harness && <AgentMark id={harness.id} className="size-3.5" decorative />}
                       {harness?.name ?? "Agent"}
                       <ChevronDown className="text-faint" />
                     </Button>
@@ -379,7 +394,7 @@ export function IssuesView({
                   <DropdownMenuContent align="start">
                     {store.harnesses.map((h) => (
                       <DropdownMenuItem key={h.id} disabled={!h.available} onSelect={() => setPrefs({ lastAgent: h.id })}>
-                        <AgentMark id={h.id} />
+                        <AgentMark id={h.id} decorative />
                         <span>{h.name}</span>
                         {!h.available && <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span>}
                       </DropdownMenuItem>
@@ -437,15 +452,6 @@ export function IssuesView({
           </>
         )}
       </div>
-      <AutomationEditor
-        open={automationPrefill != null}
-        automation={null}
-        prefill={automationPrefill ?? undefined}
-        onOpenChange={(open) => {
-          if (!open) setAutomationPrefill(null);
-        }}
-        onSaved={() => setAutomationPrefill(null)}
-      />
     </div>
   );
 }

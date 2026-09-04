@@ -16,6 +16,7 @@ mod issues;
 mod installation;
 mod models;
 mod names;
+mod pairing;
 mod pty;
 mod session;
 pub mod skills;
@@ -36,6 +37,7 @@ fn supports_deep_link_scheme(scheme: &str) -> bool {
 
 pub struct AppState {
     pub account: Arc<account::AccountManager>,
+    pub pairing: Arc<pairing::PairingManager>,
     pub host: Arc<harness::host::Host>,
     pub terminals: Arc<pty::Terminals>,
     pub dictation: Arc<dictation::Dictation>,
@@ -61,8 +63,10 @@ pub fn run() {
     let terminals = Arc::new(pty::Terminals::new());
     let status_state = Arc::new(status::StatusState::default());
     let account = Arc::new(account::AccountManager::default());
+    let pairing = Arc::new(pairing::PairingManager::new(account.clone()));
     let state = AppState {
         account: account.clone(),
+        pairing: pairing.clone(),
         host: host.clone(),
         terminals: terminals.clone(),
         dictation: Arc::new(dictation::Dictation::default()),
@@ -85,6 +89,7 @@ pub fn run() {
         .manage(state)
         .setup(move |app| {
             account.configure(&app.config().identifier)?;
+            pairing.configure(app.handle(), &app.config().identifier)?;
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
@@ -152,6 +157,10 @@ pub fn run() {
             commands::account_status,
             commands::account_sign_in,
             commands::account_sign_out,
+            commands::pairing_status,
+            commands::pairing_generate,
+            commands::pairing_revoke,
+            commands::pairing_set_host_name,
             commands::add_project,
             commands::remove_project,
             commands::select_project,
@@ -223,6 +232,7 @@ pub fn run() {
             commands::pty_spawn,
             commands::pty_write,
             commands::pty_resize,
+            commands::mobile_terminal_drivers,
             commands::pty_kill,
             commands::list_dir,
             commands::read_text_file,
@@ -237,6 +247,8 @@ pub fn run() {
             commands::update_project,
             commands::set_project_logo,
             commands::list_workspaces,
+            commands::preview_workspace_name,
+            commands::rename_workspace,
             commands::workspace_disposition,
             commands::delete_workspace,
             commands::issues_list,
@@ -275,6 +287,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(state) = window.try_state::<AppState>() {
+                    state.pairing.stop();
                     state.host.kill_all();
                     state.terminals.kill_all();
                 }

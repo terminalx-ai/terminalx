@@ -177,7 +177,7 @@ export function AgentDashboard() {
                   onSelect={(e) => e.preventDefault()}
                   onCheckedChange={() => setFilters((f) => ({ ...f, harnesses: toggleFilter(f.harnesses, h.id) }))}
                 >
-                  <AgentMark id={h.id} />
+                  <AgentMark id={h.id} decorative />
                   <span className="truncate">{h.name}</span>
                 </DropdownMenuCheckboxItem>
               ))}

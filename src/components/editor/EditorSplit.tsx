@@ -23,7 +23,8 @@ const MIN_W = 320;
  * The editor pane: open files as tabs beside the transcript. The chat keeps
  * its height and its composer; the pane takes width from the right, drags on
  * its left edge, and collapses to a thin strip so a long read never has to
- * be closed to see the conversation again.
+ * be closed to see the conversation again. In narrow columns, the editor
+ * fills the column until hidden or closed, keeping both surfaces usable.
  */
 export function EditorSplit({ sessionId, active }: { sessionId: string; active: boolean }) {
   const prefs = usePrefs();
@@ -34,10 +35,10 @@ export function EditorSplit({ sessionId, active }: { sessionId: string; active: 
   const root = useRef<HTMLDivElement>(null);
   const drag = useRef<{ x: number; w: number; max: number } | null>(null);
 
-  // The pane may take up to 70% of the column it sits in.
+  // Leave enough space for the composer in side-by-side mode.
   const maxWidth = useCallback(() => {
     const parent = root.current?.parentElement;
-    return parent ? Math.max(MIN_W, Math.floor(parent.clientWidth * 0.7)) : 1200;
+    return parent ? Math.max(MIN_W, parent.clientWidth - 360) : 1200;
   }, []);
   const clamp = (w: number, max: number) => Math.max(MIN_W, Math.min(max, w));
   const onDown = useCallback(
@@ -89,7 +90,7 @@ export function EditorSplit({ sessionId, active }: { sessionId: string; active: 
   return (
     <div
       ref={root}
-      className="relative flex h-full w-(--editor-w) shrink-0 flex-col border-l border-hairline"
+      className="absolute inset-0 z-10 flex h-full w-full min-w-0 shrink-0 flex-col border-l border-hairline bg-background @min-[768px]/editor-host:relative @min-[768px]/editor-host:w-(--editor-w) @min-[768px]/editor-host:max-w-[calc(100%-360px)]"
       onPointerDownCapture={() => setLastFocused("editor")}
       onFocusCapture={() => setLastFocused("editor")}
     >

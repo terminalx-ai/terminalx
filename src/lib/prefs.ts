@@ -10,10 +10,7 @@ export interface Prefs {
   sidebarWidth: number;
   panelOpen: boolean;
   panelWidth: number;
-  explorerOpen: boolean;
-  explorerWidth: number;
   editorPaneWidth: number;
-  terminalHeight: number;
   updateChannel: "stable" | "beta";
   sounds: boolean;
   animations: boolean;
@@ -36,10 +33,7 @@ const DEFAULTS: Prefs = {
   sidebarWidth: 268,
   panelOpen: false,
   panelWidth: 400,
-  explorerOpen: false,
-  explorerWidth: 240,
   editorPaneWidth: 520,
-  terminalHeight: 260,
   updateChannel: "stable",
   sounds: true,
   animations: true,
@@ -50,7 +44,7 @@ const DEFAULTS: Prefs = {
   lastAgent: "claude",
   lastModel: {},
   lastEffort: {},
-  lastMode: "auto",
+  lastMode: "bypassPermissions",
   issueProvider: "github",
   useWorktree: true,
   bypassConfirmed: false,

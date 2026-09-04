@@ -16,6 +16,7 @@ import type {
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
+import type { PairingConnectionMode, PairingStatus } from "@/types/pairing";
 
 export interface NewTab {
   harness: string;
@@ -96,11 +97,24 @@ export interface NewSession {
   tab?: NewTab;
 }
 
+export interface WorkspaceRename {
+  name: string;
+  path: string;
+  branch: string;
+  sessions: SessionEntry[];
+}
+
 export const api = {
   // optional TerminalX account
   accountStatus: () => invoke<AccountStatus>("account_status"),
   accountSignIn: () => invoke<AccountStatus>("account_sign_in"),
   accountSignOut: () => invoke<AccountStatus>("account_sign_out"),
+
+  // opt-in device pairing
+  pairingStatus: () => invoke<PairingStatus>("pairing_status"),
+  pairingGenerate: (connectionMode: PairingConnectionMode) => invoke<PairingStatus>("pairing_generate", { connectionMode }),
+  pairingRevoke: (deviceId: string) => invoke<PairingStatus>("pairing_revoke", { deviceId }),
+  pairingSetHostName: (displayName: string) => invoke<PairingStatus>("pairing_set_host_name", { displayName }),
 
   // projects
   listProjects: () => invoke<{ projects: Project[]; lastSelected: string | null }>("list_projects"),
@@ -110,6 +124,10 @@ export const api = {
   updateProject: (path: string, patch: ProjectPatch) => invoke<Project>("update_project", { path, patch }),
   setProjectLogo: (path: string, source: string | null) => invoke<Project>("set_project_logo", { path, source }),
   listWorkspaces: (projectPath: string) => invoke<Workspace[]>("list_workspaces", { projectPath }),
+  previewWorkspaceName: (projectPath: string, requested?: string | null) =>
+    invoke<string>("preview_workspace_name", { projectPath, requested: requested ?? null }),
+  renameWorkspace: (projectPath: string, path: string, name: string) =>
+    invoke<WorkspaceRename>("rename_workspace", { projectPath, path, name }),
   workspaceDisposition: (projectPath: string, path: string) => invoke<WorkspaceDisposition>("workspace_disposition", { projectPath, path }),
   deleteWorkspace: (projectPath: string, path: string, deleteBranch: boolean) =>
     invoke<SessionEntry[]>("delete_workspace", { projectPath, path, deleteBranch }),

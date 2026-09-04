@@ -15,9 +15,10 @@ export interface TerminalPane {
   id: string;
   sessionId: string;
   title: string;
+  created: string;
   exited: boolean;
   exitCode: number | null;
-  /** Owned by a tab's terminal view; the dock leaves it out. */
+  /** Owned by an agent tab's terminal view, so it is not a peer shell tab. */
   hidden?: boolean;
   /** Spawned by the backend for an agent tab, so closing it is the backend's. */
   owned?: boolean;
@@ -31,22 +32,24 @@ export interface OpenTerminalOptions {
   hidden?: boolean;
 }
 
-interface State {
+export interface TerminalState {
   panes: TerminalPane[];
-  /** session id → active pane id */
+  /** session id → most recently selected shell pane id */
   active: Record<string, string>;
-  /** session id → dock open */
-  open: Record<string, boolean>;
+  /** session id → selected peer tab (agent or shell) */
+  selected: Record<string, SelectedSessionTab>;
 }
 
-let state: State = { panes: [], active: {}, open: {} };
+export type SelectedSessionTab = { kind: "agent" | "terminal"; id: string };
+
+let state: TerminalState = { panes: [], active: {}, selected: {} };
 const listeners = new Set<() => void>();
-function set(patch: Partial<State>) {
+function set(patch: Partial<TerminalState>) {
   state = { ...state, ...patch };
   for (const l of listeners) l();
 }
 
-export function useTerminals(): State {
+export function useTerminals(): TerminalState {
   return useSyncExternalStore(
     (cb) => {
       listeners.add(cb);
@@ -55,6 +58,10 @@ export function useTerminals(): State {
     () => state,
     () => state,
   );
+}
+
+export function getTerminalState(): TerminalState {
+  return state;
 }
 
 /**
@@ -138,22 +145,43 @@ async function register() {
 }
 
 let counter = 0;
+const terminalNumbers = new Map<string, number>();
 export async function openTerminal(sessionId: string, cwd: string, cols = 100, rows = 24, opts: OpenTerminalOptions = {}): Promise<TerminalPane> {
   await subscribeTerminals();
   counter++;
   const id = opts.id ?? `${sessionId}:${Date.now().toString(36)}${counter}`;
   if (state.panes.some((p) => p.id === id)) await closeTerminal(id);
-  const visibleCount = state.panes.filter((p) => p.sessionId === sessionId && !p.hidden).length;
-  const pane: TerminalPane = { id, sessionId, title: opts.title ?? `Terminal ${visibleCount + 1}`, exited: false, exitCode: null, hidden: opts.hidden };
+  const number = (terminalNumbers.get(sessionId) ?? 0) + 1;
+  if (!opts.hidden && !opts.title) terminalNumbers.set(sessionId, number);
+  const pane: TerminalPane = {
+    id,
+    sessionId,
+    title: opts.title ?? `Terminal ${number}`,
+    created: new Date().toISOString(),
+    exited: false,
+    exitCode: null,
+    hidden: opts.hidden,
+  };
   set({
     panes: [...state.panes, pane],
     active: opts.hidden ? state.active : { ...state.active, [sessionId]: id },
-    open: opts.hidden ? state.open : { ...state.open, [sessionId]: true },
+    selected: opts.hidden ? state.selected : { ...state.selected, [sessionId]: { kind: "terminal", id } },
   });
   try {
     await pty.spawn(id, cwd, cols, rows, opts.command);
   } catch (e) {
-    set({ panes: state.panes.filter((p) => p.id !== id) });
+    const rest = state.panes.filter((p) => p.id !== id);
+    const fallback = rest.filter((p) => p.sessionId === sessionId && !p.hidden).at(-1);
+    const selected = { ...state.selected };
+    if (selected[sessionId]?.kind === "terminal" && selected[sessionId]?.id === id) {
+      if (fallback) selected[sessionId] = { kind: "terminal", id: fallback.id };
+      else delete selected[sessionId];
+    }
+    set({
+      panes: rest,
+      active: state.active[sessionId] === id ? { ...state.active, [sessionId]: fallback?.id ?? "" } : state.active,
+      selected,
+    });
     throw e;
   }
   return pane;
@@ -163,18 +191,42 @@ export async function closeTerminal(id: string) {
   const pane = state.panes.find((p) => p.id === id);
   if (!pane) return;
   await pty.kill(id).catch(() => {});
+  if (pane.hidden) {
+    set({ panes: state.panes.filter((p) => p.id !== id) });
+    replay.delete(id);
+    disposeInstance(id);
+    return;
+  }
+  const visibleBefore = state.panes.filter((p) => p.sessionId === pane.sessionId && !p.hidden);
+  const closedIndex = visibleBefore.findIndex((p) => p.id === id);
   const rest = state.panes.filter((p) => p.id !== id);
   const siblings = rest.filter((p) => p.sessionId === pane.sessionId && !p.hidden);
+  const nextTerminal = siblings[Math.min(Math.max(closedIndex, 0), siblings.length - 1)];
+  const selected = { ...state.selected };
+  if (selected[pane.sessionId]?.kind === "terminal" && selected[pane.sessionId]?.id === id) {
+    if (nextTerminal) selected[pane.sessionId] = { kind: "terminal", id: nextTerminal.id };
+    else delete selected[pane.sessionId];
+  }
   set({
     panes: rest,
-    active: { ...state.active, [pane.sessionId]: siblings[siblings.length - 1]?.id ?? "" },
+    active: { ...state.active, [pane.sessionId]: nextTerminal?.id ?? "" },
+    selected,
   });
   replay.delete(id);
   disposeInstance(id);
 }
 
 export function setActiveTerminal(sessionId: string, id: string) {
-  set({ active: { ...state.active, [sessionId]: id } });
+  const pane = state.panes.find((item) => item.id === id && item.sessionId === sessionId && !item.hidden);
+  if (!pane) return;
+  set({
+    active: { ...state.active, [sessionId]: id },
+    selected: { ...state.selected, [sessionId]: { kind: "terminal", id } },
+  });
+}
+
+export function setSelectedAgent(sessionId: string, id: string) {
+  set({ selected: { ...state.selected, [sessionId]: { kind: "agent", id } } });
 }
 
 /**
@@ -182,40 +234,34 @@ export function setActiveTerminal(sessionId: string, id: string) {
  * already have produced output before this window heard about it, which is why
  * the replay buffer is kept for ids no pane claims yet.
  */
-export async function adoptPane(pane: Omit<TerminalPane, "exited" | "exitCode">) {
+export async function adoptPane(pane: Omit<TerminalPane, "created" | "exited" | "exitCode">) {
   await subscribeTerminals();
-  const live = { ...pane, exited: false, exitCode: null };
+  const live = { ...pane, created: new Date().toISOString(), exited: false, exitCode: null };
   // The same pane can be adopted twice: a tab whose CLI is replaced in place
   // keeps its pane, so the exit the old process reported is stale news.
   const existing = state.panes.some((p) => p.id === pane.id);
-  set({ panes: existing ? state.panes.map((p) => (p.id === pane.id ? { ...p, ...live } : p)) : [...state.panes, live] });
+  set({
+    panes: existing
+      ? state.panes.map((p) => (p.id === pane.id ? { ...p, ...live, created: p.created } : p))
+      : [...state.panes, live],
+  });
 }
 
-/** ⌘J and the header button: show the dock (spawning a first shell), or hide it. */
-export async function toggleDock(sessionId: string, cwd: string) {
-  if (state.open[sessionId]) {
-    setDockOpen(sessionId, false);
-    return;
+const terminalActivations = new Map<string, Promise<TerminalPane>>();
+
+/** ⌘J and the header action select the latest shell, creating one when absent. */
+export function activateLatestTerminal(sessionId: string, cwd: string): Promise<TerminalPane> {
+  const panes = state.panes.filter((p) => p.sessionId === sessionId && !p.hidden);
+  const latest = panes.find((p) => p.id === state.active[sessionId]) ?? panes[panes.length - 1];
+  if (latest) {
+    setActiveTerminal(sessionId, latest.id);
+    return Promise.resolve(latest);
   }
-  await openDock(sessionId, cwd);
-}
-
-export function setDockOpen(sessionId: string, open: boolean) {
-  set({ open: { ...state.open, [sessionId]: open } });
-}
-
-const dockOpenings = new Map<string, Promise<void>>();
-
-/** Show a session's dock and start its login shell exactly once. */
-export function openDock(sessionId: string, cwd: string): Promise<void> {
-  setDockOpen(sessionId, true);
-  if (state.panes.some((p) => p.sessionId === sessionId && !p.hidden)) return Promise.resolve();
-  const pending = dockOpenings.get(sessionId);
+  const pending = terminalActivations.get(sessionId);
   if (pending) return pending;
   const request = openTerminal(sessionId, cwd)
-    .then(() => undefined)
-    .finally(() => dockOpenings.delete(sessionId));
-  dockOpenings.set(sessionId, request);
+    .finally(() => terminalActivations.delete(sessionId));
+  terminalActivations.set(sessionId, request);
   return request;
 }
 

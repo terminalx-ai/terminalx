@@ -28,6 +28,9 @@ import { bootAutomations } from "@/lib/automations";
 import { RightPanel } from "@/components/layout/RightPanel";
 import { CommandPalette } from "@/components/command/CommandPalette";
 import { bootAccount } from "@/lib/account";
+import { bootPairing } from "@/lib/pairing";
+import { useEditors } from "@/lib/editors";
+import { EditorSplit } from "@/components/editor/EditorSplit";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
@@ -38,7 +41,7 @@ const viewFallback = <div className="flex min-h-0 flex-1 items-center justify-ce
 export const TITLEBAR_INSET = 78; // traffic-light clearance, px
 
 /**
- * Three columns under one drag strip: sidebar, workspace, optional right panel.
+ * Main content between one navigation sidebar and the optional right panel.
  * The title bar is ours (overlay style), so every column draws its own strip of
  * height --titlebar-h and the whole strip is a deep drag region.
  */
@@ -59,6 +62,7 @@ export function AppShell() {
     startNotifications();
     void bootStatus();
     void bootAccount();
+    void bootPairing();
   }, []);
 
   // The first prompt of a new session is sent right after the worktree exists.
@@ -177,6 +181,7 @@ function UnselectedWorkspace({
 }) {
   const prefs = usePrefs();
   const store = useSessionStore();
+  const editors = useEditors();
   const [useWorktree, setUseWorktree] = useState(prefs.useWorktree);
   const [issueProjectPath, setIssueProjectPath] = useState<string | null>(null);
 
@@ -188,6 +193,8 @@ function UnselectedWorkspace({
   const cwd = store.view === "new" ? (preset?.cwd ?? project?.path ?? null) : project?.path ?? null;
   const workspace = cwd && project ? (store.workspaces[project.path] ?? []).find((item) => item.path === cwd) : null;
   const panelAvailable = !!cwd && !!project;
+  const checkoutEditorId = cwd ? `checkout:${cwd}` : null;
+  const hasCheckoutEditors = !!checkoutEditorId && editors.editors.some((editor) => editor.sessionId === checkoutEditorId);
   const labelMode = preset?.cwd && store.view === "new" ? "branch" : useWorktree ? "base" : "branch";
 
   return (
@@ -223,31 +230,34 @@ function UnselectedWorkspace({
             </WithTooltip>
           )}
         </header>
-        <section className="flex min-h-0 flex-1 flex-col">
-          {store.view === "issues" ? (
-            <IssuesView
-              onCreated={onCreated}
-              useWorktree={useWorktree}
-              onUseWorktreeChange={setUseWorktree}
-              onTargetProjectChange={setIssueProjectPath}
-            />
-          ) : store.view === "agents" ? (
-            <AgentDashboard />
-          ) : store.view === "stats" ? (
-            <Suspense fallback={viewFallback}>
-              <StatsUsageView />
-            </Suspense>
-          ) : store.view === "automations" ? (
-            <AutomationsView />
-          ) : store.view === "skills" ? (
-            <SkillsView
-              key={`${store.skillsFilter?.projectPath ?? store.selectedProject ?? "home"}:${store.skillsFilter?.agent ?? "all"}`}
-              projectPath={store.skillsFilter?.projectPath ?? store.selectedProject}
-              initialAgent={store.skillsFilter?.agent ?? null}
-            />
-          ) : (
-            <NewSessionView onCreated={onCreated} useWorktree={useWorktree} onUseWorktreeChange={setUseWorktree} />
-          )}
+        <section className="@container/editor-host relative flex min-h-0 flex-1">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            {store.view === "issues" ? (
+              <IssuesView
+                onCreated={onCreated}
+                useWorktree={useWorktree}
+                onUseWorktreeChange={setUseWorktree}
+                onTargetProjectChange={setIssueProjectPath}
+              />
+            ) : store.view === "agents" ? (
+              <AgentDashboard />
+            ) : store.view === "stats" ? (
+              <Suspense fallback={viewFallback}>
+                <StatsUsageView />
+              </Suspense>
+            ) : store.view === "automations" ? (
+              <AutomationsView initialAutomationId={store.selectedAutomationId} />
+            ) : store.view === "skills" ? (
+              <SkillsView
+                key={`${store.skillsFilter?.projectPath ?? store.selectedProject ?? "home"}:${store.skillsFilter?.agent ?? "all"}`}
+                projectPath={store.skillsFilter?.projectPath ?? store.selectedProject}
+                initialAgent={store.skillsFilter?.agent ?? null}
+              />
+            ) : (
+              <NewSessionView onCreated={onCreated} useWorktree={useWorktree} onUseWorktreeChange={setUseWorktree} />
+            )}
+          </div>
+          {checkoutEditorId && hasCheckoutEditors ? <EditorSplit sessionId={checkoutEditorId} active /> : null}
         </section>
       </main>
       {prefs.panelOpen && panelAvailable && cwd && project && (
@@ -258,6 +268,7 @@ function UnselectedWorkspace({
           workingTree
           rootName={project.name}
           labelMode={labelMode}
+          workspace={workspace?.managed && !workspace.isMain ? { projectPath: project.path, name: workspace.name } : undefined}
         />
       )}
     </>

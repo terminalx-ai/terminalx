@@ -92,6 +92,47 @@ struct CliLaunch {
     transcript_root: PathBuf,
 }
 
+/// A composer prompt waiting for the CLI transcript to echo it. Codex adds
+/// `[Image #N]` labels to the echoed text, so attachment count is part of the
+/// identity even though the composer already published the archived images.
+struct ComposerEcho {
+    text: String,
+    image_count: usize,
+}
+
+impl ComposerEcho {
+    fn matches(&self, echoed: &str) -> bool {
+        if self.text == echoed {
+            return true;
+        }
+        if self.image_count == 0 {
+            return false;
+        }
+
+        let labels = (1..=self.image_count).map(|n| format!("[Image #{n}]")).collect::<Vec<_>>().join(" ");
+        if self.text.is_empty() {
+            echoed == labels
+        } else {
+            echoed == format!("{labels} {}", self.text)
+        }
+    }
+}
+
+fn cli_composer_message(prompt: &PromptText, images: Vec<ImageRef>, baseline: Option<String>, queued: bool, cwd: &str) -> (Payload, Option<ComposerEcho>) {
+    let echo = (!queued).then(|| ComposerEcho { text: prompt.agent.clone(), image_count: images.len() });
+    let payload = Payload::UserMessage { text: prompt.display.clone(), images, baseline, queued, cwd: Some(cwd.to_string()) };
+    (payload, echo)
+}
+
+fn consume_composer_echo(pending: &mut std::collections::VecDeque<ComposerEcho>, payload: &Payload) -> bool {
+    let Payload::UserMessage { text, .. } = payload else { return false };
+    if !pending.front().is_some_and(|prompt| prompt.matches(text)) {
+        return false;
+    }
+    pending.pop_front();
+    true
+}
+
 /// A PTY-first tab: the CLI in a pane, its transcript being followed, and the
 /// permission frames its hooks have parked here waiting for an answer.
 pub struct CliTab {
@@ -114,7 +155,7 @@ pub struct CliTab {
     pub tail: Arc<tui::Tail>,
     /// Prompts the composer already published, waiting for the transcript to
     /// echo them back so the reader is not shown the same message twice.
-    pub echoed: std::collections::VecDeque<String>,
+    echoed: std::collections::VecDeque<ComposerEcho>,
     /// Hook threads parked on a decision, by request id.
     pub decisions: HashMap<String, std::sync::mpsc::Sender<Decision>>,
     /// Keeps the turn's reply from being drawn twice when the `Stop` hook and
@@ -213,6 +254,11 @@ pub struct TabPtyEvent {
 pub struct SendOutcome {
     pub queued: bool,
     pub events: Vec<AgentEvent>,
+}
+
+struct PromptText {
+    agent: String,
+    display: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -384,8 +430,16 @@ impl SessionManager {
     pub fn load_events(&self, session_id: &str, tab_id: &str) -> Result<Vec<AgentEvent>> {
         let path = store::log_path(session_id, tab_id)?;
         let mut events: Vec<AgentEvent> = store::read_lines(&path)?;
+        self.reconcile_lapsed_events(session_id, tab_id, &mut events)?;
+        Ok(events)
+    }
+
+    /// Retire permission cards found in a bounded transcript window when the
+    /// process that asked is no longer parked on them. A backwards mobile
+    /// tail can use this without loading the entire append-only log.
+    pub fn reconcile_lapsed_events(&self, session_id: &str, tab_id: &str, events: &mut Vec<AgentEvent>) -> Result<()> {
         let mut open: Vec<(String, Option<String>)> = Vec::new();
-        for ev in &events {
+        for ev in events.iter() {
             match &ev.payload {
                 Payload::PermissionRequested { request_id, tool_use_id, .. } | Payload::QuestionsAsked { request_id, tool_use_id, .. } => {
                     open.push((request_id.clone(), Some(tool_use_id.clone())));
@@ -403,7 +457,7 @@ impl SessionManager {
                 events.push(ev);
             }
         }
-        Ok(events)
+        Ok(())
     }
 
     pub fn status_of(&self, session_id: &str, tab_id: &str) -> TabStatus {
@@ -527,7 +581,30 @@ impl SessionManager {
     }
 
     /// Send a prompt. A tab mid-turn queues it for the next boundary.
-    pub fn send(&self, session_id: &str, tab_id: &str, text: String, images: Vec<ImageInput>) -> Result<SendOutcome> {
+    pub fn send(
+        &self,
+        session_id: &str,
+        tab_id: &str,
+        text: String,
+        images: Vec<ImageInput>,
+    ) -> Result<SendOutcome> {
+        self.send_with_display_text(session_id, tab_id, text.clone(), text, images)
+    }
+
+    /// Send one prompt to the agent while publishing a different, user-facing
+    /// representation to the transcript.
+    pub(crate) fn send_with_display_text(
+        &self,
+        session_id: &str,
+        tab_id: &str,
+        text: String,
+        display_text: String,
+        images: Vec<ImageInput>,
+    ) -> Result<SendOutcome> {
+        let prompt = PromptText {
+            agent: text,
+            display: display_text,
+        };
         let rt_arc = self.runtime(session_id, tab_id)?;
         let entry = index::get(session_id)?;
         let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
@@ -535,13 +612,34 @@ impl SessionManager {
         let (refs, wire_images) = Self::archive_images(session_id, &images)?;
 
         if pty_first(&tab.harness).is_some() {
-            return self.send_to_cli(&mut rt, &rt_arc, &entry, &tab, text, refs);
+            return self.send_to_cli(
+                &mut rt,
+                &rt_arc,
+                &entry,
+                &tab,
+                prompt,
+                refs,
+            );
         }
 
         if rt.turn_open && rt.child.is_some() {
-            let q = QueuedMessage { id: uuid::Uuid::now_v7().to_string(), text: text.clone(), images: wire_images };
+            let q = QueuedMessage {
+                id: uuid::Uuid::now_v7().to_string(),
+                text: prompt.agent.clone(),
+                images: wire_images,
+            };
             rt.queued.push(q);
-            let ev = self.publish(&mut rt, Payload::UserMessage { text, images: refs, baseline: None, queued: true, cwd: Some(entry.cwd.clone()) }, None);
+            let ev = self.publish(
+                &mut rt,
+                Payload::UserMessage {
+                    text: prompt.display,
+                    images: refs,
+                    baseline: None,
+                    queued: true,
+                    cwd: Some(entry.cwd.clone()),
+                },
+                None,
+            );
             return Ok(SendOutcome { queued: true, events: vec![ev] });
         }
 
@@ -555,15 +653,33 @@ impl SessionManager {
         }
 
         let baseline = git::snapshot_tree(Path::new(&entry.cwd)).ok();
-        let events = vec![self.publish(&mut rt, Payload::UserMessage { text: text.clone(), images: refs, baseline, queued: false, cwd: Some(entry.cwd.clone()) }, None)];
+        let events = vec![self.publish(
+            &mut rt,
+            Payload::UserMessage {
+                text: prompt.display,
+                images: refs,
+                baseline,
+                queued: false,
+                cwd: Some(entry.cwd.clone()),
+            },
+            None,
+        )];
 
         match &mut rt.engine {
             Engine::Acp(a) => {
-                let actions = if a.ready { a.prompt(text.clone(), wire_images) } else { a.start(text.clone(), wire_images) };
+                let actions = if a.ready {
+                    a.prompt(prompt.agent.clone(), wire_images)
+                } else {
+                    a.start(prompt.agent.clone(), wire_images)
+                };
                 self.apply_actions(&mut rt, actions);
             }
             Engine::OpenCode(o) => {
-                let actions = if o.ready { o.prompt(text.clone(), wire_images) } else { o.start(text.clone(), wire_images) };
+                let actions = if o.ready {
+                    o.prompt(prompt.agent.clone(), wire_images)
+                } else {
+                    o.start(prompt.agent.clone(), wire_images)
+                };
                 self.apply_actions(&mut rt, actions);
             }
             Engine::Cli(_) | Engine::None => bail!("no engine"),
@@ -1224,9 +1340,8 @@ impl SessionManager {
         for payload in payloads {
             // A prompt sent from the composer was published when it was sent;
             // the transcript's copy of it would be the same message twice.
-            if let (Payload::UserMessage { text, .. }, Engine::Cli(p)) = (&payload, &mut rt.engine) {
-                if p.echoed.front().is_some_and(|q| q == text) {
-                    p.echoed.pop_front();
+            if let Engine::Cli(p) = &mut rt.engine {
+                if consume_composer_echo(&mut p.echoed, &payload) {
                     continue;
                 }
             }
@@ -1306,7 +1421,7 @@ impl SessionManager {
         rt_arc: &Arc<Mutex<TabRuntime>>,
         entry: &index::SessionEntry,
         tab: &TabEntry,
-        text: String,
+        prompt: PromptText,
         images: Vec<ImageRef>,
     ) -> Result<SendOutcome> {
         self.start_cli(rt, rt_arc, entry, tab)?;
@@ -1317,14 +1432,13 @@ impl SessionManager {
         let queued = rt.turn_open;
         let baseline = if queued { None } else { git::snapshot_tree(Path::new(&entry.cwd)).ok() };
         let paths: Vec<String> = images.iter().map(|i| i.url.clone()).collect();
-        if !queued {
-            if let Engine::Cli(p) = &mut rt.engine {
-                p.echoed.push_back(text.clone());
-                p.turn_tail.opened();
-            }
+        let (message, echo) = cli_composer_message(&prompt, images, baseline, queued, &entry.cwd);
+        if let (Some(echo), Engine::Cli(p)) = (echo, &mut rt.engine) {
+            p.echoed.push_back(echo);
+            p.turn_tail.opened();
         }
-        let ev = self.publish(rt, Payload::UserMessage { text: text.clone(), images, baseline, queued, cwd: Some(entry.cwd.clone()) }, None);
-        self.type_prompt(rt_arc, &pane, text, paths, Some(ready));
+        let ev = self.publish(rt, message, None);
+        self.type_prompt(rt_arc, &pane, prompt.agent, paths, Some(ready));
         if !queued {
             rt.turn_open = true;
             rt.turn_started_at = Some(Instant::now());
@@ -1855,6 +1969,35 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
+
+    #[test]
+    fn codex_image_prompts_project_once_and_repeated_submissions_stay_distinct() {
+        let prompt = PromptText { agent: "describe this".into(), display: "describe this".into() };
+        let image = ImageRef { url: "attachments/session/proof.png".into(), media_type: Some("image/png".into()), name: Some("proof.png".into()) };
+        let mut pending = std::collections::VecDeque::new();
+        let mut projected = Vec::new();
+
+        for _ in 0..2 {
+            let (composer, echo) = cli_composer_message(&prompt, vec![image.clone()], None, false, "/workspace");
+            pending.push_back(echo.unwrap());
+            projected.push(composer);
+
+            let rollout = Payload::UserMessage { text: "[Image #1] describe this".into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
+            assert!(consume_composer_echo(&mut pending, &rollout));
+        }
+
+        assert_eq!(projected.len(), 2, "one projected record per real submission");
+        assert!(projected.iter().all(|p| matches!(p, Payload::UserMessage { text, images, .. } if text == "describe this" && images.as_slice() == std::slice::from_ref(&image))));
+    }
+
+    #[test]
+    fn composer_echo_matching_is_strict_about_attachments() {
+        assert!(ComposerEcho { text: "plain".into(), image_count: 0 }.matches("plain"));
+        assert!(!ComposerEcho { text: "plain".into(), image_count: 0 }.matches("[Image #1] plain"));
+        assert!(ComposerEcho { text: "compare".into(), image_count: 2 }.matches("[Image #1] [Image #2] compare"));
+        assert!(!ComposerEcho { text: "compare".into(), image_count: 2 }.matches("[Image #1] compare"));
+        assert!(ComposerEcho { text: String::new(), image_count: 1 }.matches("[Image #1]"));
+    }
 
     /// Two tab views mounting at once — React runs a mount effect twice in
     /// development — used to build a runtime each, so each held its own lock
