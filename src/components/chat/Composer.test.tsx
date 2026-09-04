@@ -92,21 +92,22 @@ describe("composer height", () => {
     expect(textarea.rows).toBe(1);
   });
 
-  it("fits the content once the textarea is laid out", () => {
+  it("fits the content once the textarea is laid out", async () => {
     const { container } = render(<TestComposer onSend={vi.fn()} />);
     const textarea = container.querySelector("textarea")!;
 
     scrollHeight = 52;
     layOut();
 
-    expect(textarea.style.height).toBe("52px");
+    await waitFor(() => expect(textarea.style.height).toBe("52px"));
   });
 
-  it("does not shrink a fitted textarea back to nothing when hidden again", () => {
+  it("does not shrink a fitted textarea back to nothing when hidden again", async () => {
     const { container } = render(<TestComposer onSend={vi.fn()} />);
     const textarea = container.querySelector("textarea")!;
     scrollHeight = 52;
     layOut();
+    await waitFor(() => expect(textarea.style.height).toBe("52px"));
 
     scrollHeight = 0;
     fireEvent.change(textarea, { target: { value: "still hidden" } });

@@ -108,16 +108,26 @@ export function Composer({
     el.style.height = content > 0 ? Math.min(content, MAX_HEIGHT) + "px" : previous;
   }, []);
 
-  useLayoutEffect(fit, [fit, draft]);
+  // autoFocus follows the selected tab, so a switch re-fits before paint.
+  useLayoutEffect(fit, [fit, draft, autoFocus]);
 
   // A hidden textarea is laid out at 0×0. The observer fires when it gains a
-  // box (the tab was selected) and when its width changes (lines re-wrap).
+  // box and when its width changes (lines re-wrap). Resizing the observed
+  // element inside its own notification is reported as an observer loop and
+  // deferred a frame regardless, so take that frame explicitly.
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const observer = new ResizeObserver(fit);
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(fit);
+    });
     observer.observe(el);
-    return () => observer.disconnect();
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
   }, [fit]);
 
   // Until the web fonts settle the fallback face measures short, and the
