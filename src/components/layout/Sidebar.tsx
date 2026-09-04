@@ -9,8 +9,8 @@ import { WorkspaceColumn } from "./WorkspaceColumn";
 
 /**
  * Two columns: the project rail, and the focused project's workspaces with
- * their sessions. Focus follows the selected session's project, or the last
- * project used, so the column is never empty while a project exists.
+ * their sessions. Selecting a session focuses its project in the session
+ * store; otherwise the last project keeps the column populated.
  */
 export function Sidebar({
   onToggle,
@@ -36,10 +36,6 @@ export function Sidebar({
   const store = useSessionStore();
   const selected = store.sessions.find((s) => s.id === store.selectedSessionId);
   const focus = store.selectedProject ?? selected?.projectPath ?? store.lastProject ?? store.projects[0]?.path ?? null;
-
-  useEffect(() => {
-    if (selected && store.selectedProject !== selected.projectPath) selectProjectInSidebar(selected.projectPath);
-  }, [selected, store.selectedProject]);
 
   useEffect(() => {
     if (!store.selectedProject && focus) selectProjectInSidebar(focus);

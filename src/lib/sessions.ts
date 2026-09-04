@@ -129,7 +129,13 @@ export function patchTab(sessionId: string, tabId: string, patch: Partial<TabEnt
 }
 
 export function selectSession(id: string | null) {
-  set({ selectedSessionId: id, view: "new" });
+  const selected = id ? state.sessions.find((session) => session.id === id) : null;
+  set({
+    selectedSessionId: id,
+    view: "new",
+    ...(selected ? { selectedProject: selected.projectPath } : {}),
+  });
+  if (selected) void refreshWorkspaces(selected.projectPath);
 }
 
 /** The issues browser takes the workspace; no session stays selected. */
@@ -315,7 +321,7 @@ export async function settleSession(id: string, action: "delete" | "relocate") {
 export async function forkSession(id: string, tabId: string) {
   const s = await api.forkSession(id, tabId);
   upsertSession(s);
-  set({ selectedSessionId: s.id });
+  selectSession(s.id);
   return s;
 }
 
