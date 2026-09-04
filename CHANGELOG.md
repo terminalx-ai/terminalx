@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Settings is now a full page instead of a dialog. It replaces the workspace
+  while open, and the back button returns to exactly the view that opened it.
 - The app now ships as TerminalX while retaining the `com.terminalx.next`
   bundle identifier. It registers `terminalx://` and still recognizes
   `terminalx-next://` links in code for compatibility. Development builds use

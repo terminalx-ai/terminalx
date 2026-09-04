@@ -2,7 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { PanelLeft, PanelRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { SettingsDialog, type SettingsTab } from "@/components/settings/SettingsDialog";
+import type { SettingsTab } from "@/components/settings/SettingsPage";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { NewSessionView } from "@/components/session/NewSessionView";
 import { IssuesView } from "@/components/issues/IssuesView";
@@ -34,6 +34,7 @@ import { EditorSplit } from "@/components/editor/EditorSplit";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
+const SettingsPage = lazy(() => import("@/components/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const statusBarFallback = <div aria-hidden className="h-[22px] shrink-0 border-t border-hairline bg-background/70" />;
 const viewFallback = <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-faint">Loading view…</div>;
 
@@ -114,34 +115,42 @@ export function AppShell() {
       <SettleDialog />
       <WorkspaceDeleteDialog />
       <div className="flex min-h-0 flex-1">
-        {sidebarOpen && (
-          <Sidebar
-            onToggle={toggleSidebar}
-            onOpenSettings={openSettings}
-            onOpenAccount={openAccountSettings}
-            onOpenIssues={showIssues}
-            onOpenAgents={showAgents}
-            onOpenStats={showStats}
-            onOpenAutomations={showAutomations}
-            onOpenSkills={showSkills}
-            onSearch={() => setPaletteOpen(true)}
-          />
-        )}
-
-        {selected ? (
-          <main className="flex h-full min-w-0 flex-1 flex-col">
-            <ErrorBoundary key={selected.id} label="the session">
-              <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
-            </ErrorBoundary>
-          </main>
+        {settingsOpen ? (
+          <Suspense fallback={viewFallback}>
+            <SettingsPage initialTab={settingsTab} onBack={() => setSettingsOpen(false)} />
+          </Suspense>
         ) : (
-          <UnselectedWorkspace
-            key={store.view}
-            sidebarOpen={sidebarOpen}
-            onToggleSidebar={toggleSidebar}
-            onTogglePanel={togglePanel}
-            onCreated={onCreated}
-          />
+          <>
+            {sidebarOpen && (
+              <Sidebar
+                onToggle={toggleSidebar}
+                onOpenSettings={openSettings}
+                onOpenAccount={openAccountSettings}
+                onOpenIssues={showIssues}
+                onOpenAgents={showAgents}
+                onOpenStats={showStats}
+                onOpenAutomations={showAutomations}
+                onOpenSkills={showSkills}
+                onSearch={() => setPaletteOpen(true)}
+              />
+            )}
+
+            {selected ? (
+              <main className="flex h-full min-w-0 flex-1 flex-col">
+                <ErrorBoundary key={selected.id} label="the session">
+                  <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                </ErrorBoundary>
+              </main>
+            ) : (
+              <UnselectedWorkspace
+                key={store.view}
+                sidebarOpen={sidebarOpen}
+                onToggleSidebar={toggleSidebar}
+                onTogglePanel={togglePanel}
+                onCreated={onCreated}
+              />
+            )}
+          </>
         )}
       </div>
 
@@ -153,7 +162,6 @@ export function AppShell() {
         </ErrorBoundary>
       ) : null}
 
-      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} initialTab={settingsTab} />
       {paletteOpen ? <CommandPalette open onOpenChange={setPaletteOpen} onOpenSettings={openSettings} onCreated={onCreated} /> : null}
     </div>
   );

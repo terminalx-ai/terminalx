@@ -59,7 +59,13 @@ vi.mock("@/lib/pairing", () => ({ bootPairing: vi.fn() }));
 vi.mock("@/lib/notify", () => ({ startNotifications: vi.fn() }));
 vi.mock("@/lib/tabViews", () => ({ subscribeTabPty: vi.fn() }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
-vi.mock("@/components/layout/Sidebar", () => ({ Sidebar: () => <div data-testid="sidebar" /> }));
+vi.mock("@/components/layout/Sidebar", () => ({
+  Sidebar: ({ onOpenSettings }: { onOpenSettings: () => void }) => (
+    <div data-testid="sidebar">
+      <button type="button" onClick={onOpenSettings}>Open settings</button>
+    </div>
+  ),
+}));
 vi.mock("@/components/session/NewSessionView", () => ({ NewSessionView: () => <div data-testid="new-session" /> }));
 vi.mock("@/components/issues/IssuesView", () => ({ IssuesView: () => <div data-testid="issues" /> }));
 vi.mock("@/components/dashboard/AgentDashboard", () => ({ AgentDashboard: () => <div data-testid="agents" /> }));
@@ -74,7 +80,13 @@ vi.mock("@/components/editor/EditorSplit", () => ({ EditorSplit: ({ sessionId }:
 vi.mock("@/components/layout/RightPanel", () => ({
   RightPanel: ({ cwd, branch }: { cwd: string; branch?: string | null }) => <div data-testid="right-panel" data-cwd={cwd} data-branch={branch ?? ""} />,
 }));
-vi.mock("@/components/settings/SettingsDialog", () => ({ SettingsDialog: () => null }));
+vi.mock("@/components/settings/SettingsPage", () => ({
+  SettingsPage: ({ onBack }: { onBack: () => void }) => (
+    <div data-testid="settings-page">
+      <button type="button" onClick={onBack}>Back to previous page</button>
+    </div>
+  ),
+}));
 vi.mock("@/components/command/CommandPalette", () => ({ CommandPalette: () => null }));
 vi.mock("@/components/ui/Toasts", () => ({ Toasts: () => null }));
 vi.mock("@/components/session/BypassDialog", () => ({ BypassDialog: () => null }));
@@ -89,6 +101,7 @@ beforeEach(() => {
   sessionStore.lastProject = "/repo";
   sessionStore.selectedProject = "/repo";
   sessionStore.newSessionPreset = { projectPath: "/repo", cwd: "/outside/feature" };
+  sessionStore.selectedSessionId = null;
   sessionStore.selectedAutomationId = null;
   sessionStore.view = "new";
   setPrefs({ sidebarOpen: true, panelOpen: true, lastProject: "/repo", useWorktree: true });
@@ -152,5 +165,23 @@ describe("automation navigation", () => {
     render(<AppShell />);
 
     expect(screen.getByTestId("automations").getAttribute("data-automation-id")).toBe("automation-99");
+  });
+});
+
+describe("settings page navigation", () => {
+  it("returns to the exact workspace view that opened settings", async () => {
+    sessionStore.view = "issues";
+    render(<AppShell />);
+
+    expect(screen.getByTestId("issues")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+
+    expect(await screen.findByTestId("settings-page")).toBeTruthy();
+    expect(screen.queryByTestId("issues")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to previous page" }));
+
+    expect(await screen.findByTestId("issues")).toBeTruthy();
+    expect(screen.queryByTestId("settings-page")).toBeNull();
   });
 });
