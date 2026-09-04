@@ -128,14 +128,16 @@ export function patchTab(sessionId: string, tabId: string, patch: Partial<TabEnt
   });
 }
 
+function focusProject(path: string | null, patch: Partial<State> = {}) {
+  set({ ...patch, selectedProject: path });
+  if (path) void refreshWorkspaces(path);
+}
+
 export function selectSession(id: string | null) {
   const selected = id ? state.sessions.find((session) => session.id === id) : null;
-  set({
-    selectedSessionId: id,
-    view: "new",
-    ...(selected ? { selectedProject: selected.projectPath } : {}),
-  });
-  if (selected) void refreshWorkspaces(selected.projectPath);
+  const patch: Partial<State> = { selectedSessionId: id, view: "new" };
+  if (selected) focusProject(selected.projectPath, patch);
+  else set(patch);
 }
 
 /** The issues browser takes the workspace; no session stays selected. */
@@ -164,8 +166,7 @@ export function openSkills(filter: State["skillsFilter"] = null) {
 }
 
 export function selectProjectInSidebar(path: string | null) {
-  set({ selectedProject: path });
-  if (path) void refreshWorkspaces(path);
+  focusProject(path);
 }
 
 /** Open the new-session form for a project, optionally inside one of its workspaces. */
