@@ -183,9 +183,10 @@ describe("status bar usage", () => {
     expect(trigger.getAttribute("aria-label")).not.toContain("resets Fable");
     fireEvent.click(trigger);
 
-    const row = document.querySelector('[data-usage-compact-window="claude:fable_weekly"]') as HTMLElement;
+    const row = document.querySelector('[data-usage-compact-agent="claude"]') as HTMLElement;
     expect(row).not.toBeNull();
-    expect(row.textContent).not.toContain("resets");
+    expect(row.textContent).toContain("82%");
+    expect(row.textContent).not.toContain("Resets");
     fireEvent.click(row);
     const detail = document.querySelector('[data-usage-detail="claude"]') as HTMLElement;
     expect(within(detail).getByText("Fable").parentElement?.textContent).not.toContain("Resets in");
@@ -193,7 +194,6 @@ describe("status bar usage", () => {
 
   it("hides empty OAuth windows while keeping every data-bearing window", () => {
     const now = Date.now();
-    statusState.settings.usageMode = "compact";
     statusState.usage.windows.push(
       { agent: "claude", key: "nimbus_quill", label: "Nimbus Quill", usedPercent: 0, resetsAt: null, windowMinutes: null, updatedAt: now, stale: false },
       { agent: "claude", key: "spend", label: "Spend", usedPercent: 0, resetsAt: null, windowMinutes: null, updatedAt: now, stale: false },
@@ -222,15 +222,61 @@ describe("status bar usage", () => {
     expect(within(detail).getByText("Reset now")).toBeTruthy();
   });
 
-  it("keeps compact mode as one dense row per provider window", () => {
+  it("lists one compact row per agent showing only its tightest window", () => {
     statusState.settings.usageMode = "compact";
     const { getByRole } = render(<StatusBar />);
     fireEvent.click(getByRole("button", { name: /Claude 5h 12% used/ }));
 
     const popover = document.querySelector("[data-usage-popover]") as HTMLElement;
-    expect(popover.querySelectorAll("[data-usage-compact-window]")).toHaveLength(5);
-    expect(popover.querySelector('[data-usage-compact-window="claude:fable_weekly"]')).not.toBeNull();
-    expect(popover.querySelector('[data-usage-compact-window="codex:weekly"]')).not.toBeNull();
+    expect(popover.querySelectorAll("[data-usage-compact-agent]")).toHaveLength(2);
+    const claudeRow = within(popover).getByRole("button", { name: "Claude, Resets in 4d 2h" });
+    expect(within(claudeRow).getByText("82%").className).toContain("text-destructive");
+    expect(within(claudeRow).queryByText("5h")).toBeNull();
+    expect(within(claudeRow).queryByText("7d")).toBeNull();
+    expect(within(claudeRow).queryByText("Fable")).toBeNull();
+    const codexRow = within(popover).getByRole("button", { name: "Codex, Resets in 6d 4h" });
+    expect(within(codexRow).getByText("52%")).toBeTruthy();
+    expect(popover.textContent).not.toContain("pro");
+
+    fireEvent.click(claudeRow);
+    expect(document.querySelector('[data-usage-detail="claude"]')).not.toBeNull();
+  });
+
+  it("shows one window per agent in the bar when Compact is chosen at full width", () => {
+    statusState.settings.usageMode = "compact";
+    const { container } = render(<StatusBar />);
+
+    expect(container.querySelector("[data-status-bar]")?.getAttribute("data-tier")).toBe("full");
+    const claudeSegment = within(container.querySelector('[data-usage-agent="claude"]') as HTMLElement);
+    expect(claudeSegment.getByText("Fable 82%")).toBeTruthy();
+    expect(claudeSegment.getByText("4d 2h", { exact: false })).toBeTruthy();
+    expect(claudeSegment.queryByText("5h 12%")).toBeNull();
+    expect(claudeSegment.queryByText("7d 41%")).toBeNull();
+    const codexSegment = within(container.querySelector('[data-usage-agent="codex"]') as HTMLElement);
+    expect(codexSegment.getByText("7d 52%")).toBeTruthy();
+    expect(codexSegment.queryByText("5h 23%")).toBeNull();
+  });
+
+  it("keeps Codex per-model sub-limits out of the bar and both popover lists", () => {
+    const now = Date.now();
+    statusState.usage.windows.push(
+      { agent: "codex", key: "codex_bengalfox_five_hour", label: "GPT-5.3-Codex-Spark 5h", usedPercent: 97, resetsAt: now + 60 * 60_000, windowMinutes: 300, updatedAt: now, plan: "pro", stale: false },
+      { agent: "codex", key: "codex_bengalfox_weekly", label: "GPT-5.3-Codex-Spark weekly", usedPercent: 9, resetsAt: now + 7 * 24 * 60 * 60_000, windowMinutes: 10_080, updatedAt: now, plan: "pro", stale: false },
+    );
+    const { container, getByRole } = render(<StatusBar />);
+
+    const codexSegment = container.querySelector('[data-usage-agent="codex"]') as HTMLElement;
+    expect(codexSegment.textContent).not.toContain("GPT-5.3-Codex-Spark");
+    expect(codexSegment.querySelectorAll("[data-usage-window]")).toHaveLength(2);
+    expect(getByRole("button", { name: /Codex 5h 23% used/ }).getAttribute("aria-label")).not.toContain("97%");
+
+    fireEvent.click(getByRole("button", { name: /Codex 5h 23% used/ }));
+    const popover = document.querySelector("[data-usage-popover]") as HTMLElement;
+    const codexRow = within(popover).getByRole("button", { name: "Codex, Resets in 3h 5m" });
+    expect(codexRow.textContent).not.toContain("GPT-5.3-Codex-Spark");
+    expect(codexRow.textContent).not.toContain("97%");
+    fireEvent.click(codexRow);
+    expect((document.querySelector('[data-usage-detail="codex"]') as HTMLElement).textContent).not.toContain("GPT-5.3-Codex-Spark");
   });
 
   it("confirms before asking the backend to consume a Codex reset", () => {
