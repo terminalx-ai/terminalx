@@ -112,10 +112,72 @@ if (offer.relay) {
   resumeToken.fill(0);
 }
 
+const summaries = await rpc(socket, session, "sessions.summaries");
+const target = selectSessionTab(summaries);
+const marker = `TerminalX mobile interop ${randomUUID()}`;
+const posted = await rpc(socket, session, "chat.post", { worktreeId: target.sessionId, body: marker });
+if (!posted.ok || posted.result?.status !== "sent" || posted.result?.message?.body !== marker || typeof posted.result.message.id !== "string") {
+  throw new Error(`Posting the interop note failed: ${rpcError(posted)}`);
+}
+const noteId = posted.result.message.id;
+const listed = await rpc(socket, session, "chat.list", { worktreeId: target.sessionId, limit: 100 });
+if (!listed.ok || !Array.isArray(listed.result?.messages) || !listed.result.messages.some((note) => note?.id === noteId && note.body === marker)) {
+  throw new Error(`The posted interop note did not appear in chat.list: ${rpcError(listed)}`);
+}
+const promoted = await rpc(socket, session, "chat.promoteToAgent", {
+  worktreeId: target.sessionId,
+  tabId: target.tabId,
+  messageIds: [noteId],
+});
+if (!promoted.ok || promoted.result?.status !== "sent" || typeof promoted.result.queued !== "boolean") {
+  throw new Error(`Promoting the interop note failed: ${rpcError(promoted)}`);
+}
+await waitForAgentInput(socket, session, target, marker, 30_000);
+
 console.log(`Pairing passed over ${transport}: pinned host key, E2EE frame, status RPC, relay install ${installMode}.`);
+console.log(`Send passed: note listed and agent input ${promoted.result.queued ? "queued" : "delivered"}.`);
 console.log("Revoke the scripted device in Settings → Devices; waiting for its socket to close…");
 await waitForClose(socket, 120_000);
 console.log("Interop passed: revocation closed the live encrypted connection.");
+
+function selectSessionTab(response) {
+  if (!response.ok || !Array.isArray(response.result?.sessions)) {
+    throw new Error(`Listing sessions failed: ${rpcError(response)}`);
+  }
+  const candidates = response.result.sessions.flatMap((session) => {
+    if (!session || typeof session.id !== "string" || !Array.isArray(session.tabs)) return [];
+    return session.tabs
+      .filter((tab) => tab && typeof tab.id === "string")
+      .map((tab) => ({ sessionId: session.id, tabId: tab.id, status: tab.status }));
+  });
+  const target = candidates.find((candidate) => candidate.status !== "in_progress") ?? candidates[0];
+  if (!target) throw new Error("The host published no session tab for the send interop test");
+  return target;
+}
+
+async function waitForAgentInput(socket, session, target, marker, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const tail = await rpc(socket, session, "session.tail", {
+      sessionId: target.sessionId,
+      tabId: target.tabId,
+      limit: 20,
+    });
+    if (!tail.ok || !Array.isArray(tail.result?.events)) {
+      throw new Error(`Reading the agent event tail failed: ${rpcError(tail)}`);
+    }
+    const published = tail.result.events.some((event) => event?.payload?.type === "user_message" && event.payload.text?.endsWith(marker));
+    const terminal = await rpc(socket, session, "terminal.read", { worktreeId: target.sessionId, tabId: target.tabId });
+    if (!terminal.ok) throw new Error(`Reading the agent terminal failed: ${rpcError(terminal)}`);
+    if (published && typeof terminal.result?.text === "string" && terminal.result.text.includes(marker)) return;
+    await wait(250);
+  }
+  throw new Error("The promoted interop note did not reach the agent terminal before timeout");
+}
+
+function rpcError(response) {
+  return response?.error?.message ?? "invalid response";
+}
 
 function parseTransport(args) {
   let value = "auto";
@@ -283,6 +345,10 @@ function waitForClose(socket, timeoutMs) {
       else resolve();
     });
   });
+}
+
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function requireExactKeys(value, keys) {
