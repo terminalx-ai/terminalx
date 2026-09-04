@@ -1,6 +1,72 @@
 # TerminalX changelog
 
-## Unreleased
+## 0.2.0
+
+TerminalX gets a phone, a command palette, automations, and an honest view
+of what the agents are costing you.
+
+### Companion app and accounts
+
+- Optional TerminalX account sign-in from the sidebar or Settings → Account.
+  Sign-in goes through the deployed console with PKCE and returns on
+  `terminalx://auth/callback`; credentials live in the Keychain and every
+  local workflow keeps working without an account.
+- Pair a phone in Settings → Devices, over the relay or entirely on the LAN.
+  Pairing is end-to-end encrypted and bound to this Mac's identity; unclaimed
+  invites expire and superseded credentials are discarded.
+- The companion sees this Mac's sessions and tabs, follows the transcript and
+  terminal live, posts notes, promotes a note into a prompt, answers
+  permission requests, and sends write-gated terminal input. The Mac stays the
+  only copy of the session; the phone keeps a bounded cache and nothing is
+  stored in the cloud. ([docs/MOBILE.md](docs/MOBILE.md),
+  [docs/ACCOUNTS.md](docs/ACCOUNTS.md))
+- Attachments travel with the message on both desktop and phone, and survive
+  a failed send.
+
+### Automations
+
+- An Automations workspace: define an automation, run it from a GitHub
+  issue, and watch each run land in its own worktree and session. Runs are
+  persisted and listed in a full-screen table — trigger, status, timing,
+  worktree, result or pull request.
+
+### Navigation
+
+- A global command palette (⌘K) for jumping to a session, opening a file,
+  running an app command, or typing a task or workspace name straight in;
+  it hands focus back to wherever you were.
+- One sidebar for getting around: projects, workspaces, sessions, agent
+  tabs and shell tabs sit in a single expandable tree, and Files is the one
+  file browser. The separate workspace column and the ⌘⇧E explorer pane are
+  gone; keyboard navigation, workspace provenance and terminal lifetimes are
+  unchanged.
+- Shell terminals are now tabs inside the session, alongside agent tabs,
+  instead of a dock at the bottom. Terminal scrollback is retained within a
+  bound so a freshly attached companion can replay recent output.
+- Stats and Usage (⌘⇧U): a full-area view of local analytics — which
+  agents ran, for how long, and what they used — plus Codex credit
+  balances and reset times. Everything is computed on this Mac from its own
+  transcripts.
+- Agent icons are recognizable and accessible in every picker and tab.
+
+### Workspaces and sessions
+
+- Workspaces can be renamed.
+- Delete is offered for clean, merged workspaces; sessions refresh after a
+  worktree is removed and a deleted workspace's session provenance is kept.
+- Projects stay focused when clicked, and the file tree no longer shows the
+  previous project's files after a switch.
+- New sessions default to the bypass permission mode.
+- Codex tabs replay a fresh rollout after the session starts and no longer
+  echo image prompts twice.
+
+### Dictation
+
+- The microphone and speech permission prompts are deferred until the first
+  time dictation actually starts; opening the composer or Settings no longer
+  touches either.
+
+### Identity
 
 - The app now ships as TerminalX while retaining the `com.terminalx.next`
   bundle identifier. It registers `terminalx://` and still recognizes
@@ -8,7 +74,6 @@
   the separate TerminalX Dev identity and the existing "D" badge; the release
   keeps its badged icon too. The command-line tool and first-party skill now
   install as `terminalx` and `terminalx-cli`; `tnx` remains an alias.
-
 - Claude tabs now run the real interactive CLI in a terminal, and the chat is a
   view of that one process: the transcript is read from the CLI's own session
   file, status and permission cards come from its hooks, and ⌘⇧T flips between
