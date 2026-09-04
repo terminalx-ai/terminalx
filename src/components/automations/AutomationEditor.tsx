@@ -13,6 +13,7 @@ import type { Automation, AutomationInput, AutomationIssueReport, AutomationIssu
 
 const INPUT = "h-8 w-full rounded-md bg-well px-2.5 text-[13px] outline-none ring-offset-background focus:ring-2 focus:ring-ring/30";
 const LABEL = "flex flex-col gap-1.5 text-xs font-medium";
+const WARNING_NOTE = "col-span-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground";
 
 function localTimezone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -319,7 +320,7 @@ export function AutomationEditor({
             </select>
           </label>
           {input.mode === BYPASS_MODE && (
-            <div role="note" aria-label="Bypass permissions warning" className="col-span-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+            <div role="note" aria-label="Bypass permissions warning" className={WARNING_NOTE}>
               <span className="font-medium text-foreground">Runs bypass permissions.</span> {bypassEffect(input.harness).effect} Unattended runs never pause for approval; pick another mode above if this automation should ask.
             </div>
           )}
@@ -352,7 +353,7 @@ export function AutomationEditor({
                 New runs per tick
                 <input type="number" min={1} max={50} value={input.issueTrigger.maxRunsPerTick} onChange={(event) => patchIssueTrigger({ maxRunsPerTick: Math.max(1, Number(event.target.value)) })} className={INPUT} />
               </label>
-              <div className="col-span-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+              <div className={WARNING_NOTE}>
                 Issue titles and descriptions can be untrusted. Descriptions are quoted as context, not followed as instructions, and each run uses the Permissions mode chosen above.
               </div>
               <div className="col-span-2 rounded-lg bg-well p-2">

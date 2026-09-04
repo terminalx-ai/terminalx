@@ -1762,7 +1762,7 @@ mod tests {
         assert!(prompt.contains(&issue.url));
     }
 
-    fn input_json(mode: Option<&str>, issue_trigger: bool) -> AutomationInput {
+    fn automation_input(mode: Option<&str>, issue_trigger: bool) -> AutomationInput {
         let mut value = serde_json::json!({
             "name": "Nightly audit",
             "projectPath": "/project",
@@ -1801,7 +1801,7 @@ mod tests {
     fn an_input_without_a_mode_defaults_to_bypass_for_both_triggers() {
         let now = at("2026-09-05T12:00:00Z");
         for issue_trigger in [false, true] {
-            let saved = definition_from_input(input_json(None, issue_trigger), None, now).unwrap();
+            let saved = definition_from_input(automation_input(None, issue_trigger), None, now).unwrap();
             assert_eq!(saved.mode, index::DEFAULT_PERMISSION_MODE);
             assert_eq!(saved.mode, "bypassPermissions");
         }
@@ -1811,11 +1811,11 @@ mod tests {
     fn an_explicit_mode_survives_create_edit_disable_and_re_enable() {
         let now = at("2026-09-05T12:00:00Z");
         for mode in ["manual", "auto", "acceptEdits", "plan"] {
-            let created = definition_from_input(input_json(Some(mode), false), None, now).unwrap();
+            let created = definition_from_input(automation_input(Some(mode), false), None, now).unwrap();
             assert_eq!(created.mode, mode);
 
             // Editing keeps the saved mode; switching the trigger type does too.
-            let mut edited = input_json(Some(&created.mode), true);
+            let mut edited = automation_input(Some(&created.mode), true);
             edited.enabled = false;
             let disabled =
                 definition_from_input(edited, Some(&created), now + chrono::TimeDelta::minutes(1))
@@ -1824,7 +1824,7 @@ mod tests {
             assert!(!disabled.enabled);
             assert_eq!(disabled.mode, mode);
 
-            let mut re_enabled = input_json(Some(&disabled.mode), true);
+            let mut re_enabled = automation_input(Some(&disabled.mode), true);
             re_enabled.enabled = true;
             let enabled = definition_from_input(
                 re_enabled,
