@@ -126,7 +126,11 @@ undisturbed: prefix the command with
 
 ## Cut a version
 
-1. Bump `version` in `package.json` and `src-tauri/tauri.conf.json` (keep them equal).
+1. Bump `version` in `package.json`, `src-tauri/tauri.conf.json` and
+   `src-tauri/Cargo.toml` (keep all three equal), then refresh the lock entry
+   with `cargo update -p raccoon` in `src-tauri`. The About tab reads
+   `tauri.conf.json`; `terminalx --version`, the pairing handshake and the
+   agent client hellos read `CARGO_PKG_VERSION` from `Cargo.toml`.
 2. Add a section to `CHANGELOG.md`; the About tab renders it in the app.
 3. Commit, tag `v<version>`, build as above.
 
