@@ -68,8 +68,6 @@ export function NewSessionView({
     ?? PERMISSION_MODES.find((m) => m.id === "bypassPermissions")!;
   const workspace = preset?.cwd ? (store.workspaces[preset.projectPath] ?? []).find((w) => w.path === preset.cwd) ?? null : null;
 
-  useEffect(() => () => clearNewSessionPreset(), []);
-
   useEffect(() => {
     let cancelled = false;
     const at = preset?.cwd ?? project?.path;

@@ -1,6 +1,6 @@
 import "@testing-library/dom";
 import type { ReactNode } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 
@@ -70,6 +70,7 @@ vi.mock("@/components/automations/AutomationsView", () => ({
 }));
 vi.mock("@/components/skills/SkillsView", () => ({ SkillsView: () => <div data-testid="skills" /> }));
 vi.mock("@/components/session/SessionView", () => ({ SessionView: () => <div data-testid="session" /> }));
+vi.mock("@/components/editor/EditorSplit", () => ({ EditorSplit: ({ sessionId }: { sessionId: string }) => <div data-testid="editor-split" data-session-id={sessionId} /> }));
 vi.mock("@/components/layout/RightPanel", () => ({
   RightPanel: ({ cwd, branch }: { cwd: string; branch?: string | null }) => <div data-testid="right-panel" data-cwd={cwd} data-branch={branch ?? ""} />,
 }));
@@ -81,6 +82,7 @@ vi.mock("@/components/session/SettleDialog", () => ({ SettleDialog: () => null }
 vi.mock("@/components/session/WorkspaceDeleteDialog", () => ({ WorkspaceDeleteDialog: () => null }));
 
 const { AppShell } = await import("./AppShell");
+const { closeAllEditors, openFile } = await import("@/lib/editors");
 
 beforeEach(() => {
   sessionStore.projects = [{ path: "/repo", name: "Raccoon" }];
@@ -92,7 +94,10 @@ beforeEach(() => {
   setPrefs({ sidebarOpen: true, panelOpen: true, lastProject: "/repo", useWorktree: true });
 });
 
-afterEach(cleanup);
+afterEach(async () => {
+  cleanup();
+  await closeAllEditors("checkout:/outside/feature");
+});
 
 describe("new-session right panel", () => {
   it("renders the preset checkout in the persisted open panel", () => {
@@ -126,6 +131,16 @@ describe("new-session right panel", () => {
 
     expect(screen.queryByRole("button", { name: "Toggle panel" })).toBeNull();
     expect(screen.queryByTestId("right-panel")).toBeNull();
+  });
+
+  it("shows files opened from a pre-session workspace in the editor pane", async () => {
+    render(<AppShell />);
+
+    act(() => openFile("checkout:/outside/feature", "/outside/feature", "README.md"));
+
+    const editor = await screen.findByTestId("editor-split");
+    expect(editor.getAttribute("data-session-id")).toBe("checkout:/outside/feature");
+    expect(screen.getByTestId("right-panel").getAttribute("data-cwd")).toBe("/outside/feature");
   });
 });
 

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionEntry } from "@/types/session";
 
 const mocks = vi.hoisted(() => ({
+  hotkeys: new Map<string, () => void>(),
   setActiveTab: vi.fn(),
   setSelectedAgent: vi.fn(),
   setActiveTerminal: vi.fn(),
@@ -56,7 +57,7 @@ vi.mock("@/lib/editors", () => ({ closeEditor: vi.fn(), useEditors: () => ({ edi
 vi.mock("@/lib/mobileDriver", () => ({ useMobileDrivenTabs: () => new Set() }));
 vi.mock("@/lib/api", () => ({ skills: { list: vi.fn().mockResolvedValue([]) } }));
 vi.mock("@/lib/prefs", () => ({ getPrefs: () => ({ lastModel: {}, lastEffort: {}, lastMode: "default" }) }));
-vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn() }));
+vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: (key: string, callback: () => void) => mocks.hotkeys.set(key, callback) }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/components/ui/menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => children,
@@ -70,7 +71,8 @@ vi.mock("@/components/ui/menu", () => ({
   ContextMenuTrigger: ({ children }: { children: ReactNode }) => children,
 }));
 
-const { TabStrip } = await import("./TabStrip");
+const { TabActions } = await import("./TabStrip");
+const { peerOrder } = await import("@/lib/sessionTabs");
 
 const session: SessionEntry = {
   id: "session-1",
@@ -114,31 +116,23 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-describe("mixed session tab strip", () => {
-  it("renders accessible agent and shell tabs in creation order without agent-owned panes", () => {
-    render(<TabStrip session={session} selected={{ kind: "terminal", id: "shell-1" }} />);
-
-    expect(screen.getByRole("tablist", { name: "Session tabs" })).toBeTruthy();
-    const tabs = screen.getAllByRole("tab");
-    expect(tabs.map((tab) => tab.getAttribute("aria-label"))).toEqual(["Claude", "Terminal 1", "Codex"]);
-    expect(tabs.map((tab) => tab.getAttribute("aria-selected"))).toEqual(["false", "true", "false"]);
-    expect(screen.getByRole("button", { name: "Close Terminal 1 terminal tab" })).toBeTruthy();
-    expect(screen.queryByRole("tab", { name: "Agent" })).toBeNull();
-  });
-
-  it("activates peer tabs with pointer and arrow-key controls", () => {
-    render(<TabStrip session={session} selected={{ kind: "terminal", id: "shell-1" }} />);
-
-    fireEvent.click(screen.getByRole("tab", { name: "Claude" }));
-    expect(mocks.setSelectedAgent).toHaveBeenCalledWith("session-1", "agent-1");
-    expect(mocks.setActiveTab).toHaveBeenCalledWith("session-1", "agent-1");
-
-    fireEvent.keyDown(screen.getByRole("tab", { name: "Terminal 1" }), { key: "ArrowRight" });
-    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Codex" }));
-    fireEvent.keyDown(screen.getByRole("tab", { name: "Codex" }), { key: "Enter" });
-    expect(mocks.setSelectedAgent).toHaveBeenCalledWith("session-1", "agent-2");
-
+describe("mixed session tab actions", () => {
+  it("retains mixed creation order without duplicating sidebar destinations in the header", () => {
+    render(<TabActions session={session} selected={{ kind: "terminal", id: "shell-1" }} />);
+    expect(peerOrder(session, mocks.panes).map((tab) => tab.id)).toEqual(["agent-1", "shell-1", "agent-2"]);
+    expect(screen.queryByRole("tablist", { name: "Session tabs" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "New terminal" }));
     expect(mocks.openTerminal).toHaveBeenCalledWith("session-1", "/repo");
+  });
+
+  it("cycles mixed tabs and closes shells without closing agent-owned panes", () => {
+    render(<TabActions session={session} selected={{ kind: "terminal", id: "shell-1" }} />);
+    mocks.hotkeys.get("mod+shift+[")!();
+    expect(mocks.setActiveTab).toHaveBeenCalledWith("session-1", "agent-1");
+    mocks.hotkeys.get("mod+shift+]")!();
+    expect(mocks.setActiveTab).toHaveBeenCalledWith("session-1", "agent-2");
+    mocks.hotkeys.get("mod+w")!();
+    expect(mocks.closeTerminal).toHaveBeenCalledWith("shell-1");
+    expect(mocks.removeTab).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,6 @@
 import { FileTreeView } from "./FileTreeView";
 
-/** The right panel's Files tab: the same tree as the explorer column. */
+/** The right panel's Files tab: the app's single checkout browser. */
 export function FileTree({
   sessionId,
   root,
