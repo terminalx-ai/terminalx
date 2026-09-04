@@ -11,3 +11,9 @@ if (typeof globalThis.ResizeObserver === "undefined") {
   }
   globalThis.ResizeObserver = ResizeObserverNoop as unknown as typeof ResizeObserver;
 }
+
+// Nor does jsdom load fonts. Components that re-measure once the web fonts
+// settle await document.fonts.ready; hand them an already-settled set.
+if (typeof document !== "undefined" && !("fonts" in document)) {
+  Object.defineProperty(document, "fonts", { configurable: true, value: { ready: Promise.resolve() } });
+}

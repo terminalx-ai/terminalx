@@ -114,6 +114,20 @@ describe("composer height", () => {
     expect(textarea.style.height).toBe("52px");
   });
 
+  it("measures again once the web fonts settle", async () => {
+    let fontsSettled!: () => void;
+    Object.defineProperty(document, "fonts", { configurable: true, value: { ready: new Promise<void>((resolve) => (fontsSettled = resolve)) } });
+    scrollHeight = 40;
+    const { container } = render(<TestComposer onSend={vi.fn()} />);
+    const textarea = container.querySelector("textarea")!;
+    expect(textarea.style.height).toBe("40px");
+
+    scrollHeight = 46;
+    fontsSettled();
+
+    await waitFor(() => expect(textarea.style.height).toBe("46px"));
+  });
+
   it("caps the height at ten lines", () => {
     const { container } = render(<TestComposer onSend={vi.fn()} />);
     const textarea = container.querySelector("textarea")!;

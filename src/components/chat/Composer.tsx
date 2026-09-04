@@ -120,6 +120,18 @@ export function Composer({
     return () => observer.disconnect();
   }, [fit]);
 
+  // Until the web fonts settle the fallback face measures short, and the
+  // explicit height hides that from the observer; fit once more when they do.
+  useEffect(() => {
+    let cancelled = false;
+    void document.fonts.ready.then(() => {
+      if (!cancelled) fit();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [fit]);
+
   useEffect(() => {
     if (autoFocus) ref.current?.focus();
   }, [autoFocus, tab.id]);
