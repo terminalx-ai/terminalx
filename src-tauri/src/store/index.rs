@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TabStatus {
@@ -58,7 +60,7 @@ pub struct TabEntry {
 }
 
 fn default_mode() -> String {
-    "auto".into()
+    DEFAULT_PERMISSION_MODE.into()
 }
 
 /// The tracker issue a session was started from, enough to link back.
@@ -227,6 +229,18 @@ mod tests {
         let text = std::fs::read_to_string(file_path().unwrap()).unwrap();
         assert!(text.contains("futureField"));
         assert!(text.contains("\"extra\": 1"));
+    }
+
+    #[test]
+    fn tabs_without_a_permission_mode_use_the_product_default() {
+        let tab: TabEntry = serde_json::from_value(serde_json::json!({
+            "id": "t1",
+            "harness": "claude",
+            "created": "x"
+        }))
+        .unwrap();
+
+        assert_eq!(tab.permission_mode, DEFAULT_PERMISSION_MODE);
     }
 
     #[test]

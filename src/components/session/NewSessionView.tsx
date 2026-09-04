@@ -62,7 +62,8 @@ export function NewSessionView({
   const modelId = harness ? (prefs.lastModel[harness.id] ?? models.find((m) => m.isDefault)?.id ?? models[0]?.id ?? "") : "";
   const model = models.find((m) => m.id === modelId) ?? null;
   const effort = harness ? (prefs.lastEffort[harness.id] ?? model?.defaultEffort ?? null) : null;
-  const mode = PERMISSION_MODES.find((m) => m.id === prefs.lastMode) ?? PERMISSION_MODES[0];
+  const mode = PERMISSION_MODES.find((m) => m.id === prefs.lastMode)
+    ?? PERMISSION_MODES.find((m) => m.id === "bypassPermissions")!;
   const workspace = preset?.cwd ? (store.workspaces[preset.projectPath] ?? []).find((w) => w.path === preset.cwd) ?? null : null;
 
   useEffect(() => () => clearNewSessionPreset(), []);

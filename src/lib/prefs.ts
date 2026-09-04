@@ -50,7 +50,7 @@ const DEFAULTS: Prefs = {
   lastAgent: "claude",
   lastModel: {},
   lastEffort: {},
-  lastMode: "auto",
+  lastMode: "bypassPermissions",
   issueProvider: "github",
   useWorktree: true,
   bypassConfirmed: false,
