@@ -20,6 +20,7 @@ Settings → Transcription and linked to its Hugging Face model card.
 ## Contents
 
 - [Geist and Geist Mono (SIL OFL-1.1)](#geist-and-geist-mono-sil-ofl-11)
+- [Coding-agent marks](#coding-agent-marks)
 - [Material Icon Theme (MIT, two notices)](#material-icon-theme-mit-two-notices)
 - [transcribe.cpp (MIT)](#transcribecpp-mit)
 - [ggml (MIT)](#ggml-mit)
@@ -133,6 +134,19 @@ DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
 OTHER DEALINGS IN THE FONT SOFTWARE.
 ```
+
+---
+
+## Coding-agent marks
+
+The Claude Code, Cursor, and OpenCode SVG paths are adapted from
+[`simple-icons`](https://github.com/simple-icons/simple-icons), version
+16.29.0, whose icon data is released under
+[CC0-1.0](https://github.com/simple-icons/simple-icons/blob/16.29.0/LICENSE.md).
+CC0 does not affect any trademark rights in the depicted brands. The Codex
+mark is the OpenAI mark published on the official
+[OpenAI brand page](https://openai.com/brand/). These marks are used only to
+identify their corresponding coding agents and do not imply endorsement.
 
 ---
 

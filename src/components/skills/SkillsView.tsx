@@ -227,7 +227,7 @@ function SkillReader({ skill }: { skill: DiscoveredSkill | null }) {
               <span className="flex items-center gap-1">
                 {skill.agents.map((id) => (
                   <span key={id} className="flex items-center gap-0.5 capitalize">
-                    <AgentMark id={id} className="size-3" /> {id}
+                    <AgentMark id={id} className="size-3" decorative /> {id}
                   </span>
                 ))}
               </span>

@@ -1,7 +1,7 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { Archive, CircleDot, FolderOpen, GitBranch, MessageSquare, PanelsTopLeft, Square } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { AgentMark } from "@/components/AgentMark";
+import { AgentMark, agentName as agentDisplayName } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { ProjectGlyph } from "@/components/layout/ProjectRail";
@@ -59,7 +59,7 @@ export function AgentCard({
         ref={ref}
         role="button"
         tabIndex={-1}
-        aria-label={session.title}
+        aria-label={`${session.title}, ${harnesses.map(agentDisplayName).join(", ")}`}
         onClick={() => {
           onFocus();
           open();
@@ -84,7 +84,7 @@ export function AgentCard({
         <div className="flex min-w-0 items-center gap-2">
           <div className="flex shrink-0 -space-x-1 text-muted-foreground">
             {harnesses.map((h) => (
-              <AgentMark key={h} id={h} className="size-4 rounded-full bg-background" />
+              <AgentMark key={h} id={h} className="size-4 rounded-full bg-background" decorative />
             ))}
           </div>
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{session.title}</span>

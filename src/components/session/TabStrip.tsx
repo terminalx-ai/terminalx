@@ -211,7 +211,8 @@ export function TabStrip({ session, selected }: { session: SessionEntry; selecte
           }
 
           const { tab } = item;
-          const name = tab.title ?? store.harnesses.find((h) => h.id === tab.harness)?.name ?? tab.harness;
+          const harnessName = store.harnesses.find((h) => h.id === tab.harness)?.name ?? tab.harness;
+          const name = tab.title ?? harnessName;
           const skillCount = reachableSkills.filter((skill) => skill.agents.includes(tab.harness)).length;
           return (
             <ContextMenu key={`agent:${tab.id}`}>
@@ -222,7 +223,7 @@ export function TabStrip({ session, selected }: { session: SessionEntry; selecte
                   role="tab"
                   aria-selected={active}
                   aria-controls={tabPanelId(item)}
-                  aria-label={name}
+                  aria-label={name === harnessName ? name : `${name}, ${harnessName}`}
                   tabIndex={active ? 0 : -1}
                   onClick={() => activate(item)}
                   onKeyDown={(event) => onTabKeyDown(event, item)}
@@ -240,7 +241,7 @@ export function TabStrip({ session, selected }: { session: SessionEntry; selecte
                       tab.status === "completed" && "bg-add",
                     )}
                   />
-                  <AgentMark id={tab.harness} className="size-3.5 shrink-0" />
+                  <AgentMark id={tab.harness} className="size-3.5 shrink-0" decorative />
                   <span className="max-w-[9rem] truncate">{name}</span>
                   {mobileDriven.has(tab.id) && <Lock className="size-3 shrink-0 text-warning" aria-label="Mobile is driving this terminal" />}
                   {tabViews.views[tab.id] === "terminal" && <TerminalSquare className="size-3 shrink-0 text-faint" aria-label="In terminal view" />}
@@ -285,7 +286,7 @@ export function TabStrip({ session, selected }: { session: SessionEntry; selecte
           <DropdownMenuLabel>New agent tab with</DropdownMenuLabel>
           {store.harnesses.map((h) => (
             <DropdownMenuItem key={h.id} disabled={!h.available} onSelect={() => void addAgent(h.id)}>
-              <AgentMark id={h.id} />
+              <AgentMark id={h.id} decorative />
               <span>{h.name}</span>
               {!h.available && <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span>}
             </DropdownMenuItem>
