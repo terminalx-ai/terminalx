@@ -371,7 +371,31 @@ function isAccountWindow(window: UsageWindow): boolean {
  * reset countdown alone; a scoped window shows its name instead, so Fable
  * reads "2% used Fable".
  */
+function usageExpired(window: UsageWindow, now: number): boolean {
+  return window.agent === "claude" && window.resetsAt != null && window.resetsAt <= now;
+}
+
+function usageStale(window: UsageWindow, now: number): boolean {
+  return window.stale || usageExpired(window, now);
+}
+
+function usageMeterClass(window: UsageWindow, now: number): string {
+  return usageStale(window, now) ? "bg-muted-foreground/45" : urgency(window.usedPercent);
+}
+
+function usageTextClass(window: UsageWindow, now: number): string {
+  return usageStale(window, now) ? "text-muted-foreground" : urgencyText(window.usedPercent);
+}
+
+function usageResetLabel(agent: UsageAgent, reset: number, now: number): string {
+  return agent === "claude" && reset <= now
+    ? "Window expired — awaiting update"
+    : `Resets in ${formatResetCountdown(reset, now, "")}`;
+}
+
 function windowTrailer(window: UsageWindow, now: number): string | null {
+  if (usageExpired(window, now)) return `${windowLabel(window)} expired`;
+  if (window.stale) return `${windowLabel(window)} stale`;
   if (!isAccountWindow(window)) return windowLabel(window);
   return window.resetsAt == null ? null : formatResetCountdown(window.resetsAt, now, "");
 }
@@ -455,7 +479,7 @@ interface UsageClusterProps {
 }
 
 function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageClusterProps) {
-  const { settings, usage, usageRefreshing } = useStatus();
+  const { settings, usage, usageRefreshing, usageError } = useStatus();
   const [open, setOpen] = useState(false);
   const [detailAgent, setDetailAgent] = useState<UsageAgent | null>(null);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
@@ -469,7 +493,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
     .filter((window) => hasUsageData(window) && !isCodexSubLimit(window))
     .sort((a, b) => b.usedPercent - a.usedPercent);
   const compactMode = settings.usageMode === "compact";
-  const now = useCountdownNow(windows.map((window) => window.resetsAt));
+  const now = useCountdownNow([...windows.map((window) => window.resetsAt), usage.claude?.retryAt ?? null]);
   if (!settings.usage || (!providerProbePending && !available.has("claude") && !available.has("codex"))) return null;
 
   const groups = AGENTS.flatMap((agent) => {
@@ -478,7 +502,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
   }).sort((a, b) => b.tightest.usedPercent - a.tightest.usedPercent);
   const usageLabel = groups.length
     ? groups.flatMap(({ agent, windows: agentWindows }) => orderedWindows(agentWindows).map((window) =>
-      `${agentName(agent)} ${windowLabel(window)} ${Math.round(shownPercent(window, settings.percent))}% ${settings.percent}${window.resetsAt == null ? "" : `, resets ${formatResetCountdown(window.resetsAt, now, "")}`}`,
+      `${agentName(agent)} ${windowLabel(window)} ${Math.round(shownPercent(window, settings.percent))}% ${settings.percent}${usageExpired(window, now) ? ", window expired; awaiting update" : window.resetsAt == null ? "" : `, resets ${formatResetCountdown(window.resetsAt, now, "")}`}`,
     )).join("; ")
     : "Usage unavailable";
   const detailGroup = groups.find(({ agent }) => agent === detailAgent) ?? null;
@@ -537,7 +561,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                       className="h-1 w-10 shrink-0 overflow-hidden rounded-full bg-hairline-strong"
                     >
                       <i
-                        className={cn("block h-full rounded-full", urgency(tightest.usedPercent))}
+                        className={cn("block h-full rounded-full", usageMeterClass(tightest, now))}
                         style={{ width: `${shownPercent(tightest, settings.percent)}%` }}
                       />
                     </span>
@@ -547,10 +571,10 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                         <span
                           key={window.key}
                           data-usage-window={windowKind(window) ?? window.key}
-                          className={cn("flex shrink-0 items-center gap-1", urgencyText(window.usedPercent))}
+                          className={cn("flex shrink-0 items-center gap-1", usageTextClass(window, now))}
                         >
                           {windowIndex > 0 ? <span aria-hidden className="text-faint">·</span> : null}
-                          {window.stale ? <TriangleAlert className="size-3" aria-label="Stale usage data" /> : null}
+                          {usageStale(window, now) ? <TriangleAlert className="size-3" aria-label="Stale usage data" /> : null}
                           <span className="font-medium">{Math.round(shownPercent(window, settings.percent))}% {settings.percent}</span>
                           {trailer ? <span className="text-faint">{trailer}</span> : null}
                         </span>
@@ -597,12 +621,20 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
             <button
               type="button"
               aria-label="Refresh usage"
+              disabled={usageRefreshing}
               onClick={() => void refreshUsage(true)}
               className="rounded-md p-1 text-faint hover:bg-veil-raised hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/50"
             >
               <RefreshCw className={cn("size-3.5", usageRefreshing && "animate-spin")} />
             </button>
           </div>
+          {usageError || usage.claude?.error || (usage.claude?.retryAt != null && usage.claude.retryAt > now) ? (
+            <div role="status" className="mb-2 text-[10.5px] text-muted-foreground">
+              {usageError ?? (usage.claude?.retryAt != null && usage.claude.retryAt > now
+                ? `Claude refresh paused; retry in ${formatResetCountdown(usage.claude.retryAt, now, "")}. ${usage.claude.error ?? ""}`
+                : usage.claude?.error)}
+            </div>
+          ) : null}
           <Segmented
             aria-label="Usage layout"
             value={settings.usageMode}
@@ -625,7 +657,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                       type="button"
                       data-usage-compact-agent={compactMode ? agent : undefined}
                       aria-expanded={detailAgent === agent}
-                      aria-label={`${agentName(agent)}${reset == null ? "" : `, Resets in ${formatResetCountdown(reset, now, "")}`}`}
+                      aria-label={`${agentName(agent)}${reset == null ? "" : `, ${usageResetLabel(agent, reset, now)}`}`}
                       onClick={() => setDetailAgent((current) => current === agent ? null : agent)}
                       className={cn(
                         "flex w-full items-center gap-2 rounded-lg bg-well/60 px-2.5 text-left outline-none transition-colors hover:bg-veil-raised focus-visible:ring-1 focus-visible:ring-ring/50",
@@ -639,7 +671,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                           <span className="text-[12px] font-medium">{agentName(agent)}</span>
                           {reset != null ? (
                             <span className="truncate text-[10px] tabular-nums text-faint">
-                              Resets in {formatResetCountdown(reset, now, "")}
+                              {usageResetLabel(agent, reset, now)}
                             </span>
                           ) : null}
                         </div>
@@ -652,12 +684,12 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                                   <span className="shrink-0 text-faint">{windowLabel(window)}</span>
                                   <span className="h-1 w-8 shrink-0 overflow-hidden rounded-full bg-hairline-strong">
                                     <span
-                                      className={cn("block h-full rounded-full", isTightest ? urgency(window.usedPercent) : "bg-muted-foreground/45")}
+                                      className={cn("block h-full rounded-full", isTightest ? usageMeterClass(window, now) : "bg-muted-foreground/45")}
                                       style={{ width: `${shownPercent(window, settings.percent)}%` }}
                                     />
                                   </span>
-                                  <span className={cn("shrink-0", isTightest ? urgencyText(window.usedPercent) : "text-muted-foreground")}>
-                                    {Math.round(shownPercent(window, settings.percent))}%
+                                  <span className={cn("shrink-0", isTightest ? usageTextClass(window, now) : "text-muted-foreground")}>
+                                    {Math.round(shownPercent(window, settings.percent))}%{usageExpired(window, now) ? " expired" : window.stale ? " stale" : ""}
                                   </span>
                                 </span>
                               );
@@ -666,8 +698,8 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                         ) : null}
                       </div>
                       {compactMode ? (
-                        <span className={cn("flex shrink-0 items-center gap-1 text-[11px] font-medium tabular-nums", urgencyText(tightest.usedPercent))}>
-                          {tightest.stale ? <TriangleAlert className="size-3" aria-label="Stale usage data" /> : null}
+                        <span className={cn("flex shrink-0 items-center gap-1 text-[11px] font-medium tabular-nums", usageTextClass(tightest, now))}>
+                          {usageStale(tightest, now) ? <TriangleAlert className="size-3" aria-label="Stale usage data" /> : null}
                           {Math.round(shownPercent(tightest, settings.percent))}%
                         </span>
                       ) : null}
@@ -752,7 +784,6 @@ function AgentUsageDetail({
   onReset: () => void;
   onOpenAgentSettings: () => void;
 }) {
-  const updatedAt = Math.max(...windows.map((window) => window.updatedAt));
   const resetCredits = agent === "codex" ? codex?.resetCredits : undefined;
   const credits = agent === "codex" ? codex?.credits : undefined;
   return (
@@ -761,7 +792,6 @@ function AgentUsageDetail({
         <AgentMark id={agent} className="size-4 text-muted-foreground" decorative brand />
         <span className="text-[13px] font-medium">{agentName(agent)}</span>
       </div>
-      <div className="mt-0.5 text-[10.5px] text-faint">{formatUpdatedAgo(updatedAt, now)}</div>
       <div className="my-3 border-t border-hairline" />
       <div className="flex flex-col gap-3">
         {orderedWindows(windows).map((window) => {
@@ -770,12 +800,13 @@ function AgentUsageDetail({
             <div key={window.key}>
               <div className="mb-1.5 text-[12px] font-medium">{detailWindowLabel(window)}</div>
               <div className="h-1.5 overflow-hidden rounded-full bg-hairline-strong">
-                <div className={cn("h-full rounded-full", urgency(window.usedPercent))} style={{ width: `${shownPercent(window, percent)}%` }} />
+                <div className={cn("h-full rounded-full", usageMeterClass(window, now))} style={{ width: `${shownPercent(window, percent)}%` }} />
               </div>
               <div className="mt-1 flex items-center justify-between gap-3 text-[10.5px] tabular-nums text-muted-foreground">
-                <span>{shown}% {percent}</span>
-                {window.resetsAt != null ? <span>Resets in {formatResetCountdown(window.resetsAt, now, "")}</span> : null}
+                <span>{shown}% {percent}{usageStale(window, now) ? " (last known)" : ""}</span>
+                {window.resetsAt != null ? <span>{usageResetLabel(agent, window.resetsAt, now)}</span> : null}
               </div>
+              <div className="mt-0.5 text-[10px] text-faint">{formatUpdatedAgo(window.updatedAt, now)}</div>
             </div>
           );
         })}

@@ -1050,11 +1050,16 @@ pub async fn status_usage_refresh(app: AppHandle, state: State<'_, AppState>, ma
     let status = state.status.clone();
     let manager = state.manager().ok_or("not ready")?;
     let manual = manual.unwrap_or(false);
+    let publishing_app = app.clone();
+    let publishing_manager = manager.clone();
     let failures = tauri::async_runtime::spawn_blocking(move || {
         let mut failures = Vec::new();
-        if let Err(error) = status.usage.refresh_claude() {
+        if let Err(error) = status.usage.refresh_claude(manual) {
             failures.push(format!("Claude usage refresh: {error:#}"));
         }
+        // Publish Claude as soon as its source settles; starting Codex's
+        // app-server must not hold a confirmed Claude rollover off-screen.
+        let _ = publishing_app.emit(crate::status::usage::EVENT, publishing_manager.usage_snapshot());
         if let Err(error) = status.usage.refresh_codex(manual) {
             failures.push(format!("Codex usage refresh: {error:#}"));
         }

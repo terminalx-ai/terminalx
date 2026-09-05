@@ -31,6 +31,15 @@ export function useCountdownNow(resets: Array<number | null>): number {
   const [now, setNow] = useState(Date.now);
   const key = resets.join(",");
   useEffect(() => {
+    const update = () => setNow(Date.now());
+    window.addEventListener("focus", update);
+    document.addEventListener("visibilitychange", update);
+    return () => {
+      window.removeEventListener("focus", update);
+      document.removeEventListener("visibilitychange", update);
+    };
+  }, []);
+  useEffect(() => {
     const current = Date.now();
     const delay = nextCountdownDelay(resets, current);
     if (delay == null) return;
@@ -39,5 +48,5 @@ export function useCountdownNow(resets: Array<number | null>): number {
     // A primitive key avoids a new array retriggering the effect on every tick.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, now]);
-  return now;
+  return Math.max(now, Date.now());
 }

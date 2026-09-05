@@ -255,9 +255,13 @@ export interface UsageWindow {
   windowMinutes: number | null;
   updatedAt: number;
   stale: boolean;
+  source?: string;
 }
 
 export interface UsageSnapshot {
+  revision?: number;
+  claudeAccount?: string | null;
+  claude?: { retryAt: number | null; revalidateAt: number | null; error: string | null };
   windows: UsageWindow[];
   codex?: {
     credits?: {
