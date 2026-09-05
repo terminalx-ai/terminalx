@@ -95,12 +95,13 @@ export interface BucketOptions {
 
 export type Buckets<T extends DashboardSession = DashboardSession> = Record<ColumnId, T[]>;
 
-export function bucketSessions<T extends DashboardSession>(sessions: T[], options: BucketOptions): Buckets<T> {
+/** Omit options for the global totals, independent of dashboard-local filters. */
+export function bucketSessions<T extends DashboardSession>(sessions: T[], options?: BucketOptions): Buckets<T> {
   const buckets: Buckets<T> = { needs: [], working: [], done: [] };
   for (const session of sessions) {
     if (session.archived || !session.tabs.length) continue;
-    if (!matchesFilters(session, options.filters)) continue;
-    if (!matchesQuery(session, options.projectName(session.projectPath), options.query)) continue;
+    if (options && !matchesFilters(session, options.filters)) continue;
+    if (options && !matchesQuery(session, options.projectName(session.projectPath), options.query)) continue;
     buckets[sessionColumn(session)].push(session);
   }
   for (const id of Object.keys(buckets) as ColumnId[]) {

@@ -6,12 +6,13 @@
 //! metadata read on later visits.
 
 mod pricing;
+mod saved;
+pub use saved::{StatsUsageState, StatsUsageStore};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -23,7 +24,7 @@ const CACHE_SCHEMA: u32 = 3;
 const CACHE_FILE: &str = "stats-usage-cache.json";
 const OVERVIEW_DAYS: u64 = 30;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatsUsageSnapshot {
     pub app: AppStats,
@@ -43,7 +44,7 @@ pub struct StatsUsageSnapshot {
 
 pub use crate::store::activity::Summary as AppStats;
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageDay {
     pub day: String,
@@ -52,7 +53,7 @@ pub struct UsageDay {
     pub codex_tokens: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderUsage {
     pub id: String,
@@ -124,146 +125,151 @@ impl Default for ScanCache {
     }
 }
 
-#[derive(Default)]
-pub struct StatsUsageStore {
-    scan_lock: Mutex<()>,
+/// Build a candidate; the lifecycle publishes it only after durable persistence.
+fn scan_snapshot(store_root: &Path) -> Result<StatsUsageSnapshot> {
+    scan_snapshot_with(
+        store_root,
+        || discover_sources(store_root),
+        || Ok((app_stats()?, usage_scope()?)),
+    )
 }
 
-impl StatsUsageStore {
-    pub fn snapshot(&self) -> Result<StatsUsageSnapshot> {
-        let _scan = self
-            .scan_lock
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let cache_path = crate::store::root()?.join(CACHE_FILE);
-        let previous = match crate::store::read_json::<ScanCache>(&cache_path) {
-            Ok(Some(cache)) if cache.schema_version == CACHE_SCHEMA => cache,
-            Ok(_) => ScanCache::default(),
+fn scan_snapshot_with(
+    store_root: &Path,
+    sources: impl FnOnce() -> Result<Vec<(PathBuf, Provider)>>,
+    inputs: impl FnOnce() -> Result<(AppStats, UsageScope)>,
+) -> Result<StatsUsageSnapshot> {
+    let cache_path = store_root.join(CACHE_FILE);
+    let previous = match crate::store::read_json::<ScanCache>(&cache_path) {
+        Ok(Some(cache)) if cache.schema_version == CACHE_SCHEMA => cache,
+        Ok(_) => ScanCache::default(),
+        Err(error) => {
+            log::warn!("read stats usage cache: {error:#}");
+            ScanCache::default()
+        }
+    };
+
+    let files = sources()?;
+    let mut previous_by_path: HashMap<PathBuf, CachedFile> = previous
+        .files
+        .into_iter()
+        .map(|file| (file.path.clone(), file))
+        .collect();
+    let mut current = Vec::with_capacity(files.len());
+    for (path, provider) in files {
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
-                log::warn!("read stats usage cache: {error:#}");
-                ScanCache::default()
+                return Err(error)
+                    .with_context(|| format!("stat usage transcript {}", path.display()))
             }
         };
-
-        let store_root = crate::store::root()?;
-        let files = discover_sources(&store_root)?;
-        let mut previous_by_path: HashMap<PathBuf, CachedFile> = previous
-            .files
-            .into_iter()
-            .map(|file| (file.path.clone(), file))
-            .collect();
-        let mut current = Vec::with_capacity(files.len());
-        for (path, provider) in files {
-            let metadata = match fs::metadata(&path) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    log::warn!("stat usage transcript {}: {error}", path.display());
-                    continue;
-                }
-            };
-            let modified_nanos = modified_nanos(&metadata);
-            let size = metadata.len();
-            if let Some(cached) = previous_by_path.remove(&path).filter(|cached| {
-                cached.provider == provider
-                    && cached.modified_nanos == modified_nanos
-                    && cached.size == size
-            }) {
-                current.push(cached);
-                continue;
-            }
-            match parse_file(&path, provider) {
-                Ok(events) => current.push(CachedFile {
-                    path,
-                    provider,
-                    modified_nanos,
-                    size,
-                    events,
-                }),
-                Err(error) => log::warn!("scan usage transcript {}: {error:#}", path.display()),
+        let modified_nanos = modified_nanos(&metadata)?;
+        let size = metadata.len();
+        if let Some(cached) = previous_by_path.remove(&path).filter(|cached| {
+            cached.provider == provider
+                && cached.modified_nanos == modified_nanos
+                && cached.size == size
+        }) {
+            current.push(cached);
+            continue;
+        }
+        match parse_file(&path, provider) {
+            Ok(events) => current.push(CachedFile {
+                path,
+                provider,
+                modified_nanos,
+                size,
+                events,
+            }),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("scan usage transcript {}", path.display()))
             }
         }
-
-        current.sort_by(|left, right| lexical_path_cmp(&left.path, &right.path));
-        let scope = usage_scope()?;
-        let snapshot = aggregate(
-            &current,
-            app_stats()?,
-            &scope,
-            &overview_cutoff(Local::now()),
-        );
-        let cache = ScanCache {
-            schema_version: CACHE_SCHEMA,
-            files: current,
-        };
-        let bytes = serde_json::to_vec(&cache)?;
-        if let Err(error) = crate::store::write_atomic(&cache_path, &bytes) {
-            log::warn!("write stats usage cache: {error:#}");
-        }
-        Ok(snapshot)
     }
+
+    current.sort_by(|left, right| lexical_path_cmp(&left.path, &right.path));
+    let (app, scope) = inputs()?;
+    let snapshot = aggregate(&current, app, &scope, &overview_cutoff(Local::now()));
+    let cache = ScanCache {
+        schema_version: CACHE_SCHEMA,
+        files: current,
+    };
+    let bytes = serde_json::to_vec(&cache)?;
+    crate::store::write_atomic(&cache_path, &bytes).context("write stats scan cache")?;
+    Ok(snapshot)
 }
 
-fn modified_nanos(metadata: &fs::Metadata) -> u64 {
-    metadata
-        .modified()
-        .ok()
-        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos().min(u64::MAX as u128) as u64)
-        .unwrap_or(0)
+fn modified_nanos(metadata: &fs::Metadata) -> Result<u64> {
+    Ok(metadata
+        .modified()?
+        .duration_since(UNIX_EPOCH)?
+        .as_nanos()
+        .min(u64::MAX as u128) as u64)
 }
 
 fn discover_sources(store_root: &Path) -> Result<Vec<(PathBuf, Provider)>> {
     let home = dirs::home_dir().context("no home directory")?;
     let predecessor_root = predecessor_data_root();
-    Ok(discover_sources_at(
-        &home,
-        store_root,
-        predecessor_root.as_deref(),
-    ))
+    discover_sources_at(&home, store_root, predecessor_root.as_deref())
 }
 
 fn discover_sources_at(
     home: &Path,
     store_root: &Path,
     predecessor_root: Option<&Path>,
-) -> Vec<(PathBuf, Provider)> {
+) -> Result<Vec<(PathBuf, Provider)>> {
     let mut roots = vec![
         (home.join(".claude/projects"), Provider::Claude),
         (home.join(".claude/transcripts"), Provider::Claude),
         (home.join(".codex/sessions"), Provider::Codex),
         (store_root.join("codex/sessions"), Provider::Codex),
     ];
-    add_managed_codex_roots(store_root, &mut roots);
+    add_managed_codex_roots(store_root, &mut roots)?;
     if let Some(root) = predecessor_root {
         roots.push((
             root.join("codex-runtime-home/home/sessions"),
             Provider::Codex,
         ));
-        add_managed_codex_roots(root, &mut roots);
+        add_managed_codex_roots(root, &mut roots)?;
     }
     let mut files = Vec::new();
     let mut seen = HashSet::new();
     for (root, provider) in roots {
-        discover_jsonl(&root, provider, &mut files, &mut seen);
+        discover_jsonl(&root, provider, &mut files, &mut seen)?;
     }
     files.sort_by(|left, right| lexical_path_cmp(&left.0, &right.0));
-    files
+    Ok(files)
 }
 
 fn lexical_path_cmp(left: &Path, right: &Path) -> std::cmp::Ordering {
     left.to_string_lossy().cmp(&right.to_string_lossy())
 }
 
-fn add_managed_codex_roots(root: &Path, roots: &mut Vec<(PathBuf, Provider)>) {
-    let Ok(accounts) = fs::read_dir(root.join("codex-accounts")) else {
-        return;
-    };
-    for account in accounts.flatten() {
-        if account.file_type().is_ok_and(|kind| kind.is_dir()) {
-            roots.push((account.path().join("home/sessions"), Provider::Codex));
+// Only a confirmed absence is an empty source. Permission/I/O failures abort
+// the entire candidate, including when a directory entry disappears mid-walk.
+fn optional_directory(path: &Path) -> Result<Option<fs::ReadDir>> {
+    match fs::read_dir(path) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("read usage directory {}", path.display()))
         }
     }
+}
+
+fn add_managed_codex_roots(root: &Path, roots: &mut Vec<(PathBuf, Provider)>) -> Result<()> {
+    if let Some(accounts) = optional_directory(&root.join("codex-accounts"))? {
+        for account in accounts {
+            let account = account?;
+            if account.file_type()?.is_dir() {
+                roots.push((account.path().join("home/sessions"), Provider::Codex));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn discover_jsonl(
@@ -271,26 +277,25 @@ fn discover_jsonl(
     provider: Provider,
     out: &mut Vec<(PathBuf, Provider)>,
     seen: &mut HashSet<PathBuf>,
-) {
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
-        if kind.is_dir() {
-            discover_jsonl(&path, provider, out, seen);
-        } else if kind.is_file()
-            && path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
-        {
-            let identity = fs::canonicalize(&path).unwrap_or(path);
-            if seen.insert(identity.clone()) {
-                out.push((identity, provider));
+) -> Result<()> {
+    if let Some(entries) = optional_directory(root)? {
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                discover_jsonl(&path, provider, out, seen)?;
+            } else if kind.is_file()
+                && path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
+            {
+                let identity = fs::canonicalize(&path)?;
+                if seen.insert(identity.clone()) {
+                    out.push((identity, provider));
+                }
             }
         }
     }
+    Ok(())
 }
 
 fn parse_file(path: &Path, provider: Provider) -> Result<Vec<UsageEvent>> {
@@ -310,13 +315,7 @@ fn parse_claude(path: &Path) -> Result<Vec<UsageEvent>> {
     let mut by_key = HashMap::<String, usize>::new();
 
     for line in BufReader::new(file).lines() {
-        let line = match line {
-            Ok(line) => line,
-            Err(error) => {
-                log::warn!("read Claude transcript {}: {error}", path.display());
-                continue;
-            }
-        };
+        let line = line.with_context(|| format!("read usage transcript {}", path.display()))?;
         if !line.contains("assistant") || !line.contains("usage") {
             continue;
         }
@@ -575,13 +574,7 @@ fn parse_codex(path: &Path) -> Result<Vec<UsageEvent>> {
     let mut events = Vec::new();
 
     for line in BufReader::new(file).lines() {
-        let line = match line {
-            Ok(line) => line,
-            Err(error) => {
-                log::warn!("read Codex rollout {}: {error}", path.display());
-                continue;
-            }
-        };
+        let line = line.with_context(|| format!("read usage transcript {}", path.display()))?;
         let interesting = line.contains("\"type\":\"session_meta\"")
             || line.contains("\"type\":\"turn_context\"")
             || (line.contains("\"type\":\"event_msg\"")
@@ -816,7 +809,11 @@ fn usage_scope() -> Result<UsageScope> {
             Ok(worktrees) => {
                 paths.extend(worktrees.into_iter().map(|(path, _)| PathBuf::from(path)));
             }
-            Err(error) => log::warn!("list usage worktrees for {}: {error:#}", root.display()),
+            Err(_) if !root.try_exists()? => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("list usage worktrees for {}", root.display()))
+            }
         }
     }
     paths.extend(
@@ -826,28 +823,28 @@ fn usage_scope() -> Result<UsageScope> {
     );
     if let Some(root) = predecessor_data_root() {
         for name in ["terminalx-claude-usage.json", "terminalx-codex-usage.json"] {
-            read_usage_scope_cache(&root.join(name), &mut paths);
+            read_usage_scope_cache(&root.join(name), &mut paths)?;
         }
     }
     Ok(UsageScope::from_paths(paths))
 }
 
-fn read_usage_scope_cache(path: &Path, paths: &mut Vec<PathBuf>) {
-    let Ok(file) = File::open(path) else {
-        return;
-    };
-    let cache = match serde_json::from_reader::<_, UsageScopeCache>(file) {
-        Ok(cache) => cache,
+fn read_usage_scope_cache(path: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
-            log::warn!("read usage scope cache {}: {error}", path.display());
-            return;
+            return Err(error).with_context(|| format!("read usage scope {}", path.display()))
         }
     };
+    let cache: UsageScopeCache = serde_json::from_reader(file)
+        .with_context(|| format!("parse usage scope {}", path.display()))?;
     paths.extend(cache.daily_aggregates.into_iter().filter_map(|entry| {
         entry
             .worktree_id
             .and_then(|id| id.split_once("::").map(|(_, path)| PathBuf::from(path)))
     }));
+    Ok(())
 }
 
 fn overview_cutoff(reference: DateTime<Local>) -> String {
@@ -1331,7 +1328,7 @@ mod tests {
             File::create(path).unwrap();
         }
 
-        let sources = discover_sources_at(&home, &store, Some(&predecessor));
+        let sources = discover_sources_at(&home, &store, Some(&predecessor)).unwrap();
         assert_eq!(sources.len(), 7);
         assert_eq!(
             sources
@@ -1359,7 +1356,7 @@ mod tests {
         File::create(&parent).unwrap();
         File::create(&child).unwrap();
 
-        let sources = discover_sources_at(root.path(), root.path(), None);
+        let sources = discover_sources_at(root.path(), root.path(), None).unwrap();
         assert_eq!(sources[0].0, fs::canonicalize(parent).unwrap());
         assert_eq!(sources[1].0, fs::canonicalize(child).unwrap());
     }
@@ -1484,5 +1481,95 @@ mod tests {
         );
         assert_eq!(snapshot.total_tokens, 105);
         assert_eq!(snapshot.providers[1].sessions, 1);
+    }
+    #[test]
+    fn unchanged_projections_are_reaggregated_at_local_day_rollover() {
+        let scope = UsageScope::from_paths([PathBuf::from("/work/repo")]);
+        let files = [cached(vec![test_event(
+            Provider::Codex,
+            "boundary",
+            "2026-08-05",
+            "/work/repo",
+            100,
+        )])];
+        let before = chrono::TimeZone::with_ymd_and_hms(&Local, 2026, 9, 3, 12, 0, 0)
+            .single()
+            .unwrap();
+        let after = before + chrono::Duration::days(1);
+        let first = aggregate(
+            &files,
+            AppStats::default(),
+            &scope,
+            &overview_cutoff(before),
+        );
+        let next = aggregate(&files, AppStats::default(), &scope, &overview_cutoff(after));
+        assert_eq!(first.total_tokens, 100);
+        assert_eq!(next.total_tokens, 0);
+        assert_eq!(next.active_days, 0);
+    }
+
+    #[test]
+    fn source_failures_are_not_confirmed_removals() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        assert!(optional_directory(&missing).unwrap().is_none());
+        let blocked = dir.path().join("not-a-directory");
+        fs::write(&blocked, b"blocked").unwrap();
+        assert!(optional_directory(&blocked).is_err());
+        let transcript = dir.path().join("invalid-utf8.jsonl");
+        fs::write(&transcript, [0xff, 0xfe, b'\n']).unwrap();
+        assert!(parse_claude(&transcript).is_err());
+        assert!(parse_codex(&transcript).is_err());
+        assert!(scan_snapshot_with(
+            dir.path(),
+            || Err(anyhow::anyhow!("discovery failed")),
+            || Ok((AppStats::default(), UsageScope::default()))
+        )
+        .is_err());
+        assert!(scan_snapshot_with(
+            dir.path(),
+            || Ok(vec![(transcript, Provider::Claude)]),
+            || Ok((AppStats::default(), UsageScope::default()))
+        )
+        .is_err());
+        assert!(!dir.path().join(CACHE_FILE).exists());
+    }
+
+    #[test]
+    fn app_read_failure_does_not_publish_a_scan_cache_and_confirmed_removal_invalidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("claude.jsonl");
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/stats/fixtures/parity/claude.jsonl"),
+            &transcript,
+        )
+        .unwrap();
+        let sources = || Ok(vec![(transcript.clone(), Provider::Claude)]);
+        assert!(
+            scan_snapshot_with(dir.path(), sources, || Err(anyhow::anyhow!(
+                "app read failed"
+            )))
+            .is_err()
+        );
+        assert!(!dir.path().join(CACHE_FILE).exists());
+        scan_snapshot_with(dir.path(), sources, || {
+            Ok((AppStats::default(), UsageScope::default()))
+        })
+        .unwrap();
+        let before: ScanCache = crate::store::read_json(&dir.path().join(CACHE_FILE))
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.files.len(), 1);
+        fs::remove_file(transcript).unwrap();
+        scan_snapshot_with(
+            dir.path(),
+            || Ok(vec![]),
+            || Ok((AppStats::default(), UsageScope::default())),
+        )
+        .unwrap();
+        let after: ScanCache = crate::store::read_json(&dir.path().join(CACHE_FILE))
+            .unwrap()
+            .unwrap();
+        assert!(after.files.is_empty());
     }
 }

@@ -40,7 +40,7 @@ export interface TerminalState {
   selected: Record<string, SelectedSessionTab>;
 }
 
-export type SelectedSessionTab = { kind: "agent" | "terminal"; id: string };
+export type SelectedSessionTab = { kind: "agent" | "terminal" | "browser"; id: string };
 
 let state: TerminalState = { panes: [], active: {}, selected: {} };
 const listeners = new Set<() => void>();
@@ -227,6 +227,20 @@ export function setActiveTerminal(sessionId: string, id: string) {
 
 export function setSelectedAgent(sessionId: string, id: string) {
   set({ selected: { ...state.selected, [sessionId]: { kind: "agent", id } } });
+}
+
+/** A browser page is a peer tab too; the page itself lives in the browser store. */
+export function setSelectedBrowser(sessionId: string, id: string) {
+  set({ selected: { ...state.selected, [sessionId]: { kind: "browser", id } } });
+}
+
+/** Drop a browser selection whose page is gone so the session falls back cleanly. */
+export function clearSelectedBrowser(sessionId: string, id: string) {
+  const current = state.selected[sessionId];
+  if (current?.kind !== "browser" || current.id !== id) return;
+  const selected = { ...state.selected };
+  delete selected[sessionId];
+  set({ selected });
 }
 
 /**

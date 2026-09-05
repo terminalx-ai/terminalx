@@ -81,6 +81,14 @@ export interface StatsUsageSnapshot {
   updatedAt: number;
 }
 
+export interface StatsUsageState {
+  scope: string;
+  generation: number;
+  snapshot: StatsUsageSnapshot | null;
+  refreshing: boolean;
+  error: string | null;
+}
+
 export interface NewSession {
   projectPath: string;
   /** Run in this existing workspace instead of creating a worktree. */
@@ -137,7 +145,8 @@ export const api = {
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
   /** Card snippets for the agent dashboard; every session when no ids are given. */
   sessionSummaries: (sessionIds?: string[]) => invoke<SessionSummary[]>("session_summaries", { sessionIds: sessionIds ?? null }),
-  statsUsageSnapshot: () => invoke<StatsUsageSnapshot>("stats_usage_snapshot"),
+  statsUsageSnapshot: () => invoke<StatsUsageState>("stats_usage_snapshot"),
+  statsUsageRefresh: (scope: string, generation: number) => invoke<StatsUsageState>("stats_usage_refresh", { scope, generation }),
   appActivitySummary: () => invoke<AppStats>("app_activity_summary"),
   createSession: (req: NewSession) => invoke<SessionEntry>("create_session", { req }),
   addTab: (sessionId: string, tab: NewTab) => invoke<TabEntry>("add_tab", { sessionId, tab }),
@@ -162,6 +171,10 @@ export const api = {
   installCliTool: () => invoke<CliToolStatus>("install_cli_tool"),
   cliSkillStatus: () => invoke<SkillInstallStatus>("cli_skill_status"),
   installCliSkill: () => invoke<SkillInstallStatus>("install_cli_skill"),
+
+  // built-in browser runtime (agent-browser + Chromium)
+  browserRuntimeStatus: () => invoke<BrowserRuntimeStatus>("browser_runtime_status"),
+  browserInstallBrowser: () => invoke<BrowserRuntimeStatus>("browser_install_browser"),
 
   // git
   workStatus: (cwd: string) => invoke<WorkStatus>("work_status", { cwd }),
@@ -469,6 +482,51 @@ export const gh = {
     invoke<string>("pr_create", { cwd, title, body, base, draft }),
   merge: (cwd: string, number: number, method: "merge" | "squash" | "rebase") => invoke<void>("pr_merge", { cwd, number, method }),
   ready: (cwd: string, number: number) => invoke<void>("pr_ready", { cwd, number }),
+};
+
+// ---- built-in browser pages
+/** One tab of the app-managed Chromium, as the page store describes it. */
+export interface BrowserPage {
+  id: string;
+  browserPageId: string;
+  profileId: string;
+  tabId: string;
+  url: string;
+  title: string;
+  workspacePath: string | null;
+  created: string;
+  active: boolean;
+  index: number;
+}
+export interface BrowserProfile {
+  id: string;
+  label: string;
+  created: string;
+}
+export interface BrowserRuntimeStatus {
+  binary: string | null;
+  version: string | null;
+  expectedVersion: string;
+  browser: string | null;
+  socketDir: string | null;
+  ownsSocketDir: boolean;
+  liveSessions: string[];
+}
+export interface BrowserNavigation {
+  browserPageId: string;
+  url?: string;
+  title?: string;
+}
+export const browser = {
+  pages: () => invoke<BrowserPage[]>("browser_pages"),
+  openTab: (workspace: string, url?: string | null, profile?: string | null) =>
+    invoke<{ browserPageId: string; url: string; title: string }>("browser_open_tab", { workspace, url: url ?? null, profile: profile ?? null }),
+  closePage: (pageId: string) => invoke<void>("browser_close_page", { pageId }),
+  activatePage: (pageId: string, focus: boolean) => invoke<void>("browser_activate_page", { pageId, focus }),
+  navigate: (pageId: string, action: "goto" | "back" | "forward" | "reload", url?: string | null) =>
+    invoke<BrowserNavigation>("browser_navigate", { pageId, action, url: url ?? null }),
+  screencast: (pageId: string, live: boolean) => invoke<void>("browser_screencast", { pageId, live }),
+  profiles: () => invoke<BrowserProfile[]>("browser_profiles"),
 };
 
 // ---- terminals

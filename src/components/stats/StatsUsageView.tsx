@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useSyncExternalStore, type ReactNode } from "react";
 import {
   Activity,
   BarChart3,
@@ -17,32 +17,19 @@ import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/menu";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { api, errorMessage, type ProviderUsage, type StatsUsageSnapshot } from "@/lib/api";
+import type { ProviderUsage, StatsUsageSnapshot } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { formatAgentTime, formatCost, formatTokens, heatmapDays } from "@/lib/stats";
+import { statsUsageStore } from "@/lib/statsUsageStore";
 
 const LEVELS = ["bg-veil-raised", "bg-muted-foreground/25", "bg-muted-foreground/45", "bg-muted-foreground/70", "bg-foreground/85"];
 
 export function StatsUsageView() {
-  const [snapshot, setSnapshot] = useState<StatsUsageSnapshot | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      setSnapshot(await api.statsUsageSnapshot());
-    } catch (cause) {
-      setError(errorMessage(cause));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const { snapshot, refreshing: loading, error, initialized } = useSyncExternalStore(
+    statsUsageStore.subscribe, statsUsageStore.getSnapshot,
+  );
+  const load = statsUsageStore.refresh;
+  useEffect(() => { void load(); }, [load]);
 
   return (
     <div className="@container min-h-0 flex-1 overflow-y-auto scrollbar-thin">
@@ -54,11 +41,13 @@ export function StatsUsageView() {
               TerminalX activity plus local Claude and Codex token analytics.
             </p>
           </div>
+          <span role="status" aria-live="polite" className="ml-auto self-center text-xs text-muted-foreground">
+            {loading ? "Refreshing…" : ""}
+          </span>
           <WithTooltip label="Refresh local analytics">
             <Button
               variant="ghost"
               size="icon-sm"
-              className="ml-auto"
               aria-label="Refresh local analytics"
               disabled={loading}
               onClick={() => void load()}
@@ -68,15 +57,13 @@ export function StatsUsageView() {
           </WithTooltip>
         </header>
 
-        {error ? (
-          <div role="alert" className="mt-6 rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
+        {error && (
+          <div role="alert" className="mt-4 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
             <p>Could not read local usage: {error}</p>
-            <Button variant="outline" size="sm" className="mt-3" onClick={() => void load()}>Try again</Button>
+            <Button variant="outline" size="sm" className="mt-3" onClick={() => void load()} disabled={loading}>Retry</Button>
           </div>
-        ) : null}
-        {snapshot ? (
-          <StatsContents snapshot={snapshot} refreshing={loading} />
-        ) : !error ? <LoadingState /> : null}
+        )}
+        {snapshot ? <StatsContents snapshot={snapshot} /> : initialized && loading ? <LoadingState /> : null}
       </div>
     </div>
   );
@@ -88,21 +75,21 @@ function LoadingState() {
       <div className="flex flex-col items-center gap-2 text-center text-sm text-muted-foreground">
         <Loader2 className="size-5 animate-spin text-faint" />
         <span>Reading local transcripts…</span>
-        <span className="max-w-sm text-xs text-faint">The first scan can take a moment. Later visits only revisit changed files.</span>
+        <span className="max-w-sm text-xs text-faint">The first scan can take a moment. Later visits show your saved data while refreshing.</span>
       </div>
     </div>
   );
 }
 
-function StatsContents({ snapshot, refreshing }: { snapshot: StatsUsageSnapshot; refreshing: boolean }) {
-  const heatmap = useMemo(() => heatmapDays(snapshot.daily), [snapshot.daily]);
+function StatsContents({ snapshot }: { snapshot: StatsUsageSnapshot }) {
+  const heatmap = useMemo(() => heatmapDays(snapshot.daily, new Date(snapshot.updatedAt)), [snapshot.daily, snapshot.updatedAt]);
   const best = heatmap.reduce((winner, day) => day.totalTokens > winner.totalTokens ? day : winner, heatmap[0]);
   const enabled = snapshot.providers.filter((provider) => provider.enabled);
   const withData = enabled.filter((provider) => provider.hasData).length;
   const sessions = enabled.reduce((total, provider) => total + provider.sessions, 0);
 
   return (
-    <div className={cn("transition-opacity", refreshing && "opacity-70")} aria-busy={refreshing}>
+    <div>
       <section className="mt-6 rounded-2xl bg-well/35 p-4 hairline @min-[760px]:p-5">
         <div className="grid gap-3 @min-[620px]:grid-cols-3">
           <MetricCard icon={<Bot />} value={snapshot.app.agentsSpawned.toLocaleString()} label="Agents spawned" />
