@@ -607,7 +607,15 @@ export interface ReplaceReport {
   files: number;
   replacements: number;
 }
+export interface MediaFile {
+  token: string;
+  url: string;
+  mtimeMs: number;
+}
+
 export const fs = {
+  openMedia: (root: string, rel: string) => invoke<MediaFile>("open_media_file", { root, rel }),
+  closeMedia: (token: string) => invoke<void>("close_media_file", { token }),
   listDir: (root: string, rel: string) => invoke<DirEntry[]>("list_dir", { root, rel }),
   readText: (path: string) => invoke<TextFile>("read_text_file", { path }),
   writeText: (path: string, content: string) => invoke<number>("write_text_file", { path, content }),

@@ -210,6 +210,7 @@ pub fn read_text(path: &Path) -> Result<TextFile> {
 }
 
 pub fn write_text(path: &Path, content: &str) -> Result<u64> {
+    anyhow::ensure!(crate::media::media_type(path).is_none(), "Media files are read-only in the file pane");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

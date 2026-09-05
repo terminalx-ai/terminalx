@@ -15,6 +15,7 @@ import {
   toggleViewMode,
   useEditors,
 } from "@/lib/editors";
+import { MediaPane } from "./MediaPane";
 import { EditorPane } from "./EditorPane";
 
 const MIN_W = 320;
@@ -153,7 +154,7 @@ export function EditorSplit({ sessionId, active }: { sessionId: string; active: 
       <div className="relative min-h-0 flex-1">
         {editors.map((e) => (
           <div key={e.id} className={cn("absolute inset-0 flex flex-col", e.id !== activeId && "hidden")}>
-            <EditorPane entry={e} visible={e.id === activeId && active} />
+            {e.kind === "text" ? <EditorPane entry={e} visible={e.id === activeId && active} /> : <MediaPane entry={e} visible={e.id === activeId && active} />}
           </div>
         ))}
       </div>
