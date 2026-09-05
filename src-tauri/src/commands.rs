@@ -244,12 +244,25 @@ pub async fn session_summaries(session_ids: Option<Vec<String>>) -> CmdResult<Ve
         .map_err(err)?
 }
 
-/// App-owned activity and transcript-backed token analytics are disk-heavy on
-/// the first scan, so keep them off the UI thread.
+/// Cached display/status reads never walk transcripts or wait for the scan.
 #[tauri::command]
-pub async fn stats_usage_snapshot(state: State<'_, AppState>) -> CmdResult<crate::stats::StatsUsageSnapshot> {
+pub async fn app_activity_summary() -> CmdResult<crate::store::activity::Summary> {
+    tauri::async_runtime::spawn_blocking(|| crate::store::activity::summary().map_err(err))
+        .await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn stats_usage_snapshot(state: State<'_, AppState>) -> CmdResult<crate::stats::StatsUsageState> {
     let stats = state.stats_usage.clone();
-    tauri::async_runtime::spawn_blocking(move || stats.snapshot().map_err(err))
+    tauri::async_runtime::spawn_blocking(move || stats.read().map_err(err))
+        .await
+        .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn stats_usage_refresh(state: State<'_, AppState>, scope: String, generation: u64) -> CmdResult<crate::stats::StatsUsageState> {
+    let stats = state.stats_usage.clone();
+    tauri::async_runtime::spawn_blocking(move || stats.refresh(&scope, generation).map_err(err))
         .await
         .map_err(err)?
 }
@@ -840,6 +853,15 @@ use crate::AppState;
 use tauri::State;
 
 #[tauri::command]
+pub async fn prepare_continuation(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<crate::continuation::Context> {
+    let m = state.manager().ok_or("not ready")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let tracked = m.tracked_transcript(&session_id, &tab_id);
+        crate::continuation::prepare(&session_id, &tab_id, tracked).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn load_tab_events(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<Vec<crate::events::AgentEvent>> {
     let m = state.manager().ok_or("not ready")?;
     tauri::async_runtime::spawn_blocking(move || m.load_events(&session_id, &tab_id).map_err(err)).await.map_err(err)?
@@ -852,9 +874,16 @@ pub async fn send_message(
     tab_id: String,
     text: String,
     images: Option<Vec<ImageInput>>,
+    confirm_delivery: Option<bool>,
 ) -> CmdResult<SendOutcome> {
     let m = state.manager().ok_or("not ready")?;
-    tauri::async_runtime::spawn_blocking(move || m.send(&session_id, &tab_id, text, images.unwrap_or_default()).map_err(err))
+    tauri::async_runtime::spawn_blocking(move || {
+        if confirm_delivery.unwrap_or(false) {
+            m.send_confirmed(&session_id, &tab_id, text).map_err(err)
+        } else {
+            m.send(&session_id, &tab_id, text, images.unwrap_or_default()).map_err(err)
+        }
+    })
         .await
         .map_err(err)?
 }
@@ -1021,11 +1050,16 @@ pub async fn status_usage_refresh(app: AppHandle, state: State<'_, AppState>, ma
     let status = state.status.clone();
     let manager = state.manager().ok_or("not ready")?;
     let manual = manual.unwrap_or(false);
+    let publishing_app = app.clone();
+    let publishing_manager = manager.clone();
     let failures = tauri::async_runtime::spawn_blocking(move || {
         let mut failures = Vec::new();
-        if let Err(error) = status.usage.refresh_claude() {
+        if let Err(error) = status.usage.refresh_claude(manual) {
             failures.push(format!("Claude usage refresh: {error:#}"));
         }
+        // Publish Claude as soon as its source settles; starting Codex's
+        // app-server must not hold a confirmed Claude rollover off-screen.
+        let _ = publishing_app.emit(crate::status::usage::EVENT, publishing_manager.usage_snapshot());
         if let Err(error) = status.usage.refresh_codex(manual) {
             failures.push(format!("Codex usage refresh: {error:#}"));
         }
@@ -1266,11 +1300,38 @@ pub fn file_mtime(path: String) -> Option<u64> {
 }
 
 #[tauri::command]
-pub async fn search_text(root: String, query: String, regex: bool, case_sensitive: bool, limit: Option<usize>) -> CmdResult<crate::files::TextSearch> {
-    tauri::async_runtime::spawn_blocking(move || crate::files::search_text(Path::new(&root), &query, regex, case_sensitive, limit.unwrap_or(500)))
-        .await
-        .map_err(err)?
-        .map_err(err)
+pub async fn search_text(
+    root: String,
+    query: String,
+    regex: bool,
+    case_sensitive: bool,
+    limit: Option<usize>,
+    replacement: Option<String>,
+) -> CmdResult<crate::files::TextSearch> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::files::search_text(Path::new(&root), &query, regex, case_sensitive, limit.unwrap_or(500), replacement.as_deref())
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
+}
+
+#[tauri::command]
+pub async fn replace_text(
+    root: String,
+    query: String,
+    replacement: String,
+    regex: bool,
+    case_sensitive: bool,
+    targets: Option<Vec<crate::files::ReplaceTarget>>,
+    skip: Option<Vec<String>>,
+) -> CmdResult<crate::files::ReplaceReport> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::files::replace_text(Path::new(&root), &query, &replacement, regex, case_sensitive, targets, &skip.unwrap_or_default())
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
 }
 
 // ------------------------------------------------------------------ dictation
@@ -1934,6 +1995,7 @@ pub async fn delete_workspace(app: AppHandle, project_path: String, path: String
                 kill_tab(&state, &s.id, &t.id);
             }
         }
+        state.browser.forget_workspace(&crate::browser::control::canonical(&path));
         let removed = delete_workspace_entries(&project_path, &path, delete_branch)?;
         notify_workspace_deleted(&app, &project_path, &removed);
         Ok(removed)

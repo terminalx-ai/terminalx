@@ -31,3 +31,6 @@ dist-ssr
 # Swift helper build output
 native/**/.build/
 native/**/.swiftpm/
+
+# the agent-browser sidecar is copied out of node_modules by scripts/ensure-agent-browser.mjs
+/src-tauri/binaries/agent-browser-*

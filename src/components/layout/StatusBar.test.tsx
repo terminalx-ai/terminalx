@@ -63,8 +63,8 @@ beforeEach(() => {
       { agent: "claude", key: "five_hour", label: "5h", usedPercent: 12, resetsAt: now + (2 * 60 + 10) * 60_000, windowMinutes: 300, updatedAt: now, stale: false },
       { agent: "claude", key: "seven_day", label: "7d", usedPercent: 41, resetsAt: now + (5 * 24 + 6) * 60 * 60_000, windowMinutes: 10_080, updatedAt: now, stale: false },
       { agent: "claude", key: "fable_weekly", label: "Fable", usedPercent: 82, resetsAt: now + (4 * 24 + 2) * 60 * 60_000, windowMinutes: 10_080, updatedAt: now, stale: false },
-      { agent: "codex", key: "five_hour", label: "5h", usedPercent: 23, resetsAt: now + (3 * 60 + 5) * 60_000, windowMinutes: 300, updatedAt: now, plan: "pro", stale: false },
-      { agent: "codex", key: "weekly", label: "weekly", usedPercent: 52, resetsAt: now + (6 * 24 + 4) * 60 * 60_000, windowMinutes: 10_080, updatedAt: now, plan: "pro", stale: false },
+      { agent: "codex", key: "five_hour", label: "5h", usedPercent: 23, resetsAt: now + (3 * 60 + 5) * 60_000, windowMinutes: 300, updatedAt: now, stale: false },
+      { agent: "codex", key: "weekly", label: "weekly", usedPercent: 52, resetsAt: now + (6 * 24 + 4) * 60 * 60_000, windowMinutes: 10_080, updatedAt: now, stale: false },
     ],
     codex: {
       credits: { hasCredits: true, unlimited: false, balance: "1652.0941250000" },
@@ -80,7 +80,47 @@ afterEach(() => {
 });
 
 describe("status bar usage", () => {
-  it("renders the 5h, 7d, and Fable windows separately in the full tier", () => {
+  it("explains provider backoff beside manual Refresh", () => {
+    statusState.usage.claude = { retryAt: Date.now() + 60_000, revalidateAt: Date.now() + 60_000, error: "Rate limited" };
+    render(<StatusBar />);
+    fireEvent.click(screen.getByRole("button", { name: /Claude 5h/ }));
+    expect(screen.getByRole("status").textContent).toContain("Claude refresh paused; retry in 1m");
+    expect(screen.getByRole("button", { name: "Refresh usage" })).toBeTruthy();
+  });
+
+  it("marks the expired session honestly on every surface without inventing zero", async () => {
+    const session = statusState.usage.windows[0];
+    session.usedPercent = 100;
+    session.resetsAt = Date.now() + 1_000;
+    session.updatedAt = Date.now() - 5 * 60_000;
+    const view = render(<StatusBar />);
+    fireEvent.click(screen.getByRole("button", { name: /Claude 5h 100% used/ }));
+    const popover = document.querySelector("[data-usage-popover]") as HTMLElement;
+    fireEvent.click(within(popover).getByRole("button", { name: /Claude, Resets/ }));
+    await act(async () => vi.advanceTimersByTimeAsync(1_001));
+    const bar = view.container.querySelector('[data-usage-agent="claude"]') as HTMLElement;
+    expect(bar.textContent).toContain("expired");
+    expect(bar.textContent).toContain("100% used");
+    expect(within(popover).getByRole("button", { name: /Claude, Window expired/ })).toBeTruthy();
+    const detail = document.querySelector('[data-usage-detail="claude"]') as HTMLElement;
+    expect(within(detail).getByText(/Window expired/)).toBeTruthy();
+    expect(within(detail).getByText("Updated 5m ago")).toBeTruthy();
+    expect(detail.textContent).not.toContain("Resets in now");
+    session.usedPercent = 1;
+    session.resetsAt = Date.now() + 5 * 60 * 60_000;
+    session.updatedAt = Date.now();
+    view.rerender(<StatusBar />);
+    expect(bar.textContent).toContain("1% used");
+    expect(bar.textContent).not.toContain("100%");
+    const row = within(popover).getByRole("button", { name: /Claude, Resets/ });
+    expect(row.textContent).toContain("1%");
+    expect(row.textContent).toContain("41%");
+    expect(row.textContent).toContain("82%");
+    expect(within(detail).getByText("Session").parentElement?.textContent).toContain("1% used");
+    expect(detail.textContent).not.toContain("Window expired");
+  });
+
+  it("renders one brand mark, a meter, and N% used per window in the full tier", () => {
     const { container } = render(<StatusBar />);
 
     const claude = container.querySelector('[data-usage-agent="claude"]');
@@ -89,21 +129,43 @@ describe("status bar usage", () => {
     expect(codex).not.toBeNull();
 
     const claudeSegment = within(claude as HTMLElement);
-    expect(claudeSegment.getByText("Claude")).toBeTruthy();
-    expect(claudeSegment.getByText("5h 12%")).toBeTruthy();
-    expect(claudeSegment.getByText("2h 10m", { exact: false })).toBeTruthy();
-    expect(claudeSegment.getByText("7d 41%")).toBeTruthy();
-    expect(claudeSegment.getByText("5d 6h", { exact: false })).toBeTruthy();
-    expect(claudeSegment.getByText("Fable 82%")).toBeTruthy();
-    expect(claudeSegment.getByText("4d 2h", { exact: false })).toBeTruthy();
+    expect(claude?.querySelector('[data-agent-id="claude"]')).not.toBeNull();
+    expect(claude?.querySelector('[data-usage-meter="fable_weekly"] i')?.className).toContain("bg-destructive");
+    expect((claude?.querySelector("[data-usage-meter] i") as HTMLElement).style.width).toBe("82%");
+    expect(claudeSegment.queryByText("Claude")).toBeNull();
+    expect(claudeSegment.getByText("12% used")).toBeTruthy();
+    expect(claudeSegment.getByText("2h 10m")).toBeTruthy();
+    expect(claudeSegment.getByText("41% used")).toBeTruthy();
+    expect(claudeSegment.getByText("5d 6h")).toBeTruthy();
+    expect(claudeSegment.getByText("82% used")).toBeTruthy();
+    expect(claudeSegment.getByText("Fable")).toBeTruthy();
+    expect(claudeSegment.queryByText("4d 2h")).toBeNull();
+    expect(claude?.textContent).toBe("12% used2h 10m·41% used5d 6h·82% usedFable");
 
     const codexSegment = within(codex as HTMLElement);
-    expect(codexSegment.getByText("Codex")).toBeTruthy();
-    expect(codexSegment.getByText("pro", { exact: false })).toBeTruthy();
-    expect(codexSegment.getByText("5h 23%")).toBeTruthy();
-    expect(codexSegment.getByText("3h 5m", { exact: false })).toBeTruthy();
-    expect(codexSegment.getByText("7d 52%")).toBeTruthy();
-    expect(codexSegment.getByText("6d 4h", { exact: false })).toBeTruthy();
+    expect(codex?.querySelector('[data-agent-id="codex"]')).not.toBeNull();
+    expect(codexSegment.queryByText("Codex")).toBeNull();
+    expect(codexSegment.queryByText("pro", { exact: false })).toBeNull();
+    expect(codexSegment.queryByText("weekly", { exact: false })).toBeNull();
+    expect(codexSegment.getByText("23% used")).toBeTruthy();
+    expect(codexSegment.getByText("3h 5m")).toBeTruthy();
+    expect(codexSegment.getByText("52% used")).toBeTruthy();
+    expect(codexSegment.getByText("6d 4h")).toBeTruthy();
+  });
+
+  it("shows a Codex account with one weekly limit as a single entry", () => {
+    const now = Date.now();
+    statusState.usage.windows = statusState.usage.windows.filter((window) => window.agent !== "codex");
+    statusState.usage.windows.push(
+      { agent: "codex", key: "weekly", label: "weekly", usedPercent: 83, resetsAt: now + (2 * 24 + 5) * 60 * 60_000, windowMinutes: 10_080, updatedAt: now, stale: false },
+    );
+    const { container, getByRole } = render(<StatusBar />);
+
+    const codex = container.querySelector('[data-usage-agent="codex"]') as HTMLElement;
+    expect(codex.querySelectorAll("[data-usage-window]")).toHaveLength(1);
+    expect(codex.textContent).toBe("83% used2d 5h");
+    expect(codex.querySelector("[data-usage-meter] i")?.className).toContain("bg-destructive");
+    expect(getByRole("button", { name: /Codex 7d 83% used, resets 2d 5h/ })).toBeTruthy();
   });
 
   it("uses Fable as the tightest compact window with the remaining preference", () => {
@@ -114,8 +176,10 @@ describe("status bar usage", () => {
     expect(container.querySelector("[data-status-bar]")?.getAttribute("data-tier")).toBe("compact");
     const claude = container.querySelector('[data-usage-agent="claude"]');
     const claudeSegment = within(claude as HTMLElement);
-    expect(claudeSegment.getByText("Fable 18%")).toBeTruthy();
-    expect(claudeSegment.queryByText("5h 88%")).toBeNull();
+    expect(claudeSegment.getByText("18% remaining")).toBeTruthy();
+    expect(claudeSegment.getByText("Fable")).toBeTruthy();
+    expect(claudeSegment.queryByText("88% remaining")).toBeNull();
+    expect((claude?.querySelector("[data-usage-meter] i") as HTMLElement).style.width).toBe("18%");
     expect(getByRole("button", { name: /Claude Fable 18% remaining, resets 4d 2h/ })).toBeTruthy();
   });
 
@@ -125,8 +189,8 @@ describe("status bar usage", () => {
 
     expect(container.querySelector("[data-status-bar]")?.getAttribute("data-tier")).toBe("icon");
     const claude = container.querySelector('[data-usage-agent="claude"]');
-    expect(within(claude as HTMLElement).queryByText("Claude")).toBeNull();
-    expect(claude?.querySelector("i")?.className).toContain("bg-destructive");
+    expect(claude?.querySelectorAll("[data-usage-window]")).toHaveLength(0);
+    expect(claude?.querySelector("[data-usage-meter] i")?.className).toContain("bg-destructive");
     expect(getByRole("button", { name: /Claude Fable 82% used, resets 4d 2h/ })).toBeTruthy();
   });
 
@@ -151,7 +215,7 @@ describe("status bar usage", () => {
 
     fireEvent.click(claudeRow);
     const detail = document.querySelector('[data-usage-detail="claude"]') as HTMLElement;
-    expect(within(detail).getByText("Updated just now")).toBeTruthy();
+    expect(within(detail).getAllByText("Updated just now")[0]).toBeTruthy();
     expect(within(detail).getByText("Session")).toBeTruthy();
     expect(within(detail).getByText("Weekly")).toBeTruthy();
     expect(within(detail).getByText("Fable")).toBeTruthy();
@@ -183,9 +247,10 @@ describe("status bar usage", () => {
     expect(trigger.getAttribute("aria-label")).not.toContain("resets Fable");
     fireEvent.click(trigger);
 
-    const row = document.querySelector('[data-usage-compact-window="claude:fable_weekly"]') as HTMLElement;
+    const row = document.querySelector('[data-usage-compact-agent="claude"]') as HTMLElement;
     expect(row).not.toBeNull();
-    expect(row.textContent).not.toContain("resets");
+    expect(row.textContent).toContain("82%");
+    expect(row.textContent).not.toContain("Resets");
     fireEvent.click(row);
     const detail = document.querySelector('[data-usage-detail="claude"]') as HTMLElement;
     expect(within(detail).getByText("Fable").parentElement?.textContent).not.toContain("Resets in");
@@ -193,7 +258,6 @@ describe("status bar usage", () => {
 
   it("hides empty OAuth windows while keeping every data-bearing window", () => {
     const now = Date.now();
-    statusState.settings.usageMode = "compact";
     statusState.usage.windows.push(
       { agent: "claude", key: "nimbus_quill", label: "Nimbus Quill", usedPercent: 0, resetsAt: null, windowMinutes: null, updatedAt: now, stale: false },
       { agent: "claude", key: "spend", label: "Spend", usedPercent: 0, resetsAt: null, windowMinutes: null, updatedAt: now, stale: false },
@@ -222,15 +286,62 @@ describe("status bar usage", () => {
     expect(within(detail).getByText("Reset now")).toBeTruthy();
   });
 
-  it("keeps compact mode as one dense row per provider window", () => {
+  it("lists one compact row per agent showing only its tightest window", () => {
     statusState.settings.usageMode = "compact";
     const { getByRole } = render(<StatusBar />);
     fireEvent.click(getByRole("button", { name: /Claude 5h 12% used/ }));
 
     const popover = document.querySelector("[data-usage-popover]") as HTMLElement;
-    expect(popover.querySelectorAll("[data-usage-compact-window]")).toHaveLength(5);
-    expect(popover.querySelector('[data-usage-compact-window="claude:fable_weekly"]')).not.toBeNull();
-    expect(popover.querySelector('[data-usage-compact-window="codex:weekly"]')).not.toBeNull();
+    expect(popover.querySelectorAll("[data-usage-compact-agent]")).toHaveLength(2);
+    const claudeRow = within(popover).getByRole("button", { name: "Claude, Resets in 4d 2h" });
+    expect(within(claudeRow).getByText("82%").className).toContain("text-destructive");
+    expect(within(claudeRow).queryByText("5h")).toBeNull();
+    expect(within(claudeRow).queryByText("7d")).toBeNull();
+    expect(within(claudeRow).queryByText("Fable")).toBeNull();
+    const codexRow = within(popover).getByRole("button", { name: "Codex, Resets in 6d 4h" });
+    expect(within(codexRow).getByText("52%")).toBeTruthy();
+    expect(popover.textContent).not.toContain("pro");
+
+    fireEvent.click(claudeRow);
+    expect(document.querySelector('[data-usage-detail="claude"]')).not.toBeNull();
+  });
+
+  it("shows one window per agent in the bar when Compact is chosen at full width", () => {
+    statusState.settings.usageMode = "compact";
+    const { container } = render(<StatusBar />);
+
+    expect(container.querySelector("[data-status-bar]")?.getAttribute("data-tier")).toBe("full");
+    const claudeSegment = within(container.querySelector('[data-usage-agent="claude"]') as HTMLElement);
+    expect(claudeSegment.getByText("82% used")).toBeTruthy();
+    expect(claudeSegment.getByText("Fable")).toBeTruthy();
+    expect(claudeSegment.queryByText("12% used")).toBeNull();
+    expect(claudeSegment.queryByText("41% used")).toBeNull();
+    const codexSegment = within(container.querySelector('[data-usage-agent="codex"]') as HTMLElement);
+    expect(codexSegment.getByText("52% used")).toBeTruthy();
+    expect(codexSegment.getByText("6d 4h")).toBeTruthy();
+    expect(codexSegment.queryByText("23% used")).toBeNull();
+  });
+
+  it("keeps Codex per-model sub-limits out of the bar and both popover lists", () => {
+    const now = Date.now();
+    statusState.usage.windows.push(
+      { agent: "codex", key: "codex_bengalfox_five_hour", label: "GPT-5.3-Codex-Spark 5h", usedPercent: 97, resetsAt: now + 60 * 60_000, windowMinutes: 300, updatedAt: now, stale: false },
+      { agent: "codex", key: "codex_bengalfox_weekly", label: "GPT-5.3-Codex-Spark weekly", usedPercent: 9, resetsAt: now + 7 * 24 * 60 * 60_000, windowMinutes: 10_080, updatedAt: now, stale: false },
+    );
+    const { container, getByRole } = render(<StatusBar />);
+
+    const codexSegment = container.querySelector('[data-usage-agent="codex"]') as HTMLElement;
+    expect(codexSegment.textContent).not.toContain("GPT-5.3-Codex-Spark");
+    expect(codexSegment.querySelectorAll("[data-usage-window]")).toHaveLength(2);
+    expect(getByRole("button", { name: /Codex 5h 23% used/ }).getAttribute("aria-label")).not.toContain("97%");
+
+    fireEvent.click(getByRole("button", { name: /Codex 5h 23% used/ }));
+    const popover = document.querySelector("[data-usage-popover]") as HTMLElement;
+    const codexRow = within(popover).getByRole("button", { name: "Codex, Resets in 3h 5m" });
+    expect(codexRow.textContent).not.toContain("GPT-5.3-Codex-Spark");
+    expect(codexRow.textContent).not.toContain("97%");
+    fireEvent.click(codexRow);
+    expect((document.querySelector('[data-usage-detail="codex"]') as HTMLElement).textContent).not.toContain("GPT-5.3-Codex-Spark");
   });
 
   it("confirms before asking the backend to consume a Codex reset", () => {

@@ -210,6 +210,10 @@ pub struct Tail {
 }
 
 impl Tail {
+    pub fn path(&self) -> PathBuf {
+        self.path.lock().unwrap().clone()
+    }
+
     /// Follow from the file's length now: whatever it already holds is either
     /// history the app has logged or a conversation it is resuming. `carried`
     /// names records a fork will copy in later, which are history too.

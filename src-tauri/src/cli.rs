@@ -54,14 +54,17 @@ Usage:
   terminalx skills get terminalx-cli|computer-use [--full] [--json]
 
 Computer use (desktop apps, macOS 14+):
-"#;
+COMPUTER_HELP
+BROWSER_HELP
 
-const HELP_FOOTER: &str = r#"
 Use `terminalx skills get terminalx-cli` for the complete guide and
 `terminalx skills get computer-use` for desktop automation."#;
 
+/// The help text with the computer and browser verbs spliced in from their
+/// own modules.
 fn help_text() -> String {
-    format!("{HELP}{}{HELP_FOOTER}", crate::computer::cli::HELP)
+    HELP.replace("COMPUTER_HELP", crate::computer::cli::HELP)
+        .replace("BROWSER_HELP", crate::browser::cli::HELP)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -167,15 +170,15 @@ fn run(args: &[String]) -> i32 {
         } => match control::call(&command, params.clone(), timeout) {
             Ok(response) => {
                 let ok = response.ok;
-                let pretty = if ok && !parsed.json {
-                    response
-                        .result
-                        .as_ref()
-                        .and_then(|result| crate::computer::cli::format_result(&command, &params, result))
-                } else {
-                    None
-                };
-                match pretty {
+                let readable = (!parsed.json && ok)
+                    .then(|| {
+                        response.result.as_ref().and_then(|result| {
+                            crate::computer::cli::format_result(&command, &params, result)
+                                .or_else(|| crate::browser::cli::format(&command, result))
+                        })
+                    })
+                    .flatten();
+                match readable {
                     Some(text) => println!("{text}"),
                     None => print_response(&response, parsed.json),
                 }
@@ -282,6 +285,9 @@ fn parse_with_stdin(
                 &mut tokens,
             )
         }
+        "wait" if crate::browser::cli::is_browser_wait(&tokens.values) => {
+            crate::browser::cli::parse("wait", &mut tokens).expect("wait is a browser verb")
+        }
         "wait" => {
             let seconds = tokens.option_u64("--timeout")?.unwrap_or(600);
             let target = tokens.required_front("session or tab")?;
@@ -310,7 +316,10 @@ fn parse_with_stdin(
             tokens.finish()?;
             Ok(Action::Guide { name, guide })
         }
-        other => Err(invalid(format!("Unknown command group {other}."))),
+        other => match crate::browser::cli::parse(other, &mut tokens) {
+            Some(action) => action,
+            None => Err(invalid(format!("Unknown command group {other}."))),
+        },
     }?;
     Ok(Parsed { json, action })
 }
@@ -428,7 +437,7 @@ fn expect_word(tokens: &mut Tokens, expected: &str, group: &str) -> Result<(), C
     }
 }
 
-fn invalid(message: impl Into<String>) -> ControlError {
+pub(crate) fn invalid(message: impl Into<String>) -> ControlError {
     ControlError::new(
         "invalid_arguments",
         message,
@@ -437,7 +446,7 @@ fn invalid(message: impl Into<String>) -> ControlError {
 }
 
 pub(crate) struct Tokens {
-    values: Vec<String>,
+    pub(crate) values: Vec<String>,
 }
 
 impl Tokens {
@@ -447,7 +456,7 @@ impl Tokens {
         }
     }
 
-    fn take_front(&mut self) -> Option<String> {
+    pub(crate) fn take_front(&mut self) -> Option<String> {
         (!self.values.is_empty()).then(|| self.values.remove(0))
     }
 
@@ -494,12 +503,12 @@ impl Tokens {
         Ok(Some(self.values.remove(position)))
     }
 
-    fn required_option(&mut self, name: &str) -> Result<String, ControlError> {
+    pub(crate) fn required_option(&mut self, name: &str) -> Result<String, ControlError> {
         self.option(name)?
             .ok_or_else(|| invalid(format!("Missing {name}.")))
     }
 
-    fn option_u64(&mut self, name: &str) -> Result<Option<u64>, ControlError> {
+    pub(crate) fn option_u64(&mut self, name: &str) -> Result<Option<u64>, ControlError> {
         self.option(name)?
             .map(|value| {
                 value
@@ -665,6 +674,9 @@ mod tests {
         assert!(HELP.starts_with("terminalx — control a running TerminalX app"));
         let help = help_text();
         assert!(help.contains("terminalx computer get-app-state --app <app>"));
+        assert!(help.contains("snapshot [--interactive]"));
+        assert!(!help.contains("BROWSER_HELP"));
+        assert!(!help.contains("COMPUTER_HELP"));
         for copy in [help.as_str(), GUIDE, SKILL_STUB, COMPUTER_GUIDE, COMPUTER_SKILL_STUB] {
             assert!(!copy.contains("Raccoon app"));
             assert!(!copy.contains("Raccoon →"));

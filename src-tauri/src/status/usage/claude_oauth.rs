@@ -37,6 +37,7 @@ pub(super) fn parse_response(payload: &Value, updated_at: i64) -> Vec<UsageWindo
             upsert_window(&mut windows, window);
         }
     }
+    for window in &mut windows { window.source = "oauth".into(); }
     windows
 }
 
@@ -83,10 +84,26 @@ fn read_keychain_token() -> Option<String> {
 }
 
 pub(super) fn read_token() -> Option<String> {
+    if let Some(dir) = std::env::var("CLAUDE_CONFIG_DIR").ok().filter(|v| !v.is_empty()) {
+        // A custom config must never fall back to another account's keychain.
+        let path = std::path::PathBuf::from(dir).join(".credentials.json");
+        return parse_token(&std::fs::read_to_string(path).ok()?);
+    }
     read_keychain_token().or_else(|| {
         let path = dirs::home_dir()?.join(".claude/.credentials.json");
         parse_token(&std::fs::read_to_string(path).ok()?)
     })
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Claude usage is rate limited; waiting for the provider retry deadline")]
+pub(super) struct RetryAfter(pub i64);
+
+fn retry_deadline(raw: &str, now: i64) -> Option<i64> {
+    if let Ok(seconds) = raw.trim().parse::<i64>() {
+        return Some(now.saturating_add(seconds.max(0).saturating_mul(1000)));
+    }
+    chrono::DateTime::parse_from_rfc2822(raw).ok().map(|at| at.timestamp_millis())
 }
 
 pub(super) fn fetch(token: &str, updated_at: i64) -> Result<Vec<UsageWindow>> {
@@ -99,7 +116,12 @@ pub(super) fn fetch(token: &str, updated_at: i64) -> Result<Vec<UsageWindow>> {
         .call();
     let payload: Value = match response {
         Ok(response) => response.into_json().context("Claude OAuth usage reply was not JSON")?,
-        Err(ureq::Error::Status(code, _)) => bail!("Claude OAuth usage request failed with HTTP {code}"),
+        Err(ureq::Error::Status(code, response)) => {
+            if let Some(at) = response.header("retry-after").and_then(|raw| retry_deadline(raw, super::now_ms())) {
+                return Err(RetryAfter(at).into());
+            }
+            bail!("Claude OAuth usage request failed with HTTP {code}");
+        },
         Err(error) => bail!("Could not reach Claude OAuth usage endpoint: {error}"),
     };
     let windows = parse_response(&payload, updated_at);
@@ -113,6 +135,19 @@ pub(super) fn fetch(token: &str, updated_at: i64) -> Result<Vec<UsageWindow>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn retry_after_accepts_seconds_and_http_dates() {
+        assert_eq!(retry_deadline("120", 1000), Some(121_000));
+        assert_eq!(retry_deadline("Wed, 02 Sep 2026 12:00:00 GMT", 1000), Some(1_788_350_400_000));
+        assert_eq!(retry_deadline("invalid", 1000), None);
+    }
+
+    #[test]
+    fn oauth_one_percent_after_rollover_is_one_percent_not_one_hundred() {
+        let windows = parse_response(&json!({"five_hour": {"utilization": 1, "resets_at": 1788757220}}), 789);
+        assert_eq!(windows[0].used_percent, 1.0);
+    }
 
     #[test]
     fn maps_standard_and_all_scoped_weekly_windows() {
@@ -143,11 +178,11 @@ mod tests {
 
         assert_eq!(windows.len(), 6);
         let five_hour = windows.iter().find(|window| window.key == "five_hour").unwrap();
-        assert_eq!(five_hour.used_percent, 12.0);
+        assert_eq!(five_hour.used_percent, 0.12);
         assert_eq!(five_hour.resets_at, Some(1_788_757_220_000));
         let sonnet = windows.iter().find(|window| window.key == "seven_day_sonnet").unwrap();
         assert_eq!(sonnet.label, "7d Sonnet");
-        assert_eq!(sonnet.used_percent, 70.0);
+        assert_eq!(sonnet.used_percent, 0.7);
         let fable = windows.iter().find(|window| window.key == "fable_weekly").unwrap();
         assert_eq!(fable.label, "Fable");
         assert_eq!(fable.used_percent, 82.0);

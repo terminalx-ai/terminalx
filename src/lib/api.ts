@@ -40,6 +40,7 @@ export interface AppStats {
   agentTimeMs: number;
   prsCreated: number;
   trackingSince: string | null;
+  accountingError?: string | null;
 }
 
 export interface UsageDay {
@@ -78,6 +79,15 @@ export interface StatsUsageSnapshot {
   daily: UsageDay[];
   providers: ProviderUsage[];
   updatedAt: number;
+}
+
+export interface StatsUsageState {
+  scope: string;
+  generation: number;
+  snapshot: StatsUsageSnapshot | null;
+  activity?: AppStats | null;
+  refreshing: boolean;
+  error: string | null;
 }
 
 export interface NewSession {
@@ -136,7 +146,9 @@ export const api = {
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
   /** Card snippets for the agent dashboard; every session when no ids are given. */
   sessionSummaries: (sessionIds?: string[]) => invoke<SessionSummary[]>("session_summaries", { sessionIds: sessionIds ?? null }),
-  statsUsageSnapshot: () => invoke<StatsUsageSnapshot>("stats_usage_snapshot"),
+  statsUsageSnapshot: () => invoke<StatsUsageState>("stats_usage_snapshot"),
+  statsUsageRefresh: (scope: string, generation: number) => invoke<StatsUsageState>("stats_usage_refresh", { scope, generation }),
+  appActivitySummary: () => invoke<AppStats>("app_activity_summary"),
   createSession: (req: NewSession) => invoke<SessionEntry>("create_session", { req }),
   addTab: (sessionId: string, tab: NewTab) => invoke<TabEntry>("add_tab", { sessionId, tab }),
   removeTab: (sessionId: string, tabId: string) => invoke<void>("remove_tab", { sessionId, tabId }),
@@ -166,6 +178,10 @@ export const api = {
   computerOpenPermission: (id: ComputerPermissionId | null) =>
     invoke<ComputerPermissionSetup>("computer_open_permission", { id }),
   computerResetPermissions: () => invoke<ComputerPermissionStatus>("computer_reset_permissions"),
+
+  // built-in browser runtime (agent-browser + Chromium)
+  browserRuntimeStatus: () => invoke<BrowserRuntimeStatus>("browser_runtime_status"),
+  browserInstallBrowser: () => invoke<BrowserRuntimeStatus>("browser_install_browser"),
 
   // git
   workStatus: (cwd: string) => invoke<WorkStatus>("work_status", { cwd }),
@@ -265,11 +281,14 @@ export interface UsageWindow {
   resetsAt: number | null;
   windowMinutes: number | null;
   updatedAt: number;
-  plan?: string;
   stale: boolean;
+  source?: string;
 }
 
 export interface UsageSnapshot {
+  revision?: number;
+  claudeAccount?: string | null;
+  claude?: { retryAt: number | null; revalidateAt: number | null; error: string | null };
   windows: UsageWindow[];
   codex?: {
     credits?: {
@@ -400,9 +419,10 @@ export interface TabPtyEvent {
 }
 
 export const agent = {
+  prepareContinuation: (sessionId: string, tabId: string) => invoke<import("@/lib/continuation").ContinuationContext>("prepare_continuation", { sessionId, tabId }),
   loadEvents: (sessionId: string, tabId: string) => invoke<AgentEvent[]>("load_tab_events", { sessionId, tabId }),
-  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[]) =>
-    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null }),
+  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false) =>
+    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery }),
   interrupt: (sessionId: string, tabId: string) => invoke<void>("interrupt_turn", { sessionId, tabId }),
   tabHandoff: (sessionId: string, tabId: string) => invoke<HandoffInfo>("tab_handoff", { sessionId, tabId }),
   /** Start a tab's own CLI. Idempotent, and a no-op for headless harnesses. */
@@ -496,6 +516,51 @@ export const gh = {
   ready: (cwd: string, number: number) => invoke<void>("pr_ready", { cwd, number }),
 };
 
+// ---- built-in browser pages
+/** One tab of the app-managed Chromium, as the page store describes it. */
+export interface BrowserPage {
+  id: string;
+  browserPageId: string;
+  profileId: string;
+  tabId: string;
+  url: string;
+  title: string;
+  workspacePath: string | null;
+  created: string;
+  active: boolean;
+  index: number;
+}
+export interface BrowserProfile {
+  id: string;
+  label: string;
+  created: string;
+}
+export interface BrowserRuntimeStatus {
+  binary: string | null;
+  version: string | null;
+  expectedVersion: string;
+  browser: string | null;
+  socketDir: string | null;
+  ownsSocketDir: boolean;
+  liveSessions: string[];
+}
+export interface BrowserNavigation {
+  browserPageId: string;
+  url?: string;
+  title?: string;
+}
+export const browser = {
+  pages: () => invoke<BrowserPage[]>("browser_pages"),
+  openTab: (workspace: string, url?: string | null, profile?: string | null) =>
+    invoke<{ browserPageId: string; url: string; title: string }>("browser_open_tab", { workspace, url: url ?? null, profile: profile ?? null }),
+  closePage: (pageId: string) => invoke<void>("browser_close_page", { pageId }),
+  activatePage: (pageId: string, focus: boolean) => invoke<void>("browser_activate_page", { pageId, focus }),
+  navigate: (pageId: string, action: "goto" | "back" | "forward" | "reload", url?: string | null) =>
+    invoke<BrowserNavigation>("browser_navigate", { pageId, action, url: url ?? null }),
+  screencast: (pageId: string, live: boolean) => invoke<void>("browser_screencast", { pageId, live }),
+  profiles: () => invoke<BrowserProfile[]>("browser_profiles"),
+};
+
 // ---- terminals
 export const pty = {
   spawn: (id: string, cwd: string, cols: number, rows: number, command?: string) => invoke<void>("pty_spawn", { id, cwd, cols, rows, command: command ?? null }),
@@ -520,21 +585,41 @@ export interface TextFile {
 export interface TextHit {
   path: string;
   line: number;
+  /** Character column of the first match on the line. */
   col: number;
   text: string;
+  /** Every match on the line as `[start, end)` character offsets into `text`. */
+  matches: [number, number][];
+  /** What each match becomes, in the same order, when the search carried a replacement. */
+  replacements?: string[];
 }
 export interface TextSearch {
   hits: TextHit[];
   files: number;
   capped: boolean;
 }
+/** A file to rewrite, and the 1-based lines to touch in it (every line when absent). */
+export interface ReplaceTarget {
+  path: string;
+  lines?: number[];
+}
+export interface ReplaceReport {
+  files: number;
+  replacements: number;
+}
 export const fs = {
   listDir: (root: string, rel: string) => invoke<DirEntry[]>("list_dir", { root, rel }),
   readText: (path: string) => invoke<TextFile>("read_text_file", { path }),
   writeText: (path: string, content: string) => invoke<number>("write_text_file", { path, content }),
   mtime: (path: string) => invoke<number | null>("file_mtime", { path }),
-  searchText: (root: string, query: string, regex: boolean, caseSensitive: boolean, limit = 500) =>
-    invoke<TextSearch>("search_text", { root, query, regex, caseSensitive, limit }),
+  searchText: (root: string, query: string, regex: boolean, caseSensitive: boolean, limit = 500, replacement?: string) =>
+    invoke<TextSearch>("search_text", { root, query, regex, caseSensitive, limit, replacement: replacement ?? null }),
+  /**
+   * Rewrite matches on disk. Without `targets` every searchable file under
+   * the root is a candidate except those in `skip`.
+   */
+  replaceText: (root: string, query: string, replacement: string, regex: boolean, caseSensitive: boolean, targets: ReplaceTarget[] | null, skip: string[] = []) =>
+    invoke<ReplaceReport>("replace_text", { root, query, replacement, regex, caseSensitive, targets, skip }),
 };
 
 // ---- issues (GitHub through gh, Linear through its API)

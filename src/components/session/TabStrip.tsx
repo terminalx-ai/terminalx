@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import { Plus, TerminalSquare } from "lucide-react";
+import { Globe, Plus, TerminalSquare } from "lucide-react";
 import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -7,6 +7,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { closeEditor, useEditors } from "@/lib/editors";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { getPrefs } from "@/lib/prefs";
+import { openBrowserTab, pagesFor, useBrowser } from "@/lib/browser";
 import { activatePeer, closePeer, peerOrder } from "@/lib/sessionTabs";
 import { addTab, useSessionStore } from "@/lib/sessions";
 import { openTerminal, useTerminals, type SelectedSessionTab } from "@/lib/terminal";
@@ -16,7 +17,8 @@ import type { SessionEntry } from "@/types/session";
 export function TabActions({ session, selected }: { session: SessionEntry; selected: SelectedSessionTab | null }) {
   const store = useSessionStore();
   const { panes } = useTerminals();
-  const tabs = useMemo(() => peerOrder(session, panes), [session, panes]);
+  const browser = useBrowser();
+  const tabs = useMemo(() => peerOrder(session, panes, pagesFor(browser.pages, session.cwd)), [session, panes, browser.pages]);
   const editors = useEditors();
   const hasEditors = editors.editors.some((editor) => editor.sessionId === session.id);
   const activeEditor = editors.active[session.id] ?? null;
@@ -58,6 +60,9 @@ export function TabActions({ session, selected }: { session: SessionEntry; selec
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => void openTerminal(session.id, session.cwd)}>
           <TerminalSquare /><span>Terminal</span>
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => void openBrowserTab(session.id, session.cwd).catch((error) => console.error("browser open failed", error))}>
+          <Globe /><span>Browser</span>
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

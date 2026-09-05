@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CalendarClock, CircleDot, GitBranch, MessageSquare, PanelLeft, PanelRight, Terminal } from "lucide-react";
+import { CalendarClock, CircleDot, GitBranch, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Terminal } from "lucide-react";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
@@ -10,11 +10,14 @@ import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { openAutomations, renameWorkspace, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
+import { ContinuationDialog } from "./ContinuationDialog";
 import { TabView } from "./TabView";
 import { TabActions } from "./TabStrip";
 import { tabPanelId } from "@/lib/sessionTabs";
 import { activateLatestTerminal, useTerminals, type SelectedSessionTab } from "@/lib/terminal";
 import { TerminalView } from "@/components/terminal/TerminalView";
+import { BrowserView } from "@/components/browser/BrowserView";
+import { bootBrowser, pagesFor, useBrowser } from "@/lib/browser";
 import { setLastFocused, useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
 import { QuickOpen } from "@/components/editor/QuickOpen";
@@ -70,6 +73,11 @@ export function SessionView({
   const project = store.projects.find((p) => p.path === session.projectPath);
   const terminals = useTerminals();
   const shellPanes = terminals.panes.filter((pane) => pane.sessionId === session.id && !pane.hidden);
+  const browserState = useBrowser();
+  const browserPages = pagesFor(browserState.pages, session.cwd);
+  useEffect(() => {
+    void bootBrowser();
+  }, []);
   const requested = terminals.selected[session.id];
   const persistedAgent = session.tabs.find((tab) => tab.id === session.activeTab) ?? session.tabs[0];
   const selected: SelectedSessionTab | null =
@@ -77,6 +85,8 @@ export function SessionView({
       ? requested
       : requested?.kind === "terminal" && shellPanes.some((pane) => pane.id === requested.id)
         ? requested
+        : requested?.kind === "browser" && browserPages.some((page) => page.id === requested.id)
+          ? requested
         : persistedAgent
           ? { kind: "agent", id: persistedAgent.id }
           : shellPanes.length
@@ -89,6 +99,7 @@ export function SessionView({
   const switching = !!activeTab && !!tabViews.switching[activeTab.id];
   const workspaceLabel = session.worktreeRemoved ? workspaceName(session) : session.branch;
   const workspaceTitle = session.removedWorkspace?.path ?? session.cwd;
+  const [continuationSource, setContinuationSource] = useState<TabEntry | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
   const workspace = managedWorkspaceFor(session);
   useHotkey("mod+shift+t", () => {
@@ -180,6 +191,13 @@ export function SessionView({
           <div className="ml-auto flex max-w-[70%] shrink-0 items-center gap-0.5">
             <TabActions session={session} selected={selected} />
             {activeTab && (
+              <WithTooltip label="Continue in New Session…">
+                <Button variant="ghost" size="icon-sm" aria-label="Continue in New Session…" onClick={() => setContinuationSource(activeTab)}>
+                  <MessageSquarePlus />
+                </Button>
+              </WithTooltip>
+            )}
+            {activeTab && (
               <WithTooltip label={activeInTerminal ? "Back to chat" : "Show terminal view"} keys={keycaps("mod+shift+t")}>
                 <Button
                   variant="ghost"
@@ -207,6 +225,7 @@ export function SessionView({
           </div>
         </header>
 
+        {continuationSource && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
         <section className="flex min-h-0 flex-1 flex-col">
           <div className="@container/editor-host relative flex min-h-0 flex-1">
             <div
@@ -223,7 +242,7 @@ export function SessionView({
                   aria-hidden={selected?.kind !== "agent" || t.id !== selected.id}
                   className={cn("flex min-h-0 flex-1 flex-col", (selected?.kind !== "agent" || t.id !== selected.id) && "hidden")}
                 >
-                  <TabView session={session} tab={t} active={selected?.kind === "agent" && t.id === selected.id} />
+                  <TabView session={session} tab={t} continuationOpen={!!continuationSource} active={selected?.kind === "agent" && t.id === selected.id} />
                 </div>
               ))}
               {shellPanes.map((pane) => (
@@ -243,7 +262,19 @@ export function SessionView({
                   )}
                 </div>
               ))}
-              {!session.tabs.length && !shellPanes.length && (
+              {browserPages.map((page) => (
+                <div
+                  key={page.id}
+                  id={tabPanelId({ kind: "browser", id: page.id })}
+                  role="tabpanel"
+                  aria-labelledby={`session-browser-tab-${encodeURIComponent(page.id)}`}
+                  aria-hidden={selected?.kind !== "browser" || page.id !== selected.id}
+                  className={cn("absolute inset-0", (selected?.kind !== "browser" || page.id !== selected.id) && "invisible")}
+                >
+                  <BrowserView session={session} page={page} active={selected?.kind === "browser" && page.id === selected.id} />
+                </div>
+              ))}
+              {!session.tabs.length && !shellPanes.length && !browserPages.length && (
                 <div className="flex flex-1 flex-col items-center justify-center gap-1 text-sm text-muted-foreground">
                   <span>Workspace open</span>
                   <span className="text-xs text-faint">Open a new terminal or add an agent tab.</span>

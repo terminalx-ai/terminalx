@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Popover as PopoverPrimitive } from "radix-ui";
 import { ChevronRight, Cpu, History, Loader2, RefreshCw, RotateCcw, SquareTerminal, Trash2, TriangleAlert } from "lucide-react";
-import { AgentMark } from "@/components/AgentMark";
+import { AgentMark, agentName } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -361,8 +361,43 @@ type UsageAgent = UsageWindow["agent"];
 
 const AGENTS: UsageAgent[] = ["claude", "codex"];
 
-function agentName(agent: UsageAgent): string {
-  return agent === "claude" ? "Claude" : "Codex";
+/** The rolling account windows every provider reports; anything else is scoped to a model or a plan feature. */
+function isAccountWindow(window: UsageWindow): boolean {
+  return window.key === "five_hour" || window.key === "seven_day" || window.key === "weekly";
+}
+
+/**
+ * What follows "N% used" in the bar. Account windows are told apart by their
+ * reset countdown alone; a scoped window shows its name instead, so Fable
+ * reads "2% used Fable".
+ */
+function usageExpired(window: UsageWindow, now: number): boolean {
+  return window.agent === "claude" && window.resetsAt != null && window.resetsAt <= now;
+}
+
+function usageStale(window: UsageWindow, now: number): boolean {
+  return window.stale || usageExpired(window, now);
+}
+
+function usageMeterClass(window: UsageWindow, now: number): string {
+  return usageStale(window, now) ? "bg-muted-foreground/45" : urgency(window.usedPercent);
+}
+
+function usageTextClass(window: UsageWindow, now: number): string {
+  return usageStale(window, now) ? "text-muted-foreground" : urgencyText(window.usedPercent);
+}
+
+function usageResetLabel(agent: UsageAgent, reset: number, now: number): string {
+  return agent === "claude" && reset <= now
+    ? "Window expired — awaiting update"
+    : `Resets in ${formatResetCountdown(reset, now, "")}`;
+}
+
+function windowTrailer(window: UsageWindow, now: number): string | null {
+  if (usageExpired(window, now)) return `${windowLabel(window)} expired`;
+  if (window.stale) return `${windowLabel(window)} stale`;
+  if (!isAccountWindow(window)) return windowLabel(window);
+  return window.resetsAt == null ? null : formatResetCountdown(window.resetsAt, now, "");
 }
 
 type CanonicalWindowKind = "5h" | "7d" | "fable";
@@ -399,6 +434,18 @@ function hasUsageData(window: UsageWindow): boolean {
   return window.usedPercent > 0 || window.resetsAt != null;
 }
 
+/**
+ * Codex account windows keep the bare keys `classify_codex` produces. The
+ * backend no longer emits the per-model sub-limits from `rateLimitsByLimitId`,
+ * which carried their limit id as a key prefix (`codex_bengalfox_weekly`);
+ * this guard keeps any snapshot that still does out of the bar and popover.
+ */
+const CODEX_ACCOUNT_KEY = /^(?:five_hour|weekly|\d+_minutes)$/;
+
+function isCodexSubLimit(window: UsageWindow): boolean {
+  return window.agent === "codex" && !CODEX_ACCOUNT_KEY.test(window.key);
+}
+
 function nextReset(windows: UsageWindow[]): number | null {
   const resets = windows.map((window) => window.resetsAt).filter((value): value is number => value != null);
   return resets.length ? Math.min(...resets) : null;
@@ -432,7 +479,7 @@ interface UsageClusterProps {
 }
 
 function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageClusterProps) {
-  const { settings, usage, usageRefreshing } = useStatus();
+  const { settings, usage, usageRefreshing, usageError } = useStatus();
   const [open, setOpen] = useState(false);
   const [detailAgent, setDetailAgent] = useState<UsageAgent | null>(null);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
@@ -443,9 +490,10 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
   const providerProbePending = harnesses.length === 0;
   const windows = usage.windows
     .filter((window) => providerProbePending || available.has(window.agent))
-    .filter(hasUsageData)
+    .filter((window) => hasUsageData(window) && !isCodexSubLimit(window))
     .sort((a, b) => b.usedPercent - a.usedPercent);
-  const now = useCountdownNow(windows.map((window) => window.resetsAt));
+  const compactMode = settings.usageMode === "compact";
+  const now = useCountdownNow([...windows.map((window) => window.resetsAt), usage.claude?.retryAt ?? null]);
   if (!settings.usage || (!providerProbePending && !available.has("claude") && !available.has("codex"))) return null;
 
   const groups = AGENTS.flatMap((agent) => {
@@ -454,7 +502,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
   }).sort((a, b) => b.tightest.usedPercent - a.tightest.usedPercent);
   const usageLabel = groups.length
     ? groups.flatMap(({ agent, windows: agentWindows }) => orderedWindows(agentWindows).map((window) =>
-      `${agentName(agent)} ${windowLabel(window)} ${Math.round(shownPercent(window, settings.percent))}% ${settings.percent}${window.resetsAt == null ? "" : `, resets ${formatResetCountdown(window.resetsAt, now, "")}`}`,
+      `${agentName(agent)} ${windowLabel(window)} ${Math.round(shownPercent(window, settings.percent))}% ${settings.percent}${usageExpired(window, now) ? ", window expired; awaiting update" : window.resetsAt == null ? "" : `, resets ${formatResetCountdown(window.resetsAt, now, "")}`}`,
     )).join("; ")
     : "Usage unavailable";
   const detailGroup = groups.find(({ agent }) => agent === detailAgent) ?? null;
@@ -495,42 +543,43 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
           {groups.length ? (
             <span className="flex min-w-0 items-center whitespace-nowrap tabular-nums">
               {groups.map(({ agent, windows: agentWindows, tightest }, index) => {
-                const plan = agentWindows.find((window) => window.plan)?.plan;
-                const shown = tier === "full" ? orderedWindows(agentWindows) : [tightest];
+                // Width can force fewer windows; a Compact preference can too. Neither ever adds more.
+                const shown = tier === "full" && !compactMode ? orderedWindows(agentWindows) : [tightest];
                 return (
                   <span
                     key={agent}
                     data-usage-agent={agent}
                     className={cn(
                       "flex min-w-0 items-center gap-1.5",
-                      index < groups.length - 1 && "mr-1.5 border-r border-hairline pr-2",
+                      index < groups.length - 1 && "mr-2 border-r border-hairline pr-2.5",
                     )}
                   >
-                    <span className="flex shrink-0 items-center gap-1">
-                      <AgentMark id={agent} className="size-3 text-faint" decorative />
-                      {tier !== "icon" ? <span className="font-medium text-foreground">{agentName(agent)}</span> : null}
-                      {tier === "full" && plan ? <span className="capitalize text-faint">· {plan}</span> : null}
-                    </span>
-                    {tier === "icon" ? (
+                    <AgentMark id={agent} className="size-3 text-foreground" decorative brand />
+                    <span
+                      aria-hidden
+                      data-usage-meter={tightest.key}
+                      className="h-1 w-10 shrink-0 overflow-hidden rounded-full bg-hairline-strong"
+                    >
                       <i
-                        aria-hidden
-                        className={cn("size-1.5 shrink-0 rounded-full", urgency(tightest.usedPercent))}
+                        className={cn("block h-full rounded-full", usageMeterClass(tightest, now))}
+                        style={{ width: `${shownPercent(tightest, settings.percent)}%` }}
                       />
-                    ) : shown.map((window, windowIndex) => (
-                      <span
-                        key={window.key}
-                        data-usage-window={windowKind(window) ?? window.key}
-                        className={cn(
-                          "flex shrink-0 items-center gap-1",
-                          urgencyText(window.usedPercent),
-                          tier === "full" && windowIndex > 0 && "border-l border-hairline pl-1.5",
-                        )}
-                      >
-                        {window.stale ? <TriangleAlert className="size-3" aria-label="Stale usage data" /> : null}
-                        <span className="font-medium">{windowLabel(window)} {Math.round(shownPercent(window, settings.percent))}%</span>
-                        {tier === "full" && window.resetsAt != null ? <span className="text-faint">· {formatResetCountdown(window.resetsAt, now, "")}</span> : null}
-                      </span>
-                    ))}
+                    </span>
+                    {tier !== "icon" ? shown.map((window, windowIndex) => {
+                      const trailer = windowTrailer(window, now);
+                      return (
+                        <span
+                          key={window.key}
+                          data-usage-window={windowKind(window) ?? window.key}
+                          className={cn("flex shrink-0 items-center gap-1", usageTextClass(window, now))}
+                        >
+                          {windowIndex > 0 ? <span aria-hidden className="text-faint">·</span> : null}
+                          {usageStale(window, now) ? <TriangleAlert className="size-3" aria-label="Stale usage data" /> : null}
+                          <span className="font-medium">{Math.round(shownPercent(window, settings.percent))}% {settings.percent}</span>
+                          {trailer ? <span className="text-faint">{trailer}</span> : null}
+                        </span>
+                      );
+                    }) : null}
                   </span>
                 );
               })}
@@ -553,7 +602,9 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
           <div className="mb-2.5 flex items-center gap-2">
             <div>
               <div className="text-xs font-medium">Agent usage</div>
-              <div className="mt-0.5 text-[10.5px] text-faint">All rolling windows, closest limit first</div>
+              <div className="mt-0.5 text-[10.5px] text-faint">
+                {compactMode ? "Closest limit per agent" : "All rolling windows, closest limit first"}
+              </div>
             </div>
             <div className="ml-auto flex rounded-md bg-well p-0.5 text-[10px]">
               {(["used", "remaining"] as const).map((percent) => (
@@ -570,12 +621,20 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
             <button
               type="button"
               aria-label="Refresh usage"
+              disabled={usageRefreshing}
               onClick={() => void refreshUsage(true)}
               className="rounded-md p-1 text-faint hover:bg-veil-raised hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/50"
             >
               <RefreshCw className={cn("size-3.5", usageRefreshing && "animate-spin")} />
             </button>
           </div>
+          {usageError || usage.claude?.error || (usage.claude?.retryAt != null && usage.claude.retryAt > now) ? (
+            <div role="status" className="mb-2 text-[10.5px] text-muted-foreground">
+              {usageError ?? (usage.claude?.retryAt != null && usage.claude.retryAt > now
+                ? `Claude refresh paused; retry in ${formatResetCountdown(usage.claude.retryAt, now, "")}. ${usage.claude.error ?? ""}`
+                : usage.claude?.error)}
+            </div>
+          ) : null}
           <Segmented
             aria-label="Usage layout"
             value={settings.usageMode}
@@ -587,32 +646,36 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
             ]}
           />
           {windows.length ? (
-            settings.usageMode === "detailed" ? (
-              <ul className="flex flex-col gap-1.5">
-                {groups.map(({ agent, windows: agentWindows, tightest }) => {
-                  const reset = nextReset(agentWindows);
-                  return (
-                    <li key={agent}>
-                      <button
-                        type="button"
-                        aria-expanded={detailAgent === agent}
-                        aria-label={`${agentName(agent)}${reset == null ? "" : `, Resets in ${formatResetCountdown(reset, now, "")}`}`}
-                        onClick={() => setDetailAgent((current) => current === agent ? null : agent)}
-                        className={cn(
-                          "flex w-full items-center gap-2 rounded-lg bg-well/60 px-2.5 py-2.5 text-left outline-none transition-colors hover:bg-veil-raised focus-visible:ring-1 focus-visible:ring-ring/50",
-                          detailAgent === agent && "bg-selected",
-                        )}
-                      >
-                        <AgentMark id={agent} className="size-4 shrink-0 text-faint" decorative />
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-baseline gap-2">
-                            <span className="text-[12px] font-medium">{agentName(agent)}</span>
-                            {reset != null ? (
-                              <span className="truncate text-[10px] tabular-nums text-faint">
-                                Resets in {formatResetCountdown(reset, now, "")}
-                              </span>
-                            ) : null}
-                          </div>
+            <ul className="flex flex-col gap-1.5">
+              {groups.map(({ agent, windows: agentWindows, tightest }) => {
+                // Compact pairs the tightest window's percent with that window's own reset;
+                // Detailed lists every window, so its headline reset is the soonest one.
+                const reset = compactMode ? tightest.resetsAt : nextReset(agentWindows);
+                return (
+                  <li key={agent}>
+                    <button
+                      type="button"
+                      data-usage-compact-agent={compactMode ? agent : undefined}
+                      aria-expanded={detailAgent === agent}
+                      aria-label={`${agentName(agent)}${reset == null ? "" : `, ${usageResetLabel(agent, reset, now)}`}`}
+                      onClick={() => setDetailAgent((current) => current === agent ? null : agent)}
+                      className={cn(
+                        "flex w-full items-center gap-2 rounded-lg bg-well/60 px-2.5 text-left outline-none transition-colors hover:bg-veil-raised focus-visible:ring-1 focus-visible:ring-ring/50",
+                        compactMode ? "py-2" : "py-2.5",
+                        detailAgent === agent && "bg-selected",
+                      )}
+                    >
+                      <AgentMark id={agent} className="size-4 shrink-0 text-faint" decorative brand />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-baseline gap-2">
+                          <span className="text-[12px] font-medium">{agentName(agent)}</span>
+                          {reset != null ? (
+                            <span className="truncate text-[10px] tabular-nums text-faint">
+                              {usageResetLabel(agent, reset, now)}
+                            </span>
+                          ) : null}
+                        </div>
+                        {!compactMode ? (
                           <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
                             {orderedWindows(agentWindows).map((window) => {
                               const isTightest = window.key === tightest.key;
@@ -621,59 +684,31 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                                   <span className="shrink-0 text-faint">{windowLabel(window)}</span>
                                   <span className="h-1 w-8 shrink-0 overflow-hidden rounded-full bg-hairline-strong">
                                     <span
-                                      className={cn("block h-full rounded-full", isTightest ? urgency(window.usedPercent) : "bg-muted-foreground/45")}
+                                      className={cn("block h-full rounded-full", isTightest ? usageMeterClass(window, now) : "bg-muted-foreground/45")}
                                       style={{ width: `${shownPercent(window, settings.percent)}%` }}
                                     />
                                   </span>
-                                  <span className={cn("shrink-0", isTightest ? urgencyText(window.usedPercent) : "text-muted-foreground")}>
-                                    {Math.round(shownPercent(window, settings.percent))}%
+                                  <span className={cn("shrink-0", isTightest ? usageTextClass(window, now) : "text-muted-foreground")}>
+                                    {Math.round(shownPercent(window, settings.percent))}%{usageExpired(window, now) ? " expired" : window.stale ? " stale" : ""}
                                   </span>
                                 </span>
                               );
                             })}
                           </div>
-                        </div>
-                        <ChevronRight className="size-3.5 shrink-0 text-faint" />
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            ) : (
-              <ul className="flex flex-col gap-1.5">
-                {windows.map((window) => {
-                  const percent = Math.round(shownPercent(window, settings.percent));
-                  return (
-                    <li key={`${window.agent}:${window.key}`}>
-                      <button
-                        type="button"
-                        data-usage-compact-window={`${window.agent}:${window.key}`}
-                        onClick={() => setDetailAgent(window.agent)}
-                        className="grid w-full grid-cols-[16px_72px_1fr_auto] items-center gap-2 rounded-lg bg-well/60 px-2 py-2 text-left outline-none hover:bg-veil-raised focus-visible:ring-1 focus-visible:ring-ring/50"
-                      >
-                        <AgentMark id={window.agent} className="size-3.5 text-faint" decorative />
-                        <div className="min-w-0">
-                          <div className="truncate text-[11px] font-medium">{windowLabel(window)}</div>
-                          <div className="capitalize text-[9.5px] text-faint">{window.agent}{window.plan ? ` · ${window.plan}` : ""}</div>
-                        </div>
-                        <div className="h-1 overflow-hidden rounded-full bg-hairline-strong">
-                          <div className={cn("h-full rounded-full", urgency(window.usedPercent))} style={{ width: `${shownPercent(window, settings.percent)}%` }} />
-                        </div>
-                        <div className="flex min-w-[68px] flex-col items-end gap-0.5 tabular-nums">
-                          <span className={cn("flex items-center gap-1 text-[11px]", urgencyText(window.usedPercent))}>
-                            {window.stale ? <TriangleAlert className="size-3" aria-label="Stale usage data" /> : null}
-                            {percent}%
-                          </span>
-                          {window.resetsAt != null ? (
-                            <span className="text-[9.5px] text-faint">resets {formatResetCountdown(window.resetsAt, now, "")}</span>
-                          ) : null}
-                        </div>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )
+                        ) : null}
+                      </div>
+                      {compactMode ? (
+                        <span className={cn("flex shrink-0 items-center gap-1 text-[11px] font-medium tabular-nums", usageTextClass(tightest, now))}>
+                          {usageStale(tightest, now) ? <TriangleAlert className="size-3" aria-label="Stale usage data" /> : null}
+                          {Math.round(shownPercent(tightest, settings.percent))}%
+                        </span>
+                      ) : null}
+                      <ChevronRight className="size-3.5 shrink-0 text-faint" />
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
           ) : (
             <div className="rounded-lg bg-well/60 px-3 py-5 text-center text-[11px] text-faint">
               Usage appears after a Claude turn or a Codex refresh.
@@ -749,16 +784,14 @@ function AgentUsageDetail({
   onReset: () => void;
   onOpenAgentSettings: () => void;
 }) {
-  const updatedAt = Math.max(...windows.map((window) => window.updatedAt));
   const resetCredits = agent === "codex" ? codex?.resetCredits : undefined;
   const credits = agent === "codex" ? codex?.credits : undefined;
   return (
     <aside data-usage-detail={agent} className="absolute bottom-0 left-[calc(100%+6px)] w-[300px] rounded-xl bg-(--surface-card) p-3 text-popover-foreground shadow-surface hairline max-[760px]:static max-[760px]:mt-2 max-[760px]:w-full">
       <div className="flex items-center gap-2">
-        <AgentMark id={agent} className="size-4 text-muted-foreground" decorative />
+        <AgentMark id={agent} className="size-4 text-muted-foreground" decorative brand />
         <span className="text-[13px] font-medium">{agentName(agent)}</span>
       </div>
-      <div className="mt-0.5 text-[10.5px] text-faint">{formatUpdatedAgo(updatedAt, now)}</div>
       <div className="my-3 border-t border-hairline" />
       <div className="flex flex-col gap-3">
         {orderedWindows(windows).map((window) => {
@@ -767,12 +800,13 @@ function AgentUsageDetail({
             <div key={window.key}>
               <div className="mb-1.5 text-[12px] font-medium">{detailWindowLabel(window)}</div>
               <div className="h-1.5 overflow-hidden rounded-full bg-hairline-strong">
-                <div className={cn("h-full rounded-full", urgency(window.usedPercent))} style={{ width: `${shownPercent(window, percent)}%` }} />
+                <div className={cn("h-full rounded-full", usageMeterClass(window, now))} style={{ width: `${shownPercent(window, percent)}%` }} />
               </div>
               <div className="mt-1 flex items-center justify-between gap-3 text-[10.5px] tabular-nums text-muted-foreground">
-                <span>{shown}% {percent}</span>
-                {window.resetsAt != null ? <span>Resets in {formatResetCountdown(window.resetsAt, now, "")}</span> : null}
+                <span>{shown}% {percent}{usageStale(window, now) ? " (last known)" : ""}</span>
+                {window.resetsAt != null ? <span>{usageResetLabel(agent, window.resetsAt, now)}</span> : null}
               </div>
+              <div className="mt-0.5 text-[10px] text-faint">{formatUpdatedAgo(window.updatedAt, now)}</div>
             </div>
           );
         })}

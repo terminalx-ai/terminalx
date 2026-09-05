@@ -1,6 +1,13 @@
 fn main() {
+    // Share the homepage with the frontend instead of maintaining a second repo target.
+    println!("cargo:rerun-if-changed=../src/lib/repo.ts");
+    let repo = std::fs::read_to_string("../src/lib/repo.ts").expect("read repository identity");
+    let url = repo.lines().find_map(|line| line.strip_prefix("export const REPO_URL = \"").and_then(|s| s.strip_suffix("\";"))).expect("REPO_URL literal");
+    assert!(url.starts_with("https://github.com/"));
+    println!("cargo:rustc-env=TERMINALX_REPO_URL={url}");
     embed_cli_skill();
     ensure_helper_resource_dirs();
+    ensure_agent_browser_stand_in();
     // ggml's Metal backend uses `@available` checks, which compile to a call
     // into clang's builtins runtime. Rust links with `-nodefaultlibs`, so that
     // archive has to be named explicitly or release links fail on
@@ -34,6 +41,33 @@ fn embed_cli_skill() {
     ] {
         println!("cargo:rerun-if-changed={source}");
         std::fs::read(source).unwrap_or_else(|e| panic!("read embedded file {source}: {e}"));
+    }
+}
+
+/// `bundle.externalBin` lists the agent-browser sidecar, and tauri-build
+/// refuses to build when a listed binary is missing. `cargo test` and clippy
+/// must not depend on the 10 MB runtime, so a stand-in that explains itself
+/// is written when `scripts/ensure-agent-browser.mjs` has not run. The real
+/// copy replaces it before `tauri dev` and `tauri build`.
+fn ensure_agent_browser_stand_in() {
+    let triple = std::env::var("TARGET").unwrap_or_default();
+    if triple.is_empty() {
+        return;
+    }
+    let ext = if triple.contains("windows") { ".exe" } else { "" };
+    let path = std::path::Path::new("binaries").join(format!("agent-browser-{triple}{ext}"));
+    println!("cargo:rerun-if-changed={}", path.display());
+    if path.exists() {
+        return;
+    }
+    let _ = std::fs::create_dir_all("binaries");
+    let stub = "#!/bin/sh\necho '{\"success\":false,\"error\":\"agent-browser is not bundled with this build; run node scripts/ensure-agent-browser.mjs\"}'\nexit 1\n";
+    if std::fs::write(&path, stub).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+        }
     }
 }
 

@@ -1,10 +1,11 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { Archive, BarChart3, CalendarClock, ChevronDown, CircleDot, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { Archive, BarChart3, CalendarClock, ChevronDown, CircleDot, Ellipsis, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
+import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { cn } from "@/lib/cn";
 import { keycaps } from "@/lib/hotkeys";
@@ -21,7 +22,7 @@ import {
   updateProject,
   useSessionStore,
 } from "@/lib/sessions";
-import { isUnread, sessionColumn } from "@/lib/dashboard";
+import { bucketSessions, COLUMNS, type Buckets } from "@/lib/dashboard";
 import type { Project } from "@/types/session";
 import { MASCOTS, PROJECT_COLORS, PixelMascot, colorCss } from "./PixelMascot";
 import { TITLEBAR_INSET } from "./AppShell";
@@ -64,10 +65,7 @@ export function ProjectRail({
     .filter((p) => !!p.archived === showArchived || store.sessions.some((s) => s.id === store.selectedSessionId && s.projectPath === p.path))
     .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || a.name.localeCompare(b.name));
   const archivedCount = store.projects.filter((p) => p.archived).length;
-  // The two counts beside the dashboard entry, over every project at once.
-  const liveSessions = store.sessions.filter((s) => !s.archived);
-  const needsYou = liveSessions.filter((s) => sessionColumn(s) === "needs").length;
-  const unread = liveSessions.filter(isUnread).length;
+  const dashboardBuckets = useMemo(() => bucketSessions(store.sessions), [store.sessions]);
   const automationRunning = automationStore.automations.some((automation) => automation.lastOutcome === "pending" || automation.lastOutcome === "running");
   const automationFailures = automationStore.automations.filter((automation) => automation.lastOutcome === "failed").length;
   const selectedSession = store.sessions.find((session) => session.id === store.selectedSessionId) ?? null;
@@ -131,12 +129,12 @@ export function ProjectRail({
         <WithTooltip label="Agent dashboard" keys={keycaps("mod+shift+a")}>
           <Button
             variant="ghost"
-            className={cn("justify-start gap-2 px-2", store.view === "agents" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+            className={cn("min-w-0 justify-start gap-2 px-2", store.view === "agents" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
             onClick={onOpenAgents}
           >
             <LayoutGrid />
-            <span className="truncate">Agent Dashboard</span>
-            <AttentionDots needs={needsYou} unread={unread} />
+            <span className="min-w-0 truncate">Agent Dashboard</span>
+            <DashboardTotals buckets={dashboardBuckets} />
           </Button>
         </WithTooltip>
         <WithTooltip label="Stats & Usage" keys={keycaps("mod+shift+u")}>
@@ -256,27 +254,26 @@ export function ProjectRail({
   );
 }
 
-/**
- * Two counts on the dashboard entry: amber for sessions waiting on an answer,
- * green for ones that finished and have not been looked at. A count of zero
- * draws nothing, so a quiet rail stays quiet.
- */
-function AttentionDots({ needs, unread }: { needs: number; unread: number }) {
-  if (!needs && !unread) return null;
+/** Full column totals, including zero counts and read Done sessions. */
+function DashboardTotals({ buckets }: { buckets: Buckets }) {
   return (
-    <span className="ml-auto flex items-center gap-1.5 text-[10px] tabular-nums">
-      {needs > 0 && (
-        <span className="flex items-center gap-1 text-warning" title={`${needs} waiting on you`}>
-          <span className="size-1.5 rounded-full bg-warning" />
-          {needs}
-        </span>
-      )}
-      {unread > 0 && (
-        <span className="flex items-center gap-1 text-add" title={`${unread} finished and unread`}>
-          <span className="size-1.5 rounded-full bg-add" />
-          {unread}
-        </span>
-      )}
+    <span className="ml-auto flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums">
+      {COLUMNS.map(({ id, label }) => {
+        const count = buckets[id].length;
+        const description = `${count} ${label.toLowerCase()}`;
+        return (
+          <span
+            key={id}
+            role="img"
+            aria-label={description}
+            title={description}
+            className={cn("flex items-center gap-1", id === "needs" && "text-warning", id === "working" && "text-info", id === "done" && "text-add")}
+          >
+            <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-current" />
+            {count}
+          </span>
+        );
+      })}
     </span>
   );
 }
@@ -344,7 +341,8 @@ function ProjectRow({
         <div
           data-tree-row
           className={cn(
-            "group relative flex h-8 cursor-default items-center gap-1 rounded-md px-1 outline-none",
+            actionRow,
+            "relative flex h-8 cursor-default items-center gap-1 rounded-md px-1 outline-none",
             selected ? "bg-selected" : active ? "bg-selected/50" : "hover:bg-selected/50",
           )}
           title={project.path}
@@ -368,33 +366,24 @@ function ProjectRow({
             {project.pinned && <Pin className="size-3 shrink-0 text-faint" />}
             {project.archived && <Archive className="size-3 shrink-0 text-faint" aria-label="Archived project" />}
             {main && (main.additions > 0 || main.deletions > 0) && (
-              <span className="shrink-0 text-[11px] tabular-nums group-hover:hidden group-focus-within:hidden group-has-[[data-state=open]]:hidden">
+              <span className={cn("shrink-0 text-[11px] tabular-nums", yieldsToRowActions)}>
                 {main.additions > 0 && <span className="text-add">+{main.additions}</span>}
                 {main.deletions > 0 && <span className="ml-1 text-destructive">−{main.deletions}</span>}
               </span>
             )}
           </button>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              aria-label={`Project menu for ${project.name}`}
-              className="absolute right-1 top-1/2 hidden -translate-y-1/2 group-hover:inline-flex group-focus-within:inline-flex data-[state=open]:inline-flex"
-            >
-              <span className="text-[13px] leading-none">…</span>
-            </Button>
-          </DropdownMenuTrigger>
-          <WithTooltip label={`New session in ${project.name}`}>
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              aria-label={`New session in ${project.name}`}
-              onClick={() => startSessionIn(project.path, null)}
-              className="absolute right-7 top-1/2 hidden -translate-y-1/2 group-hover:inline-flex group-focus-within:inline-flex"
-            >
-              <FolderPlus />
-            </Button>
-          </WithTooltip>
+          <RowActions>
+            <WithTooltip label={`New session in ${project.name}`}>
+              <Button variant="ghost" size="icon-xs" aria-label={`New session in ${project.name}`} onClick={() => startSessionIn(project.path, null)}>
+                <FolderPlus />
+              </Button>
+            </WithTooltip>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon-xs" aria-label={`Project menu for ${project.name}`}>
+                <Ellipsis />
+              </Button>
+            </DropdownMenuTrigger>
+          </RowActions>
         </div>
         {children}
       </div>
