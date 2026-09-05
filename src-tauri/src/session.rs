@@ -690,7 +690,6 @@ impl SessionManager {
                 &mut rt,
                 &rt_arc,
                 &entry,
-                &tab,
                 prompt,
                 refs,
                 receipt,
@@ -1495,11 +1494,11 @@ impl SessionManager {
         rt: &mut TabRuntime,
         rt_arc: &Arc<Mutex<TabRuntime>>,
         entry: &index::SessionEntry,
-        tab: &TabEntry,
         prompt: PromptText,
         images: Vec<ImageRef>,
         receipt: Option<DeliveryReceipt>,
     ) -> Result<SendOutcome> {
+        let tab = entry.tab(&rt.tab_id).ok_or_else(|| anyhow!("tab not found"))?;
         self.start_cli(rt, rt_arc, entry, tab)?;
         let (pane, ready) = match &rt.engine {
             Engine::Cli(p) => (p.pane_id.clone(), p.ready.clone()),
