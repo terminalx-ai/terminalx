@@ -840,6 +840,15 @@ use crate::AppState;
 use tauri::State;
 
 #[tauri::command]
+pub async fn prepare_continuation(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<crate::continuation::Context> {
+    let m = state.manager().ok_or("not ready")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let tracked = m.tracked_transcript(&session_id, &tab_id);
+        crate::continuation::prepare(&session_id, &tab_id, tracked).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn load_tab_events(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<Vec<crate::events::AgentEvent>> {
     let m = state.manager().ok_or("not ready")?;
     tauri::async_runtime::spawn_blocking(move || m.load_events(&session_id, &tab_id).map_err(err)).await.map_err(err)?
@@ -852,9 +861,16 @@ pub async fn send_message(
     tab_id: String,
     text: String,
     images: Option<Vec<ImageInput>>,
+    confirm_delivery: Option<bool>,
 ) -> CmdResult<SendOutcome> {
     let m = state.manager().ok_or("not ready")?;
-    tauri::async_runtime::spawn_blocking(move || m.send(&session_id, &tab_id, text, images.unwrap_or_default()).map_err(err))
+    tauri::async_runtime::spawn_blocking(move || {
+        if confirm_delivery.unwrap_or(false) {
+            m.send_confirmed(&session_id, &tab_id, text).map_err(err)
+        } else {
+            m.send(&session_id, &tab_id, text, images.unwrap_or_default()).map_err(err)
+        }
+    })
         .await
         .map_err(err)?
 }

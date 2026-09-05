@@ -92,6 +92,8 @@ struct CliLaunch {
     transcript_root: PathBuf,
 }
 
+type DeliveryReceipt = std::sync::mpsc::Sender<std::result::Result<(), String>>;
+
 /// A composer prompt waiting for the CLI transcript to echo it. Both CLIs
 /// add an `[Image #N]` label per pasted image to the echoed text, so the
 /// attachment count is part of the identity even though the composer already
@@ -101,6 +103,7 @@ struct ComposerEcho {
     text: String,
     image_count: usize,
     sent_at: Instant,
+    receipt: Option<DeliveryReceipt>,
 }
 
 /// How long a composer prompt waits for its echo before the next send drops
@@ -109,7 +112,7 @@ const COMPOSER_ECHO_TTL: std::time::Duration = std::time::Duration::from_secs(12
 
 impl ComposerEcho {
     fn new(text: String, image_count: usize) -> Self {
-        Self { text, image_count, sent_at: Instant::now() }
+        Self { text, image_count, sent_at: Instant::now(), receipt: None }
     }
 
     fn matches(&self, echoed: &str) -> bool {
@@ -157,6 +160,9 @@ fn consume_composer_echo(pending: &mut std::collections::VecDeque<ComposerEcho>,
     let Some(at) = pending.iter().position(|prompt| prompt.matches(text)) else { return false };
     if at > 0 {
         log::warn!("{at} composer prompt(s) never echoed by the transcript; dropping them");
+    }
+    if let Some(receipt) = &pending[at].receipt {
+        let _ = receipt.send(Ok(()));
     }
     pending.drain(..=at);
     true
@@ -633,6 +639,25 @@ impl SessionManager {
         self.send_with_display_text(session_id, tab_id, text.clone(), text, images)
     }
 
+    /// Continuations use the normal send path, but only acknowledge delivery
+    /// when the provider's own saved transcript echoes the prompt.
+    pub fn send_confirmed(&self, session_id: &str, tab_id: &str, text: String) -> Result<SendOutcome> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let outcome = self.send_impl(session_id, tab_id, text.clone(), text, Vec::new(), Some(tx))?;
+        rx.recv_timeout(std::time::Duration::from_secs(90))
+            .map_err(|_| anyhow!("The new session opened, but prompt delivery could not be confirmed. Check its terminal before retrying; the prepared prompt is retained."))?
+            .map_err(anyhow::Error::msg)?;
+        Ok(outcome)
+    }
+
+    /// Read tracking only; preparing a handoff must never instantiate or start
+    /// the source runtime (which can otherwise resume its provider session).
+    pub fn tracked_transcript(&self, session_id: &str, tab_id: &str) -> Option<PathBuf> {
+        let rt = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned()?;
+        let rt = rt.lock().unwrap();
+        match &rt.engine { Engine::Cli(p) => Some(p.tail.path()), _ => None }
+    }
+
     /// Send one prompt to the agent while publishing a different, user-facing
     /// representation to the transcript.
     pub(crate) fn send_with_display_text(
@@ -642,6 +667,13 @@ impl SessionManager {
         text: String,
         display_text: String,
         images: Vec<ImageInput>,
+    ) -> Result<SendOutcome> {
+        self.send_impl(session_id, tab_id, text, display_text, images, None)
+    }
+
+    fn send_impl(
+        &self, session_id: &str, tab_id: &str, text: String,
+        display_text: String, images: Vec<ImageInput>, receipt: Option<DeliveryReceipt>,
     ) -> Result<SendOutcome> {
         let prompt = PromptText {
             agent: text,
@@ -653,14 +685,17 @@ impl SessionManager {
         let mut rt = rt_arc.lock().unwrap();
         let (refs, wire_images) = Self::archive_images(session_id, &images)?;
 
+        if receipt.is_some() && (pty_first(&tab.harness).is_none() || rt.turn_open || !rt.pending.is_empty()) {
+            bail!("Continuation delivery requires an idle Claude Code or Codex destination.");
+        }
         if pty_first(&tab.harness).is_some() {
             return self.send_to_cli(
                 &mut rt,
                 &rt_arc,
                 &entry,
-                &tab,
                 prompt,
                 refs,
+                receipt,
             );
         }
 
@@ -1464,10 +1499,11 @@ impl SessionManager {
         rt: &mut TabRuntime,
         rt_arc: &Arc<Mutex<TabRuntime>>,
         entry: &index::SessionEntry,
-        tab: &TabEntry,
         prompt: PromptText,
         images: Vec<ImageRef>,
+        receipt: Option<DeliveryReceipt>,
     ) -> Result<SendOutcome> {
+        let tab = entry.tab(&rt.tab_id).ok_or_else(|| anyhow!("tab not found"))?;
         self.start_cli(rt, rt_arc, entry, tab)?;
         let (pane, ready) = match &rt.engine {
             Engine::Cli(p) => (p.pane_id.clone(), p.ready.clone()),
@@ -1477,13 +1513,14 @@ impl SessionManager {
         let baseline = if queued { None } else { git::snapshot_tree(Path::new(&entry.cwd)).ok() };
         let paths: Vec<String> = images.iter().map(|i| i.url.clone()).collect();
         let (message, echo) = cli_composer_message(&prompt, images, baseline, queued, &entry.cwd);
-        if let (Some(echo), Engine::Cli(p)) = (echo, &mut rt.engine) {
+        if let (Some(mut echo), Engine::Cli(p)) = (echo, &mut rt.engine) {
+            echo.receipt = receipt.clone();
             expire_composer_echoes(&mut p.echoed, Instant::now());
             p.echoed.push_back(echo);
             p.turn_tail.opened();
         }
         let ev = self.publish(rt, message, None);
-        self.type_prompt(rt_arc, &pane, prompt.agent, paths, Some(ready));
+        self.type_prompt(rt_arc, &pane, prompt.agent, paths, Some(ready), receipt);
         if !queued {
             rt.turn_open = true;
             rt.turn_started_at = Some(Instant::now());
@@ -1496,16 +1533,24 @@ impl SessionManager {
     /// Enter has to be a later write than the body — a carriage return inside
     /// the same one is read as part of the paste and never submits — so this
     /// sleeps, which no caller holding the tab lock could afford to do.
-    fn type_prompt(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, text: String, attachments: Vec<String>, ready: Option<Arc<tui::Ready>>) {
+    fn type_prompt(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, text: String, attachments: Vec<String>, ready: Option<Arc<tui::Ready>>, receipt: Option<DeliveryReceipt>) {
         let lock = self.writers.lock().unwrap().entry(pane.to_string()).or_default().clone();
         let terminals = self.terminals.clone();
         let manager = self.clone();
         let rt_arc = rt_arc.clone();
         let pane = pane.to_string();
-        let _ = std::thread::Builder::new().name("cli-input".into()).spawn(move || {
+        let spawn_receipt = receipt.clone();
+        let spawned = std::thread::Builder::new().name("cli-input".into()).spawn(move || {
             let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ready) = ready {
                 if !manager.wait_ready(&pane, &ready) {
+                    if let Some(receipt) = &receipt {
+                        let mut rt = rt_arc.lock().unwrap();
+                        rt.turn_open = false;
+                        manager.set_status(&mut rt, TabStatus::Idle);
+                        let _ = receipt.send(Err("The new session did not become ready. Context was not sent; the prepared prompt is retained.".into()));
+                        return;
+                    }
                     // Both signals failed. Typing anyway may lose the prompt to
                     // a TUI that is not listening, but dropping it silently is
                     // worse: the reader would watch a message they sent never
@@ -1515,23 +1560,33 @@ impl SessionManager {
                     manager.apply(&mut rt, Payload::Status { text: "The agent was slow to start; check that your message arrived.".into() }, None);
                 }
             }
-            let write = |bytes: &[u8]| {
-                if let Err(e) = terminals.write(&pane, bytes) {
-                    log::warn!("[{pane}] write: {e:#}");
+            let result = (|| -> Result<()> {
+                terminals.write(&pane, tui::CLEAR_LINE)?;
+                for path in &attachments {
+                    terminals.write(&pane, &tui::attachment_bytes(path))?;
                 }
-            };
-            write(tui::CLEAR_LINE);
-            for path in &attachments {
-                write(&tui::attachment_bytes(path));
+                if !attachments.is_empty() {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                }
+                let body = tui::body_bytes(&text);
+                terminals.write(&pane, &body)?;
+                std::thread::sleep(tui::submit_delay(body.len()));
+                terminals.write(&pane, tui::SUBMIT)?;
+                Ok(())
+            })();
+            if let Err(e) = result {
+                log::warn!("[{pane}] write: {e:#}");
+                if let Some(receipt) = receipt {
+                    let mut rt = rt_arc.lock().unwrap();
+                    rt.turn_open = false;
+                    manager.set_status(&mut rt, TabStatus::Idle);
+                    let _ = receipt.send(Err(format!("The new session opened, but writing its continuation prompt failed: {e}. The prepared prompt is retained.")));
+                }
             }
-            if !attachments.is_empty() {
-                std::thread::sleep(std::time::Duration::from_millis(300));
-            }
-            let body = tui::body_bytes(&text);
-            write(&body);
-            std::thread::sleep(tui::submit_delay(body.len()));
-            write(tui::SUBMIT);
         });
+        if let (Err(e), Some(receipt)) = (spawned, spawn_receipt) {
+            let _ = receipt.send(Err(format!("Could not start prompt delivery: {e}")));
+        }
     }
 
     /// Wait until the pane's CLI is listening. `true` when it said so — or looked
@@ -1572,7 +1627,7 @@ impl SessionManager {
 
     /// A slash command the CLI runs itself (`/model`, `/effort`).
     fn type_command(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, command: String) {
-        self.type_prompt(rt_arc, pane, command, Vec::new(), None);
+        self.type_prompt(rt_arc, pane, command, Vec::new(), None, None);
     }
 
     // ---- inbound from the CLI's hooks
@@ -2061,6 +2116,21 @@ mod tests {
         assert_eq!(strip_image_labels("[Image #1 x"), (0, "[Image #1 x"));
     }
 
+    #[test]
+    fn delivery_is_confirmed_only_by_the_matching_provider_echo() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut echo = ComposerEcho::new("continuation prompt".into(), 0);
+        echo.receipt = Some(tx);
+        let mut pending = std::collections::VecDeque::from([echo]);
+        let message = |text: &str| Payload::UserMessage { text: text.into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
+        assert!(!consume_composer_echo(&mut pending, &message("unrelated prompt")));
+        assert!(rx.try_recv().is_err());
+        assert!(consume_composer_echo(&mut pending, &message("continuation prompt")));
+        assert_eq!(rx.try_recv().unwrap(), Ok(()));
+        assert!(!consume_composer_echo(&mut pending, &message("continuation prompt")));
+        assert!(rx.try_recv().is_err());
+    }
+
     /// One echo the transcript never produces must not shift every later
     /// comparison by one: a match further back drains the misses ahead of it,
     /// and the next send drops anything that has waited past the TTL.
@@ -2081,8 +2151,8 @@ mod tests {
         // freshly booted runner may not have two minutes behind it.
         let sent = Instant::now();
         let later = sent + COMPOSER_ECHO_TTL + std::time::Duration::from_secs(1);
-        pending.push_back(ComposerEcho { text: "stale".into(), image_count: 0, sent_at: sent });
-        pending.push_back(ComposerEcho { text: "fresh".into(), image_count: 0, sent_at: later });
+        pending.push_back(ComposerEcho { text: "stale".into(), image_count: 0, sent_at: sent, receipt: None });
+        pending.push_back(ComposerEcho { text: "fresh".into(), image_count: 0, sent_at: later, receipt: None });
         expire_composer_echoes(&mut pending, later);
         assert_eq!(pending.len(), 1);
         assert!(consume_composer_echo(&mut pending, &user("fresh")));

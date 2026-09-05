@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CalendarClock, CircleDot, GitBranch, MessageSquare, PanelLeft, PanelRight, Terminal } from "lucide-react";
+import { CalendarClock, CircleDot, GitBranch, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Terminal } from "lucide-react";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,7 @@ import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { openAutomations, renameWorkspace, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
+import { ContinuationDialog } from "./ContinuationDialog";
 import { TabView } from "./TabView";
 import { TabActions } from "./TabStrip";
 import { tabPanelId } from "@/lib/sessionTabs";
@@ -89,6 +90,7 @@ export function SessionView({
   const switching = !!activeTab && !!tabViews.switching[activeTab.id];
   const workspaceLabel = session.worktreeRemoved ? workspaceName(session) : session.branch;
   const workspaceTitle = session.removedWorkspace?.path ?? session.cwd;
+  const [continuationSource, setContinuationSource] = useState<TabEntry | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
   const workspace = managedWorkspaceFor(session);
   useHotkey("mod+shift+t", () => {
@@ -180,6 +182,13 @@ export function SessionView({
           <div className="ml-auto flex max-w-[70%] shrink-0 items-center gap-0.5">
             <TabActions session={session} selected={selected} />
             {activeTab && (
+              <WithTooltip label="Continue in New Session…">
+                <Button variant="ghost" size="icon-sm" aria-label="Continue in New Session…" onClick={() => setContinuationSource(activeTab)}>
+                  <MessageSquarePlus />
+                </Button>
+              </WithTooltip>
+            )}
+            {activeTab && (
               <WithTooltip label={activeInTerminal ? "Back to chat" : "Show terminal view"} keys={keycaps("mod+shift+t")}>
                 <Button
                   variant="ghost"
@@ -207,6 +216,7 @@ export function SessionView({
           </div>
         </header>
 
+        {continuationSource && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
         <section className="flex min-h-0 flex-1 flex-col">
           <div className="@container/editor-host relative flex min-h-0 flex-1">
             <div
@@ -223,7 +233,7 @@ export function SessionView({
                   aria-hidden={selected?.kind !== "agent" || t.id !== selected.id}
                   className={cn("flex min-h-0 flex-1 flex-col", (selected?.kind !== "agent" || t.id !== selected.id) && "hidden")}
                 >
-                  <TabView session={session} tab={t} active={selected?.kind === "agent" && t.id === selected.id} />
+                  <TabView session={session} tab={t} continuationOpen={!!continuationSource} active={selected?.kind === "agent" && t.id === selected.id} />
                 </div>
               ))}
               {shellPanes.map((pane) => (

@@ -34,7 +34,7 @@ function handoffsFor(t: Transcript, changed: boolean): { label: string; prompt: 
   ];
 }
 
-export function TabView({ session, tab, active }: { session: SessionEntry; tab: TabEntry; active: boolean }) {
+export function TabView({ session, tab, active, continuationOpen = false }: { session: SessionEntry; tab: TabEntry; active: boolean; continuationOpen?: boolean }) {
   const log = useTabLog(session.id, tab.id);
   const draft = useDraft(tab.id);
   const [error, setError] = useState<string | null>(null);
@@ -93,7 +93,7 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
   }, [session.id, tab.id]);
 
   // Editors, dialogs and pickers own Escape before the agent-stop shortcut.
-  useHotkey("escape", () => (live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane") ? (stop(), true) : false), { enabled: active });
+  useHotkey("escape", () => (live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane") ? (stop(), true) : false), { enabled: active && !continuationOpen });
 
   const answerPermission = useCallback(
     async (requestId: string, optionId: string) => {
