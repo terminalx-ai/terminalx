@@ -8,6 +8,7 @@ mod dictation;
 mod transcription;
 mod events;
 mod files;
+mod media;
 mod git;
 mod github;
 mod harness;
@@ -82,6 +83,7 @@ pub fn run() {
     };
 
     tauri::Builder::default()
+        .manage(media::MediaServer::default())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -244,6 +246,8 @@ pub fn run() {
             commands::mobile_terminal_drivers,
             commands::pty_kill,
             commands::list_dir,
+            media::open_media_file,
+            media::close_media_file,
             commands::read_text_file,
             commands::write_text_file,
             commands::file_mtime,

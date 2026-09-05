@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
+import mediaTypes from "./mediaTypes.json";
 import { extOf, fileName } from "@/lib/paths";
 
 /**
@@ -10,6 +11,14 @@ import { extOf, fileName } from "@/lib/paths";
  */
 export type ViewMode = "source" | "preview";
 
+export type FileKind = "text" | "image" | "audio" | "video";
+
+/** Decoder support is runtime-dependent; recognized media never enters a text buffer. SVG stays source. */
+export function fileKind(rel: string): FileKind {
+  const format = mediaTypes[extOf(rel) as keyof typeof mediaTypes];
+  return format?.kind === "image" || format?.kind === "audio" || format?.kind === "video" ? format.kind : "text";
+}
+
 export interface EditorEntry {
   id: string;
   sessionId: string;
@@ -18,7 +27,8 @@ export interface EditorEntry {
   rel: string;
   name: string;
   dirty: boolean;
-  /** Markdown opens rendered; everything else opens as source. */
+  kind: FileKind;
+  /** Text mode only; media surfaces are always read-only. */
   viewMode: ViewMode;
   /** Set to scroll to a place; bumped `nonce` re-fires it on a re-open. */
   jump?: { line: number; col?: number; nonce: number };
@@ -70,7 +80,8 @@ let nonce = 0;
  */
 export function openFile(sessionId: string, root: string, rel: string, at?: { line: number; col?: number }) {
   const existing = state.editors.find((e) => e.sessionId === sessionId && e.root === root && e.rel === rel);
-  const jump = at ? { ...at, nonce: ++nonce } : undefined;
+  const kind = fileKind(rel);
+  const jump = at && kind === "text" ? { ...at, nonce: ++nonce } : undefined;
   const collapsed = { ...state.collapsed, [sessionId]: false };
   if (existing) {
     set({
@@ -80,7 +91,7 @@ export function openFile(sessionId: string, root: string, rel: string, at?: { li
     });
     return existing.id;
   }
-  const id = `${sessionId}:${rel}`;
+  const id = JSON.stringify([sessionId, root, rel]);
   const entry: EditorEntry = {
     id,
     sessionId,
@@ -88,6 +99,7 @@ export function openFile(sessionId: string, root: string, rel: string, at?: { li
     rel,
     name: fileName(rel),
     dirty: false,
+    kind,
     viewMode: jump ? "source" : isMarkdown(rel) ? "preview" : "source",
     jump,
   };
@@ -134,12 +146,12 @@ export function setActiveEditor(sessionId: string, id: string | null) {
 
 export function setEditorDirty(id: string, dirty: boolean) {
   const e = state.editors.find((x) => x.id === id);
-  if (!e || e.dirty === dirty) return;
+  if (!e || e.kind !== "text" || e.dirty === dirty) return;
   set({ editors: state.editors.map((x) => (x.id === id ? { ...x, dirty } : x)) });
 }
 
 export function setViewMode(id: string, viewMode: ViewMode) {
-  set({ editors: state.editors.map((x) => (x.id === id ? { ...x, viewMode } : x)) });
+  set({ editors: state.editors.map((x) => (x.id === id && x.kind === "text" ? { ...x, viewMode } : x)) });
 }
 
 /** Flip preview and source for a markdown editor; other files stay as source. */
