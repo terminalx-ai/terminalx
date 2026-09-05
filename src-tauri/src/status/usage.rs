@@ -33,6 +33,7 @@ pub struct UsageWindow {
     pub window_minutes: Option<u32>,
     pub updated_at: i64,
     pub stale: bool,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -64,9 +65,20 @@ pub struct CodexUsage {
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSnapshot {
+    pub revision: u64,
+    pub claude: ClaudeRefresh,
+    pub claude_account: Option<String>,
     pub windows: Vec<UsageWindow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codex: Option<CodexUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeRefresh {
+    pub retry_at: Option<i64>,
+    pub revalidate_at: Option<i64>,
+    pub error: Option<String>,
 }
 
 #[derive(Default)]
@@ -77,13 +89,16 @@ struct PollState {
     retry_at: Option<i64>,
     failures: u32,
     in_flight: bool,
+    error: Option<String>,
 }
 
 #[derive(Default)]
 struct Inner {
     windows: HashMap<(String, String), UsageWindow>,
-    statusline_by_tab: HashMap<String, i64>,
-    claude_statusline_by_key: HashMap<String, i64>,
+    revision: u64,
+    claude_account: Option<String>,
+    claude_generation: u64,
+    claude_reset_checks: HashMap<String, (i64, u8)>,
     claude: PollState,
     codex: PollState,
     codex_usage: Option<CodexUsage>,
@@ -120,11 +135,12 @@ fn reset_ms(value: &Value) -> Option<i64> {
 }
 
 fn claude_used_percent(raw: &Value) -> Option<f32> {
-    if let Some(value) = raw.get("used_percentage").and_then(numeric).or_else(|| raw.get("percent").and_then(numeric)) {
-        return Some(value.clamp(0.0, 100.0));
-    }
-    let utilization = raw.get("utilization").and_then(numeric)?;
-    Some(if utilization <= 1.0 { utilization * 100.0 } else { utilization }.clamp(0.0, 100.0))
+    // All supported Claude fields are percentages, including utilization: 1.
+    // Inferring fractions from magnitude turns genuine post-reset 1% into 100%.
+    raw.get("used_percentage").and_then(numeric)
+        .or_else(|| raw.get("percent").and_then(numeric))
+        .or_else(|| raw.get("utilization").and_then(numeric))
+        .map(|value| value.clamp(0.0, 100.0))
 }
 
 fn claude_label(key: &str) -> (String, Option<u32>) {
@@ -165,6 +181,7 @@ fn parse_claude_window(key: &str, raw: &Value, updated_at: i64) -> Option<UsageW
         window_minutes,
         updated_at,
         stale: false,
+        source: "statusline".into(),
     })
 }
 
@@ -222,12 +239,74 @@ fn parse_claude(payload: &Value, updated_at: i64) -> Vec<UsageWindow> {
     windows
 }
 
-fn merge_claude_windows(oauth: Vec<UsageWindow>, statusline: Vec<UsageWindow>) -> Vec<UsageWindow> {
-    let mut merged: HashMap<String, UsageWindow> = oauth.into_iter().map(|window| (window.key.clone(), window)).collect();
-    for window in statusline {
+fn expired(window: &UsageWindow, now: i64) -> bool {
+    window.resets_at.is_some_and(|reset| reset <= now)
+}
+
+/// Reset deadlines identify successive windows. A late receipt of the previous
+/// window never beats a confirmed next window; within one window, observation
+/// time wins (OAuth uses request start, not response completion).
+fn newer_window(incoming: &UsageWindow, current: &UsageWindow) -> bool {
+    match (incoming.resets_at, current.resets_at) {
+        (Some(next), Some(previous)) if next != previous => next > previous,
+        (None, Some(_)) => false,
+        _ => incoming.updated_at > current.updated_at
+            || (incoming.updated_at == current.updated_at && !(incoming.source == "oauth" && current.source == "statusline")),
+    }
+}
+
+fn same_sample(a: &UsageWindow, b: &UsageWindow) -> bool {
+    a.used_percent == b.used_percent && a.resets_at == b.resets_at
+        && a.label == b.label && a.window_minutes == b.window_minutes
+}
+
+fn merge_claude_windows(oauth: Vec<UsageWindow>, current: Vec<UsageWindow>) -> Vec<UsageWindow> {
+    let mut merged: HashMap<String, UsageWindow> = current.into_iter().map(|w| (w.key.clone(), w)).collect();
+    for mut window in oauth {
+        if let Some(previous) = merged.get(&window.key) {
+            if !newer_window(&window, previous) { continue; }
+            // Seeing the same expired window again is not confirmation of a reset.
+            if expired(&window, window.updated_at) && window.resets_at == previous.resets_at {
+                window.updated_at = previous.updated_at;
+            }
+        }
         merged.insert(window.key.clone(), window);
     }
     merged.into_values().collect()
+}
+
+/// One immediate reset check and one follow-up, then ordinary polling. The
+/// provider's retry gate always takes precedence, including on focus/manual.
+fn claude_revalidate_at(inner: &Inner) -> Option<i64> {
+    inner.windows.values().filter(|w| w.agent == "claude").filter_map(|w| {
+        let reset = w.resets_at?;
+        let attempts = inner.claude_reset_checks.get(&w.key)
+            .filter(|(checked, _)| *checked == reset).map_or(0, |(_, count)| *count);
+        let at = match attempts {
+            0 => reset,
+            1 => inner.claude.last_attempt?.saturating_add(60_000).max(reset),
+            _ => return None,
+        };
+        Some(at.max(inner.claude.retry_at.unwrap_or(at)))
+    }).min()
+}
+
+fn begin_claude_refresh(inner: &mut Inner, now: i64, manual: bool) -> bool {
+    let reset_due = claude_revalidate_at(inner).is_some_and(|at| at <= now);
+    let poll = &mut inner.claude;
+    if poll.in_flight || poll.retry_at.is_some_and(|at| now < at)
+        || (!manual && !reset_due && poll.last_attempt.is_some_and(|at| now.saturating_sub(at) < BACKGROUND_REFRESH_MS)) {
+        return false;
+    }
+    poll.in_flight = true;
+    poll.last_attempt = Some(now);
+    for window in inner.windows.values().filter(|w| w.agent == "claude" && expired(w, now)) {
+        let reset = window.resets_at.unwrap();
+        let check = inner.claude_reset_checks.entry(window.key.clone()).or_insert((reset, 0));
+        if check.0 != reset { *check = (reset, 0); }
+        check.1 = check.1.saturating_add(1);
+    }
+    true
 }
 
 /// The account-level windows of one Codex limit block. The block's `limitName`
@@ -249,6 +328,7 @@ fn parse_codex_limit(limits: &Value, updated_at: i64) -> Vec<UsageWindow> {
                 window_minutes: Some(minutes),
                 updated_at,
                 stale: false,
+                source: "app-server".into(),
             })
         })
         .collect()
@@ -324,107 +404,150 @@ fn apply_codex(inner: &mut Inner, result: &Value, updated_at: i64) {
     inner.codex_reset_credit_id = reset_credit_id;
 }
 
+/// Only compare windows attributed to the same system Claude account. Tokens
+/// never leave the credential reader; this opaque identity hashes config path
+/// and account UUID, and is also captured when the CLI starts.
+pub fn claude_account_identity() -> Option<String> {
+    use sha2::{Digest, Sha256};
+    if ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"].iter()
+        .any(|key| std::env::var(key).is_ok_and(|value| !value.is_empty())) { return None; }
+    let path = match std::env::var("CLAUDE_CONFIG_DIR").ok().filter(|v| !v.is_empty()) {
+        Some(dir) => std::path::PathBuf::from(dir).join(".claude.json"),
+        None => dirs::home_dir()?.join(".claude.json"),
+    };
+    let path = path.canonicalize().ok()?;
+    let config: Value = serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+    let account = config.pointer("/oauthAccount/accountUuid")?.as_str()?;
+    if account.is_empty() { return None; }
+    let organization = config.pointer("/oauthAccount/organizationUuid").and_then(Value::as_str).unwrap_or_default();
+    Some(format!("{:x}", Sha256::digest(format!("{}\0{account}\0{organization}", path.display()).as_bytes())))
+}
+
+fn select_claude_account(inner: &mut Inner, account: Option<String>) -> bool {
+    if inner.claude_account == account { return false; }
+    inner.claude_account = account;
+    inner.claude_generation += 1;
+    inner.windows.retain(|(agent, _), _| agent != "claude");
+    inner.claude_reset_checks.clear();
+    inner.claude = PollState::default();
+    true
+}
+
+fn ingest_attributed_claude(inner: &mut Inner, account: Option<String>, launch_account: Option<&str>, payload: &Value, now: i64) -> bool {
+    let switched = select_claude_account(inner, account.clone());
+    if account.is_none() || account.as_deref() != launch_account
+        || payload.get("_raccoon_usage_account").and_then(Value::as_str) != account.as_deref() {
+        return switched;
+    }
+    apply_claude_live(inner, payload, now) || switched
+}
+
+fn apply_claude_live(inner: &mut Inner, payload: &Value, now: i64) -> bool {
+    let mut changed = false;
+    for mut window in parse_claude(payload, now) {
+        let key = (window.agent.clone(), window.key.clone());
+        if let Some(previous) = inner.windows.get(&key) {
+            if !newer_window(&window, previous) { continue; }
+            if same_sample(&window, previous)
+                && (expired(&window, now) || now.saturating_sub(previous.updated_at) < STATUSLINE_THROTTLE_MS) {
+                continue;
+            }
+            if expired(&window, now) && window.resets_at == previous.resets_at {
+                window.updated_at = previous.updated_at;
+            }
+        }
+        inner.windows.insert(key, window);
+        changed = true;
+    }
+    changed
+}
+
+fn finish_claude_refresh(inner: &mut Inner, generation: u64, answer: Result<Vec<UsageWindow>>, now: i64, completed_at: i64) -> Result<()> {
+    if generation != inner.claude_generation { return Ok(()); }
+    inner.claude.in_flight = false;
+    match answer {
+        Ok(oauth) => {
+            let current = inner.windows.values().filter(|w| w.agent == "claude").cloned().collect();
+            for window in merge_claude_windows(oauth, current) {
+                inner.windows.insert((window.agent.clone(), window.key.clone()), window);
+            }
+            inner.claude.last_success = Some(now);
+            inner.claude.retry_at = None;
+            inner.claude.error = None;
+            inner.claude.failures = 0;
+            Ok(())
+        }
+        Err(error) => {
+            inner.claude.failures = inner.claude.failures.saturating_add(1);
+            let shift = inner.claude.failures.saturating_sub(1).min(8);
+            let backoff = (60_000_i64.saturating_mul(1_i64 << shift)).min(CLAUDE_MAX_BACKOFF_MS);
+            let retry_at = error.downcast_ref::<claude_oauth::RetryAfter>().map(|retry| retry.0).unwrap_or(0);
+            inner.claude.retry_at = Some(completed_at.saturating_add(backoff).max(retry_at));
+            inner.claude.error = Some(format!("{error:#}"));
+            Err(error)
+        }
+    }
+}
+
 impl UsageStore {
-    /// Accept at most one status-line sample per pane in a fifteen-second
-    /// window. The forwarder processes are intentionally stateless; the app
-    /// can enforce the throttle without a sidecar file or a second transport.
-    pub fn ingest_claude(&self, tab_id: &str, payload: &Value) -> bool {
-        let now = now_ms();
-        let mut inner = self.inner.lock().unwrap();
-        if inner.statusline_by_tab.get(tab_id).is_some_and(|last| now.saturating_sub(*last) < STATUSLINE_THROTTLE_MS) {
-            return false;
-        }
-        let windows = parse_claude(payload, now);
-        if windows.is_empty() {
-            return false;
-        }
-        inner.statusline_by_tab.insert(tab_id.to_string(), now);
-        for window in windows {
-            inner.claude_statusline_by_key.insert(window.key.clone(), now);
-            inner.windows.insert((window.agent.clone(), window.key.clone()), window);
-        }
-        true
+    /// Deduplicate identical windows only. Changed percentages and deadlines
+    /// publish immediately, even when another tab just supplied the old window.
+    pub fn ingest_claude(&self, launch_account: Option<&str>, payload: &Value) -> bool {
+        let account = claude_account_identity();
+        ingest_attributed_claude(&mut self.inner.lock().unwrap(), account, launch_account, payload, now_ms())
+    }
+
+    #[cfg(test)]
+    fn ingest_claude_at(&self, payload: &Value, now: i64) -> bool {
+        apply_claude_live(&mut self.inner.lock().unwrap(), payload, now)
     }
 
     pub fn snapshot(&self, running_agents: &HashSet<String>) -> UsageSnapshot {
-        let now = now_ms();
-        let mut inner = self.inner.lock().unwrap();
-        inner.windows.retain(|_, window| now.saturating_sub(window.updated_at) < STALE_MS || running_agents.contains(&window.agent));
-        let mut windows: Vec<_> = inner
-            .windows
-            .values()
-            .map(|window| {
-                let stale = now.saturating_sub(window.updated_at) >= STALE_MS;
-                let mut window = window.clone();
-                window.stale = stale;
-                window
-            })
-            .collect();
-        windows.sort_by(|a, b| b.used_percent.total_cmp(&a.used_percent).then_with(|| a.agent.cmp(&b.agent)).then_with(|| a.key.cmp(&b.key)));
-        UsageSnapshot { windows, codex: inner.codex_usage.clone() }
+        self.snapshot_at(running_agents, now_ms())
     }
 
-    /// Fill Claude windows that the status line has not supplied recently.
-    /// Credentials are read for this request only, and even a manual refresh
-    /// cannot call the endpoint more than once every fifteen minutes.
-    pub fn refresh_claude(&self) -> Result<()> {
-        let now = now_ms();
-        {
-            let mut inner = self.inner.lock().unwrap();
-            let fable_is_live = inner
-                .claude_statusline_by_key
-                .get("fable_weekly")
-                .is_some_and(|last| now.saturating_sub(*last) < BACKGROUND_REFRESH_MS);
-            let poll = &mut inner.claude;
-            if fable_is_live
-                || poll.in_flight
-                || poll.retry_at.is_some_and(|at| now < at)
-                || poll.last_attempt.is_some_and(|at| now.saturating_sub(at) < BACKGROUND_REFRESH_MS)
-            {
-                return Ok(());
-            }
-            poll.in_flight = true;
-            poll.last_attempt = Some(now);
-        }
-
-        let answer = claude_oauth::read_token()
-            .context("Claude Code OAuth credentials were not found")
-            .and_then(|token| claude_oauth::fetch(&token, now));
-
+    fn snapshot_at(&self, running_agents: &HashSet<String>, now: i64) -> UsageSnapshot {
         let mut inner = self.inner.lock().unwrap();
-        inner.claude.in_flight = false;
-        match answer {
-            Ok(oauth) => {
-                let live_statusline = inner
-                    .windows
-                    .values()
-                    .filter(|window| window.agent == "claude")
-                    .filter(|window| {
-                        inner
-                            .claude_statusline_by_key
-                            .get(&window.key)
-                            .is_some_and(|seen| now.saturating_sub(*seen) < BACKGROUND_REFRESH_MS)
-                    })
-                    .cloned()
-                    .collect();
-                let windows = merge_claude_windows(oauth, live_statusline);
-                inner.windows.retain(|(agent, _), _| agent != "claude");
-                for window in windows {
-                    inner.windows.insert((window.agent.clone(), window.key.clone()), window);
-                }
-                inner.claude.last_success = Some(now);
-                inner.claude.retry_at = None;
-                inner.claude.failures = 0;
-                Ok(())
-            }
-            Err(error) => {
-                inner.claude.failures = inner.claude.failures.saturating_add(1);
-                let shift = inner.claude.failures.saturating_sub(1).min(4);
-                let backoff = (BACKGROUND_REFRESH_MS.saturating_mul(1_i64 << shift)).min(CLAUDE_MAX_BACKOFF_MS);
-                inner.claude.retry_at = Some(now.saturating_add(backoff));
-                Err(error)
-            }
+        inner.windows.retain(|_, window| window.agent == "claude" || now.saturating_sub(window.updated_at) < STALE_MS || running_agents.contains(&window.agent));
+        let mut windows: Vec<_> = inner.windows.values().map(|window| {
+            let mut window = window.clone();
+            window.stale = now.saturating_sub(window.updated_at) >= STALE_MS
+                || (window.agent == "claude" && expired(&window, now));
+            window
+        }).collect();
+        windows.sort_by(|a, b| b.used_percent.total_cmp(&a.used_percent).then_with(|| a.agent.cmp(&b.agent)).then_with(|| a.key.cmp(&b.key)));
+        inner.revision += 1;
+        UsageSnapshot {
+            revision: inner.revision,
+            claude_account: inner.claude_account.clone(),
+            windows,
+            codex: inner.codex_usage.clone(),
+            claude: ClaudeRefresh {
+                retry_at: inner.claude.retry_at.filter(|at| *at > now),
+                revalidate_at: claude_revalidate_at(&inner),
+                error: inner.claude.error.clone(),
+            },
         }
+    }
+
+    /// Manual and reset-boundary refreshes bypass the ordinary poll debounce,
+    /// while failures and Retry-After still gate every request.
+    pub fn refresh_claude(&self, manual: bool) -> Result<()> {
+        let now = now_ms();
+        let account = claude_account_identity();
+        let generation = {
+            let mut inner = self.inner.lock().unwrap();
+            select_claude_account(&mut inner, account.clone());
+            if !begin_claude_refresh(&mut inner, now, manual) { return Ok(()); }
+            inner.claude_generation
+        };
+        let answer = account.as_ref().context("Claude account attribution is unavailable; check the system Claude login")
+            .and_then(|_| claude_oauth::read_token().context("Claude Code OAuth credentials were not found"))
+            .and_then(|token| claude_oauth::fetch(&token, now));
+        let current_account = claude_account_identity();
+        let mut inner = self.inner.lock().unwrap();
+        select_claude_account(&mut inner, current_account);
+        finish_claude_refresh(&mut inner, generation, answer, now, now_ms())
     }
 
     /// Refresh through the local Codex app-server. Ordinary calls are cached
@@ -553,6 +676,158 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn session_sample(used: u32, reset: i64) -> Value {
+        json!({"rate_limits": {"five_hour": {"used_percentage": used, "resets_at": reset}}})
+    }
+
+    #[test]
+    fn changed_percent_is_immediate_but_identical_receipts_are_deduplicated() {
+        let store = UsageStore::default();
+        assert!(store.ingest_claude_at(&session_sample(10, 100), 1000));
+        assert!(!store.ingest_claude_at(&session_sample(10, 100), 2000));
+        assert!(store.ingest_claude_at(&session_sample(11, 100), 2000));
+        assert!(!store.ingest_claude_at(&session_sample(11, 100), 3000));
+        assert!(store.ingest_claude_at(&session_sample(11, 100), 17_000));
+    }
+
+    #[test]
+    fn expiration_is_stale_even_after_a_recent_receipt_and_does_not_make_zero() {
+        let store = UsageStore::default();
+        store.ingest_claude_at(&session_sample(100, 10), 9_000);
+        let before = store.snapshot_at(&HashSet::new(), 9_999);
+        assert!(!before.windows[0].stale);
+        let after = store.snapshot_at(&HashSet::new(), 10_000);
+        assert!(after.windows[0].stale);
+        assert_eq!(after.windows[0].used_percent, 100.0);
+        assert_eq!(after.claude.revalidate_at, Some(10_000));
+        assert!(!store.ingest_claude_at(&session_sample(100, 10), 30_000));
+        assert_eq!(store.snapshot_at(&HashSet::new(), 30_000).windows[0].updated_at, 9_000);
+        assert!(after.revision > before.revision);
+    }
+
+    #[test]
+    fn old_tab_or_oauth_window_cannot_replace_a_confirmed_rollover() {
+        let store = UsageStore::default();
+        store.ingest_claude_at(&session_sample(1, 200), 11_000);
+        assert!(!store.ingest_claude_at(&session_sample(100, 10), 12_000));
+        let oauth = parse_claude(&session_sample(100, 10), 13_000);
+        let current = store.snapshot_at(&HashSet::new(), 13_000).windows;
+        let merged = merge_claude_windows(oauth, current.clone());
+        assert_eq!(merged, current);
+        // Reverse source order: a more recently RECEIVED old live window must
+        // not mask the next window from an OAuth request that started earlier.
+        let merged = merge_claude_windows(current, parse_claude(&session_sample(100, 10), 14_000));
+        assert_eq!(merged[0].used_percent, 1.0);
+        assert_eq!(merged[0].resets_at, Some(200_000));
+    }
+
+    #[test]
+    fn oauth_preserves_omitted_windows_and_live_data_arriving_in_flight() {
+        let mut inner = Inner::default();
+        apply_claude_live(&mut inner, &json!({"rate_limits": {
+            "five_hour": {"used_percentage": 100, "resets_at": 10},
+            "seven_day": {"used_percentage": 45, "resets_at": 500},
+            "fable_weekly": {"used_percentage": 72, "resets_at": 600}
+        }}), 9_000);
+        assert!(begin_claude_refresh(&mut inner, 10_000, false));
+        apply_claude_live(&mut inner, &session_sample(1, 200), 11_000);
+        let old = parse_claude(&session_sample(100, 10), 10_000);
+        finish_claude_refresh(&mut inner, 0, Ok(old), 10_000, 12_000).unwrap();
+        assert_eq!(inner.windows.len(), 3);
+        assert_eq!(inner.windows[&("claude".into(), "five_hour".into())].used_percent, 1.0);
+        // A delayed response for the SAME window also loses to the live turn.
+        let old = parse_claude(&session_sample(0, 200), 10_000);
+        finish_claude_refresh(&mut inner, 0, Ok(old), 10_000, 13_000).unwrap();
+        assert_eq!(inner.windows[&("claude".into(), "five_hour".into())].used_percent, 1.0);
+        assert!(finish_claude_refresh(&mut inner, 0, Err(anyhow::anyhow!("offline")), 10_000, 14_000).is_err());
+        assert_eq!(inner.windows[&("claude".into(), "five_hour".into())].used_percent, 1.0);
+        assert_eq!(inner.windows[&("claude".into(), "fable_weekly".into())].used_percent, 72.0);
+    }
+
+    #[test]
+    fn expiry_bypasses_recent_poll_once_then_gets_one_bounded_followup() {
+        let mut inner = Inner::default();
+        apply_claude_live(&mut inner, &session_sample(100, 10), 9_000);
+        inner.claude.last_attempt = Some(9_500);
+        assert!(!begin_claude_refresh(&mut inner, 9_999, false));
+        assert!(begin_claude_refresh(&mut inner, 10_000, false));
+        assert!(!begin_claude_refresh(&mut inner, 10_000, true));
+        let old = parse_claude(&session_sample(100, 10), 10_000);
+        finish_claude_refresh(&mut inner, 0, Ok(old), 10_000, 11_000).unwrap();
+        assert_eq!(inner.windows[&("claude".into(), "five_hour".into())].updated_at, 9_000);
+        assert_eq!(claude_revalidate_at(&inner), Some(70_000));
+        assert!(!begin_claude_refresh(&mut inner, 69_999, false));
+        assert!(begin_claude_refresh(&mut inner, 70_000, false));
+        finish_claude_refresh(&mut inner, 0, Ok(vec![]), 70_000, 71_000).unwrap();
+        assert_eq!(claude_revalidate_at(&inner), None);
+        assert!(!begin_claude_refresh(&mut inner, 72_000, false));
+        assert!(begin_claude_refresh(&mut inner, 70_000 + BACKGROUND_REFRESH_MS, false));
+    }
+
+    #[test]
+    fn manual_refresh_bypasses_polling_but_respects_retry_after() {
+        let mut inner = Inner::default();
+        inner.claude.last_attempt = Some(1000);
+        assert!(!begin_claude_refresh(&mut inner, 2000, false));
+        assert!(begin_claude_refresh(&mut inner, 2000, true));
+        let error = claude_oauth::RetryAfter(180_000).into();
+        assert!(finish_claude_refresh(&mut inner, 0, Err(error), 2000, 3000).is_err());
+        assert_eq!(inner.claude.retry_at, Some(180_000));
+        assert!(inner.claude.error.is_some());
+        assert!(!begin_claude_refresh(&mut inner, 4000, true));
+        apply_claude_live(&mut inner, &session_sample(100, 10), 9_000);
+        assert_eq!(claude_revalidate_at(&inner), Some(180_000));
+        assert!(!begin_claude_refresh(&mut inner, 10_000, false));
+        assert!(begin_claude_refresh(&mut inner, 180_000, false));
+    }
+
+    #[test]
+    fn account_switch_rejects_old_tabs_unknown_identity_and_inflight_responses() {
+        let mut inner = Inner::default();
+        let mut a = session_sample(100, 100);
+        a["_raccoon_usage_account"] = json!("account-a");
+        ingest_attributed_claude(&mut inner, Some("account-a".into()), Some("account-a"), &a, 1000);
+        assert_eq!(inner.windows.len(), 1);
+        let generation = inner.claude_generation;
+        assert!(begin_claude_refresh(&mut inner, 1000, false));
+        // The old tab's next hook observes the selected account B, but it was
+        // launched for A; its windows must not be reassigned to B.
+        ingest_attributed_claude(&mut inner, Some("account-b".into()), Some("account-a"), &a, 2000);
+        assert!(inner.windows.is_empty());
+        let mut b = session_sample(12, 90);
+        b["_raccoon_usage_account"] = json!("account-b");
+        ingest_attributed_claude(&mut inner, Some("account-b".into()), Some("account-b"), &b, 3000);
+        // Generation protects even a response with a later reset deadline.
+        finish_claude_refresh(&mut inner, generation, Ok(parse_claude(&a, 1000)), 1000, 4000).unwrap();
+        assert_eq!(inner.windows[&("claude".into(), "five_hour".into())].used_percent, 12.0);
+        assert!(inner.claude.retry_at.is_none());
+        assert!(!ingest_attributed_claude(&mut inner, Some("account-b".into()), Some("account-b"), &a, 5000));
+        ingest_attributed_claude(&mut inner, None, None, &b, 6000);
+        assert!(inner.windows.is_empty());
+    }
+
+    #[test]
+    fn changed_live_rollover_is_published_inside_dedup_interval() {
+        let store = UsageStore::default();
+        let reset = 1_788_757_220;
+        let before_at = reset * 1000 - 1000;
+        let after_at = reset * 1000 + 1000;
+        let before = json!({"rate_limits": {
+            "five_hour": {"used_percentage": 100, "resets_at": reset},
+            "seven_day": {"used_percentage": 45},
+            "fable_weekly": {"used_percentage": 72}
+        }});
+        assert!(store.ingest_claude_at(&before, before_at));
+        assert!(!store.ingest_claude_at(&before, before_at));
+        let after = json!({"rate_limits": {
+            "five_hour": {"used_percentage": 1, "resets_at": reset + 18_000}
+        }});
+        assert!(store.ingest_claude_at(&after, after_at), "changed post-reset sample must publish immediately");
+        let snapshot = store.snapshot_at(&HashSet::new(), after_at);
+        assert_eq!(snapshot.windows.len(), 3);
+        assert_eq!(snapshot.windows.iter().find(|w| w.key == "five_hour").unwrap().used_percent, 1.0);
+    }
+
     #[test]
     fn codex_classifies_known_windows_with_one_minute_tolerance() {
         assert_eq!(classify_codex(299), ("five_hour".into(), "5h".into()));
@@ -654,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_statusline_accepts_documented_and_fractional_usage() {
+    fn claude_statusline_accepts_percentage_fields() {
         let windows = parse_claude(
             &json!({"rate_limits": {
                 "five_hour": {"used_percentage": 62, "resets_at": 1788757220},
@@ -672,7 +947,7 @@ mod tests {
         assert_eq!(five_hour.used_percent, 62.0);
         let opus = windows.iter().find(|window| window.key == "seven_day_opus").unwrap();
         assert_eq!(opus.label, "7d Opus");
-        assert_eq!(opus.used_percent, 90.0);
+        assert_eq!(opus.used_percent, 0.9);
         let fable = windows.iter().find(|window| window.key == "fable_weekly").unwrap();
         assert_eq!(fable.label, "Fable");
         assert_eq!(fable.used_percent, 82.0);

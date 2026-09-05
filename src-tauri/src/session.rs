@@ -181,6 +181,8 @@ fn expire_composer_echoes(pending: &mut std::collections::VecDeque<ComposerEcho>
 /// A PTY-first tab: the CLI in a pane, its transcript being followed, and the
 /// permission frames its hooks have parked here waiting for an answer.
 pub struct CliTab {
+    /// Account/config identity captured before launch, used only for usage attribution.
+    usage_account: Option<String>,
     /// Which CLI is in the pane. The launch line, the hook plumbing and the
     /// transcript differ per harness; nothing below does.
     pub harness: CliKind,
@@ -1194,12 +1196,14 @@ impl SessionManager {
             CliKind::Codex => self.codex_launch(rt, entry, tab, &exe, &mut env)?,
         };
 
+        let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: 120, rows: 30, command: Some(&launch.command), env: &env };
         self.terminals.spawn(self.app.clone(), &pane, spec).context("start the agent's CLI")?;
         self.app.state::<crate::AppState>().star_nag.launched(&self.app, rt.key());
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         rt.engine = Engine::Cli(CliTab {
+            usage_account,
             harness: kind,
             mode: tab.permission_mode.clone(),
             pane_id: pane.clone(),
@@ -1643,10 +1647,10 @@ impl SessionManager {
         let Ok(rt_arc) = self.runtime(&frame.session, &frame.tab) else {
             return HookReply::default();
         };
-        let (kind, tail, asks_every_tool, origin) = {
+        let (kind, tail, asks_every_tool, origin, usage_account) = {
             let rt = rt_arc.lock().unwrap();
             match &rt.engine {
-                Engine::Cli(p) => (p.harness, p.tail.clone(), p.harness == CliKind::Codex && codex::asks_every_tool(&p.mode), p.origin.clone()),
+                Engine::Cli(p) => (p.harness, p.tail.clone(), p.harness == CliKind::Codex && codex::asks_every_tool(&p.mode), p.origin.clone(), p.usage_account.clone()),
                 // A hook from a CLI this app did not start, or from one whose
                 // tab has moved on: nothing to say, and nothing to block.
                 _ => return HookReply::default(),
@@ -1661,7 +1665,7 @@ impl SessionManager {
             return HookReply::default();
         }
         if frame.event == "StatusLine" {
-            if kind == CliKind::Claude && self.status.usage.ingest_claude(&frame.tab, &frame.payload) {
+            if kind == CliKind::Claude && self.status.usage.ingest_claude(usage_account.as_deref(), &frame.payload) {
                 self.emit_usage();
             }
             return HookReply::default();
