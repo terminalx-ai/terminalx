@@ -396,3 +396,10 @@
 .editor-pane .cm-editor {
   height: 100%;
 }
+
+/* Support reminders yield to approval and update dialogs. Keep their stack
+   space so higher-priority agent notices do not jump when a dialog opens. */
+body:has([role="dialog"]) [data-star-reminder],
+body:has([role="alertdialog"]) [data-star-reminder] {
+  visibility: hidden;
+}

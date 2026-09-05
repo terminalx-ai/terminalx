@@ -19,6 +19,8 @@ interface Binding {
   handler: Handler;
   /** Fire even when focus is inside an editable field. */
   global?: boolean;
+  /** Higher priorities win before registration order (e.g. non-modal Escape). */
+  priority?: number;
 }
 
 const bindings: Binding[] = [];
@@ -63,6 +65,11 @@ export function isEditable(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
 }
 
+/** Escape belongs to an open surface before background tabs or reminders. */
+export function hasEscapeOverlay(): boolean {
+  return !!document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]');
+}
+
 let installed = false;
 function install() {
   if (installed || typeof window === "undefined") return;
@@ -87,23 +94,25 @@ function install() {
   );
 }
 
-export function registerHotkey(chord: string, handler: Handler, opts?: { global?: boolean }) {
+export function registerHotkey(chord: string, handler: Handler, opts?: { global?: boolean; priority?: number }) {
   install();
-  const b: Binding = { chord: normalizeChord(chord), handler, global: opts?.global };
+  const b: Binding = { chord: normalizeChord(chord), handler, global: opts?.global, priority: opts?.priority };
   bindings.push(b);
+  bindings.sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0));
   return () => {
     const i = bindings.indexOf(b);
     if (i >= 0) bindings.splice(i, 1);
   };
 }
 
-export function useHotkey(chord: string, handler: Handler, opts?: { global?: boolean; enabled?: boolean }) {
+export function useHotkey(chord: string, handler: Handler, opts?: { global?: boolean; enabled?: boolean; priority?: number }) {
   const enabled = opts?.enabled ?? true;
   const global = opts?.global;
+  const priority = opts?.priority;
   useEffect(() => {
     if (!enabled) return;
-    return registerHotkey(chord, handler, { global });
-  }, [chord, handler, enabled, global]);
+    return registerHotkey(chord, handler, { global, priority });
+  }, [chord, handler, enabled, global, priority]);
 }
 
 /** Keycaps for tooltips: ["⌘", "B"] on mac, ["Ctrl", "B"] elsewhere. */

@@ -240,7 +240,6 @@ export interface UsageWindow {
   resetsAt: number | null;
   windowMinutes: number | null;
   updatedAt: number;
-  plan?: string;
   stale: boolean;
 }
 
@@ -375,9 +374,10 @@ export interface TabPtyEvent {
 }
 
 export const agent = {
+  prepareContinuation: (sessionId: string, tabId: string) => invoke<import("@/lib/continuation").ContinuationContext>("prepare_continuation", { sessionId, tabId }),
   loadEvents: (sessionId: string, tabId: string) => invoke<AgentEvent[]>("load_tab_events", { sessionId, tabId }),
-  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[]) =>
-    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null }),
+  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false) =>
+    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery }),
   interrupt: (sessionId: string, tabId: string) => invoke<void>("interrupt_turn", { sessionId, tabId }),
   tabHandoff: (sessionId: string, tabId: string) => invoke<HandoffInfo>("tab_handoff", { sessionId, tabId }),
   /** Start a tab's own CLI. Idempotent, and a no-op for headless harnesses. */
@@ -495,21 +495,41 @@ export interface TextFile {
 export interface TextHit {
   path: string;
   line: number;
+  /** Character column of the first match on the line. */
   col: number;
   text: string;
+  /** Every match on the line as `[start, end)` character offsets into `text`. */
+  matches: [number, number][];
+  /** What each match becomes, in the same order, when the search carried a replacement. */
+  replacements?: string[];
 }
 export interface TextSearch {
   hits: TextHit[];
   files: number;
   capped: boolean;
 }
+/** A file to rewrite, and the 1-based lines to touch in it (every line when absent). */
+export interface ReplaceTarget {
+  path: string;
+  lines?: number[];
+}
+export interface ReplaceReport {
+  files: number;
+  replacements: number;
+}
 export const fs = {
   listDir: (root: string, rel: string) => invoke<DirEntry[]>("list_dir", { root, rel }),
   readText: (path: string) => invoke<TextFile>("read_text_file", { path }),
   writeText: (path: string, content: string) => invoke<number>("write_text_file", { path, content }),
   mtime: (path: string) => invoke<number | null>("file_mtime", { path }),
-  searchText: (root: string, query: string, regex: boolean, caseSensitive: boolean, limit = 500) =>
-    invoke<TextSearch>("search_text", { root, query, regex, caseSensitive, limit }),
+  searchText: (root: string, query: string, regex: boolean, caseSensitive: boolean, limit = 500, replacement?: string) =>
+    invoke<TextSearch>("search_text", { root, query, regex, caseSensitive, limit, replacement: replacement ?? null }),
+  /**
+   * Rewrite matches on disk. Without `targets` every searchable file under
+   * the root is a candidate except those in `skip`.
+   */
+  replaceText: (root: string, query: string, replacement: string, regex: boolean, caseSensitive: boolean, targets: ReplaceTarget[] | null, skip: string[] = []) =>
+    invoke<ReplaceReport>("replace_text", { root, query, replacement, regex, caseSensitive, targets, skip }),
 };
 
 // ---- issues (GitHub through gh, Linear through its API)

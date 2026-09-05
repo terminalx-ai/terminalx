@@ -1,4 +1,10 @@
 fn main() {
+    // Share the homepage with the frontend instead of maintaining a second repo target.
+    println!("cargo:rerun-if-changed=../src/lib/repo.ts");
+    let repo = std::fs::read_to_string("../src/lib/repo.ts").expect("read repository identity");
+    let url = repo.lines().find_map(|line| line.strip_prefix("export const REPO_URL = \"").and_then(|s| s.strip_suffix("\";"))).expect("REPO_URL literal");
+    assert!(url.starts_with("https://github.com/"));
+    println!("cargo:rustc-env=TERMINALX_REPO_URL={url}");
     embed_cli_skill();
     // ggml's Metal backend uses `@available` checks, which compile to a call
     // into clang's builtins runtime. Rust links with `-nodefaultlibs`, so that
