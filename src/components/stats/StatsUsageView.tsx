@@ -69,15 +69,14 @@ export function StatsUsageView() {
         </header>
 
         {error ? (
-          <div className="mt-6 rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
+          <div role="alert" className="mt-6 rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
             <p>Could not read local usage: {error}</p>
             <Button variant="outline" size="sm" className="mt-3" onClick={() => void load()}>Try again</Button>
           </div>
-        ) : !snapshot ? (
-          <LoadingState />
-        ) : (
+        ) : null}
+        {snapshot ? (
           <StatsContents snapshot={snapshot} refreshing={loading} />
-        )}
+        ) : !error ? <LoadingState /> : null}
       </div>
     </div>
   );
@@ -111,8 +110,15 @@ function StatsContents({ snapshot, refreshing }: { snapshot: StatsUsageSnapshot;
           <MetricCard icon={<GitPullRequest />} value={snapshot.app.prsCreated.toLocaleString()} label="PRs created" />
         </div>
         <p className="mt-4 px-1 text-xs text-muted-foreground">
-          {snapshot.app.trackingSince ? `Tracking since ${formatDate(snapshot.app.trackingSince)}` : "Tracking starts with the first local session"}
+          {snapshot.app.trackingSince ? `Tracking since ${formatDate(snapshot.app.trackingSince)}` : "Tracking starts with the first recorded activity"}
         </p>
+        <p className="mt-2 px-1 text-xs leading-relaxed text-muted-foreground">
+          Lifetime activity on this installation. Agents spawned counts each live start of work, including another turn or resuming after a wait in the same conversation. Working time excludes waits and idle time. PRs include those discovered on tracked workspace branches, including merged and closed PRs.
+        </p>
+        <p className="mt-2 px-1 text-[11px] leading-relaxed text-faint">
+          Earlier activity is recovered from surviving local history. Deleted history and unrecorded work cannot be fully reconstructed.
+        </p>
+        {snapshot.app.accountingError && <p role="alert" className="mt-3 px-1 text-xs text-destructive">{snapshot.app.accountingError}</p>}
 
         <div className="mb-3 mt-7 flex items-center gap-3">
           <h2 className="text-sm font-semibold">Usage Analytics</h2>
@@ -132,7 +138,7 @@ function StatsContents({ snapshot, refreshing }: { snapshot: StatsUsageSnapshot;
           <div className="flex items-start gap-3">
             <div>
               <h3 id="usage-overview-heading" className="text-sm font-semibold">Usage Overview</h3>
-              <p className="mt-0.5 text-xs text-muted-foreground">Updated {formatTimestamp(snapshot.updatedAt)}</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">Latest 30 local calendar dates, including today · Known TerminalX projects and worktrees · Updated {formatTimestamp(snapshot.updatedAt)}</p>
             </div>
           </div>
 

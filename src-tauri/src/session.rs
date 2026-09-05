@@ -448,6 +448,27 @@ impl SessionManager {
     }
 
     fn set_status(&self, rt: &mut TabRuntime, status: TabStatus) {
+        // CLI work starts require a live hook (or a delivered permission
+        // answer). Composer optimism and transcript hydration only affect UI.
+        if !matches!(rt.engine, Engine::Cli(_)) || status != TabStatus::InProgress {
+            self.record_activity(rt, status, store::activity::Source::Live);
+        }
+        self.set_display_status(rt, status);
+    }
+
+    fn record_activity(&self, rt: &TabRuntime, status: TabStatus, source: store::activity::Source) {
+        match store::activity::transition(&rt.key(), status, source) {
+            Ok(Some(total)) => {
+                // #110's reminder can subscribe without scanning transcripts
+                // or treating hydration/tab creation as fresh usage.
+                let _ = self.app.emit("agent_work_started", total);
+            }
+            Ok(None) => {}
+            Err(error) => log::error!("record app activity: {error:#}"),
+        }
+    }
+
+    fn set_display_status(&self, rt: &mut TabRuntime, status: TabStatus) {
         if rt.status == status {
             return;
         }
@@ -799,6 +820,7 @@ impl SessionManager {
         if rt.child.is_none() && !matches!(rt.engine, Engine::Cli(_)) {
             return Ok(());
         }
+        self.record_activity(&rt, TabStatus::Idle, store::activity::Source::Live);
         match &mut rt.engine {
             // The TUI reads a bare Escape as "stop"; nothing else can reach it.
             Engine::Cli(p) => {
@@ -831,6 +853,7 @@ impl SessionManager {
         let rt = self.tabs.lock().unwrap().get(&key).cloned();
         let pane = rt.and_then(|rt| {
             let mut rt = rt.lock().unwrap();
+            self.record_activity(&rt, TabStatus::Idle, store::activity::Source::Live);
             rt.child = None;
             rt.child_pid = None;
             self.release_cli(&mut rt)
@@ -885,6 +908,7 @@ impl SessionManager {
         };
         self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: allow, label, automatic: false }, None);
         if rt.pending.is_empty() {
+            self.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
             self.set_status(&mut rt, TabStatus::InProgress);
         }
         Ok(())
@@ -906,6 +930,7 @@ impl SessionManager {
         }
         self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: true, label: "Answered".into(), automatic: false }, None);
         if rt.pending.is_empty() {
+            self.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
             self.set_status(&mut rt, TabStatus::InProgress);
         }
         Ok(())
@@ -1043,6 +1068,9 @@ impl SessionManager {
     }
 
     pub fn kill_all(&self) {
+        if let Err(error) = store::activity::shutdown() {
+            log::error!("flush activity on shutdown: {error:#}");
+        }
         self.host.kill_all();
     }
 
@@ -1403,6 +1431,9 @@ impl SessionManager {
                         continue;
                     }
                 }
+                // A transcript may supply a completion the hook missed. It
+                // may close actual live work but never open a replayed start.
+                self.record_activity(&rt, TabStatus::Completed, store::activity::Source::Replay);
             }
             self.apply(&mut rt, payload, None);
         }
@@ -1606,6 +1637,11 @@ impl SessionManager {
             }
             return HookReply::default();
         }
+        // Stop at hook receipt, before transcript settling/git snapshots, so
+        // time spent waiting for display bookkeeping is not agent work.
+        if matches!(frame.event.as_str(), "Stop" | "Interrupt" | "SessionEnd") {
+            self.record_activity(&rt_arc.lock().unwrap(), TabStatus::Completed, store::activity::Source::Live);
+        }
         // Claude's transcript path is a guess made before the CLI ran and
         // Codex's is not knowable at all until now; either way the hook
         // carries the file it actually opened — but only a file this CLI
@@ -1645,12 +1681,18 @@ impl SessionManager {
             "PreToolUse" if asks_every_tool => return self.ask_permission(&rt_arc, &frame, kind),
             "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => {
                 let mut rt = rt_arc.lock().unwrap();
+                // A settings restart/teardown may have replaced this launch
+                // while its transcript was being drained above.
+                if !matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(&frame)) {
+                    return HookReply::default();
+                }
                 rt.last_activity = Instant::now();
                 if !rt.turn_open {
                     rt.turn_open = true;
                     rt.turn_started_at = Some(Instant::now());
                 }
                 if rt.pending.is_empty() {
+                    self.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
                     self.set_status(&mut rt, TabStatus::InProgress);
                 }
                 drop(rt);
@@ -1913,6 +1955,9 @@ impl SessionManager {
         }
 
         let is_boundary = payload.is_turn_boundary();
+        if is_boundary {
+            self.record_activity(rt, TabStatus::Completed, store::activity::Source::Replay);
+        }
         let payload = match payload {
             Payload::TurnCompleted { status, final_text, usage, duration_ms, auth_failed, .. } => {
                 let head = index::get(&rt.session_id).ok().and_then(|e| git::snapshot_tree(Path::new(&e.cwd)).ok());
@@ -1954,6 +1999,7 @@ impl SessionManager {
                 if sent {
                     rt.turn_open = true;
                     rt.turn_started_at = Some(Instant::now());
+                    self.set_status(rt, TabStatus::InProgress);
                     return;
                 }
             }

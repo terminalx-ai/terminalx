@@ -40,6 +40,7 @@ export interface AppStats {
   agentTimeMs: number;
   prsCreated: number;
   trackingSince: string | null;
+  accountingError?: string | null;
 }
 
 export interface UsageDay {
@@ -137,6 +138,7 @@ export const api = {
   /** Card snippets for the agent dashboard; every session when no ids are given. */
   sessionSummaries: (sessionIds?: string[]) => invoke<SessionSummary[]>("session_summaries", { sessionIds: sessionIds ?? null }),
   statsUsageSnapshot: () => invoke<StatsUsageSnapshot>("stats_usage_snapshot"),
+  appActivitySummary: () => invoke<AppStats>("app_activity_summary"),
   createSession: (req: NewSession) => invoke<SessionEntry>("create_session", { req }),
   addTab: (sessionId: string, tab: NewTab) => invoke<TabEntry>("add_tab", { sessionId, tab }),
   removeTab: (sessionId: string, tabId: string) => invoke<void>("remove_tab", { sessionId, tabId }),

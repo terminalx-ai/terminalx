@@ -227,11 +227,46 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
   new input plus cached tokens. API-equivalent prices are inferred per local
   day, model, and attributed worktree; long-context tiers apply within each of
   those buckets. Unknown model prices leave the estimate explicitly partial.
-- **Local app counters.** Agents spawned, agent working time, created pull
-  requests, and “Tracking since” come from this installation's retained
-  TerminalX sessions and event log, not provider histories. “Tracking since”
-  is the earliest retained local session creation date. Those counters are
-  deliberately installation-local and do not change the analytics window.
+- **Lifetime app activity.** Installation-local aggregates in `stats-activity.json`
+  survive deleting/archiving tabs and workspaces, event pruning, restarts, and
+  provider-cache invalidation. “Agents spawned” counts each live transition
+  into working, following Legacy's recorder: working → done/waiting → working
+  counts twice even in one conversation. Blank tabs, optimistic submissions,
+  provider identity updates, transcript replay, and same-state hooks do not
+  create starts. Claude Code, Codex, and app-launched automations share the
+  backend lifecycle source. The `agent_work_started` event carries the new
+  cumulative count for the #110 reminder; consumers must use this definition
+  and must not count loaded tabs or provider sessions. `app_activity_summary`
+  reads the persisted baseline without invoking provider scanners. No reminder
+  consumer exists on this branch yet; #110 should use that command and event.
+- **Working time and tracking date.** Completed active intervals use a monotonic
+  clock and stop at completion, waiting/blocking, interruption, teardown, or
+  shutdown. Simultaneous agents contribute their own work time. In-flight time
+  appears after an interval closes. Starts are persisted immediately; a hard
+  process crash can lose the unfinished interval's time, which is never extended
+  through downtime. The earliest recorded activity date is persisted separately
+  and may move earlier during recovery, never forward during history cleanup.
+- **PR accounting.** App creation and normal lookup of a tracked workspace branch
+  record a canonical host/repository/PR number once, including agent CLI-created
+  PRs and merged/closed PRs. Deduplication identities outlive diagnostic event
+  retention. Startup also retries discovery for known project worktrees and
+  retained session branches (including removed-workspace branch provenance).
+  This is scoped discovery, not every PR in a GitHub account.
+- **Recovery and persistence.** Version 1 imports surviving Raccoon logs, even
+  logs outside the current session index, and `stats-prs.json`. Prompts need
+  subsequent work evidence; resume identity announcements are not starts.
+  Historical wait/resume boundaries are recovered where recorded. Missing
+  starts/stops, deleted logs, and PRs on forgotten branches cannot be fully
+  reconstructed, so recovered start totals are a lower bound. Pre-ledger
+  durations cannot separate waits that were never logged. Stable recovered-event
+  identities and a persisted pre-live cutoff make retries idempotent without
+  double-counting live work. One owner serializes updates and atomic writes,
+  including shutdown; a second complete snapshot and generations recover a
+  missing/corrupt copy. If neither copy is readable, accounting reports an error
+  and preserves the files. Valid known totals remain available with recovery or
+  persistence errors. Diagnostic events are bounded independently of lifetime
+  aggregates and deduplication. These counters have no 30-day limit; provider
+  analytics above still do.
 
 ### C16 — Audit and hardening ✅
 - [x] Screenshots read back against native macOS conventions at 1360×860 and 1000×700 (sidebar, transcript, composer and panel all hold their layout at both sizes; traffic lights, drag region and focus rings behave as a native window's).

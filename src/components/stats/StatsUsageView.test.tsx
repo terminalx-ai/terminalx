@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { StatsUsageSnapshot } from "@/lib/api";
@@ -32,6 +32,7 @@ vi.mock("@/lib/api", async (importOriginal) => ({
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 
 const { StatsUsageView } = await import("./StatsUsageView");
+const { api } = await import("@/lib/api");
 
 afterEach(cleanup);
 
@@ -47,5 +48,25 @@ describe("StatsUsageView", () => {
     expect(screen.getByText("423 sessions")).toBeTruthy();
     expect(screen.getByText("gpt-5.6-sol · ai/raccoon")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Enable" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText(/Agents spawned counts each live start of work/)).toBeTruthy();
+    expect(screen.getByText(/Latest 30 local calendar dates/)).toBeTruthy();
+  });
+
+  it("keeps known totals visible alongside an accounting error", async () => {
+    vi.mocked(api.statsUsageSnapshot).mockResolvedValueOnce({
+      ...snapshot, app: { ...snapshot.app, accountingError: "Activity recovery is incomplete: unreadable history" },
+    });
+    render(<StatsUsageView />);
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Activity recovery is incomplete: unreadable history");
+    expect(screen.getByText("7")).toBeTruthy();
+  });
+
+  it("does not replace a valid snapshot with zero when a later read fails", async () => {
+    render(<StatsUsageView />);
+    await screen.findByText("7");
+    vi.mocked(api.statsUsageSnapshot).mockRejectedValueOnce(new Error("Activity history could not be loaded"));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh local analytics" }));
+    expect(await screen.findByText(/Activity history could not be loaded/)).toBeTruthy();
+    expect(screen.getByText("7")).toBeTruthy();
   });
 });
