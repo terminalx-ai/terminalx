@@ -238,7 +238,6 @@ export interface UsageWindow {
   resetsAt: number | null;
   windowMinutes: number | null;
   updatedAt: number;
-  plan?: string;
   stale: boolean;
 }
 

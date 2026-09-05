@@ -24,7 +24,7 @@ use std::time::Instant;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::events::*;
 use crate::harness::host::{Host, LiveChild, Sink, SpawnSpec};
@@ -449,6 +449,7 @@ impl SessionManager {
                 }
             }
         }
+        self.app.state::<crate::AppState>().star_nag.observe(&self.app, &ev);
         let _ = self.app.emit("agent_event", &ev);
         ev
     }
@@ -458,6 +459,7 @@ impl SessionManager {
             return;
         }
         rt.status = status;
+        self.app.state::<crate::AppState>().star_nag.status(&self.app, rt.key(), status);
         let _ = self.app.emit("tab_status", TabStatusEvent { session_id: rt.session_id.clone(), tab_id: rt.tab_id.clone(), status });
         let (sid, tid) = (rt.session_id.clone(), rt.tab_id.clone());
         // Persist off the hot path; the index write takes a lock and a rename.
@@ -616,6 +618,7 @@ impl SessionManager {
             (crate::hooks::CONTROL_TOKEN_ENV.to_string(), self.control.token.clone()),
         ];
         let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env }, sink)?;
+        self.app.state::<crate::AppState>().star_nag.launched(&self.app, rt.key());
         rt.child_pid = Some(child.pid);
         rt.child = Some(child);
         Ok(())
@@ -831,6 +834,7 @@ impl SessionManager {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         rt.queued.clear();
+        self.app.state::<crate::AppState>().star_nag.interrupted(&rt.key());
         if rt.child.is_none() && !matches!(rt.engine, Engine::Cli(_)) {
             return Ok(());
         }
@@ -1193,6 +1197,7 @@ impl SessionManager {
         let tail = Arc::new(launch.tail);
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: 120, rows: 30, command: Some(&launch.command), env: &env };
         self.terminals.spawn(self.app.clone(), &pane, spec).context("start the agent's CLI")?;
+        self.app.state::<crate::AppState>().star_nag.launched(&self.app, rt.key());
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         rt.engine = Engine::Cli(CliTab {
             harness: kind,

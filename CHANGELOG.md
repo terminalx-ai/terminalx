@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- The status bar's usage cluster shows one entry per account limit. Codex
+  used to list every per-model sub-limit the app-server reports (such as
+  "GPT-5.3-Codex-Spark weekly", almost always at 0%) alongside the plan
+  name; only the account-level windows are kept now, and the plan is gone.
+  Each agent reads as a brand mark, a small meter for its tightest window,
+  then "N% used" and the reset countdown per window, with Fable named in
+  place of a countdown. (#104)
 - Deleting a workspace now stops and removes the sessions that ran in it,
   the same way deleting a single session does: agents and terminal panes are
   killed, and the index entries, transcripts and attachments go. Previously
