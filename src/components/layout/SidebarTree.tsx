@@ -5,6 +5,7 @@ import {
   ArrowUp,
   CalendarClock,
   ChevronDown,
+  Ellipsis,
   FolderOpen,
   GitBranch,
   GitFork,
@@ -20,6 +21,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AgentMark, agentName } from "@/components/AgentMark";
 import { WorkspaceNameEditor } from "@/components/session/WorkspaceNameEditor";
+import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { Button } from "@/components/ui/button";
 import {
   ContextMenu,
@@ -214,7 +216,8 @@ function WorkspaceNode({
       <div
         data-tree-row
         className={cn(
-          "group/ws relative flex min-h-7 items-center gap-1 rounded-md pr-1 text-[11px] text-muted-foreground",
+          actionRow,
+          "relative flex min-h-7 items-center gap-1 rounded-md pr-1 text-[11px] text-muted-foreground",
           active ? "bg-selected/60" : "hover:bg-selected/40",
         )}
         title={group.path}
@@ -239,7 +242,7 @@ function WorkspaceNode({
         <span className="shrink-0 rounded-sm bg-veil-raised px-1 text-[9px] text-faint">{kind}</span>
         {workspace ? <WorkspaceStats workspace={workspace} /> : null}
         {workspace ? (
-          <span className="absolute right-1 flex items-center opacity-0 group-hover/ws:opacity-100 group-focus-within/ws:opacity-100 has-[[data-state=open]]:opacity-100">
+          <RowActions>
             <WithTooltip label="New session here">
               <Button variant="ghost" size="icon-xs" aria-label={`New session in ${displayName}`} onClick={() => startSessionIn(project.path, workspace.path)}>
                 <Plus />
@@ -248,7 +251,7 @@ function WorkspaceNode({
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="icon-xs" aria-label={`Workspace menu for ${displayName}`}>
-                  <span className="text-[13px] leading-none">…</span>
+                  <Ellipsis />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
@@ -268,7 +271,7 @@ function WorkspaceNode({
                 ) : null}
               </DropdownMenuContent>
             </DropdownMenu>
-          </span>
+          </RowActions>
         ) : null}
       </div>
       {renameError ? (
@@ -298,7 +301,7 @@ function WorkspaceNode({
 function WorkspaceStats({ workspace }: { workspace: Workspace }) {
   if (!workspace.additions && !workspace.deletions && !workspace.unpushed) return null;
   return (
-    <span className="flex shrink-0 items-center gap-1 tabular-nums group-hover/ws:opacity-0 group-focus-within/ws:opacity-0 group-has-[[data-state=open]]/ws:opacity-0">
+    <span className={cn("flex shrink-0 items-center gap-1 tabular-nums", yieldsToRowActions)}>
       {workspace.additions > 0 ? <span className="text-add">+{workspace.additions}</span> : null}
       {workspace.deletions > 0 ? <span className="text-destructive">−{workspace.deletions}</span> : null}
       {workspace.unpushed > 0 ? (
@@ -341,7 +344,8 @@ function SessionNode({
         <div
           data-tree-row
           className={cn(
-            "group/session relative flex min-h-7 cursor-default items-center gap-1 rounded-md pr-1 outline-none",
+            actionRow,
+            "relative flex min-h-7 cursor-default items-center gap-1 rounded-md pr-1 outline-none",
             selected ? "bg-selected" : "hover:bg-selected/50",
           )}
         >
@@ -366,17 +370,17 @@ function SessionNode({
             <span className="min-w-0 flex-1 truncate text-[12px]">{session.title}</span>
             {branchBadge ? <span className="max-w-20 shrink-0 truncate rounded-sm bg-veil-raised px-1 font-mono text-[9px] text-faint">{branchBadge}</span> : null}
           </button>
-          <span className="shrink-0 text-[10px] tabular-nums text-faint group-hover/session:opacity-0 group-focus-within/session:opacity-0 group-has-[[data-state=open]]/session:opacity-0">
+          <span className={cn("shrink-0 text-[10px] tabular-nums text-faint", yieldsToRowActions)}>
             {relativeTime(session.modified)}
           </span>
-          <span className="absolute right-1 flex items-center opacity-0 group-hover/session:opacity-100 group-focus-within/session:opacity-100 has-[[data-state=open]]:opacity-100">
+          <RowActions>
             <NewTabButton session={session} />
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="icon-xs" aria-label={`Session menu for ${session.title}`}>
-                <span className="text-[13px] leading-none">…</span>
+                <Ellipsis />
               </Button>
             </DropdownMenuTrigger>
-          </span>
+          </RowActions>
         </div>
         {session.automation ? (
           <button

@@ -1,6 +1,6 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { AgentMark, KNOWN_AGENT_IDS, agentName } from "./AgentMark";
+import { AgentMark, KNOWN_AGENT_IDS, agentBrandColor, agentName } from "./AgentMark";
 
 afterEach(cleanup);
 
@@ -11,7 +11,7 @@ describe("AgentMark", () => {
     );
 
     expect(KNOWN_AGENT_IDS).toEqual(["claude", "codex", "cursor", "opencode"]);
-    expect(KNOWN_AGENT_IDS.map(agentName)).toEqual(["Claude Code", "Codex", "Cursor", "OpenCode"]);
+    expect(KNOWN_AGENT_IDS.map(agentName)).toEqual(["Claude", "Codex", "Cursor", "OpenCode"]);
     const marks = [...container.querySelectorAll<SVGElement>('[data-agent-icon="brand"]')];
     expect(marks).toHaveLength(KNOWN_AGENT_IDS.length);
     expect(new Set(marks.map((mark) => mark.querySelector("path")?.getAttribute("d"))).size).toBe(KNOWN_AGENT_IDS.length);
@@ -20,10 +20,35 @@ describe("AgentMark", () => {
   it("gives an icon-only mark its accessible agent name", () => {
     render(<AgentMark id="claude" className="size-3" />);
 
-    const mark = screen.getByRole("img", { name: "Claude Code" });
+    const mark = screen.getByRole("img", { name: "Claude" });
     expect(mark.classList.contains("size-3")).toBe(true);
     expect(mark.getAttribute("fill")).toBe("currentColor");
     expect(mark.getAttribute("focusable")).toBe("false");
+  });
+
+  it("draws Claude with the Anthropic starburst rather than the Claude Code terminal glyph", () => {
+    const { container } = render(<AgentMark id="claude" />);
+
+    const path = container.querySelector("path")?.getAttribute("d") ?? "";
+    expect(path.startsWith("m4.7144 15.9555")).toBe(true);
+    expect(path).not.toContain("M21 10.5h3v3h-3v3h-1.5v3H18");
+  });
+
+  it("tints only agents with a brand colour when asked to, and inherits currentColor otherwise", () => {
+    const { container } = render(
+      <div className="text-faint">
+        <AgentMark id="claude" brand decorative />
+        <AgentMark id="codex" brand decorative />
+        <AgentMark id="claude" decorative />
+      </div>,
+    );
+
+    const [claudeBrand, codexBrand, claudePlain] = container.querySelectorAll("svg");
+    expect(agentBrandColor("claude")).toBe("#D97757");
+    expect(agentBrandColor("codex")).toBeUndefined();
+    expect(claudeBrand?.getAttribute("fill")).toBe("#D97757");
+    expect(codexBrand?.getAttribute("fill")).toBe("currentColor");
+    expect(claudePlain?.getAttribute("fill")).toBe("currentColor");
   });
 
   it("hides a decorative mark when the visible name is beside it", () => {
