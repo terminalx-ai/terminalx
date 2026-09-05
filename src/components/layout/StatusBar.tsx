@@ -361,6 +361,21 @@ type UsageAgent = UsageWindow["agent"];
 
 const AGENTS: UsageAgent[] = ["claude", "codex"];
 
+/** The rolling account windows every provider reports; anything else is scoped to a model or a plan feature. */
+function isAccountWindow(window: UsageWindow): boolean {
+  return window.key === "five_hour" || window.key === "seven_day" || window.key === "weekly";
+}
+
+/**
+ * What follows "N% used" in the bar. Account windows are told apart by their
+ * reset countdown alone; a scoped window shows its name instead, so Fable
+ * reads "2% used Fable".
+ */
+function windowTrailer(window: UsageWindow, now: number): string | null {
+  if (!isAccountWindow(window)) return windowLabel(window);
+  return window.resetsAt == null ? null : formatResetCountdown(window.resetsAt, now, "");
+}
+
 type CanonicalWindowKind = "5h" | "7d" | "fable";
 
 function windowKind(window: UsageWindow): CanonicalWindowKind | null {
@@ -396,10 +411,10 @@ function hasUsageData(window: UsageWindow): boolean {
 }
 
 /**
- * Codex account windows keep the bare keys `classify_codex` produces; the
- * per-model sub-limits from `rateLimitsByLimitId` are prefixed with their
- * limit id (`codex_bengalfox_weekly`). Only the account windows belong in
- * the bar and popover.
+ * Codex account windows keep the bare keys `classify_codex` produces. The
+ * backend no longer emits the per-model sub-limits from `rateLimitsByLimitId`,
+ * which carried their limit id as a key prefix (`codex_bengalfox_weekly`);
+ * this guard keeps any snapshot that still does out of the bar and popover.
  */
 const CODEX_ACCOUNT_KEY = /^(?:five_hour|weekly|\d+_minutes)$/;
 
@@ -504,7 +519,6 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
           {groups.length ? (
             <span className="flex min-w-0 items-center whitespace-nowrap tabular-nums">
               {groups.map(({ agent, windows: agentWindows, tightest }, index) => {
-                const plan = agentWindows.find((window) => window.plan)?.plan;
                 // Width can force fewer windows; a Compact preference can too. Neither ever adds more.
                 const shown = tier === "full" && !compactMode ? orderedWindows(agentWindows) : [tightest];
                 return (
@@ -513,34 +527,35 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                     data-usage-agent={agent}
                     className={cn(
                       "flex min-w-0 items-center gap-1.5",
-                      index < groups.length - 1 && "mr-1.5 border-r border-hairline pr-2",
+                      index < groups.length - 1 && "mr-2 border-r border-hairline pr-2.5",
                     )}
                   >
-                    <span className="flex shrink-0 items-center gap-1">
-                      <AgentMark id={agent} className="size-3 text-faint" decorative brand />
-                      {tier !== "icon" ? <span className="font-medium text-foreground">{agentName(agent)}</span> : null}
-                      {tier === "full" && plan ? <span className="capitalize text-faint">· {plan}</span> : null}
-                    </span>
-                    {tier === "icon" ? (
+                    <AgentMark id={agent} className="size-3 text-foreground" decorative brand />
+                    <span
+                      aria-hidden
+                      data-usage-meter={tightest.key}
+                      className="h-1 w-10 shrink-0 overflow-hidden rounded-full bg-hairline-strong"
+                    >
                       <i
-                        aria-hidden
-                        className={cn("size-1.5 shrink-0 rounded-full", urgency(tightest.usedPercent))}
+                        className={cn("block h-full rounded-full", urgency(tightest.usedPercent))}
+                        style={{ width: `${shownPercent(tightest, settings.percent)}%` }}
                       />
-                    ) : shown.map((window, windowIndex) => (
-                      <span
-                        key={window.key}
-                        data-usage-window={windowKind(window) ?? window.key}
-                        className={cn(
-                          "flex shrink-0 items-center gap-1",
-                          urgencyText(window.usedPercent),
-                          tier === "full" && windowIndex > 0 && "border-l border-hairline pl-1.5",
-                        )}
-                      >
-                        {window.stale ? <TriangleAlert className="size-3" aria-label="Stale usage data" /> : null}
-                        <span className="font-medium">{windowLabel(window)} {Math.round(shownPercent(window, settings.percent))}%</span>
-                        {tier === "full" && window.resetsAt != null ? <span className="text-faint">· {formatResetCountdown(window.resetsAt, now, "")}</span> : null}
-                      </span>
-                    ))}
+                    </span>
+                    {tier !== "icon" ? shown.map((window, windowIndex) => {
+                      const trailer = windowTrailer(window, now);
+                      return (
+                        <span
+                          key={window.key}
+                          data-usage-window={windowKind(window) ?? window.key}
+                          className={cn("flex shrink-0 items-center gap-1", urgencyText(window.usedPercent))}
+                        >
+                          {windowIndex > 0 ? <span aria-hidden className="text-faint">·</span> : null}
+                          {window.stale ? <TriangleAlert className="size-3" aria-label="Stale usage data" /> : null}
+                          <span className="font-medium">{Math.round(shownPercent(window, settings.percent))}% {settings.percent}</span>
+                          {trailer ? <span className="text-faint">{trailer}</span> : null}
+                        </span>
+                      );
+                    }) : null}
                   </span>
                 );
               })}
