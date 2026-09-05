@@ -255,7 +255,7 @@ pub fn open_setup(
             opened_settings: false,
             launched_helper: false,
             permissions: unsupported_states(),
-            next_step: None,
+            next_step: Some(desktop_preconditions().join("\n")),
         });
     }
     let Some(app) = helper_app else {
@@ -399,6 +399,27 @@ pub fn read_bundle_id(app: &Path) -> Result<String, ComputerError> {
         )));
     }
     Ok(id)
+}
+
+/// Read-only prerequisites, shared by CLI setup output and Settings.
+fn desktop_preconditions() -> Vec<String> {
+    if cfg!(target_os = "linux") {
+        let wayland = std::env::var("XDG_SESSION_TYPE").is_ok_and(|value| value.eq_ignore_ascii_case("wayland"))
+            || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty());
+        vec![
+            "AT-SPI: install python3-gi gir1.2-atspi-2.0 at-spi2-core (and Gdk/GdkPixbuf for X11 screenshots).".into(),
+            format!("Desktop session: XDG_RUNTIME_DIR={}, DBUS_SESSION_BUS_ADDRESS={}.",
+                if std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|v| !v.is_empty()) { "set" } else { "missing" },
+                if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some_and(|v| !v.is_empty()) { "set" } else { "missing" }),
+            format!("Session type: {}. Screenshots and hotkeys require X11; Wayland supports accessibility state and semantic actions.", if wayland { "Wayland" } else { "X11 or unspecified" }),
+            format!("Optional X11 hotkeys, modifier clicks, and reliable text/key synthesis on older AT-SPI: xdotool {}.", if which::which("xdotool").is_ok() { "available" } else { "not found" }),
+            format!("Optional clipboard paste: install wl-copy, xclip, or xsel ({}).", if ["wl-copy", "xclip", "xsel"].iter().any(|tool| which::which(tool).is_ok()) { "a clipboard tool is available" } else { "none found" }),
+        ]
+    } else if cfg!(windows) {
+        vec!["UI Automation requires no permission grant. Windows PowerShell 5.1 or PowerShell 7 must be installed.".into(),
+            "Elevated and UIPI-protected windows cannot be reached from a non-elevated TerminalX app.".into(),
+            "Screenshots capture the desktop region: use --restore-window to bring the target forward.".into()]
+    } else { vec!["Computer use has no provider for this platform.".into()] }
 }
 
 #[cfg(test)]

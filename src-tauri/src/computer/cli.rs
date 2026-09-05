@@ -451,7 +451,7 @@ fn format_permission_list(value: &Value) -> String {
 
 pub fn format_permissions(value: &Value) -> String {
     if s(value, "platform") != Some("macos") {
-        return "Computer-use permission setup is only required on macOS.".into();
+        return s(value, "nextStep").unwrap_or("Run terminalx computer permissions --json to inspect desktop prerequisites.").into();
     }
     let launched = b(value, "launchedHelper");
     let mut lines = vec![
@@ -1008,7 +1008,7 @@ mod tests {
         let permissions = format_permissions(&json!({"platform": "macos", "helperAppPath": "/h.app", "launchedHelper": true, "permissions": [{"id": "accessibility", "status": "granted"}, {"id": "screenshots", "status": "not-granted"}], "nextStep": "Grant Screen Recording"}));
         assert!(permissions.contains("Permissions: accessibility=granted, screenshots=not-granted"));
         assert!(permissions.contains("Next: Grant Screen Recording"));
-        assert_eq!(format_permissions(&json!({"platform": "linux"})), "Computer-use permission setup is only required on macOS.");
+        assert_eq!(format_permissions(&json!({"platform": "linux", "nextStep": "Install AT-SPI"})), "Install AT-SPI");
     }
 
     #[test]

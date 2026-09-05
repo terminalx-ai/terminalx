@@ -25,12 +25,17 @@ const COMPUTER_PERMISSIONS: { id: ComputerPermissionId; label: string; descripti
  */
 export function ComputerUseRows() {
   const [status, setStatus] = useState<ComputerPermissionStatus | null>(null);
+  const [preconditions, setPreconditions] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<ComputerPermissionId | "reset" | null>(null);
   const [polling, setPolling] = useState(false);
   const refresh = async () => {
     try {
       const next = await api.computerPermissionStatus();
+      if (next.platform !== "macos") {
+        const setup = await api.computerOpenPermission(null);
+        setPreconditions(setup.nextStep?.split("\n") ?? []);
+      }
       setStatus(next);
       setError(null);
       return next;
@@ -75,7 +80,15 @@ export function ComputerUseRows() {
       setBusy(null);
     }
   };
-  if (status && status.platform !== "macos") return null;
+  if (status && status.platform !== "macos") return (
+    <div className="flex flex-col" data-testid="computer-use-settings">
+      <SettingRow label="Computer use" stacked description="Desktop requirements for agents on this platform." control={null} />
+      <ul className="ml-6 list-disc space-y-1 text-xs leading-relaxed text-muted-foreground">
+        {preconditions.map((item) => <li key={item}>{item}</li>)}
+      </ul>
+      {error && <div className="mt-1 text-xs text-destructive">{error}</div>}
+    </div>
+  );
   const unavailable = status?.helperUnavailableReason ?? null;
   const allGranted = status?.permissions.every((p) => p.status === "granted") ?? false;
   return (

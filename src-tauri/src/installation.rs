@@ -39,12 +39,15 @@ fn cli_status_at(home: &Path, target: &Path) -> CliToolStatus {
     let directory = cli_dir(home);
     let commands: Vec<String> = ["terminalx", "tnx"]
         .iter()
-        .map(|name| directory.join(name).to_string_lossy().into_owned())
+        .map(|name| directory.join(if cfg!(windows) { format!("{name}.cmd") } else { (*name).into() }).to_string_lossy().into_owned())
         .collect();
     let installed = commands.iter().all(|command| {
-        std::fs::read_link(command)
+        #[cfg(windows)]
+        { std::fs::read_to_string(command).ok().as_deref() == Some(&windows_shim(target)) }
+        #[cfg(unix)]
+        { std::fs::read_link(command)
             .map(|link| link == target)
-            .unwrap_or(false)
+            .unwrap_or(false) }
     });
     CliToolStatus {
         installed,
@@ -102,9 +105,27 @@ fn install_cli_links(home: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn install_cli_links(_home: &Path, _target: &Path) -> Result<()> {
-    bail!("the command line tool currently requires Unix")
+#[cfg(windows)]
+fn windows_shim(target: &Path) -> String {
+    // Percent signs expand even inside cmd quotes; delayed expansion is disabled.
+    let target = target.to_string_lossy().replace('%', "%%");
+    format!("@echo off\r\nrem TerminalX CLI shim\r\nsetlocal DisableDelayedExpansion\r\n\"{target}\" terminalx %*\r\n")
+}
+
+#[cfg(windows)]
+fn install_cli_links(home: &Path, target: &Path) -> Result<()> {
+    let directory = cli_dir(home);
+    std::fs::create_dir_all(&directory)?;
+    for name in ["terminalx.cmd", "tnx.cmd"] {
+        let path = directory.join(name);
+        if path.exists() && !std::fs::read_to_string(&path)?.contains("rem TerminalX CLI shim") {
+            bail!("{} already exists and is not a TerminalX shim", path.display());
+        }
+    }
+    for name in ["terminalx.cmd", "tnx.cmd"] {
+        crate::store::write_atomic(&directory.join(name), windows_shim(target).as_bytes())?;
+    }
+    Ok(())
 }
 
 /// Every (path, stub) pair "Install skills" writes: each first-party skill in

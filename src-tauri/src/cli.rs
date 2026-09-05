@@ -53,7 +53,7 @@ Usage:
       [--assigned-to-me] [--team ID] [--search TEXT] [--json]
   terminalx skills get terminalx-cli|computer-use [--full] [--json]
 
-Computer use (desktop apps, macOS 14+):
+Computer use (desktop apps on macOS, Linux and Windows):
 COMPUTER_HELP
 BROWSER_HELP
 
@@ -94,7 +94,7 @@ pub fn run_cli() -> Option<i32> {
     let all: Vec<String> = std::env::args().collect();
     let invoked = all
         .first()
-        .and_then(|arg| Path::new(arg).file_name())
+        .and_then(|arg| Path::new(arg).file_stem())
         .and_then(|name| name.to_str())
         .unwrap_or_default();
     let offset = if matches!(invoked, "terminalx" | "tnx") {

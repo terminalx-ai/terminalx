@@ -116,7 +116,78 @@ At runtime the helper is looked up in this order:
 
 ## Scope
 
-Phase 1 is macOS 14 and newer. The provider trait and the CLI do not assume
-macOS; on other platforms every command reports `unsupported_capability`.
-Linux (AT-SPI) and Windows (UIAutomation) providers are a later phase.
+The provider is selected by platform: the native helper on macOS 14+, AT-SPI
+on Linux, and UI Automation on Windows 10/11. The CLI, result shapes, error
+codes, validation and screenshot export are shared. An absent desktop runtime
+reports `unsupported_capability` with reinstall/override instructions.
 Browser automation is tracked separately in #101.
+
+
+## Linux and Windows
+
+The bundles include `computer-use-linux/runtime.py` or
+`computer-use-windows/runtime.ps1`, copied unchanged from Legacy along with
+their rendering tests. `TERMINALX_COMPUTER_DESKTOP_SCRIPT_PROVIDER_PATH` overrides
+the runtime location; otherwise the provider checks Tauri's resource directory,
+then `native/` in debug builds. The platform Tauri configs exclude the macOS
+helper. The Swift build command exits successfully off macOS.
+
+Each request runs `python3 -c <embedded-launcher> runtime.py <operation-file>` or PowerShell with
+`-NoProfile -NonInteractive -ExecutionPolicy Bypass -File runtime.ps1 <operation-file>`.
+Windows prefers `powershell.exe` and falls back to `pwsh.exe`. Operation payloads
+stay out of process arguments, in a private temporary directory (0700 directory,
+0600 files on Unix; inherited user temp ACL on Windows). Success, parse errors,
+spawn errors, and timeouts all remove the directory. A 30-second deadline sends
+SIGTERM on Unix and escalates to SIGKILL after one second; Windows terminates
+the child directly. The child is reaped before cleanup. Output is capped at 20 MiB.
+
+Scripts are stateless. The provider caches up to 32 snapshots for two minutes,
+without PNG data, under app query/name/pid and window selectors. Explicit session
+or worktree namespaces remain separate; window indexes are always scoped to
+an app. A cache miss rejects an element action before spawning any script.
+`window_changed` retires stale window aliases. `set-value` verifies the refreshed
+value using provider identity first, then index. Clipboard and synthetic input
+retain their explicit unverified reasons.
+
+Linux requires a graphical session with `XDG_RUNTIME_DIR` and
+`DBUS_SESSION_BUS_ADDRESS`, plus `python3-gi gir1.2-atspi-2.0 at-spi2-core`.
+Gdk/GdkPixbuf are required for screenshots. `xdotool` enables X11 hotkeys and
+modifier clicks; `wl-copy`, `xclip` or `xsel` enables clipboard paste. Wayland
+screenshots/hotkeys remain unsupported. Windows needs PowerShell 5.1 or 7 and
+cannot reach elevated/UIPI-protected windows from a non-elevated app. Both
+platforms capture desktop regions: use `--restore-window` and trust the tree
+when pixels might be occluded. Settings → General → Computer use and
+`terminalx computer permissions` show the same read-only prerequisites.
+
+Windows control commands and hooks share authenticated JSON-lines over
+`\\.\pipe\terminalx-<home-hash>`; the server refuses remote pipe clients.
+Bundles include `.cmd` launchers next to `raccoon.exe`; Install CLI writes
+`terminalx.cmd` and `tnx.cmd` to `~/.local/bin` without requiring symlink rights.
+Add that directory to PATH, as with the Unix CLI installation.
+
+Validation: `cargo test --lib computer::`, the three
+`scripts/computer-use-*.test.mjs` safety suites, and the runtime render tests
+run in CI. On a graphical Linux or Windows desktop with TerminalX running:
+
+```sh
+node scripts/computer-use-smoke.mjs --actions --apps "Text Editor"
+node scripts/computer-use-smoke.mjs --actions --apps Notepad
+```
+
+Apple dictation and Keychain account persistence remain platform-specific
+features. They are separate from the computer-use provider.
+
+The embedded Linux launcher adds `Accessible.is_editable_text()` only when
+missing from the local PyGObject binding, using the supported
+`get_editable_text_iface()` API. This fixes value writes on Debian's AT-SPI
+binding while keeping the Legacy runtime byte-for-byte unchanged. Its behavior
+is covered by `native/computer-use-linux/launcher_test.py`.
+
+On X11, the launcher uses `xdotool` when available for text and named keys.
+Text travels through stdin (`type --file -`), never argv. Without `xdotool`,
+GDK keysyms use AT-SPI symbolic events rather than hardware keycodes, and text
+is emitted as symbolic events for older registries that reject composed strings.
+Failures stop delivery without replaying partial text. Wayland keeps the
+original composed-string path. The smoke script reads fresh state to verify
+that typed and pasted text reached the editor, while retaining the public
+unverified input metadata.

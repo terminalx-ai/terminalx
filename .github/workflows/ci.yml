@@ -1,8 +1,8 @@
 name: CI
 
 # The four checks a change has to pass, in the order they fail fastest.
-# macOS because TerminalX is macOS-only: the Rust side links AppKit, AVFoundation
-# and Speech, and will not build anywhere else.
+# macOS runs the full suite and Apple helper tests; desktop-platforms checks
+# the Linux/Windows build, provider contract, and native script renderers.
 
 on:
   push:
@@ -72,3 +72,66 @@ jobs:
       - name: cargo test
         working-directory: src-tauri
         run: cargo test
+
+  desktop-platforms:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake
+      - name: Install npm dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git/db
+            src-tauri/target
+          key: desktop-cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: desktop-cargo-${{ runner.os }}-
+      - name: Build frontend and verify off-macOS helper build is a no-op
+        run: pnpm build:computer-macos && pnpm build
+      - name: Platform build
+        working-directory: src-tauri
+        run: cargo check --all-targets
+      - name: Computer contract tests
+        working-directory: src-tauri
+        run: "cargo test --lib computer::"
+      - name: Windows pipe tests
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        run: "cargo test --lib pipe_transport::"
+      - name: Windows control and hook integration
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        run: cargo test --lib named_pipe_serves_authenticated_control_and_hook_frames
+      - name: Desktop script input safety tests
+        run: pnpm vitest run scripts/computer-use-modifier-safety.test.mjs scripts/computer-use-mouse-button-routing.test.mjs scripts/computer-use-windows-horizontal-scroll.test.mjs
+      - name: Linux render tests
+        if: runner.os == 'Linux'
+        run: |
+          python3 native/computer-use-linux/runtime_render_test.py
+          python3 native/computer-use-linux/launcher_test.py
+      - name: Windows render tests (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./native/computer-use-windows/runtime-render.test.ps1
+      - name: Windows render tests (PowerShell 7)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./native/computer-use-windows/runtime-render.test.ps1

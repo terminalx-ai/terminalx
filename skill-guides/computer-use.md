@@ -23,7 +23,11 @@ Use this skill for desktop UI through `terminalx computer`. When the requested t
 - Prefer `--json`; see Screenshots below for image output.
 - Do not push, submit forms, send messages, buy items, delete data, change account settings, or expose secrets unless the user explicitly asked for that action.
 - If an app contains sensitive content, read only what the user requested.
-- Computer use runs on macOS 14 or newer through the "TerminalX Computer Use" helper app that ships inside TerminalX. The helper holds the Accessibility and Screen Recording grants, so your shell needs no permissions of its own.
+- Run `terminalx computer capabilities --json` to check this platform's provider and supported operations. macOS 14+ uses the bundled "TerminalX Computer Use" helper, which holds the Accessibility and Screen Recording grants. Linux uses AT-SPI (`python3-gi gir1.2-atspi-2.0 at-spi2-core`) in a desktop session; Windows uses UI Automation through Windows PowerShell 5.1 or PowerShell 7. `terminalx computer permissions` lists the platform's prerequisites.
+- On Linux and Windows, action payloads pass through a short-lived local operation file, so avoid sending secrets unless the user explicitly asked.
+- Linux and Windows screenshots capture a desktop region. Use `--restore-window` so another window does not cover the target region; if you cannot take focus, trust the tree over potentially occluded pixels.
+- Linux window targets use `--window-index`; bundle ids and `--window-id` are unsupported. Use the returned app name or `pid:<n>`. Wayland screenshots and hotkeys remain unsupported; use the tree and semantic actions. X11 hotkeys and modifier clicks need `xdotool`, which also enables reliable text/key synthesis on older AT-SPI; clipboard paste needs `wl-copy`, `xclip`, or `xsel`.
+- Windows UI Automation needs no permission grant, but a non-elevated app cannot reach elevated or UIPI-protected windows.
 
 ```text
 terminalx status --json
@@ -47,7 +51,7 @@ In `--json` output, read the accessibility tree and action indexes from `result.
 Prefer bundle IDs from `list-apps`; names are acceptable when unambiguous. Use `pid:<number>` only when bundle ID or name matching is ambiguous, or when the app has no bundle ID (a binary run outside an app bundle, such as a dev build).
 
 ```text
-terminalx computer get-app-state --app com.microsoft.edgemac --json
+terminalx computer get-app-state --app "Microsoft Edge" --json
 terminalx computer get-app-state --app Spotify --json
 terminalx computer get-app-state --app pid:12345 --json
 ```
@@ -96,7 +100,7 @@ printf '%s' "$TEXT" | terminalx computer set-value --app <app> --element-index <
   - Missing verification metadata is unverified, including responses from older runtimes.
 - Prefer semantic actions: `set-value` for editable fields, `click` for controls, `perform-secondary-action` only for listed action names.
 - After any UI-changing action, use the returned state or rerun `get-app-state` before choosing the next element index.
-- Use `type-text` only after focusing a field and confirming the app has a focused text receiver. When the provider can read the focused field back it reports `verified focusedText`; otherwise synthetic keyboard delivery is reported as unverified, so inspect the returned state before assuming text landed.
+- Use `type-text` only after focusing a field and confirming the app has a focused text receiver; synthetic keyboard delivery is reported as unverified, so inspect the returned state before assuming text landed.
 - Use `press-key` for single/navigation keys such as Return, Escape, Tab, and arrows. Use `hotkey` only for one modifier chord plus one key, such as `CmdOrCtrl+A` or `CmdOrCtrl+Shift+P`; prefer `CmdOrCtrl+...` for cross-platform combos.
 - Use `click --modifiers <chord>` for modifier-clicks. Never synthesize separate modifier-down and modifier-up commands around a click; interruption can leave a modifier logically held.
 - Some actions work in background apps, but this is app-dependent. If success does not change the UI, refresh state and choose a more semantic action or restore/focus the window.
@@ -129,9 +133,9 @@ Browsers: for Edge, Chrome, Safari, and similar browser windows, set the address
 For browser-hosted forms such as Gmail compose, verify the focused UI element after each field action. Page text fields can expose accessibility actions without moving DOM focus; if a click or `set-value` does not change the focused receiver, use `Tab` / `Shift+Tab` from a known focused field or window-local coordinates from a fresh screenshot. Prefer `paste-text` into the verified focused field for draft bodies, then inspect the returned state before continuing.
 
 ```text
-terminalx computer get-app-state --app com.microsoft.edgemac --restore-window --json
-terminalx computer set-value --app com.microsoft.edgemac --element-index <addressBarIndex> --value "test123" --json
-terminalx computer press-key --app com.microsoft.edgemac --key Return --json
+terminalx computer get-app-state --app "Microsoft Edge" --restore-window --json
+terminalx computer set-value --app "Microsoft Edge" --element-index <addressBarIndex> --value "test123" --json
+terminalx computer press-key --app "Microsoft Edge" --key Return --json
 ```
 
 Spotify: refresh after playback clicks; the UI often changes asynchronously.
@@ -140,12 +144,12 @@ Slack: the accessibility tree may be shallow while the screenshot contains usefu
 
 ## Errors
 
-- `app_not_found`: run `list-apps` and retry with the bundle ID. If the target is a web app such as Gmail, choose the desktop browser app/window that contains it; do not retry `terminalx computer ... --app Gmail` unchanged because `terminalx computer` app selectors refer to desktop apps, not website names.
+- `app_not_found`: run `list-apps` and retry with the returned app name or `pid:<n>` (or a bundle ID on macOS). If the target is a web app such as Gmail, choose the desktop browser app/window that contains it; do not retry `terminalx computer ... --app Gmail` unchanged because `terminalx computer` app selectors refer to desktop apps, not website names.
 - `app_blocked`: stop; the target is intentionally blocked from computer-use.
 - `window_not_found` / `window_stale`: run `list-windows`, choose a current selector, then rerun `get-app-state`.
 - `window_not_focused`: retry once with `--restore-window`; if the message says restore was already requested, stop retrying restore and bring the app forward manually or check permissions. For editable fields prefer `set-value`, then inspect before assuming keyboard input worked.
 - `element_not_found`: index is stale; run `get-app-state` again.
-- `unsupported_capability`: the provider or platform cannot do that action; use a semantic alternative. If the message says the helper app was not found, ask the reader to reinstall TerminalX (or, in a development checkout, run `pnpm build:computer-macos` and restart the app).
+- `unsupported_capability`: the provider or platform cannot do that action; use a semantic alternative. If the message names missing Linux packages, install those packages. If the runtime script was not found, reinstall TerminalX. If the message says the helper app was not found, ask the reader to reinstall TerminalX (or, in a development checkout, run `pnpm build:computer-macos` and restart the app).
 - `action_not_supported`: inspect the element's listed actions and retry with one of those names, or use click/set-value when appropriate.
 - `value_not_settable`: the element cannot accept direct value writes; focus it and use keyboard input only when the returned state can be inspected.
 - `element_not_clickable`: the element has no actionable frame; use a parent/child element with a frame or choose window-local coordinates from the latest screenshot.

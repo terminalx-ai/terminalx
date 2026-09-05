@@ -12,7 +12,9 @@
 //! - anything that goes wrong — no socket, no app, bad frame — exits 0 with
 //!   empty output, which the CLI reads as "this hook had nothing to say".
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::io::{BufRead, BufReader};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -156,7 +158,10 @@ pub struct HookReply {
 /// Where this app instance listens. One socket per Raccoon home, so a second
 /// instance on the same home takes the socket over rather than racing for it.
 pub fn socket_path() -> anyhow::Result<PathBuf> {
-    Ok(crate::store::ensure_dir(crate::store::root()?.join("run"))?.join("hooks.sock"))
+    #[cfg(unix)]
+    { Ok(crate::store::ensure_dir(crate::store::root()?.join("run"))?.join("hooks.sock")) }
+    #[cfg(windows)]
+    { Ok(crate::pipe_transport::path_for_home(&crate::store::root()?)) }
 }
 
 pub fn control_token_path() -> anyhow::Result<PathBuf> {
@@ -168,6 +173,7 @@ pub fn control_token_path() -> anyhow::Result<PathBuf> {
 pub fn prepare_control() -> anyhow::Result<ControlEndpoint> {
     let socket = socket_path()?;
     let token = mint_token();
+    #[cfg(unix)]
     crate::store::write_atomic(&control_token_path()?, token.as_bytes())?;
     Ok(ControlEndpoint { socket, token })
 }
@@ -238,16 +244,24 @@ where
     Ok(path)
 }
 
-#[cfg(not(unix))]
-pub fn serve<F, C>(_endpoint: ControlEndpoint, _hook_handler: F, _control_handler: C) -> anyhow::Result<PathBuf>
+#[cfg(windows)]
+pub fn serve<F, C>(endpoint: ControlEndpoint, hook_handler: F, control_handler: C) -> anyhow::Result<PathBuf>
 where
     F: Fn(HookFrame) -> HookReply + Send + Sync + 'static,
     C: Fn(crate::control::ControlRequest) -> crate::control::ControlResponse + Send + Sync + 'static,
 {
-    anyhow::bail!("hooks need a unix socket")
+    let path = endpoint.socket.clone();
+    let token = endpoint.token.clone();
+    crate::pipe_transport::serve(path.clone(), move |line| {
+        let reply = dispatch_line(&line, &endpoint.token, &hook_handler, &control_handler);
+        format!("{reply}\n")
+    })?;
+    // Publish only after successfully owning the pipe. A second app using the
+    // same home must not replace the running instance's discovery token.
+    crate::store::write_atomic(&control_token_path()?, token.as_bytes())?;
+    Ok(path)
 }
 
-#[cfg(unix)]
 fn dispatch_line<F, C>(line: &str, control_token: &str, hook_handler: &F, control_handler: &C) -> Value
 where
     F: Fn(HookFrame) -> HookReply + ?Sized,
@@ -340,8 +354,8 @@ pub fn run_statusline_cli() -> bool {
 
 /// Send one frame and wait for the reply. `None` on any failure, so the CLI
 /// carries on exactly as it would with no hook installed.
-#[cfg(unix)]
 fn ask_app(event: &str, stdin: &str) -> Option<Value> {
+    #[cfg(unix)]
     use std::os::unix::net::UnixStream;
 
     let payload: Value = serde_json::from_str(stdin).unwrap_or(Value::Null);
@@ -353,21 +367,22 @@ fn ask_app(event: &str, stdin: &str) -> Option<Value> {
         payload,
     };
     let path = std::env::var(SOCKET_ENV).ok()?;
-    let mut stream = UnixStream::connect(path).ok()?;
-    stream.set_read_timeout(Some(REPLY_TIMEOUT)).ok()?;
-    stream.set_write_timeout(Some(Duration::from_secs(5))).ok()?;
     let mut bytes = serde_json::to_vec(&frame).ok()?;
     bytes.push(b'\n');
-    stream.write_all(&bytes).ok()?;
-    stream.flush().ok()?;
-    let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).ok()?;
+    #[cfg(unix)]
+    let line = {
+        let mut stream = UnixStream::connect(path).ok()?;
+        stream.set_read_timeout(Some(REPLY_TIMEOUT)).ok()?;
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok()?;
+        stream.write_all(&bytes).ok()?;
+        stream.flush().ok()?;
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).ok()?;
+        line
+    };
+    #[cfg(windows)]
+    let line = crate::pipe_transport::exchange(Path::new(&path), bytes, REPLY_TIMEOUT).ok()?;
     serde_json::from_str::<HookReply>(&line).ok()?.output
-}
-
-#[cfg(not(unix))]
-fn ask_app(_event: &str, _stdin: &str) -> Option<Value> {
-    None
 }
 
 #[cfg(test)]
@@ -385,6 +400,24 @@ mod tests {
         assert_eq!(statusline_command(Path::new("/opt/raccoon")), "'/opt/raccoon' statusline");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn named_pipe_serves_authenticated_control_and_hook_frames() {
+        let _home = crate::store::temp_home();
+        let endpoint = prepare_control().unwrap();
+        serve(endpoint.clone(), |frame| HookReply { output: Some(json!({"event": frame.event})) },
+            |request| crate::control::ControlResponse::success(request.id, json!({"called": request.command}))).unwrap();
+        let response = crate::control::call("status", json!({}), Duration::from_secs(2)).unwrap();
+        assert!(response.ok);
+        assert_eq!(response.result.unwrap()["called"], "status");
+        let bad = json!({"id": "bad", "command": "status", "token": "wrong"});
+        let response = crate::pipe_transport::exchange(&endpoint.socket, format!("{bad}\n").into_bytes(), Duration::from_secs(2)).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&response).unwrap()["error"]["code"], "unauthorized");
+        let hook = HookFrame { tab: "t".into(), session: "s".into(), token: "token".into(), event: "Stop".into(), payload: Value::Null };
+        let response = crate::pipe_transport::exchange(&endpoint.socket, format!("{}\n", serde_json::to_string(&hook).unwrap()).into_bytes(), Duration::from_secs(2)).unwrap();
+        assert_eq!(serde_json::from_str::<HookReply>(&response).unwrap().output.unwrap()["event"], "Stop");
+    }
+
     #[test]
     fn frames_and_replies_round_trip_as_one_line_each() {
         let f = HookFrame { tab: "t1".into(), session: "s1".into(), token: "tok".into(), event: "PreToolUse".into(), payload: json!({"tool_name": "Bash"}) };
@@ -398,7 +431,6 @@ mod tests {
         assert_eq!(serde_json::from_str::<HookReply>(&serde_json::to_string(&r).unwrap()).unwrap(), r);
     }
 
-    #[cfg(unix)]
     #[test]
     fn control_frames_require_the_current_launch_token() {
         use crate::control::{ControlRequest, ControlResponse};
@@ -515,6 +547,7 @@ mod tests {
         assert_eq!(origin.transcript(&HookFrame { payload: json!({}), ..frame("", "") }), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlinked_root_still_holds_its_own_transcripts() {
         // `$RACCOON_HOME` under /tmp is /private/tmp once resolved, so the

@@ -16,6 +16,7 @@
 //! separate bundle and not a library linked into the app.
 
 pub mod cli;
+pub mod desktop_script;
 pub mod macos_native;
 pub mod permissions;
 pub mod screenshot;
@@ -89,7 +90,7 @@ pub fn recovery_for(code: &str) -> &'static str {
         "action_timeout" => "Inspect current state before retrying; use --no-screenshot if observation is slow.",
         "screenshot_failed" => "Use --no-screenshot if the tree is enough; if Screen Recording is named, run terminalx computer permissions --id screenshots.",
         "accessibility_error" => "Run terminalx computer capabilities; if Accessibility is named, run terminalx computer permissions --id accessibility.",
-        "permission_denied" => "Run terminalx computer permissions --json, grant the named permission to TerminalX Computer Use, then retry.",
+        "permission_denied" => "Run terminalx computer permissions --json and follow the platform prerequisites, then retry.",
         "provider_incompatible" => "Update TerminalX so the app and its computer-use helper match, then retry.",
         _ => "Report this error and stop rather than guessing at desktop state.",
     }
@@ -202,7 +203,7 @@ pub fn provider_unavailable_message() -> String {
         )
     } else {
         format!(
-            "computer-use has no native provider for {}; only macOS is supported in this release.",
+            "computer-use has no native provider for {} because the desktop provider runtime file was not found. Reinstall TerminalX or set TERMINALX_COMPUTER_DESKTOP_SCRIPT_PROVIDER_PATH to the runtime file.",
             std::env::consts::OS
         )
     }
@@ -317,6 +318,11 @@ impl ComputerService {
     }
 
     fn start_provider(&self) -> Result<Option<Box<dyn ComputerProvider>>, ComputerError> {
+        if let Some(platform) = desktop_script::Platform::current() {
+            let resources = self.resource_dir.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            return Ok(desktop_script::script_path(platform, resources.as_deref())
+                .map(|path| Box::new(desktop_script::DesktopScriptProvider::new(platform, path)) as Box<dyn ComputerProvider>));
+        }
         if !cfg!(target_os = "macos") || !macos_native::is_macos_14_or_newer() {
             return Ok(None);
         }

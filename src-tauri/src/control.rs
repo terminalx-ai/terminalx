@@ -1,6 +1,7 @@
 //! Authenticated JSON-lines control protocol shared by the desktop app and
 //! the `terminalx` command-line client.
 
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -120,15 +121,16 @@ impl ControlResponse {
 
 /// Send one request to the running app. Socket and token resolution happen
 /// here so every command has identical authentication and recovery behavior.
-#[cfg(unix)]
 pub fn call(
     command: &str,
     params: Value,
     timeout: Duration,
 ) -> Result<ControlResponse, ControlError> {
+    #[cfg(unix)]
     use std::os::unix::net::UnixStream;
 
     let socket = client_socket_path();
+    #[cfg(unix)]
     if !socket.exists() {
         return Err(ControlError::new(
             "app_unavailable",
@@ -153,6 +155,10 @@ pub fn call(
         command: command.into(),
         params,
     };
+    let mut bytes = serde_json::to_vec(&request).map_err(ControlError::internal)?;
+    bytes.push(b'\n');
+    #[cfg(unix)]
+    let line = {
     let mut stream = UnixStream::connect(&socket).map_err(|e| {
         ControlError::new(
             "app_unavailable",
@@ -166,8 +172,6 @@ pub fn call(
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(ControlError::internal)?;
-    let mut bytes = serde_json::to_vec(&request).map_err(ControlError::internal)?;
-    bytes.push(b'\n');
     stream.write_all(&bytes).map_err(ControlError::internal)?;
     stream.flush().map_err(ControlError::internal)?;
     let mut line = String::new();
@@ -181,6 +185,15 @@ pub fn call(
         } else {
             ControlError::internal(e)
         }
+    })?;
+        line
+    };
+    #[cfg(windows)]
+    let line = crate::pipe_transport::exchange(&socket, bytes, timeout).map_err(|error| {
+        let timed_out = error.kind() == std::io::ErrorKind::TimedOut;
+        ControlError::new(if timed_out { "timeout" } else { "app_unavailable" },
+            format!("Could not exchange a control frame at {}: {error}", socket.display()),
+            Some(if timed_out { "Check status before retrying; the command may already have completed." } else { APP_UNAVAILABLE_RECOVERY }.into()))
     })?;
     let response: ControlResponse = serde_json::from_str(&line).map_err(|e| {
         ControlError::new(
@@ -199,19 +212,6 @@ pub fn call(
     Ok(response)
 }
 
-#[cfg(not(unix))]
-pub fn call(
-    _command: &str,
-    _params: Value,
-    _timeout: Duration,
-) -> Result<ControlResponse, ControlError> {
-    Err(ControlError::new(
-        "app_unavailable",
-        "The control socket requires Unix.",
-        None,
-    ))
-}
-
 fn client_home() -> PathBuf {
     std::env::var_os("RACCOON_HOME")
         .map(PathBuf::from)
@@ -222,7 +222,12 @@ fn client_home() -> PathBuf {
 fn client_socket_path() -> PathBuf {
     std::env::var_os(crate::hooks::CONTROL_SOCKET_ENV)
         .map(PathBuf::from)
-        .unwrap_or_else(|| client_home().join("run/hooks.sock"))
+        .unwrap_or_else(|| {
+            #[cfg(unix)]
+            { client_home().join("run/hooks.sock") }
+            #[cfg(windows)]
+            { crate::pipe_transport::path_for_home(&client_home()) }
+        })
 }
 
 fn client_token_path() -> PathBuf {

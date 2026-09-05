@@ -8,7 +8,10 @@
 //! `.zprofile`. Answers are cached for the life of the process.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(unix)]
+use std::path::Path;
+#[cfg(unix)]
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
@@ -59,6 +62,7 @@ pub fn known_dirs() -> Vec<PathBuf> {
     v
 }
 
+#[cfg(unix)]
 fn is_executable(p: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -73,6 +77,7 @@ fn is_executable(p: &Path) -> bool {
 
 /// The user's login-shell `PATH`, read once. Everything the app spawns gets
 /// this so agents can find `git`, `gh`, `node` and each other.
+#[cfg(unix)]
 pub fn login_path() -> String {
     static P: OnceLock<String> = OnceLock::new();
     P.get_or_init(|| {
@@ -115,6 +120,7 @@ pub fn invalidate() {
     cache().lock().unwrap().clear();
 }
 
+#[cfg(unix)]
 fn resolve_uncached(name: &str) -> Option<PathBuf> {
     if name.contains('/') {
         let p = PathBuf::from(name);
@@ -136,6 +142,18 @@ fn resolve_uncached(name: &str) -> Option<PathBuf> {
     is_executable(&p).then_some(p)
 }
 
+#[cfg(windows)]
+pub fn login_path() -> String {
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let paths = known_dirs().into_iter().chain(std::env::split_paths(&inherited));
+    std::env::join_paths(paths).unwrap_or(inherited).to_string_lossy().into_owned()
+}
+
+#[cfg(windows)]
+fn resolve_uncached(name: &str) -> Option<PathBuf> {
+    which::which_in(name, Some(login_path()), std::env::current_dir().ok()?).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,6 +162,7 @@ mod tests {
     fn resolves_git_and_misses_nonsense() {
         assert!(resolve("git").is_some());
         assert!(resolve("definitely-not-a-binary-raccoon").is_none());
+        #[cfg(unix)]
         assert!(login_path().contains("/usr/bin"));
     }
 }

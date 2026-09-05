@@ -6,6 +6,8 @@ pub mod cli;
 mod commands;
 pub mod computer;
 mod control;
+#[cfg(windows)]
+mod pipe_transport;
 mod dictation;
 mod transcription;
 mod events;

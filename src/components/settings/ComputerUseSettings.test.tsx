@@ -50,11 +50,16 @@ describe("ComputerUseRows", () => {
     expect(screen.queryByRole("button", { name: /Grant/ })).toBeNull();
   });
 
-  it("renders nothing off macOS", async () => {
-    mocks.invoke.mockResolvedValue({ ...status("unsupported", "unsupported"), platform: "linux" });
-    const { container } = render(<ComputerUseRows />);
-    await waitFor(() => expect(mocks.invoke).toHaveBeenCalled());
-    await waitFor(() => expect(container.querySelector('[data-testid="computer-use-settings"]')).toBeNull());
+  it.each(["linux", "windows"])("shows read-only prerequisites on %s", async (platform) => {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "computer_permission_status") return { ...status("unsupported", "unsupported"), platform };
+      if (command === "computer_open_permission") return { nextStep: "Desktop prerequisites\nSession requirements" };
+      throw new Error(`unexpected ${command}`);
+    });
+    render(<ComputerUseRows />);
+    await screen.findByText("Desktop prerequisites");
+    expect(screen.getByText("Session requirements")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Grant|Reset permissions/ })).toBeNull();
   });
 
   it("resets permissions and shows the returned status", async () => {
