@@ -80,6 +80,46 @@ afterEach(() => {
 });
 
 describe("status bar usage", () => {
+  it("explains provider backoff beside manual Refresh", () => {
+    statusState.usage.claude = { retryAt: Date.now() + 60_000, revalidateAt: Date.now() + 60_000, error: "Rate limited" };
+    render(<StatusBar />);
+    fireEvent.click(screen.getByRole("button", { name: /Claude 5h/ }));
+    expect(screen.getByRole("status").textContent).toContain("Claude refresh paused; retry in 1m");
+    expect(screen.getByRole("button", { name: "Refresh usage" })).toBeTruthy();
+  });
+
+  it("marks the expired session honestly on every surface without inventing zero", async () => {
+    const session = statusState.usage.windows[0];
+    session.usedPercent = 100;
+    session.resetsAt = Date.now() + 1_000;
+    session.updatedAt = Date.now() - 5 * 60_000;
+    const view = render(<StatusBar />);
+    fireEvent.click(screen.getByRole("button", { name: /Claude 5h 100% used/ }));
+    const popover = document.querySelector("[data-usage-popover]") as HTMLElement;
+    fireEvent.click(within(popover).getByRole("button", { name: /Claude, Resets/ }));
+    await act(async () => vi.advanceTimersByTimeAsync(1_001));
+    const bar = view.container.querySelector('[data-usage-agent="claude"]') as HTMLElement;
+    expect(bar.textContent).toContain("expired");
+    expect(bar.textContent).toContain("100% used");
+    expect(within(popover).getByRole("button", { name: /Claude, Window expired/ })).toBeTruthy();
+    const detail = document.querySelector('[data-usage-detail="claude"]') as HTMLElement;
+    expect(within(detail).getByText(/Window expired/)).toBeTruthy();
+    expect(within(detail).getByText("Updated 5m ago")).toBeTruthy();
+    expect(detail.textContent).not.toContain("Resets in now");
+    session.usedPercent = 1;
+    session.resetsAt = Date.now() + 5 * 60 * 60_000;
+    session.updatedAt = Date.now();
+    view.rerender(<StatusBar />);
+    expect(bar.textContent).toContain("1% used");
+    expect(bar.textContent).not.toContain("100%");
+    const row = within(popover).getByRole("button", { name: /Claude, Resets/ });
+    expect(row.textContent).toContain("1%");
+    expect(row.textContent).toContain("41%");
+    expect(row.textContent).toContain("82%");
+    expect(within(detail).getByText("Session").parentElement?.textContent).toContain("1% used");
+    expect(detail.textContent).not.toContain("Window expired");
+  });
+
   it("renders one brand mark, a meter, and N% used per window in the full tier", () => {
     const { container } = render(<StatusBar />);
 
@@ -175,7 +215,7 @@ describe("status bar usage", () => {
 
     fireEvent.click(claudeRow);
     const detail = document.querySelector('[data-usage-detail="claude"]') as HTMLElement;
-    expect(within(detail).getByText("Updated just now")).toBeTruthy();
+    expect(within(detail).getAllByText("Updated just now")[0]).toBeTruthy();
     expect(within(detail).getByText("Session")).toBeTruthy();
     expect(within(detail).getByText("Weekly")).toBeTruthy();
     expect(within(detail).getByText("Fable")).toBeTruthy();

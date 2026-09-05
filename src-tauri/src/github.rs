@@ -1,7 +1,8 @@
 //! Pull requests through the `gh` CLI, which already holds auth and host
 //! configuration. Absent `gh` is one readable line, not a broken panel.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
 use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -98,11 +99,72 @@ fn parse_pr(v: &Value) -> PullRequest {
 
 /// Every PR whose head is `branch`, open first then newest.
 pub fn prs_for_branch(cwd: &Path, branch: &str) -> Result<Vec<PullRequest>> {
-    let out = run(cwd, &["pr", "list", "--head", branch, "--state", "all", "--json", FIELDS, "--limit", "10"])?;
+    prs_for_branch_with(cwd, branch, run)
+}
+
+fn prs_for_branch_with(cwd: &Path, branch: &str, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<Vec<PullRequest>> {
+    let out = run(cwd, &["pr", "list", "--head", branch, "--state", "all", "--json", FIELDS, "--limit", "1000"])?;
     let v: Value = serde_json::from_str(&out)?;
     let mut prs: Vec<PullRequest> = v.as_array().map(|a| a.iter().map(parse_pr).collect()).unwrap_or_default();
     prs.sort_by(|a, b| (b.state == "OPEN").cmp(&(a.state == "OPEN")).then(b.number.cmp(&a.number)));
+    // Lookup is also used by workspace deletion checks, and runs while Stats
+    // is closed. Only known workspaces/branches contribute installation totals.
+    let recorded = (|| -> Result<()> {
+        if tracked_pr_branches()?.contains(&(canonical_path(cwd), branch.to_string())) {
+            for pr in &prs { crate::stats::record_pr(&pr.url)?; }
+        }
+        Ok(())
+    })();
+    if let Err(error) = recorded {
+        log::warn!("record discovered PRs: {error:#}");
+        crate::store::activity::report_error(format!("PRs were discovered, but their activity could not be saved: {error:#}"));
+    }
     Ok(prs)
+}
+
+fn canonical_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn tracked_pr_branches() -> Result<BTreeSet<(PathBuf, String)>> {
+    let mut branches = BTreeSet::new();
+    for session in crate::store::index::load()? {
+        if let Some(branch) = session.branch {
+            let cwd = if Path::new(&session.cwd).exists() { &session.cwd } else { &session.project_path };
+            branches.insert((canonical_path(Path::new(cwd)), branch));
+        }
+        if let Some(removed) = session.removed_workspace {
+            if let Some(branch) = removed.branch {
+                branches.insert((canonical_path(Path::new(&session.project_path)), branch));
+            }
+        }
+    }
+    for project in crate::store::projects::list()?.0 {
+        let path = Path::new(&project.path);
+        if !path.exists() { continue; }
+        if let Ok(worktrees) = crate::git::list_worktrees(path) {
+            for (path, branch) in worktrees {
+                if let Some(branch) = branch {
+                    let cwd = if Path::new(&path).exists() { Path::new(&path) } else { Path::new(&project.path) };
+                    branches.insert((canonical_path(cwd), branch));
+                }
+            }
+        }
+    }
+    Ok(branches)
+}
+
+/// Repeatable startup discovery, including retained archived/removed branches.
+/// No account-wide PR search and no dependence on opening the PR/Stats panels.
+pub fn recover_workspace_prs() -> Result<()> {
+    let mut errors = Vec::new();
+    for (cwd, branch) in tracked_pr_branches()? {
+        if let Err(error) = prs_for_branch(&cwd, &branch) {
+            errors.push(format!("{} ({branch}): {error:#}", cwd.display()));
+        }
+    }
+    if !errors.is_empty() { bail!("{}", errors.join("; ")); }
+    Ok(())
 }
 
 /// One pull request by number, for command-palette task URLs.
@@ -113,6 +175,10 @@ pub fn pr_details(cwd: &Path, number: u64) -> Result<PullRequest> {
 }
 
 pub fn create_pr(cwd: &Path, title: &str, body: &str, base: Option<&str>, draft: bool) -> Result<String> {
+    create_pr_with(cwd, title, body, base, draft, run)
+}
+
+fn create_pr_with(cwd: &Path, title: &str, body: &str, base: Option<&str>, draft: bool, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<String> {
     let mut args = vec!["pr", "create", "--title", title, "--body", body];
     if let Some(b) = base {
         args.extend(["--base", b]);
@@ -124,6 +190,7 @@ pub fn create_pr(cwd: &Path, title: &str, body: &str, base: Option<&str>, draft:
     let url = out.trim().lines().last().unwrap_or("").to_string();
     if let Err(error) = crate::stats::record_pr(&url) {
         log::warn!("record created PR: {error:#}");
+        crate::store::activity::report_error(format!("The PR was created, but saving its activity failed: {error:#}"));
     }
     Ok(url)
 }
@@ -158,6 +225,53 @@ pub fn available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn branch_discovery_counts_cli_pr_once_and_retains_merge_close_history() {
+        let _home = crate::store::temp_home();
+        let cwd = crate::store::root().unwrap();
+        let session = serde_json::from_value(serde_json::json!({
+            "id":"s", "projectPath":cwd, "cwd":cwd, "branch":"feature", "title":"Work",
+            "created":"2026-09-01T00:00:00Z", "modified":"2026-09-01T00:00:00Z"
+        })).unwrap();
+        crate::store::index::save(&[session]).unwrap();
+        for state in ["OPEN", "OPEN", "MERGED", "CLOSED"] {
+            let prs = prs_for_branch_with(&cwd, "feature", |_, args| {
+                assert!(args.windows(2).any(|pair| pair == ["--state", "all"]));
+                Ok(serde_json::json!([{"number":111,"url":"https://github.com/terminalx-ai/raccoon/pull/111","state":state}]).to_string())
+            }).unwrap();
+            assert_eq!(prs[0].state, state);
+        }
+        // App creation followed by discovery uses exactly the same registry.
+        create_pr_with(&cwd, "Fix", "Details", None, true, |_, _| {
+            Ok("https://GITHUB.COM/TerminalX-AI/Raccoon/pull/111/\n".into())
+        }).unwrap();
+        assert_eq!(crate::store::activity::summary().unwrap().prs_created, 1);
+        prs_for_branch_with(&cwd, "untracked", |_, _| {
+            Ok(r#"[{"number":112,"url":"https://github.com/terminalx-ai/raccoon/pull/112"}]"#.into())
+        }).unwrap();
+        assert_eq!(crate::store::activity::summary().unwrap().prs_created, 1);
+        crate::store::index::save(&[]).unwrap();
+        assert_eq!(crate::store::activity::summary().unwrap().prs_created, 1);
+    }
+
+    #[test]
+    fn corrupt_accounting_does_not_hide_a_discovered_pr_or_replace_history() {
+        let _home = crate::store::temp_home();
+        let cwd = crate::store::root().unwrap();
+        let session = serde_json::from_value(serde_json::json!({
+            "id":"s", "projectPath":cwd, "cwd":cwd, "branch":"feature", "title":"Work",
+            "created":"2026-09-01T00:00:00Z", "modified":"2026-09-01T00:00:00Z"
+        })).unwrap();
+        crate::store::index::save(&[session]).unwrap();
+        std::fs::write(cwd.join("stats-activity.json"), "broken").unwrap();
+        let prs = prs_for_branch_with(&cwd, "feature", |_, _| {
+            Ok(r#"[{"number":111,"url":"https://github.com/o/r/pull/111"}]"#.into())
+        }).unwrap();
+        assert_eq!(prs.len(), 1);
+        assert!(crate::store::activity::summary().is_err());
+        assert_eq!(std::fs::read_to_string(cwd.join("stats-activity.json")).unwrap(), "broken");
+    }
 
     #[test]
     fn parses_rollup_shapes() {

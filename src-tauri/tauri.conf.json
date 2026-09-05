@@ -4,9 +4,9 @@
   "version": "0.2.0",
   "identifier": "com.terminalx.next",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "node scripts/ensure-agent-browser.mjs && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "node scripts/ensure-agent-browser.mjs && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -45,7 +45,8 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "binaries/terminalx"
+      "binaries/terminalx",
+      "binaries/agent-browser"
     ],
     "macOS": {
       "signingIdentity": "-",

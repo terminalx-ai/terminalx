@@ -1,13 +1,13 @@
 use super::*;
 
 fn core(dir: &tempfile::TempDir) -> Core {
-    let mut core = Core::load(dir.path().join("reminder.json"), "1", HashSet::from(["restored/tab".into()]), 0).unwrap();
+    let mut core = Core::load(dir.path().join("reminder.json"), "1", 0, 0).unwrap();
     core.ready = true;
     core
 }
 fn launches(core: &mut Core, count: u64, now: i64) {
     for _ in 0..count {
-        core.launched(format!("new/{}", core.saved.launches), now).unwrap();
+        core.work_started(core.saved.launches + 1, now).unwrap();
     }
 }
 fn event(payload: Payload) -> AgentEvent {
@@ -28,11 +28,11 @@ fn show(core: &mut Core, status: StarStatus, now: i64) {
 fn usage_is_monotonic_and_evaluated_only_on_new_launches() {
     let dir = tempfile::tempdir().unwrap();
     let mut c = core(&dir);
-    c.launched("restored/tab".into(), 0).unwrap();
+    c.work_started(0, 0).unwrap();
     assert_eq!(c.saved.launches, 0);
     launches(&mut c, 34, 0);
     assert_eq!(c.begin_check(0), None);
-    c.launched("new/33".into(), 0).unwrap();
+    c.work_started(34, 0).unwrap();
     assert_eq!(c.saved.launches, 34);
     launches(&mut c, 1, 0);
     show(&mut c, StarStatus::NotStarred, 0);
@@ -50,7 +50,7 @@ fn dismissal_requires_three_days_and_another_seventy_launches_across_restart() {
     show(&mut c, StarStatus::Unknown, 0);
     c.defer(100).unwrap();
     assert_eq!(c.saved.next_threshold, 70);
-    let mut c = Core::load(c.path, "1", c.seen, 100).unwrap();
+    let mut c = Core::load(c.path, "1", c.saved.launches, 100).unwrap();
     c.ready = true;
     assert_eq!(c.saved.baseline, 35);
     launches(&mut c, 69, COOLDOWN_MS + 100);
@@ -77,7 +77,7 @@ fn update_resets_baseline_but_preserves_dismissal_and_supporter() {
     let mut c = core(&dir);
     launches(&mut c, 35, 0);
     c.defer(0).unwrap();
-    let mut c = Core::load(c.path, "2", c.seen, 1).unwrap();
+    let mut c = Core::load(c.path, "2", c.saved.launches, 1).unwrap();
     c.ready = true;
     assert_eq!(c.saved.baseline, 35);
     assert_eq!(c.saved.next_threshold, 35);
@@ -85,7 +85,7 @@ fn update_resets_baseline_but_preserves_dismissal_and_supporter() {
     launches(&mut c, 35, 1);
     assert_eq!(c.begin_check(1), None);
     c.complete().unwrap();
-    let c = Core::load(c.path, "3", c.seen, COOLDOWN_MS).unwrap();
+    let c = Core::load(c.path, "3", c.saved.launches, COOLDOWN_MS).unwrap();
     assert!(c.saved.completed);
 }
 
@@ -163,7 +163,7 @@ fn existing_star_and_successful_direct_action_survive_restarts_and_updates() {
         }
         assert!(c.saved.completed);
         assert!(!c.view.visible);
-        let mut c = Core::load(c.path, "2", c.seen, 999999999).unwrap();
+        let mut c = Core::load(c.path, "2", c.saved.launches, 999999999).unwrap();
         c.ready = true;
         launches(&mut c, 1000, 999999999);
         assert_eq!(c.begin_check(999999999), None);
@@ -200,7 +200,7 @@ fn completion_during_cooldown_is_consumed_for_the_version() {
     c.observe(&prompt("work", false), 1).unwrap();
     c.observe(&done(TurnStatus::Ok), 2).unwrap();
     assert_eq!(c.saved.completion_version.as_deref(), Some("1"));
-    let c = Core::load(c.path, "1", c.seen, COOLDOWN_MS).unwrap();
+    let c = Core::load(c.path, "1", c.saved.launches, COOLDOWN_MS).unwrap();
     assert_eq!(c.saved.completion_version.as_deref(), Some("1"));
 }
 
@@ -223,6 +223,55 @@ fn corrupt_persistence_is_not_overwritten() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("broken.json");
     std::fs::write(&path, "broken").unwrap();
-    assert!(Core::load(path.clone(), "1", HashSet::new(), 0).is_err());
+    assert!(Core::load(path.clone(), "1", 0, 0).is_err());
     assert_eq!(std::fs::read_to_string(path).unwrap(), "broken");
+}
+
+#[test]
+fn migrating_to_work_starts_preserves_cooldown_backoff_and_completion_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reminder.json");
+    let old = Saved { launches: 35, baseline: 10, next_threshold: 70, cooldown_until: 5000,
+        app_version: "1".into(), completion_version: Some("1".into()), ..Saved::default() };
+    store::write_json(&path, &old).unwrap();
+    let mut c = Core::load(path.clone(), "1", 26, 0).unwrap();
+    assert_eq!((c.saved.launches, c.saved.baseline, c.saved.usage_schema), (26, 26, 1));
+    assert_eq!(c.saved.next_threshold, 70);
+    assert_eq!(c.saved.cooldown_until, 5000);
+    assert_eq!(c.saved.completion_version.as_deref(), Some("1"));
+    assert!(!c.pending_usage);
+    c.work_started(27, 1).unwrap();
+    let c = Core::load(path, "1", 27, 2).unwrap();
+    assert_eq!(c.saved.baseline, 26, "migration must not rebase on every restart");
+}
+
+#[test]
+fn lifetime_hydration_and_stale_notifications_do_not_trigger_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Core::load(dir.path().join("reminder.json"), "1", 100, 0).unwrap();
+    c.ready = true;
+    c.work_started(100, 0).unwrap();
+    c.work_started(99, 0).unwrap();
+    assert_eq!(c.begin_check(0), None);
+    c.work_started(134, 0).unwrap();
+    assert_eq!(c.begin_check(0), None);
+    c.work_started(135, 0).unwrap();
+    assert!(c.begin_check(0).is_some());
+    let mut c = Core::load(c.path, "1", 135, 1).unwrap();
+    c.ready = true;
+    c.work_started(135, 1).unwrap();
+    assert_eq!(c.begin_check(1), None, "loading the same durable count is not new usage");
+}
+
+#[test]
+fn repeated_live_cycles_in_one_tab_feed_the_reminder_from_the_activity_ledger() {
+    let _home = store::temp_home();
+    let mut c = Core::load(store::root().unwrap().join("reminder.json"), "1", 0, 0).unwrap();
+    for state in [TabStatus::InProgress, TabStatus::InProgress, TabStatus::Waiting, TabStatus::InProgress, TabStatus::Completed] {
+        if let Some(total) = store::activity::transition("same/tab", state, store::activity::Source::Live).unwrap() {
+            c.work_started(total as u64, 0).unwrap();
+        }
+    }
+    assert_eq!(store::activity::summary().unwrap().agents_spawned, 2);
+    assert_eq!(c.saved.launches, 2);
 }
