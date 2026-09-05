@@ -107,19 +107,26 @@ fn install_cli_links(_home: &Path, _target: &Path) -> Result<()> {
     bail!("the command line tool currently requires Unix")
 }
 
-fn skill_targets(home: &Path) -> [PathBuf; 2] {
-    [
-        home.join(".claude/skills/terminalx-cli/SKILL.md"),
-        home.join(".agents/skills/terminalx-cli/SKILL.md"),
-    ]
+/// Every (path, stub) pair "Install skills" writes: each first-party skill in
+/// both the Claude Code and the Codex skill homes.
+fn skill_targets(home: &Path) -> Vec<(PathBuf, &'static str)> {
+    crate::cli::SKILLS
+        .iter()
+        .flat_map(|(name, _, stub)| {
+            [
+                (home.join(format!(".claude/skills/{name}/SKILL.md")), *stub),
+                (home.join(format!(".agents/skills/{name}/SKILL.md")), *stub),
+            ]
+        })
+        .collect()
 }
 
 fn skill_status_at(home: &Path) -> SkillInstallStatus {
     let targets = skill_targets(home)
         .into_iter()
-        .map(|path| {
+        .map(|(path, stub)| {
             let installed = std::fs::read_to_string(&path)
-                .map(|contents| contents == crate::cli::SKILL_STUB)
+                .map(|contents| contents == stub)
                 .unwrap_or(false);
             SkillTargetStatus {
                 path: path.to_string_lossy().into_owned(),
@@ -142,12 +149,12 @@ pub fn cli_skill_status() -> Result<SkillInstallStatus, String> {
 #[tauri::command]
 pub fn install_cli_skill() -> Result<SkillInstallStatus, String> {
     let home = user_home().map_err(|error| format!("{error:#}"))?;
-    install_skill_at(&home, crate::cli::SKILL_STUB).map_err(|error| format!("{error:#}"))?;
+    install_skills_at(&home).map_err(|error| format!("{error:#}"))?;
     Ok(skill_status_at(&home))
 }
 
-fn install_skill_at(home: &Path, stub: &str) -> Result<()> {
-    for path in skill_targets(home) {
+fn install_skills_at(home: &Path) -> Result<()> {
+    for (path, stub) in skill_targets(home) {
         let parent = path.parent().context("skill target has no parent")?;
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         if let Ok(metadata) = std::fs::symlink_metadata(&path) {
@@ -189,18 +196,33 @@ mod tests {
     }
 
     #[test]
-    fn installs_the_exact_discovery_stub_in_both_skill_homes() {
+    fn installs_the_exact_discovery_stubs_in_both_skill_homes() {
         let home = tempfile::tempdir().unwrap();
-        install_skill_at(home.path(), crate::cli::SKILL_STUB).unwrap();
+        assert!(!skill_status_at(home.path()).installed);
+        install_skills_at(home.path()).unwrap();
         let status = skill_status_at(home.path());
         assert!(status.installed);
-        assert_eq!(status.targets.len(), 2);
-        for path in skill_targets(home.path()) {
-            assert!(path.to_string_lossy().contains("/terminalx-cli/SKILL.md"));
-            assert_eq!(
-                std::fs::read_to_string(path).unwrap(),
-                crate::cli::SKILL_STUB
-            );
+        assert_eq!(status.targets.len(), 4);
+        for (path, stub) in skill_targets(home.path()) {
+            let text = path.to_string_lossy();
+            assert!(text.contains("/terminalx-cli/SKILL.md") || text.contains("/computer-use/SKILL.md"));
+            assert_eq!(std::fs::read_to_string(path).unwrap(), stub);
         }
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(".claude/skills/computer-use/SKILL.md")).unwrap(),
+            crate::cli::COMPUTER_SKILL_STUB
+        );
+    }
+
+    #[test]
+    fn an_outdated_stub_reads_as_not_installed() {
+        let home = tempfile::tempdir().unwrap();
+        install_skills_at(home.path()).unwrap();
+        let stale = home.path().join(".agents/skills/computer-use/SKILL.md");
+        std::fs::write(&stale, "old stub").unwrap();
+        let status = skill_status_at(home.path());
+        assert!(!status.installed);
+        let target = status.targets.iter().find(|t| t.path == stale.to_string_lossy()).unwrap();
+        assert!(!target.installed);
     }
 }

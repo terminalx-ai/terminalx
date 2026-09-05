@@ -16,6 +16,7 @@ import { hasEscapeOverlay, keycaps, useHotkey } from "@/lib/hotkeys";
 import { SHORTCUTS } from "@/lib/shortcuts";
 import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
 import { api, errorMessage, gh, issues, type BrowserRuntimeStatus, type CliToolStatus, type LinearStatus, type SkillInstallStatus } from "@/lib/api";
+import { ComputerUseRows } from "./ComputerUseSettings";
 import changelog from "../../../CHANGELOG.md?raw";
 import { TranscriptionTab } from "./TranscriptionTab";
 import { setStatusSettings, useStatus } from "@/lib/status";
@@ -146,6 +147,7 @@ function GeneralTab() {
         }
       />
       {cliError && <div className="-mt-2 mb-3 text-xs text-destructive">{cliError}</div>}
+      <ComputerUseRows />
       <BrowserRuntimeRow />
       <SettingRow
         label="Sounds"
@@ -400,7 +402,7 @@ function AgentsTab() {
         <div className="min-w-0">
           <div className="text-sm font-medium">TerminalX agent skill</div>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            Install the discovery stub for Claude Code and Codex. The CLI serves the complete version-matched guide.
+            Install the terminalx-cli and computer-use discovery stubs for Claude Code and Codex. The CLI serves the complete version-matched guides.
           </p>
           {skillError && <div className="mt-1 text-xs text-destructive">{skillError}</div>}
         </div>

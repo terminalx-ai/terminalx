@@ -4,9 +4,9 @@
   "version": "0.2.0",
   "identifier": "com.terminalx.next",
   "build": {
-    "beforeDevCommand": "node scripts/ensure-agent-browser.mjs && pnpm dev",
+    "beforeDevCommand": "node scripts/ensure-agent-browser.mjs && pnpm build:computer-macos --dev && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "node scripts/ensure-agent-browser.mjs && pnpm build",
+    "beforeBuildCommand": "node scripts/ensure-agent-browser.mjs && pnpm build:computer-macos && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -60,7 +60,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "resources": {
+      "../native/computer-use-macos/.build/release/TerminalX Computer Use.app": "TerminalX Computer Use.app"
+    }
   },
   "plugins": {
     "deep-link": {

@@ -105,13 +105,16 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 pnpm tauri build
 ```
 
-`pnpm tauri build` runs `tsc && vite build`, compiles the Rust side in
-release mode, and writes to `src-tauri/target/release/bundle/`:
+`pnpm tauri build` first builds and signs the computer-use helper
+(`pnpm build:computer-macos`, see [COMPUTER-USE.md](COMPUTER-USE.md)), then
+runs `tsc && vite build`, compiles the Rust side in release mode, and writes
+to `src-tauri/target/release/bundle/`:
 
 | Path | What |
 | --- | --- |
 | `macos/TerminalX.app` | The app, ad-hoc signed (`signingIdentity: "-"`) |
 | `macos/TerminalX.app/Contents/MacOS/terminalx` | A tiny launcher for the app's built-in CLI command family |
+| `macos/TerminalX.app/Contents/Resources/TerminalX Computer Use.app` | The signed computer-use helper that owns the Accessibility and Screen Recording grants |
 | `dmg/TerminalX_<version>_aarch64.dmg` | Disk image for distribution |
 | `macos/TerminalX.app.tar.gz` | Updater artifact |
 | `macos/TerminalX.app.tar.gz.sig` | Its signature, made with the private key |

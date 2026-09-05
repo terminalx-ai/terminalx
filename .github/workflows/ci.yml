@@ -56,6 +56,15 @@ jobs:
       - name: vitest
         run: pnpm vitest run
 
+      # The computer-use helper is a Swift package with its own unit tests.
+      # It is built before the Rust checks so tauri-build packages a real
+      # helper rather than the empty stand-in build.rs creates.
+      - name: swift test (computer-use helper)
+        run: swift test --package-path native/computer-use-macos
+
+      - name: build the computer-use helper app
+        run: node scripts/build-computer-macos.mjs
+
       - name: clippy
         working-directory: src-tauri
         run: cargo clippy --all-targets -- -D warnings

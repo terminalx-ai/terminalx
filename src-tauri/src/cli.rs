@@ -15,6 +15,21 @@ pub const SKILL_STUB: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../skills/terminalx-cli/SKILL.md"
 ));
+pub const COMPUTER_GUIDE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../skill-guides/computer-use.md"
+));
+pub const COMPUTER_SKILL_STUB: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../skills/computer-use/SKILL.md"
+));
+
+/// Every guide this binary can serve through `terminalx skills get <name>`,
+/// with the discovery stub "Install skills" writes for it.
+pub const SKILLS: [(&str, &str, &str); 2] = [
+    ("terminalx-cli", GUIDE, SKILL_STUB),
+    ("computer-use", COMPUTER_GUIDE, COMPUTER_SKILL_STUB),
+];
 
 const HELP: &str = r#"terminalx — control a running TerminalX app
 
@@ -36,15 +51,20 @@ Usage:
   terminalx worktrees delete WORKTREE [--project PROJECT] --yes [--json]
   terminalx issues list --project PROJECT [--provider github|linear]
       [--assigned-to-me] [--team ID] [--search TEXT] [--json]
-  terminalx skills get terminalx-cli [--full] [--json]
+  terminalx skills get terminalx-cli|computer-use [--full] [--json]
 
+Computer use (desktop apps, macOS 14+):
+COMPUTER_HELP
 BROWSER_HELP
 
-Use `terminalx skills get terminalx-cli` for the complete guide."#;
+Use `terminalx skills get terminalx-cli` for the complete guide and
+`terminalx skills get computer-use` for desktop automation."#;
 
-/// The help text with the browser verbs spliced in from their own module.
+/// The help text with the computer and browser verbs spliced in from their
+/// own modules.
 fn help_text() -> String {
-    HELP.replace("BROWSER_HELP", crate::browser::cli::HELP)
+    HELP.replace("COMPUTER_HELP", crate::computer::cli::HELP)
+        .replace("BROWSER_HELP", crate::browser::cli::HELP)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,7 +74,10 @@ pub(crate) enum Action {
         params: Value,
         timeout: Duration,
     },
-    Guide,
+    Guide {
+        name: &'static str,
+        guide: &'static str,
+    },
     Help,
     Version,
 }
@@ -123,18 +146,18 @@ fn run(args: &[String]) -> i32 {
             }
             0
         }
-        Action::Guide => {
+        Action::Guide { name, guide } => {
             if parsed.json {
                 print_response(
                     &ControlResponse::success(
                         "local",
-                        json!({"name": "terminalx-cli", "version": env!("CARGO_PKG_VERSION"), "guide": GUIDE}),
+                        json!({"name": name, "version": env!("CARGO_PKG_VERSION"), "guide": guide}),
                     ),
                     true,
                 );
             } else {
-                print!("{GUIDE}");
-                if !GUIDE.ends_with('\n') {
+                print!("{guide}");
+                if !guide.ends_with('\n') {
                     println!();
                 }
             }
@@ -144,11 +167,16 @@ fn run(args: &[String]) -> i32 {
             command,
             params,
             timeout,
-        } => match control::call(&command, params, timeout) {
+        } => match control::call(&command, params.clone(), timeout) {
             Ok(response) => {
                 let ok = response.ok;
                 let readable = (!parsed.json && ok)
-                    .then(|| response.result.as_ref().and_then(|result| crate::browser::cli::format(&command, result)))
+                    .then(|| {
+                        response.result.as_ref().and_then(|result| {
+                            crate::computer::cli::format_result(&command, &params, result)
+                                .or_else(|| crate::browser::cli::format(&command, result))
+                        })
+                    })
                     .flatten();
                 match readable {
                     Some(text) => println!("{text}"),
@@ -196,6 +224,15 @@ fn print_error(error: ControlError, json_output: bool) {
 }
 
 fn parse(args: &[String]) -> Result<Parsed, ControlError> {
+    parse_with_stdin(args, &mut crate::computer::cli::read_stdin_payload)
+}
+
+/// `stdin` is only consulted for `--text-stdin` / `--value-stdin`, so the
+/// parser can be tested without a real standard input.
+fn parse_with_stdin(
+    args: &[String],
+    stdin: &mut dyn FnMut() -> Result<String, ControlError>,
+) -> Result<Parsed, ControlError> {
     let mut tokens = Tokens::new(args);
     let json = tokens.flag("--json")?;
     if tokens.flag("--help")? || tokens.flag("-h")? {
@@ -264,19 +301,20 @@ fn parse(args: &[String]) -> Result<Parsed, ControlError> {
         "permissions" => parse_permissions(&mut tokens),
         "worktrees" => parse_worktrees(&mut tokens),
         "issues" => parse_issues(&mut tokens),
+        "computer" => crate::computer::cli::parse(&mut tokens, stdin),
         "skills" => {
             expect_word(&mut tokens, "get", "skills")?;
             let name = tokens.required_front("skill name")?;
-            if name != "terminalx-cli" {
+            let Some((name, guide, _)) = SKILLS.iter().find(|(known, _, _)| *known == name) else {
                 return Err(ControlError::new(
                     "not_found",
                     format!("This binary does not embed a guide named {name}."),
-                    Some("Use terminalx-cli exactly.".into()),
+                    Some("Use terminalx-cli or computer-use exactly.".into()),
                 ));
-            }
+            };
             let _full = tokens.flag("--full")?;
             tokens.finish()?;
-            Ok(Action::Guide)
+            Ok(Action::Guide { name, guide })
         }
         other => match crate::browser::cli::parse(other, &mut tokens) {
             Some(action) => action,
@@ -596,21 +634,56 @@ mod tests {
     #[test]
     fn skills_get_is_local_and_version_matched() {
         let parsed = parse(&args(&["skills", "get", "terminalx-cli", "--full"])).unwrap();
-        assert_eq!(parsed.action, Action::Guide);
+        assert!(matches!(parsed.action, Action::Guide { name: "terminalx-cli", .. }));
         assert!(GUIDE.contains("TERMINALX_NEXT_SOCKET"));
         assert!(SKILL_STUB.contains("discovery stub"));
+
+        let computer = parse(&args(&["skills", "get", "computer-use"])).unwrap();
+        let Action::Guide { name, guide } = computer.action else {
+            panic!("expected guide")
+        };
+        assert_eq!(name, "computer-use");
+        assert!(guide.contains("terminalx computer get-app-state"));
+        assert!(COMPUTER_SKILL_STUB.contains("terminalx skills get computer-use"));
+
+        let unknown = parse(&args(&["skills", "get", "browser-use"])).unwrap_err();
+        assert_eq!(unknown.code, "not_found");
+    }
+
+    #[test]
+    fn computer_commands_route_through_the_computer_parser() {
+        let parsed = parse(&args(&["computer", "click", "--app", "Finder", "--element-index", "3", "--json"])).unwrap();
+        assert!(parsed.json);
+        let Action::Rpc { command, params, timeout } = parsed.action else {
+            panic!("expected rpc")
+        };
+        assert_eq!(command, "computer.click");
+        assert_eq!(params["elementIndex"], 3);
+        assert_eq!(timeout, crate::computer::cli::CLI_TIMEOUT);
+
+        let mut stdin = || Ok::<_, ControlError>("hunter2".to_string());
+        let parsed = parse_with_stdin(&args(&["computer", "set-value", "--app", "Finder", "--element-index", "1", "--value-stdin"]), &mut stdin).unwrap();
+        let Action::Rpc { params, .. } = parsed.action else {
+            panic!("expected rpc")
+        };
+        assert_eq!(params["value"], "hunter2");
     }
 
     #[test]
     fn public_copy_uses_the_terminalx_identity() {
         assert!(HELP.starts_with("terminalx — control a running TerminalX app"));
         let help = help_text();
+        assert!(help.contains("terminalx computer get-app-state --app <app>"));
         assert!(help.contains("snapshot [--interactive]"));
         assert!(!help.contains("BROWSER_HELP"));
-        for copy in [help.as_str(), GUIDE, SKILL_STUB] {
+        assert!(!help.contains("COMPUTER_HELP"));
+        for copy in [help.as_str(), GUIDE, SKILL_STUB, COMPUTER_GUIDE, COMPUTER_SKILL_STUB] {
             assert!(!copy.contains("Raccoon app"));
             assert!(!copy.contains("Raccoon →"));
             assert!(!copy.contains("/Applications/Raccoon.app"));
+            assert!(!copy.contains("terminalx-legacy"));
+            assert!(!copy.contains("terminalx-dev"));
+            assert!(!copy.contains("TERMINALX_CLI_COMMAND"));
         }
     }
 }

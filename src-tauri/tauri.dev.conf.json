@@ -9,6 +9,10 @@
       "icons-dev/128x128@2x.png",
       "icons-dev/icon.icns",
       "icons-dev/icon.ico"
-    ]
+    ],
+    "resources": {
+      "../native/computer-use-macos/.build/release/TerminalX Computer Use.app": null,
+      "../native/computer-use-macos/.build/release-dev/TerminalX Computer Use.app": "TerminalX Computer Use.app"
+    }
   }
 }
