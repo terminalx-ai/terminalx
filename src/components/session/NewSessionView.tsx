@@ -209,7 +209,7 @@ export function NewSessionView({
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="secondary" size="sm" className={pill}>
-                  {harness && <AgentMark id={harness.id} className="size-3.5" decorative />}
+                  {harness && <AgentMark id={harness.id} className="size-3.5" decorative brand />}
                   {harness?.name ?? "Agent"}
                   <ChevronDown className="text-faint" />
                 </Button>
@@ -218,7 +218,7 @@ export function NewSessionView({
                 <DropdownMenuLabel>Agent</DropdownMenuLabel>
                 {store.harnesses.map((h) => (
                   <DropdownMenuItem key={h.id} disabled={!h.available} onSelect={() => setPrefs({ lastAgent: h.id })}>
-                    <AgentMark id={h.id} decorative />
+                    <AgentMark id={h.id} decorative brand />
                     <span>{h.name}</span>
                     {!h.available && <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span>}
                   </DropdownMenuItem>

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Popover as PopoverPrimitive } from "radix-ui";
 import { ChevronRight, Cpu, History, Loader2, RefreshCw, RotateCcw, SquareTerminal, Trash2, TriangleAlert } from "lucide-react";
-import { AgentMark } from "@/components/AgentMark";
+import { AgentMark, agentName } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -361,10 +361,6 @@ type UsageAgent = UsageWindow["agent"];
 
 const AGENTS: UsageAgent[] = ["claude", "codex"];
 
-function agentName(agent: UsageAgent): string {
-  return agent === "claude" ? "Claude" : "Codex";
-}
-
 type CanonicalWindowKind = "5h" | "7d" | "fable";
 
 function windowKind(window: UsageWindow): CanonicalWindowKind | null {
@@ -521,7 +517,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                     )}
                   >
                     <span className="flex shrink-0 items-center gap-1">
-                      <AgentMark id={agent} className="size-3 text-faint" decorative />
+                      <AgentMark id={agent} className="size-3 text-faint" decorative brand />
                       {tier !== "icon" ? <span className="font-medium text-foreground">{agentName(agent)}</span> : null}
                       {tier === "full" && plan ? <span className="capitalize text-faint">· {plan}</span> : null}
                     </span>
@@ -622,7 +618,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                         detailAgent === agent && "bg-selected",
                       )}
                     >
-                      <AgentMark id={agent} className="size-4 shrink-0 text-faint" decorative />
+                      <AgentMark id={agent} className="size-4 shrink-0 text-faint" decorative brand />
                       <div className="min-w-0 flex-1">
                         <div className="flex items-baseline gap-2">
                           <span className="text-[12px] font-medium">{agentName(agent)}</span>
@@ -747,7 +743,7 @@ function AgentUsageDetail({
   return (
     <aside data-usage-detail={agent} className="absolute bottom-0 left-[calc(100%+6px)] w-[300px] rounded-xl bg-(--surface-card) p-3 text-popover-foreground shadow-surface hairline max-[760px]:static max-[760px]:mt-2 max-[760px]:w-full">
       <div className="flex items-center gap-2">
-        <AgentMark id={agent} className="size-4 text-muted-foreground" decorative />
+        <AgentMark id={agent} className="size-4 text-muted-foreground" decorative brand />
         <span className="text-[13px] font-medium">{agentName(agent)}</span>
       </div>
       <div className="mt-0.5 text-[10.5px] text-faint">{formatUpdatedAgo(updatedAt, now)}</div>
