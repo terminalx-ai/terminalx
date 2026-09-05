@@ -492,21 +492,41 @@ export interface TextFile {
 export interface TextHit {
   path: string;
   line: number;
+  /** Character column of the first match on the line. */
   col: number;
   text: string;
+  /** Every match on the line as `[start, end)` character offsets into `text`. */
+  matches: [number, number][];
+  /** What each match becomes, in the same order, when the search carried a replacement. */
+  replacements?: string[];
 }
 export interface TextSearch {
   hits: TextHit[];
   files: number;
   capped: boolean;
 }
+/** A file to rewrite, and the 1-based lines to touch in it (every line when absent). */
+export interface ReplaceTarget {
+  path: string;
+  lines?: number[];
+}
+export interface ReplaceReport {
+  files: number;
+  replacements: number;
+}
 export const fs = {
   listDir: (root: string, rel: string) => invoke<DirEntry[]>("list_dir", { root, rel }),
   readText: (path: string) => invoke<TextFile>("read_text_file", { path }),
   writeText: (path: string, content: string) => invoke<number>("write_text_file", { path, content }),
   mtime: (path: string) => invoke<number | null>("file_mtime", { path }),
-  searchText: (root: string, query: string, regex: boolean, caseSensitive: boolean, limit = 500) =>
-    invoke<TextSearch>("search_text", { root, query, regex, caseSensitive, limit }),
+  searchText: (root: string, query: string, regex: boolean, caseSensitive: boolean, limit = 500, replacement?: string) =>
+    invoke<TextSearch>("search_text", { root, query, regex, caseSensitive, limit, replacement: replacement ?? null }),
+  /**
+   * Rewrite matches on disk. Without `targets` every searchable file under
+   * the root is a candidate except those in `skip`.
+   */
+  replaceText: (root: string, query: string, replacement: string, regex: boolean, caseSensitive: boolean, targets: ReplaceTarget[] | null, skip: string[] = []) =>
+    invoke<ReplaceReport>("replace_text", { root, query, replacement, regex, caseSensitive, targets, skip }),
 };
 
 // ---- issues (GitHub through gh, Linear through its API)

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Popover as PopoverPrimitive } from "radix-ui";
 import { ChevronRight, Cpu, History, Loader2, RefreshCw, RotateCcw, SquareTerminal, Trash2, TriangleAlert } from "lucide-react";
-import { AgentMark } from "@/components/AgentMark";
+import { AgentMark, agentName } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -361,13 +361,6 @@ type UsageAgent = UsageWindow["agent"];
 
 const AGENTS: UsageAgent[] = ["claude", "codex"];
 
-function agentName(agent: UsageAgent): string {
-  return agent === "claude" ? "Claude" : "Codex";
-}
-
-/** Brand colour for each agent's mark in the bar: Anthropic's terra cotta, and OpenAI's monochrome mark. */
-const BRAND_MARK: Record<UsageAgent, string> = { claude: "text-[#d97757]", codex: "text-foreground" };
-
 /** The rolling account windows every provider reports; anything else is scoped to a model or a plan feature. */
 function isAccountWindow(window: UsageWindow): boolean {
   return window.key === "five_hour" || window.key === "seven_day" || window.key === "weekly";
@@ -523,7 +516,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                       index < groups.length - 1 && "mr-2 border-r border-hairline pr-2.5",
                     )}
                   >
-                    <AgentMark id={agent} className={cn("size-3", BRAND_MARK[agent])} decorative />
+                    <AgentMark id={agent} className="size-3 text-foreground" decorative brand />
                     <span
                       aria-hidden
                       data-usage-meter={tightest.key}
@@ -621,7 +614,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                           detailAgent === agent && "bg-selected",
                         )}
                       >
-                        <AgentMark id={agent} className="size-4 shrink-0 text-faint" decorative />
+                        <AgentMark id={agent} className="size-4 shrink-0 text-faint" decorative brand />
                         <div className="min-w-0 flex-1">
                           <div className="flex items-baseline gap-2">
                             <span className="text-[12px] font-medium">{agentName(agent)}</span>
@@ -669,7 +662,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                         onClick={() => setDetailAgent(window.agent)}
                         className="grid w-full grid-cols-[16px_72px_1fr_auto] items-center gap-2 rounded-lg bg-well/60 px-2 py-2 text-left outline-none hover:bg-veil-raised focus-visible:ring-1 focus-visible:ring-ring/50"
                       >
-                        <AgentMark id={window.agent} className="size-3.5 text-faint" decorative />
+                        <AgentMark id={window.agent} className="size-3.5 text-faint" decorative brand />
                         <div className="min-w-0">
                           <div className="truncate text-[11px] font-medium">{windowLabel(window)}</div>
                           <div className="capitalize text-[9.5px] text-faint">{window.agent}</div>
@@ -773,7 +766,7 @@ function AgentUsageDetail({
   return (
     <aside data-usage-detail={agent} className="absolute bottom-0 left-[calc(100%+6px)] w-[300px] rounded-xl bg-(--surface-card) p-3 text-popover-foreground shadow-surface hairline max-[760px]:static max-[760px]:mt-2 max-[760px]:w-full">
       <div className="flex items-center gap-2">
-        <AgentMark id={agent} className="size-4 text-muted-foreground" decorative />
+        <AgentMark id={agent} className="size-4 text-muted-foreground" decorative brand />
         <span className="text-[13px] font-medium">{agentName(agent)}</span>
       </div>
       <div className="mt-0.5 text-[10.5px] text-faint">{formatUpdatedAgo(updatedAt, now)}</div>
