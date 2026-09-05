@@ -4,7 +4,7 @@ import { applyEvent, loadTab, useTabLog } from "@/lib/agentEvents";
 import { buildTranscript, type Transcript } from "@/lib/transcript";
 import { getDraft, setDraft, useDraft } from "@/lib/drafts";
 import { patchTab } from "@/lib/sessions";
-import { useHotkey } from "@/lib/hotkeys";
+import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { changeRange, useChanges } from "@/lib/changes";
 import { Chat } from "@/components/chat/Chat";
 import { Composer } from "@/components/chat/Composer";
@@ -92,7 +92,7 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
     void agent.interrupt(session.id, tab.id).catch((e) => setError(errorMessage(e)));
   }, [session.id, tab.id]);
 
-  useHotkey("escape", () => (live ? (stop(), true) : false), { enabled: active });
+  useHotkey("escape", () => (live && !hasEscapeOverlay() ? (stop(), true) : false), { enabled: active });
 
   const answerPermission = useCallback(
     async (requestId: string, optionId: string) => {
