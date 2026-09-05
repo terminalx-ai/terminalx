@@ -373,9 +373,10 @@ export interface TabPtyEvent {
 }
 
 export const agent = {
+  prepareContinuation: (sessionId: string, tabId: string) => invoke<import("@/lib/continuation").ContinuationContext>("prepare_continuation", { sessionId, tabId }),
   loadEvents: (sessionId: string, tabId: string) => invoke<AgentEvent[]>("load_tab_events", { sessionId, tabId }),
-  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[]) =>
-    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null }),
+  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false) =>
+    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery }),
   interrupt: (sessionId: string, tabId: string) => invoke<void>("interrupt_turn", { sessionId, tabId }),
   tabHandoff: (sessionId: string, tabId: string) => invoke<HandoffInfo>("tab_handoff", { sessionId, tabId }),
   /** Start a tab's own CLI. Idempotent, and a no-op for headless harnesses. */

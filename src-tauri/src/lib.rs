@@ -19,6 +19,7 @@ mod names;
 mod pairing;
 mod pty;
 mod session;
+mod continuation;
 pub mod skills;
 mod store;
 mod status;
@@ -196,6 +197,7 @@ pub fn run() {
             commands::file_contents_at,
             commands::log_commits,
             commands::load_tab_events,
+            commands::prepare_continuation,
             commands::send_message,
             commands::interrupt_turn,
             commands::stop_tab,
