@@ -80,6 +80,14 @@ export interface StatsUsageSnapshot {
   updatedAt: number;
 }
 
+export interface StatsUsageState {
+  scope: string;
+  generation: number;
+  snapshot: StatsUsageSnapshot | null;
+  refreshing: boolean;
+  error: string | null;
+}
+
 export interface NewSession {
   projectPath: string;
   /** Run in this existing workspace instead of creating a worktree. */
@@ -136,7 +144,8 @@ export const api = {
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
   /** Card snippets for the agent dashboard; every session when no ids are given. */
   sessionSummaries: (sessionIds?: string[]) => invoke<SessionSummary[]>("session_summaries", { sessionIds: sessionIds ?? null }),
-  statsUsageSnapshot: () => invoke<StatsUsageSnapshot>("stats_usage_snapshot"),
+  statsUsageSnapshot: () => invoke<StatsUsageState>("stats_usage_snapshot"),
+  statsUsageRefresh: (scope: string, generation: number) => invoke<StatsUsageState>("stats_usage_refresh", { scope, generation }),
   createSession: (req: NewSession) => invoke<SessionEntry>("create_session", { req }),
   addTab: (sessionId: string, tab: NewTab) => invoke<TabEntry>("add_tab", { sessionId, tab }),
   removeTab: (sessionId: string, tabId: string) => invoke<void>("remove_tab", { sessionId, tabId }),

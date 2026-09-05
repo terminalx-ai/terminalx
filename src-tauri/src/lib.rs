@@ -175,6 +175,7 @@ pub fn run() {
             commands::automation_run_now,
             commands::session_summaries,
             commands::stats_usage_snapshot,
+            commands::stats_usage_refresh,
             commands::create_session,
             commands::add_tab,
             commands::remove_tab,
@@ -293,8 +294,13 @@ pub fn run() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                app.state::<AppState>().stats_usage.shutdown();
+            }
+        });
 }
 
 #[cfg(test)]
