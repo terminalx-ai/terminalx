@@ -161,6 +161,12 @@ export const api = {
   cliSkillStatus: () => invoke<SkillInstallStatus>("cli_skill_status"),
   installCliSkill: () => invoke<SkillInstallStatus>("install_cli_skill"),
 
+  // computer use: the helper app's Accessibility and Screen Recording grants
+  computerPermissionStatus: () => invoke<ComputerPermissionStatus>("computer_permission_status"),
+  computerOpenPermission: (id: ComputerPermissionId | null) =>
+    invoke<ComputerPermissionSetup>("computer_open_permission", { id }),
+  computerResetPermissions: () => invoke<ComputerPermissionStatus>("computer_reset_permissions"),
+
   // git
   workStatus: (cwd: string) => invoke<WorkStatus>("work_status", { cwd }),
   listBranches: (cwd: string) => invoke<BranchInfo[]>("list_branches", { cwd }),
@@ -201,6 +207,27 @@ export interface SkillTargetStatus {
 export interface SkillInstallStatus {
   installed: boolean;
   targets: SkillTargetStatus[];
+}
+
+export type ComputerPermissionId = "accessibility" | "screenshots";
+
+export interface ComputerPermissionState {
+  id: ComputerPermissionId;
+  status: "granted" | "not-granted" | "unsupported";
+}
+
+export interface ComputerPermissionStatus {
+  platform: string;
+  helperAppPath: string | null;
+  helperUnavailableReason: string | null;
+  permissions: ComputerPermissionState[];
+}
+
+export interface ComputerPermissionSetup extends ComputerPermissionStatus {
+  permissionId?: ComputerPermissionId;
+  openedSettings: boolean;
+  launchedHelper: boolean;
+  nextStep: string | null;
 }
 
 export const automationsApi = {

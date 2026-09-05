@@ -3,6 +3,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -233,26 +234,42 @@ pub struct ControlService {
     app: AppHandle,
     manager: SessionManager,
     endpoint: ControlEndpoint,
+    computer: Arc<crate::computer::ComputerService>,
 }
 
 impl ControlService {
-    pub fn new(app: AppHandle, manager: SessionManager, endpoint: ControlEndpoint) -> Self {
+    pub fn new(
+        app: AppHandle,
+        manager: SessionManager,
+        endpoint: ControlEndpoint,
+        computer: Arc<crate::computer::ComputerService>,
+    ) -> Self {
         Self {
             app,
             manager,
             endpoint,
+            computer,
         }
     }
 
     pub fn handle(&self, request: ControlRequest) -> ControlResponse {
         let id = request.id.clone();
-        match self.execute(&request.command, request.params) {
+        match self.execute(&request.command, request.params, &id) {
             Ok(result) => ControlResponse::success(id, result),
             Err(error) => ControlResponse::failure(id, error),
         }
     }
 
-    fn execute(&self, command: &str, params: Value) -> Result<Value, ControlError> {
+    fn execute(&self, command: &str, params: Value, request_id: &str) -> Result<Value, ControlError> {
+        if let Some(method) = command.strip_prefix("computer.") {
+            // Computer-use errors keep their own codes: the skill guide
+            // teaches recovery per code, so they must not collapse into
+            // `internal`.
+            return self
+                .computer
+                .call(method, params, request_id)
+                .map_err(computer_error);
+        }
         match command {
             "status" => {
                 let (projects, _) = projects::list().map_err(ControlError::internal)?;
@@ -583,6 +600,11 @@ struct Target {
     tab: TabEntry,
 }
 
+fn computer_error(error: crate::computer::ComputerError) -> ControlError {
+    let recovery = error.recovery();
+    ControlError::new(&error.code, error.message, Some(recovery))
+}
+
 fn resolve_project(selector: &str) -> Result<Project, ControlError> {
     let (projects, _) = projects::list().map_err(ControlError::internal)?;
     let canonical = Path::new(selector)
@@ -831,6 +853,17 @@ mod tests {
             serde_json::from_str::<ControlResponse>(&encoded).unwrap(),
             response
         );
+    }
+
+    #[test]
+    fn computer_errors_keep_their_code_and_gain_the_guide_recovery() {
+        let error = computer_error(crate::computer::ComputerError::new(
+            "app_not_found",
+            "no app matches Gmail",
+        ));
+        assert_eq!(error.code, "app_not_found");
+        assert_eq!(error.message, "no app matches Gmail");
+        assert!(error.recovery.unwrap().contains("list-apps"));
     }
 
     #[test]

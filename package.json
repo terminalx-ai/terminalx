@@ -12,6 +12,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:computer-macos": "node scripts/build-computer-macos.mjs",
+    "test:computer-macos": "swift test --package-path native/computer-use-macos",
+    "smoke:computer": "node scripts/computer-use-smoke.mjs",
     "test": "vitest run",
     "check": "tsc --noEmit && vitest run",
     "preview": "vite preview",

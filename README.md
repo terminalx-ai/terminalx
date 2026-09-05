@@ -25,6 +25,11 @@ drives the `claude` and `codex` CLIs you are already logged into.
   `~/.codex` is never edited.
 - **A composer that never hides**: `@` file mentions, `/` slash commands,
   images by drop or paste, and follow-ups queued while a turn runs.
+- **Computer use for agents**: `terminalx computer …` gives agents
+  accessibility snapshots, window screenshots, clicks, typing, scrolling and
+  drags on any desktop app, through a signed helper app that holds the
+  Accessibility and Screen Recording grants so agent shells never need them.
+  See [docs/COMPUTER-USE.md](docs/COMPUTER-USE.md).
 - **Dictation** (⌘⇧D) using the Mac's own on-device speech recognition, with
   optional local models (Parakeet, Nemotron, Canary, Whisper) downloaded on
   demand. Audio never leaves the machine.

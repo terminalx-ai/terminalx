@@ -3,6 +3,7 @@ mod automations;
 mod binpath;
 pub mod cli;
 mod commands;
+pub mod computer;
 mod control;
 mod dictation;
 mod transcription;
@@ -46,6 +47,8 @@ pub struct AppState {
     pub codex_models: Arc<harness::codex::models::Cache>,
     pub status: Arc<status::StatusState>,
     pub stats_usage: Arc<stats::StatsUsageStore>,
+    /// Desktop automation for agents; the helper it spawns dies with the app.
+    pub computer: Arc<computer::ComputerService>,
     manager: std::sync::Mutex<Option<session::SessionManager>>,
 }
 
@@ -64,6 +67,9 @@ pub fn run() {
     let status_state = Arc::new(status::StatusState::default());
     let account = Arc::new(account::AccountManager::default());
     let pairing = Arc::new(pairing::PairingManager::new(account.clone()));
+    // The resource directory is only known once Tauri is up; the service
+    // resolves the helper lazily, so it can be built before `setup`.
+    let computer = Arc::new(computer::ComputerService::new(None));
     let state = AppState {
         account: account.clone(),
         pairing: pairing.clone(),
@@ -74,6 +80,7 @@ pub fn run() {
         codex_models: codex_models.clone(),
         status: status_state.clone(),
         stats_usage: Arc::new(stats::StatsUsageStore::default()),
+        computer: computer.clone(),
         manager: std::sync::Mutex::new(None),
     };
 
@@ -113,6 +120,9 @@ pub fn run() {
                 });
             }
             status::install_menu(app)?;
+            if let Ok(resources) = app.path().resource_dir() {
+                computer.set_resource_dir(resources);
+            }
             let control_endpoint = hooks::prepare_control()?;
             let manager = session::SessionManager::new(
                 app.handle().clone(),
@@ -126,7 +136,7 @@ pub fn run() {
             // The agent CLIs' hooks reach the app through this socket; without
             // it a PTY-first tab still runs, it just cannot report or ask.
             let hooked = manager.clone();
-            let service = control::ControlService::new(app.handle().clone(), manager.clone(), control_endpoint.clone());
+            let service = control::ControlService::new(app.handle().clone(), manager.clone(), control_endpoint.clone(), computer.clone());
             match hooks::serve(control_endpoint, move |frame| hooked.on_hook(frame), move |request| service.handle(request)) {
                 Ok(path) => log::info!("hook socket at {}", path.display()),
                 Err(e) => log::warn!("hook socket: {e:#}"),
@@ -278,6 +288,9 @@ pub fn run() {
             installation::install_cli_tool,
             installation::cli_skill_status,
             installation::install_cli_skill,
+            computer::computer_permission_status,
+            computer::computer_open_permission,
+            computer::computer_reset_permissions,
         ])
         .on_menu_event(|app, event| {
             if event.id().as_ref() == status::MENU_ID {
@@ -290,11 +303,22 @@ pub fn run() {
                     state.pairing.stop();
                     state.host.kill_all();
                     state.terminals.kill_all();
+                    state.computer.shutdown();
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Cmd+Q and `relaunch()` end the run loop without necessarily
+            // destroying the window first; the computer-use helper must not
+            // outlive the app on either path.
+            if let tauri::RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.computer.shutdown();
+                }
+            }
+        });
 }
 
 #[cfg(test)]
