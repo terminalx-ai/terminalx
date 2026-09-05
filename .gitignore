@@ -27,3 +27,10 @@ dist-ssr
 /.raccoon/
 /target/
 /.superdesign/
+
+# Swift helper build output
+native/**/.build/
+native/**/.swiftpm/
+
+# Python desktop runtime test bytecode
+native/**/__pycache__/

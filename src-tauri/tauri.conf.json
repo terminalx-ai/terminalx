@@ -4,9 +4,9 @@
   "version": "0.2.0",
   "identifier": "com.terminalx.next",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "pnpm build:computer-macos --dev && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm build:computer-macos && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -59,7 +59,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "resources": {
+      "../native/computer-use-macos/.build/release/TerminalX Computer Use.app": "TerminalX Computer Use.app"
+    }
   },
   "plugins": {
     "deep-link": {

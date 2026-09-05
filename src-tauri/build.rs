@@ -6,6 +6,7 @@ fn main() {
     assert!(url.starts_with("https://github.com/"));
     println!("cargo:rustc-env=TERMINALX_REPO_URL={url}");
     embed_cli_skill();
+    ensure_helper_resource_dirs();
     // ggml's Metal backend uses `@available` checks, which compile to a call
     // into clang's builtins runtime. Rust links with `-nodefaultlibs`, so that
     // archive has to be named explicitly or release links fail on
@@ -15,8 +16,17 @@ fn main() {
     tauri_build::build()
 }
 
+fn ensure_helper_resource_dirs() {
+    for output in ["release", "release-dev"] {
+        let dir = format!("../native/computer-use-macos/.build/{output}/TerminalX Computer Use.app");
+        if !std::path::Path::new(&dir).exists() {
+            let _ = std::fs::create_dir_all(&dir);
+        }
+    }
+}
+
 fn embed_cli_skill() {
-    for source in ["../skill-guides/terminalx-cli.md", "../skills/terminalx-cli/SKILL.md"] {
+    for source in ["../skill-guides/terminalx-cli.md", "../skills/terminalx-cli/SKILL.md", "../skill-guides/computer-use.md", "../skills/computer-use/SKILL.md"] {
         println!("cargo:rerun-if-changed={source}");
         std::fs::read(source).unwrap_or_else(|e| panic!("read embedded file {source}: {e}"));
     }

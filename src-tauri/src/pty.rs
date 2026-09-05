@@ -84,6 +84,8 @@ fn shell() -> String {
     std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| {
         if cfg!(target_os = "macos") {
             "/bin/zsh".into()
+        } else if cfg!(windows) {
+            "powershell.exe".into()
         } else {
             "/bin/bash".into()
         }
@@ -128,7 +130,7 @@ impl Terminals {
         let sh = shell();
         let mut cmd = CommandBuilder::new(&sh);
         // A login shell so PATH and prompts match the reader's own terminal.
-        let known_shell = sh.ends_with("zsh") || sh.ends_with("bash") || sh.ends_with("fish") || sh.ends_with("sh");
+        let known_shell = sh.ends_with("zsh") || sh.ends_with("bash") || sh.ends_with("fish") || sh.ends_with("sh") && !sh.ends_with("pwsh");
         match command {
             Some(c) if known_shell => {
                 cmd.arg("-l");

@@ -9,8 +9,7 @@ the hooks it runs, and ⌘⇧T flips between the chat and the terminal without
 stopping anything or waiting for a turn to end. One process, two views. See
 [docs/PTY-FIRST.md](docs/PTY-FIRST.md) for how that works and why.
 
-TerminalX is macOS-only today, and it brings no compute of its own: it
-drives the `claude` and `codex` CLIs you are already logged into.
+TerminalX brings no compute of its own: it drives the `claude` and `codex` CLIs you are already logged into.
 
 ## What it does
 
@@ -25,6 +24,12 @@ drives the `claude` and `codex` CLIs you are already logged into.
   `~/.codex` is never edited.
 - **A composer that never hides**: `@` file mentions, `/` slash commands,
   images by drop or paste, and follow-ups queued while a turn runs.
+- **Computer use for agents**: `terminalx computer …` gives agents
+  accessibility snapshots, window screenshots, clicks, typing, scrolling and
+  drags through a signed helper on macOS 14+, AT-SPI on Linux, or UI Automation
+  on Windows. Linux screenshots and hotkeys require X11; Windows cannot reach
+  elevated windows from a non-elevated app.
+  See [docs/COMPUTER-USE.md](docs/COMPUTER-USE.md).
 - **Dictation** (⌘⇧D) using the Mac's own on-device speech recognition, with
   optional local models (Parakeet, Nemotron, Canary, Whisper) downloaded on
   demand. Audio never leaves the machine.

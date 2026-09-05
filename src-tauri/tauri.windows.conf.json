@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "externalBin": [],
+    "resources": {
+      "../native/computer-use-macos/.build/release/TerminalX Computer Use.app": null,
+      "../native/computer-use-macos/.build/release-dev/TerminalX Computer Use.app": null,
+      "../native/computer-use-windows/runtime.ps1": "computer-use-windows/runtime.ps1",
+      "../resources/windows/terminalx.cmd": "terminalx.cmd",
+      "../resources/windows/tnx.cmd": "tnx.cmd"
+    }
+  }
+}

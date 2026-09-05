@@ -39,12 +39,15 @@ fn cli_status_at(home: &Path, target: &Path) -> CliToolStatus {
     let directory = cli_dir(home);
     let commands: Vec<String> = ["terminalx", "tnx"]
         .iter()
-        .map(|name| directory.join(name).to_string_lossy().into_owned())
+        .map(|name| directory.join(if cfg!(windows) { format!("{name}.cmd") } else { (*name).into() }).to_string_lossy().into_owned())
         .collect();
     let installed = commands.iter().all(|command| {
-        std::fs::read_link(command)
+        #[cfg(windows)]
+        { std::fs::read_to_string(command).ok().as_deref() == Some(&windows_shim(target)) }
+        #[cfg(unix)]
+        { std::fs::read_link(command)
             .map(|link| link == target)
-            .unwrap_or(false)
+            .unwrap_or(false) }
     });
     CliToolStatus {
         installed,
@@ -102,24 +105,49 @@ fn install_cli_links(home: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn install_cli_links(_home: &Path, _target: &Path) -> Result<()> {
-    bail!("the command line tool currently requires Unix")
+#[cfg(windows)]
+fn windows_shim(target: &Path) -> String {
+    // Percent signs expand even inside cmd quotes; delayed expansion is disabled.
+    let target = target.to_string_lossy().replace('%', "%%");
+    format!("@echo off\r\nrem TerminalX CLI shim\r\nsetlocal DisableDelayedExpansion\r\n\"{target}\" terminalx %*\r\n")
 }
 
-fn skill_targets(home: &Path) -> [PathBuf; 2] {
-    [
-        home.join(".claude/skills/terminalx-cli/SKILL.md"),
-        home.join(".agents/skills/terminalx-cli/SKILL.md"),
-    ]
+#[cfg(windows)]
+fn install_cli_links(home: &Path, target: &Path) -> Result<()> {
+    let directory = cli_dir(home);
+    std::fs::create_dir_all(&directory)?;
+    for name in ["terminalx.cmd", "tnx.cmd"] {
+        let path = directory.join(name);
+        if path.exists() && !std::fs::read_to_string(&path)?.contains("rem TerminalX CLI shim") {
+            bail!("{} already exists and is not a TerminalX shim", path.display());
+        }
+    }
+    for name in ["terminalx.cmd", "tnx.cmd"] {
+        crate::store::write_atomic(&directory.join(name), windows_shim(target).as_bytes())?;
+    }
+    Ok(())
+}
+
+/// Every (path, stub) pair "Install skills" writes: each first-party skill in
+/// both the Claude Code and the Codex skill homes.
+fn skill_targets(home: &Path) -> Vec<(PathBuf, &'static str)> {
+    crate::cli::SKILLS
+        .iter()
+        .flat_map(|(name, _, stub)| {
+            [
+                (home.join(format!(".claude/skills/{name}/SKILL.md")), *stub),
+                (home.join(format!(".agents/skills/{name}/SKILL.md")), *stub),
+            ]
+        })
+        .collect()
 }
 
 fn skill_status_at(home: &Path) -> SkillInstallStatus {
     let targets = skill_targets(home)
         .into_iter()
-        .map(|path| {
+        .map(|(path, stub)| {
             let installed = std::fs::read_to_string(&path)
-                .map(|contents| contents == crate::cli::SKILL_STUB)
+                .map(|contents| contents == stub)
                 .unwrap_or(false);
             SkillTargetStatus {
                 path: path.to_string_lossy().into_owned(),
@@ -142,12 +170,12 @@ pub fn cli_skill_status() -> Result<SkillInstallStatus, String> {
 #[tauri::command]
 pub fn install_cli_skill() -> Result<SkillInstallStatus, String> {
     let home = user_home().map_err(|error| format!("{error:#}"))?;
-    install_skill_at(&home, crate::cli::SKILL_STUB).map_err(|error| format!("{error:#}"))?;
+    install_skills_at(&home).map_err(|error| format!("{error:#}"))?;
     Ok(skill_status_at(&home))
 }
 
-fn install_skill_at(home: &Path, stub: &str) -> Result<()> {
-    for path in skill_targets(home) {
+fn install_skills_at(home: &Path) -> Result<()> {
+    for (path, stub) in skill_targets(home) {
         let parent = path.parent().context("skill target has no parent")?;
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         if let Ok(metadata) = std::fs::symlink_metadata(&path) {
@@ -189,18 +217,33 @@ mod tests {
     }
 
     #[test]
-    fn installs_the_exact_discovery_stub_in_both_skill_homes() {
+    fn installs_the_exact_discovery_stubs_in_both_skill_homes() {
         let home = tempfile::tempdir().unwrap();
-        install_skill_at(home.path(), crate::cli::SKILL_STUB).unwrap();
+        assert!(!skill_status_at(home.path()).installed);
+        install_skills_at(home.path()).unwrap();
         let status = skill_status_at(home.path());
         assert!(status.installed);
-        assert_eq!(status.targets.len(), 2);
-        for path in skill_targets(home.path()) {
-            assert!(path.to_string_lossy().contains("/terminalx-cli/SKILL.md"));
-            assert_eq!(
-                std::fs::read_to_string(path).unwrap(),
-                crate::cli::SKILL_STUB
-            );
+        assert_eq!(status.targets.len(), 4);
+        for (path, stub) in skill_targets(home.path()) {
+            let text = path.to_string_lossy();
+            assert!(text.contains("/terminalx-cli/SKILL.md") || text.contains("/computer-use/SKILL.md"));
+            assert_eq!(std::fs::read_to_string(path).unwrap(), stub);
         }
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(".claude/skills/computer-use/SKILL.md")).unwrap(),
+            crate::cli::COMPUTER_SKILL_STUB
+        );
+    }
+
+    #[test]
+    fn an_outdated_stub_reads_as_not_installed() {
+        let home = tempfile::tempdir().unwrap();
+        install_skills_at(home.path()).unwrap();
+        let stale = home.path().join(".agents/skills/computer-use/SKILL.md");
+        std::fs::write(&stale, "old stub").unwrap();
+        let status = skill_status_at(home.path());
+        assert!(!status.installed);
+        let target = status.targets.iter().find(|t| t.path == stale.to_string_lossy()).unwrap();
+        assert!(!target.installed);
     }
 }

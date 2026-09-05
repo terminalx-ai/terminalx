@@ -1,8 +1,10 @@
 //! Authenticated JSON-lines control protocol shared by the desktop app and
 //! the `terminalx` command-line client.
 
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -119,15 +121,16 @@ impl ControlResponse {
 
 /// Send one request to the running app. Socket and token resolution happen
 /// here so every command has identical authentication and recovery behavior.
-#[cfg(unix)]
 pub fn call(
     command: &str,
     params: Value,
     timeout: Duration,
 ) -> Result<ControlResponse, ControlError> {
+    #[cfg(unix)]
     use std::os::unix::net::UnixStream;
 
     let socket = client_socket_path();
+    #[cfg(unix)]
     if !socket.exists() {
         return Err(ControlError::new(
             "app_unavailable",
@@ -152,6 +155,10 @@ pub fn call(
         command: command.into(),
         params,
     };
+    let mut bytes = serde_json::to_vec(&request).map_err(ControlError::internal)?;
+    bytes.push(b'\n');
+    #[cfg(unix)]
+    let line = {
     let mut stream = UnixStream::connect(&socket).map_err(|e| {
         ControlError::new(
             "app_unavailable",
@@ -165,8 +172,6 @@ pub fn call(
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(ControlError::internal)?;
-    let mut bytes = serde_json::to_vec(&request).map_err(ControlError::internal)?;
-    bytes.push(b'\n');
     stream.write_all(&bytes).map_err(ControlError::internal)?;
     stream.flush().map_err(ControlError::internal)?;
     let mut line = String::new();
@@ -180,6 +185,15 @@ pub fn call(
         } else {
             ControlError::internal(e)
         }
+    })?;
+        line
+    };
+    #[cfg(windows)]
+    let line = crate::pipe_transport::exchange(&socket, bytes, timeout).map_err(|error| {
+        let timed_out = error.kind() == std::io::ErrorKind::TimedOut;
+        ControlError::new(if timed_out { "timeout" } else { "app_unavailable" },
+            format!("Could not exchange a control frame at {}: {error}", socket.display()),
+            Some(if timed_out { "Check status before retrying; the command may already have completed." } else { APP_UNAVAILABLE_RECOVERY }.into()))
     })?;
     let response: ControlResponse = serde_json::from_str(&line).map_err(|e| {
         ControlError::new(
@@ -198,19 +212,6 @@ pub fn call(
     Ok(response)
 }
 
-#[cfg(not(unix))]
-pub fn call(
-    _command: &str,
-    _params: Value,
-    _timeout: Duration,
-) -> Result<ControlResponse, ControlError> {
-    Err(ControlError::new(
-        "app_unavailable",
-        "The control socket requires Unix.",
-        None,
-    ))
-}
-
 fn client_home() -> PathBuf {
     std::env::var_os("RACCOON_HOME")
         .map(PathBuf::from)
@@ -221,7 +222,12 @@ fn client_home() -> PathBuf {
 fn client_socket_path() -> PathBuf {
     std::env::var_os(crate::hooks::CONTROL_SOCKET_ENV)
         .map(PathBuf::from)
-        .unwrap_or_else(|| client_home().join("run/hooks.sock"))
+        .unwrap_or_else(|| {
+            #[cfg(unix)]
+            { client_home().join("run/hooks.sock") }
+            #[cfg(windows)]
+            { crate::pipe_transport::path_for_home(&client_home()) }
+        })
 }
 
 fn client_token_path() -> PathBuf {
@@ -233,26 +239,42 @@ pub struct ControlService {
     app: AppHandle,
     manager: SessionManager,
     endpoint: ControlEndpoint,
+    computer: Arc<crate::computer::ComputerService>,
 }
 
 impl ControlService {
-    pub fn new(app: AppHandle, manager: SessionManager, endpoint: ControlEndpoint) -> Self {
+    pub fn new(
+        app: AppHandle,
+        manager: SessionManager,
+        endpoint: ControlEndpoint,
+        computer: Arc<crate::computer::ComputerService>,
+    ) -> Self {
         Self {
             app,
             manager,
             endpoint,
+            computer,
         }
     }
 
     pub fn handle(&self, request: ControlRequest) -> ControlResponse {
         let id = request.id.clone();
-        match self.execute(&request.command, request.params) {
+        match self.execute(&request.command, request.params, &id) {
             Ok(result) => ControlResponse::success(id, result),
             Err(error) => ControlResponse::failure(id, error),
         }
     }
 
-    fn execute(&self, command: &str, params: Value) -> Result<Value, ControlError> {
+    fn execute(&self, command: &str, params: Value, request_id: &str) -> Result<Value, ControlError> {
+        if let Some(method) = command.strip_prefix("computer.") {
+            // Computer-use errors keep their own codes: the skill guide
+            // teaches recovery per code, so they must not collapse into
+            // `internal`.
+            return self
+                .computer
+                .call(method, params, request_id)
+                .map_err(computer_error);
+        }
         match command {
             "status" => {
                 let (projects, _) = projects::list().map_err(ControlError::internal)?;
@@ -583,6 +605,11 @@ struct Target {
     tab: TabEntry,
 }
 
+fn computer_error(error: crate::computer::ComputerError) -> ControlError {
+    let recovery = error.recovery();
+    ControlError::new(&error.code, error.message, Some(recovery))
+}
+
 fn resolve_project(selector: &str) -> Result<Project, ControlError> {
     let (projects, _) = projects::list().map_err(ControlError::internal)?;
     let canonical = Path::new(selector)
@@ -831,6 +858,17 @@ mod tests {
             serde_json::from_str::<ControlResponse>(&encoded).unwrap(),
             response
         );
+    }
+
+    #[test]
+    fn computer_errors_keep_their_code_and_gain_the_guide_recovery() {
+        let error = computer_error(crate::computer::ComputerError::new(
+            "app_not_found",
+            "no app matches Gmail",
+        ));
+        assert_eq!(error.code, "app_not_found");
+        assert_eq!(error.message, "no app matches Gmail");
+        assert!(error.recovery.unwrap().contains("list-apps"));
     }
 
     #[test]

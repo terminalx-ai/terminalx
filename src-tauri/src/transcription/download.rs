@@ -169,6 +169,7 @@ mod tests {
 
     /// Pulls the smallest model for real and runs a tone through it. Network
     /// and a couple of hundred megabytes, so opt in with `--ignored`.
+    #[cfg(target_os = "macos")]
     #[test]
     #[ignore]
     fn downloads_verifies_and_loads_the_smallest_model() {

@@ -2,25 +2,32 @@
 //! megabytes, so the loaded model is kept between dictations and only let go
 //! when the selection changes or the weights are deleted.
 
+#[cfg(target_os = "macos")]
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::sync::Mutex;
 
+#[cfg(target_os = "macos")]
 use anyhow::{anyhow, Result};
 
 pub const TARGET_RATE: u32 = 16_000;
 
+#[cfg(target_os = "macos")]
 struct Loaded {
     id: String,
     model: transcribe_cpp::Model,
 }
 // The model is only ever driven from inside the mutex, one run at a time.
+#[cfg(target_os = "macos")]
 unsafe impl Send for Loaded {}
 
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 pub struct Engine {
     loaded: Mutex<Option<Loaded>>,
 }
 
+#[cfg(target_os = "macos")]
 impl Engine {
     pub fn unload(&self) {
         *self.loaded.lock().unwrap() = None;
@@ -52,4 +59,18 @@ impl Engine {
         let transcript = session.run(audio, &options).map_err(|e| anyhow!("transcription failed: {e}"))?;
         Ok(transcript.text.trim().to_string())
     }
+}
+
+// Dictation is already unavailable off macOS. Avoid linking an unused native
+// model runtime there; selection/unload remain safe until dictation is ported.
+#[cfg(not(target_os = "macos"))]
+#[derive(Default)]
+pub struct Engine {
+    _unavailable: (),
+}
+
+#[cfg(not(target_os = "macos"))]
+impl Engine {
+    pub fn unload(&self) {}
+    pub fn unload_if(&self, _id: &str) {}
 }
