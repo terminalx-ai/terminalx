@@ -15,7 +15,7 @@ import { repoFile } from "@/lib/repo";
 import { hasEscapeOverlay, keycaps, useHotkey } from "@/lib/hotkeys";
 import { SHORTCUTS } from "@/lib/shortcuts";
 import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
-import { api, errorMessage, gh, issues, type CliToolStatus, type LinearStatus, type SkillInstallStatus } from "@/lib/api";
+import { api, errorMessage, gh, issues, type BrowserRuntimeStatus, type CliToolStatus, type LinearStatus, type SkillInstallStatus } from "@/lib/api";
 import changelog from "../../../CHANGELOG.md?raw";
 import { TranscriptionTab } from "./TranscriptionTab";
 import { setStatusSettings, useStatus } from "@/lib/status";
@@ -146,6 +146,7 @@ function GeneralTab() {
         }
       />
       {cliError && <div className="-mt-2 mb-3 text-xs text-destructive">{cliError}</div>}
+      <BrowserRuntimeRow />
       <SettingRow
         label="Sounds"
         description="A short tone when a session finishes or asks for you. Silent while another app has focus; the desktop notification makes its own noise there."
@@ -304,6 +305,71 @@ function AppearanceTab() {
         }
       />
     </div>
+  );
+}
+
+/**
+ * The built-in browser runtime: the bundled agent-browser and the Chromium it
+ * drives. A system Chrome is used when present; otherwise agent-browser can
+ * download its own.
+ */
+function BrowserRuntimeRow() {
+  const [status, setStatus] = useState<BrowserRuntimeStatus | null>(null);
+  const [busy, setBusy] = useState<"check" | "install" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const refresh = async () => {
+    setBusy("check");
+    setError(null);
+    try {
+      setStatus(await api.browserRuntimeStatus());
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  useEffect(() => {
+    void refresh();
+  }, []);
+  const install = async () => {
+    setBusy("install");
+    setError(null);
+    try {
+      setStatus(await api.browserInstallBrowser());
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const description = !status
+    ? "Checking the agent-browser runtime…"
+    : !status.binary
+      ? "The agent-browser runtime is not bundled with this build. Agents cannot open browser tabs until it is."
+      : !status.browser
+        ? `agent-browser ${status.version ?? "?"} is ready, but no Chrome or Chromium was found. Install one for agents to drive.`
+        : `agent-browser ${status.version ?? "?"} drives ${status.browser}. Agents open tabs with terminalx tab create.`;
+  return (
+    <>
+      <SettingRow
+        label="Built-in browser"
+        description={description}
+        control={
+          status?.binary && !status.browser ? (
+            <Button size="sm" variant="outline" disabled={busy != null} onClick={() => void install()}>
+              {busy === "install" ? <Loader2 className="animate-spin" /> : null}
+              Install Chromium
+            </Button>
+          ) : (
+            <Button size="sm" variant="outline" disabled={busy != null} onClick={() => void refresh()}>
+              {busy === "check" ? <Loader2 className="animate-spin" /> : status?.browser ? <Check /> : <RefreshCw />}
+              {status?.browser ? "Ready" : "Re-check"}
+            </Button>
+          )
+        }
+      />
+      {error && <div className="-mt-2 mb-3 text-xs text-destructive">{error}</div>}
+    </>
   );
 }
 

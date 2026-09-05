@@ -1984,6 +1984,7 @@ pub async fn delete_workspace(app: AppHandle, project_path: String, path: String
                 kill_tab(&state, &s.id, &t.id);
             }
         }
+        state.browser.forget_workspace(&crate::browser::control::canonical(&path));
         let removed = delete_workspace_entries(&project_path, &path, delete_branch)?;
         notify_workspace_deleted(&app, &project_path, &removed);
         Ok(removed)
