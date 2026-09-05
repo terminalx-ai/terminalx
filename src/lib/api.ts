@@ -40,6 +40,7 @@ export interface AppStats {
   agentTimeMs: number;
   prsCreated: number;
   trackingSince: string | null;
+  accountingError?: string | null;
 }
 
 export interface UsageDay {
@@ -84,6 +85,7 @@ export interface StatsUsageState {
   scope: string;
   generation: number;
   snapshot: StatsUsageSnapshot | null;
+  activity?: AppStats | null;
   refreshing: boolean;
   error: string | null;
 }
@@ -146,6 +148,7 @@ export const api = {
   sessionSummaries: (sessionIds?: string[]) => invoke<SessionSummary[]>("session_summaries", { sessionIds: sessionIds ?? null }),
   statsUsageSnapshot: () => invoke<StatsUsageState>("stats_usage_snapshot"),
   statsUsageRefresh: (scope: string, generation: number) => invoke<StatsUsageState>("stats_usage_refresh", { scope, generation }),
+  appActivitySummary: () => invoke<AppStats>("app_activity_summary"),
   createSession: (req: NewSession) => invoke<SessionEntry>("create_session", { req }),
   addTab: (sessionId: string, tab: NewTab) => invoke<TabEntry>("add_tab", { sessionId, tab }),
   removeTab: (sessionId: string, tabId: string) => invoke<void>("remove_tab", { sessionId, tabId }),

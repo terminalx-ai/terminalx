@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 const DISPLAY_FILE: &str = "stats-usage-snapshot.json";
-// Bump whenever aggregation, attribution, pricing, or app-stat definitions change.
+// Bump whenever provider aggregation, attribution, or pricing changes.
+// App activity is read independently from its durable ledger on every response.
 const DISPLAY_SCHEMA: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,8 +48,30 @@ pub struct StatsUsageState {
     pub scope: String,
     pub generation: u64,
     pub snapshot: Option<StatsUsageSnapshot>,
+    pub activity: Option<super::AppStats>,
     pub refreshing: bool,
     pub error: Option<String>,
+}
+
+impl StatsUsageState {
+    // A delayed provider scan or a pre-migration display cache must never replace
+    // the independently committed lifetime counters with an older app summary.
+    fn with_activity(mut self, activity: Result<super::AppStats>) -> Self {
+        match activity {
+            Ok(activity) => self.activity = Some(activity),
+            Err(error) => {
+                let message = format!("Activity history unavailable: {error:#}");
+                self.error = Some(match self.error {
+                    Some(previous) => format!("{previous}; {message}"),
+                    None => message,
+                });
+            }
+        }
+        if let (Some(snapshot), Some(activity)) = (self.snapshot.as_mut(), self.activity.as_ref()) {
+            snapshot.app = activity.clone();
+        }
+        self
+    }
 }
 
 #[derive(Default)]
@@ -65,7 +88,7 @@ pub struct StatsUsageStore {
 
 impl StatsUsageStore {
     pub fn read(&self) -> Result<StatsUsageState> {
-        self.read_at(Scope::current()?)
+        Ok(self.attach_activity(self.read_at(Scope::current()?)?, super::app_stats))
     }
 
     fn read_at(&self, scope: Scope) -> Result<StatsUsageState> {
@@ -79,6 +102,7 @@ impl StatsUsageStore {
                 scope: scope.id(),
                 generation: state.view.generation + 1,
                 snapshot,
+                activity: None,
                 refreshing: false,
                 error,
             };
@@ -94,14 +118,32 @@ impl StatsUsageStore {
         let current = Scope::current()?;
         self.read_at(current.clone())?;
         let expected = current.clone();
-        self.start(current, scope, generation, move || {
+        let view = self.start(current, scope, generation, move || {
             let candidate = scan_snapshot(&expected.root)?;
             anyhow::ensure!(
                 Scope::current()? == expected,
                 "Usage data scope changed during refresh"
             );
             Ok(candidate)
-        })
+        })?;
+        Ok(self.attach_activity(view, super::app_stats))
+    }
+
+    fn attach_activity(&self, mut view: StatsUsageState, activity: impl FnOnce() -> Result<super::AppStats>) -> StatsUsageState {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // Read under the publication lock so an older concurrent response
+        // cannot overwrite a newer last-known activity summary.
+        let activity = activity();
+        if state.view.scope == view.scope {
+            view.activity = state.view.activity.clone();
+            view = view.with_activity(activity);
+            // Keep the latest known counters across failed reads and provider
+            // publications; neither depends on a valid provider display cache.
+            state.view.activity = view.activity.clone();
+            view
+        } else {
+            view.with_activity(activity)
+        }
     }
 
     fn start(
@@ -239,6 +281,50 @@ mod tests {
             assert!(Instant::now() < deadline, "refresh did not settle");
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn lifetime_activity_updates_even_when_provider_refresh_fails_or_is_running() {
+        let cached = StatsUsageState {
+            snapshot: Some(snapshot(17)),
+            refreshing: true,
+            error: Some("provider scan failed".into()),
+            ..Default::default()
+        };
+        let current = cached.with_activity(Ok(super::super::AppStats {
+            agents_spawned: 42,
+            prs_created: 9,
+            accounting_error: Some("history recovery incomplete".into()),
+            ..Default::default()
+        }));
+        assert_eq!(current.snapshot.as_ref().unwrap().app.agents_spawned, 42);
+        assert_eq!(current.snapshot.as_ref().unwrap().total_tokens, 17);
+        assert_eq!(current.snapshot.as_ref().unwrap().updated_at, 1234);
+        assert!(current.refreshing);
+        let failed = current.with_activity(Err(anyhow::anyhow!("unreadable ledger")));
+        assert_eq!(failed.snapshot.unwrap().app.prs_created, 9);
+        let error = failed.error.unwrap();
+        assert!(error.contains("provider scan failed"));
+        assert!(error.contains("unreadable ledger"));
+    }
+
+    #[test]
+    fn missing_provider_cache_does_not_hide_activity_and_failed_reads_keep_known_totals() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StatsUsageStore::default();
+        let scope = scope(dir.path());
+        let empty = store.read_at(scope.clone()).unwrap();
+        let current = store.attach_activity(empty, || Ok(super::super::AppStats {
+            agents_spawned: 42,
+            prs_created: 9,
+            ..Default::default()
+        }));
+        assert!(current.snapshot.is_none());
+        assert_eq!(current.activity.unwrap().agents_spawned, 42);
+        let failed = store.attach_activity(store.read_at(scope).unwrap(), || Err(anyhow::anyhow!("unreadable ledger")));
+        assert!(failed.snapshot.is_none());
+        assert_eq!(failed.activity.unwrap().prs_created, 9);
+        assert!(failed.error.unwrap().contains("unreadable ledger"));
     }
 
     #[test]

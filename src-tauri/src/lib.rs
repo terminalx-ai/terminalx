@@ -122,6 +122,11 @@ pub fn run() {
                 });
             }
             status::install_menu(app)?;
+            // Recover local history before hooks/automations can publish live
+            // activity. Provider cache scans are deliberately unrelated.
+            if let Err(error) = store::activity::summary() {
+                log::error!("initialize activity history: {error:#}");
+            }
             let control_endpoint = hooks::prepare_control()?;
             let manager = session::SessionManager::new(
                 app.handle().clone(),
@@ -140,6 +145,12 @@ pub fn run() {
                 Ok(path) => log::info!("hook socket at {}", path.display()),
                 Err(e) => log::warn!("hook socket: {e:#}"),
             }
+            std::thread::spawn(|| {
+                if let Err(error) = github::recover_workspace_prs() {
+                    log::warn!("recover workspace PR history: {error:#}");
+                    store::activity::report_error(format!("Workspace PR recovery is incomplete; discovery will retry on restart or workspace refresh: {error:#}"));
+                }
+            });
             let exited = manager.clone();
             app.listen("pty_exit", move |event| {
                 if let Ok(exit) = serde_json::from_str::<pty::PtyExit>(event.payload()) {
@@ -189,6 +200,7 @@ pub fn run() {
             commands::automation_run_now,
             commands::session_summaries,
             commands::stats_usage_snapshot,
+            commands::app_activity_summary,
             commands::stats_usage_refresh,
             commands::create_session,
             commands::add_tab,
@@ -318,6 +330,11 @@ pub fn run() {
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(state) = window.try_state::<AppState>() {
                     state.pairing.stop();
+                    if window.label() == "main" {
+                        if let Err(error) = store::activity::shutdown() {
+                            log::error!("flush activity on window teardown: {error:#}");
+                        }
+                    }
                     state.host.kill_all();
                     state.terminals.kill_all();
                     state.browser.shutdown();
@@ -327,8 +344,11 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
+            if matches!(event, tauri::RunEvent::Exit) {
                 app.state::<AppState>().stats_usage.shutdown();
+                if let Err(error) = store::activity::shutdown() {
+                    log::error!("flush activity on exit: {error:#}");
+                }
             }
         });
 }

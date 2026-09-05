@@ -13,7 +13,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -23,7 +22,6 @@ use serde_json::Value;
 
 const CACHE_SCHEMA: u32 = 3;
 const CACHE_FILE: &str = "stats-usage-cache.json";
-const PR_FILE: &str = "stats-prs.json";
 const OVERVIEW_DAYS: u64 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,14 +42,7 @@ pub struct StatsUsageSnapshot {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct AppStats {
-    pub agents_spawned: usize,
-    pub agent_time_ms: u64,
-    pub prs_created: usize,
-    pub tracking_since: Option<String>,
-}
+pub use crate::store::activity::Summary as AppStats;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -132,13 +123,6 @@ impl Default for ScanCache {
             files: Vec::new(),
         }
     }
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PrHistory {
-    #[serde(default)]
-    urls: Vec<String>,
 }
 
 /// Build a candidate; the lifecycle publishes it only after durable persistence.
@@ -1134,55 +1118,10 @@ fn off_provider(id: &str, label: &str) -> ProviderUsage {
 }
 
 fn app_stats() -> Result<AppStats> {
-    let sessions = crate::store::index::load()?;
-    let agents_spawned = sessions.iter().map(|session| session.tabs.len()).sum();
-    let tracking_since = sessions.iter().map(|session| session.created.clone()).min();
-    let mut agent_time_ms = 0_u64;
-    for session in &sessions {
-        for tab in &session.tabs {
-            for event in crate::store::read_lines::<crate::events::AgentEvent>(
-                &crate::store::log_path(&session.id, &tab.id)?,
-            )? {
-                if let crate::events::Payload::TurnCompleted {
-                    duration_ms: Some(duration),
-                    ..
-                } = event.payload
-                {
-                    agent_time_ms = agent_time_ms.saturating_add(duration);
-                }
-            }
-        }
-    }
-    let prs_created = read_pr_history()?.urls.len();
-    Ok(AppStats {
-        agents_spawned,
-        agent_time_ms,
-        prs_created,
-        tracking_since,
-    })
+    crate::store::activity::summary()
 }
 
-static PR_LOCK: Mutex<()> = Mutex::new(());
-
-fn read_pr_history() -> Result<PrHistory> {
-    let path = crate::store::root()?.join(PR_FILE);
-    Ok(crate::store::read_json(&path)?.unwrap_or_default())
-}
-
-/// Count a successful PR creation once, whatever app surface initiated it.
-pub fn record_pr(url: &str) -> Result<()> {
-    if url.trim().is_empty() {
-        return Ok(());
-    }
-    let _guard = PR_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    let path = crate::store::root()?.join(PR_FILE);
-    let mut history: PrHistory = crate::store::read_json(&path)?.unwrap_or_default();
-    if !history.urls.iter().any(|known| known == url) {
-        history.urls.push(url.to_string());
-        crate::store::write_json(&path, &history)?;
-    }
-    Ok(())
-}
+pub use crate::store::activity::record_pr;
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -1196,6 +1135,20 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn blank_tabs_are_not_agent_activity() {
+        let _home = crate::store::temp_home();
+        let session = serde_json::from_value(serde_json::json!({
+            "id": "s", "projectPath": "/repo", "cwd": "/repo", "title": "Blank",
+            "created": "2026-09-01T00:00:00Z", "modified": "2026-09-01T00:00:00Z",
+            "tabs": [{"id": "t", "harness": "claude", "created": "2026-09-01T00:00:00Z"}]
+        })).unwrap();
+        crate::store::index::save(&[session]).unwrap();
+        let stats = app_stats().unwrap();
+        assert_eq!(stats.agents_spawned, 0, "a retained blank tab is not a live work start");
+        assert_eq!(stats.tracking_since, None);
+    }
 
     fn test_event(
         provider: Provider,

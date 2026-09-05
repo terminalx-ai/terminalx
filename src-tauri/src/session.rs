@@ -82,6 +82,12 @@ pub enum Decision {
     Deny,
 }
 
+/// Own the receiver so a timed-out hook stops accepting answers before it
+/// waits to reacquire the runtime lock. Only the returned decision resumes work.
+fn wait_for_decision(rx: std::sync::mpsc::Receiver<Decision>, wait: std::time::Duration) -> Option<Decision> {
+    rx.recv_timeout(wait).ok()
+}
+
 /// What a PTY-first tab needs to start: the line the pane runs, the
 /// transcript to follow, and the conversation id if the app minted one.
 struct CliLaunch {
@@ -455,6 +461,28 @@ impl SessionManager {
     }
 
     fn set_status(&self, rt: &mut TabRuntime, status: TabStatus) {
+        // CLI work starts require a live hook (or a delivered permission
+        // answer). Composer optimism and transcript hydration only affect UI.
+        if !matches!(rt.engine, Engine::Cli(_)) || status != TabStatus::InProgress {
+            self.record_activity(rt, status, store::activity::Source::Live);
+        }
+        self.set_display_status(rt, status);
+    }
+
+    fn record_activity(&self, rt: &TabRuntime, status: TabStatus, source: store::activity::Source) {
+        match store::activity::transition(&rt.key(), status, source) {
+            Ok(Some(total)) => {
+                // #110's reminder can subscribe without scanning transcripts
+                // or treating hydration/tab creation as fresh usage.
+                let _ = self.app.emit("agent_work_started", total);
+                self.app.state::<crate::AppState>().star_nag.work_started(&self.app, total as u64);
+            }
+            Ok(None) => {}
+            Err(error) => log::error!("record app activity: {error:#}"),
+        }
+    }
+
+    fn set_display_status(&self, rt: &mut TabRuntime, status: TabStatus) {
         if rt.status == status {
             return;
         }
@@ -618,7 +646,6 @@ impl SessionManager {
             (crate::hooks::CONTROL_TOKEN_ENV.to_string(), self.control.token.clone()),
         ];
         let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env }, sink)?;
-        self.app.state::<crate::AppState>().star_nag.launched(&self.app, rt.key());
         rt.child_pid = Some(child.pid);
         rt.child = Some(child);
         Ok(())
@@ -838,6 +865,7 @@ impl SessionManager {
         if rt.child.is_none() && !matches!(rt.engine, Engine::Cli(_)) {
             return Ok(());
         }
+        self.record_activity(&rt, TabStatus::Idle, store::activity::Source::Live);
         match &mut rt.engine {
             // The TUI reads a bare Escape as "stop"; nothing else can reach it.
             Engine::Cli(p) => {
@@ -870,6 +898,7 @@ impl SessionManager {
         let rt = self.tabs.lock().unwrap().get(&key).cloned();
         let pane = rt.and_then(|rt| {
             let mut rt = rt.lock().unwrap();
+            self.record_activity(&rt, TabStatus::Idle, store::activity::Source::Live);
             rt.child = None;
             rt.child_pid = None;
             self.release_cli(&mut rt)
@@ -905,7 +934,7 @@ impl SessionManager {
                 };
                 let allow = !matches!(decision, Decision::Deny);
                 let tx = p.decisions.remove(request_id).ok_or_else(|| anyhow!("the agent stopped waiting for that request"))?;
-                let _ = tx.send(decision);
+                tx.send(decision).map_err(|_| anyhow!("the agent stopped waiting for that request"))?;
                 (allow, label)
             }
             Engine::Acp(a) => {
@@ -923,7 +952,7 @@ impl SessionManager {
             Engine::None => bail!("no engine"),
         };
         self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: allow, label, automatic: false }, None);
-        if rt.pending.is_empty() {
+        if rt.pending.is_empty() && !matches!(rt.engine, Engine::Cli(_)) {
             self.set_status(&mut rt, TabStatus::InProgress);
         }
         Ok(())
@@ -939,14 +968,11 @@ impl SessionManager {
         match &mut rt.engine {
             Engine::Cli(p) if p.harness == CliKind::Claude => {
                 let tx = p.decisions.remove(request_id).ok_or_else(|| anyhow!("the agent stopped waiting for that question"))?;
-                let _ = tx.send(Decision::Answers(input));
+                tx.send(Decision::Answers(input)).map_err(|_| anyhow!("the agent stopped waiting for that question"))?;
             }
             _ => bail!("that agent does not ask questions this way"),
         }
         self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: true, label: "Answered".into(), automatic: false }, None);
-        if rt.pending.is_empty() {
-            self.set_status(&mut rt, TabStatus::InProgress);
-        }
         Ok(())
     }
 
@@ -1082,6 +1108,9 @@ impl SessionManager {
     }
 
     pub fn kill_all(&self) {
+        if let Err(error) = store::activity::shutdown() {
+            log::error!("flush activity on shutdown: {error:#}");
+        }
         self.host.kill_all();
     }
 
@@ -1197,7 +1226,6 @@ impl SessionManager {
         let tail = Arc::new(launch.tail);
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: 120, rows: 30, command: Some(&launch.command), env: &env };
         self.terminals.spawn(self.app.clone(), &pane, spec).context("start the agent's CLI")?;
-        self.app.state::<crate::AppState>().star_nag.launched(&self.app, rt.key());
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         rt.engine = Engine::Cli(CliTab {
             harness: kind,
@@ -1443,6 +1471,9 @@ impl SessionManager {
                         continue;
                     }
                 }
+                // A transcript may supply a completion the hook missed. It
+                // may close actual live work but never open a replayed start.
+                self.record_activity(&rt, TabStatus::Completed, store::activity::Source::Replay);
             }
             self.apply(&mut rt, payload, None);
         }
@@ -1666,6 +1697,11 @@ impl SessionManager {
             }
             return HookReply::default();
         }
+        // Stop at hook receipt, before transcript settling/git snapshots, so
+        // time spent waiting for display bookkeeping is not agent work.
+        if matches!(frame.event.as_str(), "Stop" | "Interrupt" | "SessionEnd") {
+            self.record_activity(&rt_arc.lock().unwrap(), TabStatus::Completed, store::activity::Source::Live);
+        }
         // Claude's transcript path is a guess made before the CLI ran and
         // Codex's is not knowable at all until now; either way the hook
         // carries the file it actually opened — but only a file this CLI
@@ -1705,12 +1741,18 @@ impl SessionManager {
             "PreToolUse" if asks_every_tool => return self.ask_permission(&rt_arc, &frame, kind),
             "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => {
                 let mut rt = rt_arc.lock().unwrap();
+                // A settings restart/teardown may have replaced this launch
+                // while its transcript was being drained above.
+                if !matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(&frame)) {
+                    return HookReply::default();
+                }
                 rt.last_activity = Instant::now();
                 if !rt.turn_open {
                     rt.turn_open = true;
                     rt.turn_started_at = Some(Instant::now());
                 }
                 if rt.pending.is_empty() {
+                    self.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
                     self.set_status(&mut rt, TabStatus::InProgress);
                 }
                 drop(rt);
@@ -1846,6 +1888,7 @@ impl SessionManager {
         {
             let mut rt = rt_arc.lock().unwrap();
             let Engine::Cli(p) = &mut rt.engine else { return HookReply::default() };
+            if !p.origin.accepts(frame) { return HookReply::default(); }
             p.decisions.insert(request_id.clone(), tx);
             // The event carries no tool_use_id — it fires before the call is
             // recorded — so the card stands on its own rather than attaching
@@ -1875,8 +1918,13 @@ impl SessionManager {
             CliKind::Claude => claude::pty::PERMISSION_WAIT,
             CliKind::Codex => codex::pty::PERMISSION_WAIT,
         };
-        let answer = rx.recv_timeout(wait).ok();
+        let answer = wait_for_decision(rx, wait);
         let mut rt = rt_arc.lock().unwrap();
+        // Teardown or a settings restart may replace this CLI while the hook
+        // waits. An answer for that old launch cannot start the new one's work.
+        if !matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)) {
+            return HookReply::default();
+        }
         if let Engine::Cli(p) = &mut rt.engine {
             p.decisions.remove(&request_id);
             if let Some(d) = &answer {
@@ -1884,7 +1932,13 @@ impl SessionManager {
             }
         }
         match answer {
-            Some(decision) => reply_for(kind, gate, decision),
+            Some(decision) => {
+                if rt.pending.is_empty() {
+                    self.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
+                    self.set_status(&mut rt, TabStatus::InProgress);
+                }
+                reply_for(kind, gate, decision)
+            }
             None => {
                 // The CLI has stopped waiting on us and will ask in its own
                 // TUI; the card must stop offering buttons that go nowhere.
@@ -1973,6 +2027,9 @@ impl SessionManager {
         }
 
         let is_boundary = payload.is_turn_boundary();
+        if is_boundary {
+            self.record_activity(rt, TabStatus::Completed, store::activity::Source::Replay);
+        }
         let payload = match payload {
             Payload::TurnCompleted { status, final_text, usage, duration_ms, auth_failed, .. } => {
                 let head = index::get(&rt.session_id).ok().and_then(|e| git::snapshot_tree(Path::new(&e.cwd)).ok());
@@ -2014,6 +2071,7 @@ impl SessionManager {
                 if sent {
                     rt.turn_open = true;
                     rt.turn_started_at = Some(Instant::now());
+                    self.set_status(rt, TabStatus::InProgress);
                     return;
                 }
             }
@@ -2069,6 +2127,41 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
+
+    #[test]
+    fn permission_timeout_disconnects_before_runtime_lock_cleanup() {
+        let runtime_lock = Arc::new(Mutex::new(()));
+        let held = runtime_lock.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (timed_out, observed) = std::sync::mpsc::channel();
+        let hook_lock = runtime_lock.clone();
+        let hook = std::thread::spawn(move || {
+            let answer = wait_for_decision(rx, std::time::Duration::ZERO);
+            timed_out.send(answer.is_none()).unwrap();
+            let _cleanup = hook_lock.lock().unwrap();
+            answer
+        });
+        assert!(observed.recv_timeout(std::time::Duration::from_secs(2)).unwrap());
+        // The hook has timed out but cannot clean up its pending request yet.
+        // A UI response in this exact window must fail, not start idle timing.
+        assert!(tx.send(Decision::Allow).is_err());
+        drop(held);
+        assert!(hook.join().unwrap().is_none());
+    }
+
+    #[test]
+    fn permission_receipt_preserves_all_delivered_decisions() {
+        for decision in [Decision::Allow, Decision::Deny, Decision::Answers(json!({"answers": {"question": "answer"}}))] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            tx.send(decision.clone()).unwrap();
+            let received = wait_for_decision(rx, std::time::Duration::ZERO).unwrap();
+            assert_eq!(std::mem::discriminant(&received), std::mem::discriminant(&decision));
+            if let Decision::Answers(input) = received {
+                assert_eq!(input["answers"]["question"], "answer");
+            }
+            assert!(tx.send(Decision::Allow).is_err());
+        }
+    }
 
     #[test]
     fn codex_image_prompts_project_once_and_repeated_submissions_stay_distinct() {

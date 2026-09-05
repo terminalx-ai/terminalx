@@ -68,11 +68,11 @@ describe("StatsUsageView", () => {
     vi.mocked(api.statsUsageRefresh).mockReturnValue(refresh.promise);
     const first = render(<StatsUsageView />);
     await screen.findByText("12.7B");
-    const oldTimestamp = screen.getByText(/^Updated /).textContent;
+    const oldTimestamp = screen.getByText(/ · Updated /).textContent;
     first.unmount();
     const second = render(<StatsUsageView />);
     expect(screen.getByText("12.7B")).toBeTruthy();
-    expect(screen.getByText(/^Updated /).textContent).toBe(oldTimestamp);
+    expect(screen.getByText(/ · Updated /).textContent).toBe(oldTimestamp);
     expect(api.statsUsageRefresh).toHaveBeenCalledTimes(1);
     second.unmount();
     const updated = {
@@ -88,21 +88,21 @@ describe("StatsUsageView", () => {
     expect(screen.getByText("42K")).toBeTruthy();
     expect(screen.getByText("99")).toBeTruthy();
     expect(screen.getByText("2 sessions")).toBeTruthy();
-    expect(screen.getByText(/^Updated /).textContent).not.toBe(oldTimestamp);
+    expect(screen.getByText(/ · Updated /).textContent).not.toBe(oldTimestamp);
   });
 
   it.each(["refresh", "read", "persist"])("retains saved data and its timestamp after a %s failure, with Retry", async (failure) => {
     render(<StatsUsageView />);
     await screen.findByText("12.7B");
     await waitFor(() => expect(screen.getByRole("status").textContent).toBe(""));
-    const timestamp = screen.getByText(/^Updated /).textContent;
+    const timestamp = screen.getByText(/ · Updated /).textContent;
     if (failure === "read") vi.mocked(api.statsUsageSnapshot).mockRejectedValueOnce(new Error("read failed"));
     else if (failure === "refresh") vi.mocked(api.statsUsageRefresh).mockRejectedValueOnce(new Error("scan failed"));
     else vi.mocked(api.statsUsageRefresh).mockResolvedValueOnce(saved({ error: "persist failed" }));
     fireEvent.click(screen.getByRole("button", { name: "Refresh local analytics" }));
     await screen.findByRole("alert");
     expect(screen.getByText("12.7B")).toBeTruthy();
-    expect(screen.getByText(/^Updated /).textContent).toBe(timestamp);
+    expect(screen.getByText(/ · Updated /).textContent).toBe(timestamp);
     expect(screen.getByRole("status").textContent).toBe("");
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
@@ -132,5 +132,45 @@ describe("StatsUsageView", () => {
     expect(screen.getByText("423 sessions")).toBeTruthy();
     expect(screen.getByText("gpt-5.6-sol · ai/raccoon")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Enable" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText(/Agents spawned counts each live start of work/)).toBeTruthy();
+    expect(screen.getByText(/Latest 30 local calendar dates/)).toBeTruthy();
+  });
+
+  it("shows lifetime counters without a provider cache, through a failed refresh", async () => {
+    const refresh = deferred<StatsUsageState>();
+    const appOnly = saved({ snapshot: null, activity: snapshot.app });
+    vi.mocked(api.statsUsageSnapshot).mockResolvedValue(appOnly);
+    vi.mocked(api.statsUsageRefresh).mockReturnValue(refresh.promise);
+    render(<StatsUsageView />);
+    expect(await screen.findByText("7")).toBeTruthy();
+    expect(screen.getByText("Reading local transcripts…")).toBeTruthy();
+    expect(screen.queryByText("Total tokens")).toBeNull();
+    await act(async () => refresh.resolve({ ...appOnly, error: "Provider history is unreadable" }));
+    expect(screen.getByRole("alert").textContent).toContain("Provider history is unreadable");
+    expect(screen.getByText("7")).toBeTruthy();
+    expect(screen.getByText("PRs created")).toBeTruthy();
+    expect(screen.queryByText("Reading local transcripts…")).toBeNull();
+    expect(screen.queryByText("Total tokens")).toBeNull();
+  });
+
+  it("keeps known totals visible alongside an accounting error", async () => {
+    const withError = saved({ snapshot: {
+      ...snapshot, app: { ...snapshot.app, accountingError: "Activity recovery is incomplete: unreadable history" },
+    } });
+    vi.mocked(api.statsUsageSnapshot).mockResolvedValue(withError);
+    vi.mocked(api.statsUsageRefresh).mockResolvedValue(withError);
+    render(<StatsUsageView />);
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Activity recovery is incomplete: unreadable history");
+    expect(screen.getByText("7")).toBeTruthy();
+  });
+
+  it("does not replace a valid snapshot with zero when a later read fails", async () => {
+    render(<StatsUsageView />);
+    await screen.findByText("7");
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe(""));
+    vi.mocked(api.statsUsageSnapshot).mockRejectedValueOnce(new Error("Activity history could not be loaded"));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh local analytics" }));
+    expect(await screen.findByText(/Activity history could not be loaded/)).toBeTruthy();
+    expect(screen.getByText("7")).toBeTruthy();
   });
 });

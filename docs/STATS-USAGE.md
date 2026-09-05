@@ -6,8 +6,9 @@ only removes a reader. The backend owns the worker, so a refresh also survives a
 renderer reload. An app restart reads the persisted result.
 
 `stats_usage_snapshot` returns the saved snapshot, scope, generation, refresh
-status, and last error. It loads a compact file once per data scope and thereafter
-reads memory. It does not load the scanner cache, discover sources, run Git, or
+status, independent lifetime activity, and last error. It loads a compact file once per data scope and thereafter
+reads memory. Every read/refresh response also overlays the current durable app
+activity summary, independently of the provider snapshot generation. It does not load the scanner cache, discover sources, run Git, or
 wait for scanning. `stats_usage_refresh` takes the reader's observed scope and
 generation and starts or joins work immediately. Requests with an older generation
 return the current state, including when they arrive just after completion. The
@@ -19,11 +20,15 @@ path, modification time, and size. Discovery, transcript I/O, worktree/scope rea
 app reads, and persistence must succeed before publication. Confirmed missing
 sources are removed; other I/O errors abort the candidate. Existing parser rules
 for unrelated/malformed transcript records, attribution, token accounting,
-deduplication, PRs, and agent activity otherwise remain in place. Changes to the
-activity collector tracked by #111 feed into this same candidate.
+deduplication, and provider scope remain in place. App activity is collected while
+this page is closed; its durable ledger is independent of either usage cache.
 
 Only after the complete result is saved does the backend replace the snapshot and
-its success timestamp. The frontend replaces all metrics and charts together.
+its success timestamp. The frontend replaces provider metrics and charts together.
+Lifetime app counters are refreshed from `stats-activity.json` on every backend
+response and render separately, even when no provider snapshot exists or provider
+refresh fails or remains in flight. A failed ledger
+read exposes an error and preserves the last valid displayed counters.
 While refreshing, saved content stays undimmed and interactive, with a spinning
 Refresh button and live status. Errors retain the snapshot and timestamp and offer
 Retry. The initial scan-loading panel appears only after a cached read confirms
@@ -41,7 +46,8 @@ its successful timestamp, rather than requiring a Git walk to render historical
 data. The enabled provider set is currently fixed in the aggregator.
 
 Bump `DISPLAY_SCHEMA` in `src-tauri/src/stats/saved.rs` when calculation, pricing,
-attribution, enabled providers, or app-stat definitions become incompatible. Bump
+attribution, or enabled providers become incompatible. App activity has its own
+ledger schema and is overlaid on older saved display snapshots. Bump
 `CACHE_SCHEMA` when per-file projections become incompatible. Unknown versions,
 corrupt files, unrelated scopes, and missing success timestamps are rejected with
 an explicit recovery error and repopulated by a complete refresh.

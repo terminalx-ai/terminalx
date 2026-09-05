@@ -246,6 +246,12 @@ pub async fn session_summaries(session_ids: Option<Vec<String>>) -> CmdResult<Ve
 
 /// Cached display/status reads never walk transcripts or wait for the scan.
 #[tauri::command]
+pub async fn app_activity_summary() -> CmdResult<crate::store::activity::Summary> {
+    tauri::async_runtime::spawn_blocking(|| crate::store::activity::summary().map_err(err))
+        .await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn stats_usage_snapshot(state: State<'_, AppState>) -> CmdResult<crate::stats::StatsUsageState> {
     let stats = state.stats_usage.clone();
     tauri::async_runtime::spawn_blocking(move || stats.read().map_err(err))
