@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { EditorState, StateEffect, StateField, type Extension } from "@codemirror/state";
 import {
   EditorView,
@@ -20,11 +21,13 @@ import { Segmented } from "@/components/ui/controls";
 import { Markdown } from "@/components/chat/Markdown";
 import { Button } from "@/components/ui/button";
 import { api, fs } from "@/lib/api";
+import { registerLiveEditor } from "@/lib/editorViews";
 import { languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
 import { diffLines } from "@/lib/diff";
 import { clearJump, isMarkdown, setEditorDirty, setViewMode, type EditorEntry, type ViewMode } from "@/lib/editors";
 import { keycaps } from "@/lib/hotkeys";
 import { cn } from "@/lib/cn";
+import { FindBar, findPanel, type FindPanelHandle } from "./FindPanel";
 
 // ---- git gutter: which lines differ from HEAD
 
@@ -111,6 +114,8 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
   const [changedOnDisk, setChangedOnDisk] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [truncated, setTruncated] = useState(false);
+  // The ⌘F bar while it is open; its element belongs to CodeMirror, its contents to React.
+  const [find, setFind] = useState<FindPanelHandle | null>(null);
   // The buffer as text, for the markdown preview; refreshed a beat after edits.
   const [docText, setDocText] = useState("");
   const abs = `${entry.root}/${entry.rel}`;
@@ -163,6 +168,7 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
     if (!el) return;
     let cancelled = false;
     let markTimer: number | undefined;
+    let unregister: (() => void) | undefined;
     (async () => {
       try {
         const f = await fs.readText(abs);
@@ -189,6 +195,7 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
           bracketMatching(),
           closeBrackets(),
           highlightSelectionMatches(),
+          findPanel(setFind),
           languageFor(entry.rel),
           keymap.of([
             { key: "Mod-s", run: () => (void save(), true) },
@@ -211,6 +218,7 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
         ];
         const view = new EditorView({ parent: el, state: EditorState.create({ doc: f.content, extensions }) });
         viewRef.current = view;
+        unregister = registerLiveEditor(abs, { view, isDirty: () => view.state.doc.toString() !== savedDoc.current, save });
         setStatus("ready");
         try {
           const tree = await api.headTree(entry.root);
@@ -232,8 +240,10 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
     return () => {
       cancelled = true;
       window.clearTimeout(markTimer);
+      unregister?.();
       viewRef.current?.destroy();
       viewRef.current = null;
+      setFind(null);
     };
   }, [abs, entry.id, entry.rel, entry.root, save, updateMarks]);
 
@@ -318,6 +328,7 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
         </div>
       )}
       <div ref={host} className={cn("editor-pane min-h-0 flex-1 overflow-auto scrollbar-thin select-text", (status !== "ready" || preview) && "hidden")} />
+      {find && createPortal(<FindBar handle={find} />, find.dom)}
     </div>
   );
 }

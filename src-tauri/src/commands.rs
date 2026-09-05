@@ -1282,11 +1282,38 @@ pub fn file_mtime(path: String) -> Option<u64> {
 }
 
 #[tauri::command]
-pub async fn search_text(root: String, query: String, regex: bool, case_sensitive: bool, limit: Option<usize>) -> CmdResult<crate::files::TextSearch> {
-    tauri::async_runtime::spawn_blocking(move || crate::files::search_text(Path::new(&root), &query, regex, case_sensitive, limit.unwrap_or(500)))
-        .await
-        .map_err(err)?
-        .map_err(err)
+pub async fn search_text(
+    root: String,
+    query: String,
+    regex: bool,
+    case_sensitive: bool,
+    limit: Option<usize>,
+    replacement: Option<String>,
+) -> CmdResult<crate::files::TextSearch> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::files::search_text(Path::new(&root), &query, regex, case_sensitive, limit.unwrap_or(500), replacement.as_deref())
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
+}
+
+#[tauri::command]
+pub async fn replace_text(
+    root: String,
+    query: String,
+    replacement: String,
+    regex: bool,
+    case_sensitive: bool,
+    targets: Option<Vec<crate::files::ReplaceTarget>>,
+    skip: Option<Vec<String>>,
+) -> CmdResult<crate::files::ReplaceReport> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::files::replace_text(Path::new(&root), &query, &replacement, regex, case_sensitive, targets, &skip.unwrap_or_default())
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
 }
 
 // ------------------------------------------------------------------ dictation

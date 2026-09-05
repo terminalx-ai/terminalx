@@ -92,7 +92,8 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
     void agent.interrupt(session.id, tab.id).catch((e) => setError(errorMessage(e)));
   }, [session.id, tab.id]);
 
-  useHotkey("escape", () => (live ? (stop(), true) : false), { enabled: active && !continuationOpen });
+  // Esc belongs to an open continuation dialog or the focused editor pane.
+  useHotkey("escape", () => (live && !document.activeElement?.closest(".editor-pane") ? (stop(), true) : false), { enabled: active && !continuationOpen });
 
   const answerPermission = useCallback(
     async (requestId: string, optionId: string) => {

@@ -29,6 +29,8 @@ export const SHORTCUTS: Shortcut[] = [
   { chord: "mod+alt+4", label: "Files", group: "Panel" },
   { chord: "mod+p", label: "Open file by name", group: "Files" },
   { chord: "mod+shift+f", label: "Search in project", group: "Files" },
+  { chord: "mod+shift+h", label: "Replace in project", group: "Files" },
+  { chord: "mod+f", label: "Find in the open file", group: "Files" },
   { chord: "mod+s", label: "Save the open file", group: "Files" },
   { chord: "mod+shift+p", label: "Preview or source for a markdown file", group: "Files" },
   { chord: "mod+alt+w", label: "Close all open files", group: "Files" },
