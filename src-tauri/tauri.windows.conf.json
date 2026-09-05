@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "externalBin": [],
+    "externalBin": ["binaries/agent-browser"],
     "resources": {
       "../native/computer-use-macos/.build/release/TerminalX Computer Use.app": null,
       "../native/computer-use-macos/.build/release-dev/TerminalX Computer Use.app": null,

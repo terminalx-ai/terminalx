@@ -93,30 +93,30 @@ impl LineTransport {
     /// Send one request and wait for the line that answers it. Lines that are
     /// blank, unparseable, or answer a different id are skipped: a late reply
     /// from a timed-out request must not be mistaken for this one.
-    pub fn request(&mut self, method: &str, params: Value) -> Result<Value, ComputerError> {
+    pub fn request(&mut self, method: &str, params: Value) -> Result<Value, RequestFailure> {
         let id = self.next_id;
         self.next_id += 1;
         let request = json!({"id": id, "method": method, "params": params, "token": self.token});
         let mut bytes = serde_json::to_vec(&request)
-            .map_err(|e| ComputerError::accessibility(format!("encode helper request: {e}")))?;
+            .map_err(|e| RequestFailure::transport(ComputerError::accessibility(format!("encode helper request: {e}"))))?;
         bytes.push(b'\n');
         self.writer
             .write_all(&bytes)
             .and_then(|_| self.writer.flush())
-            .map_err(|e| ComputerError::accessibility(format!("write to helper: {e}")))?;
+            .map_err(|e| RequestFailure::transport(ComputerError::accessibility(format!("write to helper: {e}"))))?;
         loop {
             let mut line = String::new();
             let read = self.reader.read_line(&mut line).map_err(|e| {
-                if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) {
+                RequestFailure::transport(if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) {
                     ComputerError::new("action_timeout", format!("native macOS provider {method} timed out"))
                 } else {
                     ComputerError::accessibility(format!("read from helper: {e}"))
-                }
+                })
             })?;
             if read == 0 {
-                return Err(ComputerError::accessibility(
+                return Err(RequestFailure::transport(ComputerError::accessibility(
                     "native macOS helper app connection closed",
-                ));
+                )));
             }
             if line.trim().is_empty() {
                 continue;
@@ -127,7 +127,7 @@ impl LineTransport {
             if response.get("id").and_then(Value::as_u64) != Some(id) {
                 continue;
             }
-            return decode_response(response);
+            return decode_response(response).map_err(RequestFailure::answered);
         }
     }
 
@@ -142,6 +142,24 @@ impl LineTransport {
             let _ = self.writer.flush();
         }
         let _ = self.writer.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+/// Why a request failed: the socket itself broke (the helper must be
+/// restarted) or the helper answered with an error (it is still healthy).
+#[derive(Debug)]
+pub struct RequestFailure {
+    pub error: ComputerError,
+    pub transport_failure: bool,
+}
+
+impl RequestFailure {
+    fn transport(error: ComputerError) -> Self {
+        Self { error, transport_failure: true }
+    }
+
+    fn answered(error: ComputerError) -> Self {
+        Self { error, transport_failure: false }
     }
 }
 
@@ -244,6 +262,11 @@ impl HelperProcess {
     }
 }
 
+/// Only the descriptors named in the file actions survive into the helper
+/// (`<spawn.h>`; the libc crate does not export this Apple-only flag).
+#[cfg(target_os = "macos")]
+const POSIX_SPAWN_CLOEXEC_DEFAULT: libc::c_short = 0x4000;
+
 #[cfg(target_os = "macos")]
 extern "C" {
     /// Private but long-stable (Chromium and Electron rely on it): makes the
@@ -269,6 +292,19 @@ fn spawn_helper(executable: &Path, socket: &Path, token: &Path) -> std::io::Resu
     let mut argv: Vec<*mut libc::c_char> = args.iter().map(|a| a.as_ptr() as *mut _).collect();
     argv.push(std::ptr::null_mut());
     let dev_null = CString::new("/dev/null")?;
+    // An owned copy of the environment: the live `environ` pointer can be
+    // reallocated under us by any thread calling `set_var`, and posix_spawn
+    // would then read freed memory (EFAULT).
+    let env: Vec<CString> = std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let mut pair = key.as_bytes().to_vec();
+            pair.push(b'=');
+            pair.extend_from_slice(value.as_bytes());
+            CString::new(pair).ok()
+        })
+        .collect();
+    let mut envp: Vec<*mut libc::c_char> = env.iter().map(|e| e.as_ptr() as *mut _).collect();
+    envp.push(std::ptr::null_mut());
 
     unsafe {
         let mut attr: libc::posix_spawnattr_t = std::mem::zeroed();
@@ -282,17 +318,14 @@ fn spawn_helper(executable: &Path, socket: &Path, token: &Path) -> std::io::Resu
         }
         #[cfg(target_os = "macos")]
         {
-            // POSIX_SPAWN_CLOEXEC_DEFAULT: only the descriptors named in the
-            // file actions survive into the helper.
-            libc::posix_spawnattr_setflags(&mut attr, 0x4000);
+            libc::posix_spawnattr_setflags(&mut attr, POSIX_SPAWN_CLOEXEC_DEFAULT);
             responsibility_spawnattrs_setdisclaim(&mut attr, 1);
         }
         libc::posix_spawn_file_actions_addopen(&mut actions, 0, dev_null.as_ptr(), libc::O_RDONLY, 0);
         libc::posix_spawn_file_actions_addopen(&mut actions, 1, dev_null.as_ptr(), libc::O_WRONLY, 0);
         libc::posix_spawn_file_actions_addopen(&mut actions, 2, dev_null.as_ptr(), libc::O_WRONLY, 0);
         let mut pid: libc::pid_t = 0;
-        let environ = environ_ptr();
-        let result = libc::posix_spawn(&mut pid, program.as_ptr(), &actions, &attr, argv.as_ptr(), environ);
+        let result = libc::posix_spawn(&mut pid, program.as_ptr(), &actions, &attr, argv.as_ptr(), envp.as_ptr());
         libc::posix_spawn_file_actions_destroy(&mut actions);
         libc::posix_spawnattr_destroy(&mut attr);
         if result != 0 {
@@ -300,19 +333,6 @@ fn spawn_helper(executable: &Path, socket: &Path, token: &Path) -> std::io::Resu
         }
         Ok(HelperProcess { pid, status: None })
     }
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn environ_ptr() -> *const *mut libc::c_char {
-    *libc::_NSGetEnviron() as *const *mut libc::c_char
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-unsafe fn environ_ptr() -> *const *mut libc::c_char {
-    extern "C" {
-        static environ: *const *mut libc::c_char;
-    }
-    environ
 }
 
 #[cfg(unix)]
@@ -369,33 +389,23 @@ impl MacosNativeProvider {
     #[cfg(unix)]
     fn start(&self) -> Result<Session, ComputerError> {
         let mut started = start_session(&self.executable)?;
-        let (started, capabilities) = match evaluate_handshake(started.handshake()?) {
-            Handshake::Compatible(capabilities) => (started, capabilities),
-            Handshake::Incompatible { .. } => {
-                // One restart covers a stale helper left from a previous
-                // app version; a second mismatch is a real incompatibility.
+        match evaluate_handshake(started.handshake()?) {
+            Handshake::Compatible(capabilities) => Ok(Session {
+                transport: started.transport,
+                child: started.child,
+                socket_dir: started.socket_dir,
+                capabilities,
+            }),
+            Handshake::Incompatible { protocol_version } => {
                 started.close();
-                let mut restarted = start_session(&self.executable)?;
-                match evaluate_handshake(restarted.handshake()?) {
-                    Handshake::Compatible(capabilities) => (restarted, capabilities),
-                    Handshake::Incompatible { protocol_version } => {
-                        restarted.close();
-                        return Err(ComputerError::new(
-                            "provider_incompatible",
-                            format!(
-                                "native macOS provider protocol {protocol_version} is incompatible with required protocol {REQUIRED_PROTOCOL_VERSION}"
-                            ),
-                        ));
-                    }
-                }
+                Err(ComputerError::new(
+                    "provider_incompatible",
+                    format!(
+                        "native macOS provider protocol {protocol_version} is incompatible with required protocol {REQUIRED_PROTOCOL_VERSION}"
+                    ),
+                ))
             }
-        };
-        Ok(Session {
-            transport: started.transport,
-            child: started.child,
-            socket_dir: started.socket_dir,
-            capabilities,
-        })
+        }
     }
 
     #[cfg(unix)]
@@ -404,14 +414,15 @@ impl MacosNativeProvider {
         match session.transport.request(method, params) {
             Ok(result) => Ok(result),
             Err(error) => {
-                // Any transport failure (timeout, hangup, write error) makes
-                // the socket unreliable; the next call starts a fresh helper.
-                if error.code == "action_timeout" || error.message.contains("helper") {
+                // A transport failure (timeout, hang-up, write error) makes
+                // the socket unreliable, so the next call starts a fresh
+                // helper. Errors the helper itself answered leave it running.
+                if error.transport_failure {
                     if let Some(session) = self.session.take() {
                         session.close();
                     }
                 }
-                Err(error)
+                Err(error.error)
             }
         }
     }
@@ -498,7 +509,7 @@ pub struct StartedSession {
 #[cfg(unix)]
 impl StartedSession {
     pub fn handshake(&mut self) -> Result<Value, ComputerError> {
-        self.transport.request("handshake", json!({}))
+        self.transport.request("handshake", json!({})).map_err(|f| f.error)
     }
 
     pub fn close(self) {
@@ -724,9 +735,10 @@ mod tests {
                 .write_all(format!("{reply}\n").as_bytes())
                 .unwrap();
         });
-        let error = transport.request("getAppState", json!({"app": "1Password"})).unwrap_err();
-        assert_eq!(error.code, "app_blocked");
-        assert_eq!(error.message, "1Password");
+        let failure = transport.request("getAppState", json!({"app": "1Password"})).unwrap_err();
+        assert!(!failure.transport_failure, "an answered error must not restart the helper");
+        assert_eq!(failure.error.code, "app_blocked");
+        assert_eq!(failure.error.message, "1Password");
         helper.join().unwrap();
     }
 
@@ -735,9 +747,10 @@ mod tests {
         let (client, _server) = pair();
         let mut transport =
             LineTransport::new(client, "tok".into(), Duration::from_millis(200)).unwrap();
-        let error = transport.request("click", json!({})).unwrap_err();
-        assert_eq!(error.code, "action_timeout");
-        assert!(error.message.contains("click"));
+        let failure = transport.request("click", json!({})).unwrap_err();
+        assert!(failure.transport_failure);
+        assert_eq!(failure.error.code, "action_timeout");
+        assert!(failure.error.message.contains("click"));
     }
 
     #[test]
@@ -745,9 +758,10 @@ mod tests {
         let (client, server) = pair();
         let mut transport = LineTransport::new(client, "tok".into(), Duration::from_secs(1)).unwrap();
         drop(server);
-        let error = transport.request("listApps", json!({})).unwrap_err();
-        assert_eq!(error.code, "accessibility_error");
-        assert!(error.message.contains("connection closed") || error.message.contains("write to helper"));
+        let failure = transport.request("listApps", json!({})).unwrap_err();
+        assert!(failure.transport_failure);
+        assert_eq!(failure.error.code, "accessibility_error");
+        assert!(failure.error.message.contains("connection closed") || failure.error.message.contains("write to helper"));
     }
 
     #[test]

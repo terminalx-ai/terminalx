@@ -4107,9 +4107,9 @@ private func isTrustedTerminalXApplication(_ pid: pid_t) -> Bool {
         return false
     }
     // Why: the release app is com.terminalx.next and the dev build is
-    // com.terminalx.next.dev; both may own a computer-use session.
-    return bundleId == "com.terminalx.next" ||
-        bundleId.hasPrefix("com.terminalx.next.")
+    // com.terminalx.next.dev; both may own a computer-use session. The
+    // helper's own bundle ids are deliberately not trusted.
+    return bundleId == "com.terminalx.next" || bundleId == "com.terminalx.next.dev"
 }
 
 private func parentProcessId(_ pid: pid_t) -> pid_t? {

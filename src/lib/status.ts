@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { createUsageRevalidation } from "./statusPolling";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -13,6 +14,7 @@ interface StatusState {
   settings: StatusBarSettings;
   usage: UsageSnapshot;
   usageRefreshing: boolean;
+  usageError: string | null;
   resources: ResourceOverview;
   resourceSample: ResourceSnapshot | null;
   resourcesRefreshing: boolean;
@@ -24,6 +26,7 @@ let state: StatusState = {
   settings: defaults,
   usage: { windows: [] },
   usageRefreshing: false,
+  usageError: null,
   resources: { agentCount: 0, orphanCount: 0, rssBytes: null, pressure: null },
   resourceSample: null,
   resourcesRefreshing: false,
@@ -31,9 +34,18 @@ let state: StatusState = {
 };
 const listeners = new Set<() => void>();
 
+const revalidation = createUsageRevalidation(async () => {
+  await usageFlight;
+  await refreshUsage();
+});
+
 function set(patch: Partial<StatusState>) {
+  if (patch.usage && (patch.usage.revision ?? 0) < (state.usage.revision ?? 0)) {
+    patch = { ...patch, usage: state.usage };
+  }
   state = { ...state, ...patch };
   for (const listener of listeners) listener();
+  if (patch.usage) revalidation.update(state.usage.claudeAccount, state.usage.claude?.revalidateAt);
 }
 
 export function useStatus(): StatusState {
@@ -77,14 +89,14 @@ async function windowCanPoll(): Promise<boolean> {
 }
 
 export function refreshUsage(manual = false): Promise<void> {
-  if (usageFlight) return usageFlight;
+  if (usageFlight) return manual ? usageFlight.then(() => refreshUsage(true)) : usageFlight;
   return (usageFlight = (async () => {
     if (!(await windowCanPoll())) return;
-    set({ usageRefreshing: true });
+    set({ usageRefreshing: true, usageError: null });
     try {
       set({ usage: await statusBar.refreshUsage(manual) });
     } catch {
-      // The last snapshot is deliberately better than clearing the pill.
+      set({ usageError: "Usage refresh failed. Showing last known usage; try Refresh again." });
     } finally {
       set({ usageRefreshing: false });
     }

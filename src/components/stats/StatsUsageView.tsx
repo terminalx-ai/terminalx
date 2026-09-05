@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useSyncExternalStore, type ReactNode } from "react";
 import {
   Activity,
   BarChart3,
@@ -17,32 +17,20 @@ import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/menu";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { api, errorMessage, type ProviderUsage, type StatsUsageSnapshot } from "@/lib/api";
+import type { AppStats, ProviderUsage, StatsUsageSnapshot } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { formatAgentTime, formatCost, formatTokens, heatmapDays } from "@/lib/stats";
+import { statsUsageStore } from "@/lib/statsUsageStore";
 
 const LEVELS = ["bg-veil-raised", "bg-muted-foreground/25", "bg-muted-foreground/45", "bg-muted-foreground/70", "bg-foreground/85"];
 
 export function StatsUsageView() {
-  const [snapshot, setSnapshot] = useState<StatsUsageSnapshot | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      setSnapshot(await api.statsUsageSnapshot());
-    } catch (cause) {
-      setError(errorMessage(cause));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const { snapshot, activity: currentActivity, refreshing: loading, error, initialized } = useSyncExternalStore(
+    statsUsageStore.subscribe, statsUsageStore.getSnapshot,
+  );
+  const activity = currentActivity ?? snapshot?.app;
+  const load = statsUsageStore.refresh;
+  useEffect(() => { void load(); }, [load]);
 
   return (
     <div className="@container min-h-0 flex-1 overflow-y-auto scrollbar-thin">
@@ -54,11 +42,13 @@ export function StatsUsageView() {
               TerminalX activity plus local Claude and Codex token analytics.
             </p>
           </div>
+          <span role="status" aria-live="polite" className="ml-auto self-center text-xs text-muted-foreground">
+            {loading ? "Refreshing…" : ""}
+          </span>
           <WithTooltip label="Refresh local analytics">
             <Button
               variant="ghost"
               size="icon-sm"
-              className="ml-auto"
               aria-label="Refresh local analytics"
               disabled={loading}
               onClick={() => void load()}
@@ -68,16 +58,19 @@ export function StatsUsageView() {
           </WithTooltip>
         </header>
 
-        {error ? (
-          <div className="mt-6 rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
+        {error && (
+          <div role="alert" className="mt-4 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
             <p>Could not read local usage: {error}</p>
-            <Button variant="outline" size="sm" className="mt-3" onClick={() => void load()}>Try again</Button>
+            <Button variant="outline" size="sm" className="mt-3" onClick={() => void load()} disabled={loading}>Retry</Button>
           </div>
-        ) : !snapshot ? (
-          <LoadingState />
-        ) : (
-          <StatsContents snapshot={snapshot} refreshing={loading} />
         )}
+        {(activity || snapshot) && (
+          <section className="mt-6 rounded-2xl bg-well/35 p-4 hairline @min-[760px]:p-5">
+            {activity && <ActivityContents activity={activity} />}
+            {snapshot && <StatsContents snapshot={snapshot} />}
+          </section>
+        )}
+        {!snapshot && initialized && loading ? <LoadingState /> : null}
       </div>
     </div>
   );
@@ -89,31 +82,44 @@ function LoadingState() {
       <div className="flex flex-col items-center gap-2 text-center text-sm text-muted-foreground">
         <Loader2 className="size-5 animate-spin text-faint" />
         <span>Reading local transcripts…</span>
-        <span className="max-w-sm text-xs text-faint">The first scan can take a moment. Later visits only revisit changed files.</span>
+        <span className="max-w-sm text-xs text-faint">The first scan can take a moment. Later visits show your saved data while refreshing.</span>
       </div>
     </div>
   );
 }
 
-function StatsContents({ snapshot, refreshing }: { snapshot: StatsUsageSnapshot; refreshing: boolean }) {
-  const heatmap = useMemo(() => heatmapDays(snapshot.daily), [snapshot.daily]);
+function ActivityContents({ activity }: { activity: AppStats }) {
+  return (
+    <>
+        <div className="grid gap-3 @min-[620px]:grid-cols-3">
+          <MetricCard icon={<Bot />} value={activity.agentsSpawned.toLocaleString()} label="Agents spawned" />
+          <MetricCard icon={<Clock3 />} value={formatAgentTime(activity.agentTimeMs)} label="Time agents worked" />
+          <MetricCard icon={<GitPullRequest />} value={activity.prsCreated.toLocaleString()} label="PRs created" />
+        </div>
+        <p className="mt-4 px-1 text-xs text-muted-foreground">
+          {activity.trackingSince ? `Tracking since ${formatDate(activity.trackingSince)}` : "Tracking starts with the first recorded activity"}
+        </p>
+        <p className="mt-2 px-1 text-xs leading-relaxed text-muted-foreground">
+          Lifetime activity on this installation. Agents spawned counts each live start of work, including another turn or resuming after a wait in the same conversation. Working time excludes waits and idle time. PRs include those discovered on tracked workspace branches, including merged and closed PRs.
+        </p>
+        <p className="mt-2 px-1 text-[11px] leading-relaxed text-faint">
+          Earlier activity is recovered from surviving local history. Deleted history and unrecorded work cannot be fully reconstructed.
+        </p>
+        {activity.accountingError && <p role="alert" className="mt-3 px-1 text-xs text-destructive">{activity.accountingError}</p>}
+
+    </>
+  );
+}
+
+function StatsContents({ snapshot }: { snapshot: StatsUsageSnapshot }) {
+  const heatmap = useMemo(() => heatmapDays(snapshot.daily, new Date(snapshot.updatedAt)), [snapshot.daily, snapshot.updatedAt]);
   const best = heatmap.reduce((winner, day) => day.totalTokens > winner.totalTokens ? day : winner, heatmap[0]);
   const enabled = snapshot.providers.filter((provider) => provider.enabled);
   const withData = enabled.filter((provider) => provider.hasData).length;
   const sessions = enabled.reduce((total, provider) => total + provider.sessions, 0);
 
   return (
-    <div className={cn("transition-opacity", refreshing && "opacity-70")} aria-busy={refreshing}>
-      <section className="mt-6 rounded-2xl bg-well/35 p-4 hairline @min-[760px]:p-5">
-        <div className="grid gap-3 @min-[620px]:grid-cols-3">
-          <MetricCard icon={<Bot />} value={snapshot.app.agentsSpawned.toLocaleString()} label="Agents spawned" />
-          <MetricCard icon={<Clock3 />} value={formatAgentTime(snapshot.app.agentTimeMs)} label="Time agents worked" />
-          <MetricCard icon={<GitPullRequest />} value={snapshot.app.prsCreated.toLocaleString()} label="PRs created" />
-        </div>
-        <p className="mt-4 px-1 text-xs text-muted-foreground">
-          {snapshot.app.trackingSince ? `Tracking since ${formatDate(snapshot.app.trackingSince)}` : "Tracking starts with the first local session"}
-        </p>
-
+    <>
         <div className="mb-3 mt-7 flex items-center gap-3">
           <h2 className="text-sm font-semibold">Usage Analytics</h2>
           <DropdownMenu>
@@ -132,7 +138,7 @@ function StatsContents({ snapshot, refreshing }: { snapshot: StatsUsageSnapshot;
           <div className="flex items-start gap-3">
             <div>
               <h3 id="usage-overview-heading" className="text-sm font-semibold">Usage Overview</h3>
-              <p className="mt-0.5 text-xs text-muted-foreground">Updated {formatTimestamp(snapshot.updatedAt)}</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">Latest 30 local calendar dates, including today · Known TerminalX projects and worktrees · Updated {formatTimestamp(snapshot.updatedAt)}</p>
             </div>
           </div>
 
@@ -173,8 +179,7 @@ function StatsContents({ snapshot, refreshing }: { snapshot: StatsUsageSnapshot;
             * Costs are estimates from the included per-token model price table. Subscription billing, discounts, and taxes are not included.
           </p>
         </section>
-      </section>
-    </div>
+    </>
   );
 }
 

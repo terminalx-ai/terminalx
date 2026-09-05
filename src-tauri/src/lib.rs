@@ -1,6 +1,7 @@
 mod account;
 mod automations;
 mod binpath;
+pub mod browser;
 pub mod cli;
 mod commands;
 pub mod computer;
@@ -11,6 +12,7 @@ mod dictation;
 mod transcription;
 mod events;
 mod files;
+mod media;
 mod git;
 mod github;
 mod harness;
@@ -52,7 +54,10 @@ pub struct AppState {
     pub status: Arc<status::StatusState>,
     pub star_nag: Arc<star_nag::StarNag>,
     pub stats_usage: Arc<stats::StatsUsageStore>,
+    /// Desktop automation for agents; the helper it spawns dies with the app.
     pub computer: Arc<computer::ComputerService>,
+    /// The built-in browser: agent-browser sessions, pages and profiles.
+    pub browser: Arc<browser::BrowserRuntime>,
     manager: std::sync::Mutex<Option<session::SessionManager>>,
 }
 
@@ -71,7 +76,10 @@ pub fn run() {
     let status_state = Arc::new(status::StatusState::default());
     let account = Arc::new(account::AccountManager::default());
     let pairing = Arc::new(pairing::PairingManager::new(account.clone()));
+    // The resource directory is only known once Tauri is up; the service
+    // resolves the helper lazily, so it can be built before `setup`.
     let computer = Arc::new(computer::ComputerService::new(None));
+    let browser = Arc::new(browser::BrowserRuntime::open().expect("open the browser stores under RACCOON_HOME"));
     let state = AppState {
         account: account.clone(),
         pairing: pairing.clone(),
@@ -84,10 +92,12 @@ pub fn run() {
         star_nag: Arc::new(star_nag::StarNag::load(env!("CARGO_PKG_VERSION"))),
         stats_usage: Arc::new(stats::StatsUsageStore::default()),
         computer: computer.clone(),
+        browser: browser.clone(),
         manager: std::sync::Mutex::new(None),
     };
 
     tauri::Builder::default()
+        .manage(media::MediaServer::default())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -123,7 +133,14 @@ pub fn run() {
                 });
             }
             status::install_menu(app)?;
-            if let Ok(resources) = app.path().resource_dir() { computer.set_resource_dir(resources); }
+            if let Ok(resources) = app.path().resource_dir() {
+                computer.set_resource_dir(resources);
+            }
+            // Recover local history before hooks/automations can publish live
+            // activity. Provider cache scans are deliberately unrelated.
+            if let Err(error) = store::activity::summary() {
+                log::error!("initialize activity history: {error:#}");
+            }
             let control_endpoint = hooks::prepare_control()?;
             let manager = session::SessionManager::new(
                 app.handle().clone(),
@@ -137,11 +154,17 @@ pub fn run() {
             // The agent CLIs' hooks reach the app through this socket; without
             // it a PTY-first tab still runs, it just cannot report or ask.
             let hooked = manager.clone();
-            let service = control::ControlService::new(app.handle().clone(), manager.clone(), control_endpoint.clone(), computer.clone());
+            let service = control::ControlService::new(app.handle().clone(), manager.clone(), control_endpoint.clone(), computer.clone(), browser.clone());
             match hooks::serve(control_endpoint, move |frame| hooked.on_hook(frame), move |request| service.handle(request)) {
                 Ok(path) => log::info!("hook socket at {}", path.display()),
                 Err(e) => log::warn!("hook socket: {e:#}"),
             }
+            std::thread::spawn(|| {
+                if let Err(error) = github::recover_workspace_prs() {
+                    log::warn!("recover workspace PR history: {error:#}");
+                    store::activity::report_error(format!("Workspace PR recovery is incomplete; discovery will retry on restart or workspace refresh: {error:#}"));
+                }
+            });
             let exited = manager.clone();
             app.listen("pty_exit", move |event| {
                 if let Ok(exit) = serde_json::from_str::<pty::PtyExit>(event.payload()) {
@@ -161,6 +184,11 @@ pub fn run() {
                 Ok(())
             });
             automations::start_scheduler(app.handle().clone());
+            // The built-in browser: sweep daemons a crashed run left behind,
+            // then keep this run's own daemons warm and its page list honest.
+            browser.attach(app.handle().clone());
+            browser.sweep_orphans();
+            browser.start_keepalive();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -186,6 +214,8 @@ pub fn run() {
             commands::automation_run_now,
             commands::session_summaries,
             commands::stats_usage_snapshot,
+            commands::app_activity_summary,
+            commands::stats_usage_refresh,
             commands::create_session,
             commands::add_tab,
             commands::remove_tab,
@@ -251,6 +281,8 @@ pub fn run() {
             commands::mobile_terminal_drivers,
             commands::pty_kill,
             commands::list_dir,
+            media::open_media_file,
+            media::close_media_file,
             commands::read_text_file,
             commands::write_text_file,
             commands::file_mtime,
@@ -291,6 +323,15 @@ pub fn run() {
             commands::status_resource_overview,
             commands::status_resource_sample,
             commands::status_resource_kill,
+            browser::ui::browser_pages,
+            browser::ui::browser_open_tab,
+            browser::ui::browser_close_page,
+            browser::ui::browser_activate_page,
+            browser::ui::browser_navigate,
+            browser::ui::browser_screencast,
+            browser::ui::browser_runtime_status,
+            browser::ui::browser_install_browser,
+            browser::ui::browser_profiles,
             installation::cli_tool_status,
             installation::install_cli_tool,
             installation::cli_skill_status,
@@ -308,14 +349,33 @@ pub fn run() {
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(state) = window.try_state::<AppState>() {
                     state.pairing.stop();
+                    if window.label() == "main" {
+                        if let Err(error) = store::activity::shutdown() {
+                            log::error!("flush activity on window teardown: {error:#}");
+                        }
+                    }
                     state.host.kill_all();
                     state.terminals.kill_all();
                     state.computer.shutdown();
+                    state.browser.shutdown();
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                let state = app.state::<AppState>();
+                state.stats_usage.shutdown();
+                // Cmd+Q and `relaunch()` end the run loop without necessarily
+                // destroying the window first; the computer-use helper must
+                // not outlive the app on either path.
+                state.computer.shutdown();
+                if let Err(error) = store::activity::shutdown() {
+                    log::error!("flush activity on exit: {error:#}");
+                }
+            }
+        });
 }
 
 #[cfg(test)]

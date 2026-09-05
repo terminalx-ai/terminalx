@@ -240,6 +240,7 @@ pub struct ControlService {
     manager: SessionManager,
     endpoint: ControlEndpoint,
     computer: Arc<crate::computer::ComputerService>,
+    browser: std::sync::Arc<crate::browser::BrowserRuntime>,
 }
 
 impl ControlService {
@@ -248,12 +249,14 @@ impl ControlService {
         manager: SessionManager,
         endpoint: ControlEndpoint,
         computer: Arc<crate::computer::ComputerService>,
+        browser: std::sync::Arc<crate::browser::BrowserRuntime>,
     ) -> Self {
         Self {
             app,
             manager,
             endpoint,
             computer,
+            browser,
         }
     }
 
@@ -320,6 +323,9 @@ impl ControlService {
             "worktrees.list" => self.worktrees_list(params),
             "worktrees.delete" => self.worktree_delete(params),
             "issues.list" => self.issues_list(params),
+            browser if browser.starts_with("browser.") => {
+                crate::browser::control::handle(&self.browser, browser, params)
+            }
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -551,6 +557,7 @@ impl ControlService {
                 let _ = self.manager.stop(&session.id, &tab.id);
             }
         }
+        self.browser.forget_workspace(&crate::browser::control::canonical(&worktree.path));
         let entries = crate::commands::delete_workspace_entries(
             &project.path,
             &worktree.path,
@@ -641,7 +648,7 @@ fn selected_projects(selector: Option<String>) -> Result<Vec<Project>, ControlEr
     }
 }
 
-fn resolve_session(selector: &str) -> Result<SessionEntry, ControlError> {
+pub(crate) fn resolve_session(selector: &str) -> Result<SessionEntry, ControlError> {
     let sessions = index::load().map_err(ControlError::internal)?;
     let exact: Vec<_> = sessions
         .iter()

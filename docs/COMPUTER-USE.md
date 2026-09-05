@@ -62,9 +62,11 @@ shell history. Password managers are blocked (`app_blocked`), secure text
 fields are never read, and modifier chords are atomic.
 
 Every action returns a fresh snapshot plus `action.verification`: `verified`
-when the changed value was read back, `unverified (accessibility action
-unasserted)` when the accessibility call succeeded without a post-state
-check, `unverified (synthetic input)` for keyboard and mouse events.
+when the changed value or focused text was read back (`set-value` on a text
+field, and `type-text` when the focused field is readable), `unverified
+(accessibility action unasserted)` when the accessibility call succeeded
+without a post-state check, and `unverified (synthetic input)` for keyboard
+and mouse events that could not be read back.
 
 ## Permissions
 
@@ -80,7 +82,10 @@ Computer Use", so dev and release helpers get separate rows under Privacy &
 Security. Signing with an Apple Development certificate (the build script
 picks one up from the keychain when present) gives the helper a designated
 requirement that survives rebuilds; an ad-hoc signature has to be re-granted
-after every build.
+after every build. Tauri's ad-hoc signing of the outer `TerminalX.app` leaves
+the nested helper's signature untouched (verified with `codesign -d -r-` on
+a `pnpm tauri build` bundle), so the helper's identity does not rotate with
+app builds.
 
 ## Building
 
@@ -125,7 +130,7 @@ The bundles include `computer-use-linux/runtime.py` or
 their rendering tests. `TERMINALX_COMPUTER_DESKTOP_SCRIPT_PROVIDER_PATH` overrides
 the runtime location; otherwise the provider checks Tauri's resource directory,
 then `native/` in debug builds. The platform Tauri configs exclude the macOS
-helper and sidecar. The Swift build command exits successfully off macOS.
+helper. The Swift build command exits successfully off macOS.
 
 Each request runs `python3 -c <embedded-launcher> runtime.py <operation-file>` or PowerShell with
 `-NoProfile -NonInteractive -ExecutionPolicy Bypass -File runtime.ps1 <operation-file>`.

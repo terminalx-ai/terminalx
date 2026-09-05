@@ -5,11 +5,19 @@
 baseline, next threshold, cooldown deadline, app version, permanent completion
 flag and version that consumed the successful-work trigger. No telemetry is added.
 
-SessionManager records the first successful agent process spawn for each tab
-created during this app run. The owner seeds its seen set from the saved index
-at startup: restoring sessions, restarting their processes and switching tabs
-cannot inflate usage. Deleting tabs never reduces the durable count. Failed
-spawns do not count. No transcript scan or stats snapshot drives eligibility.
+SessionManager supplies the activity ledger's committed lifetime work-start
+count. A live transition into working counts, including another turn or resuming
+after waiting in the same tab. Blank tabs, optimistic submissions, same-state
+updates, provider identity refreshes, replay and reconnect do not create starts.
+The reminder uses that total rather than incrementing a second counter. It loads
+the total at startup without triggering eligibility; only a newer live count
+does that. Duplicate or out-of-order notifications are ignored.
+
+The `usageSchema` migration rebases existing reminder usage once onto the current
+ledger count, since old process-launch counts cannot be equated with work starts.
+It preserves cooldown, threshold backoff, supporter completion and the consumed
+completion version. Later restarts preserve the migrated baseline. The activity
+ledger performs historical recovery; reminder eligibility never scans transcripts.
 
 Live nonempty user prompts followed by successful turn completion qualify for
 the separate once-per-version trigger. Queued prompts, subagent events, errors,
@@ -18,7 +26,7 @@ agents block it. A one-shot debounce waits 1.2 seconds after completion/input;
 activity and typing are checked again after GitHub returns. A prepared result
 waits locally when activity resumes, without repeating the lookup.
 
-The initial threshold is 35. Later, close, Escape and a successful browser handoff
+The initial threshold is 35 work starts. Later, close, Escape and a successful browser handoff
 set a three-day cooldown, double the threshold and reset the baseline. Both the
 cooldown and additional usage are required. An app update resets the baseline
 and initial threshold but preserves cooldown, completion and consumed-version

@@ -37,7 +37,15 @@ const bundleId =
 const displayName = dev ? 'TerminalX Dev Computer Use' : 'TerminalX Computer Use'
 const universal = process.env.TERMINALX_COMPUTER_MACOS_UNIVERSAL === '1'
 
-if (process.platform !== 'darwin' || process.env.TERMINALX_COMPUTER_MACOS_SKIP === '1') {
+if (process.platform !== 'darwin') {
+  process.exit(0)
+}
+if (process.env.TERMINALX_COMPUTER_MACOS_SKIP === '1') {
+  if (process.env.TERMINALX_MAC_RELEASE === '1') {
+    console.error('build-computer-macos: TERMINALX_COMPUTER_MACOS_SKIP cannot be combined with TERMINALX_MAC_RELEASE; a release must ship the helper')
+    process.exit(1)
+  }
+  console.warn('build-computer-macos: skipped; the app will report the computer-use helper as missing')
   process.exit(0)
 }
 if (!existsSync(path.join(packagePath, 'Package.swift'))) {

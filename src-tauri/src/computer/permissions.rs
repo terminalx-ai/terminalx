@@ -280,7 +280,7 @@ pub fn open_setup(
             next_step: None,
         });
     }
-    close_setup_helpers();
+    close_setup_helpers(app);
     let mut command = std::process::Command::new("/usr/bin/open");
     command.arg("-n").arg(app).arg("--args");
     match permission {
@@ -308,15 +308,21 @@ pub fn open_setup(
     })
 }
 
-/// Setup helpers are windowed; only one should be open. Status probes use
-/// `--permission-status-file` and are deliberately not matched.
-fn close_setup_helpers() {
+/// Setup helpers are windowed; only one should be open. The pattern is
+/// anchored on this helper's executable path so another TerminalX build's
+/// setup window is left alone, and status probes (`--permission-status-file`)
+/// are deliberately not matched.
+fn close_setup_helpers(app: &Path) {
+    let Some(executable) = super::helper_executable_in(app) else {
+        return;
+    };
+    let executable = regex::escape(&executable.to_string_lossy());
     for pattern in [
-        "terminalx-computer-use-macos[[:space:]]+--permission([[:space:]]|$)",
-        "terminalx-computer-use-macos[[:space:]]+--permissions([[:space:]]|$)",
+        format!("^{executable}[[:space:]]+--permission([[:space:]]|$)"),
+        format!("^{executable}[[:space:]]+--permissions([[:space:]]|$)"),
     ] {
         let _ = std::process::Command::new("/usr/bin/pkill")
-            .args(["-f", pattern])
+            .args(["-f", &pattern])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -347,8 +353,8 @@ pub fn reset(helper_app: Option<&Path>) -> Result<PermissionResetResult, Compute
     if let Some(reason) = current.helper_unavailable_reason {
         return Err(ComputerError::accessibility(reason));
     }
-    let bundle_id = read_bundle_id(app);
-    close_setup_helpers();
+    let bundle_id = read_bundle_id(app)?;
+    close_setup_helpers(app);
     for id in [PermissionId::Accessibility, PermissionId::Screenshots] {
         let output = std::process::Command::new("/usr/bin/tccutil")
             .args(["reset", id.tcc_service(), &bundle_id])
@@ -375,18 +381,24 @@ pub fn reset(helper_app: Option<&Path>) -> Result<PermissionResetResult, Compute
 }
 
 /// The bundle id is whatever the built helper declares; dev and release
-/// helpers differ so their TCC rows stay apart.
-pub fn read_bundle_id(app: &Path) -> String {
+/// helpers differ so their TCC rows stay apart, which is why a reset must
+/// never guess: resetting the wrong identity would clear another build's
+/// grants.
+pub fn read_bundle_id(app: &Path) -> Result<String, ComputerError> {
     let plist: PathBuf = app.join("Contents/Info.plist");
-    std::process::Command::new("/usr/libexec/PlistBuddy")
+    let output = std::process::Command::new("/usr/libexec/PlistBuddy")
         .args(["-c", "Print :CFBundleIdentifier"])
         .arg(&plist)
         .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "com.terminalx.next.computer-use".into())
+        .map_err(|e| ComputerError::accessibility(format!("Could not read the helper bundle id: {e}")))?;
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() || id.is_empty() {
+        return Err(ComputerError::accessibility(format!(
+            "Could not read the helper bundle id from {}",
+            plist.display()
+        )));
+    }
+    Ok(id)
 }
 
 /// Read-only prerequisites, shared by CLI setup output and Settings.
@@ -444,6 +456,24 @@ mod tests {
     }
 
     #[test]
+    fn a_helper_without_a_readable_bundle_id_cannot_be_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = read_bundle_id(dir.path()).unwrap_err();
+        assert_eq!(error.code, "accessibility_error");
+        assert!(error.message.contains("bundle id"));
+        let app = dir.path().join("Helper.app");
+        std::fs::create_dir_all(app.join("Contents")).unwrap();
+        std::fs::write(
+            app.join("Contents/Info.plist"),
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>com.terminalx.next.dev.computer-use</string></dict></plist>\n",
+        )
+        .unwrap();
+        if cfg!(target_os = "macos") {
+            assert_eq!(read_bundle_id(&app).unwrap(), "com.terminalx.next.dev.computer-use");
+        }
+    }
+
+    #[test]
     fn permission_results_serialize_in_the_legacy_shape() {
         let setup = PermissionSetupResult {
             platform: "macos".into(),
@@ -461,4 +491,3 @@ mod tests {
         assert_eq!(json["launchedHelper"], true);
     }
 }
-

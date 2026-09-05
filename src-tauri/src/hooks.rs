@@ -343,7 +343,12 @@ pub fn run_statusline_cli() -> bool {
     }
     let mut stdin = String::new();
     let _ = std::io::stdin().read_to_string(&mut stdin);
-    let _ = ask_app("StatusLine", &stdin);
+    if let Ok(mut payload) = serde_json::from_str::<Value>(&stdin) {
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("_raccoon_usage_account".into(), serde_json::json!(crate::status::usage::claude_account_identity()));
+            let _ = ask_app("StatusLine", &payload.to_string());
+        }
+    }
     true
 }
 

@@ -16,6 +16,10 @@ run what you change.
   archive (`libclang_rt.osx.a`) for the local transcription engine's Metal
   code, and the command line tools alone may not ship it. See
   [docs/RELEASING.md](docs/RELEASING.md).
+- **Swift 6** (part of Xcode) for the computer-use helper app that
+  `pnpm tauri:dev` and `pnpm tauri build` build first. Without it, set
+  `TERMINALX_COMPUTER_MACOS_SKIP=1` for a dev build and the app reports the
+  helper as missing. See [docs/COMPUTER-USE.md](docs/COMPUTER-USE.md).
 - The **`claude`** and **`codex`** CLIs, logged in, if you want to run agents.
   TerminalX spawns them; it does not bundle or proxy them.
 - macOS on Apple silicon is the only platform currently built and tested.
@@ -53,7 +57,9 @@ cd src-tauri && cargo test
 `pnpm check` runs the first two together and `pnpm test` runs vitest alone.
 The same four run on every pull request in `.github/workflows/ci.yml`, on
 macOS, because the Rust side links AppKit, AVFoundation and Speech and will
-not build anywhere else.
+not build anywhere else. CI also runs `pnpm test:computer-macos` (the Swift
+helper's unit tests) and builds the helper app before the Rust checks; run
+those too when you touch `native/computer-use-macos`.
 
 Clippy is run with `-D warnings`, so a warning is a failure.
 
@@ -133,6 +139,8 @@ you make one:
   the chat, the terminal view, the transcript and the hooks fit together.
 - [docs/RELEASING.md](docs/RELEASING.md) — dev vs release builds, signing, the
   updater feed, and the macOS entitlement traps.
+- [docs/COMPUTER-USE.md](docs/COMPUTER-USE.md) — how agents drive desktop
+  apps: the helper app that owns the permissions, the provider, and the CLI.
 
 ## Reporting bugs and security issues
 
