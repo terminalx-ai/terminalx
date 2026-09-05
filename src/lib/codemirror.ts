@@ -30,7 +30,10 @@ export const raccoonTheme: Extension = EditorView.theme({
   ".cm-mergeSpacer": { backgroundColor: "var(--veil-raised)" },
   ".cm-collapsedLines": { color: "var(--ink-faint)", backgroundColor: "var(--veil-raised)", padding: "2px 12px" },
   ".cm-searchMatch": { backgroundColor: "color-mix(in oklab, var(--warning) 35%, transparent)" },
+  ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: "color-mix(in oklab, var(--warning) 60%, transparent)" },
   ".cm-panels": { backgroundColor: "var(--popover)", color: "var(--foreground)" },
+  ".cm-panels.cm-panels-bottom": { borderTop: "1px solid var(--hairline-strong)" },
+  ".cm-panels.cm-panels-top": { borderBottom: "1px solid var(--hairline-strong)" },
   ".cm-tooltip": { backgroundColor: "var(--popover)", border: "1px solid var(--hairline-strong)", borderRadius: "6px" },
 });
 

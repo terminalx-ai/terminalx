@@ -19,10 +19,12 @@ mod names;
 mod pairing;
 mod pty;
 mod session;
+mod continuation;
 pub mod skills;
 mod store;
 mod status;
 mod stats;
+mod star_nag;
 mod summaries;
 mod workspaces;
 
@@ -45,6 +47,7 @@ pub struct AppState {
     /// Which Codex models this account may run, read from the CLI once.
     pub codex_models: Arc<harness::codex::models::Cache>,
     pub status: Arc<status::StatusState>,
+    pub star_nag: Arc<star_nag::StarNag>,
     pub stats_usage: Arc<stats::StatsUsageStore>,
     manager: std::sync::Mutex<Option<session::SessionManager>>,
 }
@@ -73,6 +76,7 @@ pub fn run() {
         transcription: Arc::new(transcription::Transcription::default()),
         codex_models: codex_models.clone(),
         status: status_state.clone(),
+        star_nag: Arc::new(star_nag::StarNag::load(env!("CARGO_PKG_VERSION"))),
         stats_usage: Arc::new(stats::StatsUsageStore::default()),
         manager: std::sync::Mutex::new(None),
     };
@@ -197,6 +201,7 @@ pub fn run() {
             commands::file_contents_at,
             commands::log_commits,
             commands::load_tab_events,
+            commands::prepare_continuation,
             commands::send_message,
             commands::interrupt_turn,
             commands::stop_tab,
@@ -230,6 +235,10 @@ pub fn run() {
             commands::pr_merge,
             commands::pr_ready,
             commands::gh_available,
+            star_nag::star_nag_ready,
+            star_nag::star_nag_input,
+            star_nag::star_nag_dismiss,
+            star_nag::star_nag_act,
             commands::pty_spawn,
             commands::pty_write,
             commands::pty_resize,
@@ -240,6 +249,7 @@ pub fn run() {
             commands::write_text_file,
             commands::file_mtime,
             commands::search_text,
+            commands::replace_text,
             commands::settle_session,
             commands::fork_session,
             commands::dictation_available,

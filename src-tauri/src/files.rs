@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const MAX_FILES: usize = 60_000;
 const FRESH_FOR: Duration = Duration::from_secs(20);
@@ -226,8 +226,14 @@ pub fn stat_mtime(path: &Path) -> Option<u64> {
 pub struct TextHit {
     pub path: String,
     pub line: u32,
+    /// Character column of the first match on the line.
     pub col: u32,
     pub text: String,
+    /// Every match on the line as `[start, end)` character offsets into `text`.
+    pub matches: Vec<(u32, u32)>,
+    /// What each match becomes when a replacement was asked for, in the same order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replacements: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -238,18 +244,34 @@ pub struct TextSearch {
     pub capped: bool,
 }
 
-/// Grep the tree: literal or regex, case-sensitive or not, binary files
-/// skipped, capped by hit count so a broad query returns promptly.
-pub fn search_text(root: &Path, query: &str, regex: bool, case_sensitive: bool, limit: usize) -> Result<TextSearch> {
-    if query.is_empty() {
-        return Ok(TextSearch { hits: vec![], files: 0, capped: false });
-    }
+/// Files a replacement should touch: a path, and the 1-based lines to change
+/// in it, or every line when `lines` is absent.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceTarget {
+    pub path: String,
+    pub lines: Option<Vec<u32>>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceReport {
+    pub files: usize,
+    pub replacements: usize,
+}
+
+/// How much of a line to ship back with a hit.
+const SHOWN_CHARS: usize = 400;
+
+fn text_pattern(query: &str, regex: bool, case_sensitive: bool) -> Result<regex::Regex> {
     let pattern = if regex { query.to_string() } else { regex::escape(query) };
-    let re = regex::RegexBuilder::new(&pattern).case_insensitive(!case_sensitive).build()?;
-    let mut hits = Vec::new();
-    let mut files = 0usize;
-    let mut capped = false;
-    let walker = ignore::WalkBuilder::new(root)
+    Ok(regex::RegexBuilder::new(&pattern).case_insensitive(!case_sensitive).build()?)
+}
+
+/// Every regular file under `root` that a text search should read: the
+/// `.gitignore`d, the hidden, and the build trees are left out.
+fn text_files(root: &Path) -> impl Iterator<Item = ignore::DirEntry> {
+    ignore::WalkBuilder::new(root)
         .hidden(true)
         .git_ignore(true)
         .git_global(true)
@@ -260,29 +282,151 @@ pub fn search_text(root: &Path, query: &str, regex: bool, case_sensitive: bool, 
             let name = e.file_name().to_string_lossy();
             !(name == ".git" || name == "node_modules" || name == "target" || name == ".raccoon")
         })
-        .build();
-    'files: for entry in walker.flatten() {
-        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+        .build()
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+}
+
+fn rel_of(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default()
+}
+
+/// The bytes of a file worth searching: small enough, and not binary.
+fn searchable_bytes(path: &Path) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() > MAX_TEXT as usize || bytes.iter().take(8192).any(|&b| b == 0) {
+        return None;
+    }
+    Some(bytes)
+}
+
+/// Replacement templates are written the way editors expect them: `$1`, `$&`
+/// for the whole match, `$<name>`, and `$$` for a dollar sign. The regex
+/// crate reads `$1abc` as a group called `1abc` and knows no `$&`, so those
+/// forms are rewritten into its braced syntax before expansion.
+fn normalize_replacement(template: &str) -> String {
+    let mut out = String::with_capacity(template.len() + 8);
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '$' {
+            out.push(c);
             continue;
         }
-        let Ok(bytes) = std::fs::read(entry.path()) else { continue };
-        if bytes.len() > MAX_TEXT as usize || bytes.iter().take(8192).any(|&b| b == 0) {
-            continue;
+        match chars.peek().copied() {
+            Some('$') => {
+                chars.next();
+                out.push_str("$$");
+            }
+            Some('&') => {
+                chars.next();
+                out.push_str("${0}");
+            }
+            Some('<') => {
+                chars.next();
+                let mut name = String::new();
+                let mut closed = false;
+                for n in chars.by_ref() {
+                    if n == '>' {
+                        closed = true;
+                        break;
+                    }
+                    name.push(n);
+                }
+                if closed && !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    out.push_str(&format!("${{{name}}}"));
+                } else {
+                    out.push_str("$$<");
+                    out.push_str(&name);
+                    if closed {
+                        out.push('>');
+                    }
+                }
+            }
+            Some(d) if d.is_ascii_digit() => {
+                let mut digits = String::new();
+                while let Some(&n) = chars.peek() {
+                    if n.is_ascii_digit() {
+                        digits.push(n);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                out.push_str(&format!("${{{digits}}}"));
+            }
+            _ => out.push_str("$$"),
         }
+    }
+    out
+}
+
+/// A compiled query plus how each match is rewritten, shared by the search
+/// preview and the replacement itself so what is shown is what is written.
+struct Rewriter {
+    re: regex::Regex,
+    template: Option<String>,
+    regex: bool,
+}
+
+impl Rewriter {
+    fn new(query: &str, replacement: Option<&str>, regex: bool, case_sensitive: bool) -> Result<Self> {
+        let re = text_pattern(query, regex, case_sensitive)?;
+        let template = replacement.map(|r| if regex { normalize_replacement(r) } else { r.to_string() });
+        Ok(Self { re, template, regex })
+    }
+
+    /// What one match turns into.
+    fn expand(&self, caps: &regex::Captures) -> String {
+        let template = self.template.as_deref().unwrap_or_default();
+        if !self.regex {
+            return template.to_string();
+        }
+        let mut out = String::new();
+        caps.expand(template, &mut out);
+        out
+    }
+
+    /// A line with every match rewritten, and how many there were.
+    fn rewrite_line(&self, line: &str) -> (String, usize) {
+        let mut out = String::with_capacity(line.len());
+        let mut last = 0;
+        let mut n = 0;
+        for caps in self.re.captures_iter(line) {
+            let m = caps.get(0).expect("group 0");
+            out.push_str(&line[last..m.start()]);
+            out.push_str(&self.expand(&caps));
+            last = m.end();
+            n += 1;
+        }
+        out.push_str(&line[last..]);
+        (out, n)
+    }
+}
+
+/// Grep the tree: literal or regex, case-sensitive or not, binary files
+/// skipped, capped by hit count so a broad query returns promptly. With a
+/// replacement, each hit also carries what its matches would become.
+pub fn search_text(root: &Path, query: &str, regex: bool, case_sensitive: bool, limit: usize, replacement: Option<&str>) -> Result<TextSearch> {
+    if query.is_empty() {
+        return Ok(TextSearch { hits: vec![], files: 0, capped: false });
+    }
+    let rw = Rewriter::new(query, replacement, regex, case_sensitive)?;
+    let mut hits = Vec::new();
+    let mut files = 0usize;
+    let mut capped = false;
+    'files: for entry in text_files(root) {
+        let Some(bytes) = searchable_bytes(entry.path()) else { continue };
         let text = String::from_utf8_lossy(&bytes);
-        let rel = entry.path().strip_prefix(root).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+        let rel = rel_of(root, entry.path());
         let mut any = false;
         for (i, line) in text.lines().enumerate() {
-            if let Some(m) = re.find(line) {
-                any = true;
-                let col = line[..m.start()].chars().count() as u32;
-                let shown: String = line.trim_end().chars().take(400).collect();
-                hits.push(TextHit { path: rel.clone(), line: i as u32 + 1, col, text: shown });
-                if hits.len() >= limit {
-                    capped = true;
-                    files += 1;
-                    break 'files;
-                }
+            let Some(hit) = line_hit(&rw, &rel, i as u32 + 1, line, replacement.is_some()) else { continue };
+            any = true;
+            hits.push(hit);
+            if hits.len() >= limit {
+                capped = true;
+                files += 1;
+                break 'files;
             }
         }
         if any {
@@ -290,6 +434,114 @@ pub fn search_text(root: &Path, query: &str, regex: bool, case_sensitive: bool, 
         }
     }
     Ok(TextSearch { hits, files, capped })
+}
+
+/// One line's matches as character offsets (the editor addresses columns in
+/// characters, the regex crate in bytes), with previews when replacing.
+fn line_hit(rw: &Rewriter, rel: &str, number: u32, line: &str, preview: bool) -> Option<TextHit> {
+    let mut matches = Vec::new();
+    let mut replacements = Vec::new();
+    // Byte → char offsets, walked forward once since matches come in order.
+    let mut byte_at = 0usize;
+    let mut chars_at = 0u32;
+    let mut advance = |to: usize| {
+        chars_at += line[byte_at..to].chars().count() as u32;
+        byte_at = to;
+        chars_at
+    };
+    for caps in rw.re.captures_iter(line) {
+        let m = caps.get(0).expect("group 0");
+        let start = advance(m.start());
+        let end = advance(m.end());
+        matches.push((start, end));
+        if preview {
+            replacements.push(rw.expand(&caps));
+        }
+    }
+    if matches.is_empty() {
+        return None;
+    }
+    let shown: String = line.trim_end().chars().take(SHOWN_CHARS).collect();
+    Some(TextHit {
+        path: rel.to_string(),
+        line: number,
+        col: matches[0].0,
+        text: shown,
+        matches,
+        replacements: preview.then_some(replacements),
+    })
+}
+
+/// Rewrite matches on disk. `targets` names the files and lines to touch;
+/// when absent every searchable file under `root` is a target, except the
+/// paths in `skip` (open buffers the caller updates itself). Files are only
+/// written when something changed, and a file that is not valid UTF-8 is
+/// left alone rather than written back lossily.
+pub fn replace_text(
+    root: &Path,
+    query: &str,
+    replacement: &str,
+    regex: bool,
+    case_sensitive: bool,
+    targets: Option<Vec<ReplaceTarget>>,
+    skip: &[String],
+) -> Result<ReplaceReport> {
+    if query.is_empty() {
+        return Ok(ReplaceReport { files: 0, replacements: 0 });
+    }
+    let rw = Rewriter::new(query, Some(replacement), regex, case_sensitive)?;
+    let root = root.canonicalize()?;
+    let jobs: Vec<(PathBuf, Option<Vec<u32>>)> = match targets {
+        Some(targets) => targets
+            .into_iter()
+            .map(|t| {
+                let abs = root.join(&t.path);
+                let real = abs.canonicalize().map_err(|e| anyhow::anyhow!("{}: {e}", t.path))?;
+                if !real.starts_with(&root) {
+                    anyhow::bail!("{} is outside the project", t.path);
+                }
+                Ok((real, t.lines))
+            })
+            .collect::<Result<_>>()?,
+        None => text_files(&root).filter(|e| !skip.iter().any(|s| s == &rel_of(&root, e.path()))).map(|e| (e.into_path(), None)).collect(),
+    };
+    let mut report = ReplaceReport { files: 0, replacements: 0 };
+    for (path, lines) in jobs {
+        let Some(bytes) = searchable_bytes(&path) else { continue };
+        let Ok(text) = String::from_utf8(bytes) else { continue };
+        let (next, n) = rewrite_text(&rw, &text, lines.as_deref());
+        if n == 0 {
+            continue;
+        }
+        write_text(&path, &next)?;
+        report.files += 1;
+        report.replacements += n;
+    }
+    Ok(report)
+}
+
+/// A whole file rewritten line by line so every line ending survives as it
+/// was; only the numbered lines change when a filter is given.
+fn rewrite_text(rw: &Rewriter, text: &str, lines: Option<&[u32]>) -> (String, usize) {
+    let mut out = String::with_capacity(text.len());
+    let mut total = 0;
+    for (i, raw) in text.split_inclusive('\n').enumerate() {
+        let number = i as u32 + 1;
+        if lines.is_some_and(|l| !l.contains(&number)) {
+            out.push_str(raw);
+            continue;
+        }
+        let body = raw.strip_suffix('\n').unwrap_or(raw);
+        let (body, ending) = match body.strip_suffix('\r') {
+            Some(b) => (b, &raw[b.len()..]),
+            None => (body, &raw[body.len()..]),
+        };
+        let (rewritten, n) = rw.rewrite_line(body);
+        out.push_str(&rewritten);
+        out.push_str(ending);
+        total += n;
+    }
+    (out, total)
 }
 
 #[cfg(test)]
@@ -316,12 +568,79 @@ mod tree_tests {
         let m = write_text(&p.join("src/new.ts"), "hi").unwrap();
         assert!(m > 0);
         assert_eq!(stat_mtime(&p.join("src/new.ts")), Some(m));
-        let s = search_text(p, "find", false, false, 100).unwrap();
+        let s = search_text(p, "find", false, false, 100, None).unwrap();
         assert_eq!(s.hits.len(), 2);
         assert!(s.hits.iter().all(|h| h.path != "ignored.txt"));
-        let s = search_text(p, "find", false, true, 1).unwrap();
+        let s = search_text(p, "find", false, true, 1, None).unwrap();
         assert!(s.capped && s.hits.len() == 1);
-        let s = search_text(p, "f.nd.?me", true, false, 100).unwrap();
+        let s = search_text(p, "f.nd.?me", true, false, 100, None).unwrap();
         assert_eq!(s.files, 2);
+    }
+
+    #[test]
+    fn hits_carry_every_match_and_its_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::write(p.join("a.txt"), "héllo foo, foo again\nnothing\nfoo\n").unwrap();
+        let s = search_text(p, "foo", false, false, 100, Some("bar")).unwrap();
+        assert_eq!(s.hits.len(), 2);
+        // Columns count characters, so the accent before the first match is one column wide.
+        assert_eq!(s.hits[0].col, 6);
+        assert_eq!(s.hits[0].matches, vec![(6, 9), (11, 14)]);
+        assert_eq!(s.hits[0].replacements.as_deref(), Some(&["bar".to_string(), "bar".to_string()][..]));
+        assert_eq!(s.hits[1].line, 3);
+        let s = search_text(p, "f(o+)", true, false, 100, Some("<$1>")).unwrap();
+        assert_eq!(s.hits[0].replacements.as_deref(), Some(&["<oo>".to_string(), "<oo>".to_string()][..]));
+        let s = search_text(p, "foo", false, false, 100, None).unwrap();
+        assert!(s.hits[0].replacements.is_none());
+    }
+
+    #[test]
+    fn replacement_templates_read_like_an_editor() {
+        assert_eq!(normalize_replacement("$1abc"), "${1}abc");
+        assert_eq!(normalize_replacement("[$&]"), "[${0}]");
+        assert_eq!(normalize_replacement("$<name>!"), "${name}!");
+        assert_eq!(normalize_replacement("cost: $$5"), "cost: $$5");
+        assert_eq!(normalize_replacement("$ alone"), "$$ alone");
+        assert_eq!(normalize_replacement("$<bad name>"), "$$<bad name>");
+    }
+
+    #[test]
+    fn replaces_across_files_and_within_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::create_dir_all(p.join("src")).unwrap();
+        std::fs::write(p.join("src/a.ts"), "foo();\nfoo(); foo();\nkeep();\n").unwrap();
+        std::fs::write(p.join("b.txt"), "foo\r\nfoo\r\n").unwrap();
+        std::fs::write(p.join("c.txt"), "no match here\n").unwrap();
+        std::fs::write(p.join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(p.join("ignored.txt"), "foo\n").unwrap();
+
+        // Only the second line of a.ts, leaving the first alone.
+        let r = replace_text(p, "foo", "bar", false, false, Some(vec![ReplaceTarget { path: "src/a.ts".into(), lines: Some(vec![2]) }]), &[]).unwrap();
+        assert_eq!(r, ReplaceReport { files: 1, replacements: 2 });
+        assert_eq!(std::fs::read_to_string(p.join("src/a.ts")).unwrap(), "foo();\nbar(); bar();\nkeep();\n");
+
+        // The whole tree, minus a path the caller handles itself; CRLF endings survive.
+        let r = replace_text(p, "foo", "baz", false, false, None, &["src/a.ts".to_string()]).unwrap();
+        assert_eq!(r, ReplaceReport { files: 1, replacements: 2 });
+        assert_eq!(std::fs::read_to_string(p.join("b.txt")).unwrap(), "baz\r\nbaz\r\n");
+        assert_eq!(std::fs::read_to_string(p.join("src/a.ts")).unwrap(), "foo();\nbar(); bar();\nkeep();\n");
+        assert_eq!(std::fs::read_to_string(p.join("ignored.txt")).unwrap(), "foo\n");
+        // Untouched files keep their mtime: nothing was written to c.txt.
+        let r = replace_text(p, "foo", "qux", false, false, Some(vec![ReplaceTarget { path: "c.txt".into(), lines: None }]), &[]).unwrap();
+        assert_eq!(r, ReplaceReport { files: 0, replacements: 0 });
+
+        // Regex with a capture group and a literal replacement that looks like one.
+        let r = replace_text(p, "(ba)([rz])", "$2$1", true, false, None, &[]).unwrap();
+        assert_eq!(r, ReplaceReport { files: 2, replacements: 4 });
+        assert_eq!(std::fs::read_to_string(p.join("b.txt")).unwrap(), "zba\r\nzba\r\n");
+        let r = replace_text(p, "zba", "$1", false, false, None, &[]).unwrap();
+        assert_eq!(r.replacements, 2);
+        assert_eq!(std::fs::read_to_string(p.join("b.txt")).unwrap(), "$1\r\n$1\r\n");
+
+        // Paths cannot escape the root.
+        let err = replace_text(p, "x", "y", false, false, Some(vec![ReplaceTarget { path: "../outside".into(), lines: None }]), &[]);
+        assert!(err.is_err());
     }
 }

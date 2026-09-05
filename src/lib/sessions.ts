@@ -376,7 +376,7 @@ export async function forkSession(id: string, tabId: string) {
 export async function addTab(sessionId: string, harness: string, model: string, effort: string | null, permissionMode: string) {
   const tab = await api.addTab(sessionId, { harness, model, effort, permissionMode });
   const s = state.sessions.find((x) => x.id === sessionId);
-  if (s) patchSession(sessionId, { tabs: [...s.tabs, tab], activeTab: tab.id });
+  if (s) patchSession(sessionId, { tabs: [...s.tabs.filter((t) => t.id !== tab.id), tab], activeTab: tab.id });
   setSelectedAgent(sessionId, tab.id);
   return tab;
 }

@@ -88,6 +88,7 @@ vi.mock("@/components/settings/SettingsPage", () => ({
   ),
 }));
 vi.mock("@/components/command/CommandPalette", () => ({ CommandPalette: () => null }));
+vi.mock("@/components/ui/StarReminder", () => ({ StarReminder: () => null }));
 vi.mock("@/components/ui/Toasts", () => ({ Toasts: () => null }));
 vi.mock("@/components/session/BypassDialog", () => ({ BypassDialog: () => null }));
 vi.mock("@/components/session/SettleDialog", () => ({ SettleDialog: () => null }));

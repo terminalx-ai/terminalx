@@ -32,8 +32,6 @@ pub struct UsageWindow {
     pub resets_at: Option<i64>,
     pub window_minutes: Option<u32>,
     pub updated_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub plan: Option<String>,
     pub stale: bool,
 }
 
@@ -166,7 +164,6 @@ fn parse_claude_window(key: &str, raw: &Value, updated_at: i64) -> Option<UsageW
         resets_at: raw.get("resets_at").and_then(reset_ms),
         window_minutes,
         updated_at,
-        plan: None,
         stale: false,
     })
 }
@@ -233,17 +230,16 @@ fn merge_claude_windows(oauth: Vec<UsageWindow>, statusline: Vec<UsageWindow>) -
     merged.into_values().collect()
 }
 
-fn parse_codex_limit(limits: &Value, key_prefix: Option<&str>, updated_at: i64) -> Vec<UsageWindow> {
-    let plan = limits["planType"].as_str().map(str::to_string);
-    let limit_name = limits["limitName"].as_str();
+/// The account-level windows of one Codex limit block. The block's `limitName`
+/// and `planType` are deliberately ignored: the bar shows usage, not the
+/// account's tier or which model the limit is scoped to.
+fn parse_codex_limit(limits: &Value, updated_at: i64) -> Vec<UsageWindow> {
     ["primary", "secondary"]
         .into_iter()
         .filter_map(|slot| {
             let raw = limits.get(slot)?.as_object()?;
             let minutes = raw.get("windowDurationMins")?.as_u64()?.try_into().ok()?;
-            let (window_key, window_label) = classify_codex(minutes);
-            let key = key_prefix.map(|prefix| format!("{prefix}_{window_key}")).unwrap_or(window_key);
-            let label = limit_name.map(|name| format!("{name} {window_label}")).unwrap_or(window_label);
+            let (key, label) = classify_codex(minutes);
             Some(UsageWindow {
                 agent: "codex".into(),
                 key,
@@ -252,26 +248,25 @@ fn parse_codex_limit(limits: &Value, key_prefix: Option<&str>, updated_at: i64) 
                 resets_at: raw.get("resetsAt").and_then(reset_ms),
                 window_minutes: Some(minutes),
                 updated_at,
-                plan: plan.clone(),
                 stale: false,
             })
         })
         .collect()
 }
 
+/// Only the account limit reaches the store. `rateLimitsByLimitId` repeats it
+/// under the `codex` id and adds one entry per model-specific sub-limit; those
+/// sub-limits almost always sit at 0% and would crowd out the number that
+/// matters, so they are dropped here rather than hidden by every consumer.
 fn parse_codex_windows(result: &Value, updated_at: i64) -> Vec<UsageWindow> {
-    let mut windows = parse_codex_limit(&result["rateLimits"], None, updated_at);
-    let mut additional: Vec<_> = result
-        .get("rateLimitsByLimitId")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flatten()
-        .filter(|(limit_id, _)| limit_id.as_str() != "codex")
-        .flat_map(|(limit_id, limits)| parse_codex_limit(limits, Some(limit_id), updated_at))
-        .collect();
-    additional.sort_by(|a, b| a.key.cmp(&b.key));
-    windows.extend(additional);
-    windows
+    let windows = parse_codex_limit(&result["rateLimits"], updated_at);
+    if !windows.is_empty() {
+        return windows;
+    }
+    result
+        .pointer("/rateLimitsByLimitId/codex")
+        .map(|limits| parse_codex_limit(limits, updated_at))
+        .unwrap_or_default()
 }
 
 fn parse_codex_usage(result: &Value) -> (Option<CodexUsage>, Option<String>) {
@@ -588,20 +583,20 @@ mod tests {
         assert_eq!(windows[0].label, "5h");
         assert_eq!(windows[0].resets_at, Some(1_788_757_220_000));
         assert_eq!(windows[1].label, "weekly");
-        assert_eq!(windows[1].plan.as_deref(), Some("pro"));
+        assert_eq!(windows[1].used_percent, 43.0);
     }
 
     #[test]
-    fn codex_keeps_named_limit_windows_separate_from_the_account_windows() {
+    fn codex_drops_per_model_limits_and_keeps_the_account_window() {
         let windows = parse_codex_windows(
             &json!({
                 "rateLimits": {
-                    "primary": {"usedPercent": 41, "windowDurationMins": 10080},
+                    "primary": {"usedPercent": 41, "windowDurationMins": 10080, "resetsAt": 1788981737},
                     "planType": "pro"
                 },
                 "rateLimitsByLimitId": {
                     "codex": {
-                        "primary": {"usedPercent": 41, "windowDurationMins": 10080},
+                        "primary": {"usedPercent": 41, "windowDurationMins": 10080, "resetsAt": 1788981737},
                         "planType": "pro"
                     },
                     "codex_bengalfox": {
@@ -614,11 +609,30 @@ mod tests {
             }),
             123,
         );
-        assert_eq!(windows.len(), 3);
+        assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].key, "weekly");
-        assert_eq!(windows[1].key, "codex_bengalfox_five_hour");
-        assert_eq!(windows[1].label, "GPT-5.3-Codex-Spark 5h");
-        assert_eq!(windows[2].key, "codex_bengalfox_weekly");
+        assert_eq!(windows[0].label, "weekly");
+        assert_eq!(windows[0].used_percent, 41.0);
+        assert_eq!(windows[0].resets_at, Some(1_788_981_737_000));
+    }
+
+    #[test]
+    fn codex_falls_back_to_the_codex_limit_id_when_the_account_block_is_missing() {
+        let windows = parse_codex_windows(
+            &json!({
+                "rateLimitsByLimitId": {
+                    "codex": {"primary": {"usedPercent": 12, "windowDurationMins": 300}},
+                    "codex_bengalfox": {
+                        "limitName": "GPT-5.3-Codex-Spark",
+                        "primary": {"usedPercent": 5, "windowDurationMins": 300}
+                    }
+                }
+            }),
+            123,
+        );
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].key, "five_hour");
+        assert_eq!(windows[0].used_percent, 12.0);
     }
 
     #[test]

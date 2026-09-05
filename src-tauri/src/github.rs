@@ -181,3 +181,108 @@ mod tests {
         assert!(pr.review_decision.is_none());
     }
 }
+
+/// Compiled from src/lib/repo.ts, also used by the system-browser fallback.
+pub const REPO_URL: &str = env!("TERMINALX_REPO_URL");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StarStatus { Starred, NotStarred, Unknown }
+
+fn star_query() -> String {
+    let slug = REPO_URL.strip_prefix("https://github.com/").expect("GitHub homepage");
+    let (owner, name) = slug.split_once('/').expect("owner/repository");
+    format!("query={{repository(owner:{},name:{}){{viewerHasStarred}}}}", serde_json::json!(owner), serde_json::json!(name))
+}
+
+fn parse_star_status(success: bool, output: &[u8]) -> StarStatus {
+    if !success { return StarStatus::Unknown; }
+    let Ok(value) = serde_json::from_slice::<Value>(output) else { return StarStatus::Unknown; };
+    if value.get("errors").is_some() { return StarStatus::Unknown; }
+    match value["data"]["repository"]["viewerHasStarred"].as_bool() {
+        Some(true) => StarStatus::Starred,
+        Some(false) => StarStatus::NotStarred,
+        None => StarStatus::Unknown,
+    }
+}
+
+async fn star_request(command: Command, args: &[&str]) -> Option<std::process::Output> {
+    let mut command = tokio::process::Command::from(command);
+    command.args(args).kill_on_drop(true);
+    tokio::time::timeout(std::time::Duration::from_secs(15), command.output()).await.ok()?.ok()
+}
+
+pub async fn star_status() -> StarStatus {
+    let Ok(command) = gh() else { return StarStatus::Unknown; };
+    star_status_with(command).await
+}
+
+async fn star_status_with(command: Command) -> StarStatus {
+    let query = star_query();
+    // Pin github.com even when the user's gh default host is an enterprise host.
+    match star_request(command, &["api", "--hostname", "github.com", "graphql", "-f", &query]).await {
+        Some(out) => parse_star_status(out.status.success(), &out.stdout),
+        None => StarStatus::Unknown,
+    }
+}
+
+pub async fn star_repository() -> bool {
+    let Ok(command) = gh() else { return false; };
+    star_repository_with(command).await
+}
+
+async fn star_repository_with(command: Command) -> bool {
+    let endpoint = format!("user/starred/{}", REPO_URL.strip_prefix("https://github.com/").expect("GitHub homepage"));
+    star_request(command, &["api", "--hostname", "github.com", "--method", "PUT", &endpoint]).await.is_some_and(|out| out.status.success())
+}
+
+#[cfg(test)]
+mod star_tests {
+    use super::*;
+
+    #[test]
+    fn star_lookup_keeps_explicit_false_separate_from_errors() {
+        for (success, response, expected) in [
+            (true, r#"{"data":{"repository":{"viewerHasStarred":true}}}"#, StarStatus::Starred),
+            (true, r#"{"data":{"repository":{"viewerHasStarred":false}}}"#, StarStatus::NotStarred),
+            (true, r#"{"data":{"repository":null}}"#, StarStatus::Unknown),
+            (true, r#"{"errors":[{"message":"denied"}],"data":{"repository":{"viewerHasStarred":false}}}"#, StarStatus::Unknown),
+            (false, r#"{"data":{"repository":{"viewerHasStarred":false}}}"#, StarStatus::Unknown),
+            (true, "garbage", StarStatus::Unknown),
+            (false, "HTTP 404", StarStatus::Unknown),
+        ] { assert_eq!(parse_star_status(success, response.as_bytes()), expected); }
+    }
+
+    #[cfg(unix)]
+    fn process(script: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script, "star-test"]);
+        command
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn star_cli_boundary_pins_host_repository_and_method() {
+        assert_eq!(REPO_URL, "https://github.com/terminalx-ai/raccoon");
+        let command = process(r#"
+            test "$1" = api && test "$2" = --hostname && test "$3" = github.com &&
+            test "$4" = graphql && test "$5" = -f &&
+            test "$6" = 'query={repository(owner:"terminalx-ai",name:"raccoon"){viewerHasStarred}}' || exit 1
+            printf '%s' '{"data":{"repository":{"viewerHasStarred":false}}}'
+        "#);
+        assert_eq!(star_status_with(command).await, StarStatus::NotStarred);
+        let command = process(r#"
+            test "$1" = api && test "$2" = --hostname && test "$3" = github.com &&
+            test "$4" = --method && test "$5" = PUT && test "$6" = user/starred/terminalx-ai/raccoon
+        "#);
+        assert!(star_repository_with(command).await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn missing_process_authentication_and_mutation_errors_are_recoverable() {
+        assert_eq!(star_status_with(Command::new("/nonexistent/gh")).await, StarStatus::Unknown);
+        assert_eq!(star_status_with(process("exit 4")).await, StarStatus::Unknown);
+        assert!(!star_repository_with(process("exit 1")).await);
+        assert!(!star_repository_with(Command::new("/nonexistent/gh")).await);
+    }
+}
