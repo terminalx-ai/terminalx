@@ -69,6 +69,18 @@ describe("card", () => {
     unregister();
   });
 
+  it("preserves the editor Find bar’s Escape behavior while the reminder is visible", () => {
+    const onDismiss = vi.fn();
+    const editorEscape = vi.fn();
+    render(<><div className="editor-pane"><input aria-label="Find" onKeyDown={editorEscape} /></div><StarNagCard view={direct} onAction={vi.fn()} onDismiss={onDismiss} /></>);
+    const find = screen.getByRole("textbox", { name: "Find" });
+    find.focus();
+    fireEvent.keyDown(find, { key: "Escape" });
+    expect(editorEscape).toHaveBeenCalledOnce();
+    expect(onDismiss).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(find);
+  });
+
   it("lets a dialog consume Escape", () => {
     const onDismiss = vi.fn();
     const closeDialog = vi.fn();

@@ -246,6 +246,7 @@ pub fn run() {
             commands::write_text_file,
             commands::file_mtime,
             commands::search_text,
+            commands::replace_text,
             commands::settle_session,
             commands::fork_session,
             commands::dictation_available,

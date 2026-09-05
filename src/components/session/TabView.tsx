@@ -92,7 +92,8 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
     void agent.interrupt(session.id, tab.id).catch((e) => setError(errorMessage(e)));
   }, [session.id, tab.id]);
 
-  useHotkey("escape", () => (live && !hasEscapeOverlay() ? (stop(), true) : false), { enabled: active });
+  // Editors, dialogs and pickers own Escape before the agent-stop shortcut.
+  useHotkey("escape", () => (live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane") ? (stop(), true) : false), { enabled: active });
 
   const answerPermission = useCallback(
     async (requestId: string, optionId: string) => {
