@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bucketSessions, isUnread, matchesQuery, sessionColumn, toggleFilter, workspaceName, NO_FILTERS } from "@/lib/dashboard";
+import { bucketSessions, DONE_PAGE, isUnread, matchesQuery, sessionColumn, toggleFilter, workspaceName, NO_FILTERS } from "@/lib/dashboard";
 import type { SessionEntry, TabStatus } from "@/types/session";
 
 function session(id: string, statuses: TabStatus[], patch: Partial<SessionEntry> = {}): SessionEntry {
@@ -76,6 +76,59 @@ describe("search", () => {
 });
 
 describe("bucketSessions", () => {
+  it("shares the global 0/2/9 breakdown with the unfiltered dashboard across projects", () => {
+    const sessions = [
+      session("running", ["in_progress", "idle"]),
+      session("also-running", ["in_progress"], { projectPath: "/repos/other" }),
+      session("unread", ["completed"]),
+      ...Array.from({ length: 8 }, (_, i) => session(`read-${i}`, ["idle"])),
+    ];
+    const global = bucketSessions(sessions);
+    expect([global.needs.length, global.working.length, global.done.length]).toEqual([0, 2, 9]);
+    expect(global).toEqual(bucketSessions(sessions, opts));
+    expect(sessions.filter(isUnread)).toHaveLength(1);
+  });
+
+  it("keeps read and unread completions in Done and rolls mixed tabs up once", () => {
+    const sessions = [
+      session("needs", ["completed", "in_progress", "waiting", "waiting"]),
+      session("working", ["completed", "in_progress", "in_progress"]),
+      session("done", ["completed", "idle"]),
+    ];
+    const before = bucketSessions(sessions);
+    expect(before.needs.map((s) => s.id)).toEqual(["needs"]);
+    expect(before.working.map((s) => s.id)).toEqual(["working"]);
+    expect(before.done.map((s) => s.id)).toEqual(["done"]);
+    sessions[2].tabs[0].status = "idle";
+    expect(isUnread(sessions[2])).toBe(false);
+    expect(bucketSessions(sessions).done.map((s) => s.id)).toEqual(["done"]);
+  });
+
+  it("keeps global totals independent of local filtering, search, and Done pagination", () => {
+    const sessions = Array.from({ length: DONE_PAGE + 9 }, (_, i) => session(`done-${i}`, ["idle"]));
+    const global = bucketSessions(sessions);
+    expect(global.done).toHaveLength(DONE_PAGE + 9);
+    expect(global).toEqual(bucketSessions(sessions, opts));
+    expect(bucketSessions(sessions, { ...opts, query: "no match" }).done).toHaveLength(0);
+    expect(bucketSessions(sessions, { ...opts, filters: { ...NO_FILTERS, columns: ["working"] } }).done).toHaveLength(0);
+    expect(bucketSessions(sessions).done).toHaveLength(DONE_PAGE + 9);
+  });
+
+  it("returns all three empty buckets and excludes ineligible sessions in every status", () => {
+    const empty = { needs: [], working: [], done: [] };
+    expect(bucketSessions([])).toEqual(empty);
+    const sessions = [
+      session("workspace", []),
+      ...(["waiting", "in_progress", "completed"] as const).map((status) => session(status, [status], { archived: true })),
+    ];
+    expect(bucketSessions(sessions)).toEqual(empty);
+    expect(bucketSessions(sessions, opts)).toEqual(empty);
+    const restored = sessions.map((s) => ({ ...s, archived: false }));
+    const buckets = bucketSessions(restored);
+    expect([buckets.needs.length, buckets.working.length, buckets.done.length]).toEqual([1, 1, 1]);
+    expect(buckets).toEqual(bucketSessions(restored, opts));
+  });
+
   it("skips sessions that have no agent tabs", () => {
     const b = bucketSessions([session("workspace", [])], opts);
     expect(b).toEqual({ needs: [], working: [], done: [] });

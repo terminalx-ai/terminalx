@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   setSelectedAgent: vi.fn(),
   setActiveTerminal: vi.fn(),
   openTerminal: vi.fn(),
+  openBrowserTab: vi.fn(() => Promise.resolve("bp-1")),
   removeTab: vi.fn(),
   closeTerminal: vi.fn(),
   panes: [
@@ -51,6 +52,13 @@ vi.mock("@/lib/terminal", () => ({
   setActiveTerminal: mocks.setActiveTerminal,
   setSelectedAgent: mocks.setSelectedAgent,
   useTerminals: () => ({ panes: mocks.panes, active: {}, selected: {} }),
+}));
+vi.mock("@/lib/browser", () => ({
+  openBrowserTab: mocks.openBrowserTab,
+  pagesFor: () => [],
+  useBrowser: () => ({ loaded: true, pages: [], screencast: {} }),
+  activateBrowserPage: vi.fn(),
+  closeBrowserPage: vi.fn(),
 }));
 vi.mock("@/lib/tabViews", () => ({ useTabViews: () => ({ views: {} }) }));
 vi.mock("@/lib/editors", () => ({ closeEditor: vi.fn(), useEditors: () => ({ editors: [], active: {}, lastFocused: "chat" }) }));
@@ -123,9 +131,11 @@ describe("mixed session tab actions", () => {
     expect(peerOrder(session, mocks.panes).map((tab) => tab.id)).toEqual(["agent-1", "shell-1", "agent-2"]);
     expect(screen.queryByRole("tablist", { name: "Session tabs" })).toBeNull();
     expect(screen.queryByRole("button", { name: "New terminal" })).toBeNull();
-    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Claude", "Codex", "Terminal"]);
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Claude", "Codex", "Terminal", "Browser"]);
     fireEvent.click(screen.getByRole("menuitem", { name: "Terminal" }));
     expect(mocks.openTerminal).toHaveBeenCalledWith("session-1", "/repo");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Browser" }));
+    expect(mocks.openBrowserTab).toHaveBeenCalledWith("session-1", "/repo");
   });
 
   it("cycles mixed tabs and closes shells without closing agent-owned panes", () => {

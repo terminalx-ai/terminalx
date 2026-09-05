@@ -16,6 +16,8 @@ import { TabActions } from "./TabStrip";
 import { tabPanelId } from "@/lib/sessionTabs";
 import { activateLatestTerminal, useTerminals, type SelectedSessionTab } from "@/lib/terminal";
 import { TerminalView } from "@/components/terminal/TerminalView";
+import { BrowserView } from "@/components/browser/BrowserView";
+import { bootBrowser, pagesFor, useBrowser } from "@/lib/browser";
 import { setLastFocused, useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
 import { QuickOpen } from "@/components/editor/QuickOpen";
@@ -71,6 +73,11 @@ export function SessionView({
   const project = store.projects.find((p) => p.path === session.projectPath);
   const terminals = useTerminals();
   const shellPanes = terminals.panes.filter((pane) => pane.sessionId === session.id && !pane.hidden);
+  const browserState = useBrowser();
+  const browserPages = pagesFor(browserState.pages, session.cwd);
+  useEffect(() => {
+    void bootBrowser();
+  }, []);
   const requested = terminals.selected[session.id];
   const persistedAgent = session.tabs.find((tab) => tab.id === session.activeTab) ?? session.tabs[0];
   const selected: SelectedSessionTab | null =
@@ -78,6 +85,8 @@ export function SessionView({
       ? requested
       : requested?.kind === "terminal" && shellPanes.some((pane) => pane.id === requested.id)
         ? requested
+        : requested?.kind === "browser" && browserPages.some((page) => page.id === requested.id)
+          ? requested
         : persistedAgent
           ? { kind: "agent", id: persistedAgent.id }
           : shellPanes.length
@@ -253,7 +262,19 @@ export function SessionView({
                   )}
                 </div>
               ))}
-              {!session.tabs.length && !shellPanes.length && (
+              {browserPages.map((page) => (
+                <div
+                  key={page.id}
+                  id={tabPanelId({ kind: "browser", id: page.id })}
+                  role="tabpanel"
+                  aria-labelledby={`session-browser-tab-${encodeURIComponent(page.id)}`}
+                  aria-hidden={selected?.kind !== "browser" || page.id !== selected.id}
+                  className={cn("absolute inset-0", (selected?.kind !== "browser" || page.id !== selected.id) && "invisible")}
+                >
+                  <BrowserView session={session} page={page} active={selected?.kind === "browser" && page.id === selected.id} />
+                </div>
+              ))}
+              {!session.tabs.length && !shellPanes.length && !browserPages.length && (
                 <div className="flex flex-1 flex-col items-center justify-center gap-1 text-sm text-muted-foreground">
                   <span>Workspace open</span>
                   <span className="text-xs text-faint">Open a new terminal or add an agent tab.</span>
