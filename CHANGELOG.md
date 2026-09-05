@@ -72,9 +72,12 @@ and everyday session controls.
   transcripts and attachments. The confirmation shows the affected session
   count. Settling one session's worktree still preserves that session. (#89)
 - Create shell terminals from the tab strip's **+** picker. (#88)
+- New automations default to bypass permissions and retain the chosen mode
+  when switching triggers, editing, pausing or running them. (#70)
 - Sidebar hover actions no longer overlap project or workspace labels. (#94)
-- Settings has a distinct Close button that stays visible above scrolling
-  content, including with transparent appearance enabled. (#112)
+- Settings opens as a full page and returns to the previous view when closed.
+  Its distinct Close button stays visible above scrolling content, including
+  with transparent appearance enabled. (#86, #112)
 - An optional **Enjoying TerminalX?** GitHub star reminder returns, with
   dismissal cooldowns and permanent suppression after a confirmed star. (#110)
 

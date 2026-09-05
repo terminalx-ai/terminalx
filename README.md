@@ -200,10 +200,9 @@ Download the `.dmg` from this repository's Releases page and drag TerminalX to
 Applications. You will also need `claude` and/or `codex` installed and
 logged in — TerminalX runs them, it does not replace them.
 
-The build is ad-hoc signed rather than notarized, so on first launch macOS will
-warn that it cannot verify the developer. Open it once from the right-click
-menu (Control-click → Open → Open), or allow it under System Settings →
-Privacy & Security, and Gatekeeper will not ask again.
+The macOS release is signed with a Developer ID certificate but is not notarized.
+If macOS blocks the first launch, allow TerminalX under System Settings →
+Privacy & Security → Open Anyway.
 
 ## Development
 
