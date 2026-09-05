@@ -85,6 +85,7 @@ export interface StatsUsageState {
   scope: string;
   generation: number;
   snapshot: StatsUsageSnapshot | null;
+  activity?: AppStats | null;
   refreshing: boolean;
   error: string | null;
 }

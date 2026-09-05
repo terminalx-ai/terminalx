@@ -136,6 +136,23 @@ describe("StatsUsageView", () => {
     expect(screen.getByText(/Latest 30 local calendar dates/)).toBeTruthy();
   });
 
+  it("shows lifetime counters without a provider cache, through a failed refresh", async () => {
+    const refresh = deferred<StatsUsageState>();
+    const appOnly = saved({ snapshot: null, activity: snapshot.app });
+    vi.mocked(api.statsUsageSnapshot).mockResolvedValue(appOnly);
+    vi.mocked(api.statsUsageRefresh).mockReturnValue(refresh.promise);
+    render(<StatsUsageView />);
+    expect(await screen.findByText("7")).toBeTruthy();
+    expect(screen.getByText("Reading local transcripts…")).toBeTruthy();
+    expect(screen.queryByText("Total tokens")).toBeNull();
+    await act(async () => refresh.resolve({ ...appOnly, error: "Provider history is unreadable" }));
+    expect(screen.getByRole("alert").textContent).toContain("Provider history is unreadable");
+    expect(screen.getByText("7")).toBeTruthy();
+    expect(screen.getByText("PRs created")).toBeTruthy();
+    expect(screen.queryByText("Reading local transcripts…")).toBeNull();
+    expect(screen.queryByText("Total tokens")).toBeNull();
+  });
+
   it("keeps known totals visible alongside an accounting error", async () => {
     const withError = saved({ snapshot: {
       ...snapshot, app: { ...snapshot.app, accountingError: "Activity recovery is incomplete: unreadable history" },

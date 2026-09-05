@@ -48,6 +48,7 @@ pub struct StatsUsageState {
     pub scope: String,
     pub generation: u64,
     pub snapshot: Option<StatsUsageSnapshot>,
+    pub activity: Option<super::AppStats>,
     pub refreshing: bool,
     pub error: Option<String>,
 }
@@ -57,11 +58,7 @@ impl StatsUsageState {
     // the independently committed lifetime counters with an older app summary.
     fn with_activity(mut self, activity: Result<super::AppStats>) -> Self {
         match activity {
-            Ok(activity) => {
-                if let Some(snapshot) = self.snapshot.as_mut() {
-                    snapshot.app = activity;
-                }
-            }
+            Ok(activity) => self.activity = Some(activity),
             Err(error) => {
                 let message = format!("Activity history unavailable: {error:#}");
                 self.error = Some(match self.error {
@@ -69,6 +66,9 @@ impl StatsUsageState {
                     None => message,
                 });
             }
+        }
+        if let (Some(snapshot), Some(activity)) = (self.snapshot.as_mut(), self.activity.as_ref()) {
+            snapshot.app = activity.clone();
         }
         self
     }
@@ -88,7 +88,7 @@ pub struct StatsUsageStore {
 
 impl StatsUsageStore {
     pub fn read(&self) -> Result<StatsUsageState> {
-        Ok(self.read_at(Scope::current()?)?.with_activity(super::app_stats()))
+        Ok(self.attach_activity(self.read_at(Scope::current()?)?, super::app_stats))
     }
 
     fn read_at(&self, scope: Scope) -> Result<StatsUsageState> {
@@ -102,6 +102,7 @@ impl StatsUsageStore {
                 scope: scope.id(),
                 generation: state.view.generation + 1,
                 snapshot,
+                activity: None,
                 refreshing: false,
                 error,
             };
@@ -125,7 +126,24 @@ impl StatsUsageStore {
             );
             Ok(candidate)
         })?;
-        Ok(view.with_activity(super::app_stats()))
+        Ok(self.attach_activity(view, super::app_stats))
+    }
+
+    fn attach_activity(&self, mut view: StatsUsageState, activity: impl FnOnce() -> Result<super::AppStats>) -> StatsUsageState {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // Read under the publication lock so an older concurrent response
+        // cannot overwrite a newer last-known activity summary.
+        let activity = activity();
+        if state.view.scope == view.scope {
+            view.activity = state.view.activity.clone();
+            view = view.with_activity(activity);
+            // Keep the latest known counters across failed reads and provider
+            // publications; neither depends on a valid provider display cache.
+            state.view.activity = view.activity.clone();
+            view
+        } else {
+            view.with_activity(activity)
+        }
     }
 
     fn start(
@@ -288,6 +306,25 @@ mod tests {
         let error = failed.error.unwrap();
         assert!(error.contains("provider scan failed"));
         assert!(error.contains("unreadable ledger"));
+    }
+
+    #[test]
+    fn missing_provider_cache_does_not_hide_activity_and_failed_reads_keep_known_totals() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StatsUsageStore::default();
+        let scope = scope(dir.path());
+        let empty = store.read_at(scope.clone()).unwrap();
+        let current = store.attach_activity(empty, || Ok(super::super::AppStats {
+            agents_spawned: 42,
+            prs_created: 9,
+            ..Default::default()
+        }));
+        assert!(current.snapshot.is_none());
+        assert_eq!(current.activity.unwrap().agents_spawned, 42);
+        let failed = store.attach_activity(store.read_at(scope).unwrap(), || Err(anyhow::anyhow!("unreadable ledger")));
+        assert!(failed.snapshot.is_none());
+        assert_eq!(failed.activity.unwrap().prs_created, 9);
+        assert!(failed.error.unwrap().contains("unreadable ledger"));
     }
 
     #[test]

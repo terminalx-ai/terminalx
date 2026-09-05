@@ -82,6 +82,12 @@ pub enum Decision {
     Deny,
 }
 
+/// Own the receiver so a timed-out hook stops accepting answers before it
+/// waits to reacquire the runtime lock. Only the returned decision resumes work.
+fn wait_for_decision(rx: std::sync::mpsc::Receiver<Decision>, wait: std::time::Duration) -> Option<Decision> {
+    rx.recv_timeout(wait).ok()
+}
+
 /// What a PTY-first tab needs to start: the line the pane runs, the
 /// transcript to follow, and the conversation id if the app minted one.
 struct CliLaunch {
@@ -928,7 +934,7 @@ impl SessionManager {
                 };
                 let allow = !matches!(decision, Decision::Deny);
                 let tx = p.decisions.remove(request_id).ok_or_else(|| anyhow!("the agent stopped waiting for that request"))?;
-                let _ = tx.send(decision);
+                tx.send(decision).map_err(|_| anyhow!("the agent stopped waiting for that request"))?;
                 (allow, label)
             }
             Engine::Acp(a) => {
@@ -946,8 +952,7 @@ impl SessionManager {
             Engine::None => bail!("no engine"),
         };
         self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: allow, label, automatic: false }, None);
-        if rt.pending.is_empty() {
-            self.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
+        if rt.pending.is_empty() && !matches!(rt.engine, Engine::Cli(_)) {
             self.set_status(&mut rt, TabStatus::InProgress);
         }
         Ok(())
@@ -963,15 +968,11 @@ impl SessionManager {
         match &mut rt.engine {
             Engine::Cli(p) if p.harness == CliKind::Claude => {
                 let tx = p.decisions.remove(request_id).ok_or_else(|| anyhow!("the agent stopped waiting for that question"))?;
-                let _ = tx.send(Decision::Answers(input));
+                tx.send(Decision::Answers(input)).map_err(|_| anyhow!("the agent stopped waiting for that question"))?;
             }
             _ => bail!("that agent does not ask questions this way"),
         }
         self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: true, label: "Answered".into(), automatic: false }, None);
-        if rt.pending.is_empty() {
-            self.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
-            self.set_status(&mut rt, TabStatus::InProgress);
-        }
         Ok(())
     }
 
@@ -1887,6 +1888,7 @@ impl SessionManager {
         {
             let mut rt = rt_arc.lock().unwrap();
             let Engine::Cli(p) = &mut rt.engine else { return HookReply::default() };
+            if !p.origin.accepts(frame) { return HookReply::default(); }
             p.decisions.insert(request_id.clone(), tx);
             // The event carries no tool_use_id — it fires before the call is
             // recorded — so the card stands on its own rather than attaching
@@ -1916,8 +1918,13 @@ impl SessionManager {
             CliKind::Claude => claude::pty::PERMISSION_WAIT,
             CliKind::Codex => codex::pty::PERMISSION_WAIT,
         };
-        let answer = rx.recv_timeout(wait).ok();
+        let answer = wait_for_decision(rx, wait);
         let mut rt = rt_arc.lock().unwrap();
+        // Teardown or a settings restart may replace this CLI while the hook
+        // waits. An answer for that old launch cannot start the new one's work.
+        if !matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)) {
+            return HookReply::default();
+        }
         if let Engine::Cli(p) = &mut rt.engine {
             p.decisions.remove(&request_id);
             if let Some(d) = &answer {
@@ -1925,7 +1932,13 @@ impl SessionManager {
             }
         }
         match answer {
-            Some(decision) => reply_for(kind, gate, decision),
+            Some(decision) => {
+                if rt.pending.is_empty() {
+                    self.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
+                    self.set_status(&mut rt, TabStatus::InProgress);
+                }
+                reply_for(kind, gate, decision)
+            }
             None => {
                 // The CLI has stopped waiting on us and will ask in its own
                 // TUI; the card must stop offering buttons that go nowhere.
@@ -2114,6 +2127,41 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
+
+    #[test]
+    fn permission_timeout_disconnects_before_runtime_lock_cleanup() {
+        let runtime_lock = Arc::new(Mutex::new(()));
+        let held = runtime_lock.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (timed_out, observed) = std::sync::mpsc::channel();
+        let hook_lock = runtime_lock.clone();
+        let hook = std::thread::spawn(move || {
+            let answer = wait_for_decision(rx, std::time::Duration::ZERO);
+            timed_out.send(answer.is_none()).unwrap();
+            let _cleanup = hook_lock.lock().unwrap();
+            answer
+        });
+        assert!(observed.recv_timeout(std::time::Duration::from_secs(2)).unwrap());
+        // The hook has timed out but cannot clean up its pending request yet.
+        // A UI response in this exact window must fail, not start idle timing.
+        assert!(tx.send(Decision::Allow).is_err());
+        drop(held);
+        assert!(hook.join().unwrap().is_none());
+    }
+
+    #[test]
+    fn permission_receipt_preserves_all_delivered_decisions() {
+        for decision in [Decision::Allow, Decision::Deny, Decision::Answers(json!({"answers": {"question": "answer"}}))] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            tx.send(decision.clone()).unwrap();
+            let received = wait_for_decision(rx, std::time::Duration::ZERO).unwrap();
+            assert_eq!(std::mem::discriminant(&received), std::mem::discriminant(&decision));
+            if let Decision::Answers(input) = received {
+                assert_eq!(input["answers"]["question"], "answer");
+            }
+            assert!(tx.send(Decision::Allow).is_err());
+        }
+    }
 
     #[test]
     fn codex_image_prompts_project_once_and_repeated_submissions_stay_distinct() {
