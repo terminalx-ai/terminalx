@@ -111,11 +111,11 @@ jobs:
         run: cargo check --all-targets
       - name: Computer contract tests
         working-directory: src-tauri
-        run: cargo test --lib computer::
+        run: "cargo test --lib computer::"
       - name: Windows pipe tests
         if: runner.os == 'Windows'
         working-directory: src-tauri
-        run: cargo test --lib pipe_transport::
+        run: "cargo test --lib pipe_transport::"
       - name: Windows control and hook integration
         if: runner.os == 'Windows'
         working-directory: src-tauri
