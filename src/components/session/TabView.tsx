@@ -92,7 +92,9 @@ export function TabView({ session, tab, active }: { session: SessionEntry; tab: 
     void agent.interrupt(session.id, tab.id).catch((e) => setError(errorMessage(e)));
   }, [session.id, tab.id]);
 
-  useHotkey("escape", () => (live ? (stop(), true) : false), { enabled: active });
+  // Esc stops the turn, unless the reader is in an editor pane, where it
+  // belongs to the editor (closing its find bar, for one).
+  useHotkey("escape", () => (live && !document.activeElement?.closest(".editor-pane") ? (stop(), true) : false), { enabled: active });
 
   const answerPermission = useCallback(
     async (requestId: string, optionId: string) => {
