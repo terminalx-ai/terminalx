@@ -469,6 +469,7 @@ impl SessionManager {
                 // #110's reminder can subscribe without scanning transcripts
                 // or treating hydration/tab creation as fresh usage.
                 let _ = self.app.emit("agent_work_started", total);
+                self.app.state::<crate::AppState>().star_nag.work_started(&self.app, total as u64);
             }
             Ok(None) => {}
             Err(error) => log::error!("record app activity: {error:#}"),
@@ -639,7 +640,6 @@ impl SessionManager {
             (crate::hooks::CONTROL_TOKEN_ENV.to_string(), self.control.token.clone()),
         ];
         let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env }, sink)?;
-        self.app.state::<crate::AppState>().star_nag.launched(&self.app, rt.key());
         rt.child_pid = Some(child.pid);
         rt.child = Some(child);
         Ok(())
@@ -1225,7 +1225,6 @@ impl SessionManager {
         let tail = Arc::new(launch.tail);
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: 120, rows: 30, command: Some(&launch.command), env: &env };
         self.terminals.spawn(self.app.clone(), &pane, spec).context("start the agent's CLI")?;
-        self.app.state::<crate::AppState>().star_nag.launched(&self.app, rt.key());
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         rt.engine = Engine::Cli(CliTab {
             harness: kind,

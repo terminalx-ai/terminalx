@@ -22,6 +22,7 @@ pub const EVENT: &str = "star_nag_changed";
 #[serde(default, rename_all = "camelCase")]
 struct Saved {
     launches: u64,
+    usage_schema: u32,
     baseline: u64,
     next_threshold: u64,
     cooldown_until: i64,
@@ -32,7 +33,7 @@ struct Saved {
 
 impl Default for Saved {
     fn default() -> Self {
-        Self { launches: 0, baseline: 0, next_threshold: INITIAL_THRESHOLD, cooldown_until: 0, app_version: String::new(), completed: false, completion_version: None }
+        Self { launches: 0, usage_schema: 0, baseline: 0, next_threshold: INITIAL_THRESHOLD, cooldown_until: 0, app_version: String::new(), completed: false, completion_version: None }
     }
 }
 
@@ -56,9 +57,6 @@ pub struct View {
 struct Core {
     path: PathBuf,
     saved: Saved,
-    // Seeded with restored tabs. A tab's first successful spawn counts once;
-    // tab switches, retries of a running process and restored tabs do not.
-    seen: HashSet<String>,
     active: HashSet<String>,
     meaningful: HashSet<String>,
     pending_usage: bool,
@@ -74,22 +72,29 @@ struct Core {
 }
 
 impl Core {
-    fn load(path: PathBuf, version: &str, seen: HashSet<String>, now: i64) -> Result<Self> {
+    fn load(path: PathBuf, version: &str, total_work_starts: u64, now: i64) -> Result<Self> {
         let mut saved: Saved = store::read_json(&path)?.unwrap_or_default();
+        // #111 changes usage from first process spawns to cumulative live work
+        // starts. Rebase once without inventing equivalent historical usage;
+        // retain cooldown, backoff, permanent completion and completion version.
+        if saved.usage_schema != 1 {
+            saved.usage_schema = 1;
+            saved.baseline = total_work_starts;
+        }
+        saved.launches = total_work_starts;
         if saved.app_version != version {
             saved.app_version = version.into();
             saved.baseline = saved.launches;
             saved.next_threshold = INITIAL_THRESHOLD;
         }
         store::write_json(&path, &saved)?;
-        Ok(Self::new(path, saved, seen, now))
+        Ok(Self::new(path, saved, now))
     }
 
-    fn new(path: PathBuf, saved: Saved, seen: HashSet<String>, now: i64) -> Self {
+    fn new(path: PathBuf, saved: Saved, now: i64) -> Self {
         Self {
             path,
             saved,
-            seen,
             active: HashSet::new(),
             meaningful: HashSet::new(),
             pending_usage: false,
@@ -115,14 +120,13 @@ impl Core {
         self.saved.completed || now < self.saved.cooldown_until
     }
 
-    fn launched(&mut self, key: String, now: i64) -> Result<()> {
-        if self.saved.completed || self.seen.contains(&key) {
+    fn work_started(&mut self, total_work_starts: u64, now: i64) -> Result<()> {
+        if self.saved.completed || total_work_starts <= self.saved.launches {
             return Ok(());
         }
         let mut next = self.saved.clone();
-        next.launches = next.launches.saturating_add(1);
+        next.launches = total_work_starts;
         self.save(next)?;
-        self.seen.insert(key);
         // Only usage changes create threshold eligibility, never startup or a timer.
         self.pending_usage |= !self.suppressed(now) && self.saved.launches.saturating_sub(self.saved.baseline) >= self.saved.next_threshold;
         Ok(())
@@ -277,13 +281,13 @@ fn now() -> i64 {
 impl StarNag {
     pub fn load(version: &str) -> Self {
         let load = || -> Result<Core> {
-            let seen = store::index::load()?.into_iter().flat_map(|s| s.tabs.into_iter().map(move |t| format!("{}/{}", s.id, t.id))).collect();
-            Core::load(store::root()?.join("star-reminder.json"), version, seen, now())
+            let total = store::activity::summary()?.agents_spawned as u64;
+            Core::load(store::root()?.join("star-reminder.json"), version, total, now())
         };
         let core = load().unwrap_or_else(|e| {
             // A reminder must never prevent startup or overwrite corrupt state.
             log::warn!("star reminder disabled: {e:#}");
-            Core::new(PathBuf::new(), Saved { completed: true, ..Saved::default() }, HashSet::new(), now())
+            Core::new(PathBuf::new(), Saved { completed: true, ..Saved::default() }, now())
         });
         Self { core: Mutex::new(core) }
     }
@@ -294,8 +298,8 @@ impl StarNag {
         core.view.clone()
     }
 
-    pub fn launched(self: &Arc<Self>, app: &AppHandle, key: String) {
-        if let Err(e) = self.core.lock().unwrap().launched(key, now()) {
+    pub fn work_started(self: &Arc<Self>, app: &AppHandle, total_work_starts: u64) {
+        if let Err(e) = self.core.lock().unwrap().work_started(total_work_starts, now()) {
             log::warn!("star reminder usage: {e:#}");
         }
         self.drive(app);

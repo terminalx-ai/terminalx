@@ -237,8 +237,9 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
   backend lifecycle source. The `agent_work_started` event carries the new
   cumulative count for the #110 reminder; consumers must use this definition
   and must not count loaded tabs or provider sessions. `app_activity_summary`
-  reads the persisted baseline without invoking provider scanners. No reminder
-  consumer exists on this branch yet; #110 should use that command and event.
+  reads the persisted baseline without invoking provider scanners. The #110
+  reminder consumes this same committed count in the backend; it no longer
+  counts first process spawns or maintains a separate tab-identity registry.
 - **Working time and tracking date.** Completed active intervals use a monotonic
   clock and stop at completion, waiting/blocking, interruption, teardown, or
   shutdown. Simultaneous agents contribute their own work time. In-flight time
