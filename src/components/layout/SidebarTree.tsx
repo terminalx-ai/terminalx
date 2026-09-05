@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Globe,
   Archive,
   ArrowUp,
   CalendarClock,
@@ -58,7 +59,8 @@ import {
 } from "@/lib/sessions";
 import { useTabViews } from "@/lib/tabViews";
 import { relativeTime } from "@/lib/time";
-import { activatePeer, closePeer, peerOrder, selectedPeer, tabNodeId, tabPanelId, type PeerTab } from "@/lib/sessionTabs";
+import { activatePeer, browserPageLabel, closePeer, peerOrder, selectedPeer, tabNodeId, tabPanelId, type PeerTab } from "@/lib/sessionTabs";
+import { openBrowserTab, pagesFor, useBrowser } from "@/lib/browser";
 import { openTerminal, useTerminals } from "@/lib/terminal";
 import { sessionStatus, type Project, type SessionEntry, type TabEntry, type Workspace } from "@/types/session";
 
@@ -328,7 +330,8 @@ function SessionNode({
 }) {
   const status = sessionStatus(session);
   const terminals = useTerminals();
-  const peers = peerOrder(session, terminals.panes);
+  const browser = useBrowser();
+  const peers = peerOrder(session, terminals.panes, pagesFor(browser.pages, session.cwd));
   const activePeer = selectedPeer(session, peers, terminals.selected[session.id]);
   const branchBadge = session.issue && !session.worktreeName && !session.worktreeRemoved ? session.branch : null;
 
@@ -397,6 +400,8 @@ function SessionNode({
               mobileDriven={mobileDriven.has(peer.id)}
               onClose={() => void closePeer(session.id, peer, peers, activePeer)}
             />
+          ) : peer.kind === "browser" ? (
+            <BrowserNode key={peer.id} session={session} peer={peer} active={selected && activePeer?.kind === "browser" && peer.id === activePeer.id} onClose={() => void closePeer(session.id, peer, peers, activePeer)} />
           ) : <ShellNode key={peer.id} session={session} peer={peer} active={selected && activePeer?.kind === "terminal" && peer.id === activePeer.id} onClose={() => void closePeer(session.id, peer, peers, activePeer)} />)}
           {peers.length === 0 ? <div className="px-3 py-1 text-[11px] text-faint">No tabs.</div> : null}
         </div>
@@ -506,6 +511,20 @@ function ShellNode({ session, peer, active, onClose }: { session: SessionEntry; 
   </div>;
 }
 
+function BrowserNode({ session, peer, active, onClose }: { session: SessionEntry; peer: Extract<PeerTab, { kind: "browser" }>; active: boolean; onClose: () => void }) {
+  const label = browserPageLabel(peer.page);
+  const open = () => { selectSession(session.id); activatePeer(session.id, peer); };
+  return <div role="treeitem" id={tabNodeId(peer)} aria-controls={tabPanelId(peer)} aria-label={`${label} browser page`} aria-selected={active} tabIndex={0}
+    title={peer.page.url || label} onClick={open} onAuxClick={(event) => event.button === 1 && onClose()}
+    onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); open(); } }}
+    className={cn("group/tab relative flex h-6 min-w-0 items-center gap-1.5 rounded-md px-2 text-[11px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40", active ? "bg-(--surface-thumb) text-foreground shadow-button" : "text-muted-foreground hover:bg-selected/40")}>
+    <Globe className="size-3.5 shrink-0" />
+    <span className="min-w-0 flex-1 truncate">{label}</span>
+    {peer.page.active ? <span className="size-1.5 shrink-0 rounded-full bg-info" aria-label="Active page for agents" /> : null}
+    <button type="button" aria-label={`Close ${label} browser page`} onClick={(event) => { event.stopPropagation(); onClose(); }} className="rounded-sm p-0.5 text-faint opacity-0 hover:bg-veil-strong group-hover/tab:opacity-100 focus-visible:opacity-100"><X className="size-3" /></button>
+  </div>;
+}
+
 function NewTabButton({ session }: { session: SessionEntry }) {
   const store = useSessionStore();
   const add = async (harness: string) => {
@@ -523,6 +542,7 @@ function NewTabButton({ session }: { session: SessionEntry }) {
       <DropdownMenuContent align="end">
         <DropdownMenuLabel>New tab with</DropdownMenuLabel>
         <DropdownMenuItem onSelect={() => { selectSession(session.id); void openTerminal(session.id, session.cwd); }}><Terminal /> Shell terminal</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => { selectSession(session.id); void openBrowserTab(session.id, session.cwd).catch((error) => console.error("browser open failed", error)); }}><Globe /> Browser tab</DropdownMenuItem>
         {store.harnesses.map((harness) => (
           <DropdownMenuItem key={harness.id} disabled={!harness.available} onSelect={() => void add(harness.id)}>
             <AgentMark id={harness.id} decorative />

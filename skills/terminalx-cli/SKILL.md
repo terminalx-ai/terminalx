@@ -1,6 +1,6 @@
 ---
 name: terminalx-cli
-description: Drive a running TerminalX app through its authenticated terminalx command-line interface. Use for project, session, tab, transcript, permission, worktree, and issue operations owned by the app.
+description: Drive a running TerminalX app through its authenticated terminalx command-line interface. Use for project, session, tab, transcript, permission, worktree, and issue operations owned by the app, and for the TerminalX browser (built-in browser tabs, snapshot, click, fill, goto, screenshot) that agents drive with the same CLI.
 ---
 
 # TerminalX CLI

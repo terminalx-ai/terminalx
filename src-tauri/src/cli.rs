@@ -38,10 +38,17 @@ Usage:
       [--assigned-to-me] [--team ID] [--search TEXT] [--json]
   terminalx skills get terminalx-cli [--full] [--json]
 
+BROWSER_HELP
+
 Use `terminalx skills get terminalx-cli` for the complete guide."#;
 
+/// The help text with the browser verbs spliced in from their own module.
+fn help_text() -> String {
+    HELP.replace("BROWSER_HELP", crate::browser::cli::HELP)
+}
+
 #[derive(Debug, Clone, PartialEq)]
-enum Action {
+pub(crate) enum Action {
     Rpc {
         command: String,
         params: Value,
@@ -91,13 +98,14 @@ fn run(args: &[String]) -> i32 {
     };
     match parsed.action {
         Action::Help => {
+            let help = help_text();
             if parsed.json {
                 print_response(
-                    &ControlResponse::success("local", json!({"help": HELP})),
+                    &ControlResponse::success("local", json!({"help": help})),
                     true,
                 );
             } else {
-                println!("{HELP}");
+                println!("{help}");
             }
             0
         }
@@ -139,7 +147,13 @@ fn run(args: &[String]) -> i32 {
         } => match control::call(&command, params, timeout) {
             Ok(response) => {
                 let ok = response.ok;
-                print_response(&response, parsed.json);
+                let readable = (!parsed.json && ok)
+                    .then(|| response.result.as_ref().and_then(|result| crate::browser::cli::format(&command, result)))
+                    .flatten();
+                match readable {
+                    Some(text) => println!("{text}"),
+                    None => print_response(&response, parsed.json),
+                }
                 if ok {
                     0
                 } else {
@@ -234,6 +248,9 @@ fn parse(args: &[String]) -> Result<Parsed, ControlError> {
                 &mut tokens,
             )
         }
+        "wait" if crate::browser::cli::is_browser_wait(&tokens.values) => {
+            crate::browser::cli::parse("wait", &mut tokens).expect("wait is a browser verb")
+        }
         "wait" => {
             let seconds = tokens.option_u64("--timeout")?.unwrap_or(600);
             let target = tokens.required_front("session or tab")?;
@@ -261,7 +278,10 @@ fn parse(args: &[String]) -> Result<Parsed, ControlError> {
             tokens.finish()?;
             Ok(Action::Guide)
         }
-        other => Err(invalid(format!("Unknown command group {other}."))),
+        other => match crate::browser::cli::parse(other, &mut tokens) {
+            Some(action) => action,
+            None => Err(invalid(format!("Unknown command group {other}."))),
+        },
     }?;
     Ok(Parsed { json, action })
 }
@@ -379,7 +399,7 @@ fn expect_word(tokens: &mut Tokens, expected: &str, group: &str) -> Result<(), C
     }
 }
 
-fn invalid(message: impl Into<String>) -> ControlError {
+pub(crate) fn invalid(message: impl Into<String>) -> ControlError {
     ControlError::new(
         "invalid_arguments",
         message,
@@ -387,27 +407,27 @@ fn invalid(message: impl Into<String>) -> ControlError {
     )
 }
 
-struct Tokens {
-    values: Vec<String>,
+pub(crate) struct Tokens {
+    pub(crate) values: Vec<String>,
 }
 
 impl Tokens {
-    fn new(args: &[String]) -> Self {
+    pub(crate) fn new(args: &[String]) -> Self {
         Self {
             values: args.to_vec(),
         }
     }
 
-    fn take_front(&mut self) -> Option<String> {
+    pub(crate) fn take_front(&mut self) -> Option<String> {
         (!self.values.is_empty()).then(|| self.values.remove(0))
     }
 
-    fn required_front(&mut self, label: &str) -> Result<String, ControlError> {
+    pub(crate) fn required_front(&mut self, label: &str) -> Result<String, ControlError> {
         self.take_front()
             .ok_or_else(|| invalid(format!("Missing {label}.")))
     }
 
-    fn flag(&mut self, name: &str) -> Result<bool, ControlError> {
+    pub(crate) fn flag(&mut self, name: &str) -> Result<bool, ControlError> {
         let positions: Vec<_> = self
             .values
             .iter()
@@ -425,7 +445,7 @@ impl Tokens {
         }
     }
 
-    fn option(&mut self, name: &str) -> Result<Option<String>, ControlError> {
+    pub(crate) fn option(&mut self, name: &str) -> Result<Option<String>, ControlError> {
         let positions: Vec<_> = self
             .values
             .iter()
@@ -445,12 +465,12 @@ impl Tokens {
         Ok(Some(self.values.remove(position)))
     }
 
-    fn required_option(&mut self, name: &str) -> Result<String, ControlError> {
+    pub(crate) fn required_option(&mut self, name: &str) -> Result<String, ControlError> {
         self.option(name)?
             .ok_or_else(|| invalid(format!("Missing {name}.")))
     }
 
-    fn option_u64(&mut self, name: &str) -> Result<Option<u64>, ControlError> {
+    pub(crate) fn option_u64(&mut self, name: &str) -> Result<Option<u64>, ControlError> {
         self.option(name)?
             .map(|value| {
                 value
@@ -460,7 +480,7 @@ impl Tokens {
             .transpose()
     }
 
-    fn finish(&self) -> Result<(), ControlError> {
+    pub(crate) fn finish(&self) -> Result<(), ControlError> {
         if self.values.is_empty() {
             Ok(())
         } else {
@@ -584,7 +604,10 @@ mod tests {
     #[test]
     fn public_copy_uses_the_terminalx_identity() {
         assert!(HELP.starts_with("terminalx — control a running TerminalX app"));
-        for copy in [HELP, GUIDE, SKILL_STUB] {
+        let help = help_text();
+        assert!(help.contains("snapshot [--interactive]"));
+        assert!(!help.contains("BROWSER_HELP"));
+        for copy in [help.as_str(), GUIDE, SKILL_STUB] {
             assert!(!copy.contains("Raccoon app"));
             assert!(!copy.contains("Raccoon →"));
             assert!(!copy.contains("/Applications/Raccoon.app"));
