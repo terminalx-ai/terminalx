@@ -10,7 +10,7 @@ export function Toasts() {
   const store = useSessionStore();
   if (!notices.length) return null;
   return (
-    <div className="pointer-events-none fixed bottom-4 right-4 z-(--z-toast) flex w-[22rem] flex-col gap-2">
+    <div className="pointer-events-none flex max-h-[50dvh] shrink-0 flex-col gap-2 overflow-y-auto">
       {notices.map((n) => {
         const tab = store.sessions.find((s) => s.id === n.sessionId)?.tabs.find((t) => t.id === n.tabId);
         const Icon = n.kind === "waiting" ? MessageCircleQuestion : n.kind === "failed" ? AlertCircle : CheckCircle2;

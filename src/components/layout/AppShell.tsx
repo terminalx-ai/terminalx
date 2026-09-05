@@ -18,6 +18,7 @@ import { agent, type ImageInput } from "@/lib/api";
 import { loadModels } from "@/lib/models";
 import { startNotifications } from "@/lib/notify";
 import { subscribeTabPty } from "@/lib/tabViews";
+import { StarReminder } from "@/components/ui/StarReminder";
 import { Toasts } from "@/components/ui/Toasts";
 import { BypassDialog } from "@/components/session/BypassDialog";
 import { SettleDialog } from "@/components/session/SettleDialog";
@@ -110,7 +111,10 @@ export function AppShell() {
 
   return (
     <div className="flex h-full w-full flex-col">
-      <Toasts />
+      <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
+        <StarReminder />
+        <Toasts />
+      </div>
       <BypassDialog />
       <SettleDialog />
       <WorkspaceDeleteDialog />
