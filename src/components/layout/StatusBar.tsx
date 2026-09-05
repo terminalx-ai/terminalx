@@ -365,6 +365,24 @@ function agentName(agent: UsageAgent): string {
   return agent === "claude" ? "Claude" : "Codex";
 }
 
+/** Brand colour for each agent's mark in the bar: Anthropic's terra cotta, and OpenAI's monochrome mark. */
+const BRAND_MARK: Record<UsageAgent, string> = { claude: "text-[#d97757]", codex: "text-foreground" };
+
+/** The rolling account windows every provider reports; anything else is scoped to a model or a plan feature. */
+function isAccountWindow(window: UsageWindow): boolean {
+  return window.key === "five_hour" || window.key === "seven_day" || window.key === "weekly";
+}
+
+/**
+ * What follows "N% used" in the bar. Account windows are told apart by their
+ * reset countdown alone; a scoped window shows its name instead, so Fable
+ * reads "2% used Fable".
+ */
+function windowTrailer(window: UsageWindow, now: number): string | null {
+  if (!isAccountWindow(window)) return windowLabel(window);
+  return window.resetsAt == null ? null : formatResetCountdown(window.resetsAt, now, "");
+}
+
 type CanonicalWindowKind = "5h" | "7d" | "fable";
 
 function windowKind(window: UsageWindow): CanonicalWindowKind | null {
@@ -495,7 +513,6 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
           {groups.length ? (
             <span className="flex min-w-0 items-center whitespace-nowrap tabular-nums">
               {groups.map(({ agent, windows: agentWindows, tightest }, index) => {
-                const plan = agentWindows.find((window) => window.plan)?.plan;
                 const shown = tier === "full" ? orderedWindows(agentWindows) : [tightest];
                 return (
                   <span
@@ -503,34 +520,35 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                     data-usage-agent={agent}
                     className={cn(
                       "flex min-w-0 items-center gap-1.5",
-                      index < groups.length - 1 && "mr-1.5 border-r border-hairline pr-2",
+                      index < groups.length - 1 && "mr-2 border-r border-hairline pr-2.5",
                     )}
                   >
-                    <span className="flex shrink-0 items-center gap-1">
-                      <AgentMark id={agent} className="size-3 text-faint" decorative />
-                      {tier !== "icon" ? <span className="font-medium text-foreground">{agentName(agent)}</span> : null}
-                      {tier === "full" && plan ? <span className="capitalize text-faint">· {plan}</span> : null}
-                    </span>
-                    {tier === "icon" ? (
+                    <AgentMark id={agent} className={cn("size-3", BRAND_MARK[agent])} decorative />
+                    <span
+                      aria-hidden
+                      data-usage-meter={tightest.key}
+                      className="h-1 w-10 shrink-0 overflow-hidden rounded-full bg-hairline-strong"
+                    >
                       <i
-                        aria-hidden
-                        className={cn("size-1.5 shrink-0 rounded-full", urgency(tightest.usedPercent))}
+                        className={cn("block h-full rounded-full", urgency(tightest.usedPercent))}
+                        style={{ width: `${shownPercent(tightest, settings.percent)}%` }}
                       />
-                    ) : shown.map((window, windowIndex) => (
-                      <span
-                        key={window.key}
-                        data-usage-window={windowKind(window) ?? window.key}
-                        className={cn(
-                          "flex shrink-0 items-center gap-1",
-                          urgencyText(window.usedPercent),
-                          tier === "full" && windowIndex > 0 && "border-l border-hairline pl-1.5",
-                        )}
-                      >
-                        {window.stale ? <TriangleAlert className="size-3" aria-label="Stale usage data" /> : null}
-                        <span className="font-medium">{windowLabel(window)} {Math.round(shownPercent(window, settings.percent))}%</span>
-                        {tier === "full" && window.resetsAt != null ? <span className="text-faint">· {formatResetCountdown(window.resetsAt, now, "")}</span> : null}
-                      </span>
-                    ))}
+                    </span>
+                    {tier !== "icon" ? shown.map((window, windowIndex) => {
+                      const trailer = windowTrailer(window, now);
+                      return (
+                        <span
+                          key={window.key}
+                          data-usage-window={windowKind(window) ?? window.key}
+                          className={cn("flex shrink-0 items-center gap-1", urgencyText(window.usedPercent))}
+                        >
+                          {windowIndex > 0 ? <span aria-hidden className="text-faint">·</span> : null}
+                          {window.stale ? <TriangleAlert className="size-3" aria-label="Stale usage data" /> : null}
+                          <span className="font-medium">{Math.round(shownPercent(window, settings.percent))}% {settings.percent}</span>
+                          {trailer ? <span className="text-faint">{trailer}</span> : null}
+                        </span>
+                      );
+                    }) : null}
                   </span>
                 );
               })}
@@ -654,7 +672,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                         <AgentMark id={window.agent} className="size-3.5 text-faint" decorative />
                         <div className="min-w-0">
                           <div className="truncate text-[11px] font-medium">{windowLabel(window)}</div>
-                          <div className="capitalize text-[9.5px] text-faint">{window.agent}{window.plan ? ` · ${window.plan}` : ""}</div>
+                          <div className="capitalize text-[9.5px] text-faint">{window.agent}</div>
                         </div>
                         <div className="h-1 overflow-hidden rounded-full bg-hairline-strong">
                           <div className={cn("h-full rounded-full", urgency(window.usedPercent))} style={{ width: `${shownPercent(window, settings.percent)}%` }} />

@@ -464,7 +464,10 @@ or durable cache.
 Codex 0.152.0 answers `account/rateLimits/read` on the same one-shot app-server
 client already used for model discovery. A 300-minute primary window is `5h`,
 a 10,080-minute secondary window is `weekly`, and `resetsAt` seconds become
-milliseconds at the boundary. The client only runs while the macOS window is
+milliseconds at the boundary. Only the account-level `rateLimits` block is
+kept; `rateLimitsByLimitId` repeats it under the `codex` id (used as a fallback
+when the block is absent) and adds one per-model sub-limit per entry, which
+never reach the store, and `planType` is not kept. The client only runs while the macOS window is
 visible, focused, and not minimized: once on focus, then no more than every 15
 minutes, with provider-local failure backoff. The status bar keeps the
 composer's per-tab context ring; only app-wide account limits moved.
