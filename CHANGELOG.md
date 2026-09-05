@@ -1,28 +1,88 @@
 # TerminalX changelog
 
-## Unreleased
+## 0.2.1
 
-- The status bar's usage cluster shows one entry per account limit. Codex
-  used to list every per-model sub-limit the app-server reports (such as
-  "GPT-5.3-Codex-Spark weekly", almost always at 0%) alongside the plan
-  name; only the account-level windows are kept now, and the plan is gone.
-  Each agent reads as a brand mark, a small meter for its tightest window,
-  then "N% used" and the reset countdown per window, with Fable named in
-  place of a countdown. (#104)
-- Deleting a workspace now stops and removes the sessions that ran in it,
-  the same way deleting a single session does: agents and terminal panes are
-  killed, and the index entries, transcripts and attachments go. Previously
-  those sessions were kept and filed under a "Removed workspace" group, which
-  piled up dead sessions after every cleanup. The delete dialog says so and
-  shows how many sessions will go; the CLI's `worktrees delete` reports them
-  as `removedSessions`. Settling a single session's worktree still keeps that
-  session and moves it to the project root. (#89)
-- Dictation keeps what was said before a pause. Apple's recogniser starts a
-  new utterance whose text stands alone after a pause, and the composer took
-  that for a revision of the phrase before it whenever it arrived within a
-  moment — which, after a cold start, everything does. Utterances are now told
-  apart by when the recogniser settles them, so speech after a pause is
-  appended after the earlier words rather than in their place. (#72)
+Agents can now browse the web and operate desktop apps, conversations can
+continue with a fresh Claude Code or Codex tab, and the file pane previews
+images, audio and video. This release also improves usage reporting, editing
+and everyday session controls.
+
+### Browser and computer use
+
+- A built-in browser with persistent profiles and an in-app browser pane.
+  Agents can open and navigate tabs, inspect pages, click, fill forms, capture
+  screenshots, read console and network activity, and evaluate JavaScript
+  through the `terminalx` CLI. Browser runtime setup is in Settings. (#101)
+- Desktop computer use through `terminalx computer`: discover apps and
+  windows, read accessibility trees, capture screenshots, click, type, scroll,
+  drag and set values. The bundled macOS helper owns the Accessibility and
+  Screen Recording permissions, with grant and reset controls in Settings →
+  General. The embedded computer-use guide teaches agents the commands. (#100)
+- Linux AT-SPI and Windows UI Automation providers, platform prerequisite
+  reporting, and Windows CLI launchers and control transport are included in
+  the source. The downloadable installer for this release remains macOS on
+  Apple Silicon; macOS computer use requires macOS 14 or later. (#117)
+
+### Conversation continuation and attachments
+
+- **Continue in New Session** opens a fresh Claude Code or Codex tab in the
+  same workspace. Choose focused context or the full saved transcript while
+  keeping the original conversation, branch and uncommitted files. Delivery
+  feedback distinguishes launch failures from uncertain prompt delivery. (#109)
+- Attach images to the first prompt of a new session using the same picker,
+  paste and drag-and-drop controls as an existing conversation. (#95)
+- Claude Code image prompts no longer appear twice in chat. (#91)
+- The composer keeps a usable height after being hidden, switching views or
+  waiting for fonts to load. (#90)
+- Dictation preserves words spoken before a pause and appends the next
+  utterance instead of replacing earlier text. (#72)
+
+### Files and editing
+
+- Open local images, audio and video from Files or Quick Open. Images support
+  fit, actual size, zoom, dimensions and a transparency checkerboard; audio and
+  video have native playback controls. Viewers are read-only, pause hidden
+  playback and offer Reload when a file changes. Codec support depends on the
+  system WebView. SVG and other text files remain editable. (#118)
+- A styled editor Find/Replace bar, plus project-wide replace with previews,
+  per-file and per-match exclusions, and support for open unsaved buffers.
+  Use ⌘⇧F to search or ⌘⇧H to replace across the project. (#98)
+
+### Usage and activity
+
+- Stats & Usage shows its saved results immediately and refreshes in the
+  background. Existing metrics remain visible and interactive during refresh;
+  a failed refresh keeps the last successful snapshot and offers Retry. (#113)
+- Lifetime agent activity is recorded independently of usage scans, survives
+  workspace cleanup, and counts live work starts correctly. Pull request
+  totals include discovered PRs.
+- Claude's five-hour usage refreshes across reset boundaries, accepts changed
+  live samples promptly, and interprets OAuth percentages correctly. Expired
+  windows are marked stale while awaiting confirmation; manual refresh and
+  retry feedback are available in usage details. (#119)
+- The status bar shows account-level limits without Codex's per-model
+  sub-limits or plan label. The Compact toggle now changes the presentation,
+  and usage details show one row per agent. (#104, #105)
+- The dashboard sidebar shows waiting, working and done totals. Claude Code
+  uses the Anthropic starburst consistently across agent controls. (#114, #103)
+
+### Workspace and interface fixes
+
+- Deleting a workspace stops its agents and terminals and removes its sessions,
+  transcripts and attachments. The confirmation shows the affected session
+  count. Settling one session's worktree still preserves that session. (#89)
+- Create shell terminals from the tab strip's **+** picker. (#88)
+- Sidebar hover actions no longer overlap project or workspace labels. (#94)
+- Settings has a distinct Close button that stays visible above scrolling
+  content, including with transparent appearance enabled. (#112)
+- An optional **Enjoying TerminalX?** GitHub star reminder returns, with
+  dismissal cooldowns and permanent suppression after a confirmed star. (#110)
+
+### Distribution
+
+- The macOS app, computer-use helper and DMG are signed with a Developer ID
+  certificate. This release is not notarized. The signed updater archive is
+  available through Settings → About → Check for updates.
 
 ## 0.2.0
 

@@ -3,7 +3,7 @@
   "description": "TerminalX \u2014 a desktop workbench for coding agents",
   "private": true,
   "license": "MIT",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "packageManager": "pnpm@10.33.0",
   "engines": {
     "node": ">=24"
