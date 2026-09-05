@@ -76,11 +76,26 @@ pub struct Ctx<'a> {
 pub struct Bridge {
     pub env: ProcessEnvironment,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// A fixed executable instead of the located one; tests use it so no
+    /// process-wide environment is touched.
+    binary_override: Option<PathBuf>,
 }
 
 impl Bridge {
     pub fn new(env: ProcessEnvironment) -> Self {
-        Self { env, sessions: Mutex::new(HashMap::new()) }
+        Self { env, sessions: Mutex::new(HashMap::new()), binary_override: None }
+    }
+
+    #[cfg(test)]
+    pub fn with_binary(env: ProcessEnvironment, binary: PathBuf) -> Self {
+        Self { env, sessions: Mutex::new(HashMap::new()), binary_override: Some(binary) }
+    }
+
+    pub fn binary(&self) -> BrowserResult<PathBuf> {
+        match &self.binary_override {
+            Some(path) => Ok(path.clone()),
+            None => super::binary::require(),
+        }
     }
 
     /// The session for a profile, created lazily; creation does not launch
@@ -137,8 +152,9 @@ impl Bridge {
             for session in chunk {
                 let session = session.clone();
                 let env = self.env.clone();
+                let binary = self.binary();
                 handles.push(std::thread::spawn(move || {
-                    if let Ok(binary) = super::binary::require() {
+                    if let Ok(binary) = binary {
                         let _ = run(&binary, &["--session", &session.name, "close"], &env, RunOptions { timeout: CLEANUP_TIMEOUT, stdin: None });
                     }
                     if let Ok(mut lane) = session.lane.lock() {
@@ -159,7 +175,7 @@ impl Ctx<'_> {
     /// envelope. `args` are the command and its own arguments; the session,
     /// launch options and `--json` are added here.
     pub fn run(&mut self, args: &[&str], options: ExecOptions) -> BrowserResult<Value> {
-        let binary = super::binary::require()?;
+        let binary = self.bridge.binary()?;
         let mut argv: Vec<&str> = vec!["--session", &self.session.name];
         let profile_dir = self.session.profile_dir.to_string_lossy().into_owned();
         let download_dir = self.session.download_dir.to_string_lossy().into_owned();
@@ -212,7 +228,7 @@ impl Ctx<'_> {
     }
 
     pub fn close(&mut self) -> BrowserResult<()> {
-        let binary = super::binary::require()?;
+        let binary = self.bridge.binary()?;
         let out = run(&binary, &["--session", &self.session.name, "close"], &self.bridge.env, RunOptions { timeout: CLEANUP_TIMEOUT, stdin: None });
         self.lane.launched = false;
         self.lane.active_tab = None;
@@ -424,10 +440,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let log_path = tmp.path().join("log");
-        std::env::set_var(super::super::binary::BINARY_ENV, &fake);
         let mut env = ProcessEnvironment { vars: Vec::new(), socket_dir: None, owns_socket_directory: false };
         env.vars.push(("AB_LOG".into(), log_path.to_string_lossy().into_owned()));
-        let bridge = Bridge::new(env);
+        let bridge = Bridge::with_binary(env, fake);
         let session = bridge.session("default", tmp.path().join("profile"), tmp.path().join("downloads"));
         for _ in 0..CONSECUTIVE_TIMEOUT_LIMIT {
             let err = bridge
@@ -435,7 +450,6 @@ mod tests {
                 .unwrap_err();
             assert_eq!(err.code, "browser_timeout");
         }
-        std::env::remove_var(super::super::binary::BINARY_ENV);
         let log = std::fs::read_to_string(&log_path).unwrap();
         assert_eq!(log.matches("snapshot").count(), 3);
         assert!(log.lines().last().unwrap().contains("close"), "{log}");

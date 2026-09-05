@@ -20,7 +20,13 @@ pub const BINARY_ENV: &str = "TERMINALX_AGENT_BROWSER_BIN";
 pub const EXPECTED_VERSION: &str = "0.27.0";
 
 pub fn locate() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os(BINARY_ENV).filter(|v| !v.is_empty()) {
+    locate_with(std::env::var_os(BINARY_ENV).as_deref())
+}
+
+/// `locate` with the override given explicitly, so it can be tested
+/// without touching the process environment.
+pub fn locate_with(explicit: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    if let Some(explicit) = explicit.filter(|v| !v.is_empty()) {
         let p = PathBuf::from(explicit);
         return executable(&p).then_some(p);
     }
@@ -137,10 +143,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn explicit_env_wins_and_a_missing_file_is_a_miss() {
+    fn an_explicit_override_wins_and_a_missing_file_is_a_miss() {
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var(BINARY_ENV, tmp.path().join("nope"));
-        assert!(locate().is_none());
-        std::env::remove_var(BINARY_ENV);
+        let missing = tmp.path().join("nope");
+        assert!(locate_with(Some(missing.as_os_str())).is_none());
+        let present = tmp.path().join("agent-browser");
+        std::fs::write(&present, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&present, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(locate_with(Some(present.as_os_str())), Some(present));
     }
 }
