@@ -320,7 +320,7 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
         </div>
       )}
       {error && <div className="shrink-0 px-3 py-1.5 text-xs text-destructive">{error}</div>}
-      {status === "binary" && <div className="p-4 text-sm text-muted-foreground">Binary file, not shown.</div>}
+      {status === "binary" && <div className="p-4 text-sm text-muted-foreground">Cannot preview {entry.name}. This binary format is unsupported. Use Reveal in Finder to open it externally.</div>}
       {status === "loading" && <div className="p-4 text-sm text-muted-foreground">Loading…</div>}
       {preview && status === "ready" && (
         <div className="min-h-0 flex-1 overflow-auto scrollbar-thin px-6 py-4 select-text">
