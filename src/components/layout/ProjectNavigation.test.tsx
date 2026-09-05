@@ -27,8 +27,8 @@ const makeSession = (id: string, projectPath = "/alpha"): SessionEntry => ({
 let sessions: SessionEntry[];
 let workspaces: Record<string, Workspace[]>;
 
-function mount() {
-  return render(<TooltipProvider><ProjectRail onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
+function mount(onOpenAgents = () => {}) {
+  return render(<TooltipProvider><ProjectRail onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenIssues={() => {}} onOpenAgents={onOpenAgents} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
 }
 
 beforeEach(async () => {
@@ -52,6 +52,66 @@ beforeEach(async () => {
 afterEach(cleanup);
 
 describe("complete navigation hierarchy", () => {
+  it("shows all dashboard totals, including read completions and zero needs-you sessions", async () => {
+    sessions = Array.from({ length: 11 }, (_, i) => {
+      const entry = makeSession(`dashboard-${i}`, i % 2 ? "/alpha" : "/beta");
+      entry.tabs[0].status = i < 2 ? "in_progress" : i === 2 ? "completed" : "idle";
+      return entry;
+    });
+    await act(async () => { await store.refreshSessions(); });
+    const openAgents = vi.fn();
+    mount(openAgents);
+    const row = screen.getByRole("button", { name: /Agent Dashboard/ });
+    expect(row.textContent).toBe("Agent Dashboard029");
+    for (const [label, color] of [["0 needs you", "warning"], ["2 working", "info"], ["9 done", "add"]]) {
+      const badge = within(row).getByRole("img", { name: label });
+      expect(badge.getAttribute("title")).toBe(label);
+      expect(badge.className).toContain(`text-${color}`);
+    }
+    fireEvent.click(row);
+    expect(openAgents).toHaveBeenCalledOnce();
+  });
+
+  it("keeps all zero totals visible", async () => {
+    sessions = [];
+    await act(async () => { await store.refreshSessions(); });
+    mount();
+    const row = screen.getByRole("button", { name: /Agent Dashboard/ });
+    expect(within(row).getAllByRole("img").map((badge) => badge.getAttribute("aria-label")))
+      .toEqual(["0 needs you", "0 working", "0 done"]);
+  });
+
+  it("updates totals from the live store through reads, status changes, navigation and eligibility changes", async () => {
+    mount();
+    const totals = () => within(screen.getByRole("button", { name: /Agent Dashboard/ }))
+      .getAllByRole("img").map((badge) => badge.getAttribute("aria-label"));
+    expect(totals()).toEqual(["0 needs you", "0 working", "2 done"]);
+    act(() => store.patchTab("one", "one-tab", { status: "completed" }));
+    expect(totals()).toEqual(["0 needs you", "0 working", "2 done"]);
+    act(() => store.patchTab("one", "one-tab", { status: "idle" }));
+    expect(totals()).toEqual(["0 needs you", "0 working", "2 done"]);
+    act(() => store.patchTab("one", "one-tab", { status: "in_progress" }));
+    expect(totals()).toEqual(["0 needs you", "1 working", "1 done"]);
+    act(() => store.patchTab("one", "one-tab", { status: "waiting" }));
+    expect(totals()).toEqual(["1 needs you", "0 working", "1 done"]);
+    act(() => store.patchTab("one", "one-tab", { status: "completed" }));
+    expect(totals()).toEqual(["0 needs you", "0 working", "2 done"]);
+    await act(async () => { store.openAgents(); store.selectSession("two"); store.setShowArchived(true); });
+    expect(totals()).toEqual(["0 needs you", "0 working", "2 done"]);
+    act(() => store.patchSession("one", { archived: true }));
+    expect(totals()).toEqual(["0 needs you", "0 working", "1 done"]);
+    act(() => store.patchSession("one", { archived: false }));
+    expect(totals()).toEqual(["0 needs you", "0 working", "2 done"]);
+    act(() => store.removeSessions(["one"]));
+    expect(totals()).toEqual(["0 needs you", "0 working", "1 done"]);
+    act(() => store.upsertSession(makeSession("one")));
+    expect(totals()).toEqual(["0 needs you", "0 working", "2 done"]);
+    act(() => store.patchSession("one", { tabs: [] }));
+    expect(totals()).toEqual(["0 needs you", "0 working", "1 done"]);
+    await act(async () => { await store.refreshSessions(); });
+    expect(totals()).toEqual(["0 needs you", "0 working", "2 done"]);
+  });
+
   it("opens shell peers in the tree without exposing agent-owned panes", async () => {
     mount();
     fireEvent.click(screen.getByRole("button", { name: "Collapse Session one" }));
