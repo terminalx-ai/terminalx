@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, Check, CircleAlert, ExternalLink, Loader2, RefreshCw } from "lucide-react";
+import { ArrowLeft, Check, CircleAlert, ExternalLink, Loader2, RefreshCw, X } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -12,7 +12,7 @@ import { cn } from "@/lib/cn";
 import { THEMES, hasLightMode, setMode, setTheme, useTheme, type Mode, type ThemeId } from "@/lib/theme";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { repoFile } from "@/lib/repo";
-import { keycaps } from "@/lib/hotkeys";
+import { hasEscapeOverlay, keycaps, useHotkey } from "@/lib/hotkeys";
 import { SHORTCUTS } from "@/lib/shortcuts";
 import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
 import { api, errorMessage, gh, issues, type CliToolStatus, type LinearStatus, type SkillInstallStatus } from "@/lib/api";
@@ -49,6 +49,11 @@ export function SettingsPage({
     setTab(initialTab);
   }, [initialTab]);
 
+  useHotkey("escape", () => {
+    if (hasEscapeOverlay()) return false;
+    onBack();
+  });
+
   return (
     <main className="flex h-full min-w-0 flex-1 flex-col bg-background" aria-label="Settings">
       <header data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-1 border-b border-hairline pl-[78px] pr-3">
@@ -56,6 +61,16 @@ export function SettingsPage({
           <ArrowLeft />
         </Button>
         <h1 className="px-1 text-sm font-medium">Settings</h1>
+        {/* Keep the surface opaque in glass mode and outside the scroll viewport. */}
+        <Button
+          variant="outline"
+          size="icon-sm"
+          aria-label="Close"
+          onClick={onBack}
+          className="ml-auto shrink-0 bg-raised hover:bg-[color-mix(in_oklab,var(--surface-raised),var(--foreground)_8%)] active:bg-[color-mix(in_oklab,var(--surface-raised),var(--foreground)_14%)]"
+        >
+          <X />
+        </Button>
       </header>
       <div className="flex min-h-0 flex-1">
         <nav aria-label="Settings sections" className="flex w-48 shrink-0 flex-col gap-0.5 border-r border-hairline p-4">
