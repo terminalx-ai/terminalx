@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { isTranscriptionInputSaving } from "./transcriptionInput";
 import { applyFinal, applyPartial, EMPTY_BUFFER, spokenText, type DictationBuffer } from "./dictationText";
 
 /**
@@ -153,10 +154,11 @@ export async function refreshDictationEngine() {
 /**
  * Start listening for `target`. The session number comes back at once — before
  * anything can be recognised — so the composer that asked for the dictation can
- * tell its own text from a later one's. `null` if a dictation is already going.
+ * tell its own text from a later one's. `null` if dictation is already going
+ * or the next recording's input preference is still being saved.
  */
 export function startDictation(target: string): number | null {
-  if (state.phase !== "idle") return null;
+  if (state.phase !== "idle" || isTranscriptionInputSaving()) return null;
   buffer = EMPTY_BUFFER;
   previousPartialAt = null;
   const session = state.session + 1;

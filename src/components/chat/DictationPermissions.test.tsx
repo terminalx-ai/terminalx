@@ -1,3 +1,4 @@
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { useRef, useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -8,7 +9,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 
-const { useDictationInto } = await import("./Dictation");
+const { useDictationInto, MicButton } = await import("./Dictation");
 const { TranscriptionTab } = await import("@/components/settings/TranscriptionTab");
 
 /**
@@ -26,8 +27,8 @@ function permissionCalls(): string[] {
 function ComposerDictation() {
   const [draft, setDraft] = useState("");
   const field = useRef<HTMLTextAreaElement>(null);
-  useDictationInto("tab-1", draft, setDraft, field);
-  return <textarea ref={field} value={draft} onChange={(event) => setDraft(event.target.value)} />;
+  const dictation = useDictationInto("tab-1", draft, setDraft, field);
+  return <><textarea ref={field} value={draft} onChange={(event) => setDraft(event.target.value)} /><MicButton dictation={dictation} /></>;
 }
 
 afterEach(() => {
@@ -44,7 +45,7 @@ describe("passive dictation surfaces", () => {
       return undefined;
     });
 
-    render(<ComposerDictation />);
+    render(<TooltipProvider><ComposerDictation /></TooltipProvider>);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("dictation_available"));
 
     expect(permissionCalls()).toEqual([]);
@@ -62,6 +63,19 @@ describe("passive dictation surfaces", () => {
 
     expect(screen.getByRole("button", { name: /Studio Microphone/i })).toBeTruthy();
     expect(permissionCalls()).toEqual([]);
+  });
+
+  it("does not start capture through the shortcut while an input preference is saving", async () => {
+    const { selectTranscriptionInput } = await import("@/lib/transcriptionInput");
+    const { startDictation } = await import("@/lib/dictation");
+    let finish!: () => void;
+    invoke.mockImplementation((command: string) => command === "transcription_set_input"
+      ? new Promise<void>((resolve) => { finish = resolve; }) : Promise.resolve());
+    const saving = selectTranscriptionInput("Studio Microphone");
+    expect(startDictation("tab-1")).toBeNull();
+    expect(permissionCalls()).toEqual([]);
+    finish();
+    await saving;
   });
 
   it("enumerates inputs only when the microphone picker opens", async () => {

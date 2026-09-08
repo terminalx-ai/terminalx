@@ -7,6 +7,8 @@ import { cn } from "@/lib/cn";
 import { keycaps } from "@/lib/hotkeys";
 import { clearDictationError, dictationAvailable, startDictation, stopDictation, useDictation, type DictationState } from "@/lib/dictation";
 import { anchorAt, insertSpoken, type DictationAnchor } from "@/lib/dictationText";
+import { useTranscriptionInput } from "@/lib/transcriptionInput";
+import { TranscriptionInputPicker } from "./TranscriptionInputPicker";
 
 /**
  * The mic, shared by the two composers: the one inside a session and the one
@@ -210,20 +212,24 @@ export function DictationStatus({ dictation }: { dictation: Dictation }) {
 /** Nothing while the availability check is out or dictation is unsupported. */
 export function MicButton({ dictation }: { dictation: Dictation }) {
   const { state, dictating, available, toggle } = dictation;
+  const input = useTranscriptionInput();
   if (available === false) return null;
   return (
-    <WithTooltip label={dictating ? "Stop dictating" : `Dictate · ${state.engine}`} keys={keycaps("mod+shift+d")}>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        aria-label={dictating ? "Stop dictating" : "Dictate"}
-        aria-pressed={dictating}
-        onClick={toggle}
-        disabled={state.phase !== "idle" && !dictating}
-        className={cn(dictating && "bg-destructive/15 text-destructive hover:bg-destructive/25 hover:text-destructive")}
-      >
-        <Mic className={cn(dictating && state.phase === "listening" && "animate-pulse-soft")} />
-      </Button>
-    </WithTooltip>
+    <div className="flex min-w-0 items-center">
+      <WithTooltip label={dictating ? "Stop dictating" : `Dictate · ${state.engine}`} keys={keycaps("mod+shift+d")}>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label={dictating ? "Stop dictating" : "Dictate"}
+          aria-pressed={dictating}
+          onClick={toggle}
+          disabled={input.saving || (state.phase !== "idle" && !dictating)}
+          className={cn("shrink-0", dictating && "bg-destructive/15 text-destructive hover:bg-destructive/25 hover:text-destructive")}
+        >
+          <Mic className={cn(dictating && state.phase === "listening" && "animate-pulse-soft")} />
+        </Button>
+      </WithTooltip>
+      <TranscriptionInputPicker compact />
+    </div>
   );
 }
