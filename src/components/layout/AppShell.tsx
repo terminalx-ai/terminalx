@@ -268,6 +268,7 @@ function UnselectedWorkspace({
         <RightPanel
           key={cwd}
           cwd={cwd}
+          isGit={project.kind !== "folder"}
           branch={workspace?.branch}
           workingTree
           rootName={project.name}

@@ -3,7 +3,7 @@ import { agent, errorMessage, type ImageInput } from "@/lib/api";
 import { applyEvent, loadTab, useTabLog } from "@/lib/agentEvents";
 import { buildTranscript, type Transcript } from "@/lib/transcript";
 import { getDraft, setDraft, useDraft } from "@/lib/drafts";
-import { patchTab } from "@/lib/sessions";
+import { patchTab, useSessionStore } from "@/lib/sessions";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { changeRange, useChanges } from "@/lib/changes";
 import { Chat } from "@/components/chat/Chat";
@@ -35,6 +35,7 @@ function handoffsFor(t: Transcript, changed: boolean): { label: string; prompt: 
 }
 
 export function TabView({ session, tab, active, continuationOpen = false }: { session: SessionEntry; tab: TabEntry; active: boolean; continuationOpen?: boolean }) {
+  const isGit = useSessionStore().projects.find((p) => p.path === session.projectPath)?.kind !== "folder";
   const log = useTabLog(session.id, tab.id);
   const draft = useDraft(tab.id);
   const [error, setError] = useState<string | null>(null);
@@ -70,7 +71,7 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
   // Whether the session's checkout differs from where the conversation
   // started, by tree diff, so a shell heredoc counts as much as an edit tool.
   const range = useMemo(() => changeRange(log.events, session.baseRef), [log.events, log.version, session.baseRef]);
-  const changes = useChanges(session.cwd, range, active && !live);
+  const changes = useChanges(session.cwd, range, isGit && active && !live);
 
   const send = useCallback(
     async (text: string, images: ImageInput[]) => {
@@ -158,7 +159,7 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
           }}
           contextUsed={transcript.contextUsed ?? tab.contextUsed ?? undefined}
           contextMax={transcript.contextMax ?? tab.contextMax ?? undefined}
-          handoffs={handoffsFor(transcript, changes.files.length > 0)}
+          handoffs={handoffsFor(transcript, isGit && changes.files.length > 0)}
           disabledReason={error ?? viewError}
           autoFocus={active}
         />

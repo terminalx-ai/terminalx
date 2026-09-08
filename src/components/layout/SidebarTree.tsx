@@ -205,7 +205,7 @@ function WorkspaceNode({
   const removedSession = group.sessions.find((session) => session.removedWorkspace) ?? group.sessions[0];
   const name = group.removed && removedSession ? sessionWorkspaceName(removedSession) : (workspace?.name ?? group.path.split("/").pop() ?? group.path);
   const displayName = group.removed ? name : workspace?.managed ? name : (workspace?.branch ?? name);
-  const kind = group.removed ? "removed" : !workspace ? "missing" : workspace.isMain ? "main" : workspace.managed ? "worktree" : "external";
+  const kind = group.removed ? "removed" : !workspace ? "missing" : project.kind === "folder" ? "folder" : workspace.isMain ? "main" : workspace.managed ? "worktree" : "external";
   const openWorkspace = () => {
     if (workspace) startSessionIn(project.path, workspace.path);
     else if (group.sessions[0]) selectSession(group.sessions[0].id);
@@ -223,7 +223,7 @@ function WorkspaceNode({
         title={group.path}
       >
         <TreeToggle expanded={expanded} label={displayName} onToggle={onToggle} className="ml-0.5" />
-        <GitBranch className="size-3 shrink-0" />
+        {project.kind === "folder" ? <FolderOpen className="size-3 shrink-0" /> : <GitBranch className="size-3 shrink-0" />}
         {workspace ? (
           <WorkspaceNameEditor
             value={displayName}

@@ -22,6 +22,7 @@ interface FileTreeViewProps {
   root: string;
   rootName: string;
   active: boolean;
+  isGit?: boolean;
   /** Tab whose draft "Mention in composer" appends to. */
   mentionTabId?: string | null;
   /** Any string that changes when an agent's status does; bumps the git refresh. */
@@ -54,6 +55,7 @@ function RootedFileTreeView({
   root,
   rootName,
   active,
+  isGit = true,
   mentionTabId,
   statusKey = "",
   refreshTick = 0,
@@ -94,12 +96,12 @@ function RootedFileTreeView({
   // Git status: cheap enough to poll gently while the tree is on screen, and
   // re-read the moment an agent's status changes, which is when files move.
   useEffect(() => {
-    if (!active) return;
+    if (!active || !isGit) return;
     setTick((t) => t + 1);
     const id = window.setInterval(() => setTick((t) => t + 1), 5000);
     return () => window.clearInterval(id);
-  }, [active, statusKey]);
-  const changes = useWorkingChanges(root, active, tick);
+  }, [active, statusKey, isGit]);
+  const changes = useWorkingChanges(root, active && isGit, tick);
   const { fileStatus, dirsWithChanges } = useMemo(() => {
     const fileStatus = new Map<string, ChangeStatus>();
     const dirsWithChanges = new Set<string>();

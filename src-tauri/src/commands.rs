@@ -128,9 +128,6 @@ pub fn list_projects() -> CmdResult<ProjectsResponse> {
 
 #[tauri::command]
 pub fn add_project(path: String) -> CmdResult<Project> {
-    if !git::is_repo(Path::new(&path)) {
-        return Err("That folder is not a git repository.".into());
-    }
     projects::add(&path).map_err(err)
 }
 
@@ -218,6 +215,9 @@ pub fn automation_delete(app: AppHandle, id: String) -> CmdResult<()> {
 }
 
 fn validate_automation_target(input: &crate::automations::AutomationInput) -> CmdResult<()> {
+    if input.workspace == crate::automations::AutomationWorkspace::NewWorktree && !git::is_repo(Path::new(&input.project_path)) {
+        return Err("Folder automations must use an existing session; worktrees require a Git repository.".into());
+    }
     if input.workspace == crate::automations::AutomationWorkspace::Session {
         let target = index::get(input.session_id.as_deref().ok_or("Choose a session for this automation.")?).map_err(err)?;
         if projects::canonical(&target.project_path).map_err(err)? != input.project_path {
@@ -368,7 +368,7 @@ pub(crate) fn create_session_blocking(app: &AppHandle, req: NewSession) -> CmdRe
 
 fn create_session_entry(req: NewSession) -> CmdResult<SessionEntry> {
     validate_session_target(&req)?;
-    let project = projects::canonical(&req.project_path).map_err(err)?;
+    let project = projects::canonical_directory(&req.project_path).map_err(err)?;
     let project_path = Path::new(&project);
     let id = uuid::Uuid::now_v7().to_string();
     let now = index::now();
@@ -398,10 +398,10 @@ fn create_session_entry(req: NewSession) -> CmdResult<SessionEntry> {
     };
 
     if let Some(cwd) = req.cwd.as_deref().filter(|c| !c.is_empty()) {
-        let cwd = projects::canonical(cwd).map_err(err)?;
+        let cwd = projects::canonical_directory(cwd).map_err(err)?;
         entry.branch = git::current_branch(Path::new(&cwd));
         entry.cwd = cwd;
-    } else if has_agent && req.use_worktree {
+    } else if has_agent && req.use_worktree && git::is_repo(project_path) {
         let name = available_worktree_name(project_path, req.worktree_name.as_deref(), None)?;
         let wt = git::create_worktree(project_path, &name, req.base_ref.as_deref()).map_err(err)?;
         entry.cwd = wt.path;
@@ -1512,6 +1512,56 @@ mod command_tests {
             tab.permission_mode,
             crate::store::index::DEFAULT_PERMISSION_MODE
         );
+    }
+
+    #[test]
+    fn folder_sessions_and_workspaces_survive_reload_without_git() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = super::add_project(dir.path().to_string_lossy().into_owned()).unwrap();
+        assert_eq!(project.kind, crate::store::projects::ProjectKind::Folder);
+        let workspaces = crate::workspaces::list(dir.path()).unwrap();
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].path, project.path);
+        assert!(workspaces[0].is_main && !workspaces[0].managed);
+        assert!(workspaces[0].branch.is_none() && workspaces[0].head.is_none());
+        for agent in [false, true] {
+            let req: NewSession = serde_json::from_value(serde_json::json!({
+                "projectPath": project.path, "useWorktree": true,
+                "worktreeName": "saved-preference",
+                "tab": if agent { serde_json::json!({"harness": "codex", "model": ""}) } else { serde_json::Value::Null }
+            })).unwrap();
+            let session = create_session_entry(req).unwrap();
+            assert_eq!(session.cwd, project.path);
+            assert!(session.worktree_name.is_none() && session.branch.is_none() && session.base_ref.is_none());
+            assert_eq!(crate::store::index::get(&session.id).unwrap().cwd, project.path);
+        }
+        assert_eq!(super::list_projects().unwrap().projects, vec![project.clone()]);
+        assert_eq!(super::add_project(format!("{}/", project.path)).unwrap().path, project.path);
+        assert_eq!(super::list_projects().unwrap().projects.len(), 1);
+        assert!(!dir.path().join(".git").exists());
+        assert!(!dir.path().join(".raccoon").exists());
+        assert!(!crate::git::work_status(dir.path()).is_repo);
+    }
+
+    #[test]
+    fn session_and_workspace_targets_must_be_directories() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, "hello").unwrap();
+        for target in [&file, &dir.path().join("missing")] {
+            assert!(super::add_project(target.to_string_lossy().into_owned()).is_err());
+            assert!(crate::workspaces::list(target).is_err());
+            for override_cwd in [false, true] {
+                let req = serde_json::from_value(serde_json::json!({
+                    "projectPath": if override_cwd { dir.path() } else { target.as_path() },
+                    "cwd": if override_cwd { Some(target) } else { None }, "useWorktree": false
+                })).unwrap();
+                assert!(create_session_entry(req).is_err());
+            }
+        }
+        assert!(crate::store::index::load().unwrap().is_empty());
     }
 
     #[test]

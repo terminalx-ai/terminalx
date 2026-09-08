@@ -52,6 +52,8 @@ export interface SessionEntry {
 }
 
 export interface Project {
+  /** Older project stores contain Git projects without an explicit kind. */
+  kind?: "git" | "folder";
   path: string;
   name: string;
   lastOpened?: string | null;
