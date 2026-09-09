@@ -1,15 +1,25 @@
-//! Attached projects: repo roots the reader has opened.
+//! Attached projects: Git checkouts and ordinary folders the reader has opened.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectKind {
+    #[default]
+    Git,
+    Folder,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     pub path: String,
     pub name: String,
+    #[serde(default)]
+    pub kind: ProjectKind,
     #[serde(default)]
     pub last_opened: Option<String>,
     /// Accent for the mascot and badges; a token name like `blue`.
@@ -104,6 +114,13 @@ pub fn canonical(path: &str) -> Result<String> {
     Ok(c.to_string_lossy().into_owned())
 }
 
+/// Validate before persisting projects or choosing a process working directory.
+pub fn canonical_directory(path: &str) -> Result<String> {
+    let canonical = canonical(path)?;
+    anyhow::ensure!(Path::new(&canonical).is_dir(), "Not a directory: {path}");
+    Ok(canonical)
+}
+
 pub fn project_name(path: &str) -> String {
     Path::new(path)
         .file_name()
@@ -117,17 +134,19 @@ pub fn list() -> Result<(Vec<Project>, Option<String>)> {
 }
 
 pub fn add(path: &str) -> Result<Project> {
-    let path = canonical(path)?;
+    let path = canonical_directory(path)?;
+    let kind = if crate::git::is_repo(Path::new(&path)) { ProjectKind::Git } else { ProjectKind::Folder };
     let mut f = load()?;
     let now = chrono::Utc::now().to_rfc3339();
     if let Some(existing) = f.projects.iter_mut().find(|p| p.path == path) {
         existing.last_opened = Some(now);
+        existing.kind = kind;
         let out = existing.clone();
         f.last_selected = Some(path);
         save(&f)?;
         return Ok(out);
     }
-    let p = Project { name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false };
     f.projects.push(p.clone());
     f.last_selected = Some(path);
     save(&f)?;
@@ -152,6 +171,39 @@ pub fn set_last_selected(path: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directories_are_validated_and_git_projects_keep_their_kind() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file.txt");
+        std::fs::write(&file, "hello").unwrap();
+        assert!(add(file.to_str().unwrap()).unwrap_err().to_string().contains("Not a directory"));
+        assert!(add(dir.path().join("missing").to_str().unwrap()).is_err());
+        assert!(list().unwrap().0.is_empty());
+        let folder = add(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(folder.kind, ProjectKind::Folder);
+        assert!(!dir.path().join(".git").exists());
+        assert_eq!(list().unwrap().0, vec![folder]);
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(dir.path()).status().unwrap().success());
+        assert_eq!(add(dir.path().to_str().unwrap()).unwrap().kind, ProjectKind::Git);
+        assert_eq!(list().unwrap().0.len(), 1);
+        let legacy: Project = serde_json::from_str(r#"{"path":"/repo","name":"repo"}"#).unwrap();
+        assert_eq!(legacy.kind, ProjectKind::Git);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_aliases_do_not_duplicate_projects() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("folder");
+        let alias = dir.path().join("alias");
+        std::fs::create_dir(&folder).unwrap();
+        std::os::unix::fs::symlink(&folder, &alias).unwrap();
+        assert_eq!(add(folder.to_str().unwrap()).unwrap().path, add(alias.to_str().unwrap()).unwrap().path);
+        assert_eq!(list().unwrap().0.len(), 1);
+    }
 
     #[test]
     fn add_is_idempotent_on_canonical_path() {

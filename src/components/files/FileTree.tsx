@@ -6,6 +6,7 @@ export function FileTree({
   root,
   rootName,
   active,
+  isGit = true,
   mentionTabId,
   statusKey,
 }: {
@@ -13,6 +14,7 @@ export function FileTree({
   root: string;
   rootName?: string;
   active: boolean;
+  isGit?: boolean;
   mentionTabId?: string | null;
   statusKey?: string;
 }) {
@@ -22,6 +24,7 @@ export function FileTree({
       root={root}
       rootName={rootName ?? root.split("/").pop() ?? "project"}
       active={active}
+      isGit={isGit}
       mentionTabId={mentionTabId}
       statusKey={statusKey}
     />

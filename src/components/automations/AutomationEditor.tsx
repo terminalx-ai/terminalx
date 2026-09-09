@@ -149,6 +149,12 @@ export function AutomationEditor({
     () => store.sessions.filter((session) => !session.archived && session.projectPath === input.projectPath),
     [store.sessions, input.projectPath],
   );
+  const isGit = store.projects.find((project) => project.path === input.projectPath)?.kind !== "folder";
+  useEffect(() => {
+    if (!isGit && (input.workspace !== "session" || input.issueTrigger)) {
+      setInput((current) => ({ ...current, workspace: "session", sessionId: null, issueTrigger: null, reuseSession: false }));
+    }
+  }, [isGit, input.workspace, input.issueTrigger]);
   const patch = (next: Partial<AutomationInput>) => setInput((current) => ({ ...current, ...next }));
   const patchSchedule = (next: Partial<AutomationSchedule>) => setInput((current) => ({ ...current, schedule: { ...current.schedule, ...next } }));
   const patchIssueTrigger = (next: Partial<AutomationIssueTrigger>) => setInput((current) => ({
@@ -331,7 +337,7 @@ export function AutomationEditor({
               aria-label="Automation trigger"
               value={input.issueTrigger ? "issues" : "schedule"}
               onChange={setTriggerKind}
-              options={[{ value: "schedule", label: "Schedule" }, { value: "issues", label: "GitHub issues" }]}
+              options={isGit ? [{ value: "schedule", label: "Schedule" }, { value: "issues", label: "GitHub issues" }] : [{ value: "schedule", label: "Schedule" }]}
             />
           </div>
 
@@ -434,7 +440,7 @@ export function AutomationEditor({
                 aria-label="Run workspace"
                 value={input.workspace}
                 onChange={setWorkspace}
-                options={[{ value: "newWorktree", label: "New worktree per run" }, { value: "session", label: "Existing session" }]}
+                options={isGit ? [{ value: "newWorktree", label: "New worktree per run" }, { value: "session", label: "Existing session" }] : [{ value: "session", label: "Existing session" }]}
               />
             </div>
           )}

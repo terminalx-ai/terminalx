@@ -35,12 +35,14 @@ function managedWorkspaceFor(session: SessionEntry) {
 
 /** The right panel reads the active tab's log for the changes range. */
 function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
+  const project = useSessionStore().projects.find((p) => p.path === session.projectPath);
   const log = useTabLog(session.id, tab.id);
   const live = tab.status === "in_progress" || tab.status === "waiting";
   const workspace = managedWorkspaceFor(session);
   return (
     <RightPanel
       cwd={session.cwd}
+      isGit={project?.kind !== "folder"}
       branch={session.branch ?? null}
       baseRef={session.baseRef}
       events={log.events}
@@ -292,6 +294,7 @@ export function SessionView({
         ) : (
           <RightPanel
             cwd={session.cwd}
+            isGit={project?.kind !== "folder"}
             branch={session.branch ?? null}
             workingTree
             sessionId={session.id}

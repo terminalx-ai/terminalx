@@ -59,10 +59,11 @@ export function IssuesView({
   const [status, setStatus] = useState<WorkStatus | null>(null);
   const [tick, setTick] = useState(0);
   const [automationPrefill, setAutomationPrefill] = useState<AutomationEditorPrefill | null>(null);
-  const useWorktree = controlledUseWorktree ?? localUseWorktree;
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
 
   const project = store.projects.find((p) => p.path === prefs.lastProject) ?? store.projects[0] ?? null;
+  const isGit = project?.kind !== "folder";
+  const useWorktree = isGit && (controlledUseWorktree ?? localUseWorktree);
   const harness = store.harnesses.find((h) => h.id === prefs.lastAgent) ?? store.harnesses[0] ?? null;
   const linkedIssueUrls = useMemo(
     () => new Set(store.sessions.flatMap((session) => session.issue?.url ? [session.issue.url] : [])),
@@ -89,7 +90,7 @@ export function IssuesView({
   }, [tick]);
   useEffect(() => {
     let live = true;
-    if (!project) return setRepo(null);
+    if (!project || project.kind === "folder") return setRepo(null);
     issuesApi.githubRepo(project.path).then((r) => live && setRepo(r)).catch(() => {});
     return () => {
       live = false;
@@ -97,7 +98,7 @@ export function IssuesView({
   }, [project]);
   useEffect(() => {
     let live = true;
-    if (!project) return setStatus(null);
+    if (!project || project.kind === "folder") return setStatus(null);
     setStatus(null);
     api.workStatus(project.path).then((s) => live && setStatus(s)).catch(() => {});
     return () => {
@@ -173,7 +174,7 @@ export function IssuesView({
         title: `${issue.identifier} ${issue.title}`.slice(0, 80),
         useWorktree,
         onMain: !useWorktree,
-        worktreeName: issueWorktreeName(issue.identifier, issue.title),
+        worktreeName: isGit ? issueWorktreeName(issue.identifier, issue.title) : null,
         issue: { provider: issue.provider, id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url },
         tab: {
           harness: harness.id,
@@ -190,7 +191,7 @@ export function IssuesView({
     } finally {
       setStarting(false);
     }
-  }, [detail, selected, project, harness, prefs, useWorktree, onCreated]);
+  }, [detail, selected, project, harness, prefs, useWorktree, isGit, onCreated]);
 
   const emptyReason = useMemo(() => {
     if (!project) return "Add a project to see its issues.";
@@ -418,7 +419,7 @@ export function IssuesView({
                 </DropdownMenu>
               </div>
               <div className="flex items-center gap-2">
-                <label className="flex min-w-0 items-center gap-2 text-[11px] text-faint">
+                {!isGit ? <span className="text-xs text-faint">In folder · no Git</span> : <label className="flex min-w-0 items-center gap-2 text-[11px] text-faint">
                   <Switch aria-label="Start issue in a new worktree" size="sm" checked={useWorktree} onCheckedChange={setUseWorktree} />
                   <span className={cn("flex min-w-0 items-center gap-1", !useWorktree && "text-warning")}>
                     <GitBranch className="size-3.5 shrink-0" />
@@ -433,7 +434,7 @@ export function IssuesView({
                       </>
                     )}
                   </span>
-                </label>
+                </label>}
                 {linkedSession && (
                   <Button variant="secondary" size="sm" onClick={() => selectSession(linkedSession.id)}>
                     Open session

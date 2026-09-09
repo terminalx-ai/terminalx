@@ -54,7 +54,7 @@ vi.mock("@/lib/prefs", () => ({
 vi.mock("@/lib/sessions", () => ({
   selectSession,
   useSessionStore: () => ({
-    projects: [{ path: "/repo", name: "Raccoon" }, { path: "/docs", name: "Docs" }],
+    projects: [{ path: "/repo", name: "Raccoon" }, { path: "/docs", name: "Docs", kind: "folder" }],
     harnesses: [{ id: "claude", name: "Claude Code", available: true }],
     sessions: [{ id: "session-7", title: "Automation run 7", projectPath: "/repo", archived: false }],
   }),
@@ -343,4 +343,19 @@ describe("automation permission mode", () => {
     fireEvent.click(screen.getByRole("switch", { name: "Enable automation" }));
     await waitFor(() => expect(updateAutomation).toHaveBeenLastCalledWith("automation-1", expect.objectContaining({ enabled: true, mode: "bypassPermissions" })));
   });
+});
+
+
+it("offers existing-session automations without Git actions for folders", async () => {
+  prefs.lastProject = "/docs";
+  try {
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: "New automation" }));
+    await screen.findByRole("heading", { name: "New automation" });
+    expect(screen.queryByRole("radio", { name: "New worktree per run" })).toBeNull();
+    expect(screen.queryByRole("radio", { name: "GitHub issues" })).toBeNull();
+    expect(await screen.findByLabelText("Session")).toBeTruthy();
+  } finally {
+    prefs.lastProject = "/repo";
+  }
 });
