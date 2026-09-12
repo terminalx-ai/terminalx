@@ -4,6 +4,7 @@ mod binpath;
 pub mod browser;
 pub mod cli;
 mod commands;
+mod cloud_workspaces;
 pub mod computer;
 mod control;
 #[cfg(windows)]
@@ -44,6 +45,7 @@ fn supports_deep_link_scheme(scheme: &str) -> bool {
 
 pub struct AppState {
     pub account: Arc<account::AccountManager>,
+    pub cloud_workspaces: Arc<cloud_workspaces::CloudWorkspaceService>,
     pub pairing: Arc<pairing::PairingManager>,
     pub host: Arc<harness::host::Host>,
     pub terminals: Arc<pty::Terminals>,
@@ -76,12 +78,14 @@ pub fn run() {
     let status_state = Arc::new(status::StatusState::default());
     let account = Arc::new(account::AccountManager::default());
     let pairing = Arc::new(pairing::PairingManager::new(account.clone()));
+    let cloud_workspaces = Arc::new(cloud_workspaces::CloudWorkspaceService::new(account.clone()));
     // The resource directory is only known once Tauri is up; the service
     // resolves the helper lazily, so it can be built before `setup`.
     let computer = Arc::new(computer::ComputerService::new(None));
     let browser = Arc::new(browser::BrowserRuntime::open().expect("open the browser stores under RACCOON_HOME"));
     let state = AppState {
         account: account.clone(),
+        cloud_workspaces,
         pairing: pairing.clone(),
         host: host.clone(),
         terminals: terminals.clone(),
@@ -196,6 +200,17 @@ pub fn run() {
             commands::account_status,
             commands::account_sign_in,
             commands::account_sign_out,
+            commands::cloud_providers,
+            commands::cloud_provider,
+            commands::cloud_workspace_setup,
+            commands::cloud_workspace_quote,
+            commands::cloud_workspace_create,
+            commands::cloud_workspaces,
+            commands::cloud_workspace_suspend,
+            commands::cloud_workspace_resume,
+            commands::cloud_workspace_release,
+            commands::cloud_workspace_operation,
+            commands::cloud_workspace_operation_cancel,
             commands::pairing_status,
             commands::pairing_generate,
             commands::pairing_revoke,
