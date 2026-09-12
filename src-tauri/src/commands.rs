@@ -77,6 +77,111 @@ pub async fn account_sign_out(
     tauri::async_runtime::spawn_blocking(move || account.sign_out(&app)).await.map_err(err)
 }
 
+// --------------------------------------------------------- cloud workspaces
+
+macro_rules! cloud_command {
+    ($state:expr, $risk:expr, $operation:expr) => {{
+        let service = $state.cloud_workspaces.clone();
+        tauri::async_runtime::spawn_blocking(move || $operation(service))
+            .await
+            .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::task_failed($risk))?
+    }};
+}
+
+#[tauri::command]
+pub async fn cloud_providers(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudProviderSummaryResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.providers())
+}
+
+#[tauri::command]
+pub async fn cloud_provider(
+    provider: crate::cloud_workspaces::CloudWorkspaceProviderId,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudProviderConnectionResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.provider(provider))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_setup(
+    provider: crate::cloud_workspaces::CloudWorkspaceProviderId,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSetup, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.setup(provider))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_quote(
+    input: crate::cloud_workspaces::CloudWorkspaceQuoteInput,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceQuote, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.quote(input))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_create(
+    input: crate::cloud_workspaces::CloudWorkspaceCreateInput,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Create, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.create(input))
+}
+
+#[tauri::command]
+pub async fn cloud_workspaces(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceList, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.workspaces())
+}
+
+async fn cloud_workspace_lifecycle(
+    state: tauri::State<'_, crate::AppState>,
+    workspace_id: String,
+    action: crate::cloud_workspaces::OperationAction,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.lifecycle(&workspace_id, action))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_suspend(
+    workspace_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_workspace_lifecycle(state, workspace_id, crate::cloud_workspaces::OperationAction::Suspend).await
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_resume(
+    workspace_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_workspace_lifecycle(state, workspace_id, crate::cloud_workspaces::OperationAction::Resume).await
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_release(
+    workspace_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_workspace_lifecycle(state, workspace_id, crate::cloud_workspaces::OperationAction::Delete).await
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_operation(
+    operation_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.operation(&operation_id))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_operation_cancel(
+    operation_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.cancel_operation(&operation_id))
+}
+
 #[tauri::command]
 pub fn pairing_status(state: tauri::State<'_, crate::AppState>) -> crate::pairing::PairingStatus {
     state.pairing.status()
