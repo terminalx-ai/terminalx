@@ -1,4 +1,4 @@
-import { memo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Brain, Check, ChevronRight, CircleAlert, Clock, RefreshCw, Shrink, Users, X } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -16,12 +16,14 @@ import { usePrefs } from "@/lib/prefs";
  */
 export const TurnBlock = memo(function TurnBlock({
   turn,
+  sessionId,
   cwd,
   stream,
   working,
   streamingTool,
 }: {
   turn: Turn;
+  sessionId: string;
   cwd?: string;
   stream: StreamBlock[];
   working: boolean;
@@ -36,6 +38,7 @@ export const TurnBlock = memo(function TurnBlock({
   const failed = turn.completed && turn.completed.status !== "ok";
   const streamText = stream.filter((s) => s.kind === "text" && s.text);
   const streamThinking = stream.filter((s) => s.kind === "thinking" && s.text && !s.done);
+  const linkContext = useMemo(() => cwd ? { sessionId, cwd } : undefined, [cwd, sessionId]);
 
   return (
     <div className="transcript-turn" data-turn={turn.key}>
@@ -71,15 +74,15 @@ export const TurnBlock = memo(function TurnBlock({
           </button>
           {expanded && (
             <div className="ml-1 mt-1 border-l border-hairline pl-2">
-              {turn.work.map((w) => (w.kind === "text" ? null : <WorkRow key={w.key} item={w} cwd={cwd} />))}
+              {turn.work.map((w) => (w.kind === "text" ? null : <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} />))}
             </div>
           )}
-          {turn.work.map((w) => (w.kind === "text" ? <WorkRow key={w.key} item={w} cwd={cwd} /> : null))}
+          {turn.work.map((w) => (w.kind === "text" ? <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} /> : null))}
         </div>
       ) : (
         <div className="mb-3 space-y-0.5">
           {turn.work.map((w) => (
-            <WorkRow key={w.key} item={w} cwd={cwd} />
+            <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} />
           ))}
         </div>
       )}
@@ -97,7 +100,7 @@ export const TurnBlock = memo(function TurnBlock({
         </div>
       )}
       {streamText.map((s) => (
-        <Markdown key={`${s.ref.messageId}:${s.ref.index}`} text={s.text} streaming className="mb-3" />
+        <Markdown key={`${s.ref.messageId}:${s.ref.index}`} text={s.text} streaming className="mb-3" linkContext={linkContext} />
       ))}
 
       {working && !streamText.length && !streamThinking.length && !streamingTool && (
@@ -159,10 +162,10 @@ export function previewFromPartialJson(partial: string): string {
   return "";
 }
 
-function WorkRow({ item, cwd }: { item: WorkItem; cwd?: string }) {
+function WorkRow({ item, cwd, linkContext }: { item: WorkItem; cwd?: string; linkContext?: { sessionId: string; cwd: string } }) {
   switch (item.kind) {
     case "text":
-      return <Markdown text={item.text} className="mb-3" />;
+      return <Markdown text={item.text} className="mb-3" linkContext={linkContext} />;
     case "reasoning":
       return <ReasoningRow text={item.text} />;
     case "tool":

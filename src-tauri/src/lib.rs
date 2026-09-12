@@ -286,6 +286,8 @@ pub fn run() {
             commands::read_text_file,
             commands::write_text_file,
             commands::file_mtime,
+            commands::inspect_local_path,
+            commands::open_local_path,
             commands::search_text,
             commands::replace_text,
             commands::settle_session,
