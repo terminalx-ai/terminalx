@@ -22,6 +22,8 @@ export function fileKind(rel: string): FileKind {
 export interface EditorEntry {
   id: string;
   sessionId: string;
+  /** Session workspace captured when the file was opened; browser links stay scoped here. */
+  workspaceRoot: string;
   /** Absolute project root the relative path hangs off. */
   root: string;
   rel: string;
@@ -78,14 +80,14 @@ let nonce = 0;
  * Open (or focus) a file in the session's pane. A jump target implies the
  * reader wants a line, which only source can show, so it forces source mode.
  */
-export function openFile(sessionId: string, root: string, rel: string, at?: { line: number; col?: number }) {
+export function openFile(sessionId: string, root: string, rel: string, at?: { line: number; col?: number }, workspaceRoot = root) {
   const existing = state.editors.find((e) => e.sessionId === sessionId && e.root === root && e.rel === rel);
   const kind = fileKind(rel);
   const jump = at && kind === "text" ? { ...at, nonce: ++nonce } : undefined;
   const collapsed = { ...state.collapsed, [sessionId]: false };
   if (existing) {
     set({
-      editors: state.editors.map((e) => (e.id === existing.id ? { ...e, jump: jump ?? e.jump, viewMode: jump ? "source" : e.viewMode } : e)),
+      editors: state.editors.map((e) => (e.id === existing.id ? { ...e, workspaceRoot, jump: jump ?? e.jump, viewMode: jump ? "source" : e.viewMode } : e)),
       active: { ...state.active, [sessionId]: existing.id },
       collapsed,
     });
@@ -95,6 +97,7 @@ export function openFile(sessionId: string, root: string, rel: string, at?: { li
   const entry: EditorEntry = {
     id,
     sessionId,
+    workspaceRoot,
     root,
     rel,
     name: fileName(rel),
@@ -105,6 +108,17 @@ export function openFile(sessionId: string, root: string, rel: string, at?: { li
   };
   set({ editors: [...state.editors, entry], active: { ...state.active, [sessionId]: id }, collapsed });
   return id;
+}
+
+/** Link routing in a Markdown preview uses the document parent for files but the captured session workspace for browser tabs. */
+export function editorLinkContext(entry: EditorEntry) {
+  const abs = `${entry.root}/${entry.rel}`;
+  const separator = Math.max(abs.lastIndexOf("/"), abs.lastIndexOf("\\"));
+  return {
+    sessionId: entry.sessionId,
+    cwd: entry.workspaceRoot,
+    basePath: separator > 0 ? abs.slice(0, separator) : entry.root,
+  };
 }
 
 async function confirmDiscard(names: string[]): Promise<boolean> {

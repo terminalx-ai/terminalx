@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { EditorState, StateEffect, StateField, type Extension } from "@codemirror/state";
 import {
@@ -24,7 +24,7 @@ import { api, fs } from "@/lib/api";
 import { registerLiveEditor } from "@/lib/editorViews";
 import { languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
 import { diffLines } from "@/lib/diff";
-import { clearJump, isMarkdown, setEditorDirty, setViewMode, type EditorEntry, type ViewMode } from "@/lib/editors";
+import { clearJump, editorLinkContext, isMarkdown, setEditorDirty, setViewMode, type EditorEntry, type ViewMode } from "@/lib/editors";
 import { keycaps } from "@/lib/hotkeys";
 import { cn } from "@/lib/cn";
 import { FindBar, findPanel, type FindPanelHandle } from "./FindPanel";
@@ -121,6 +121,7 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
   const abs = `${entry.root}/${entry.rel}`;
   const markdown = isMarkdown(entry.rel);
   const preview = markdown && entry.viewMode === "preview";
+  const linkContext = useMemo(() => editorLinkContext(entry), [entry]);
 
   const updateMarks = useCallback(() => {
     const view = viewRef.current;
@@ -324,7 +325,11 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
       {status === "loading" && <div className="p-4 text-sm text-muted-foreground">Loading…</div>}
       {preview && status === "ready" && (
         <div className="min-h-0 flex-1 overflow-auto scrollbar-thin px-6 py-4 select-text">
-          <Markdown text={docText} className="prose-chat" />
+          <Markdown
+            text={docText}
+            className="prose-chat"
+            linkContext={linkContext}
+          />
         </div>
       )}
       <div ref={host} className={cn("editor-pane min-h-0 flex-1 overflow-auto scrollbar-thin select-text", (status !== "ready" || preview) && "hidden")} />
