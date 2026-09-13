@@ -119,6 +119,8 @@ export const api = {
   accountStatus: () => invoke<AccountStatus>("account_status"),
   accountSignIn: () => invoke<AccountStatus>("account_sign_in"),
   accountSignOut: () => invoke<AccountStatus>("account_sign_out"),
+  organizationCreate: (name: string, idempotencyKey: string) =>
+    invoke<OrganizationSummary>("organization_create", { name, idempotencyKey }),
 
   // provider-aware Cloud Workspaces; authentication and Organization scope
   // are resolved natively, so account tokens never cross this boundary.
@@ -218,6 +220,12 @@ export const api = {
     invoke<CommitInfo[]>("log_commits", { cwd, range: range ?? null, limit: limit ?? 100 }),
 };
 
+export interface OrganizationSummary {
+  id: string;
+  name: string;
+  role: string;
+}
+
 export interface AccountIdentity {
   name: string | null;
   email: string;
@@ -270,6 +278,7 @@ export interface CloudProviderConnection {
   connectedAt: number | null;
   lastValidatedAt: number | null;
 }
+
 
 export interface CloudWorkspaceProviderSelection {
   sourceId: string;

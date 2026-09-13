@@ -200,6 +200,7 @@ pub fn run() {
             commands::account_status,
             commands::account_sign_in,
             commands::account_sign_out,
+            commands::organization_create,
             commands::cloud_providers,
             commands::cloud_provider,
             commands::cloud_workspace_setup,

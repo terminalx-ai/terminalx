@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Loader2, Pencil } from "lucide-react";
 import { AccountAvatar } from "@/components/account/AccountAvatar";
 import { Button } from "@/components/ui/button";
-import { signIn, signOut, useAccount } from "@/lib/account";
+import { refreshAccount, signIn, signOut, useAccount } from "@/lib/account";
 import { setPairingHostName, usePairing } from "@/lib/pairing";
+import { api, errorMessage, type CloudProviderSummary } from "@/lib/api";
 
 export function AccountTab() {
   const account = useAccount();
@@ -40,6 +41,7 @@ export function AccountTab() {
         <p className="text-xs leading-relaxed text-muted-foreground">
           Your TerminalX account is optional. The session refreshes automatically and its credentials are stored in macOS Keychain.
         </p>
+        <OrganizationOnboarding organizationName={identity.organization} accountEmail={identity.email} />
         {pairing.status.host && (
           <div className="rounded-lg border border-hairline px-3 py-3">
             <div className="text-xs font-medium">What this Mac shares</div>
@@ -134,4 +136,59 @@ export function AccountTab() {
       </div>
     </div>
   );
+}
+
+function OrganizationOnboarding({ organizationName, accountEmail }: { organizationName: string | null; accountEmail: string }) {
+  const [name, setName] = useState("");
+  const [providers, setProviders] = useState<CloudProviderSummary[]>([]);
+  const [provider, setProvider] = useState<CloudProviderSummary | null>(null);
+  const [consented, setConsented] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const createKey = useRef("");
+  useEffect(() => {
+    const storageKey = `terminalx.organization-create.${accountEmail}.${organizationName ?? "unselected"}`;
+    const existing = globalThis.localStorage?.getItem(storageKey);
+    const key = existing ?? (globalThis.crypto?.randomUUID?.() ?? `org-${Date.now()}-${Math.random()}`);
+    if (!existing) globalThis.localStorage?.setItem(storageKey, key);
+    createKey.current = key;
+  }, [accountEmail, organizationName]);
+
+  useEffect(() => {
+    if (!organizationName) return;
+    api.cloudProviders().then((result) => {
+      setProviders(result.providers);
+    }).catch((failure) => setError(errorMessage(failure)));
+  }, [organizationName]);
+
+  const create = async () => {
+    setBusy(true); setError(null);
+    try {
+      await api.organizationCreate(name.trim(), createKey.current);
+      await refreshAccount();
+      setName("");
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally { setBusy(false); }
+  };
+
+  if (!organizationName) {
+    return <div className="rounded-lg border border-hairline p-3">
+      <div className="text-sm font-medium">Create an organization</div>
+      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">Organization setup is incomplete. Create one to configure compute access; no machine is created by this step.</p>
+      <div className="mt-3 flex gap-2"><input aria-label="Organization name" className="h-8 min-w-0 flex-1 rounded-md border border-hairline bg-background px-2 text-xs" value={name} onChange={(event) => setName(event.target.value)} /><Button size="sm" disabled={busy || name.trim().length < 2} onClick={() => void create()}>{busy ? <Loader2 className="animate-spin" /> : "Create"}</Button></div>
+      {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+    </div>;
+  }
+
+  const connected = provider?.connection?.state === "connected";
+  return <div className="rounded-lg border border-hairline p-3">
+    <div className="text-sm font-medium">Compute setup</div>
+    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{connected ? "Compute connection validated. Choose a build or workspace action when you are ready; validation does not provision a machine." : "Setup incomplete — an organization administrator must validate a provider key before cloud workspaces are ready."}</p>
+    {providers.length > 0 && !connected && <>
+      <label className="mt-3 block text-xs text-muted-foreground">Provider<select aria-label="Provider" className="mt-1 h-8 w-full rounded-md border border-hairline bg-background px-2 text-xs" value={provider?.id ?? ""} onChange={(event) => setProvider(providers.find((item) => item.id === event.target.value) ?? null)}>{providers.map((item) => <option key={item.id} value={item.id}>{item.displayName}</option>)}</select></label>
+      {provider?.canManage ? <><p className="mt-3 text-[11px] text-muted-foreground">Secure native provider-key entry is not available in this build; no key is accepted or sent from this page.</p><label className="mt-2 flex items-start gap-2 text-[11px] text-muted-foreground"><input type="checkbox" checked={consented} onChange={(event) => setConsented(event.target.checked)} />I understand provider billing and organization use.</label><Button className="mt-3" size="sm" disabled>{busy ? <Loader2 className="animate-spin" /> : "Secure setup unavailable"}</Button></> : provider ? <p className="mt-3 text-xs text-muted-foreground">Only organization owners and administrators can manage provider connections.</p> : <p className="mt-3 text-xs text-muted-foreground">Select a provider to continue.</p>}
+    </>}
+    {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+  </div>;
 }

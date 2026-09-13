@@ -77,6 +77,19 @@ pub async fn account_sign_out(
     tauri::async_runtime::spawn_blocking(move || account.sign_out(&app)).await.map_err(err)
 }
 
+#[tauri::command]
+pub async fn organization_create(
+    name: String,
+    idempotency_key: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::account::OrganizationSummary> {
+    let account = state.account.clone();
+    tauri::async_runtime::spawn_blocking(move || account.create_organization(&name, &idempotency_key))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
 // --------------------------------------------------------- cloud workspaces
 
 macro_rules! cloud_command {

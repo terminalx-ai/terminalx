@@ -105,6 +105,21 @@ pub struct CloudProviderConnectionResponse {
     pub last_validated_at: Option<i64>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudProviderConnectInput {
+    pub secure_credential_ref: String,
+    pub disclosure: CloudProviderDisclosure,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudProviderDisclosure {
+    pub version: String,
+    pub provider_billing_accepted: bool,
+    pub organization_use_accepted: bool,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CloudProviderConnectionState {
@@ -643,6 +658,30 @@ impl CloudWorkspaceService {
             )?;
             ensure_connection(result, provider)
         })
+    }
+
+    pub fn connect(
+        &self,
+        _provider: CloudWorkspaceProviderId,
+        input: CloudProviderConnectInput,
+    ) -> Result<CloudProviderConnectionResponse, CloudWorkspaceClientError> {
+        if input.secure_credential_ref.trim().is_empty()
+            || input.disclosure.version.trim().is_empty()
+            || !input.disclosure.provider_billing_accepted
+            || !input.disclosure.organization_use_accepted
+        {
+            return Err(CloudWorkspaceClientError::local(
+                "cloud_workspace_request_invalid",
+                false,
+            ));
+        }
+        // A provider secret must be read by native secure input/keychain code.
+        // This client has no secure-input handoff yet; never send the opaque
+        // reference as if it were the credential itself.
+        return Err(CloudWorkspaceClientError::local(
+            "cloud_provider_secure_input_unavailable",
+            false,
+        ));
     }
 
     pub fn setup(
@@ -1736,5 +1775,25 @@ mod tests {
         assert!(!join_error.retryable);
         assert!(join_error.retry_with_same_idempotency_key);
         assert!(join_error.requires_original_account_context);
+    }
+
+    #[test]
+    fn secure_connect_never_treats_reference_as_provider_credential() {
+        let (account, service) = test_service("http://127.0.0.1:1");
+        let error = service
+            .connect(
+                CloudWorkspaceProviderId::Machine0,
+                CloudProviderConnectInput {
+                    secure_credential_ref: "keychain://cloud-provider/machine0".into(),
+                    disclosure: CloudProviderDisclosure {
+                        version: "cloud-provider-connections-2026-08-13".into(),
+                        provider_billing_accepted: true,
+                        organization_use_accepted: true,
+                    },
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "cloud_provider_secure_input_unavailable");
+        drop(account);
     }
 }
