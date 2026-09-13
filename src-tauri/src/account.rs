@@ -69,6 +69,7 @@ pub(crate) struct AccountContext {
     pub profile_id: String,
     pub organization_id: String,
     pub relay_entitled: bool,
+    pub generation: u64,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -156,6 +157,35 @@ enum CloudError {
 }
 
 impl AccountManager {
+    #[cfg(test)]
+    pub(crate) fn set_context_for_test(&self, context: Option<AccountContext>) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.loaded = true;
+        inner.generation = context.as_ref().map_or_else(
+            || inner.generation.wrapping_add(1),
+            |context| context.generation,
+        );
+        inner.session = context.map(|context| DesktopSession {
+            access_token: context.access_token,
+            refresh_token: "test-refresh".into(),
+            expires_at: 4_000_000_000_000,
+            cloud: CloudIdentity {
+                cloud_profile_id: context.profile_id,
+                user_id: context.user_id,
+                email: context.email,
+                display_name: Some(context.display_name),
+                active_org_id: Some(context.organization_id),
+                active_org_name: Some("Test Organization".into()),
+                linked_at: 1,
+            },
+            organizations: vec![],
+            capabilities: Capabilities {
+                flags: BTreeMap::new(),
+                refreshed_at: 1,
+            },
+        });
+    }
+
     pub fn configure(&self, app_identifier: &str) -> Result<()> {
         let wanted = format!("{app_identifier}.account");
         if let Some(current) = self.service.get() {
@@ -196,7 +226,22 @@ impl AccountManager {
             profile_id: session.cloud.cloud_profile_id.clone(),
             organization_id: session.cloud.active_org_id.clone().unwrap_or_default(),
             relay_entitled: session.capabilities.flags.get("relay.use") == Some(&true),
+            generation: inner.generation,
         })
+    }
+
+    /// Fence native service responses against sign-out or account replacement.
+    /// A request may finish after either event, but its Organization data must
+    /// never be returned to the webview in the new account generation.
+    pub(crate) fn is_current(&self, context: &AccountContext) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.generation == context.generation
+            && inner.session.as_ref().is_some_and(|session| {
+                session.cloud.user_id == context.user_id
+                    && session.cloud.cloud_profile_id == context.profile_id
+                    && session.cloud.active_org_id.as_deref()
+                        == Some(context.organization_id.as_str())
+            })
     }
 
     pub fn begin_sign_in(self: &Arc<Self>, app: &AppHandle) -> Result<AccountStatus> {
@@ -840,5 +885,64 @@ mod tests {
         assert!(!should_refresh(1_000_061_000, 1_000_000_000));
         assert!(should_refresh(1_000_060_000, 1_000_000_000));
         assert!(should_refresh(999_999_999, 1_000_000_000));
+    }
+
+    #[test]
+    fn rejects_service_completion_after_account_or_organization_changes() {
+        let session = || {
+            serde_json::from_value::<DesktopSession>(json!({
+                "accessToken": "access-one",
+                "refreshToken": "refresh-one",
+                "expiresAt": 1_900_000_000_000_i64,
+                "cloud": {
+                    "cloudProfileId": "profile-one",
+                    "userId": "user-one",
+                    "email": "owner@example.com",
+                    "activeOrgId": "org-one",
+                    "linkedAt": 1_700_000_000_000_i64
+                },
+                "organizations": [{ "orgId": "org-one", "name": "One", "role": "owner" }],
+                "capabilities": { "flags": {}, "refreshedAt": 1_700_000_000_000_i64 }
+            }))
+            .unwrap()
+        };
+        let manager = AccountManager::default();
+        {
+            let mut inner = manager.inner.lock().unwrap();
+            inner.loaded = true;
+            inner.generation = 9;
+            inner.session = Some(session());
+        }
+        let request_context = manager.context().unwrap();
+        assert!(manager.is_current(&request_context));
+
+        manager.inner.lock().unwrap().generation = 10;
+        assert!(!manager.is_current(&request_context));
+
+        {
+            let mut inner = manager.inner.lock().unwrap();
+            inner.generation = request_context.generation;
+            inner.session = Some(session());
+            inner.session.as_mut().unwrap().cloud.active_org_id = Some("org-two".into());
+        }
+        assert!(!manager.is_current(&request_context));
+
+        {
+            let mut inner = manager.inner.lock().unwrap();
+            inner.session = Some(session());
+            inner.session.as_mut().unwrap().access_token = "refreshed-access".into();
+        }
+        assert!(manager.is_current(&request_context));
+
+        manager
+            .inner
+            .lock()
+            .unwrap()
+            .session
+            .as_mut()
+            .unwrap()
+            .cloud
+            .cloud_profile_id = "profile-two".into();
+        assert!(!manager.is_current(&request_context));
     }
 }
