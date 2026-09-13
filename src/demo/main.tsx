@@ -84,6 +84,7 @@ function Demo() {
           </header>
           <section className="flex min-h-0 flex-1 flex-col">
             <Chat
+              sessionId="demo-session"
               transcript={transcript}
               stream={stream}
               cwd="/tmp/repo"

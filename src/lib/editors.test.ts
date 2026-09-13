@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { closeAllEditors, closeEditor, fileKind, getEditors, openFile, setEditorDirty, setPaneCollapsed, setViewMode, toggleViewMode } from "./editors";
+import { closeAllEditors, closeEditor, editorLinkContext, fileKind, getEditors, openFile, setEditorDirty, setPaneCollapsed, setViewMode, toggleViewMode } from "./editors";
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn() }));
 
 afterEach(async () => {
@@ -56,5 +56,12 @@ describe("file opening boundary", () => {
     await closeEditor(svg);
     expect(getEditors().editors.find((e) => e.id === svg)?.dirty).toBe(true);
     expect(ask).toHaveBeenCalledOnce();
+  });
+
+  it("stores the originating workspace separately from an outside file root", () => {
+    const id = openFile("session", "/tmp", "Outside.md", undefined, "/workspace");
+    const entry = getEditors().editors.find((candidate) => candidate.id === id)!;
+    expect(entry).toMatchObject({ root: "/tmp", rel: "Outside.md", workspaceRoot: "/workspace" });
+    expect(editorLinkContext(entry)).toEqual({ sessionId: "session", cwd: "/workspace", basePath: "/tmp" });
   });
 });

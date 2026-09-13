@@ -613,6 +613,15 @@ export interface MediaFile {
   mtimeMs: number;
 }
 
+export interface LocalPathInfo {
+  path: string;
+  root: string;
+  rel: string;
+  kind: "file" | "directory";
+  /** A conservative content sniff; known media extensions are classified separately. */
+  text: boolean;
+}
+
 export const fs = {
   openMedia: (root: string, rel: string) => invoke<MediaFile>("open_media_file", { root, rel }),
   closeMedia: (token: string) => invoke<void>("close_media_file", { token }),
@@ -620,6 +629,9 @@ export const fs = {
   readText: (path: string) => invoke<TextFile>("read_text_file", { path }),
   writeText: (path: string, content: string) => invoke<number>("write_text_file", { path, content }),
   mtime: (path: string) => invoke<number | null>("file_mtime", { path }),
+  inspectPath: (base: string, path: string) => invoke<LocalPathInfo>("inspect_local_path", { base, path }),
+  /** Native default-app opening, restricted to existing local files/folders. */
+  openPath: (path: string) => invoke<void>("open_local_path", { path }),
   searchText: (root: string, query: string, regex: boolean, caseSensitive: boolean, limit = 500, replacement?: string) =>
     invoke<TextSearch>("search_text", { root, query, regex, caseSensitive, limit, replacement: replacement ?? null }),
   /**

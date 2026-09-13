@@ -1,13 +1,17 @@
 import { memo, useMemo } from "react";
-import { Streamdown } from "streamdown";
+import { defaultRemarkPlugins, Streamdown } from "streamdown";
 import { createCodePlugin } from "@streamdown/code";
 import "streamdown/styles.css";
 import { useTheme } from "@/lib/theme";
 import { chunkStream } from "@/lib/markdownChunks";
+import { chatLinkComponent } from "./ChatLink";
+import { routeMarkdownLinks, type ChatLinkContext } from "@/lib/chatLinks";
 
 const codePlugin = createCodePlugin({ themes: ["github-light", "github-dark"] });
+const routedRemarkPlugins = [...Object.values(defaultRemarkPlugins), routeMarkdownLinks];
 
-const Block = memo(function Block({ text, streaming, mode }: { text: string; streaming: boolean; mode: string }) {
+const Block = memo(function Block({ text, streaming, mode, linkContext }: { text: string; streaming: boolean; mode: string; linkContext?: ChatLinkContext }) {
+  const components = useMemo(() => (linkContext ? { a: chatLinkComponent(linkContext) } : undefined), [linkContext]);
   return (
     <div className="prose-chat select-text" data-mode={mode}>
       <Streamdown
@@ -17,6 +21,8 @@ const Block = memo(function Block({ text, streaming, mode }: { text: string; str
         plugins={{ code: codePlugin }}
         shikiTheme={["github-light", "github-dark"]}
         controls={{ code: true, table: true, mermaid: false }}
+        components={components}
+        remarkPlugins={linkContext ? routedRemarkPlugins : undefined}
         linkSafety={{ enabled: false }}
         codeBlockMaxHeight="24rem"
       >
@@ -28,23 +34,26 @@ const Block = memo(function Block({ text, streaming, mode }: { text: string; str
 
 /**
  * Assistant prose. Streaming text keeps incomplete markdown parseable; the
- * committed block re-renders in static mode. Links open outside the app.
+ * committed block re-renders in static mode. Routed links retain their
+ * originating session and workspace context.
  */
 export const Markdown = memo(function Markdown({
   text,
   streaming,
   className,
+  linkContext,
 }: {
   text: string;
   streaming?: boolean;
   className?: string;
+  linkContext?: ChatLinkContext;
 }) {
   const { resolvedMode } = useTheme();
   const chunks = useMemo(() => (streaming ? chunkStream(text) : [text]), [text, streaming]);
   if (chunks.length === 1) {
     return (
       <div className={className}>
-        <Block text={text} streaming={!!streaming} mode={resolvedMode} />
+        <Block text={text} streaming={!!streaming} mode={resolvedMode} linkContext={linkContext} />
       </div>
     );
   }
@@ -54,7 +63,7 @@ export const Markdown = memo(function Markdown({
   return (
     <div className={className}>
       {chunks.map((c, i) => (
-        <Block key={i} text={c} streaming={i === last} mode={resolvedMode} />
+        <Block key={i} text={c} streaming={i === last} mode={resolvedMode} linkContext={linkContext} />
       ))}
     </div>
   );

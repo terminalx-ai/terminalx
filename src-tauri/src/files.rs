@@ -185,6 +185,23 @@ pub struct TextFile {
     pub truncated: bool,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalPathInfo {
+    pub path: String,
+    pub root: String,
+    pub rel: String,
+    pub kind: LocalPathKind,
+    pub text: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LocalPathKind {
+    File,
+    Directory,
+}
+
 const MAX_TEXT: u64 = 4 * 1024 * 1024;
 
 fn mtime_ms(meta: &std::fs::Metadata) -> u64 {
@@ -220,6 +237,68 @@ pub fn write_text(path: &Path, content: &str) -> Result<u64> {
 
 pub fn stat_mtime(path: &Path) -> Option<u64> {
     std::fs::metadata(path).ok().map(|m| mtime_ms(&m))
+}
+
+/// Resolve a link only after a local webview activation. This deliberately is
+/// not part of ACP or paired RPC: it returns metadata, never file contents.
+pub fn inspect_local_path(base: &Path, requested: &Path) -> Result<LocalPathInfo> {
+    let candidate = if requested.is_absolute() { requested.to_path_buf() } else { base.join(requested) };
+    let path = existing_local_path(&candidate)?;
+    let metadata = path.metadata()?;
+    let kind = if metadata.is_dir() {
+        LocalPathKind::Directory
+    } else if metadata.is_file() {
+        LocalPathKind::File
+    } else {
+        anyhow::bail!("Destination {} is not a regular file or folder", path.display());
+    };
+
+    let canonical_base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    let (root, rel) = if let Ok(relative) = path.strip_prefix(&canonical_base) {
+        (canonical_base, relative.to_path_buf())
+    } else if path.parent().is_none() {
+        // Filesystem roots are valid folder destinations even though they do
+        // not have a parent from which to construct an editor-relative path.
+        (path.clone(), PathBuf::new())
+    } else {
+        let parent = path.parent().expect("filesystem roots handled above");
+        (parent.to_path_buf(), path.file_name().map(PathBuf::from).unwrap_or_default())
+    };
+    let text = matches!(&kind, LocalPathKind::File) && {
+        use std::io::Read;
+        let mut sample = [0_u8; 8192];
+        std::fs::File::open(&path)
+            .and_then(|mut file| file.read(&mut sample))
+            .map(|read| {
+                let bytes = &sample[..read];
+                !bytes.contains(&0)
+                    && std::str::from_utf8(bytes)
+                        .map(|_| true)
+                        // A multibyte source character may cross the sample boundary.
+                        .unwrap_or_else(|error| {
+                            error.error_len().is_none() && read == sample.len() && metadata.len() > read as u64
+                        })
+            })
+            .unwrap_or(false)
+    };
+    Ok(LocalPathInfo {
+        path: path.to_string_lossy().into_owned(),
+        root: root.to_string_lossy().into_owned(),
+        rel: rel.to_string_lossy().replace('\\', "/"),
+        kind,
+        text,
+    })
+}
+
+/// The native system opener accepts only a canonical target that currently
+/// exists and is a regular file or folder. It never accepts a program name.
+pub fn existing_local_path(candidate: &Path) -> Result<PathBuf> {
+    let path = candidate
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!("Destination {} is unavailable: {error}", candidate.display()))?;
+    let metadata = path.metadata()?;
+    anyhow::ensure!(metadata.is_file() || metadata.is_dir(), "Destination {} is not a regular file or folder", path.display());
+    Ok(path)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -576,6 +655,44 @@ mod tree_tests {
         assert!(s.capped && s.hits.len() == 1);
         let s = search_text(p, "f.nd.?me", true, false, 100, None).unwrap();
         assert_eq!(s.files, 2);
+    }
+
+    #[test]
+    fn link_paths_resolve_inside_and_outside_the_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+        std::fs::write(workspace.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(outside.path().join("report.pdf"), b"%PDF\0binary").unwrap();
+
+        let inside = inspect_local_path(workspace.path(), Path::new("src/main.rs")).unwrap();
+        assert_eq!(inside.kind, LocalPathKind::File);
+        assert_eq!(inside.root, workspace.path().canonicalize().unwrap().to_string_lossy());
+        assert_eq!(inside.rel, "src/main.rs");
+        assert!(inside.text);
+
+        let external = inspect_local_path(workspace.path(), &outside.path().join("report.pdf")).unwrap();
+        assert_eq!(external.root, outside.path().canonicalize().unwrap().to_string_lossy());
+        assert_eq!(external.rel, "report.pdf");
+        assert!(!external.text);
+        assert_eq!(inspect_local_path(workspace.path(), outside.path()).unwrap().kind, LocalPathKind::Directory);
+        let filesystem_root = workspace.path().canonicalize().unwrap().ancestors().last().unwrap().to_path_buf();
+        let root_folder = inspect_local_path(workspace.path(), &filesystem_root).unwrap();
+        assert_eq!(root_folder.kind, LocalPathKind::Directory);
+        assert_eq!(root_folder.path, filesystem_root.to_string_lossy());
+        assert!(inspect_local_path(workspace.path(), Path::new("missing.txt")).unwrap_err().to_string().contains("unavailable"));
+
+        let mut boundary = vec![b'a'; 8191];
+        boundary.extend_from_slice("é".as_bytes());
+        std::fs::write(workspace.path().join("boundary.txt"), boundary).unwrap();
+        assert!(inspect_local_path(workspace.path(), Path::new("boundary.txt")).unwrap().text);
+
+        std::fs::write(workspace.path().join("invalid.txt"), [b'a', 0xc3, b'(']).unwrap();
+        assert!(!inspect_local_path(workspace.path(), Path::new("invalid.txt")).unwrap().text);
+        std::fs::write(workspace.path().join("incomplete.txt"), [b'a', 0xc3]).unwrap();
+        assert!(!inspect_local_path(workspace.path(), Path::new("incomplete.txt")).unwrap().text);
+        assert_eq!(existing_local_path(&workspace.path().join("src/main.rs")).unwrap(), workspace.path().canonicalize().unwrap().join("src/main.rs"));
+        assert!(existing_local_path(&workspace.path().join("not-there")).is_err());
     }
 
     #[test]

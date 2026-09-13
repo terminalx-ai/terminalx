@@ -58,6 +58,10 @@ export function MediaPane({ entry, visible }: { entry: EditorEntry; visible: boo
     setActionError(null);
     void revealItemInDir(abs).catch((e) => setActionError(`Could not reveal ${entry.name}: ${String(e)}`));
   };
+  const openExternal = () => {
+    setActionError(null);
+    void fs.openPath(abs).catch((e) => setActionError(`Could not open ${entry.name} with the default application: ${String(e)}`));
+  };
   return (
     <div ref={pane} tabIndex={-1} className="flex h-full min-h-0 flex-col outline-none" onKeyDownCapture={(e) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); e.stopPropagation(); }
@@ -77,6 +81,7 @@ export function MediaPane({ entry, visible }: { entry: EditorEntry; visible: boo
         <p>Cannot preview {entry.name}.</p><p>{error}</p>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={reload}>Retry</Button>
+          <Button variant="outline" size="sm" onClick={openExternal}>Open with default application</Button>
           <Button variant="outline" size="sm" onClick={reveal}>Reveal file</Button>
         </div>
       </div> : media ? entry.kind === "image" ? (

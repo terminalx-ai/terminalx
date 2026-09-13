@@ -6,8 +6,8 @@ import { liveEditorsFor } from "@/lib/editorViews";
 import { getEditors, openFile, closeAllEditors } from "@/lib/editors";
 import { MediaPane } from "./MediaPane";
 
-vi.mock("@/lib/api", () => ({ fs: { openMedia: vi.fn(), closeMedia: vi.fn(), mtime: vi.fn(), readText: vi.fn(), writeText: vi.fn() } }));
-vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn().mockResolvedValue(undefined) }));
+vi.mock("@/lib/api", () => ({ fs: { openMedia: vi.fn(), closeMedia: vi.fn(), mtime: vi.fn(), readText: vi.fn(), writeText: vi.fn(), openPath: vi.fn() } }));
+vi.mock("@tauri-apps/plugin-opener", () => ({ openPath: vi.fn().mockResolvedValue(undefined), revealItemInDir: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn() }));
 
 beforeEach(() => {
@@ -15,6 +15,7 @@ beforeEach(() => {
   vi.mocked(fs.openMedia).mockResolvedValue({ token: "grant", url: "http://127.0.0.1:1234/grant", mtimeMs: 1 });
   vi.mocked(fs.closeMedia).mockResolvedValue(undefined);
   vi.mocked(fs.mtime).mockResolvedValue(1);
+  vi.mocked(fs.openPath).mockResolvedValue(undefined);
   vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
   vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
 });
@@ -82,8 +83,20 @@ describe("media surfaces", () => {
     fireEvent.error(player);
     expect(screen.getByRole("alert").textContent).toContain("broken.mp4");
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open with default application" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Open with default application" }));
+    expect(fs.openPath).toHaveBeenCalledWith("/workspace/broken.mp4");
     expect(screen.getAllByRole("button", { name: "Reveal file" })).toHaveLength(2);
     expect(player.hasAttribute("src")).toBe(false);
+  });
+
+  it("reports a default-application fallback failure", async () => {
+    vi.mocked(fs.openPath).mockRejectedValueOnce(new Error("No registered handler"));
+    const { container } = render(<MediaPane entry={entry("broken.mp4")} visible />);
+    await waitFor(() => expect(container.querySelector("video")).not.toBeNull());
+    fireEvent.error(container.querySelector("video")!);
+    fireEvent.click(screen.getByRole("button", { name: "Open with default application" }));
+    await waitFor(() => expect(screen.getAllByRole("alert").some((alert) => alert.textContent?.includes("No registered handler"))).toBe(true));
   });
 
   it("reports missing files and reloads externally changed files with a fresh grant", async () => {

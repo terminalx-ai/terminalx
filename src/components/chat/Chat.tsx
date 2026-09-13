@@ -23,6 +23,7 @@ const MOUNT_STEP = 12;
  * anchoring scrollTop so the reader's view never moves.
  */
 export function Chat({
+  sessionId,
   transcript,
   stream,
   cwd,
@@ -32,6 +33,7 @@ export function Chat({
   answering,
   footer,
 }: {
+  sessionId: string;
   transcript: Transcript;
   stream: StreamBlock[];
   cwd?: string;
@@ -148,6 +150,7 @@ export function Chat({
                 key={t.key}
                 turn={t}
                 cwd={cwd}
+                sessionId={sessionId}
                 stream={isLast && live ? stream : []}
                 working={isLast && working && !transcript.pendingAsks.length && !transcript.compacting}
                 streamingTool={isLast && live ? streamingTool : undefined}

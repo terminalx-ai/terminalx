@@ -126,6 +126,7 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
 
   const chat = (
     <Chat
+      sessionId={session.id}
       transcript={transcript}
       stream={log.stream}
       cwd={session.cwd}

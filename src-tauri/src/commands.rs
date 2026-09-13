@@ -1300,6 +1300,26 @@ pub fn file_mtime(path: String) -> Option<u64> {
 }
 
 #[tauri::command]
+pub async fn inspect_local_path(base: String, path: String) -> CmdResult<crate::files::LocalPathInfo> {
+    tauri::async_runtime::spawn_blocking(move || crate::files::inspect_local_path(Path::new(&base), Path::new(&path)))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+/// Local-main-window only (not ACP/paired RPC): open an existing filesystem
+/// object with the OS default application, with no caller-selected program.
+#[tauri::command]
+pub async fn open_local_path(app: AppHandle, path: String) -> CmdResult<()> {
+    let path = tauri::async_runtime::spawn_blocking(move || crate::files::existing_local_path(Path::new(&path)))
+        .await
+        .map_err(err)?
+        .map_err(err)?;
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_path(path.to_string_lossy(), None::<&str>).map_err(err)
+}
+
+#[tauri::command]
 pub async fn search_text(
     root: String,
     query: String,
