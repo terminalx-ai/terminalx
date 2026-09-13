@@ -9,7 +9,7 @@ Validation performed during this review:
 - `python3 native/computer-use-linux/runtime_render_test.py` — 8 tests passed.
 - `python3 native/computer-use-linux/launcher_test.py` — 6 tests passed.
 - `pnpm build:computer-macos` — completed on macOS (the expected Linux no-op is enforced in CI).
-- `pnpm build` could not run because this checkout has no installed `node_modules` (`tsc: command not found`).
-- Local `cargo check --all-targets` reached dependency compilation but was blocked by the host's malformed macOS SDK `libSystem.tbd`; this is an environment/toolchain issue and does not indicate a Linux compatibility defect.
+- `pnpm install --frozen-lockfile` restored the workspace dependencies, after which `pnpm build` succeeded and all 404 Vitest tests passed.
+- Local `cargo check --all-targets` succeeds when `SDKROOT` is set to Xcode's SDK (`/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk`). The default `xcrun` SDK path pointed at a malformed Command Line Tools SDK; this was a host configuration issue, not a project defect.
 
 No code changes are required for PRO-12. A real Linux desktop build remains covered by the existing Ubuntu CI job.
