@@ -1,5 +1,36 @@
 # TerminalX changelog
 
+## 0.2.2
+
+Open ordinary folders as projects and follow chat links directly into the
+workspace browser, editor or media viewer.
+
+### Folder projects
+
+- Open a folder without initializing Git. Agent sessions and terminals run
+  in the selected directory, with files and editing available. Folder
+  projects and their sessions survive restarts. (#136)
+- Git-only actions are hidden for folder projects across workspace controls,
+  issues, automations and the command palette. Existing Git projects retain
+  their branch and worktree behavior. (#138)
+
+### Chat links
+
+- Web links open in the originating workspace browser. Text and Markdown
+  files open in the editor, images in the media viewer, and other files and
+  folders through native handlers. Relative paths, encoded filenames and
+  line/column references keep their intended destination. (#139)
+- Link context menus offer open, reveal and copy actions. Missing files,
+  unsupported schemes and media failures display useful errors. (#140)
+
+### Foundation and development
+
+- Add the native Cloud Workspace provider client for authenticated provider
+  discovery, setup, quotes, creation and lifecycle operations. Cloud
+  Workspace setup and creation UI are still under development. (#141)
+- Add an iOS Simulator helper and pairing/keychain troubleshooting notes.
+  (#133)
+
 ## 0.2.1
 
 Agents can now browse the web and operate desktop apps, conversations can
