@@ -105,7 +105,12 @@ function ActivityContents({ activity }: { activity: AppStats }) {
         <p className="mt-2 px-1 text-[11px] leading-relaxed text-faint">
           Earlier activity is recovered from surviving local history. Deleted history and unrecorded work cannot be fully reconstructed.
         </p>
-        {activity.accountingError && <p role="alert" className="mt-3 px-1 text-xs text-destructive">{activity.accountingError}</p>}
+        {activity.accountingError && (
+          <div role="alert" className="mt-3 flex max-w-2xl flex-wrap items-center gap-2 px-1 text-xs text-destructive">
+            <span>{activity.accountingError}</span>
+            <Button variant="outline" size="sm" onClick={() => void statsUsageStore.refresh()}>Retry</Button>
+          </div>
+        )}
 
     </>
   );
