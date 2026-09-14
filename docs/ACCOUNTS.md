@@ -131,7 +131,7 @@ and `apps/api/docs/account-bound-host-pairing.md` § “Security boundary” and
 The Rust host creates one persistent Curve25519 E2EE keypair and uses it for the
 single runtime listener shared by direct and relay transports. It does not make
 a key or listener per share. The 32-byte private key is stored in macOS
-Keychain under the app's pairing service and never enters `$RACCOON_HOME`; the
+Keychain under the app's pairing service and never enters `$TERMINALX_HOME`; the
 public key is safe to publish. The key is created lazily on the first sign-in or
 when the user explicitly creates an account-free QR/code pairing.
 

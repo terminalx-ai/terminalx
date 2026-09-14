@@ -268,7 +268,7 @@ no activity-log route; relay traffic is forwarded by
 `apps/relay/src/cell/cell-server.ts` without application inspection.
 
 The Rust host appends owner-only JSON Lines to
-`$RACCOON_HOME/sessions/<session-id>/activity.jsonl`. Records contain timestamp,
+`$TERMINALX_HOME/sessions/<session-id>/activity.jsonl`. Records contain timestamp,
 verified actor id, surface/device id, action, tab id when relevant, outcome,
 reason code, and input/output byte counts. They never contain prompt text, note
 text, agent output, terminal output, secrets, tokens, paths, environment values,

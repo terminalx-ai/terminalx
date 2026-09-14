@@ -36,11 +36,11 @@ identifier and Dock icon), so it can sit beside an installed release without
 either one clobbering the other's macOS permission grants.
 
 Both builds read the same store at `~/.raccoon`. To keep your development
-sessions, projects and settings away from your real ones, point `RACCOON_HOME`
+sessions, projects and settings away from your real ones, point `TERMINALX_HOME`
 somewhere else:
 
 ```sh
-RACCOON_HOME=~/.raccoon-dev pnpm tauri:dev
+TERMINALX_HOME=~/.raccoon-dev pnpm tauri:dev
 ```
 
 ## The four checks

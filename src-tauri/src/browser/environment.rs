@@ -8,7 +8,7 @@
 //!
 //! - `AGENT_BROWSER_SOCKET_DIR`: a private, owner-only directory derived from
 //!   this app's data dir. Unix socket paths are capped at 104 bytes, so it
-//!   lives under `/tmp` rather than under `RACCOON_HOME`, and its name is a
+//!   lives under `/tmp` rather than under `TERMINALX_HOME`, and its name is a
 //!   hash of that home so two homes never see each other's daemons. Owning
 //!   the directory is what makes `session list` a safe enumeration for the
 //!   orphan sweep.

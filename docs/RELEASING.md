@@ -52,11 +52,11 @@ versa. Anything else macOS scopes per identifier (saved window state, launch
 services registration) is likewise separate.
 
 What the identifier does *not* move is TerminalX's own data. The store still
-lives in `~/.raccoon` for both builds, and `RACCOON_HOME` is still the only
+lives in `~/.raccoon` for both builds, and `TERMINALX_HOME` is still the only
 thing that points it elsewhere:
 
 ```sh
-RACCOON_HOME=~/.raccoon-dev pnpm tauri:dev
+TERMINALX_HOME=~/.raccoon-dev pnpm tauri:dev
 ```
 
 Two notes on the mechanics:

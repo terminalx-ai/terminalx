@@ -24,11 +24,18 @@ static WRITE_LOCK: Mutex<()> = Mutex::new(());
 /// `~/.raccoon`, created on first use with owner-only permissions so the
 /// transcripts and the orchestration socket in it are private to this user.
 pub fn root() -> Result<PathBuf> {
-    if let Ok(p) = std::env::var("RACCOON_HOME") {
+    if let Some(p) = state_home_env() {
         return ensure_dir(PathBuf::from(p));
     }
     let home = dirs::home_dir().context("no home directory")?;
     ensure_dir(home.join(".raccoon"))
+}
+
+
+/// Resolve the state directory. TERMINALX_HOME is canonical; RACCOON_HOME is
+/// accepted during migration when the canonical variable is unset.
+pub fn state_home_env() -> Option<String> {
+    std::env::var("TERMINALX_HOME").ok().or_else(|| std::env::var("RACCOON_HOME").ok())
 }
 
 pub fn ensure_dir(p: PathBuf) -> Result<PathBuf> {
@@ -188,7 +195,7 @@ pub(crate) fn temp_home() -> TempHome {
     static LOCK: Mutex<()> = Mutex::new(());
     let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
-    std::env::set_var("RACCOON_HOME", dir.path());
+    std::env::set_var("TERMINALX_HOME", dir.path());
     TempHome { _dir: dir, _guard: guard }
 }
 

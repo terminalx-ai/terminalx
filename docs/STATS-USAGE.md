@@ -38,7 +38,7 @@ recomputes the local-day cutoff even when all transcript projections are reused.
 
 ## Persistence and scope
 
-`stats-usage-snapshot.json` lives under the active `RACCOON_HOME`. It contains only
+`stats-usage-snapshot.json` lives under the active `TERMINALX_HOME`. It contains only
 display aggregates plus the display calculation schema, scanner schema, and source
 namespace (canonical app data root, user home, and predecessor data root). Worktree
 membership is rediscovered during refresh: a saved result describes membership at

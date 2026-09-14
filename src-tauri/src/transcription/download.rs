@@ -174,7 +174,7 @@ mod tests {
     #[ignore]
     fn downloads_verifies_and_loads_the_smallest_model() {
         let home = tempfile::tempdir().unwrap();
-        std::env::set_var("RACCOON_HOME", home.path());
+        std::env::set_var("TERMINALX_HOME", home.path());
         let spec = catalog::find("canary-180m-flash").unwrap();
         let cancel = AtomicBool::new(false);
         let seen = Mutex::new(0u64);
