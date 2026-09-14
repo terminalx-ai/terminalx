@@ -165,8 +165,23 @@ pub fn run() {
             }
             std::thread::spawn(|| {
                 if let Err(error) = github::recover_workspace_prs() {
-                    log::warn!("recover workspace PR history: {error:#}");
-                    store::activity::report_error(format!("Workspace PR recovery is incomplete; discovery will retry on restart or workspace refresh: {error:#}"));
+                    let detail = format!("{error:#}").to_lowercase();
+                    let category = if detail.contains("auth") || detail.contains("login") || detail.contains("credential") {
+                        "credentials"
+                    } else if detail.contains("rate limit") {
+                        "rate_limit"
+                    } else {
+                        "connection"
+                    };
+                    log::warn!("recover workspace PR history failed (category={category}; workspace details omitted)");
+                    let message = if category == "credentials" {
+                        "GitHub credentials need attention before pull-request data can be refreshed."
+                    } else if category == "rate_limit" {
+                        "GitHub rate limits prevented pull-request data from refreshing. We’ll retry on restart or workspace refresh."
+                    } else {
+                        "Some pull-request data couldn’t be refreshed because GitHub is unreachable. We’ll retry on restart or workspace refresh."
+                    };
+                    store::activity::report_error(message.into());
                 }
             });
             let exited = manager.clone();
