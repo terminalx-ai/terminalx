@@ -21,7 +21,7 @@ export function AccountSidebarEntry({ onOpenAccount }: { onOpenAccount: () => vo
           <span className="block truncate">{identity.name ?? identity.email}</span>
           <span className="mt-0.5 flex items-center gap-1 text-[10px] font-normal text-faint">
             <span className={pairing.status.relay.phase === "connected" ? "size-1.5 rounded-full bg-add" : "size-1.5 rounded-full bg-faint"} />
-            {pairing.status.relay.phase === "connected" ? "Relay connected" : pairing.status.relay.phase === "connecting" ? "Relay connecting" : "Relay offline"}
+            {pairing.status.relay.phase === "connected" ? "Relay connected" : pairing.status.relay.phase === "connecting" ? "Relay connecting" : pairing.status.relay.phase === "offline" ? "Relay unavailable" : "Relay not configured"}
           </span>
         </span>
       </Button>

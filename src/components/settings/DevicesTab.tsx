@@ -31,10 +31,10 @@ function lastSeen(device: PairedDevice): string {
 }
 
 function relayStatus(phase: "off" | "connecting" | "connected" | "offline"): string {
-  if (phase === "connected") return "Ready";
+  if (phase === "connected") return "Connected";
   if (phase === "connecting") return "Connecting";
-  if (phase === "offline") return "Offline";
-  return "Unavailable";
+  if (phase === "offline") return "Unavailable";
+  return "Not configured";
 }
 
 function ConnectionOption({
@@ -115,7 +115,8 @@ export function DevicesTab() {
   };
 
   const signedIn = account.status.state === "signed-in";
-  const canGenerate = connectionMode === "local-only" || signedIn;
+  const relayUnavailable = pairing.status.relay.phase === "offline" || pairing.status.relay.phase === "off";
+  const canGenerate = connectionMode === "local-only" || (signedIn && !relayUnavailable);
 
   const changeConnectionMode = (next: PairingConnectionMode) => {
     if (next === connectionMode) return;
@@ -165,10 +166,20 @@ export function DevicesTab() {
             onChange={() => changeConnectionMode("local-only")}
           />
         </div>
+        {connectionMode === "automatic" && signedIn && (
+          <div className="mt-2 rounded-md bg-well px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+            {pairing.status.relay.phase === "connected"
+              ? "Relay is ready. Nearby phones may connect directly over LAN; other networks use Relay."
+              : pairing.status.relay.phase === "connecting"
+                ? "Relay is reconnecting. You can still create a code for a nearby LAN connection."
+                : "Relay is unavailable for this account or network. Create a LAN code instead, or retry when Relay becomes available."}
+            {pairing.status.relay.message && pairing.status.relay.phase === "offline" ? ` ${pairing.status.relay.message}` : ""}
+          </div>
+        )}
         {!offer || expired ? (
           <Button className="mt-3" size="sm" disabled={pairing.busy || !canGenerate} onClick={() => void generatePairing(connectionMode)}>
             {pairing.busy ? <Loader2 className="animate-spin" /> : <QrCode />}
-            {expired ? "Generate a new code" : "Create pairing code"}
+            {expired ? "Generate a new code" : !canGenerate && connectionMode === "automatic" ? "Choose LAN to pair" : connectionMode === "local-only" ? "Create LAN pairing code" : "Create pairing code"}
           </Button>
         ) : (
           <div className="mt-3 rounded-lg border border-hairline bg-well p-3">
