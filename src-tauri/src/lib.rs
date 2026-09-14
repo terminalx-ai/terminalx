@@ -82,7 +82,7 @@ pub fn run() {
     // The resource directory is only known once Tauri is up; the service
     // resolves the helper lazily, so it can be built before `setup`.
     let computer = Arc::new(computer::ComputerService::new(None));
-    let browser = Arc::new(browser::BrowserRuntime::open().expect("open the browser stores under RACCOON_HOME"));
+    let browser = Arc::new(browser::BrowserRuntime::open().expect("open the browser stores under TERMINALX_HOME"));
     let state = AppState {
         account: account.clone(),
         cloud_workspaces,

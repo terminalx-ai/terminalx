@@ -110,7 +110,7 @@ Some detail on each:
   or refreshes credentials, never stores the token, and keeps usage results in
   memory only. Failures back off without clearing the last result.
 - **Linear.** The API key is yours, entered in Settings → Integrations. It is
-  stored in `$RACCOON_HOME/settings.json` (default `~/.raccoon/settings.json`),
+  stored in `$TERMINALX_HOME/settings.json` (default `~/.raccoon/settings.json`),
   which is written `0600` inside a `0700` directory. It is never sent anywhere
   but `https://api.linear.app/graphql`.
 - **Model downloads.** Every transcription model in the catalogue is pinned to
@@ -138,17 +138,17 @@ All of them, in full:
   TerminalX sets `projects["<worktree>"].hasTrustDialogAccepted` for each worktree it
   creates, and changes nothing else in the file. It does nothing at all if the
   file does not exist yet — a first-ever run's dialog is yours to answer.
-- **`$RACCOON_HOME/codex`** — Codex reads hooks from `$CODEX_HOME/hooks.json`
+- **`$TERMINALX_HOME/codex`** — Codex reads hooks from `$CODEX_HOME/hooks.json`
   and only runs one whose hash is recorded in `$CODEX_HOME/config.toml`, so
   TerminalX needs a Codex home it owns. It builds one here and points
   `CODEX_HOME` at it for the tabs it launches. **Your `~/.codex` is never edited.** Instead
   the managed home *symlinks* to it: `auth.json`, `AGENTS.md`, `skills`,
   `prompts` and `plugins` are links, so you stay on the same account and a
   refreshed token lands in your own file.
-- **`$RACCOON_HOME/run/hooks.sock`** — the unix control socket used by the
+- **`$TERMINALX_HOME/run/hooks.sock`** — the unix control socket used by the
   CLIs' hooks and by `terminalx`. Created `0600`, inside the `0700`
-  `$RACCOON_HOME` directory, and removed when the app exits.
-- **`$RACCOON_HOME/run/control.token`** — a per-launch control credential,
+  `$TERMINALX_HOME` directory, and removed when the app exits.
+- **`$TERMINALX_HOME/run/control.token`** — a per-launch control credential,
   written `0600`. App-launched tabs receive the same value and socket path in
   `TERMINALX_NEXT_TOKEN` and `TERMINALX_NEXT_SOCKET`; normal shells read the
   file without printing it.
@@ -158,7 +158,7 @@ All of them, in full:
   `~/.agents/skills/terminalx-cli`** — the first-party discovery stub,
   only when you install it under Settings → Agents. Its full version-matched
   guide stays embedded in the binary.
-- **`$RACCOON_HOME`** itself (default `~/.raccoon`) — projects, the session
+- **`$TERMINALX_HOME`** itself (default `~/.raccoon`) — projects, the session
   index, transcripts, settings, downloaded models, the non-secret account mirror,
   and paired-device records containing credential hashes rather than credentials.
   Created `0700`; the account session, host private key and device credentials
@@ -265,3 +265,5 @@ Built on [Tauri](https://tauri.app), [React](https://react.dev) and
 [xterm.js](https://xtermjs.org), and it drives
 [Claude Code](https://claude.com/claude-code) and
 [Codex](https://github.com/openai/codex).
+
+`TERMINALX_HOME` is the canonical state-home variable. For a compatibility period, `RACCOON_HOME` is accepted only when `TERMINALX_HOME` is unset; if both are set, `TERMINALX_HOME` takes precedence. Existing installations continue using their selected directory without copying or exposing credentials.

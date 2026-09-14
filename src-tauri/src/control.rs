@@ -18,7 +18,7 @@ use crate::store::index::{self, SessionEntry, TabEntry, TabStatus};
 use crate::store::projects::{self, Project};
 
 const APP_UNAVAILABLE_RECOVERY: &str =
-    "Open TerminalX with the same RACCOON_HOME, then retry status once.";
+    "Open TerminalX with the same TERMINALX_HOME, then retry status once.";
 const LINEAR_INTEGRATION_RECOVERY: &str =
     "Add an API key in TerminalX Settings → Integrations.";
 
@@ -146,7 +146,7 @@ pub fn call(
             ControlError::new(
                 "unauthorized",
                 "The control token is missing.",
-                Some("Restart an app-launched tab, or let a human shell read RACCOON_HOME/run/control.token.".into()),
+                Some("Restart an app-launched tab, or let a human shell read TERMINALX_HOME/run/control.token.".into()),
             )
         })?;
     let request = ControlRequest {
@@ -213,7 +213,7 @@ pub fn call(
 }
 
 fn client_home() -> PathBuf {
-    std::env::var_os("RACCOON_HOME")
+    crate::store::state_home_env().map(std::ffi::OsString::from)
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|p| p.join(".raccoon")))
         .unwrap_or_else(|| PathBuf::from(".raccoon"))
@@ -882,7 +882,7 @@ mod tests {
     fn recovery_copy_uses_the_terminalx_identity() {
         assert_eq!(
             APP_UNAVAILABLE_RECOVERY,
-            "Open TerminalX with the same RACCOON_HOME, then retry status once."
+            "Open TerminalX with the same TERMINALX_HOME, then retry status once."
         );
         assert_eq!(
             LINEAR_INTEGRATION_RECOVERY,

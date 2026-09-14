@@ -4,7 +4,7 @@
 
 ## Native smoke test
 
-Validated on September 8, 2026, on Apple silicon, macOS 27.0 (26A5425a). The debug build came from this worktree's Rust source and Vite frontend. It ran as **TerminalX Issue136**, bundle ID `com.terminalx.next.issue136`, with `RACCOON_HOME=/tmp/terminalx-136-home` and Vite port **1536**. Only this validation app was stopped/restarted; the production TerminalX process (PID 6564) continued hosting both issue workers. Desktop interaction and recording used the shared atomic directory lock, released after each recording pass.
+Validated on September 8, 2026, on Apple silicon, macOS 27.0 (26A5425a). The debug build came from this worktree's Rust source and Vite frontend. It ran as **TerminalX Issue136**, bundle ID `com.terminalx.next.issue136`, with `TERMINALX_HOME=/tmp/terminalx-136-home` and Vite port **1536**. Only this validation app was stopped/restarted; the production TerminalX process (PID 6564) continued hosting both issue workers. Desktop interaction and recording used the shared atomic directory lock, released after each recording pass.
 
 1. Leave the saved/default worktree preference enabled. Use the project rail's **Add project** picker to open the empty `/tmp/terminalx-136-empty` directory. It appears as a folder workspace; no worktree toggle or branch label is shown.
 2. Select the installed Codex agent and send: “Run pwd and report the working directory. Do not modify any files.” It successfully reports `/private/tmp/terminalx-136-empty`. The canonical `/private/tmp` path is the same selected directory. [Agent screenshot](folder-agent.png).
