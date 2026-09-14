@@ -11,6 +11,11 @@ pnpm --dir mobile ios
 
 Use a development build rather than Expo Go because pairing credentials require device-only SecureStore storage. `eas.json` includes a simulator development profile; it does not configure a store submission.
 
+Local `ios` builds and the EAS development profile use the orange D icon.
+Preview/default builds use the unbadged Legacy artwork. The `ios` command runs
+prebuild to refresh native assets before building. See `docs/RELEASING.md` in
+the repo root for icon regeneration and restoring the committed release catalog.
+
 ## Standalone simulator build and pairing smoke test
 
 With full Xcode, an installed iOS simulator runtime, and Python 3, boot an iPhone
