@@ -350,11 +350,11 @@ fn backoff(attempt: u32) -> Duration {
 
 fn reconnect_message(attempt: u32) -> &'static str {
     if attempt >= 12 {
-        "Unreachable — re-pair?"
+        "Relay is still unavailable. Check your network connection, then retry."
     } else if attempt >= 3 {
-        "Can’t connect"
+        "Relay connection failed. Retrying automatically."
     } else {
-        "Relay offline"
+        "Relay is temporarily unavailable. Retrying automatically."
     }
 }
 
@@ -824,8 +824,8 @@ mod tests {
         assert_eq!(backoff(11), Duration::from_secs(60));
         assert_eq!(backoff(12), Duration::from_secs(90));
         assert_eq!(backoff(99), Duration::from_secs(90));
-        assert_eq!(reconnect_message(3), "Can’t connect");
-        assert_eq!(reconnect_message(12), "Unreachable — re-pair?");
+        assert_eq!(reconnect_message(3), "Relay connection failed. Retrying automatically.");
+        assert_eq!(reconnect_message(12), "Relay is still unavailable. Check your network connection, then retry.");
     }
 
     #[test]
