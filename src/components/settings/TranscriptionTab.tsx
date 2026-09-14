@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Check, ChevronDown, Download, ExternalLink, Trash2, X } from "lucide-react";
+import { Check, Download, ExternalLink, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SettingRow, Switch } from "@/components/ui/controls";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/menu";
+import { TranscriptionInputPicker } from "@/components/chat/TranscriptionInputPicker";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
-import { errorMessage, transcription, type DownloadProgress, type InputDevice, type TranscriptionModel, type TranscriptionPreferences } from "@/lib/api";
+import { errorMessage, transcription, type DownloadProgress, type TranscriptionModel, type TranscriptionPreferences } from "@/lib/api";
 import { refreshDictationEngine } from "@/lib/dictation";
 
 const APPLE = "apple";
@@ -37,7 +37,6 @@ function Score({ label, value }: { label: string; value: number }) {
 export function TranscriptionTab() {
   const [models, setModels] = useState<TranscriptionModel[]>([]);
   const [settings, setSettings] = useState<TranscriptionPreferences | null>(null);
-  const [inputs, setInputs] = useState<InputDevice[]>([]);
   const [progress, setProgress] = useState<Record<string, DownloadProgress>>({});
   const [error, setError] = useState<string | null>(null);
 
@@ -49,20 +48,6 @@ export function TranscriptionTab() {
       const p: Record<string, DownloadProgress> = {};
       for (const row of m) if (row.progress && !row.progress.done) p[row.id] = row.progress;
       setProgress(p);
-    } catch (e) {
-      setError(errorMessage(e));
-    }
-  }, []);
-
-  /**
-   * Devices come and go while the tab sits open — a headset paired after mount
-   * is otherwise invisible until Settings is reopened. Enumeration is kept
-   * behind this explicit action because merely rendering settings must not
-   * make macOS consult microphone privacy.
-   */
-  const refreshInputs = useCallback(async () => {
-    try {
-      setInputs(await transcription.inputs());
     } catch (e) {
       setError(errorMessage(e));
     }
@@ -216,36 +201,7 @@ export function TranscriptionTab() {
         <div className="mb-1 text-sm font-medium">Input</div>
         <SettingRow
           label="Microphone"
-          control={
-            <DropdownMenu
-              onOpenChange={(open) => {
-                if (open) void refreshInputs();
-              }}
-            >
-              <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm" className="gap-1.5">
-                  {settings?.inputDevice ?? "System default"}
-                  <ChevronDown className="size-3 text-faint" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="min-w-[14rem]">
-                <DropdownMenuRadioGroup
-                  value={settings?.inputDevice ?? ""}
-                  onValueChange={(v) => {
-                    void transcription.setInput(v || null).then(reload).catch((e) => setError(errorMessage(e)));
-                  }}
-                >
-                  <DropdownMenuRadioItem value="">System default</DropdownMenuRadioItem>
-                  {inputs.map((d) => (
-                    <DropdownMenuRadioItem key={d.id} value={d.id}>
-                      {d.name}
-                      {d.isDefault && <span className="ml-2 text-[11px] text-faint">default</span>}
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          }
+          control={<TranscriptionInputPicker />}
         />
         <SettingRow
           label="Mute while recording"
