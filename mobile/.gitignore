@@ -1,6 +1,11 @@
 .expo/
 dist/
-ios/
+/ios/*
+!/ios/TerminalX/
+/ios/TerminalX/*
+!/ios/TerminalX/Images.xcassets/
+/ios/TerminalX/Images.xcassets/*
+!/ios/TerminalX/Images.xcassets/AppIcon.appiconset/
 *.jks
 *.mobileprovision
 *.p8

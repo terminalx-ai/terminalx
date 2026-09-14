@@ -4,6 +4,7 @@
     "slug": "terminalx-mobile",
     "version": "0.1.0",
     "orientation": "portrait",
+    "icon": "./assets/icon.png",
     "scheme": "terminalx",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
@@ -13,6 +14,12 @@
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSLocalNetworkUsageDescription": "TerminalX connects directly to a Mac you choose to pair."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#111111"
       }
     },
     "plugins": [
