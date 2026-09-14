@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Loader2, Pencil } from "lucide-react";
 import { AccountAvatar } from "@/components/account/AccountAvatar";
 import { Button } from "@/components/ui/button";
-import { signIn, signOut, useAccount } from "@/lib/account";
+import { refreshAccount, signIn, signOut, useAccount } from "@/lib/account";
 import { setPairingHostName, usePairing } from "@/lib/pairing";
+import { api, errorMessage, type CloudProviderSummary, type OrganizationSummary } from "@/lib/api";
 
 export function AccountTab() {
   const account = useAccount();
@@ -40,6 +41,7 @@ export function AccountTab() {
         <p className="text-xs leading-relaxed text-muted-foreground">
           Your TerminalX account is optional. The session refreshes automatically and its credentials are stored in macOS Keychain.
         </p>
+        <OrganizationOnboarding organizationName={identity.organization} accountEmail={identity.email} contextRevision={status.context?.revision ?? ""} organizations={status.organizations ?? []} />
         {pairing.status.host && (
           <div className="rounded-lg border border-hairline px-3 py-3">
             <div className="text-xs font-medium">What this Mac shares</div>
@@ -134,4 +136,105 @@ export function AccountTab() {
       </div>
     </div>
   );
+}
+
+export function createOrganizationAttemptKey(contextRevision: string, accountEmail: string, targetName: string): string {
+  const normalized = targetName.trim().normalize("NFKC").replace(/\s+/g, " ").toLocaleLowerCase();
+  return `terminalx.organization-create.${contextRevision || accountEmail}.${normalized}`;
+}
+
+function OrganizationOnboarding({ organizationName, accountEmail, contextRevision, organizations }: { organizationName: string | null; accountEmail: string; contextRevision: string; organizations: OrganizationSummary[] }) {
+  const [name, setName] = useState("");
+  const [providers, setProviders] = useState<CloudProviderSummary[]>([]);
+  const [provider, setProvider] = useState<CloudProviderSummary | null>(null);
+  const [consented, setConsented] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const draftStorageKey = `terminalx.organization-create.${contextRevision || accountEmail}.unselected.name`;
+  const identityEpoch = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
+  useEffect(() => {
+    identityEpoch.current += 1;
+    setProvider(null);
+    setProviders([]);
+    setConsented(false);
+    setCreateOpen(false);
+    setError(null);
+    const storageKey = `terminalx.organization-create.${contextRevision || accountEmail}.${organizationName ?? "unselected"}`;
+    const draftKey = `${storageKey}.name`;
+    setName(globalThis.localStorage?.getItem(draftKey) ?? "");
+  }, [accountEmail, organizationName, contextRevision]);
+
+  useEffect(() => {
+    if (!organizationName) return;
+    const epoch = identityEpoch.current;
+    api.cloudProviders().then((result) => {
+      if (epoch !== identityEpoch.current) return;
+      setProviders(result.providers);
+    }).catch((failure) => { if (epoch === identityEpoch.current) setError(errorMessage(failure)); });
+  }, [accountEmail, organizationName, contextRevision]);
+
+  const create = async () => {
+    const epoch = identityEpoch.current;
+    setBusy(true); setError(null);
+    try {
+      const target = name.trim();
+      const targetKey = createOrganizationAttemptKey(contextRevision, accountEmail, target);
+      const logicalKey = globalThis.localStorage?.getItem(targetKey) ?? (globalThis.crypto?.randomUUID?.() ?? `org-${Date.now()}-${Math.random()}`);
+      globalThis.localStorage?.setItem(targetKey, logicalKey);
+      await api.organizationCreate(target, logicalKey);
+      if (!mounted.current || epoch !== identityEpoch.current) return;
+      await refreshAccount();
+      setName("");
+      globalThis.localStorage?.removeItem(draftStorageKey);
+    } catch (failure) {
+      if (mounted.current && epoch === identityEpoch.current) setError(errorMessage(failure));
+    } finally { if (mounted.current && epoch === identityEpoch.current) setBusy(false); }
+  };
+
+  const connect = async () => {
+    if (!provider || !consented) return;
+    const epoch = identityEpoch.current;
+    setBusy(true); setError(null);
+    try {
+      await api.cloudProviderConnect(provider.id, { contextRevision, disclosure: { version: "cloud-provider-connections-2026-08-13", providerBillingAccepted: true, organizationUseAccepted: true } });
+      if (!mounted.current || epoch !== identityEpoch.current) return;
+      const result = await api.cloudProviders();
+      if (!mounted.current || epoch !== identityEpoch.current) return;
+      setProviders(result.providers);
+      setProvider(result.providers.find((item) => item.id === provider.id) ?? null);
+      setConsented(false);
+    } catch (failure) { if (mounted.current && epoch === identityEpoch.current) setError(errorMessage(failure)); }
+    finally { if (mounted.current && epoch === identityEpoch.current) setBusy(false); }
+  };
+
+  if (!organizationName) {
+    return <div className="rounded-lg border border-hairline p-3">
+      <div className="text-sm font-medium">Create an organization</div>
+      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">Organization setup is incomplete. Create one to configure compute access; no machine is created by this step.</p>
+      <div className="mt-3 flex gap-2"><input aria-label="Organization name" className="h-8 min-w-0 flex-1 rounded-md border border-hairline bg-background px-2 text-xs" value={name} onChange={(event) => { const value = event.target.value; setName(value); globalThis.localStorage?.setItem(draftStorageKey, value); }} /><Button size="sm" disabled={busy || name.trim().length < 2} onClick={() => void create()}>{busy ? <Loader2 className="animate-spin" /> : "Create"}</Button></div>
+      {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+    </div>;
+  }
+
+  const connected = provider?.connection?.state === "connected";
+  return <div className="rounded-lg border border-hairline p-3">
+    <div className="text-sm font-medium">Compute setup</div>
+    {organizations.length > 1 && <label className="mt-2 block text-xs text-muted-foreground">Organization<select aria-label="Organization" className="mt-1 h-8 w-full rounded-md border border-hairline bg-background px-2 text-xs" value={organizations.find((item) => item.name === organizationName)?.id ?? ""} onChange={(event) => { const revision = contextRevision; void api.organizationSelect(event.target.value, revision).then(refreshAccount).catch((failure) => setError(errorMessage(failure))); }}><option value="">Select organization</option>{organizations.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.role})</option>)}</select></label>}
+    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{connected ? "Compute connection validated. Choose a build or workspace action when you are ready; validation does not provision a machine." : "Setup incomplete — an organization administrator must validate a provider key before cloud workspaces are ready."}</p>
+    {providers.length > 0 && !connected && <>
+      <label className="mt-3 block text-xs text-muted-foreground">Provider<select aria-label="Provider" className="mt-1 h-8 w-full rounded-md border border-hairline bg-background px-2 text-xs" value={provider?.id ?? ""} onChange={(event) => { setProvider(providers.find((item) => item.id === event.target.value) ?? null); setConsented(false); }}><option value="">Select a provider</option>{providers.map((item) => <option key={item.id} value={item.id}>{item.displayName}</option>)}</select></label>
+      {provider?.canManage ? <><p className="mt-3 text-[11px] text-muted-foreground">A native secure dialog will collect the provider key; it is never shown to this page.</p><label className="mt-2 flex items-start gap-2 text-[11px] text-muted-foreground"><input type="checkbox" checked={consented} onChange={(event) => setConsented(event.target.checked)} />I understand provider billing and organization use.</label><Button className="mt-3" size="sm" disabled={busy || !consented} onClick={() => void connect()}>{busy ? <Loader2 className="animate-spin" /> : "Validate and connect"}</Button></> : provider ? <p className="mt-3 text-xs text-muted-foreground">Only organization owners and administrators can manage provider connections.</p> : <p className="mt-3 text-xs text-muted-foreground">Select a provider to continue.</p>}
+    </>}
+    {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+    <div className="mt-4 border-t border-hairline pt-3">
+      <Button variant="ghost" size="sm" onClick={() => { const opening = !createOpen; setCreateOpen(opening); if (opening) setName(globalThis.localStorage?.getItem(draftStorageKey) ?? ""); }}>{createOpen ? "Hide organization creation" : "Create or switch organization"}</Button>
+      {createOpen && <>
+        <p className="mt-1 text-[11px] text-muted-foreground">Create another organization and continue setup there. Existing organization access is unchanged.</p>
+        <div className="mt-2 flex gap-2"><input aria-label="New organization name" className="h-8 min-w-0 flex-1 rounded-md border border-hairline bg-background px-2 text-xs" value={name} onChange={(event) => { const value = event.target.value; setName(value); globalThis.localStorage?.setItem(draftStorageKey, value); }} /><Button size="sm" disabled={busy || name.trim().length < 2} onClick={() => void create()}>{busy ? <Loader2 className="animate-spin" /> : "Create"}</Button></div>
+      </>}
+    </div>
+  </div>;
 }
