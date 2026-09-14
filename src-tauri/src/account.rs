@@ -44,6 +44,15 @@ pub struct AccountStatus {
     identity: Option<AccountIdentity>,
     expires_at: Option<i64>,
     last_error: Option<String>,
+    context: Option<OnboardingContext>,
+    organizations: Vec<OrganizationSummary>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingContext {
+    scope: String,
+    revision: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -197,7 +206,7 @@ impl AccountManager {
     }
 
     pub fn configure(&self, app_identifier: &str) -> Result<()> {
-        let wanted = format!("{app_identifier}.account");
+        let wanted = keychain_service_name(app_identifier);
         if let Some(current) = self.service.get() {
             if current == &wanted {
                 return Ok(());
@@ -249,9 +258,13 @@ impl AccountManager {
             && inner.session.as_ref().is_some_and(|session| {
                 session.cloud.user_id == context.user_id
                     && session.cloud.cloud_profile_id == context.profile_id
-                    && session.cloud.active_org_id.as_deref()
-                        == Some(context.organization_id.as_str())
+                    && session.cloud.active_org_id.as_deref().unwrap_or_default()
+                        == context.organization_id
             })
+    }
+
+    pub(crate) fn context_revision(context: &AccountContext) -> String {
+        format!("{}:{}", context_scope(&context.user_id, &context.profile_id, &context.organization_id), context.generation)
     }
 
     /// Create an organization with a caller-owned idempotency key, then select
@@ -299,6 +312,10 @@ impl AccountManager {
         if inner.generation != context.generation
             || inner.session.as_ref().map(|session| session.cloud.user_id.as_str())
                 != Some(context.user_id.as_str())
+            || inner.session.as_ref().map(|session| session.cloud.cloud_profile_id.as_str())
+                != Some(context.profile_id.as_str())
+            || inner.session.as_ref().and_then(|session| session.cloud.active_org_id.as_deref())
+                != (!context.organization_id.is_empty()).then_some(context.organization_id.as_str())
         {
             return Err(anyhow!("account context changed while selecting organization"));
         }
@@ -310,6 +327,12 @@ impl AccountManager {
         }
         self.save_session(session).context("save selected organization")?;
         Ok(())
+    }
+
+    pub(crate) fn select_organization_for_revision(&self, organization_id: &str, revision: &str) -> Result<()> {
+        let context = self.context().ok_or_else(|| anyhow!("account is signed out"))?;
+        if Self::context_revision(&context) != revision { return Err(anyhow!("account context changed")); }
+        self.select_organization(organization_id, &context)
     }
 
     pub fn begin_sign_in(self: &Arc<Self>, app: &AppHandle) -> Result<AccountStatus> {
@@ -631,6 +654,17 @@ impl AccountManager {
     }
 }
 
+fn keychain_service_name(app_identifier: &str) -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var("RACCOON_DEV_KEYCHAIN_SERVICE") {
+        let value = value.trim();
+        if value.starts_with("dev.terminalx.") && value.len() <= 120 {
+            return value.to_owned();
+        }
+    }
+    format!("{app_identifier}.account")
+}
+
 fn selection_matches(requested: &str, selected: Option<&str>) -> bool {
     !requested.is_empty() && selected == Some(requested)
 }
@@ -676,7 +710,16 @@ fn snapshot(inner: &Inner) -> AccountStatus {
         identity,
         expires_at,
         last_error: inner.last_error.clone(),
+        context: inner.session.as_ref().map(|session| {
+            let scope = context_scope(&session.cloud.user_id, &session.cloud.cloud_profile_id, session.cloud.active_org_id.as_deref().unwrap_or_default());
+            OnboardingContext { revision: format!("{scope}:{}", inner.generation), scope }
+        }),
+        organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone() }).collect()).unwrap_or_default(),
     }
+}
+
+fn context_scope(user: &str, profile: &str, organization: &str) -> String {
+    format!("{:x}", Sha256::digest(serde_json::to_vec(&(user, profile, organization)).expect("serialize context")))
 }
 
 fn random_url_token() -> String {
@@ -1050,5 +1093,10 @@ mod tests {
         assert!(selection_matches("org-one", Some("org-one")));
         assert!(!selection_matches("org-one", Some("org-two")));
         assert!(!selection_matches("org-one", None));
+    }
+
+    #[test]
+    fn default_keychain_service_is_application_scoped() {
+        assert_eq!(keychain_service_name("com.example.test"), "com.example.test.account");
     }
 }

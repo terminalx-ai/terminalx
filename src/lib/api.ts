@@ -121,11 +121,15 @@ export const api = {
   accountSignOut: () => invoke<AccountStatus>("account_sign_out"),
   organizationCreate: (name: string, idempotencyKey: string) =>
     invoke<OrganizationSummary>("organization_create", { name, idempotencyKey }),
+  organizationSelect: (organizationId: string, contextRevision: string) =>
+    invoke<AccountStatus>("organization_select", { organizationId, contextRevision }),
 
   // provider-aware Cloud Workspaces; authentication and Organization scope
   // are resolved natively, so account tokens never cross this boundary.
   cloudProviders: () => invoke<CloudProviderSummaryResponse>("cloud_providers"),
   cloudProvider: (provider: CloudWorkspaceProviderId) => invoke<CloudProviderConnection>("cloud_provider", { provider }),
+  cloudProviderConnect: (provider: CloudWorkspaceProviderId, input: CloudProviderConnectInput) =>
+    invoke<CloudProviderConnection>("cloud_provider_connect", { provider, input }),
   cloudWorkspaceSetup: (provider: CloudWorkspaceProviderId) =>
     invoke<CloudWorkspaceSetup>("cloud_workspace_setup", { provider }),
   cloudWorkspaceQuote: (input: CloudWorkspaceQuoteInput) =>
@@ -237,6 +241,8 @@ export interface AccountStatus {
   identity: AccountIdentity | null;
   expiresAt: number | null;
   lastError: string | null;
+  context?: { scope: string; revision: string } | null;
+  organizations?: OrganizationSummary[];
 }
 
 export type CloudWorkspaceProviderId = "machine0" | "box";
@@ -277,6 +283,15 @@ export interface CloudProviderConnection {
   credentialFingerprint: string | null;
   connectedAt: number | null;
   lastValidatedAt: number | null;
+}
+
+export interface CloudProviderConnectInput {
+  contextRevision: string;
+  disclosure: {
+    version: string;
+    providerBillingAccepted: true;
+    organizationUseAccepted: true;
+  };
 }
 
 
