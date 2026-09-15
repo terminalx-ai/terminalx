@@ -6,11 +6,13 @@ import {
   inspectChatFile,
   openChatLink,
   openChatLinkExternally,
+  openChatLinkInBrowser,
   originalChatHref,
   parseChatLink,
   revealChatLink,
   type ChatLinkContext,
 } from "@/lib/chatLinks";
+import { getPrefs } from "@/lib/prefs";
 import type { LocalPathInfo } from "@/lib/api";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "@/components/ui/menu";
 
@@ -79,11 +81,15 @@ export function ChatLink({ context, href = "", children, className, node: _node,
       rel={undefined}
       className={`wrap-anywhere font-medium text-primary underline ${className ?? ""}`}
       data-streamdown="link"
+      title={destination.kind === "web" ? `Open in ${getPrefs().linkBrowser === "terminalx" ? "System Browser" : "TerminalX Browser"} with ${navigator.platform.toLowerCase().includes("mac") ? "⇧⌘" : "Shift+Ctrl"}-click` : undefined}
       aria-invalid={destination.kind === "rejected" || undefined}
       onClick={(event) => {
         event.preventDefault();
         event.stopPropagation();
-        run(() => openChatLink(destination, context));
+        const alternate = event.shiftKey && (event.metaKey || event.ctrlKey);
+        run(() => destination.kind === "web" && alternate
+          ? openChatLinkInBrowser(destination, context, getPrefs().linkBrowser === "terminalx" ? "system" : "terminalx")
+          : openChatLink(destination, context));
       }}
       onAuxClick={(event: MouseEvent<HTMLAnchorElement>) => {
         if (event.button !== 1) return;
@@ -102,8 +108,13 @@ export function ChatLink({ context, href = "", children, className, node: _node,
         <ContextMenuTrigger asChild>{anchor}</ContextMenuTrigger>
         <ContextMenuContent>
           {destination.kind === "web" ? <>
-            <ContextMenuItem onSelect={() => run(() => openChatLink(destination, context))}>Open internally</ContextMenuItem>
-            <ContextMenuItem onSelect={() => run(() => openChatLinkExternally(destination, context))}>Open in default browser</ContextMenuItem>
+            {getPrefs().linkBrowser === "terminalx" ? <>
+              <ContextMenuItem onSelect={() => run(() => openChatLinkInBrowser(destination, context, "terminalx"))}>Open in TerminalX Browser</ContextMenuItem>
+              {getPrefs().linkActions && <ContextMenuItem onSelect={() => run(() => openChatLinkInBrowser(destination, context, "system"))}>Open in System Browser</ContextMenuItem>}
+            </> : <>
+              <ContextMenuItem onSelect={() => run(() => openChatLinkInBrowser(destination, context, "system"))}>Open in System Browser</ContextMenuItem>
+              {getPrefs().linkActions && <ContextMenuItem onSelect={() => run(() => openChatLinkInBrowser(destination, context, "terminalx"))}>Open in TerminalX Browser</ContextMenuItem>}
+            </>}
           </> : destination.kind === "application" ? (
             <ContextMenuItem onSelect={() => run(() => openChatLink(destination, context))}>Open with default application</ContextMenuItem>
           ) : destination.kind === "local" ? inspecting === identity ? (

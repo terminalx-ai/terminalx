@@ -20,12 +20,49 @@ Settings → Transcription and linked to its Hugging Face model card.
 ## Contents
 
 - [Geist and Geist Mono (SIL OFL-1.1)](#geist-and-geist-mono-sil-ofl-11)
+- [TerminalX Legacy app artwork (MIT)](#terminalx-legacy-app-artwork-mit)
 - [Coding-agent marks](#coding-agent-marks)
 - [Material Icon Theme (MIT, two notices)](#material-icon-theme-mit-two-notices)
 - [transcribe.cpp (MIT)](#transcribecpp-mit)
 - [ggml (MIT)](#ggml-mit)
 - [Rust crates](#rust-crates)
 - [npm packages](#npm-packages)
+
+---
+
+## TerminalX Legacy app artwork (MIT)
+
+The desktop source `resources/icon-source/legacy.icns` and mobile sources
+`mobile/assets/icon.png` and `mobile/assets/adaptive-icon.png` are copied from
+[dudhatparesh/terminalx-app-v3](https://github.com/dudhatparesh/terminalx-app-v3/tree/6e07f4ba0ab39dd61ae7cfc69cb53380ad38a47a),
+commit `6e07f4ba0ab39dd61ae7cfc69cb53380ad38a47a`. Generated derivatives live in
+`src-tauri/icons`, `src-tauri/icons-dev`, `mobile/assets/*-dev.png`, and the mobile
+Xcode icon catalog. The development badge follows Legacy's `resources/icon-dev.png`.
+The complete upstream licence is also kept in `resources/icon-source/LICENSE`.
+
+```text
+MIT License
+
+Copyright (c) 2026 Lovecast Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ---
 

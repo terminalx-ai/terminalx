@@ -2,6 +2,7 @@ import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { fs, type LocalPathInfo } from "@/lib/api";
 import { openBrowserTab } from "@/lib/browser";
 import { fileKind, openFile } from "@/lib/editors";
+import { getPrefs } from "@/lib/prefs";
 
 export interface ChatLinkContext {
   /** The session and workspace that rendered the link, captured at render time. */
@@ -163,7 +164,8 @@ function canOpenInternally(info: LocalPathInfo): boolean {
 /** The default route for one real click/keyboard activation. */
 export async function openChatLink(destination: ChatLinkDestination, context: ChatLinkContext): Promise<void> {
   if (destination.kind === "web") {
-    await openBrowserTab(context.sessionId, context.cwd, destination.href);
+    if (getPrefs().linkBrowser === "system") await openUrl(destination.href);
+    else await openBrowserTab(context.sessionId, context.cwd, destination.href);
     return;
   }
   if (destination.kind === "application") {
@@ -184,6 +186,12 @@ export async function openChatLink(destination: ChatLinkDestination, context: Ch
   } else {
     await fs.openPath(info.path);
   }
+}
+
+export async function openChatLinkInBrowser(destination: ChatLinkDestination, context: ChatLinkContext, browser: "terminalx" | "system") {
+  if (destination.kind !== "web") throw new Error("This destination is not a website link.");
+  if (browser === "terminalx") await openBrowserTab(context.sessionId, context.cwd, destination.href);
+  else await openUrl(destination.href);
 }
 
 export async function openChatLinkExternally(destination: ChatLinkDestination, context: ChatLinkContext, info?: LocalPathInfo): Promise<void> {

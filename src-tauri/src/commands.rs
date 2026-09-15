@@ -77,6 +77,33 @@ pub async fn account_sign_out(
     tauri::async_runtime::spawn_blocking(move || account.sign_out(&app)).await.map_err(err)
 }
 
+#[tauri::command]
+pub async fn organization_create(
+    name: String,
+    idempotency_key: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::account::OrganizationSummary> {
+    let account = state.account.clone();
+    tauri::async_runtime::spawn_blocking(move || account.create_organization(&name, &idempotency_key))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn organization_select(
+    app: AppHandle,
+    organization_id: String,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::account::AccountStatus> {
+    let account = state.account.clone();
+    tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<crate::account::AccountStatus> {
+        account.select_organization_for_revision(&organization_id, &context_revision)?;
+        Ok(account.status(&app))
+    }).await.map_err(err)?.map_err(err)
+}
+
 // --------------------------------------------------------- cloud workspaces
 
 macro_rules! cloud_command {
@@ -101,6 +128,78 @@ pub async fn cloud_provider(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<crate::cloud_workspaces::CloudProviderConnectionResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.provider(provider))
+}
+
+enum ProviderPromptError { Cancelled, Empty, Unavailable }
+
+impl ProviderPromptError {
+    fn client_error(self) -> crate::cloud_workspaces::CloudWorkspaceClientError {
+        let code = match self {
+            Self::Cancelled => "cloud_provider_entry_cancelled",
+            Self::Empty => "cloud_provider_credential_required",
+            Self::Unavailable => "cloud_provider_secure_input_unavailable",
+        };
+        crate::cloud_workspaces::CloudWorkspaceClientError::local(code, false)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn secure_provider_prompt(provider: crate::cloud_workspaces::CloudWorkspaceProviderId, organization_id: &str) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
+    use objc2::{MainThreadMarker, MainThreadOnly};
+    use objc2_app_kit::{NSAlert, NSSecureTextField, NSAlertFirstButtonReturn};
+    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+    let mtm = MainThreadMarker::new().ok_or(ProviderPromptError::Unavailable)?;
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str("Provider connection"));
+    alert.setInformativeText(&NSString::from_str(&format!("Enter the {} provider key for organization {}. The key is sent to the account service only for validation and secure storage.", provider.as_str(), organization_id)));
+    let field = NSSecureTextField::initWithFrame(NSSecureTextField::alloc(mtm), NSRect::new(NSPoint::new(0., 0.), NSSize::new(360., 24.)));
+    field.setPlaceholderString(Some(&NSString::from_str("Provider key")));
+    alert.setAccessoryView(Some(&field));
+    alert.addButtonWithTitle(&NSString::from_str("Validate"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    let response = alert.runModal();
+    if response != NSAlertFirstButtonReturn {
+        field.setStringValue(&NSString::from_str(""));
+        return Err(ProviderPromptError::Cancelled);
+    }
+    let value = zeroize::Zeroizing::new(field.stringValue().to_string());
+    field.setStringValue(&NSString::from_str(""));
+    if value.trim().is_empty() { return Err(ProviderPromptError::Empty); }
+    Ok(value)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn secure_provider_prompt(_provider: crate::cloud_workspaces::CloudWorkspaceProviderId, _organization_id: &str) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
+    Err(ProviderPromptError::Unavailable)
+}
+
+#[tauri::command]
+pub async fn cloud_provider_connect(
+    app: AppHandle,
+    provider: crate::cloud_workspaces::CloudWorkspaceProviderId,
+    input: crate::cloud_workspaces::CloudProviderConnectInput,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudProviderConnectionResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    crate::cloud_workspaces::validate_disclosure(&input)?;
+    static PROMPT_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _prompt_guard = PROMPT_GUARD.try_lock().map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_operation_in_progress", true))?;
+    let service = state.cloud_workspaces.clone();
+    let authorization = tauri::async_runtime::spawn_blocking(move || service.authorize_connect(provider))
+        .await
+        .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::task_failed(crate::cloud_workspaces::RequestRisk::Read))??;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let org_id = authorization.organization_id().to_owned();
+    app.run_on_main_thread(move || { let _ = sender.send(secure_provider_prompt(provider, &org_id)); })
+        .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?;
+    let prompt_result = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+        .await
+        .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?
+        .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?;
+    let credential = prompt_result.map_err(ProviderPromptError::client_error)?;
+    let service = state.cloud_workspaces.clone();
+    tauri::async_runtime::spawn_blocking(move || service.connect_authorized(authorization, input, credential))
+        .await
+        .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::task_failed(crate::cloud_workspaces::RequestRisk::Mutation))?
 }
 
 #[tauri::command]

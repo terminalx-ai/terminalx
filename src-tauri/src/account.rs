@@ -25,6 +25,8 @@ const AUTHORIZE_PATH: &str = "/v1/desktop/auth/authorize";
 const SESSION_PATH: &str = "/v1/desktop/auth/session";
 const REFRESH_PATH: &str = "/v1/desktop/auth/refresh";
 const LOGOUT_PATH: &str = "/v1/desktop/auth/logout";
+const ORGANIZATIONS_PATH: &str = "/v1/desktop/orgs";
+const ACTIVE_ORGANIZATION_PATH: &str = "/v1/desktop/auth/org";
 const CLIENT_ID: &str = "terminalx-desktop";
 const SCOPE: &str = "openid profile email offline_access";
 const REDIRECT_URI: &str = "terminalx://auth/callback";
@@ -42,6 +44,23 @@ pub struct AccountStatus {
     identity: Option<AccountIdentity>,
     expires_at: Option<i64>,
     last_error: Option<String>,
+    context: Option<OnboardingContext>,
+    organizations: Vec<OrganizationSummary>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingContext {
+    scope: String,
+    revision: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationSummary {
+    pub id: String,
+    pub name: String,
+    pub role: String,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -187,7 +206,7 @@ impl AccountManager {
     }
 
     pub fn configure(&self, app_identifier: &str) -> Result<()> {
-        let wanted = format!("{app_identifier}.account");
+        let wanted = keychain_service_name(app_identifier);
         if let Some(current) = self.service.get() {
             if current == &wanted {
                 return Ok(());
@@ -239,9 +258,81 @@ impl AccountManager {
             && inner.session.as_ref().is_some_and(|session| {
                 session.cloud.user_id == context.user_id
                     && session.cloud.cloud_profile_id == context.profile_id
-                    && session.cloud.active_org_id.as_deref()
-                        == Some(context.organization_id.as_str())
+                    && session.cloud.active_org_id.as_deref().unwrap_or_default()
+                        == context.organization_id
             })
+    }
+
+    pub(crate) fn context_revision(context: &AccountContext) -> String {
+        format!("{}:{}", context_scope(&context.user_id, &context.profile_id, &context.organization_id), context.generation)
+    }
+
+    /// Create an organization with a caller-owned idempotency key, then select
+    /// it through the server-authoritative profile endpoint. The key is never
+    /// persisted in the account session and is safe to reuse after a timeout.
+    pub(crate) fn create_organization(
+        &self,
+        name: &str,
+        idempotency_key: &str,
+    ) -> Result<OrganizationSummary> {
+        let context = self
+            .context()
+            .ok_or_else(|| anyhow!("account is signed out"))?;
+        let name = name.trim();
+        if name.is_empty() || idempotency_key.trim().is_empty() {
+            return Err(anyhow!("organization name and idempotency key are required"));
+        }
+        let organization: OrganizationSummary = post_authenticated(
+            ORGANIZATIONS_PATH,
+            json!({ "name": name }),
+            Some(&context.access_token),
+            Some(idempotency_key),
+        )?;
+        self.select_organization(&organization.id, &context)?;
+        Ok(organization)
+    }
+
+    fn select_organization(&self, organization_id: &str, context: &AccountContext) -> Result<()> {
+        #[derive(Deserialize)]
+        struct SelectionBody {
+            cloud: CloudIdentity,
+            #[serde(default)]
+            organizations: Vec<Organization>,
+        }
+        let body: SelectionBody = post_authenticated(
+            ACTIVE_ORGANIZATION_PATH,
+            json!({ "orgId": organization_id }),
+            Some(&context.access_token),
+            None,
+        )?;
+        if !selection_matches(organization_id, body.cloud.active_org_id.as_deref()) {
+            return Err(anyhow!("account service selected a different organization"));
+        }
+        let mut inner = self.inner.lock().unwrap();
+        if inner.generation != context.generation
+            || inner.session.as_ref().map(|session| session.cloud.user_id.as_str())
+                != Some(context.user_id.as_str())
+            || inner.session.as_ref().map(|session| session.cloud.cloud_profile_id.as_str())
+                != Some(context.profile_id.as_str())
+            || inner.session.as_ref().and_then(|session| session.cloud.active_org_id.as_deref())
+                != (!context.organization_id.is_empty()).then_some(context.organization_id.as_str())
+        {
+            return Err(anyhow!("account context changed while selecting organization"));
+        }
+        let session = inner.session.as_mut().ok_or_else(|| anyhow!("account is signed out"))?;
+        session.cloud.active_org_id = body.cloud.active_org_id;
+        session.cloud.active_org_name = body.cloud.active_org_name;
+        if !body.organizations.is_empty() {
+            session.organizations = body.organizations;
+        }
+        self.save_session(session).context("save selected organization")?;
+        Ok(())
+    }
+
+    pub(crate) fn select_organization_for_revision(&self, organization_id: &str, revision: &str) -> Result<()> {
+        let context = self.context().ok_or_else(|| anyhow!("account is signed out"))?;
+        if Self::context_revision(&context) != revision { return Err(anyhow!("account context changed")); }
+        self.select_organization(organization_id, &context)
     }
 
     pub fn begin_sign_in(self: &Arc<Self>, app: &AppHandle) -> Result<AccountStatus> {
@@ -563,6 +654,21 @@ impl AccountManager {
     }
 }
 
+fn keychain_service_name(app_identifier: &str) -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var("RACCOON_DEV_KEYCHAIN_SERVICE") {
+        let value = value.trim();
+        if value.starts_with("dev.terminalx.") && value.len() <= 120 {
+            return value.to_owned();
+        }
+    }
+    format!("{app_identifier}.account")
+}
+
+fn selection_matches(requested: &str, selected: Option<&str>) -> bool {
+    !requested.is_empty() && selected == Some(requested)
+}
+
 pub fn focus_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
@@ -604,7 +710,16 @@ fn snapshot(inner: &Inner) -> AccountStatus {
         identity,
         expires_at,
         last_error: inner.last_error.clone(),
+        context: inner.session.as_ref().map(|session| {
+            let scope = context_scope(&session.cloud.user_id, &session.cloud.cloud_profile_id, session.cloud.active_org_id.as_deref().unwrap_or_default());
+            OnboardingContext { revision: format!("{scope}:{}", inner.generation), scope }
+        }),
+        organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone() }).collect()).unwrap_or_default(),
     }
+}
+
+fn context_scope(user: &str, profile: &str, organization: &str) -> String {
+    format!("{:x}", Sha256::digest(serde_json::to_vec(&(user, profile, organization)).expect("serialize context")))
 }
 
 fn random_url_token() -> String {
@@ -692,6 +807,33 @@ fn post_json<T: DeserializeOwned>(
         .into_json::<T>()
         .map_err(|_| CloudError::InvalidSession)?;
     Ok(value)
+}
+
+fn post_authenticated<T: DeserializeOwned>(
+    path: &str,
+    body: serde_json::Value,
+    access_token: Option<&str>,
+    idempotency_key: Option<&str>,
+) -> Result<T, anyhow::Error> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(REQUEST_TIMEOUT)
+        .redirects(0)
+        .build();
+    let mut request = agent
+        .post(&endpoint(path))
+        .set("content-type", "application/json");
+    if let Some(token) = access_token {
+        request = request.set("authorization", &format!("Bearer {token}"));
+    }
+    if let Some(key) = idempotency_key {
+        request = request.set("Idempotency-Key", key);
+    }
+    let response = request
+        .send_json(body)
+        .map_err(|error| anyhow!("account service request failed: {error}"))?;
+    response
+        .into_json::<T>()
+        .map_err(|error| anyhow!("account service returned invalid JSON: {error}"))
 }
 
 fn normalize_session(mut session: DesktopSession) -> Result<DesktopSession, CloudError> {
@@ -944,5 +1086,17 @@ mod tests {
             .cloud
             .cloud_profile_id = "profile-two".into();
         assert!(!manager.is_current(&request_context));
+    }
+
+    #[test]
+    fn rejects_authoritative_selection_for_a_different_organization() {
+        assert!(selection_matches("org-one", Some("org-one")));
+        assert!(!selection_matches("org-one", Some("org-two")));
+        assert!(!selection_matches("org-one", None));
+    }
+
+    #[test]
+    fn default_keychain_service_is_application_scoped() {
+        assert_eq!(keychain_service_name("com.example.test"), "com.example.test.account");
     }
 }

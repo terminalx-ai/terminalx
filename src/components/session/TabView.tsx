@@ -171,13 +171,16 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
   const info = views.info[tab.id];
   const terminal = (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex h-8 shrink-0 items-center gap-2 border-b border-hairline px-3 text-xs text-muted-foreground">
+      <div className="flex min-h-8 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground">
         <span className="shrink-0 text-foreground">Terminal view</span>
-        <span className="truncate font-mono text-[11px] text-faint" title={info?.command}>
+        <span className="min-w-0 truncate font-mono text-[11px] text-faint" title={info?.command}>
           {info?.command}
         </span>
-        <span className="ml-auto shrink-0 text-faint">
+        <span className="ml-auto min-w-0 text-faint">
           {ptyFirst ? "The chat is the same conversation." : "The chat resumes when you switch back."}
+          {tab.harness === "claude" && (
+            <> Claude Code may show its own diff sidebar. Type <code>/diff</code> in the terminal to hide or show it.</>
+          )}
         </span>
       </div>
       {pane?.exited && (

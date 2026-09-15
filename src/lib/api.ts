@@ -119,11 +119,17 @@ export const api = {
   accountStatus: () => invoke<AccountStatus>("account_status"),
   accountSignIn: () => invoke<AccountStatus>("account_sign_in"),
   accountSignOut: () => invoke<AccountStatus>("account_sign_out"),
+  organizationCreate: (name: string, idempotencyKey: string) =>
+    invoke<OrganizationSummary>("organization_create", { name, idempotencyKey }),
+  organizationSelect: (organizationId: string, contextRevision: string) =>
+    invoke<AccountStatus>("organization_select", { organizationId, contextRevision }),
 
   // provider-aware Cloud Workspaces; authentication and Organization scope
   // are resolved natively, so account tokens never cross this boundary.
   cloudProviders: () => invoke<CloudProviderSummaryResponse>("cloud_providers"),
   cloudProvider: (provider: CloudWorkspaceProviderId) => invoke<CloudProviderConnection>("cloud_provider", { provider }),
+  cloudProviderConnect: (provider: CloudWorkspaceProviderId, input: CloudProviderConnectInput) =>
+    invoke<CloudProviderConnection>("cloud_provider_connect", { provider, input }),
   cloudWorkspaceSetup: (provider: CloudWorkspaceProviderId) =>
     invoke<CloudWorkspaceSetup>("cloud_workspace_setup", { provider }),
   cloudWorkspaceQuote: (input: CloudWorkspaceQuoteInput) =>
@@ -218,6 +224,12 @@ export const api = {
     invoke<CommitInfo[]>("log_commits", { cwd, range: range ?? null, limit: limit ?? 100 }),
 };
 
+export interface OrganizationSummary {
+  id: string;
+  name: string;
+  role: string;
+}
+
 export interface AccountIdentity {
   name: string | null;
   email: string;
@@ -229,6 +241,8 @@ export interface AccountStatus {
   identity: AccountIdentity | null;
   expiresAt: number | null;
   lastError: string | null;
+  context?: { scope: string; revision: string } | null;
+  organizations?: OrganizationSummary[];
 }
 
 export type CloudWorkspaceProviderId = "machine0" | "box";
@@ -270,6 +284,16 @@ export interface CloudProviderConnection {
   connectedAt: number | null;
   lastValidatedAt: number | null;
 }
+
+export interface CloudProviderConnectInput {
+  contextRevision: string;
+  disclosure: {
+    version: string;
+    providerBillingAccepted: true;
+    organizationUseAccepted: true;
+  };
+}
+
 
 export interface CloudWorkspaceProviderSelection {
   sourceId: string;
