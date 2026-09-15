@@ -1,0 +1,68 @@
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { RecoveryBanner } from "./RecoveryBanner";
+import type { PendingAsk } from "@/lib/transcript";
+import type { ModelInfo } from "@/lib/api";
+
+const ask: PendingAsk = {
+  seq: 1, kind: "permission", requestId: "request", toolUseId: "call", toolName: "Bash",
+  input: { command: "TOKEN=secret /Users/private/run" }, description: "secret request details",
+  options: [{ id: "allow", kind: "allow_once", label: "unsafe secret" }, { id: "deny", kind: "deny", label: "Deny" }],
+};
+const props = () => ({ kind: null, waiting: false, asks: [], busy: false, models: [], onPermission: vi.fn(), onQuestions: vi.fn(), onRetry: vi.fn(), onStop: vi.fn(), onContinue: vi.fn() });
+afterEach(cleanup);
+
+describe("session recovery UI smoke", () => {
+  it("shows capacity recovery, model selection, then a permission request with allow, deny and stop", () => {
+    const p = props();
+    const { rerender, container } = render(<RecoveryBanner {...p} kind="capacity" models={[{ id: "available", label: "Available model" } as ModelInfo]} />);
+    expect(screen.getByText(/provider is at capacity/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry safely" }));
+    expect(p.onRetry).toHaveBeenCalledWith();
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "available" } });
+    expect(p.onRetry).toHaveBeenCalledWith("available");
+    rerender(<RecoveryBanner {...p} waiting asks={[ask]} />);
+    expect(screen.getByText(/Waiting for permission to run a command/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /^Allow/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Deny" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop session" }));
+    expect(p.onPermission.mock.calls).toEqual([["request", "allow"], ["request", "deny"]]);
+    expect(p.onStop).toHaveBeenCalledOnce();
+    expect(container.textContent).not.toMatch(/secret|TOKEN|\/Users/);
+    expect(screen.queryByRole("button", { name: "Retry safely" })).toBeNull();
+  });
+
+  it("keeps keyboard decisions on the focused permission button", () => {
+    const p = props();
+    render(<RecoveryBanner {...p} waiting asks={[ask]} />);
+    const deny = screen.getByRole("button", { name: "Deny" });
+    deny.focus();
+    fireEvent.keyDown(deny, { key: "Enter" });
+    expect(p.onPermission).not.toHaveBeenCalled();
+    // Native buttons generate their own click for Enter; no ancestor may
+    // substitute the first option for the reader's focused choice.
+    fireEvent.click(deny);
+    expect(p.onPermission).toHaveBeenCalledExactlyOnceWith("request", "deny");
+  });
+
+  it("keeps Stop available while a permission response is pending", () => {
+    const p = props();
+    render(<RecoveryBanner {...p} waiting answering asks={[ask]} />);
+    expect((screen.getByRole("button", { name: /^Allow/ }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Stop session" }));
+    expect(p.onStop).toHaveBeenCalledOnce();
+  });
+
+  it.each(["timeout", "disconnected"] as const)("distinguishes unknown %s outcomes from exit", kind => {
+    render(<RecoveryBanner {...props()} kind={kind} />);
+    expect(screen.getByText(/process outcome is unknown/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry safely" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Stop session" })).toBeTruthy();
+  });
+
+  it("retires expired permission controls and disables repeated actions while settling", () => {
+    render(<RecoveryBanner {...props()} kind="permission_expired" busy />);
+    expect(screen.queryByRole("button", { name: /^Allow/ })).toBeNull();
+    expect((screen.getByRole("button", { name: "Stop session" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});

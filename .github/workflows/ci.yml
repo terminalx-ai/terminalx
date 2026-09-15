@@ -112,6 +112,10 @@ jobs:
       - name: Computer contract tests
         working-directory: src-tauri
         run: "cargo test --lib computer::"
+      - name: Windows process exit observation
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        run: cargo test --lib process_probe_distinguishes_running_from_confirmed_exit
       - name: Windows pipe tests
         if: runner.os == 'Windows'
         working-directory: src-tauri

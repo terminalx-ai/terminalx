@@ -330,6 +330,8 @@ pub enum Payload {
         message: String,
     },
 
+    Recovery { kind: Option<crate::recovery::RecoveryKind> },
+
     // ---- indicators
     ModelRequestStarted,
     UsageUpdate(Usage),

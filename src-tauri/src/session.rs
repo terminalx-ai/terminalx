@@ -27,12 +27,14 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::events::*;
+use crate::recovery::{self, RecoveryKind};
 use crate::harness::host::{Host, LiveChild, Sink, SpawnSpec};
 use crate::harness::{acp, claude, codex, opencode, tui, Action, CliKind, HarnessId};
 use crate::hooks::{HookFrame, HookReply, Origin};
 use crate::store::index::{self, TabEntry, TabStatus};
 use crate::{git, pty, store};
 
+#[derive(Clone)]
 pub struct PendingAsk {
     pub tool_use_id: String,
     pub tool_name: String,
@@ -247,6 +249,10 @@ pub struct TabRuntime {
     pub turn_open: bool,
     pub turn_started_at: Option<Instant>,
     pub last_activity: Instant,
+    pub recovery: Option<RecoveryKind>,
+    pub stopping: bool,
+    pub stop_in_flight: bool,
+    pub stopping_pid: Option<u32>,
     pub log_path: std::path::PathBuf,
     /// Back-reference so work finished off-thread (an HTTP reply) can re-enter.
     pub me: std::sync::Weak<Mutex<TabRuntime>>,
@@ -395,7 +401,7 @@ impl SessionManager {
         status: Arc<crate::status::StatusState>,
         control: crate::hooks::ControlEndpoint,
     ) -> Self {
-        Self {
+        let manager = Self {
             app,
             host,
             terminals,
@@ -405,7 +411,19 @@ impl SessionManager {
             tabs: Arc::new(Mutex::new(HashMap::new())),
             writers: Arc::new(Mutex::new(HashMap::new())),
             starts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        }
+        };
+        let watcher = manager.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            let tabs: Vec<_> = watcher.tabs.lock().unwrap().values().cloned().collect();
+            for rt in tabs {
+                let mut rt = rt.lock().unwrap();
+                if recovery::is_stale(rt.status == TabStatus::InProgress, rt.last_activity.elapsed()) {
+                    watcher.needs_recovery(&mut rt, RecoveryKind::Timeout);
+                }
+            }
+        });
+        manager
     }
 
     fn runtime(&self, session_id: &str, tab_id: &str) -> Result<Arc<Mutex<TabRuntime>>> {
@@ -429,6 +447,10 @@ impl SessionManager {
                 turn_open: false,
                 turn_started_at: None,
                 last_activity: Instant::now(),
+                recovery: None,
+                stopping: false,
+                stop_in_flight: false,
+                stopping_pid: None,
                 log_path,
                 me: std::sync::Weak::new(),
             }));
@@ -438,7 +460,12 @@ impl SessionManager {
     }
 
     /// Stamp, persist, emit. The one path every event takes.
-    fn publish(&self, rt: &mut TabRuntime, payload: Payload, subagent: Option<SubagentRef>) -> AgentEvent {
+    fn publish(&self, rt: &mut TabRuntime, mut payload: Payload, subagent: Option<SubagentRef>) -> AgentEvent {
+        if matches!(&payload, Payload::Error { .. } | Payload::TurnCompleted { status: TurnStatus::Error, .. } | Payload::ApiRetry { .. } | Payload::RateLimited { .. } | Payload::PermissionDenied { .. })
+            || matches!(&payload, Payload::ToolCallCompleted { result, .. } if result.is_error) {
+            recovery::diagnose(&rt.log_path.with_extension("diagnostics.jsonl"), &payload);
+            recovery::sanitize(&mut payload);
+        }
         rt.seq += 1;
         let ev = AgentEvent {
             id: uuid::Uuid::now_v7().to_string(),
@@ -469,7 +496,16 @@ impl SessionManager {
         ev
     }
 
+    fn needs_recovery(&self, rt: &mut TabRuntime, kind: RecoveryKind) {
+        rt.recovery = Some(kind);
+        self.publish(rt, Payload::Recovery { kind: Some(kind) }, None);
+        self.set_status(rt, TabStatus::Waiting);
+    }
+
     fn set_status(&self, rt: &mut TabRuntime, status: TabStatus) {
+        if status != TabStatus::Waiting && rt.recovery.take().is_some() {
+            self.publish(rt, Payload::Recovery { kind: None }, None);
+        }
         // CLI work starts require a live hook (or a delivered permission
         // answer). Composer optimism and transcript hydration only affect UI.
         if !matches!(rt.engine, Engine::Cli(_)) || status != TabStatus::InProgress {
@@ -499,12 +535,11 @@ impl SessionManager {
         self.app.state::<crate::AppState>().star_nag.status(&self.app, rt.key(), status);
         let _ = self.app.emit("tab_status", TabStatusEvent { session_id: rt.session_id.clone(), tab_id: rt.tab_id.clone(), status });
         let (sid, tid) = (rt.session_id.clone(), rt.tab_id.clone());
-        // Persist off the hot path; the index write takes a lock and a rename.
-        std::thread::spawn(move || {
-            let _ = index::update_tab(&sid, &tid, |t| {
-                t.status = status;
-                Ok(())
-            });
+        // Serialize status writes under the runtime lock so an old running
+        // write cannot overwrite a newer waiting/idle state.
+        let _ = index::update_tab(&sid, &tid, |t| {
+            t.status = status;
+            Ok(())
         });
     }
 
@@ -515,6 +550,14 @@ impl SessionManager {
         let path = store::log_path(session_id, tab_id)?;
         let mut events: Vec<AgentEvent> = store::read_lines(&path)?;
         self.reconcile_lapsed_events(session_id, tab_id, &mut events)?;
+        for event in &mut events { recovery::sanitize(&mut event.payload); }
+        let rt_arc = self.runtime(session_id, tab_id)?;
+        let mut rt = rt_arc.lock().unwrap();
+        if rt.status == TabStatus::Idle && !rt.turn_open && !rt.stopping {
+            if let Some(kind) = recovery::from_history(&events) {
+                self.needs_recovery(&mut rt, kind);
+            }
+        }
         Ok(events)
     }
 
@@ -704,7 +747,13 @@ impl SessionManager {
         display_text: String,
         images: Vec<ImageInput>,
     ) -> Result<SendOutcome> {
-        self.send_impl(session_id, tab_id, text, display_text, images, None)
+        let outcome = self.send_impl(session_id, tab_id, text, display_text, images, None);
+        if let Err(error) = &outcome {
+            if let Ok(rt) = self.runtime(session_id, tab_id) {
+                self.apply(&mut rt.lock().unwrap(), Payload::Error { message: format!("{error:#}"), fatal: false }, None);
+            }
+        }
+        outcome.map_err(|error| anyhow!(RecoveryKind::classify(&error.to_string()).message()))
     }
 
     fn send_impl(
@@ -719,6 +768,7 @@ impl SessionManager {
         let entry = index::get(session_id)?;
         let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
         let mut rt = rt_arc.lock().unwrap();
+        if rt.stopping { bail!("Stop has not confirmed local process exit. Retry Stop before resuming."); }
         let (refs, wire_images) = Self::archive_images(session_id, &images)?;
 
         if receipt.is_some() && (pty_first(&tab.harness).is_none() || rt.turn_open || !rt.pending.is_empty()) {
@@ -849,7 +899,7 @@ impl SessionManager {
                 }
                 Action::Write(line) => {
                     if let Err(e) = self.write(rt, &line) {
-                        log::error!("[{}] write: {e:#}", rt.key());
+                        self.apply(rt, Payload::Error { message: format!("Connection write failed: {e:#}"), fatal: false }, None);
                     }
                 }
                 Action::Emit(p) => self.apply(rt, p, None),
@@ -903,21 +953,52 @@ impl SessionManager {
     /// Kill the agent but keep resume state, so the next prompt resumes.
     pub fn stop(&self, session_id: &str, tab_id: &str) -> Result<()> {
         let key = key_of(session_id, tab_id);
-        self.host.kill(&key);
-        let rt = self.tabs.lock().unwrap().get(&key).cloned();
-        let pane = rt.and_then(|rt| {
-            let mut rt = rt.lock().unwrap();
-            self.record_activity(&rt, TabStatus::Idle, store::activity::Source::Live);
+        let rt_arc = self.runtime(session_id, tab_id)?;
+        let (pane, pid) = {
+            let mut rt = rt_arc.lock().unwrap();
+            if rt.stop_in_flight { bail!("Stop is already in progress."); }
+            rt.stop_in_flight = true;
+            rt.stopping = true;
+            rt.queued.clear();
+            let pid = rt.stopping_pid.or(rt.child_pid).or_else(|| {
+                let pane = Self::pane_id(tab_id);
+                self.terminals.panes().iter().find(|p| p.id == pane).and_then(|p| p.pid)
+            });
+            for request_id in rt.pending.drain().map(|(id, _)| id).collect::<Vec<_>>() {
+                self.publish(&mut rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Cancelled".into(), automatic: true }, None);
+            }
+            rt.stopping_pid = pid;
+            // Settle before waiting for the OS. Late exits cannot reopen this turn.
+            self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
+            let pane = self.release_cli(&mut rt);
             rt.child = None;
             rt.child_pid = None;
-            self.release_cli(&mut rt)
-        });
-        // The CLI holds its conversation until it is gone, and Claude Code
-        // ignores a polite signal, so a prompt sent straight after Stop would
-        // otherwise find the session still taken.
+            rt.engine = Engine::None;
+            self.set_status(&mut rt, TabStatus::Idle);
+            (pane, pid)
+        };
         if let Some(pane) = pane {
             self.terminals.kill_and_wait(&pane, RESTART_WAIT);
+        } else if self.host.is_live(&key) {
+            self.host.kill(&key);
+        } else if let Some(pid) = pid {
+            crate::harness::host::terminate(pid);
         }
+        let deadline = Instant::now() + RESTART_WAIT;
+        while pid.is_some_and(crate::harness::host::is_alive) {
+            if Instant::now() >= deadline {
+                let mut rt = rt_arc.lock().unwrap();
+                rt.stop_in_flight = false;
+                self.needs_recovery(&mut rt, RecoveryKind::Disconnected);
+                bail!("Local process exit could not be confirmed. Retry Stop before resuming.");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let mut rt = rt_arc.lock().unwrap();
+        rt.stopping = false;
+        rt.stop_in_flight = false;
+        rt.stopping_pid = None;
+        self.publish(&mut rt, Payload::Status { text: recovery::SESSION_CLOSED_MESSAGE.into() }, None);
         Ok(())
     }
 
@@ -926,9 +1007,11 @@ impl SessionManager {
         let mut rt = rt_arc.lock().unwrap();
         if rt.child.is_none() && !matches!(rt.engine, Engine::Cli(_)) {
             rt.pending.remove(request_id);
+            self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true }, None);
+            self.needs_recovery(&mut rt, RecoveryKind::PermissionExpired);
             bail!("the agent is no longer running; the request lapsed");
         }
-        let ask = rt.pending.remove(request_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
+        let ask = rt.pending.get(request_id).cloned().ok_or_else(|| anyhow!("that request is no longer open"))?;
         let (allow, label) = match &mut rt.engine {
             Engine::Cli(p) => {
                 let (decision, label) = match option_id {
@@ -960,6 +1043,7 @@ impl SessionManager {
             }
             Engine::None => bail!("no engine"),
         };
+        rt.pending.remove(request_id);
         self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: allow, label, automatic: false }, None);
         if rt.pending.is_empty() && !matches!(rt.engine, Engine::Cli(_)) {
             self.set_status(&mut rt, TabStatus::InProgress);
@@ -1145,8 +1229,13 @@ impl SessionManager {
             return Ok(());
         }
         let mut rt = rt_arc.lock().unwrap();
-        if !self.start_cli(&mut rt, &rt_arc, &entry, &tab)? {
-            self.announce_pane(&rt);
+        match self.start_cli(&mut rt, &rt_arc, &entry, &tab) {
+            Ok(false) => self.announce_pane(&rt),
+            Ok(true) => {},
+            Err(error) => {
+                self.apply(&mut rt, Payload::Error { message: format!("{error:#}"), fatal: false }, None);
+                return Err(anyhow!(RecoveryKind::classify(&error.to_string()).message()));
+            }
         }
         Ok(())
     }
@@ -1166,11 +1255,13 @@ impl SessionManager {
         let Some(entry) = index::load().ok().and_then(|sessions| sessions.into_iter().find(|session| session.tab(tab_id).is_some())) else { return };
         let Ok(rt_arc) = self.runtime(&entry.id, tab_id) else { return };
         let mut rt = rt_arc.lock().unwrap();
+        // A delayed exit from a replaced pane must not settle its successor.
+        if !matches!(rt.engine, Engine::Cli(_)) || self.terminals.is_running(pane_id) { return; }
         let turn_was_open = rt.turn_open;
-        if turn_was_open {
-            self.close_open_turn(&mut rt, TurnStatus::Error, None);
-        }
-        self.set_status(&mut rt, TabStatus::Idle);
+        let recovery = rt.recovery.or(turn_was_open.then_some(RecoveryKind::Failed));
+        if turn_was_open { self.close_open_turn(&mut rt, TurnStatus::Error, None); }
+        self.release_cli(&mut rt);
+        if let Some(kind) = recovery { self.needs_recovery(&mut rt, kind); }
         drop(rt);
         if turn_was_open {
             let detail = code.map(|value| format!(" with exit code {value}")).unwrap_or_else(|| " from a signal".into());
@@ -1198,6 +1289,7 @@ impl SessionManager {
     /// Returns whether this call is what started it, so a prompt sent in the
     /// same breath knows to wait for the TUI to finish drawing.
     fn start_cli(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry) -> Result<bool> {
+        if rt.stopping { bail!("Stop has not confirmed local process exit. Retry Stop before resuming."); }
         let Some(kind) = pty_first(&tab.harness) else { return Ok(false) };
         let pane = Self::pane_id(&tab.id);
         if let Engine::Cli(p) = &rt.engine {
@@ -1412,6 +1504,9 @@ impl SessionManager {
     fn release_cli(&self, rt: &mut TabRuntime) -> Option<String> {
         let Engine::Cli(p) = &rt.engine else { return None };
         let pane = p.pane_id.clone();
+        for request_id in rt.pending.drain().map(|(id, _)| id).collect::<Vec<_>>() {
+            self.publish(rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true }, None);
+        }
         rt.engine = Engine::None;
         rt.turn_open = false;
         self.set_status(rt, TabStatus::Idle);
@@ -1436,9 +1531,10 @@ impl SessionManager {
             if !manager.terminals.is_running(&pane) {
                 let mut rt = rt_arc.lock().unwrap();
                 if matches!(&rt.engine, Engine::Cli(p) if p.generation == generation) {
+                    let recovery = rt.recovery.or(rt.turn_open.then_some(RecoveryKind::Failed));
                     manager.close_open_turn(&mut rt, TurnStatus::Aborted, None);
-                    rt.engine = Engine::None;
-                    manager.set_status(&mut rt, TabStatus::Idle);
+                    manager.release_cli(&mut rt);
+                    if let Some(kind) = recovery { manager.needs_recovery(&mut rt, kind); }
                 }
                 return;
             }
@@ -1954,6 +2050,7 @@ impl SessionManager {
                 // The CLI has stopped waiting on us and will ask in its own
                 // TUI; the card must stop offering buttons that go nowhere.
                 self.apply(&mut rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true }, None);
+                self.needs_recovery(&mut rt, RecoveryKind::PermissionExpired);
                 HookReply::default()
             }
         }
@@ -2006,6 +2103,12 @@ impl SessionManager {
     }
 
     fn apply(&self, rt: &mut TabRuntime, payload: Payload, subagent: Option<SubagentRef>) {
+        if subagent.is_none() {
+            if rt.pending.is_empty() && rt.recovery.is_some() && rt.recovery != Some(RecoveryKind::PermissionExpired) && matches!(&payload, Payload::AssistantText { .. } | Payload::Delta(Delta::TextDelta { .. }) | Payload::ToolCallStarted { .. }) {
+                self.set_status(rt, TabStatus::InProgress);
+            }
+            if let Some(kind) = recovery::failure(&payload) { self.needs_recovery(rt, kind); }
+        }
         match &payload {
             Payload::TurnStarted { provider_session_id: Some(pid), .. } => {
                 let (s, t, pid) = (rt.session_id.clone(), rt.tab_id.clone(), pid.clone());
@@ -2028,9 +2131,9 @@ impl SessionManager {
                 self.set_status(rt, TabStatus::Waiting);
             }
             Payload::QuestionsAsked { .. } => self.set_status(rt, TabStatus::Waiting),
-            Payload::PermissionDecided { request_id, automatic: true, .. } => {
+            Payload::PermissionDecided { request_id, automatic: true, label, .. } => {
                 rt.pending.remove(request_id);
-                if rt.pending.is_empty() && rt.status == TabStatus::Waiting {
+                if rt.pending.is_empty() && rt.status == TabStatus::Waiting && label != "Lapsed" {
                     self.set_status(rt, TabStatus::InProgress);
                 }
             }
@@ -2038,6 +2141,7 @@ impl SessionManager {
         }
 
         let is_boundary = payload.is_turn_boundary();
+        let aborted = matches!(&payload, Payload::TurnCompleted { status: TurnStatus::Aborted, .. });
         if is_boundary {
             self.record_activity(rt, TabStatus::Completed, store::activity::Source::Replay);
         }
@@ -2068,7 +2172,7 @@ impl SessionManager {
 
         if is_boundary {
             rt.turn_open = false;
-            if !rt.queued.is_empty() {
+            if !aborted && rt.recovery.is_none() && !rt.queued.is_empty() {
                 let q = rt.queued.remove(0);
                 let actions = match &mut rt.engine {
                     Engine::Acp(a) => a.prompt(q.text.clone(), q.images.clone()),
@@ -2086,7 +2190,7 @@ impl SessionManager {
                     return;
                 }
             }
-            self.set_status(rt, TabStatus::Completed);
+            self.set_status(rt, if rt.recovery.is_some() { TabStatus::Waiting } else if aborted { TabStatus::Idle } else { TabStatus::Completed });
         }
     }
 
@@ -2102,6 +2206,7 @@ impl SessionManager {
         for request_id in pending {
             self.publish(&mut rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true }, None);
         }
+        let recovery = rt.recovery.or((rt.turn_open && code != Some(0)).then_some(RecoveryKind::Failed));
         if rt.turn_open {
             rt.turn_open = false;
             let duration_ms = rt.turn_started_at.map(|t| t.elapsed().as_millis() as u64);
@@ -2110,7 +2215,8 @@ impl SessionManager {
             self.publish(&mut rt, Payload::TurnCompleted { status, final_text, usage: None, duration_ms, head: None, auth_failed: false }, None);
         }
         rt.queued.clear();
-        self.set_status(&mut rt, TabStatus::Idle);
+        if let Some(kind) = recovery { self.needs_recovery(&mut rt, kind); }
+        else { self.set_status(&mut rt, TabStatus::Idle); }
     }
 }
 
