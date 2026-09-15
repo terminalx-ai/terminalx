@@ -4,7 +4,6 @@ import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 import type { PendingAsk } from "@/lib/transcript";
-import { shortPath } from "@/lib/paths";
 
 /**
  * A held tool call. The buttons are the harness's own options; the app only
@@ -15,8 +14,6 @@ export function PermissionCard({ ask, onAnswer, busy }: { ask: PendingAsk; onAns
   useEffect(() => {
     ref.current?.querySelector<HTMLButtonElement>("button")?.focus();
   }, []);
-  const input = (ask.input ?? {}) as Record<string, unknown>;
-  const detail = detailFor(ask.toolName ?? "", input);
   return (
     <div
       ref={ref}
@@ -32,14 +29,8 @@ export function PermissionCard({ ask, onAnswer, busy }: { ask: PendingAsk; onAns
         <ShieldAlert className="mt-0.5 size-4 shrink-0 text-warning" />
         <div className="min-w-0 flex-1">
           <div className="text-[13px] font-medium">
-            {ask.toolName} wants to {verbFor(ask.toolName ?? "")}
+            Waiting for permission to {verbFor(ask.toolName ?? "")}
           </div>
-          {ask.description && <div className="mt-0.5 text-xs text-muted-foreground">{ask.description}</div>}
-          {detail && (
-            <pre className="mt-2 max-h-48 overflow-auto scrollbar-thin rounded-md bg-well px-2.5 py-2 font-mono text-[12px] leading-relaxed whitespace-pre-wrap break-all select-text">
-              {detail}
-            </pre>
-          )}
           <div className="mt-3 flex flex-wrap items-center gap-1.5">
             {ask.options?.map((o, i) => (
               <Button
@@ -50,7 +41,7 @@ export function PermissionCard({ ask, onAnswer, busy }: { ask: PendingAsk; onAns
                 onClick={() => onAnswer(o.id)}
                 className={cn(o.kind === "deny" && "ml-auto text-muted-foreground")}
               >
-                {o.label}
+                {o.kind === "deny" ? "Deny" : o.kind === "allow_once" ? "Allow" : o.kind === "allow_always" ? "Always allow" : o.kind === "allow_session" ? "Allow for session" : "Change permission mode"}
                 {i === 0 && <Kbd className="ml-1 bg-black/10">⏎</Kbd>}
               </Button>
             ))}
@@ -81,32 +72,6 @@ function verbFor(tool: string): string {
       return "search the web";
     default:
       return tool.startsWith("mcp__") ? "use an MCP tool" : "run";
-  }
-}
-
-function detailFor(tool: string, input: Record<string, unknown>): string | null {
-  const s = (k: string) => (typeof input[k] === "string" ? (input[k] as string) : undefined);
-  switch (tool) {
-    case "Bash":
-    case "shell":
-      return s("command") ?? null;
-    case "apply_patch": {
-      const changes = input["changes"];
-      return Array.isArray(changes) ? changes.map((c) => `${(c as { kind?: string }).kind ?? "update"} ${(c as { path?: string }).path ?? ""}`).join("\n") : null;
-    }
-    case "Edit":
-      return `${shortPath(s("file_path") ?? "")}\n- ${s("old_string") ?? ""}\n+ ${s("new_string") ?? ""}`;
-    case "Write":
-      return `${shortPath(s("file_path") ?? "")}\n${(s("content") ?? "").slice(0, 2000)}`;
-    case "Read":
-      return shortPath(s("file_path") ?? "");
-    case "WebFetch":
-      return s("url") ?? null;
-    default: {
-      const keys = Object.keys(input);
-      if (!keys.length) return null;
-      return JSON.stringify(input, null, 2).slice(0, 2000);
-    }
   }
 }
 

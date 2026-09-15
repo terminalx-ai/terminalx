@@ -140,7 +140,8 @@ export function applyEvent(ev: AgentEvent) {
     log.stream = [];
   }
   log.events.push(ev);
-  const urgent = p.type === "permission_requested" || p.type === "questions_asked" || p.type === "turn_completed";
+  if (p.type === "recovery" && p.kind) setTabStatus(ev.sessionId, ev.tabId, "waiting");
+  const urgent = p.type === "recovery" || p.type === "permission_requested" || p.type === "questions_asked" || p.type === "turn_completed";
   touch(k, urgent);
 }
 

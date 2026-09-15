@@ -25,6 +25,7 @@ mod names;
 mod pairing;
 mod pty;
 mod session;
+mod recovery;
 mod continuation;
 pub mod skills;
 mod store;
