@@ -9,6 +9,7 @@
 pub mod automations;
 pub mod activity;
 pub mod index;
+pub mod conversation_titles;
 pub mod projects;
 pub mod settings;
 

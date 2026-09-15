@@ -250,7 +250,7 @@ pub fn select_project(path: String) -> CmdResult<()> {
 
 #[tauri::command]
 pub fn list_sessions() -> CmdResult<Vec<SessionEntry>> {
-    index::load().map_err(err)
+    store::conversation_titles::backfill().map_err(err)
 }
 
 // ---------------------------------------------------------------- automations
