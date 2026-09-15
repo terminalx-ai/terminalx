@@ -18,12 +18,7 @@ export function PermissionCard({ ask, onAnswer, busy }: { ask: PendingAsk; onAns
     <div
       ref={ref}
       className="animate-fade-in rounded-xl border border-warning/30 bg-warning/[0.06] p-3.5"
-      onKeyDown={(e) => {
-        if (e.key === "Enter" && ask.options?.[0] && !busy) {
-          e.preventDefault();
-          onAnswer(ask.options[0].id);
-        }
-      }}
+
     >
       <div className="flex items-start gap-2.5">
         <ShieldAlert className="mt-0.5 size-4 shrink-0 text-warning" />

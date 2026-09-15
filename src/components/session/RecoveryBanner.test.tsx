@@ -32,6 +32,19 @@ describe("session recovery UI smoke", () => {
     expect(screen.queryByRole("button", { name: "Retry safely" })).toBeNull();
   });
 
+  it("keeps keyboard decisions on the focused permission button", () => {
+    const p = props();
+    render(<RecoveryBanner {...p} waiting asks={[ask]} />);
+    const deny = screen.getByRole("button", { name: "Deny" });
+    deny.focus();
+    fireEvent.keyDown(deny, { key: "Enter" });
+    expect(p.onPermission).not.toHaveBeenCalled();
+    // Native buttons generate their own click for Enter; no ancestor may
+    // substitute the first option for the reader's focused choice.
+    fireEvent.click(deny);
+    expect(p.onPermission).toHaveBeenCalledExactlyOnceWith("request", "deny");
+  });
+
   it.each(["timeout", "disconnected"] as const)("distinguishes unknown %s outcomes from exit", kind => {
     render(<RecoveryBanner {...props()} kind={kind} />);
     expect(screen.getByText(/process outcome is unknown/)).toBeTruthy();
