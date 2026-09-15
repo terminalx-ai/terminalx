@@ -7,8 +7,9 @@ import { HostApi, type SessionSummary } from "../data/host-api";
 import { handleNotificationEvent, restoreLocalNotifications } from "../notifications/local";
 import { discoverMachines, pairDiscoveredMachine, signOutPairing, type InstallationState } from "../pairing/account";
 import type { AccountHost } from "../pairing/account-client";
+import { pairingStep } from "../pairing/errors";
 import { pairFromOffer, recoverPendingPairing } from "../pairing/pair";
-import { parsePairingCode } from "../pairing/parse";
+import { parsePairingCodeOrThrow } from "../pairing/parse";
 import { readHostCredential, readHosts, removeHost, type StoredHost } from "../store/hosts";
 import { HostConnection, type ConnectionLogEntry, type ConnectionStage } from "../transport/connection";
 
@@ -218,10 +219,9 @@ export function AppProvider({ children }: PropsWithChildren) {
     setLoadingMachines(true);
     setError(null);
     try {
-      const offer = parsePairingCode(code);
-      if (!offer) throw new Error("That pairing code is invalid or expired");
+      const offer = parsePairingCodeOrThrow(code);
       await pairFromOffer({ offer, label: "Paired Mac", provenance: { kind: "explicit" } });
-      await loadHosts();
+      await pairingStep("persistence", loadHosts);
     } catch (cause) {
       setError(readableError(cause));
       throw cause;
@@ -235,7 +235,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     setError(null);
     try {
       await recoverPendingPairing();
-      await loadHosts();
+      await pairingStep("persistence", loadHosts);
     } catch (cause) {
       setError(readableError(cause));
       throw cause;
