@@ -45,6 +45,14 @@ describe("session recovery UI smoke", () => {
     expect(p.onPermission).toHaveBeenCalledExactlyOnceWith("request", "deny");
   });
 
+  it("keeps Stop available while a permission response is pending", () => {
+    const p = props();
+    render(<RecoveryBanner {...p} waiting answering asks={[ask]} />);
+    expect((screen.getByRole("button", { name: /^Allow/ }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Stop session" }));
+    expect(p.onStop).toHaveBeenCalledOnce();
+  });
+
   it.each(["timeout", "disconnected"] as const)("distinguishes unknown %s outcomes from exit", kind => {
     render(<RecoveryBanner {...props()} kind={kind} />);
     expect(screen.getByText(/process outcome is unknown/)).toBeTruthy();

@@ -178,7 +178,7 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
       stream={log.stream}
       cwd={session.cwd}
       live={live}
-      progressing={tab.status === "in_progress" && !recovery}
+      progressing={tab.status === "in_progress" && !recovery && !transcript.pendingAsks.length}
       answering={answering}
       onAnswerPermission={answerPermission}
       onAnswerQuestions={answerQuestions}
@@ -251,7 +251,7 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
       Session closed. Untracked or remote commands may still be running; verify their outcome before continuing.
       <Button size="sm" disabled={recovering} onClick={() => void retry()}>Resume safely</Button>
     </div>}
-    <RecoveryBanner kind={recovery} waiting={tab.status === "waiting"} asks={transcript.pendingAsks} busy={answering || recovering}
+    <RecoveryBanner kind={recovery} waiting={tab.status === "waiting"} asks={transcript.pendingAsks} busy={recovering} answering={answering}
       models={models.filter(m => m.id !== tab.model && !m.upgrade)} onPermission={answerPermission} onQuestions={answerQuestions}
       onRetry={retry} onStop={stop} onContinue={() => {
         if (recoveryLock.current) return;

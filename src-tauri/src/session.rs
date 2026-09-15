@@ -2097,7 +2097,7 @@ impl SessionManager {
 
     fn apply(&self, rt: &mut TabRuntime, payload: Payload, subagent: Option<SubagentRef>) {
         if subagent.is_none() {
-            if rt.recovery.is_some() && rt.recovery != Some(RecoveryKind::PermissionExpired) && matches!(&payload, Payload::AssistantText { .. } | Payload::Delta(Delta::TextDelta { .. }) | Payload::ToolCallStarted { .. }) {
+            if rt.pending.is_empty() && rt.recovery.is_some() && rt.recovery != Some(RecoveryKind::PermissionExpired) && matches!(&payload, Payload::AssistantText { .. } | Payload::Delta(Delta::TextDelta { .. }) | Payload::ToolCallStarted { .. }) {
                 self.set_status(rt, TabStatus::InProgress);
             }
             if let Some(kind) = recovery::failure(&payload) { self.needs_recovery(rt, kind); }
