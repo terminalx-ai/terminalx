@@ -38,6 +38,14 @@ describe("pairing payload parsing", () => {
     expect(parsePairingCode(encode(direct), () => now)).toEqual(direct);
   });
 
+  it("preserves bounded LAN, VPN and Bonjour candidates", () => {
+    const updated = { ...offer, directEndpoints: ["ws://192.168.1.2:6768", "ws://100.93.49.78:6768", "ws://mac.local:6768"] };
+    expect(parsePairingCode(encode(updated), () => now)).toEqual(updated);
+    for (const directEndpoints of [["https://example.com"], ["ws://user:secret@mac.local"], Array(65).fill("ws://mac.local:6768")]) {
+      expect(parsePairingCode(encode({ ...offer, directEndpoints }), () => now)).toBeNull();
+    }
+  });
+
   it("rejects unknown fields and expired invites", () => {
     expect(parsePairingCode(encode({ ...offer, extra: true }), () => now)).toBeNull();
     expect(parsePairingCode(encode({ ...offer, relay: { ...offer.relay, inviteExpiresAt: now } }), () => now)).toBeNull();

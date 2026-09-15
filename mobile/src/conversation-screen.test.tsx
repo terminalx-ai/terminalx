@@ -68,6 +68,7 @@ beforeEach(() => {
   mocks.push.mockClear();
   mocks.setParams.mockImplementation((params) => Object.assign(mocks.params, params));
   mocks.app = {
+    logs: [],
     activeHost: { id: mocks.params.hostId, label: "Mac", endpoint: "localhost" }, connectionStage: "connected",
     sessions: [{ id: "worktree", title: "Create a new issue", project: "TerminalX", worktree: "issue-132", modified: "today", tabs: [
       { id: "claude", harness: "claude", status: "waiting" }, { id: "codex", harness: "codex", status: "in_progress" },

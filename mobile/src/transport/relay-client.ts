@@ -96,7 +96,7 @@ export class RelayClient {
     const socket = (this.options.createSocket ?? ((url) => new WebSocket(url)))(direct ? this.options.endpoint : relaySocketUrl(this.options.relay));
     socket.binaryType = "arraybuffer";
     this.socket = socket;
-    this.handshakeTimer = setTimeout(() => this.fail(new Error("Relay handshake timed out")), 15_000);
+    this.handshakeTimer = setTimeout(() => this.fail(new Error(`${direct ? "Direct" : "Relay"} handshake timed out after 15 seconds`)), 15_000);
     socket.onopen = () => {
       if (direct) {
         this.outerReady = true;
@@ -107,7 +107,7 @@ export class RelayClient {
       }
     };
     socket.onmessage = (event) => void this.handleMessage(event.data).catch((error: unknown) => this.fail(asError(error)));
-    socket.onerror = () => this.fail(new RelayOuterError(1006));
+    socket.onerror = () => this.fail(direct ? new Error("WebSocket connection failed (network unavailable or connection refused)") : new RelayOuterError(1006));
     socket.onclose = (event) => this.fail(new RelayOuterError(event.code || 1006));
     return this.connectPromise;
   }

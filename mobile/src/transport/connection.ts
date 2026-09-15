@@ -1,6 +1,7 @@
+import { directEndpoints } from "./direct-endpoints";
 import { z } from "zod";
 import type { RpcCallResult } from "@terminalx/portable/rpc";
-import { RECONNECT_DELAYS_MS, RECONNECT_TRICKLE_MS } from "../pairing/contracts";
+import { PairingGetEndpointsResultSchema, RECONNECT_DELAYS_MS, RECONNECT_TRICKLE_MS } from "../pairing/contracts";
 import { updateStoredHost, writeHostCredential, type HostCredential, type StoredHost } from "../store/hosts";
 import { RelayClient, type RelayEvent } from "./relay-client";
 import { loadOrCreateE2EESecretKey } from "./e2ee-keypair";
@@ -15,6 +16,8 @@ const resolvedSchema = z.object({ v: z.literal(1), cellUrl: z.string().url(), as
 export class HostConnection {
   private client: RelayClient | null = null;
   private generation = 0;
+  private pendingClients = new Set<RelayClient>();
+  private refreshTimer: ReturnType<typeof setInterval> | undefined;
   private active: { host: StoredHost; credential: HostCredential } | null = null;
   private eventListeners = new Set<(event: RelayEvent) => void>();
   private stageListeners = new Set<(stage: ConnectionStage, attempt: number) => void>();
@@ -32,6 +35,9 @@ export class HostConnection {
 
   stop(): void {
     this.generation++;
+    clearInterval(this.refreshTimer);
+    for (const client of this.pendingClients) client.close();
+    this.pendingClients.clear();
     this.active = null;
     this.client?.close();
     this.client = null;
@@ -44,6 +50,9 @@ export class HostConnection {
     const active = this.active;
     if (!active) return;
     this.generation++;
+    clearInterval(this.refreshTimer);
+    for (const client of this.pendingClients) client.close();
+    this.pendingClients.clear();
     this.client?.close();
     this.client = null;
     const generation = this.generation;
@@ -108,6 +117,7 @@ export class HostConnection {
         await this.connectOnce(generation);
         return;
       } catch (error) {
+        if (generation !== this.generation) return;
         this.log("warning", "Connection attempt failed", safeError(error));
         attempt++;
       }
@@ -118,31 +128,52 @@ export class HostConnection {
     if (!this.active) return;
     const { host: storedHost, credential } = this.active;
     const clientSecretKey = await loadOrCreateE2EESecretKey();
+    if (generation !== this.generation || !this.active) return;
     const clients = new Set<RelayClient>();
-    const openDirect = async (): Promise<ConnectionCandidate> => {
-      const client = new RelayClient({ transport: "direct", endpoint: storedHost.endpoint, deviceToken: credential.deviceToken, desktopPublicKeyB64: storedHost.publicKeyB64, clientSecretKey });
+    let raceFinished = false;
+    const openDirect = async (endpoint: string): Promise<ConnectionCandidate> => {
+      const client = new RelayClient({ transport: "direct", endpoint, deviceToken: credential.deviceToken, desktopPublicKeyB64: storedHost.publicKeyB64, clientSecretKey });
       clients.add(client);
-      this.log("info", "Opening encrypted direct connection", redactEndpoint(storedHost.endpoint));
-      await client.connect();
-      return { client, host: storedHost, path: "direct" };
+      this.pendingClients.add(client);
+      this.log("info", "Opening encrypted direct connection", redactEndpoint(endpoint));
+      try { await client.connect(); } catch (error) {
+        client.close();
+        throw new Error(`${redactEndpoint(endpoint)}: ${safeError(error)}`);
+      }
+      return { client, host: { ...storedHost, endpoint }, path: "direct" };
     };
-    const attempts: Promise<ConnectionCandidate>[] = [openDirect()];
+    this.log("info", "Trying connection paths", [
+      ...directEndpoints(storedHost).map(redactEndpoint),
+      ...(storedHost.relay && credential.current ? [redactEndpoint(storedHost.relay.cellUrl)] : []),
+    ].join(" · "));
+    const attempts: Promise<ConnectionCandidate>[] = directEndpoints(storedHost).map(openDirect);
     if (storedHost.relay && credential.current) {
       const resumable = [credential.current, ...(credential.grace && credential.grace.expiresAt > Date.now() ? [credential.grace] : [])];
       for (const resume of resumable) {
         attempts.push((async () => {
           const host = await resolveRelay({ ...storedHost, relay: storedHost.relay! }, resume.token).catch(() => storedHost);
+          if (raceFinished || generation !== this.generation) throw new Error("Connection attempt cancelled");
           if (!host.relay) throw new Error("Relay endpoint unavailable");
           const client = new RelayClient({ relay: host.relay, credential: resume.token, credentialKind: "resume", credentialVersion: resume.version, deviceToken: credential.deviceToken, desktopPublicKeyB64: host.publicKeyB64, clientSecretKey });
           clients.add(client);
+          this.pendingClients.add(client);
           this.log("info", "Opening encrypted relay", redactEndpoint(host.relay.cellUrl));
-          await client.connect();
+          try { await client.connect(); } catch (error) {
+            client.close();
+            throw new Error(`${redactEndpoint(host.relay.cellUrl)}: ${safeError(error)}`);
+          }
           return { client, host, path: "relay", resumeVersion: resume.version };
         })());
       }
     }
-    const winner = await firstCandidate(attempts);
-    for (const client of clients) if (client !== winner.client) client.close();
+    let winner!: ConnectionCandidate;
+    try { winner = await firstCandidate(attempts); } finally {
+      raceFinished = true;
+      for (const client of clients) {
+        this.pendingClients.delete(client);
+        if (client !== winner?.client) client.close();
+      }
+    }
     if (generation !== this.generation || !this.active) {
       winner.client.close();
       return;
@@ -156,8 +187,9 @@ export class HostConnection {
       if (state === "connected") {
         wasConnected = true;
         this.emitStage("connected", 0);
-        this.log("success", "Connected", `${host.label} · ${winner.path}`);
+        this.log("success", "Connected", `${host.label} · ${winner.path} · ${redactEndpoint(winner.path === "direct" ? host.endpoint : host.relay!.cellUrl)}`);
       } else if (state === "disconnected" && wasConnected) {
+        clearInterval(this.refreshTimer);
         this.client = null;
         this.log("warning", "Connection lost", host.label);
         void this.connectLoop(generation);
@@ -170,16 +202,39 @@ export class HostConnection {
     if (confirmedCredential !== this.active.credential) await writeHostCredential(host.id, confirmedCredential).catch(() => undefined);
     const connectedHost = { ...host, lastConnectedAt: Date.now() };
     await updateStoredHost(connectedHost).catch(() => undefined);
+    if (generation !== this.generation || !this.active || this.client !== client) return;
     this.active.host = connectedHost;
     this.active.credential = confirmedCredential;
     for (const stream of this.streams.values()) {
       stream.detach?.();
       stream.detach = client.subscribeStream(stream.method, stream.params, stream.deliver);
     }
+    const refresh = () => this.refreshEndpoints(client, generation);
+    void refresh();
+    this.refreshTimer = setInterval(() => void refresh(), 30_000);
     if (winner.path === "relay" && connectedHost.relay && confirmedCredential.current) {
       void rotateCredentialIfNeeded({ client, host: connectedHost, credential: confirmedCredential }).then((rotated) => {
-        if (generation === this.generation && this.active) this.active = rotated;
+        if (generation === this.generation && this.active && this.client === client) this.active.credential = rotated.credential;
       }).catch((error: unknown) => this.log("warning", "Credential rotation deferred", safeError(error)));
+    }
+  }
+
+  private async refreshEndpoints(client: RelayClient, generation: number): Promise<void> {
+    try {
+      const response = await client.request("pairing.getEndpoints", {}, 5_000).catch((error: unknown) => {
+        // A network change can leave TCP apparently open. Probe the encrypted
+        // channel so a silent dead path also starts a fresh candidate race.
+        if (generation === this.generation && this.client === client) client.close();
+        throw error;
+      });
+      if (!response.ok) return; // Older hosts can keep using their saved endpoint.
+      const endpoints = PairingGetEndpointsResultSchema.parse(response.value);
+      if (generation !== this.generation || this.client !== client || !this.active || !endpoints.directEndpoints) return;
+      const host = { ...this.active.host, directEndpoints: endpoints.directEndpoints };
+      this.active.host = host;
+      await updateStoredHost(host);
+    } catch (error) {
+      if (generation === this.generation && this.client === client) this.log("warning", "Address refresh deferred", safeError(error));
     }
   }
 
@@ -199,16 +254,16 @@ function firstCandidate(attempts: Promise<ConnectionCandidate>[]): Promise<Conne
   return new Promise((resolve, reject) => {
     let failures = 0;
     let settled = false;
-    let lastError: unknown;
+    const errors: string[] = [];
     for (const attempt of attempts) {
       void attempt.then((candidate) => {
         if (settled) return candidate.client.close();
         settled = true;
         resolve(candidate);
       }).catch((error: unknown) => {
-        lastError = error;
+        errors.push(safeError(error));
         failures++;
-        if (!settled && failures === attempts.length) reject(lastError);
+        if (!settled && failures === attempts.length) reject(new Error(errors.join("; ")));
       });
     }
   });
@@ -224,7 +279,6 @@ async function resolveRelay(host: StoredHost & { relay: NonNullable<StoredHost["
     if (new TextEncoder().encode(raw).length > 16 * 1_024) throw new Error("Relay director response too large");
     const result = resolvedSchema.parse(JSON.parse(raw));
     const updated = { ...host, relay: { ...host.relay, cellUrl: result.cellUrl, assignmentEpoch: result.assignmentEpoch } };
-    await updateStoredHost(updated);
     return updated;
   } finally {
     clearTimeout(timeout);

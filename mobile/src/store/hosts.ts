@@ -1,3 +1,4 @@
+import { DirectEndpointsSchema } from "../pairing/contracts";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
 import { z } from "zod";
@@ -18,6 +19,7 @@ const hostSchema = z.object({
   id: z.string().min(1),
   label: z.string().min(1),
   publicKeyB64: z.string().min(1),
+  directEndpoints: DirectEndpointsSchema.optional(),
   endpoint: z.string().min(1),
   relay: relaySchema.optional(),
   lastConnectedAt: z.number().int().nonnegative(),
