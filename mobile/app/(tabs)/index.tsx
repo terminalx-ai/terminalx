@@ -105,7 +105,7 @@ function connectionLabel(stage: string, attempt: number) {
   if (stage === "connected") return "Connected";
   if (stage === "connecting") return "Connecting · Requesting secure credential";
   if (stage === "cant-connect") return `Can’t connect · attempt ${attempt}`;
-  if (stage === "unreachable") return "Host unreachable · re-pair?";
+  if (stage === "unreachable") return "Host unreachable · retrying";
   return "Reconnecting…";
 }
 

@@ -79,6 +79,8 @@ pub struct RelayPairingOffer {
 pub struct PairingOffer {
     pub v: u8,
     pub endpoint: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub direct_endpoints: Vec<String>,
     pub device_token: String,
     pub public_key_b64: String,
     pub paired_device_id: String,

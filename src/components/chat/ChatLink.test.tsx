@@ -43,9 +43,9 @@ describe("chat link actions", () => {
     vi.mocked(openUrl).mockRejectedValue(new Error("No registered browser"));
     render(<ChatLink href="https://example.test" context={context}>website</ChatLink>);
     fireEvent.contextMenu(screen.getByRole("link", { name: "website" }));
-    expect(await screen.findByRole("menuitem", { name: "Open internally" })).toBeTruthy();
+    expect(await screen.findByRole("menuitem", { name: "Open in TerminalX Browser" })).toBeTruthy();
     expect(screen.getByRole("menuitem", { name: "Copy link" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("menuitem", { name: "Open in default browser" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open in System Browser" }));
     expect((await screen.findByRole("alert")).textContent).toContain("No registered browser");
   });
 });
