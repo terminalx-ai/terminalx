@@ -457,6 +457,13 @@ impl SessionManager {
                 }
             }
         }
+        if ev.subagent.is_none() && matches!(&ev.payload, Payload::UserMessage { .. }) {
+            match store::conversation_titles::name_tab(&ev.session_id, &ev.tab_id) {
+                Ok(Some(session)) => { let _ = self.app.emit("session_updated", session); }
+                Ok(None) => {}
+                Err(error) => log::warn!("name conversation: {error:#}"),
+            }
+        }
         self.app.state::<crate::AppState>().star_nag.observe(&self.app, &ev);
         let _ = self.app.emit("agent_event", &ev);
         ev
