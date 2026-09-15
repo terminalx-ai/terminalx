@@ -160,7 +160,8 @@ describe("StatsUsageView", () => {
     vi.mocked(api.statsUsageSnapshot).mockResolvedValue(withError);
     vi.mocked(api.statsUsageRefresh).mockResolvedValue(withError);
     render(<StatsUsageView />);
-    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Activity recovery is incomplete: unreadable history");
+    expect((await screen.findByRole("alert")).textContent).toContain("Activity recovery is incomplete: unreadable history");
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
     expect(screen.getByText("7")).toBeTruthy();
   });
 
