@@ -5,8 +5,8 @@
   "type": "module",
   "main": "expo-router/entry",
   "scripts": {
-    "start": "expo start --dev-client",
-    "ios": "expo run:ios",
+    "start": "APP_VARIANT=development expo start --dev-client",
+    "ios": "APP_VARIANT=development expo prebuild --platform ios --no-clean && APP_VARIANT=development expo run:ios",
     "ios:simulator": "python3 scripts/ios-simulator.py",
     "typecheck": "tsc --noEmit",
     "lint": "expo lint",

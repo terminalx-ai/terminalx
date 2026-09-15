@@ -28,7 +28,7 @@ pub enum CloudWorkspaceProviderId {
 }
 
 impl CloudWorkspaceProviderId {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Machine0 => "machine0",
             Self::Box => "box",
@@ -103,6 +103,38 @@ pub struct CloudProviderConnectionResponse {
     pub credential_fingerprint: Option<String>,
     pub connected_at: Option<i64>,
     pub last_validated_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudProviderConnectInput {
+    pub context_revision: String,
+    pub disclosure: CloudProviderDisclosure,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudProviderDisclosure {
+    pub version: String,
+    pub provider_billing_accepted: bool,
+    pub organization_use_accepted: bool,
+}
+
+pub(crate) struct ProviderConnectAuthorization {
+    context: AccountContext,
+    provider: CloudWorkspaceProviderId,
+}
+
+impl ProviderConnectAuthorization {
+    pub(crate) fn organization_id(&self) -> &str { &self.context.organization_id }
+}
+
+pub(crate) fn validate_disclosure(input: &CloudProviderConnectInput) -> Result<(), CloudWorkspaceClientError> {
+    if input.disclosure.version != "cloud-provider-connections-2026-08-13"
+        || !input.disclosure.provider_billing_accepted || !input.disclosure.organization_use_accepted {
+        return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -463,7 +495,7 @@ pub struct CloudWorkspaceClientError {
 }
 
 impl CloudWorkspaceClientError {
-    fn local(code: &str, retryable: bool) -> Self {
+    pub(crate) fn local(code: &str, retryable: bool) -> Self {
         Self {
             code: code.into(),
             status: None,
@@ -643,6 +675,63 @@ impl CloudWorkspaceService {
             )?;
             ensure_connection(result, provider)
         })
+    }
+
+    pub(crate) fn authorize_connect(
+        &self,
+        provider: CloudWorkspaceProviderId,
+    ) -> Result<ProviderConnectAuthorization, CloudWorkspaceClientError> {
+        let context = self.context()?;
+        let connection = self.client.request::<CloudProviderConnectionResponse>(
+            &context,
+            &["cloud-providers", provider.as_str()],
+            None,
+            None,
+            None,
+            RequestRisk::Read,
+        )?;
+        let connection = ensure_connection(connection, provider)?;
+        if !self.account.is_current(&context) {
+            return Err(context_changed_error(RequestRisk::Read));
+        }
+        if !connection.can_manage {
+            return Err(CloudWorkspaceClientError::local("organization_admin_required", false));
+        }
+        Ok(ProviderConnectAuthorization { context, provider })
+    }
+
+    pub(crate) fn connect_authorized(
+        &self,
+        authorization: ProviderConnectAuthorization,
+        input: CloudProviderConnectInput,
+        mut credential: zeroize::Zeroizing<String>,
+    ) -> Result<CloudProviderConnectionResponse, CloudWorkspaceClientError> {
+        if credential.trim().is_empty() || credential.len() > 64 * 1024 {
+            return Err(CloudWorkspaceClientError::local(
+                "cloud_workspace_request_invalid",
+                false,
+            ));
+        }
+        validate_disclosure(&input)?;
+        if input.context_revision != AccountManager::context_revision(&authorization.context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        if !self.account.is_current(&authorization.context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        let result = self.client.request(
+            &authorization.context,
+            &["cloud-providers", authorization.provider.as_str(), "connect"],
+            None,
+            Some(json!({ "credential": &*credential, "disclosure": input.disclosure })),
+            None,
+            RequestRisk::Mutation,
+        )?;
+        credential.clear();
+        if !self.account.is_current(&authorization.context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        ensure_connection(result, authorization.provider)
     }
 
     pub fn setup(
@@ -1736,5 +1825,19 @@ mod tests {
         assert!(!join_error.retryable);
         assert!(join_error.retry_with_same_idempotency_key);
         assert!(join_error.requires_original_account_context);
+    }
+
+    #[test]
+    fn secure_connect_input_contains_no_credential_field() {
+        let input = CloudProviderConnectInput {
+            context_revision: "test-context".into(),
+            disclosure: CloudProviderDisclosure {
+                version: "cloud-provider-connections-2026-08-13".into(),
+                provider_billing_accepted: true,
+                organization_use_accepted: true,
+            },
+        };
+        let encoded = serde_json::to_value(input).unwrap();
+        assert!(encoded.get("credential").is_none());
     }
 }

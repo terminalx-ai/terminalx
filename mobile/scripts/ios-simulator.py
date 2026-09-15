@@ -79,8 +79,12 @@ def main():
     run("xcrun", "simctl", "bootstatus", device["udid"], "-b")
 
     workspace = MOBILE / "ios/TerminalX.xcworkspace"
-    if not workspace.exists():
-        run("pnpm", "exec", "expo", "prebuild", "--platform", "ios")
+    # Refresh native icons even when a previous build already created the
+    # workspace (for example, after switching from the D-badged dev variant).
+    prebuild = ["pnpm", "exec", "expo", "prebuild", "--platform", "ios", "--no-clean"]
+    if workspace.exists():
+        prebuild.append("--no-install")
+    run(*prebuild)
     derived = args.derived_data.resolve()
     # Ad-hoc simulator signing needs no Apple certificate or paid team, but must
     # remain enabled so Xcode embeds the identity used by Simulator's Keychain.
