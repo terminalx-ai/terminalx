@@ -1,3 +1,4 @@
+import { directEndpoints } from "../transport/direct-endpoints";
 import { sha256 } from "@noble/hashes/sha256";
 import { z } from "zod";
 import {
@@ -61,7 +62,7 @@ export async function recoverPendingPairing(): Promise<StoredHost | null> {
 
 async function finishNewPairing(journal: PairingJournal, clientSecretKey: Uint8Array): Promise<StoredHost> {
   const offer = offerFromJournal(journal);
-  const candidates: PairingCandidate[] = [directCandidate(offer, clientSecretKey)];
+  const candidates: PairingCandidate[] = directEndpoints(offer).map((endpoint) => directCandidate({ ...offer, endpoint }, clientSecretKey));
   if (offer.relay.inviteExpiresAt > Date.now()) candidates.push(inviteCandidate(offer, clientSecretKey));
   const winner = await firstVerified(candidates);
   try {
@@ -76,7 +77,7 @@ async function recoverPairing(journal: PairingJournal, clientSecretKey: Uint8Arr
   const offer = offerFromJournal(journal);
   const candidates: (() => Promise<PairingCandidate>)[] = [
     async () => resumeCandidate(offer, journal.secrets.pendingResumeToken, clientSecretKey),
-    async () => directCandidate(offer, clientSecretKey),
+    ...directEndpoints(offer).map((endpoint) => async () => directCandidate({ ...offer, endpoint }, clientSecretKey)),
   ];
   if (offer.relay.inviteExpiresAt > Date.now()) candidates.push(async () => inviteCandidate(offer, clientSecretKey));
 
@@ -109,23 +110,14 @@ async function pairDirect(args: {
   preferredHostId?: string;
   provenance: StoredHost["provenance"];
 }, clientSecretKey: Uint8Array): Promise<StoredHost> {
-  const client = new RelayClient({
-    transport: "direct",
-    endpoint: args.offer.endpoint,
-    deviceToken: args.offer.deviceToken,
-    desktopPublicKeyB64: args.offer.publicKeyB64,
-    clientSecretKey,
-  });
+  const { client } = await firstVerified(directEndpoints(args.offer).map((endpoint) => directCandidate({ ...args.offer, endpoint }, clientSecretKey)));
   try {
-    await client.connect();
-    const status = await client.request("status.get");
-    if (!status.ok) throw new Error(`${status.refusal.code}: ${status.refusal.message}`);
-    HostStatusSchema.parse(status.value);
     const host: StoredHost = {
       id: args.preferredHostId ?? args.offer.pairedDeviceId ?? hostIdForPublicKey(args.offer.publicKeyB64)!,
       label: args.label,
       publicKeyB64: args.offer.publicKeyB64,
       endpoint: args.offer.endpoint,
+      directEndpoints: args.offer.directEndpoints,
       lastConnectedAt: Date.now(),
       provenance: args.provenance,
     };
@@ -282,6 +274,7 @@ async function publishCommitted(
     label: journal.metadata.label,
     publicKeyB64: offer.publicKeyB64,
     endpoint: offer.endpoint,
+    directEndpoints: endpoints.directEndpoints ?? offer.directEndpoints,
     relay: endpoints.relay,
     lastConnectedAt: Date.now(),
     provenance: journal.metadata.provenance,

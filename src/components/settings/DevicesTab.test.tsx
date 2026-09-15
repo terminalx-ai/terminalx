@@ -75,7 +75,7 @@ afterEach(cleanup);
 describe("paired devices settings", () => {
   it("generates the QR locally and revokes a device through the native registry", async () => {
     mocks.invoke.mockImplementation(async (command: string, args?: { connectionMode?: string }) => {
-      if (command === "pairing_status") return { ...empty, relay: { phase: "connected", message: null, attempt: 0 } };
+      if (command === "pairing_status") return { ...empty, relay: ready.relay };
       if (command === "pairing_generate") return args?.connectionMode === "local-only" ? localReady : ready;
       if (command === "pairing_revoke") return { ...ready, devices: [] };
       throw new Error(`Unexpected command: ${command}`);
