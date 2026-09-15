@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { sha256 } from "@noble/hashes/sha256";
 import { base64Url } from "./bytes";
-import { parsePairingCode } from "./parse";
+import { parsePairingCode, parsePairingCodeOrThrow } from "./parse";
 
 const now = 1_900_000_000_000;
 const publicKey = new Uint8Array(32).fill(7);
@@ -53,5 +53,16 @@ describe("pairing payload parsing", () => {
 
   it("rejects a relay host id that is not derived from the pinned desktop key", () => {
     expect(parsePairingCode(encode({ ...offer, relay: { ...offer.relay, relayHostId: "AbCdEf0123_-xyZ9" } }), () => now)).toBeNull();
+  });
+});
+
+
+describe("safe pairing parse errors", () => {
+  it("distinguishes expiry from a malformed offer and gives a fresh-offer action", () => {
+    expect(() => parsePairingCodeOrThrow(encode({ ...offer, relay: { ...offer.relay, inviteExpiresAt: now } }), () => now)).toThrow("[pairing:parsing/expired-offer]");
+    expect(() => parsePairingCodeOrThrow("private-name or partial code", () => now)).toThrow("[pairing:parsing/invalid-offer]");
+    expect(() => parsePairingCodeOrThrow(encode({ ...offer, unknownPrivateField: "secret" }), () => now)).toThrow("Generate a fresh offer");
+    try { parsePairingCodeOrThrow(encode({ ...offer, unknownPrivateField: "secret" }), () => now); }
+    catch (cause) { expect(String(cause)).not.toMatch(/unknownPrivateField|secret/); }
   });
 });
