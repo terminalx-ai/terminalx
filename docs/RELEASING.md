@@ -83,7 +83,7 @@ repo dependencies (`pnpm install`), run:
 
 ```sh
 python3 scripts/badge-dev-icon.py
-pnpm --dir mobile exec expo prebuild --platform ios --no-install --no-clean
+APP_VARIANT=production pnpm --dir mobile exec expo prebuild --platform ios --no-install --no-clean
 python3 scripts/test_icons.py
 ```
 
@@ -111,10 +111,52 @@ Refresh an existing native project with prebuild whenever changing variants;
 JavaScript reloads cannot update an installed home-screen icon.
 
 The release Xcode `AppIcon.appiconset` is committed; the rest of `mobile/ios`
-remains generated and ignored. After checking a dev prebuild, run the unprefixed
+remains generated and ignored. After checking a dev prebuild, run the production
 prebuild command above to restore the release catalog before committing.
 Commit the sources, desktop sets, mobile assets, and release catalog together.
 The same source, macOS fonts, Pillow, and pinned Tauri CLI yield the same pixels.
+
+### Validate the delivered icons
+
+Install Pillow (`python3 -m pip install Pillow==11.1.0`). CI runs the source
+checks, packaged-metadata regression tests, and an isolated Expo prebuild →
+Apple `actool` check. The latter switches production → development → production
+to catch native catalog reuse; it requires Xcode with a compatible simulator
+runtime. Its compiled catalogs are test fixtures, not installable app builds.
+
+Before publishing, verify the **final extracted artifact**, not only the source
+tree or a neighboring build directory:
+
+```sh
+# macOS: extract the updater archive, or select the .app on the mounted DMG.
+python3 scripts/verify_packaged_icons.py macos /path/to/extracted/TerminalX.app
+
+# iOS: extract the IPA with Archive Utility/ditto and select Payload/TerminalX.app.
+python3 scripts/verify_packaged_icons.py ios /path/to/Payload/TerminalX.app
+# For a development artifact:
+python3 scripts/verify_packaged_icons.py ios /path/to/TerminalX.app --variant development
+```
+
+The verifier follows `Info.plist`'s selected icon filenames and checks bundle
+identity. iOS checks reject blank, transparent, padded, wrong-artwork, and
+wrong-badge PNGs, including Apple-optimized device PNGs. macOS requires the
+selected ICNS to match Legacy exactly (or the dev ICNS for development).
+An unsupported catalog-only layout fails instead of reporting success without
+checking pixels. `Assets.car` is required and hashed; its internal renditions
+and system rendering still need the visual check below.
+
+Save the JSON result with the artifact's SHA-256, source commit, dirty-tree
+status, resolved Expo config, variant, build command/profile, and installation
+method. Record the source commit **at build time**; the current checkout and
+file timestamps cannot establish an older artifact's source commit. Keep
+signing credentials and device/account identifiers out of shared reports.
+
+Complete the [fresh-install and upgrade matrix](testing/issue-166-icons.md)
+before claiming the installed icon is fixed. A passing asset check cannot
+prove which artifact is installed on a phone or what Dock/Finder currently
+displays. `pnpm --dir mobile ios:simulator` now fixes `APP_VARIANT=production`
+through prebuild/build and verifies packaged icons before installing; install
+Pillow before using it. The development `ios` command still uses its D badge.
 
 ## Build
 
