@@ -34,5 +34,7 @@ native/**/.swiftpm/
 
 # Python desktop runtime test bytecode
 native/**/__pycache__/
+scripts/__pycache__/
+mobile/scripts/__pycache__/
 # the agent-browser sidecar is copied out of node_modules by scripts/ensure-agent-browser.mjs
 /src-tauri/binaries/agent-browser-*

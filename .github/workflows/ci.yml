@@ -35,6 +35,17 @@ jobs:
       - name: Install npm dependencies
         run: pnpm install --frozen-lockfile
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify source and compiled app icons
+        run: |
+          python3 -m pip install Pillow==11.1.0
+          python3 scripts/test_icons.py
+          python3 scripts/test_packaged_icons.py
+          python3 scripts/test_compiled_icons.py
+
       # rust-toolchain.toml decides the channel and pulls in clippy.
       - name: Show the Rust toolchain
         run: rustup show && cargo --version && cargo clippy --version

@@ -16,6 +16,12 @@ Preview/default builds use the unbadged Legacy artwork. The `ios` command runs
 prebuild to refresh native assets before building. See `docs/RELEASING.md` in
 the repo root for icon regeneration and restoring the committed release catalog.
 
+The standalone simulator command requires Pillow
+(`python3 -m pip install Pillow==11.1.0`) and always builds the production icon,
+even when the parent shell has `APP_VARIANT=development`. It rejects an incorrect
+packaged icon before installing. For IPA and installed-app checks, see
+[release icon validation](../docs/RELEASING.md#validate-the-delivered-icons).
+
 ## Standalone simulator build and pairing smoke test
 
 With full Xcode, an installed iOS simulator runtime, and Python 3, boot an iPhone

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the shipped assets for issue #156 (macOS, Pillow, pnpm required)."""
+"""Check source assets; test_packaged_icons.py checks compiled icons (macOS)."""
 
 import json
 import os
