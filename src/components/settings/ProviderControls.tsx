@@ -89,6 +89,7 @@ export function ProviderControls({
     const request = epoch.current;
     setBusy(true);
     setError(null);
+    setConsented(false);
     try {
       await action();
       if (request !== epoch.current) return;
@@ -98,12 +99,19 @@ export function ProviderControls({
       setDisposition("");
       await refresh();
     } catch (failure) {
-      if (request === epoch.current) setError(providerActionMessage(failure));
+      if (request === epoch.current) {
+        setError(providerActionMessage(failure));
+        await refresh();
+      }
     } finally {
       setBusy(false);
     }
   };
   const connected = connection?.state === "connected";
+  const setupComplete =
+    connected &&
+    !connection?.operationsBlocked &&
+    !connection?.disconnectDisposition;
   const resources = connection?.resources ?? [];
   const hasContract =
     connection?.credentialVersion != null && connection.resources != null;
@@ -127,6 +135,9 @@ export function ProviderControls({
               setError(null);
             }}
           >
+            {!providers.length && (
+              <option value="">No providers available</option>
+            )}
             {providers.map((item) => (
               <option key={item.id} value={item.id}>
                 {item.displayName}
@@ -154,15 +165,22 @@ export function ProviderControls({
             {connection?.disconnectDisposition &&
             connection.state !== "not-connected"
               ? "Disconnect pending — new provisioning blocked"
-              : connected
-                ? "Compute connection validated"
+              : setupComplete
+                ? "Setup complete — compute connection validated"
                 : connection?.state === "not-connected"
-                  ? "Provider disconnected"
-                  : "Provider needs attention"}
+                  ? "Compute setup incomplete — connect a provider"
+                  : "Compute setup incomplete — provider needs attention"}
+          </p>
+          <p className="text-muted-foreground">
+            {setupComplete
+              ? "Next: create a cloud workspace. Choose its configuration and review provider charges before launching. Connecting a key does not create a machine."
+              : "Your organization remains usable without cloud compute. Finish setup here later; no machine is created by connecting a key."}
           </p>
           {!manage && (
             <p className="text-muted-foreground">
-              {connected ? "Organization owners and administrators manage provider keys." : "Ask an organization administrator to repair the provider connection. Only organization owners and administrators can manage provider keys."}
+              {connected
+                ? "Organization owners and administrators manage provider keys."
+                : "Ask an organization administrator to repair the provider connection. Only organization owners and administrators can manage provider keys."}
             </p>
           )}
           {manage && connection && (

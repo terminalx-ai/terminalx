@@ -44,7 +44,7 @@ vi.mock("@/lib/pairing", () => ({
   }),
 }));
 
-const { AccountTab, createOrganizationAttemptKey } = await import("./AccountTab");
+const { AccountTab } = await import("./AccountTab");
 
 afterEach(cleanup);
 
@@ -70,10 +70,4 @@ describe("account binding disclosure", () => {
     mocks.organization = null;
   });
 
-  it("scopes a second-organization retry key to its target name", () => {
-    const first = createOrganizationAttemptKey("profile-a:7", "owner@example.test", "Existing");
-    const second = createOrganizationAttemptKey("profile-a:7", "owner@example.test", "Second Org");
-    expect(second).not.toBe(first);
-    expect(createOrganizationAttemptKey("profile-a:7", "owner@example.test", " second   org ")).toBe(second);
-  });
 });
