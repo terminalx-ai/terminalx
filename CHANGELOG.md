@@ -1,5 +1,37 @@
 # TerminalX changelog
 
+## 0.2.4
+
+- Add recovery actions for stalled agent sessions. (#161)
+- Name agent tabs from their first saved request, preserving custom names
+  and giving existing unnamed conversations readable titles. (#159)
+- Improve mobile conversation selection and access, with separate transcripts
+  and drafts for each agent tab. These companion changes require an updated
+  mobile app. (#159)
+- Improve mobile reconnection across LAN and VPN changes by sharing multiple
+  direct endpoints and the Mac's Bonjour address. Both desktop and companion
+  need updating to use the new pairing offers. (#160)
+- Restore the TerminalX Legacy icon across desktop and mobile, with a distinct
+  orange D badge for development builds. (#157)
+- Explain Claude Code's terminal diff sidebar and its `/diff` toggle in the
+  Terminal view, including narrow panes. (#158)
+
+## 0.2.3
+
+- Choose whether website links open in the TerminalX browser or the system
+  browser. Context-menu actions and ⇧⌘-click offer the alternate browser.
+- Select the transcription microphone beside the composer mic, with the
+  same saved preference available in Settings. Unavailable devices show the
+  system-default fallback; selection is disabled during recording. (#137)
+- Account settings support organization creation and selection, plus
+  administrator provider onboarding with a native secure key dialog and
+  explicit billing and organization-use consent. (#145)
+- Clarify relay offline status and how relay pairing differs from local
+  network pairing. (#146)
+- Use `TERMINALX_HOME` as the canonical state-directory override, retaining
+  `RACCOON_HOME` as a fallback for existing setups. (#150)
+- Redact and aggregate workspace pull-request recovery errors.
+
 ## 0.2.2
 
 Open ordinary folders as projects and follow chat links directly into the
