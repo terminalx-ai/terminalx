@@ -15,6 +15,7 @@ vi.mock("@/lib/api", () => ({
     cloudProvider: vi.fn(),
     cloudProviderConnect: vi.fn(),
     cloudProviderDisconnect: vi.fn(),
+    cloudWorkspaceCreate: vi.fn(),
   },
 }));
 let detail: CloudProviderConnection;
@@ -181,5 +182,73 @@ describe("organization provider controls", () => {
         .getByRole("button", { name: "Disconnect" })
         .hasAttribute("disabled"),
     ).toBe(true);
+  });
+  it("keeps setup incomplete on timeout and recovers the saved connection on refresh", async () => {
+    detail.state = "not-connected";
+    detail.lastValidatedAt = null;
+    detail.resources = [];
+    vi.mocked(api.cloudProviderConnect).mockRejectedValue({
+      code: "provider_timeout",
+    });
+    const view = render(<ProviderControls contextRevision="org-revision" />);
+    await screen.findByRole("button", { name: "Connect provider" });
+    fireEvent.click(screen.getByRole("button", { name: "Connect provider" }));
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Validate and save key" }),
+    );
+    await screen.findByRole("alert");
+    await screen.findByText("Compute setup incomplete — connect a provider");
+    expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(
+      false,
+    );
+    view.unmount();
+    detail.state = "connected";
+    detail.lastValidatedAt = 100;
+    render(<ProviderControls contextRevision="org-revision" />);
+    await screen.findByText("Setup complete — compute connection validated");
+    expect(screen.getByText(/Next: create a cloud workspace/)).toBeTruthy();
+    expect(api.cloudProviderConnect).toHaveBeenCalledOnce();
+  });
+  it("honors backend rejection when the displayed admin role has been revoked", async () => {
+    vi.mocked(api.cloudProviderConnect).mockImplementation(async () => {
+      detail.canManage = false;
+      throw { code: "organization_admin_required" };
+    });
+    await ready();
+    await replace();
+    await screen.findByText(
+      "Only an organization owner or administrator can manage this connection.",
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Validate and save key" }),
+      ).toBeNull(),
+    );
+  });
+  it("does not report completion when the service blocks provisioning", async () => {
+    detail.operationsBlocked = true;
+    await ready();
+    expect(screen.queryByText(/Setup complete/)).toBeNull();
+    expect(screen.getByText(/Compute setup incomplete/)).toBeTruthy();
+  });
+  it("completes first-time setup only after validation without provisioning", async () => {
+    detail.state = "not-connected";
+    detail.resources = [];
+    vi.mocked(api.cloudProviderConnect).mockImplementation(async () => {
+      detail.state = "connected";
+      return detail;
+    });
+    render(<ProviderControls contextRevision="org-revision" />);
+    await screen.findByText("Compute setup incomplete — connect a provider");
+    fireEvent.click(screen.getByRole("button", { name: "Connect provider" }));
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Validate and save key" }),
+    );
+    await screen.findByText("Setup complete — compute connection validated");
+    expect(api.cloudProviderConnect).toHaveBeenCalledOnce();
+    expect(api.cloudWorkspaceCreate).not.toHaveBeenCalled();
+    expect(screen.queryByRole("checkbox")).toBeNull();
   });
 });
