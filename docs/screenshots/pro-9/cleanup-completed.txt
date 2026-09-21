@@ -1,0 +1,66 @@
+App=com.brave.Browser (pid 47905)
+Window: "TerminalX PRO-9 — controlled fixture - Brave", App: Brave Browser.
+
+0 standard window TerminalX PRO-9 — controlled fixture - Brave
+	1 container TerminalX PRO-9 — controlled fixture - Brave
+		2 container (disabled)
+		3 toolbar
+			4 button (disabled) Back
+			5 button (disabled) Forward
+			6 button Reload
+			7 button Bookmark this tab
+			8 pop up button View site information
+			9 text field (settable) Address and search bar, Value: 127.0.0.1:1549/scripts/fixtures/pro-9/index.html, Placeholder: Search Google or type a URL
+			10 splitter Separator
+			11 pop up button Brave Shields
+			12 pop up button Brave Rewards
+			13 button Show Sidebar
+			14 pop up button Brave Wallet
+			15 button Leo AI
+			16 pop up button VPN
+			17 pop up button Brave
+		18 HTML content TerminalX PRO-9 — controlled fixture
+			19 container
+				20 heading TerminalX · Organization compute
+				21 text PRO-9 controlled UI fixture · no live credentials or provider resources
+				22 container
+					23 text Test scenario
+					24 pop up button Test scenario, Value: Cleanup unavailable / retry
+				25 container
+					26 text Provider
+					27 pop up button Provider, Value: Machine0
+				28 button Refresh
+				29 text Provider disconnected
+				30 definition list
+					31 container Credential version
+						32 text Credential version
+					33 text 4
+					34 container Provider account
+						35 text Provider account
+					36 text Acme Compute (original account)
+					37 container Last validated
+						38 text Last validated
+					39 text 9/21/2026, 6:38:32 PM
+				40 button Connect provider
+				41 button Disconnect
+				42 text Resources and remaining charges
+				43 text Quoted estimates are not a live bill. Running compute, retained storage and archived resources can continue to incur provider charges until cleanup is confirmed.
+				44 text No unresolved resources reported by the service.
+		45 container Infobar Container
+			46 container Infobar
+				47 text Brave uses privacy-preserving product analytics to estimate the overall usage of certain features
+				48 button Got it
+				49 button Disable
+				50 link Learn more
+				51 button Close
+		52 pop up button Tab Search
+		53 tab group
+			54 tab (settable) TerminalX PRO-9 — controlled fixture, Value: 0
+			55 tab (selected, settable) TerminalX PRO-9 — controlled fixture - Memory usage - 51.3 MB, Value: 1
+		56 button New Tab
+		57 splitter
+	58 close button
+	59 full screen button, Secondary Actions: zoom the window
+	60 minimize button
+
+The focused UI element is 18 HTML content TerminalX PRO-9 — controlled fixture.

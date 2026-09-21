@@ -203,6 +203,16 @@ pub async fn cloud_provider_connect(
 }
 
 #[tauri::command]
+pub async fn cloud_provider_disconnect(
+    provider: crate::cloud_workspaces::CloudWorkspaceProviderId,
+    context_revision: String,
+    disposition: crate::cloud_workspaces::DisconnectDisposition,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudProviderConnectionResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.disconnect_provider(provider, context_revision, disposition))
+}
+
+#[tauri::command]
 pub async fn cloud_workspace_setup(
     provider: crate::cloud_workspaces::CloudWorkspaceProviderId,
     state: tauri::State<'_, crate::AppState>,

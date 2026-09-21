@@ -220,6 +220,7 @@ pub fn run() {
             commands::cloud_providers,
             commands::cloud_provider,
             commands::cloud_provider_connect,
+            commands::cloud_provider_disconnect,
             commands::cloud_workspace_setup,
             commands::cloud_workspace_quote,
             commands::cloud_workspace_create,
