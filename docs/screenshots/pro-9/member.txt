@@ -1,0 +1,52 @@
+App=com.brave.Browser (pid 47905)
+Window: "TerminalX PRO-9 — controlled fixture - Brave", App: Brave Browser.
+
+0 standard window TerminalX PRO-9 — controlled fixture - Brave
+	1 container TerminalX PRO-9 — controlled fixture - Brave
+		2 container (disabled)
+		3 toolbar
+			4 button (disabled) Back
+			5 button (disabled) Forward
+			6 button Reload
+			7 button Bookmark this tab
+			8 pop up button View site information
+			9 text field (settable) Address and search bar, Value: 127.0.0.1:1549/scripts/fixtures/pro-9/index.html, Placeholder: Search Google or type a URL
+			10 splitter Separator
+			11 pop up button Brave Shields
+			12 pop up button Brave Rewards
+			13 button Show Sidebar
+			14 pop up button Brave Wallet
+			15 button Leo AI
+			16 pop up button VPN
+			17 pop up button Brave
+		18 HTML content TerminalX PRO-9 — controlled fixture
+			19 container
+				20 heading TerminalX · Organization compute
+				21 text PRO-9 controlled UI fixture · no live credentials or provider resources
+				22 container
+					23 text Test scenario
+					24 pop up button Test scenario, Value: Member / invalidated connection
+				25 container
+					26 text Provider
+					27 pop up button Provider, Value: Machine0
+				28 button Refresh
+				29 text Provider needs attention
+				30 text Ask an organization administrator to repair the provider connection. Only organization owners and administrators can manage provider keys.
+		31 container Infobar Container
+			32 container Infobar
+				33 text Brave uses privacy-preserving product analytics to estimate the overall usage of certain features
+				34 button Got it
+				35 button Disable
+				36 link Learn more
+				37 button Close
+		38 pop up button Tab Search
+		39 tab group
+			40 tab (settable) TerminalX PRO-9 — controlled fixture, Value: 0
+			41 tab (selected, settable) TerminalX PRO-9 — controlled fixture - Memory usage - 48.2 MB, Value: 1
+		42 button New Tab
+		43 splitter
+	44 close button
+	45 full screen button, Secondary Actions: zoom the window
+	46 minimize button
+
+The focused UI element is 24 pop up button Test scenario, Value: Member / invalidated connection.
