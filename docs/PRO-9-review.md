@@ -23,6 +23,8 @@ Implemented admin provider replacement, validation and disconnect across the cur
 
 ## Completed checks
 
+After integrating current main: desktop TypeScript/check passed **75 files, 471 tests**, desktop build passed, native provider tests passed **20 tests**, and the expanded backend suite passed **29 files, 325 tests** with API TypeScript. Cleanup-result visibility was adjusted for current private-workspace rules and verified to remain hidden from another administrator.
+
 - Desktop `pnpm check`: **71 files, 434 tests passed**, including TypeScript. After final UI copy/cancel-code adjustment, focused ProviderControls/AccountPairingDisclosure checks passed **9 tests**; final `pnpm build` passed (existing large-chunk warning).
 - Rust `cargo test --manifest-path src-tauri/Cargo.toml cloud_workspaces --lib`: **20 passed**. Default CLT SDK failed in the native transcription dependency; retry using installed Xcode MacOSX26.5 SDK and clang succeeded. No repository SDK settings were changed.
 - SaaS API TypeScript and ESLint for all changed/new TypeScript files passed.
@@ -55,7 +57,7 @@ Saved local logs: `/tmp/pro9-desktop-check.log`, `/tmp/pro9-ui-tests.log`, `/tmp
 
 ## Release blockers and limits
 
-Integrate/review the SaaS dependency branch and companion changes, and apply migration 0064 before release. The desktop disables disconnect when resource/version metadata is absent. The full monorepo precommit hook is unverified after interruption. Live-provider and integrated native-desktop-to-SaaS acceptance remain unverified; current evidence consists of controlled production-component UI checks, native HTTP-fixture tests and backend database/worker tests with synthetic encrypted credentials.
+PRO-8 and PRO-11 are merged upstream. The companion SaaS change and migration 0064 must be present before enabling the controls; the existing SaaS deployment runner applies migrations before service rollout. The desktop disables disconnect when resource/version metadata is absent. The SaaS monorepo precommit hook failed in unrelated web suites with Firebase `auth/invalid-api-key` due to missing test configuration; scoped commits used the validated API checks instead. Live-provider and integrated native-desktop-to-SaaS acceptance remain unverified; current evidence consists of controlled production-component UI checks, native HTTP-fixture tests and backend database/worker tests with synthetic encrypted credentials.
 
 Validation used no real keys or resources and did not mark Linear done. This session did not start another issue. The user subsequently requested PR publication, merge, and workspace removal.
 
