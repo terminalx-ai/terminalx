@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Modal, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { useRouter } from "expo-router";
@@ -39,7 +39,7 @@ export default function MachinesScreen() {
         {app.hosts.length ? <><SectionTitle>QR-paired machines</SectionTitle><Card>{app.hosts.map((host, index) => <Pressable key={host.id} accessibilityRole="button" onPress={() => void connect(host)} style={({ pressed }) => [styles.row, index > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }, pressed && { backgroundColor: palette.raised }]}><StatusDot color={app.activeHost?.id === host.id && app.connectionStage === "connected" ? palette.success : palette.muted} /><View style={styles.rowCopy}><Text style={[styles.rowTitle, { color: palette.ink }]}>{host.label}</Text><Text style={[styles.detail, { color: palette.muted }]}>{app.activeHost?.id === host.id ? connectionLabel(app.connectionStage, app.connectionAttempt) : relativeTime(host.lastConnectedAt)}</Text></View><ChevronRight size={18} color={palette.faint} /></Pressable>)}</Card></> : null}
         <Button label="Use QR code or pairing code" kind="secondary" onPress={openPairing} />
       </Screen>
-      <PairingSheet visible={pairingOpen} error={app.error} onClearError={app.clearError} onClose={closePairing} onPair={async (code) => { await app.pairCode(code); setPairingOpen(false); }} />
+      <PairingSheet key={pairingOpen ? "open" : "closed"} visible={pairingOpen} error={app.error} onClearError={app.clearError} onClose={closePairing} onPair={async (code) => { await app.pairCode(code); setPairingOpen(false); }} />
     </>;
   }
 
@@ -58,7 +58,7 @@ export default function MachinesScreen() {
       {app.availableHosts.length ? <Card>{app.availableHosts.map((host, index) => <AvailableMachine key={host.hostId} host={host} divided={index > 0} onPair={() => void app.pairAvailable(host)} />)}</Card> : !app.loadingMachines && app.installationState === "ready" ? <EmptyState title="No unpaired Macs found" detail="A Mac appears here after TerminalX is signed in and its host service is live. QR pairing remains available." /> : null}
       <Button label="Use QR code or pairing code" kind="secondary" onPress={openPairing} />
     </Screen>
-    <PairingSheet visible={pairingOpen} error={app.error} onClearError={app.clearError} onClose={closePairing} onPair={async (code) => { await app.pairCode(code); setPairingOpen(false); }} />
+    <PairingSheet key={pairingOpen ? "open" : "closed"} visible={pairingOpen} error={app.error} onClearError={app.clearError} onClose={closePairing} onPair={async (code) => { await app.pairCode(code); setPairingOpen(false); }} />
   </>;
 }
 
@@ -83,22 +83,75 @@ function PairingSheet({ visible, error, onClearError, onClose, onPair }: { visib
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [scanned, setScanned] = useState(false);
-  const selectMode = (next: "scan" | "type") => { onClearError(); setScanned(false); setMode(next); };
+  const [cameraGeneration, setCameraGeneration] = useState(0);
+  // Native callbacks can arrive more than once before React renders busy=true.
+  const submitting = useRef(false);
+  const scanConsumed = useRef(false);
+  const visibleRef = useRef(visible);
+  useEffect(() => {
+    visibleRef.current = visible;
+    return () => { visibleRef.current = false; };
+  }, [visible]);
+  const selectMode = (next: "scan" | "type") => {
+    if (submitting.current) return;
+    onClearError();
+    scanConsumed.current = false;
+    setScanned(false);
+    setCameraGeneration((value) => value + 1);
+    setMode(next);
+  };
+  const close = () => { if (!submitting.current) onClose(); };
   const submit = async (value: string) => {
-    if (busy || !value.trim()) return;
+    if (submitting.current || !visibleRef.current || !value.trim()) return;
+    submitting.current = true;
     setBusy(true);
     setCode(value);
+    onClearError();
     try {
       await onPair(value);
       setCode("");
-      setScanned(false);
     } catch {
-      // The provider records a redacted, actionable error for the retry card.
+      // Keep the failed QR paused so it cannot repeatedly consume an offer.
+      // Retry reuses the recovery journal; Scan again explicitly rearms detection.
     } finally {
+      submitting.current = false;
       setBusy(false);
     }
   };
-  return <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}><View style={[styles.modal, { backgroundColor: palette.page }]}><View style={styles.modalHeader}><Text style={[styles.modalTitle, { color: palette.ink }]}>Pair a Mac</Text><Pressable accessibilityRole="button" accessibilityLabel="Close" onPress={onClose} hitSlop={12}><X color={palette.ink} /></Pressable></View><View style={[styles.segment, { backgroundColor: palette.raised }]}><Pressable accessibilityRole="button" onPress={() => selectMode("scan")} style={[styles.segmentItem, mode === "scan" && { backgroundColor: palette.card }]}><QrCode size={16} color={mode === "scan" ? palette.ink : palette.muted} /><Text style={{ color: mode === "scan" ? palette.ink : palette.muted }}>Scan</Text></Pressable><Pressable accessibilityRole="button" onPress={() => selectMode("type")} style={[styles.segmentItem, mode === "type" && { backgroundColor: palette.card }]}><Keyboard size={16} color={mode === "type" ? palette.ink : palette.muted} /><Text style={{ color: mode === "type" ? palette.ink : palette.muted }}>Type code</Text></Pressable></View>{mode === "scan" ? permission?.granted ? <CameraView style={styles.camera} barcodeScannerSettings={{ barcodeTypes: ["qr"] }} onBarcodeScanned={scanned ? undefined : ({ data }) => { setScanned(true); setCode(data); void submit(data); }}><View style={styles.scanFrame} /></CameraView> : <View style={styles.cameraPermission}><Text style={[styles.heroDetail, { color: palette.muted }]}>Camera access is requested only to scan a pairing QR shown on your Mac.</Text><Button label="Allow camera" onPress={() => void requestPermission()} /></View> : <View style={styles.codeForm}><Text style={[styles.detail, { color: palette.muted }]}>Paste the full pairing link or its code. Pairing grants expire and can be used only once.</Text><TextInput value={code} onChangeText={(value) => { onClearError(); setCode(value); }} autoCapitalize="none" autoCorrect={false} multiline placeholder="terminalx://pair?code=…" placeholderTextColor={palette.faint} style={[styles.codeInput, { color: palette.ink, backgroundColor: palette.card, borderColor: palette.border }]} /><Button label={busy ? "Connecting · Requesting secure credential" : "Pair securely"} disabled={busy || !code.trim()} onPress={() => void submit(code)} /></View>}{error ? <Card style={[styles.errorPanel, { borderColor: `${palette.danger}66` }]}><Text style={[styles.errorTitle, { color: palette.ink }]}>Pairing didn’t finish</Text><Text style={[styles.detail, { color: palette.muted }]}>{error}</Text><View style={styles.actions}><Button label="Retry" kind="secondary" style={styles.flex} disabled={busy || !code.trim()} onPress={() => void submit(code)} /><Button label="Use QR code" kind="secondary" style={styles.flex} onPress={() => selectMode("scan")} /></View></Card> : null}</View></Modal>;
+  const scan = ({ data }: { data: string }) => {
+    if (scanConsumed.current || submitting.current || !visibleRef.current || !data.trim()) return;
+    scanConsumed.current = true;
+    setScanned(true);
+    void submit(data);
+  };
+  return <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={close}>
+    <View style={[styles.modal, { backgroundColor: palette.page }]}>
+      <View style={styles.modalHeader}>
+        <Text style={[styles.modalTitle, { color: palette.ink }]}>Pair a Mac</Text>
+        <Pressable accessibilityRole="button" accessibilityLabel="Close" disabled={busy} onPress={close} hitSlop={12}><X color={palette.ink} /></Pressable>
+      </View>
+      <View style={[styles.segment, { backgroundColor: palette.raised }]}>
+        <Pressable accessibilityRole="button" disabled={busy} onPress={() => selectMode("scan")} style={[styles.segmentItem, mode === "scan" && { backgroundColor: palette.card }]}><QrCode size={16} color={mode === "scan" ? palette.ink : palette.muted} /><Text style={{ color: mode === "scan" ? palette.ink : palette.muted }}>Scan</Text></Pressable>
+        <Pressable accessibilityRole="button" disabled={busy} onPress={() => selectMode("type")} style={[styles.segmentItem, mode === "type" && { backgroundColor: palette.card }]}><Keyboard size={16} color={mode === "type" ? palette.ink : palette.muted} /><Text style={{ color: mode === "type" ? palette.ink : palette.muted }}>Type code</Text></Pressable>
+      </View>
+      {visible && mode === "scan" ? permission?.granted ? <>
+        {/* Expo Camera 57: off = continuous autofocus; on = focus once, then lock. */}
+        <CameraView key={cameraGeneration} style={styles.camera} facing="back" autofocus="off" barcodeScannerSettings={{ barcodeTypes: ["qr"] }} onBarcodeScanned={scanned || busy ? undefined : scan}>
+          <View style={styles.scanFrame} />
+        </CameraView>
+        <Text style={[styles.detail, { color: palette.muted }]}>{busy ? "QR decoded. Pairing securely…" : "Keep the whole QR in view. Move the phone slightly farther away if it looks blurry."}</Text>
+        <Button label={scanned ? "Scan again" : "Restart camera"} kind="secondary" disabled={busy} onPress={() => selectMode("scan")} />
+      </> : <View style={styles.cameraPermission}><Text style={[styles.heroDetail, { color: palette.muted }]}>Camera access is requested only to scan a pairing QR shown on your Mac.</Text><Button label="Allow camera" onPress={() => void requestPermission()} /></View> : mode === "type" ? <View style={styles.codeForm}>
+        <Text style={[styles.detail, { color: palette.muted }]}>Paste the full pairing link or its code. Pairing grants expire and can be used only once.</Text>
+        <TextInput value={code} editable={!busy} onChangeText={(value) => { onClearError(); setCode(value); }} autoCapitalize="none" autoCorrect={false} multiline placeholder="terminalx://pair?code=…" placeholderTextColor={palette.faint} style={[styles.codeInput, { color: palette.ink, backgroundColor: palette.card, borderColor: palette.border }]} />
+        <Button label={busy ? "Pairing securely…" : "Pair securely"} disabled={busy || !code.trim()} onPress={() => void submit(code)} />
+      </View> : null}
+      {error ? <Card style={[styles.errorPanel, { borderColor: `${palette.danger}66` }]}>
+        <Text style={[styles.errorTitle, { color: palette.ink }]}>Pairing didn’t finish</Text><Text style={[styles.detail, { color: palette.muted }]}>{error}</Text>
+        <View style={styles.actions}><Button label="Retry" kind="secondary" style={styles.flex} disabled={busy || !code.trim()} onPress={() => void submit(code)} /><Button label="Use QR code" kind="secondary" style={styles.flex} disabled={busy} onPress={() => selectMode("scan")} /></View>
+      </Card> : null}
+    </View>
+  </Modal>;
 }
 
 function connectionLabel(stage: string, attempt: number) {

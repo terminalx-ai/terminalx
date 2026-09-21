@@ -157,6 +157,7 @@ pub fn read_log_tail(path: &Path, waiting: bool) -> LogTail {
     // that decision is written after the ask, so walking backwards means every
     // answered id is already known by the time its request comes past.
     let mut decided: HashSet<String> = HashSet::new();
+    let mut recovery_seen = false;
     while out.wants_more(waiting) {
         let line = match tail.next_line() {
             Ok(Some(l)) => l,
@@ -180,6 +181,14 @@ pub fn read_log_tail(path: &Path, waiting: bool) -> LogTail {
             "assistant_text" if out.last_reply.is_none() => {
                 out.last_reply = said(payload.get("text").and_then(Value::as_str).unwrap_or_default(), ts());
             }
+            "recovery" if waiting && !recovery_seen => {
+                recovery_seen = true;
+                if out.waiting_on.is_none() {
+                    if let Ok(kind) = serde_json::from_value::<crate::recovery::RecoveryKind>(payload["kind"].clone()) {
+                        out.waiting_on = Some(kind.message().into());
+                    }
+                }
+            }
             "permission_decided" if waiting => {
                 if let Some(id) = payload.get("requestId").and_then(Value::as_str) {
                     decided.insert(id.to_string());
@@ -197,13 +206,16 @@ pub fn read_log_tail(path: &Path, waiting: bool) -> LogTail {
     out
 }
 
-/// The card line for a permission: the harness's own title, else the tool name.
+/// A permission summary never includes commands, provider titles or paths.
 fn permission_title(payload: &Value) -> Option<String> {
-    payload
-        .get("title")
-        .and_then(Value::as_str)
-        .and_then(snippet)
-        .or_else(|| payload.get("toolName").and_then(Value::as_str).and_then(snippet))
+    let action = match payload["toolName"].as_str().unwrap_or_default() {
+        "Bash" | "shell" => "run a command",
+        "Read" => "read a file",
+        "Edit" | "MultiEdit" | "Write" | "apply_patch" => "change files",
+        "WebFetch" | "WebSearch" => "access the web",
+        _ => "use a tool",
+    };
+    Some(format!("Permission to {action}"))
 }
 
 /// The card line for a question form: its header, else the first question.
@@ -429,14 +441,28 @@ mod tests {
     }
 
     #[test]
-    fn a_permission_without_a_title_falls_back_to_its_tool() {
+    fn permission_summaries_describe_the_action_without_provider_details() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("log.jsonl");
         write(
             &p,
             &[event(serde_json::json!({"type": "permission_requested", "requestId": "r1", "toolUseId": "u1", "toolName": "Bash", "input": {}, "options": []}))],
         );
-        assert_eq!(read_log_tail(&p, true).waiting_on.as_deref(), Some("Bash"));
+        assert_eq!(read_log_tail(&p, true).waiting_on.as_deref(), Some("Permission to run a command"));
+    }
+
+    #[test]
+    fn recovery_summary_uses_safe_messages_and_respects_clear_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("log.jsonl");
+        write(&p, &[event(serde_json::json!({"type": "recovery", "kind": "capacity"}))]);
+        assert_eq!(read_log_tail(&p, true).waiting_on.as_deref(), Some(crate::recovery::RecoveryKind::Capacity.message()));
+        write(&p, &[
+            event(serde_json::json!({"type": "recovery", "kind": "capacity"})),
+            event(serde_json::json!({"type": "recovery", "kind": null})),
+        ]);
+        assert!(read_log_tail(&p, true).waiting_on.is_none());
+        assert!(read_log_tail(&p, false).waiting_on.is_none());
     }
 
     fn a_tab(id: &str, status: TabStatus) -> TabEntry {
@@ -497,7 +523,7 @@ mod tests {
         let all = collect(None).unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].tab_id, "t2");
-        assert_eq!(all[0].waiting_on.as_deref(), Some("Delete the branch"));
+        assert_eq!(all[0].waiting_on.as_deref(), Some("Permission to run a command"));
 
         let one = collect(Some(vec!["s2".into()])).unwrap();
         assert_eq!(one.len(), 1);
