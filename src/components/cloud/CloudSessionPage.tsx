@@ -78,13 +78,16 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
 
   useEffect(() => reload(), [reload]);
 
-  // While any workspace is still starting, keep its phase current.
-  const starting = workspaces?.some((item) => item.workspace.state === "provisioning" && !settled(phaseOf(item))) ?? false;
+  // While any workspace is still starting (provisioning, or ready with its
+  // agent not yet running), keep its phase current. The create form polls
+  // the workspace it tracks itself, so the list waits while it is open.
+  const starting =
+    workspaces?.some((item) => (item.workspace.state === "provisioning" || item.workspace.launch) && !settled(phaseOf(item))) ?? false;
   useEffect(() => {
-    if (!starting || connection) return;
+    if (!starting || connection || creating) return;
     const timer = window.setInterval(reload, 3000);
     return () => window.clearInterval(timer);
-  }, [starting, connection, reload]);
+  }, [starting, connection, creating, reload]);
 
   useEffect(() => {
     if (!connection) return;
@@ -149,7 +152,16 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
                 </Button>
               )}
               {creating && (
-                <Button size="icon" variant="ghost" className="ml-auto size-6" aria-label="Close the new workspace form" onClick={() => setCreating(false)}>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="ml-auto size-6"
+                  aria-label="Close the new workspace form"
+                  onClick={() => {
+                    setCreating(false);
+                    reload();
+                  }}
+                >
                   <X className="size-3" />
                 </Button>
               )}

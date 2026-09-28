@@ -84,7 +84,17 @@ export function CloudCreateWorkspace({
   const models = useModels(form.agent);
   const model = models.find((item) => item.id === form.model) ?? null;
 
+  const [repositoriesError, setRepositoriesError] = useState<string | null>(null);
+  const loadRepositories = useCallback(() => {
+    setRepositoriesError(null);
+    api
+      .cloudWorkspaceRepositories()
+      .then((result) => setSelected(result.repositories.filter((repository) => repository.cloneUrl)))
+      .catch((e: unknown) => setRepositoriesError(errorCode(e)));
+  }, []);
+
   useEffect(() => {
+    loadRepositories();
     api
       .cloudProviders()
       .then((result) => {
@@ -93,11 +103,7 @@ export function CloudCreateWorkspace({
         setForm((current) => (current.provider || !usable[0] ? current : { ...current, provider: usable[0].id }));
       })
       .catch((e: unknown) => setLoadError(errorCode(e)));
-    api
-      .cloudWorkspaceRepositories()
-      .then((result) => setSelected(result.repositories.filter((repository) => repository.cloneUrl)))
-      .catch(() => setSelected([]));
-  }, []);
+  }, [loadRepositories]);
 
   const keep = useCallback(
     (next: PendingCreate | null) => {
@@ -196,6 +202,14 @@ export function CloudCreateWorkspace({
 
       <fieldset className="flex flex-col gap-2 text-xs">
         <legend className="mb-1 font-medium">Repositories</legend>
+        {repositoriesError && (
+          <p className="flex items-center gap-2 text-red-500" role="alert">
+            The organization's repositories could not be loaded ({repositoriesError}).
+            <Button type="button" size="sm" variant="outline" onClick={loadRepositories}>
+              Try again
+            </Button>
+          </p>
+        )}
         {selected?.length === 0 && (
           <p className="text-muted-foreground">No repositories are selected for cloud workspaces. An admin chooses them in Settings → GitHub.</p>
         )}

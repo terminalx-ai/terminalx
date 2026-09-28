@@ -193,3 +193,22 @@ describe("CloudCreateWorkspace", () => {
     expect(mocked.cloudWorkspaceCreate).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("CloudCreateWorkspace repository list", () => {
+  it("says the list failed to load instead of claiming none are selected, and retries", async () => {
+    mocked.cloudWorkspaceRepositories.mockRejectedValueOnce({ code: "cloud_workspace_unavailable" });
+    render(<CloudCreateWorkspace organizationId="org-1" onOpen={vi.fn()} />);
+    const alert = await screen.findByText(/could not be loaded/);
+    expect(alert.textContent).toContain("cloud_workspace_unavailable");
+    expect(screen.queryByText(/No repositories are selected/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByRole("option", { name: "acme/app" });
+  });
+
+  it("forgets an unconfirmed create older than a day, prompt included", async () => {
+    const { loadPending } = await import("@/lib/cloudCreate");
+    localStorage.setItem("terminalx.cloudCreate.pending.org-1", JSON.stringify({ idempotencyKey: "k", createdAt: Date.now() - 25 * 3600 * 1000, request: { name: "old", launch: { prompt: "secret plan" } } }));
+    expect(loadPending("org-1")).toBeNull();
+    expect(localStorage.getItem("terminalx.cloudCreate.pending.org-1")).toBeNull();
+  });
+});

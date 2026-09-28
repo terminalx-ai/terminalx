@@ -167,6 +167,22 @@ describe("cloud workspace session page", () => {
     expect(screen.getByTestId("cloud-create-stub")).toBeTruthy();
   });
 
+  it("keeps refreshing a ready workspace whose agent is still starting", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const item = (phase: string) => {
+      const ready = workspace("ws-ready", "ready");
+      return { ...ready, workspace: { ...ready.workspace, launch: { launchId: "l1", phase, state: "claimed", workBranch: "terminalx/b-000000000001", agent: "claude", hasPrompt: true, timings: {} } } };
+    };
+    vi.mocked(api.cloudWorkspaces)
+      .mockResolvedValueOnce({ workspaces: [item("starting-agent")] } as never)
+      .mockResolvedValue({ workspaces: [item("running")] } as never);
+    render(<CloudSessionPage onBack={() => undefined} />);
+    await waitFor(() => expect(screen.getByTestId("cloud-workspace-state").textContent).toBe("Starting agent · terminalx/b-000000000001"));
+    await act(async () => void (await vi.advanceTimersByTimeAsync(3100)));
+    await waitFor(() => expect(screen.getByTestId("cloud-workspace-state").textContent).toBe("ready · terminalx/b-000000000001"));
+    vi.useRealTimers();
+  });
+
   it("connects a ready workspace without waking compute", async () => {
     await openReady();
     expect(workspaceConnection).toHaveBeenCalledWith({ kind: "cloud", organizationId: "org-1", workspaceId: "ws-ready" }, "connect");

@@ -92,6 +92,9 @@ pub enum CallError {
     /// 401: bad credential, fenced generation or a malformed body.
     Rejected,
     Transient(anyhow::Error),
+    /// The launch intent was settled on the server (canceled, expired) while
+    /// this runtime held it: stop, deliver nothing.
+    Settled(String),
 }
 
 impl std::fmt::Display for CallError {
@@ -99,6 +102,7 @@ impl std::fmt::Display for CallError {
         match self {
             Self::Rejected => write!(f, "the API rejected the runtime credential"),
             Self::Transient(error) => write!(f, "{error:#}"),
+            Self::Settled(state) => write!(f, "settled on the server: {state}"),
         }
     }
 }

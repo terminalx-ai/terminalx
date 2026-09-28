@@ -76,6 +76,8 @@ pub fn poll_once(agents: &CloudAgents, unacked: &mut Vec<(Lease, Receipt)>) -> R
                 unacked.push((lease, receipt));
             }
             Err(CallError::Rejected) => return Err(CallError::Rejected),
+            // Only launch calls answer this; an ack never does.
+            Err(CallError::Settled(_)) => {}
         }
     }
     Ok(any)

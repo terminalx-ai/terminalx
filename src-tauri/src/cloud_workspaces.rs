@@ -583,8 +583,7 @@ pub struct CreateLaunch {
     pub prompt: Option<String>,
 }
 
-pub const MAX_REPOSITORIES: usize = 5;
-pub const MAX_PROMPT_BYTES: usize = 32 * 1024;
+pub use crate::cloud_agents::launch::{MAX_PROMPT_BYTES, MAX_REPOSITORIES};
 const NAME_MAX_CHARS: usize = 80;
 
 /// The create's own checks (contract §19.1), made before anything is quoted
@@ -615,8 +614,7 @@ pub fn validate_create(
         }
     }
     if let Some(launch) = launch {
-        let agent_ok = (1..=32).contains(&launch.agent.len())
-            && launch.agent.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+        let agent_ok = crate::cloud_agents::launch::valid_agent(&launch.agent);
         let model_ok = launch.model.as_deref().is_none_or(|model| (1..=100).contains(&model.len()) && model.bytes().all(|byte| (0x20..=0x7e).contains(&byte)));
         let effort_ok = launch.effort.as_deref().is_none_or(|effort| (1..=16).contains(&effort.len()) && effort.bytes().all(|byte| byte.is_ascii_lowercase()));
         let mode_ok = launch.mode.as_deref().is_none_or(|mode| matches!(mode, "plan" | "manual" | "auto" | "acceptEdits" | "bypassPermissions"));
@@ -1085,6 +1083,8 @@ impl CloudWorkspaceService {
             return Ok(CloudWorkspacePreflight { ready: true, checks: Vec::new() });
         }
         validate_create("preflight", &repositories, None)?;
+        // A POST, but it changes nothing: a failed call is simply retryable,
+        // never an unknown outcome.
         self.run(RequestRisk::Mutation, |client, context| {
             client.request(
                 context,
@@ -1094,6 +1094,16 @@ impl CloudWorkspaceService {
                 None,
                 RequestRisk::Mutation,
             )
+        })
+        .map_err(|mut error| {
+            if error.code == "cloud_workspace_request_outcome_unknown" {
+                return CloudWorkspaceClientError::local("cloud_workspace_unavailable", true);
+            }
+            if error.status.is_some_and(|status| status == 429 || status >= 500) {
+                error.retryable = true;
+                error.requires_original_account_context = false;
+            }
+            error
         })
     }
 
@@ -2334,5 +2344,14 @@ mod tests {
         assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/github-app "));
         assert_eq!(selected.repositories[0].full_name, "acme/app");
         assert_eq!(selected.repositories[0].default_branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn a_failed_preflight_call_is_retryable_not_an_unknown_outcome() {
+        let (base, _, request) = serve_once(response("503 Service Unavailable", "oops", ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.preflight(vec![repo("app", None)]).unwrap_err();
+        request.join().unwrap();
+        assert_eq!((error.code.as_str(), error.retryable), ("cloud_workspace_unavailable", true));
     }
 }

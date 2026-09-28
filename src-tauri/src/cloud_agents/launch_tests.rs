@@ -12,6 +12,8 @@ struct FakeApi {
     phases: Mutex<Vec<String>>,
     completions: Mutex<Vec<Outcome>>,
     fail_complete: Mutex<u32>,
+    /// The user cancels just before this phase is reported.
+    cancel_at: Mutex<Option<&'static str>>,
 }
 
 impl FakeApi {
@@ -23,6 +25,7 @@ impl FakeApi {
             phases: Mutex::new(Vec::new()),
             completions: Mutex::new(Vec::new()),
             fail_complete: Mutex::new(0),
+            cancel_at: Mutex::new(None),
         })
     }
 }
@@ -55,9 +58,13 @@ impl LaunchApi for FakeApi {
         Ok(Some(claim))
     }
 
-    fn phase(&self, _launch_id: &str, phase: &str) -> Result<(), CallError> {
+    fn phase(&self, _launch_id: &str, phase: &str) -> Result<Option<String>, CallError> {
         self.phases.lock().unwrap().push(phase.into());
-        Ok(())
+        let mut state = self.state.lock().unwrap();
+        if *self.cancel_at.lock().unwrap() == Some(phase) {
+            *state = "canceled".into();
+        }
+        Ok((*state != "claimed").then(|| state.clone()))
     }
 
     fn complete(&self, _launch_id: &str, outcome: &Outcome) -> Result<Completed, CallError> {
@@ -85,6 +92,8 @@ struct FakeStarter {
     unavailable: bool,
     /// Die mid-start: the prompt may or may not have been sent.
     panic: bool,
+    /// The tab is created, then typing the prompt fails.
+    send_fails: bool,
 }
 
 impl Starter for FakeStarter {
@@ -92,9 +101,12 @@ impl Starter for FakeStarter {
         !self.unavailable
     }
 
-    fn start(&self, cwd: &Path, claim: &Claim, title: &str) -> Result<(String, String)> {
+    fn start(&self, cwd: &Path, claim: &Claim, title: &str) -> Result<(String, String), StartError> {
         if self.panic {
             panic!("the runtime died while starting the agent");
+        }
+        if self.send_fails {
+            return Err(StartError::SendFailed { session_id: "session-1".into(), tab_id: "tab-1".into(), error: anyhow!("pty write failed") });
         }
         self.starts.lock().unwrap().push((cwd.to_path_buf(), title.to_string(), claim.prompt.as_ref().map(|p| p.to_string())));
         Ok(("session-1".into(), "tab-1".into()))
@@ -316,4 +328,29 @@ fn branch_names_follow_git_rules() {
     assert!(!valid_repository_path("relative/path"));
     assert!(!valid_repository_path("/home/repos/../etc"));
     assert!(valid_repository_path("/home/repos/acme/app"));
+}
+
+#[test]
+fn a_create_canceled_while_preparing_never_starts_the_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let api = FakeApi::new(Some(claim(Vec::new())));
+    // The user cancels after the claim, while the repositories are prepared.
+    *api.cancel_at.lock().unwrap() = Some("starting-agent");
+    let starter = Arc::new(FakeStarter::default());
+    let launcher = make(dir.path(), api.clone(), starter.clone(), "incarnation-aaaaaaaaaaaa");
+    assert_eq!(launcher.pass().unwrap(), Pass::Settled("canceled".into()));
+    assert!(starter.starts.lock().unwrap().is_empty(), "nothing started for a canceled intent");
+    assert!(api.completions.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_prompt_that_failed_to_send_after_the_tab_exists_is_outcome_unknown_with_the_tab() {
+    let dir = tempfile::tempdir().unwrap();
+    let api = FakeApi::new(Some(claim(Vec::new())));
+    let starter = Arc::new(FakeStarter { send_fails: true, ..FakeStarter::default() });
+    let launcher = make(dir.path(), api.clone(), starter, "incarnation-aaaaaaaaaaaa");
+    assert_eq!(launcher.pass().unwrap(), Pass::Settled("outcome-unknown".into()));
+    let completed = api.completions.lock().unwrap()[0].clone();
+    assert_eq!(completed.category.as_deref(), Some("prompt-send-failed"));
+    assert_eq!(completed.tab_id.as_deref(), Some("tab-1"));
 }

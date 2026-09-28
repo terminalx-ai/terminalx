@@ -20,8 +20,14 @@ use serde_json::{json, Value};
 use super::api::{CallError, HttpMailboxApi};
 
 const FILE: &str = "launch.json";
-const MAX_PROMPT_BYTES: usize = 32 * 1024;
-const MAX_REPOSITORIES: usize = 5;
+/// Contract §19.1 limits, shared with the desktop's create checks.
+pub const MAX_PROMPT_BYTES: usize = 32 * 1024;
+pub const MAX_REPOSITORIES: usize = 5;
+
+/// `[a-z0-9-]{1,32}`, the agent ids a launch may name.
+pub fn valid_agent(agent: &str) -> bool {
+    (1..=32).contains(&agent.len()) && agent.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -98,7 +104,9 @@ pub enum Completed {
 
 pub trait LaunchApi: Send + Sync {
     fn claim(&self, storage_incarnation_id: &str) -> Result<Option<Claim>, CallError>;
-    fn phase(&self, launch_id: &str, phase: &str) -> Result<(), CallError>;
+    /// `Some(state)` when the intent is no longer claimed (canceled, expired
+    /// or settled by the server): the launch must stop.
+    fn phase(&self, launch_id: &str, phase: &str) -> Result<Option<String>, CallError>;
     fn complete(&self, launch_id: &str, outcome: &Outcome) -> Result<Completed, CallError>;
 }
 
@@ -118,10 +126,12 @@ impl LaunchApi for HttpMailboxApi {
         }
     }
 
-    fn phase(&self, launch_id: &str, phase: &str) -> Result<(), CallError> {
+    fn phase(&self, launch_id: &str, phase: &str) -> Result<Option<String>, CallError> {
         let body = json!({ "v": 1, "launchId": launch_id, "phase": phase });
         match self.call("POST", "/v1/cloud-workspace-bootstrap/launch-intent/phase", Some(body))? {
-            (200 | 409, _) => Ok(()),
+            (200, _) => Ok(None),
+            (409, body) => Ok(Some(body.get("state").and_then(Value::as_str).unwrap_or("settled").to_string())),
+            (404, _) => Ok(Some("not-found".into())),
             (status, body) => Err(CallError::Transient(anyhow!("launch phase: HTTP {status} {}", error_code(&body)))),
         }
     }
@@ -158,7 +168,16 @@ pub trait Starter: Send + Sync {
     fn available(&self, agent: &str) -> bool;
     /// Create the session and tab in `cwd` and send `prompt` (when any).
     /// Returns `(session id, tab id)`.
-    fn start(&self, cwd: &Path, claim: &Claim, title: &str) -> Result<(String, String)>;
+    fn start(&self, cwd: &Path, claim: &Claim, title: &str) -> Result<(String, String), StartError>;
+}
+
+#[derive(Debug)]
+pub enum StartError {
+    /// Nothing was created; the prompt definitely did not reach an agent.
+    NotStarted(anyhow::Error),
+    /// The tab exists but sending the prompt failed partway: it may or may
+    /// not have reached the agent.
+    SendFailed { session_id: String, tab_id: String, error: anyhow::Error },
 }
 
 /// Prepares one repository; the real one runs git.
@@ -242,6 +261,13 @@ impl Launcher {
     }
 
     pub fn pass(&self) -> Result<Pass, CallError> {
+        match self.attempt() {
+            Err(CallError::Settled(state)) => Ok(Pass::Settled(state)),
+            other => other,
+        }
+    }
+
+    fn attempt(&self) -> Result<Pass, CallError> {
         let Some(claim) = self.api.claim(&self.incarnation)? else { return Ok(Pass::None) };
         if claim.state != "deliver" {
             return Ok(Pass::Settled(claim.state));
@@ -267,7 +293,9 @@ impl Launcher {
             log::warn!("launch intent {}: {error:#}", claim.launch_id);
             return Ok(self.finish(claim, Outcome::failed("payload-invalid", Vec::new())));
         }
-        self.api.phase(&claim.launch_id, "syncing-repository")?;
+        if let Some(state) = self.api.phase(&claim.launch_id, "syncing-repository")? {
+            return Err(CallError::Settled(state));
+        }
         let mut branches = Vec::new();
         for repository in &claim.repositories {
             match self.checkout.prepare(repository, &claim.work_branch) {
@@ -278,7 +306,11 @@ impl Launcher {
                 }
             }
         }
-        self.api.phase(&claim.launch_id, "starting-agent")?;
+        // Checked again right before the agent is touched: a create canceled
+        // while the repositories were prepared is never delivered.
+        if let Some(state) = self.api.phase(&claim.launch_id, "starting-agent")? {
+            return Err(CallError::Settled(state));
+        }
         if !self.starter.available(&claim.agent) {
             return Ok(self.finish(claim, Outcome::failed("agent-unavailable", branches)));
         }
@@ -294,9 +326,19 @@ impl Launcher {
             Ok((session_id, tab_id)) => {
                 Outcome { outcome: "started".into(), category: None, session_id: Some(session_id), tab_id: Some(tab_id), branches }
             }
-            Err(error) => {
+            Err(StartError::NotStarted(error)) => {
                 log::warn!("start the launch agent: {error:#}");
                 Outcome::failed("agent-start-failed", branches)
+            }
+            Err(StartError::SendFailed { session_id, tab_id, error }) => {
+                log::warn!("send the launch prompt: {error:#}");
+                Outcome {
+                    outcome: "outcome-unknown".into(),
+                    category: Some("prompt-send-failed".into()),
+                    session_id: Some(session_id),
+                    tab_id: Some(tab_id),
+                    branches,
+                }
             }
         };
         Ok(self.finish(claim, outcome))
@@ -331,7 +373,7 @@ fn validate(claim: &Claim) -> Result<()> {
     if claim.prompt.as_ref().is_some_and(|prompt| prompt.len() > MAX_PROMPT_BYTES || prompt.contains('\0')) {
         bail!("invalid prompt");
     }
-    if claim.agent.is_empty() || claim.agent.len() > 32 || !claim.agent.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+    if !valid_agent(&claim.agent) {
         bail!("invalid agent");
     }
     Ok(())
@@ -420,7 +462,7 @@ impl Starter for ManagerStarter {
         crate::harness::offered().into_iter().any(|harness| harness.id == agent && harness.available)
     }
 
-    fn start(&self, cwd: &Path, claim: &Claim, title: &str) -> Result<(String, String)> {
+    fn start(&self, cwd: &Path, claim: &Claim, title: &str) -> Result<(String, String), StartError> {
         let entry = crate::session_ops::create_session_blocking(
             &*self.sink,
             crate::session_ops::NewSession {
@@ -441,10 +483,12 @@ impl Starter for ManagerStarter {
                 }),
             },
         )
-        .map_err(|error| anyhow!("{error}"))?;
-        let tab = entry.tabs.first().cloned().ok_or_else(|| anyhow!("the new session has no tab"))?;
+        .map_err(|error| StartError::NotStarted(anyhow!("{error}")))?;
+        let tab = entry.tabs.first().cloned().ok_or_else(|| StartError::NotStarted(anyhow!("the new session has no tab")))?;
         if let Some(prompt) = claim.prompt.as_ref().filter(|prompt| !prompt.trim().is_empty()) {
-            self.manager.send(&entry.id, &tab.id, prompt.to_string(), Vec::new())?;
+            if let Err(error) = self.manager.send(&entry.id, &tab.id, prompt.to_string(), Vec::new()) {
+                return Err(StartError::SendFailed { session_id: entry.id, tab_id: tab.id, error });
+            }
         }
         if let Some(agents) = self.agents.upgrade() {
             agents.changed(Some(&tab.id), true);

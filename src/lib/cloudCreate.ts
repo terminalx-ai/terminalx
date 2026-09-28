@@ -190,10 +190,14 @@ const PENDING_KEY = "terminalx.cloudCreate.pending";
 /** The create in flight, kept across a reload so its retry reuses the key. */
 export function loadPending(organizationId: string): PendingCreate | null {
   try {
-    const stored = JSON.parse(localStorage.getItem(`${PENDING_KEY}.${organizationId}`) ?? "null") as PendingCreate | null;
+    const key = `${PENDING_KEY}.${organizationId}`;
+    const stored = JSON.parse(localStorage.getItem(key) ?? "null") as PendingCreate | null;
     // The server replays a create by its key for as long as the launch intent
-    // lives (a day); an older one is not worth resending.
-    return stored && Date.now() - stored.createdAt < 24 * 60 * 60 * 1000 ? stored : null;
+    // lives (a day); an older one is not worth resending, and its prompt is
+    // not kept on this machine any longer than the server keeps it.
+    if (stored && Date.now() - stored.createdAt < 24 * 60 * 60 * 1000) return stored;
+    localStorage.removeItem(key);
+    return null;
   } catch {
     return null;
   }
