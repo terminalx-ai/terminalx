@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+"""A stand-in for Claude Code under TerminalX's real PTY-first harness (PRO-22 tests).
+
+It speaks just enough of the interactive CLI for `harness/claude` to drive it:
+- the launch flags (`--session-id` / `--resume`, `--model`, `--effort`,
+  `--permission-mode`, `--settings` with the hook commands);
+- keystrokes on the PTY: Ctrl+U clears, a bracketed paste fills the composer,
+  Enter submits, a bare Escape interrupts the turn;
+- the transcript at `$HOME/.claude/projects/<encoded cwd>/<session id>.jsonl`,
+  in Claude Code's record format, appended per message;
+- the hooks, run as the CLI runs them (command line, JSON on stdin):
+  SessionStart, UserPromptSubmit, PermissionRequest (waits for the decision),
+  PreToolUse, PostToolUse and Stop.
+
+What a prompt does is scripted by its text:
+- `echo:<text>`   replies <text>;
+- `slow:<n>`      replies in n messages, 0.4 s apart (`slow:<n>:<ms>` sets the gap);
+- `ask:<command>` asks to run <command> with Bash, then says "allowed: <command>"
+                  or "denied: <command>";
+- `crash`         the process exits at once, mid-turn;
+- anything else   replies "ok: <prompt>".
+Text submitted while a turn runs is steering: it is recorded the way the CLI
+records a queued command (a record the harness skips), and the running turn
+answers it with "steered: <text>" before it ends.
+Stdlib only. Never talks to a model.
+"""
+
+import datetime
+import json
+import os
+import re
+import select
+import subprocess
+import sys
+import termios
+import threading
+import time
+import tty
+import uuid
+
+
+def parse_args(argv):
+    opts = {"session": None, "resume": False, "model": "", "effort": "", "mode": "manual", "settings": {}}
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        value = argv[i + 1] if i + 1 < len(argv) else None
+        if arg == "--session-id":
+            opts["session"] = value
+            i += 2
+        elif arg == "--resume":
+            # With --fork-session the id after --session-id wins.
+            if not opts["session"]:
+                opts["session"] = value
+            opts["resume"] = True
+            i += 2
+        elif arg == "--model":
+            opts["model"] = value
+            i += 2
+        elif arg == "--effort":
+            opts["effort"] = value
+            i += 2
+        elif arg == "--permission-mode":
+            opts["mode"] = value
+            i += 2
+        elif arg == "--name":
+            i += 2
+        elif arg == "--settings":
+            try:
+                opts["settings"] = json.loads(value)
+            except (TypeError, ValueError):
+                opts["settings"] = {}
+            i += 2
+        elif arg == "--fork-session":
+            i += 1
+        elif arg in ("--version", "-v"):
+            print("0.0.0 (fake-claude)")
+            sys.exit(0)
+        else:
+            i += 1
+    if not opts["session"]:
+        opts["session"] = str(uuid.uuid4())
+    return opts
+
+
+def working_dir():
+    pwd = os.environ.get("PWD")
+    cwd = os.getcwd()
+    if pwd and os.path.realpath(pwd) == os.path.realpath(cwd):
+        return pwd
+    return cwd
+
+
+def transcript_path(cwd, session):
+    encoded = re.sub(r"[^A-Za-z0-9-]", "-", cwd)
+    home = os.environ.get("HOME", os.path.expanduser("~"))
+    return os.path.join(home, ".claude", "projects", encoded, session + ".jsonl")
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+class Fake:
+    def __init__(self, opts):
+        self.opts = opts
+        self.session = opts["session"]
+        self.cwd = working_dir()
+        self.path = transcript_path(self.cwd, self.session)
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self.lock = threading.Lock()
+        self.parent = None
+        self.busy = False
+        self.interrupted = threading.Event()
+        self.steers = []
+        self.last_text = ""
+
+    # ------------------------------------------------------------ transcript
+
+    def append(self, record):
+        record.setdefault("uuid", str(uuid.uuid4()))
+        record.setdefault("parentUuid", self.parent)
+        record.setdefault("isSidechain", False)
+        record.setdefault("timestamp", now())
+        record.setdefault("cwd", self.cwd)
+        record.setdefault("sessionId", self.session)
+        with self.lock:
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            self.parent = record["uuid"]
+
+    def user(self, content):
+        self.append({"type": "user", "message": {"role": "user", "content": content}})
+
+    def assistant(self, content):
+        self.append({
+            "type": "assistant",
+            "message": {
+                "id": "msg_" + uuid.uuid4().hex[:16],
+                "role": "assistant",
+                "model": self.opts["model"] or "fake",
+                "content": content,
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            },
+        })
+
+    def say(self, text):
+        self.last_text = text
+        self.assistant([{"type": "text", "text": text}])
+        self.screen(text)
+
+    # ----------------------------------------------------------------- hooks
+
+    def hook(self, event, extra=None):
+        groups = (self.opts["settings"].get("hooks") or {}).get(event) or []
+        payload = {
+            "hook_event_name": event,
+            "session_id": self.session,
+            "transcript_path": self.path,
+            "cwd": self.cwd,
+            "permission_mode": self.opts["mode"],
+        }
+        payload.update(extra or {})
+        reply = {}
+        for group in groups:
+            for hook in group.get("hooks", []):
+                command = hook.get("command")
+                if not command:
+                    continue
+                try:
+                    done = subprocess.run(
+                        command, shell=True, input=json.dumps(payload).encode(), capture_output=True,
+                        timeout=float(hook.get("timeout", 60)),
+                    )
+                    text = done.stdout.decode(errors="replace").strip()
+                    if text:
+                        reply = json.loads(text.splitlines()[-1])
+                except (subprocess.TimeoutExpired, ValueError, OSError):
+                    pass
+        return reply
+
+    # ------------------------------------------------------------------ turn
+
+    def screen(self, text):
+        try:
+            os.write(1, ("\r\n" + text.replace("\n", "\r\n") + "\r\n> ").encode())
+        except OSError:
+            pass
+
+    def take_steers(self):
+        with self.lock:
+            steers, self.steers = self.steers, []
+        for steer in steers:
+            self.say("steered: " + steer)
+
+    def pause(self, seconds):
+        """Sleep, but wake for an interrupt. True when interrupted."""
+        return self.interrupted.wait(seconds)
+
+    def run_turn(self, prompt):
+        self.interrupted.clear()
+        self.user(prompt)
+        self.hook("UserPromptSubmit", {"prompt": prompt})
+        try:
+            if not self.act(prompt):
+                self.user([{"type": "text", "text": "[Request interrupted by user]"}])
+                self.screen("Interrupted")
+                return
+            self.take_steers()
+            self.hook("Stop", {"last_assistant_message": self.last_text, "stop_hook_active": False})
+        finally:
+            with self.lock:
+                self.busy = False
+
+    def act(self, prompt):
+        """The scripted turn. False when it was interrupted."""
+        if prompt.startswith("echo:"):
+            self.say(prompt[len("echo:"):])
+            return not self.interrupted.is_set()
+        if prompt.startswith("slow:"):
+            parts = prompt.split(":")
+            count = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 5
+            gap = int(parts[2]) / 1000.0 if len(parts) > 2 and parts[2].isdigit() else 0.4
+            for i in range(1, count + 1):
+                self.say("chunk %d of %d" % (i, count))
+                self.take_steers()
+                if i < count and self.pause(gap):
+                    return False
+            return not self.interrupted.is_set()
+        if prompt.startswith("ask:"):
+            command = prompt[len("ask:"):]
+            call = "toolu_" + uuid.uuid4().hex[:20]
+            tool_input = {"command": command, "description": "Run " + command}
+            self.assistant([{"type": "tool_use", "id": call, "name": "Bash", "input": tool_input}])
+            self.hook("PreToolUse", {"tool_name": "Bash", "tool_input": tool_input, "tool_use_id": call})
+            allowed = self.opts["mode"] == "bypassPermissions"
+            if not allowed:
+                reply = self.hook("PermissionRequest", {"tool_name": "Bash", "tool_input": tool_input, "permission_suggestions": []})
+                decision = ((reply.get("hookSpecificOutput") or {}).get("decision") or {})
+                allowed = decision.get("behavior") == "allow"
+            if self.interrupted.is_set():
+                return False
+            if allowed:
+                self.user([{"tool_use_id": call, "type": "tool_result", "content": "ran: " + command, "is_error": False}])
+                self.hook("PostToolUse", {"tool_name": "Bash", "tool_input": tool_input, "tool_use_id": call,
+                                          "tool_response": {"stdout": "ran: " + command}})
+                self.say("allowed: " + command)
+            else:
+                self.user([{"tool_use_id": call, "type": "tool_result", "content": "The user declined.", "is_error": True}])
+                self.say("denied: " + command)
+            return True
+        if prompt.strip() == "crash":
+            os._exit(9)
+        self.say("ok: " + prompt)
+        return not self.interrupted.is_set()
+
+    # ----------------------------------------------------------------- input
+
+    def submit(self, text):
+        text = text.strip("\n")
+        if not text.strip():
+            return
+        if text.startswith("/"):
+            # /model, /effort and friends: acknowledged on screen, as the CLI does.
+            self.screen("(fake) " + text)
+            return
+        with self.lock:
+            busy = self.busy
+            if busy:
+                self.steers.append(text)
+            else:
+                self.busy = True
+        if busy:
+            # How the CLI records a message typed mid-turn; the harness skips it.
+            self.append({"type": "queue-operation", "operation": "enqueue", "content": text})
+            return
+        threading.Thread(target=self.run_turn, args=(text,), daemon=True).start()
+
+    def interrupt(self):
+        with self.lock:
+            busy = self.busy
+        if busy:
+            self.interrupted.set()
+
+    def read_byte(self, timeout=None):
+        if timeout is not None:
+            ready, _, _ = select.select([0], [], [], timeout)
+            if not ready:
+                return None
+        data = os.read(0, 1)
+        if not data:
+            raise EOFError
+        return data
+
+    def input_loop(self):
+        line = []
+        while True:
+            b = self.read_byte()
+            if b == b"\x1b":
+                nxt = self.read_byte(0.05)
+                if nxt is None:
+                    self.interrupt()
+                    continue
+                if nxt != b"[":
+                    continue
+                seq = b""
+                while True:
+                    c = self.read_byte(1.0)
+                    if c is None:
+                        break
+                    seq += c
+                    if 0x40 <= c[0] <= 0x7E:
+                        break
+                if seq == b"200~":
+                    line.extend(self.read_paste())
+                continue
+            if b == b"\x15":
+                line = []
+            elif b in (b"\r", b"\n"):
+                text = b"".join(line).decode("utf-8", errors="replace")
+                line = []
+                self.submit(text)
+            elif b == b"\x03":
+                continue
+            elif b == b"\x7f":
+                if line:
+                    line.pop()
+            else:
+                line.append(b)
+
+    def read_paste(self):
+        """Bytes up to the end of a bracketed paste; a CR inside it is a newline."""
+        end = b"\x1b[201~"
+        buf = b""
+        while not buf.endswith(end):
+            c = self.read_byte()
+            buf += c
+        return [bytes([x]) if x != 0x0D else b"\n" for x in buf[: -len(end)]]
+
+
+def main():
+    opts = parse_args(sys.argv[1:])
+    fake = Fake(opts)
+    old = None
+    if os.isatty(0):
+        old = termios.tcgetattr(0)
+        tty.setraw(0)
+    try:
+        fake.screen("fake-claude %s (%s)" % (fake.session, "resume" if opts["resume"] else "new"))
+        time.sleep(0.1)
+        fake.hook("SessionStart", {"source": "resume" if opts["resume"] else "startup"})
+        fake.input_loop()
+    except (EOFError, KeyboardInterrupt):
+        pass
+    finally:
+        if old is not None:
+            termios.tcsetattr(0, termios.TCSADRAIN, old)
+        fake.hook("SessionEnd", {"reason": "exit"})
+
+
+if __name__ == "__main__":
+    main()
