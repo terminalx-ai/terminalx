@@ -1,9 +1,9 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FlatList, Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { FlatList, Image, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import { File as ExpoFile } from "expo-file-system";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { ChevronUp, FileText, Paperclip, Radio, Send, Terminal as TerminalIcon, X } from "lucide-react-native";
 import { buildTranscript, type PendingAsk, type Turn, type WorkItem } from "@terminalx/portable/transcript";
 import type { AgentEvent } from "@terminalx/portable/events";
@@ -11,7 +11,9 @@ import { mergeEvents, readTranscriptCache, writeTranscriptCache, type Attachment
 import { useApp } from "@mobile/state/AppProvider";
 import { Button, Card, EmptyState } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
-import { conversationKey, conversationLabel, statusLabel, type ConversationTab } from "@mobile/data/conversations";
+import { conversationKey } from "@mobile/data/conversations";
+import { agentConversations } from "@mobile/data/session-navigation";
+import { ConversationPicker } from "@mobile/ui/ConversationPicker";
 import { useConversationState } from "@mobile/state/conversation-state";
 
 // Keep the mobile terminal unavailable until its rendering and input are ready.
@@ -37,29 +39,18 @@ export default function SessionScreen() {
 
   if (!app.activeHost || !tabId || (params.hostId && params.hostId !== app.activeHost.id)) return <View style={[styles.center, { backgroundColor: palette.page }]}><EmptyState title="Session unavailable" detail="Reconnect to its Mac and open this session again." /></View>;
   const key = conversationKey(app.activeHost.id, sessionId, tabId);
-  const available = !summary || summary.tabs.some((tab) => tab.id === tabId);
+  const conversation = summary ? agentConversations(summary).find((item) => item.id === tabId) : undefined;
+  const available = !summary || !!conversation;
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
-    <ConversationSelector key={JSON.stringify([app.activeHost.id, sessionId])} tabs={summary?.tabs ?? []} tabId={tabId} onSelect={(tabId) => router.setParams({ tabId, hostId: app.activeHost!.id })} />
+    <Stack.Screen options={{ title: conversation?.label ?? params.title ?? "Session" }} />
+    {summary ? <>
+      <Text numberOfLines={1} style={[styles.sessionContext, { color: palette.muted }]}>{summary.title}</Text>
+      <ConversationPicker key={JSON.stringify([app.activeHost.id, sessionId])} session={summary} selectedTabId={tabId} horizontal onSelect={({ href }) => router.setParams({ ...href.params, hostId: app.activeHost!.id })} />
+    </> : null}
     {!available ? <Text style={{ color: palette.warning, paddingHorizontal: 16 }}>This conversation is no longer available on the Mac.</Text> : null}
     {MOBILE_TERMINAL_ENABLED ? <View style={[styles.segment, { backgroundColor: palette.raised }]}><Segment label="Chat" selected={view === "chat"} onPress={() => setView("chat")} /><Segment label="Terminal" selected={view === "terminal"} onPress={() => setView("terminal")} /></View> : null}
     {!MOBILE_TERMINAL_ENABLED || view === "chat" ? <ChatPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && app.connectionStage === "connected"} /> : <TerminalPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && app.connectionStage === "connected"} />}
   </View>;
-}
-
-function ConversationSelector({ tabs, tabId, onSelect }: { tabs: ConversationTab[]; tabId: string; onSelect(tabId: string): void }) {
-  const { palette } = useTheme();
-  const scroll = useRef<ScrollView>(null);
-  const offsets = useRef<Record<string, number>>({});
-  useEffect(() => { scroll.current?.scrollTo({ x: offsets.current[tabId] ?? 0, animated: false }); }, [tabId]);
-  return <ScrollView ref={scroll} horizontal style={styles.agentSelector} contentContainerStyle={styles.agentChoices}>
-    {tabs.map((tab) => <Pressable key={tab.id} accessibilityRole="button" accessibilityState={{ selected: tab.id === tabId }} onPress={() => onSelect(tab.id)} onLayout={({ nativeEvent }) => {
-      offsets.current[tab.id] = nativeEvent.layout.x;
-      if (tab.id === tabId) scroll.current?.scrollTo({ x: nativeEvent.layout.x, animated: false });
-    }} style={[styles.agentChoice, { backgroundColor: tab.id === tabId ? palette.selected : palette.raised }]}>
-      <Text numberOfLines={2} style={{ color: palette.ink, fontWeight: "600" }}>{conversationLabel(tab, tabs)}</Text>
-      <Text style={{ color: palette.muted, fontSize: 12 }}>{statusLabel(tab.status)}</Text>
-    </Pressable>)}
-  </ScrollView>;
 }
 
 function Segment({ label, selected, onPress }: { label: string; selected: boolean; onPress(): void }) {
@@ -343,9 +334,7 @@ function safeJson(value: unknown) { try { return JSON.stringify(value, null, 2).
 
 const styles = StyleSheet.create({
   page: { flex: 1 },
-  agentSelector: { flexGrow: 0, flexShrink: 0 },
-  agentChoices: { paddingHorizontal: 16, paddingTop: 8, gap: 8 },
-  agentChoice: { maxWidth: 280, padding: 10, borderRadius: 10, gap: 3 },
+  sessionContext: { fontSize: 13, marginHorizontal: 16, marginTop: 4 },
   flex: { flex: 1 },
   center: { flex: 1, justifyContent: "center" },
   segment: { flexDirection: "row", padding: 3, borderRadius: 10, marginHorizontal: 16, marginTop: 8 },

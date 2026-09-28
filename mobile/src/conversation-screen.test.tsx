@@ -14,7 +14,7 @@ const mocks = vi.hoisted(() => ({
   sessionListeners: new Map<string, (event: unknown) => void>(),
   terminalListeners: new Map<string, (event: unknown) => void>(),
 }));
-vi.mock("expo-router", () => ({ useLocalSearchParams: () => mocks.params, useRouter: () => ({ push: mocks.push, setParams: mocks.setParams }) }));
+vi.mock("expo-router", () => ({ Stack: { Screen: ({ options }: { options: { title: string } }) => <div data-testid="screen-title">{options.title}</div> }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ push: mocks.push, setParams: mocks.setParams }) }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("expo-crypto", () => ({ randomUUID: () => "test" }));
@@ -106,8 +106,11 @@ describe("mobile conversation navigation", () => {
 
   it("switches agents, keeps drafts and transcripts separate, and sends to the selected tab", async () => {
     await render();
+    expect(container.querySelector('[data-testid="screen-title"]')?.textContent).toBe("Claude Code");
+    expect(container.textContent).toContain("Create a new issue");
     await type("Claude draft");
-    await click("CodexWorking"); await render();
+    await click("Open Codex"); await render();
+    expect(container.querySelector('[data-testid="screen-title"]')?.textContent).toBe("Codex");
     expect(mocks.params.tabId).toBe("codex");
     expect(input().value).toBe("");
     expect(container.textContent).toContain("codex transcript");

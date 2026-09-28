@@ -1,0 +1,21 @@
+{
+  "id": "session-multi-agent",
+  "title": "Review mobile navigation",
+  "modified": "2026-01-01T00:00:00.000Z",
+  "project": "example-project",
+  "worktree": "main",
+  "tabs": [
+    {
+      "id": "agent-claude",
+      "title": null,
+      "harness": "claude",
+      "status": "completed"
+    },
+    {
+      "id": "agent-codex",
+      "title": null,
+      "harness": "codex",
+      "status": "in_progress"
+    }
+  ]
+}
