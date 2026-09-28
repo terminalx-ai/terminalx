@@ -56,11 +56,57 @@ terminalx-serve --project-root /workspace --data-dir /var/lib/terminalx --runtim
 - **Socket path length:** keep `--data-dir` short. A Unix socket path must fit in about
   104 bytes.
 
+## Cloud workspace bootstrap
+
+With `--runtime-kind cloud-workspace`, the runtime establishes its identity before it
+serves anything, using the same contract as the legacy runtime
+(`POST /v1/cloud-workspace-bootstrap/redeem` and `/refresh` on terminalx-saas `apps/api`).
+
+| Variable | Meaning |
+| --- | --- |
+| `TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_ORIGIN` | API origin: https, or http on loopback |
+| `TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_TOKEN_PATH` | File holding the one-time bootstrap token |
+
+Set both or neither; with neither the runtime serves without a cloud identity. State lives
+in `<data-dir>/cloud-workspace/` (mode 0700):
+
+- `host-key.json`: the X25519 relay host key. The relay host id is derived from it the
+  same way the server does. It is written before the token is ever sent and is never
+  regenerated, so every attempt names the same host. Rotating credentials must keep it.
+- `runtime.json`: workspace, organization, relay host id and runtime credential.
+  Rotating credentials deletes it before writing a new token.
+
+Every step survives `kill -9`:
+
+1. Generate and durably write the host key (temp file, fsync, rename, fsync dir).
+2. If `runtime.json` exists, refresh with it. On success, delete a token a previous run
+   left behind. If the credential is rejected and a token is present, redeem the token.
+3. Otherwise redeem the token. The token stays on disk until the credential is durably
+   in `runtime.json`; only then is it deleted.
+4. If the process dies after the server committed the redeem but before the credential
+   reached the disk, the retry redeems the same token with the same host key. The server
+   replays the redeem for that key and rotates the credential (terminalx-saas, PRO-42).
+   An older server rejects the replay: the token is still kept and the runtime exits 3.
+
+Exit codes: `3` means the server rejected the token or credential and a restart cannot
+help (the systemd unit sets `RestartPreventExitStatus=3`). `1` is transient, such as the
+API being unreachable. Both keep the token.
+
+Requests carry `x-terminalx-cloud-workspace-runtime-version` and, on refresh,
+`x-terminalx-cloud-workspace-runtime-capabilities: organization-access-v1`. The `ready`
+line reports `capabilities` and `cloudWorkspace` (`workspaceId`, `relayHostId`). The
+session is refreshed every 30 seconds in the background.
+
+Debug builds honour `TERMINALX_SERVE_TEST_CRASH_AT=<step>`, which SIGKILLs the process at
+that step. `serve/tests/bootstrap_crash.rs` uses it against a fake server to check each
+step. Release builds compile it out.
+
 ## Not yet
 
 - **Relay host registration and the portable RPC surface (PRO-13).** `BroadcastSink::subscribe`
   is the event feed that will serve it.
-- **Bootstrap redeem/refresh with a replay-safe identity (PRO-12).**
+- **First-run setup** (organization credentials, repository clone). The runtime does not
+  advertise `organization-setup-v*`, so the server does not send it.
 - **The `terminalx` agent CLI inside the runtime.** The CLI module links the desktop's
   computer-use and browser parsers, so it is still desktop-only.
 - **Cloud installation.** The saas bootstrap script still installs the AppImage. Switching

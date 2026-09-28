@@ -5531,6 +5531,8 @@ name = "terminalx-serve"
 version = "0.2.2"
 dependencies = [
  "raccoon",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

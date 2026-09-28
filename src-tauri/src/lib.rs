@@ -10,6 +10,7 @@ mod account;
 #[cfg(feature = "desktop")]
 mod automations;
 mod binpath;
+mod cloud_bootstrap;
 #[cfg(feature = "desktop")]
 pub mod browser;
 #[cfg(feature = "desktop")]
