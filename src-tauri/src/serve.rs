@@ -236,6 +236,7 @@ fn run(options: Options) -> Result<()> {
                 })
             }),
             "agentGrants": crate::cloud_grants::status_json(),
+            "workspaceConfig": crate::cloud_config::status_json(),
         })
     );
     // The relay host: from the bootstrap in a cloud workspace, or from a
@@ -294,6 +295,11 @@ fn start_agent_grants(cloud: Arc<crate::cloud_bootstrap::Bootstrapped>, origin: 
     let store = Arc::new(GrantStore::open(workspace_id));
     install(store.clone());
     let api = Arc::new(HttpGrantApi::new(origin, cloud.clone()));
+    // The workspace's configuration rides on the same key and credential.
+    let config = Arc::new(crate::cloud_config::ConfigStore::new(store.clone()));
+    crate::cloud_config::install(config.clone());
+    let rejected = cloud.clone();
+    crate::cloud_config::spawn_sync_loop(config, api.clone(), move || rejected.is_rejected());
     spawn_sync_loop(store, api, move || cloud.is_rejected());
 }
 

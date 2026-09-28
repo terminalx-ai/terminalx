@@ -282,6 +282,87 @@ pub fn organization_github_app_open(url: String, app: tauri::AppHandle) -> Githu
         .map_err(|_| crate::organization_github_app::GithubAppError::local("github_app_browser_failed"))
 }
 
+// ------------------------------------------- cloud workspace configuration
+
+async fn config_call(
+    state: tauri::State<'_, crate::AppState>,
+    operation: impl FnOnce(&crate::organization_workspace_config::WorkspaceConfigService) -> ComputeResult + Send + 'static,
+) -> ComputeResult {
+    let service = state.workspace_config.clone();
+    tauri::async_runtime::spawn_blocking(move || operation(&service))
+        .await
+        .map_err(|_| crate::organization_compute::OrganizationComputeError::local("cloud_workspace_config_unavailable"))?
+}
+
+#[tauri::command]
+pub async fn workspace_config_organization(state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    config_call(state, |service| service.organization()).await
+}
+
+#[tauri::command]
+pub async fn workspace_config_organization_update(layer: serde_json::Value, context_revision: String, state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    config_call(state, move |service| service.update_organization(&layer, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn workspace_config_repository_update(layer: serde_json::Value, context_revision: String, state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    config_call(state, move |service| service.update_repository(&layer, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn workspace_config_workspace(workspace_id: String, state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    config_call(state, move |service| service.workspace(&workspace_id)).await
+}
+
+#[tauri::command]
+pub async fn workspace_config_workspace_update(
+    workspace_id: String,
+    layer: serde_json::Value,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> ComputeResult {
+    config_call(state, move |service| service.update_workspace(&workspace_id, &layer, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn workspace_config_secrets(state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    config_call(state, |service| service.secrets()).await
+}
+
+#[tauri::command]
+pub async fn workspace_config_secret_put(
+    name: String,
+    value: String,
+    runtime_access: String,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> ComputeResult {
+    let value = zeroize::Zeroizing::new(value);
+    config_call(state, move |service| service.put_secret(&name, value, &runtime_access, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn workspace_config_secret_delete(name: String, context_revision: String, state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    config_call(state, move |service| service.delete_secret(&name, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn workspace_config_secret_bind(
+    name: String,
+    scope: String,
+    target: String,
+    env_name: String,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> ComputeResult {
+    config_call(state, move |service| service.bind_secret(&name, &scope, &target, &env_name, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn workspace_config_secret_unbind(binding_id: String, context_revision: String, state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    config_call(state, move |service| service.unbind_secret(&binding_id, &context_revision)).await
+}
+
 // --------------------------------------------------------- cloud workspaces
 
 macro_rules! cloud_command {

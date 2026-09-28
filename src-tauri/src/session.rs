@@ -761,6 +761,9 @@ impl SessionManager {
         // A cloud workspace's agent credentials (`cloud_grants`). Only Cursor
         // runs this way, and its grant only sets a variable.
         let harness = program.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        // The workspace's configured variables and bound secrets
+        // (`cloud_config`) first, so a grant always wins.
+        env.extend(crate::cloud_config::launch_config(&harness, &rt.key()).env);
         env.extend(crate::cloud_grants::agent_env_for_launch(&harness, &rt.key()).into_iter().filter_map(|(name, value)| value.map(|value| (name, value))));
         let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env }, sink)?;
         rt.child_pid = Some(child.pid);
@@ -1392,6 +1395,11 @@ impl SessionManager {
             CliKind::Codex => self.codex_launch(rt, entry, tab, &exe, &mut env)?,
         };
 
+        // A cloud workspace's configuration (`cloud_config`): variables,
+        // bound secrets, prompts and MCP servers. Before the grants, so an
+        // agent credential always wins.
+        let config = crate::cloud_config::launch_config(&tab.harness, &pane);
+        env.extend(config.env);
         // A cloud workspace's agent credentials (`cloud_grants`); names to
         // unset are dropped after the login shell's profile has run.
         let mut unset = Vec::new();
@@ -1401,7 +1409,7 @@ impl SessionManager {
                 None => unset.push(name),
             }
         }
-        let spawned = crate::cloud_grants::unset_prefix(&launch.command, &unset);
+        let spawned = crate::cloud_grants::unset_prefix(&format!("{}{}", launch.command, config.args), &unset);
         let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: 120, rows: 30, command: Some(&spawned), env: &env };

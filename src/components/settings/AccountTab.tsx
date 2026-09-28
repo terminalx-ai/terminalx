@@ -3,6 +3,7 @@ import { Check, Loader2, Pencil } from "lucide-react";
 import { OrganizationCompute } from "./OrganizationCompute";
 import { OrganizationGithubApp } from "./OrganizationGithubApp";
 import { OrganizationMembers } from "./OrganizationMembers";
+import { OrganizationWorkspaceConfig } from "./OrganizationWorkspaceConfig";
 import { OrganizationOnboarding } from "./OrganizationOnboarding";
 import { AccountAvatar } from "@/components/account/AccountAvatar";
 import { Button } from "@/components/ui/button";
@@ -48,6 +49,7 @@ export function AccountTab() {
         {identity.organization && <OrganizationMembers accountEmail={identity.email} contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationCompute contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationGithubApp contextRevision={status.context?.revision ?? ""} />}
+        {identity.organization && <OrganizationWorkspaceConfig contextRevision={status.context?.revision ?? ""} />}
         {pairing.status.host && (
           <div className="rounded-lg border border-hairline px-3 py-3">
             <div className="text-xs font-medium">What this Mac shares</div>

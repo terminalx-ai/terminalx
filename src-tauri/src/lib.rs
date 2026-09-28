@@ -14,6 +14,7 @@ mod cloud_activity;
 mod cloud_bootstrap;
 pub mod cloud_agents;
 mod cloud_github;
+mod cloud_config;
 mod cloud_grants;
 #[cfg(feature = "desktop")]
 pub mod browser;
@@ -33,6 +34,8 @@ mod organization_github_app;
 mod organization_members;
 #[cfg(feature = "desktop")]
 mod organization_compute;
+#[cfg(feature = "desktop")]
+mod organization_workspace_config;
 #[cfg(feature = "desktop")]
 pub mod computer;
 mod control;
@@ -97,6 +100,7 @@ pub struct AppState {
     pub organization_members: Arc<organization_members::OrganizationMembersService>,
     pub organization_compute: Arc<organization_compute::OrganizationComputeService>,
     pub organization_github_app: Arc<organization_github_app::OrganizationGithubAppService>,
+    pub workspace_config: Arc<organization_workspace_config::WorkspaceConfigService>,
     pub pairing: Arc<pairing::PairingManager>,
     pub host: Arc<harness::host::Host>,
     pub terminals: Arc<pty::Terminals>,
@@ -139,6 +143,7 @@ pub fn run() {
     );
     let organization_compute = Arc::new(organization_compute::OrganizationComputeService::new(account.clone()));
     let organization_github_app = Arc::new(organization_github_app::OrganizationGithubAppService::new(account.clone()));
+    let workspace_config = Arc::new(organization_workspace_config::WorkspaceConfigService::new(account.clone()));
     let cloud_remote = cloud_remote::CloudRemote::new(account.clone(), cloud_workspaces.clone(), cloud_agents.clone());
     // The resource directory is only known once Tauri is up; the service
     // resolves the helper lazily, so it can be built before `setup`.
@@ -150,6 +155,7 @@ pub fn run() {
         organization_members,
         organization_compute,
         organization_github_app,
+        workspace_config,
         pairing: pairing.clone(),
         host: host.clone(),
         terminals: terminals.clone(),
@@ -289,6 +295,16 @@ pub fn run() {
             commands::organization_github_app_repositories_save,
             commands::organization_github_app_disconnect,
             commands::organization_github_app_open,
+            commands::workspace_config_organization,
+            commands::workspace_config_organization_update,
+            commands::workspace_config_repository_update,
+            commands::workspace_config_workspace,
+            commands::workspace_config_workspace_update,
+            commands::workspace_config_secrets,
+            commands::workspace_config_secret_put,
+            commands::workspace_config_secret_delete,
+            commands::workspace_config_secret_bind,
+            commands::workspace_config_secret_unbind,
             commands::cloud_providers,
             commands::cloud_provider,
             commands::cloud_provider_connect,
