@@ -1075,27 +1075,29 @@ class NativeWorkspaceTransport implements WorkspaceTransport {
   private readonly states = new Set<(state: WorkspaceConnectionState) => void>();
   private unlisten: (() => void) | null = null;
   private closed = false;
+  private connectionId: string | null = null;
+  /** Events that arrive before the attach call returns our id. */
+  private early: RemoteEvent[] = [];
+  private current: WorkspaceConnectionState["state"] = "idle";
 
-  constructor(private readonly connectionId: string) {}
-
-  async start(): Promise<void> {
-    const unlisten = await listen<RemoteEvent>("cloud_remote_event", ({ payload }) => {
-      if (payload.kind === "identityChanged") {
-        if (payload.connectionIds.includes(this.connectionId)) this.emitState({ state: "stopped" });
-        return;
-      }
-      if (payload.connectionId !== this.connectionId) return;
-      if (payload.kind === "state") this.emitState(payload.state);
-      else for (const listener of this.messages) listener(payload.message);
-    });
+  /** Listen first, so nothing the native side emits right after attaching is missed. */
+  async listen(): Promise<void> {
+    const unlisten = await listen<RemoteEvent>("cloud_remote_event", ({ payload }) => this.route(payload));
     if (this.closed) unlisten();
     else this.unlisten = unlisten;
   }
 
+  bind(connectionId: string): void {
+    this.connectionId = connectionId;
+    const early = this.early;
+    this.early = [];
+    for (const event of early) this.route(event);
+  }
+
   send(frame: { id: string; method: string; params?: unknown }): boolean {
-    if (this.closed) return false;
-    // Delivery is confirmed by the response; a refused send surfaces as a
-    // timeout or drop, and the portable client resends with the same id.
+    // Refuse at once while not connected, so the caller resends after the
+    // next connect instead of waiting out a timeout.
+    if (this.closed || !this.connectionId || this.current !== "connected") return false;
     void api.cloudRemoteSend(this.connectionId, frame).catch(() => undefined);
     return true;
   }
@@ -1111,17 +1113,32 @@ class NativeWorkspaceTransport implements WorkspaceTransport {
   }
 
   activate(activation: Activation): Promise<void> {
-    return api.cloudRemoteActivate(this.connectionId, activation);
+    return this.connectionId ? api.cloudRemoteActivate(this.connectionId, activation) : Promise.resolve();
   }
 
   close(): void {
     if (this.closed) return;
     this.closed = true;
     this.unlisten?.();
-    void api.cloudRemoteDetach(this.connectionId).catch(() => undefined);
+    if (this.connectionId) void api.cloudRemoteDetach(this.connectionId).catch(() => undefined);
+  }
+
+  private route(payload: RemoteEvent): void {
+    if (payload.kind === "identityChanged") {
+      if (this.connectionId && payload.connectionIds.includes(this.connectionId)) this.emitState({ state: "stopped" });
+      return;
+    }
+    if (!this.connectionId) {
+      if (this.early.length < 256) this.early.push(payload);
+      return;
+    }
+    if (payload.connectionId !== this.connectionId) return;
+    if (payload.kind === "state") this.emitState(payload.state);
+    else for (const listener of this.messages) listener(payload.message);
   }
 
   private emitState(state: WorkspaceConnectionState): void {
+    this.current = state.state;
     for (const listener of this.states) listener(state);
   }
 }
@@ -1134,53 +1151,77 @@ export interface CloudWorkspaceConnection {
   close(): void;
 }
 
-const connections = new Map<string, CloudWorkspaceConnection>();
+const connections = new Map<string, Promise<CloudWorkspaceConnection>>();
 
 /**
  * The transport for a workspace target: null for a local workspace (use the
  * Tauri commands), a supervised remote connection for a cloud one. One
- * connection per target; `connect` never wakes suspended compute.
+ * connection per target, even for concurrent callers; `connect` never wakes
+ * suspended compute.
  */
 export async function workspaceConnection(target: WorkspaceTarget, activation: Activation = "connect"): Promise<CloudWorkspaceConnection | null> {
   if (target.kind === "local") return null;
   const key = workspaceTargetKey(target);
   const existing = connections.get(key);
   if (existing) {
-    if (activation === "wake") await existing.activate("wake");
-    return existing;
+    const connection = await existing;
+    if (activation === "wake") await connection.activate("wake");
+    return connection;
   }
-  const connectionId = await api.cloudRemoteAttach(target, activation);
-  return adopt(key, target, connectionId);
+  const pending = adopt(key, target, (transport) => api.cloudRemoteAttach(target, activation).then((id) => (transport.bind(id), id)));
+  connections.set(key, pending);
+  pending.catch(() => {
+    if (connections.get(key) === pending) connections.delete(key);
+  });
+  return pending;
 }
 
 /** Debug builds: a cloud session from a local runtime's pairing code. */
 export async function devWorkspaceConnection(pairingCode: string): Promise<CloudWorkspaceConnection> {
-  const connectionId = await api.cloudRemoteAttachDev(pairingCode);
-  return adopt(`dev:${connectionId}`, { kind: "cloud", organizationId: "dev", workspaceId: connectionId }, connectionId);
+  const key = `dev:${crypto.randomUUID()}`;
+  const pending = adopt(key, { kind: "cloud", organizationId: "dev", workspaceId: key }, (transport) =>
+    api.cloudRemoteAttachDev(pairingCode).then((id) => (transport.bind(id), id)),
+  );
+  connections.set(key, pending);
+  pending.catch(() => connections.delete(key));
+  return pending;
 }
 
-async function adopt(key: string, target: WorkspaceTarget, connectionId: string): Promise<CloudWorkspaceConnection> {
-  const transport = new NativeWorkspaceTransport(connectionId);
-  await transport.start();
+async function adopt(
+  key: string,
+  target: WorkspaceTarget,
+  attach: (transport: NativeWorkspaceTransport) => Promise<string>,
+): Promise<CloudWorkspaceConnection> {
+  const transport = new NativeWorkspaceTransport();
+  await transport.listen();
   const client = new WorkspaceRpcClient(transport);
+  try {
+    await attach(transport);
+  } catch (error) {
+    client.close();
+    throw error;
+  }
+  let self: Promise<CloudWorkspaceConnection> | undefined;
   const connection: CloudWorkspaceConnection = {
     target,
     client,
     activate: (next) => transport.activate(next),
     close: () => {
-      connections.delete(key);
+      if (connections.get(key) === self) connections.delete(key);
       client.close();
     },
   };
-  connections.set(key, connection);
+  self = connections.get(key);
   client.onState((state) => {
     // Stopped for an identity change: drop it so nothing reuses the old one.
-    if (state.state === "stopped" && connections.get(key) === connection) connection.close();
+    if (state.state === "stopped") connection.close();
   });
   return connection;
 }
 
 /** Drop every cloud connection and what it cached, e.g. on sign-out or an organization switch. */
 export function closeWorkspaceConnections(): void {
-  for (const connection of [...connections.values()]) connection.close();
+  const all = [...connections.values()];
+  connections.clear();
+  for (const pending of all) void pending.then((connection) => connection.close()).catch(() => undefined);
 }

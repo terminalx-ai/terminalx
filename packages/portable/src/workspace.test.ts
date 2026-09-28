@@ -171,4 +171,15 @@ describe("workspace RPC client", () => {
     await expect(client.call("fs.list", {})).rejects.toMatchObject({ code: "method_not_found" });
     client.close();
   });
+  it("keeps a subscription made while disconnected and starts it on connect", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    const stop = await client.attachPty("p1", () => undefined);
+    expect(runtime.sent).toHaveLength(0);
+    runtime.connect();
+    await settle();
+    expect(runtime.sent.map((frame) => frame.method)).toEqual(["pty.attach"]);
+    stop();
+    client.close();
+  });
 });

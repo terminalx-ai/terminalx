@@ -97,7 +97,7 @@ pub struct AttachGrant {
 }
 
 pub enum OpenOutcome {
-    Ready(AttachGrant),
+    Ready(Box<AttachGrant>),
     /// The attachment exists but the runtime has not answered it yet.
     WaitingForRuntime,
     /// Suspended compute; only an interactive action ([`Activation::Wake`]) resumes it.
@@ -149,7 +149,7 @@ pub struct Closed {
 
 impl Closed {
     fn other(error: impl std::fmt::Display) -> Self {
-        Self { code: None, reason: redact(&format!("{error:#}")) }
+        Self { code: None, reason: protocol::redact(&format!("{error:#}")) }
     }
 }
 
@@ -351,7 +351,14 @@ async fn run(shared: Arc<Shared>, source: Arc<dyn AttachSource>, events: mpsc::U
             emit(ClientState::Opening);
             let open_source = source.clone();
             let refresh = refresh_pairing;
-            match tokio::task::spawn_blocking(move || open_source.open(refresh, level)).await.map_err(anyhow::Error::from).and_then(|r| r) {
+            let opened = tokio::task::spawn_blocking(move || open_source.open(refresh, level)).await.map_err(anyhow::Error::from).and_then(|r| r);
+            // A wake is spent on the open that asked for it: reconnects later
+            // never resume compute again on their own.
+            if level == Activation::Wake && matches!(opened, Ok(OpenOutcome::Ready(_) | OpenOutcome::WaitingForRuntime)) {
+                shared.activation.send_replace(Activation::Connect);
+                activation.borrow_and_update();
+            }
+            match opened {
                 Ok(OpenOutcome::Ready(grant)) => {
                     refresh_pairing = false;
                     let same = attached.as_ref().is_some_and(|a| a.grant.attachment_id == grant.attachment_id);
@@ -359,7 +366,7 @@ async fn run(shared: Arc<Shared>, source: Arc<dyn AttachSource>, events: mpsc::U
                     if resume.as_ref().is_some_and(|(attachment, _)| attachment != &grant.attachment_id) {
                         resume = None;
                     }
-                    attached = Some(Attached { grant, invite_used });
+                    attached = Some(Attached { grant: *grant, invite_used });
                 }
                 Ok(OpenOutcome::WaitingForRuntime) => {
                     emit(ClientState::WaitingForRuntime);
@@ -379,7 +386,7 @@ async fn run(shared: Arc<Shared>, source: Arc<dyn AttachSource>, events: mpsc::U
                 Err(error) => {
                     attempt += 1;
                     let delay = protocol::backoff(attempt, jitter());
-                    emit(ClientState::Reconnecting { attempt, reason: redact(&format!("{error:#}")), retry_in_ms: delay.as_millis() as u64 });
+                    emit(ClientState::Reconnecting { attempt, reason: protocol::redact(&format!("{error:#}")), retry_in_ms: delay.as_millis() as u64 });
                     if sleep_or_stop(&mut stopped, delay).await {
                         break;
                     }
@@ -587,9 +594,6 @@ fn random_token() -> String {
     general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn redact(message: &str) -> String {
-    regex::Regex::new(r"[A-Za-z0-9_\-.]{32,}").map(|re| re.replace_all(message, "[redacted]").into_owned()).unwrap_or_default()
-}
 
 /// Parse the API's `open` response into an outcome.
 pub fn open_outcome(response: &Value) -> Result<OpenOutcome> {
@@ -606,11 +610,11 @@ pub fn open_outcome(response: &Value) -> Result<OpenOutcome> {
                 }
                 _ => None,
             };
-            Ok(OpenOutcome::Ready(AttachGrant {
+            Ok(OpenOutcome::Ready(Box::new(AttachGrant {
                 attachment_id: response["id"].as_str().unwrap_or_default().to_string(),
                 offer: decode_pairing_code(code)?,
                 ticket,
-            }))
+            })))
         }
         "waiting-for-runtime" => Ok(OpenOutcome::WaitingForRuntime),
         other => bail!("unexpected attachment state {other}"),

@@ -264,11 +264,17 @@ export class WorkspaceRpcClient {
     };
     this.assertGranted(spec.method);
     this.subscriptions.set(localId, subscription);
-    try {
-      await subscription.resume();
-    } catch (error) {
-      this.subscriptions.delete(localId);
-      throw error;
+    // Not connected yet (or the link drops mid-call): the subscription is
+    // registered and resumes on the next connect. A runtime refusal is final.
+    if (this.state.state === "connected") {
+      try {
+        await subscription.resume();
+      } catch (error) {
+        if (error instanceof WorkspaceRpcError) {
+          this.subscriptions.delete(localId);
+          throw error;
+        }
+      }
     }
     return () => {
       const current = this.subscriptions.get(localId);

@@ -33,6 +33,7 @@ use crate::store::index::{self, SessionEntry};
 
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_PTYS: usize = 16;
+const MAX_EXITED_PTYS: usize = 8;
 const PTY_RING_BYTES: usize = 1024 * 1024;
 const MAX_READ_BYTES: u64 = 768 * 1024;
 const MAX_DIFF_BYTES: usize = 768 * 1024;
@@ -75,6 +76,7 @@ struct PtyState {
     /// Byte offset one past the last byte ever written by the terminal.
     end: u64,
     exit: Option<Option<i32>>,
+    exited_at: Option<Instant>,
     /// Last applied `pty.write` seq per device, so a resend is dropped.
     applied_seq: HashMap<String, u64>,
     subscribers: HashMap<String, Arc<Peer>>,
@@ -109,9 +111,13 @@ impl Subscription {
     }
 }
 
+type Gate = Arc<tokio::sync::Mutex<()>>;
+
 pub struct WorkspaceRpc {
     root: PathBuf,
-    generation: u64,
+    /// The generation the relay host registered with; offsets and cursors
+    /// are bound to it.
+    generation: AtomicU64,
     version: String,
     sink: Arc<dyn EventSink>,
     terminals: Arc<Terminals>,
@@ -120,9 +126,10 @@ pub struct WorkspaceRpc {
     session_subs: Mutex<HashMap<String, SessionSubscription>>,
     subscriptions: Mutex<HashMap<String, Subscription>>,
     idempotency: Mutex<IdempotencyCache>,
-    /// Serializes mutations so a resend racing its original waits for the
-    /// cached result instead of running twice.
-    mutations: tokio::sync::Mutex<()>,
+    /// One lock per `(attachment, clientRequestId)` in flight, so a resend
+    /// racing its original waits for the cached result instead of running
+    /// twice, while unrelated mutations proceed.
+    in_flight: Mutex<HashMap<(String, String), Gate>>,
     /// Sessions a `participate` attachment may see. Nothing shares a session
     /// yet, so participants see none (fail closed).
     shared_sessions: Mutex<HashSet<String>>,
@@ -140,7 +147,7 @@ impl WorkspaceRpc {
         let root = std::fs::canonicalize(root)?;
         let rpc = Arc::new(Self {
             root,
-            generation,
+            generation: AtomicU64::new(generation),
             version: env!("CARGO_PKG_VERSION").into(),
             sink: sink.clone(),
             terminals,
@@ -149,7 +156,7 @@ impl WorkspaceRpc {
             session_subs: Mutex::new(HashMap::new()),
             subscriptions: Mutex::new(HashMap::new()),
             idempotency: Mutex::new(IdempotencyCache::default()),
-            mutations: tokio::sync::Mutex::new(()),
+            in_flight: Mutex::new(HashMap::new()),
             shared_sessions: Mutex::new(HashSet::new()),
         });
         // Listeners run inline on the emitting thread, so no output is lost
@@ -185,7 +192,12 @@ impl WorkspaceRpc {
     }
 
     pub fn generation(&self) -> u64 {
-        self.generation
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    /// Follow the relay host when it registers a newer generation.
+    pub fn set_generation(&self, generation: u64) {
+        self.generation.store(generation, Ordering::SeqCst);
     }
 
     /// Answer one request. Returns the response frame; notifications for
@@ -206,7 +218,7 @@ impl WorkspaceRpc {
             *peer.granted.lock().unwrap() = Some(granted.iter().cloned().collect());
             return Ok(json!({
                 "protocol": PROTOCOL,
-                "runtime": { "version": self.version, "runtimeGeneration": self.generation },
+                "runtime": { "version": self.version, "runtimeGeneration": self.generation() },
                 "capabilities": granted,
                 "authority": peer.authority,
                 "limits": { "maxFrameBytes": MAX_FRAME_BYTES, "maxPtys": MAX_PTYS },
@@ -234,12 +246,24 @@ impl WorkspaceRpc {
             .filter(|value| protocol::valid_client_request_id(value))
             .ok_or_else(|| RpcError::invalid("clientRequestId is required for this method"))?
             .to_string();
-        let _serial = self.mutations.lock().await;
-        if let Some(previous) = self.idempotency.lock().unwrap().get(&peer.device_id, &request_id, Instant::now()) {
-            return previous;
+        let key = (peer.device_id.clone(), request_id.clone());
+        let gate = self.in_flight.lock().unwrap().entry(key.clone()).or_default().clone();
+        let result = {
+            let _serial = gate.lock().await;
+            let previous = self.idempotency.lock().unwrap().get(&peer.device_id, &request_id, Instant::now());
+            match previous {
+                Some(previous) => previous,
+                None => {
+                    let result = self.execute(peer, method, params).await;
+                    self.idempotency.lock().unwrap().put(&peer.device_id, &request_id, &result, Instant::now());
+                    result
+                }
+            }
+        };
+        let mut in_flight = self.in_flight.lock().unwrap();
+        if in_flight.get(&key).is_some_and(|current| Arc::ptr_eq(current, &gate) && Arc::strong_count(&gate) <= 2) {
+            in_flight.remove(&key);
         }
-        let result = self.execute(peer, method, params).await;
-        self.idempotency.lock().unwrap().put(&peer.device_id, &request_id, &result, Instant::now());
         result
     }
 
@@ -372,6 +396,7 @@ impl WorkspaceRpc {
                     ring: VecDeque::new(),
                     end: 0,
                     exit: None,
+                    exited_at: None,
                     applied_seq: HashMap::new(),
                     subscribers: HashMap::new(),
                 },
@@ -439,7 +464,7 @@ impl WorkspaceRpc {
     fn pty_attach(&self, peer: &Arc<Peer>, params: Value) -> Result<Value, RpcError> {
         let pty_id = required_str(&params, "ptyId")?.to_string();
         let since = params.get("sinceOffset").and_then(Value::as_u64);
-        if since.is_some() && params.get("runtimeGeneration").and_then(Value::as_u64) != Some(self.generation) {
+        if since.is_some() && params.get("runtimeGeneration").and_then(Value::as_u64) != Some(self.generation()) {
             return Err(RpcError::new("cursor_expired", "the offset belongs to another runtime generation"));
         }
         let subscription_id = Self::subscription_id();
@@ -458,7 +483,7 @@ impl WorkspaceRpc {
             "truncated": since.is_some_and(|since| since < start),
             "exited": pty.exit.is_some(),
             "exitCode": pty.exit.flatten(),
-            "runtimeGeneration": self.generation,
+            "runtimeGeneration": self.generation(),
         });
         drop(ptys);
         self.subscriptions.lock().unwrap().insert(subscription_id, Subscription::Pty { peer: peer.id, pty_id });
@@ -489,11 +514,22 @@ impl WorkspaceRpc {
         let mut ptys = self.ptys.lock().unwrap();
         let Some(pty) = ptys.get_mut(&exit.id) else { return };
         pty.exit = Some(exit.code);
+        pty.exited_at = Some(Instant::now());
         for (subscription_id, peer) in &pty.subscribers {
             peer.notify(
                 "pty.exit",
                 json!({ "subscriptionId": subscription_id, "ptyId": exit.id, "code": exit.code, "offset": pty.end }),
             );
+        }
+        // Exited terminals keep their output for a late reader, up to a
+        // bound: the oldest are dropped first.
+        let mut exited: Vec<(Instant, String)> =
+            ptys.iter().filter_map(|(id, pty)| pty.exited_at.map(|at| (at, id.clone()))).collect();
+        if exited.len() > MAX_EXITED_PTYS {
+            exited.sort();
+            for (_, id) in exited.drain(..exited.len() - MAX_EXITED_PTYS) {
+                ptys.remove(&id);
+            }
         }
     }
 
@@ -1031,13 +1067,13 @@ impl WorkspaceRpc {
 
     /// Cursors are opaque to clients and bound to this runtime generation.
     fn cursor(&self, seq: u64) -> String {
-        format!("{}:{seq}", self.generation)
+        format!("{}:{seq}", self.generation())
     }
 
     fn parse_cursor(&self, cursor: &str) -> Result<u64, RpcError> {
         let expired = || RpcError::new("cursor_expired", "the cursor belongs to another runtime generation");
         let (generation, seq) = cursor.split_once(':').ok_or_else(expired)?;
-        if generation.parse::<u64>().ok() != Some(self.generation) {
+        if generation.parse::<u64>().ok() != Some(self.generation()) {
             return Err(expired());
         }
         seq.parse().map_err(|_| expired())

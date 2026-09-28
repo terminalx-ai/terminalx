@@ -134,9 +134,16 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
               <Bot className="size-3.5" /> Agent
             </Button>
           </div>
-          {!connected && <div className="p-4 text-xs text-muted-foreground">{describe(state)}</div>}
-          {connected && view === "terminal" && <RemoteTerminal client={connection.client} />}
-          {connected && view === "agent" && <RemoteAgent client={connection.client} />}
+          {!connected && <div className="px-4 py-1 text-xs text-muted-foreground">{describe(state)}</div>}
+          {/* Both stay mounted across reconnects and view switches: the
+              terminal and the agent tab live on the runtime, and the client
+              resumes their streams from the last offset or cursor. */}
+          <div className={view === "terminal" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+            <RemoteTerminal client={connection.client} />
+          </div>
+          <div className={view === "agent" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+            <RemoteAgent client={connection.client} />
+          </div>
         </div>
       )}
     </div>
@@ -161,6 +168,8 @@ function RemoteTerminal({ client }: { client: WorkspaceRpcClient }) {
     const decoder = new TextDecoder();
     void (async () => {
       try {
+        await firstConnect(client);
+        if (disposed) return;
         const created = await client.mutate<{ ptyId: string }>("pty.create", { cols: term.cols, rows: term.rows });
         if (disposed) return;
         ptyId = created.ptyId;
@@ -288,6 +297,18 @@ function RemoteAgent({ client }: { client: WorkspaceRpcClient }) {
       </div>
     </div>
   );
+}
+
+/** Resolves on the first `connected` state; the page mounts before that. */
+function firstConnect(client: WorkspaceRpcClient): Promise<void> {
+  return new Promise((resolve) => {
+    let stop: (() => void) | undefined;
+    stop = client.onState((state) => {
+      if (state.state !== "connected") return;
+      queueMicrotask(() => stop?.());
+      resolve();
+    });
+  });
 }
 
 function eventText(event: AgentEvent): string | null {

@@ -275,6 +275,13 @@ impl AccountManager {
         })
     }
 
+    /// The signed-in user and active organization as last loaded, without a
+    /// Keychain load or token refresh: cheap enough to poll.
+    pub(crate) fn current_identity(&self) -> Option<(String, String)> {
+        let inner = self.inner.lock().unwrap();
+        inner.session.as_ref().map(|session| (session.cloud.user_id.clone(), session.cloud.active_org_id.clone().unwrap_or_default()))
+    }
+
     /// Fence native service responses against sign-out or account replacement.
     /// A request may finish after either event, but its Organization data must
     /// never be returned to the webview in the new account generation.

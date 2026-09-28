@@ -35,6 +35,8 @@ use crate::relay_e2ee::{answer_relay_challenge, begin_e2ee_session, E2eeHello, E
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const SILENCE_TIMEOUT: Duration = Duration::from_secs(90);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
+/// Answered from their own task (see `serve_connection`).
+const SLOW_METHODS: &[&str] = &["git.push", "git.pull", "git.commit", "git.checkout", "session.create", "session.send", "session.close"];
 
 /// One pending attachment, as `/v1/cloud-workspace-bootstrap/refresh` lists it.
 #[derive(Clone, Deserialize)]
@@ -231,6 +233,8 @@ enum ControlCommand {
     InstallCredential { payload: Value, req_id: String, respond: oneshot::Sender<Result<Value>> },
     /// The runtime credential was revoked: stop serving.
     Shutdown,
+    /// A newer runtime generation was issued: register again with it.
+    Reregister,
 }
 
 #[derive(Clone)]
@@ -384,6 +388,8 @@ impl RelayHost {
     async fn connect_once(self: Arc<Self>, session: RelaySession, identity: TokenIdentity) -> Result<()> {
         let relay_host_id = self.keypair.host_id();
         let (cell_url, assignment_epoch) = assign(&session.director_url, &session.relay_token, &relay_host_id).await?;
+        // Offsets, cursors and `rpc.hello` report the generation registered.
+        self.rpc.set_generation(identity.runtime_generation);
         let (mut socket, relay_generation) =
             self.open_control(&cell_url, assignment_epoch, &session.relay_token, &identity).await?;
         let (commands, mut command_rx) = mpsc::unbounded_channel();
@@ -497,6 +503,10 @@ impl RelayHost {
                             let _ = socket.close(None).await;
                             return Err(Revoked.into());
                         }
+                        ControlCommand::Reregister => {
+                            let _ = socket.close(None).await;
+                            return Ok(());
+                        }
                         ControlCommand::Revoke { device_id } => {
                             let req_id = uuid::Uuid::new_v4().simple().to_string();
                             socket.send(Message::Text(json!({ "type": "device-revoke", "reqId": req_id, "relayDeviceId": device_id }).to_string().into())).await?;
@@ -586,7 +596,9 @@ impl RelayHost {
                     // A rotated token with a newer generation needs a fresh
                     // registration; the relay fences this one when it arrives.
                     if token_identity(&session.relay_token).is_ok_and(|identity| identity.runtime_generation > runtime_generation) {
-                        log::info!("relay host: a newer runtime generation was issued");
+                        log::info!("relay host: a newer runtime generation was issued; registering again");
+                        let _ = live.commands.send(ControlCommand::Reregister);
+                        return;
                     }
                     self.apply_revocations(&live, &session.revocations);
                     for attachment in session.attachments {
@@ -714,13 +726,19 @@ impl RelayHost {
             bail!("E2EE authentication was not bound to the handshake");
         }
         let token = auth["deviceToken"].as_str().ok_or_else(|| anyhow!("E2EE authentication lacks a device token"))?;
-        let device = self.authenticate(&connection.relay_device_id, token)?;
+        // Checked and registered under one lock, so a revocation either
+        // refuses this connection or finds it and closes it.
+        let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
+        let device = self.admit(&connection.relay_device_id, token, cancel_tx)?;
         let authenticated = json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
         send_sealed(&mut socket, &mut session, &authenticated).await?;
 
         let (peer, mut notifications) = Peer::new(connection.relay_device_id.clone(), device.authority);
-        let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
-        self.state.lock().unwrap().connections.entry(connection.relay_device_id.clone()).or_default().push(cancel_tx);
+        // Slow mutations (Git network calls, agent prompts) answer from their
+        // own task, so this connection keeps reading, streaming and honouring
+        // a revocation meanwhile. Everything else is answered in order, which
+        // keeps terminal writes ordered.
+        let (answers_tx, mut answers) = mpsc::unbounded_channel::<Value>();
         log::info!("relay host: attachment {} connected ({:?})", device.attachment_id, device.authority);
         let result = async {
             loop {
@@ -733,6 +751,11 @@ impl RelayHost {
                         let Some(notification) = notification else { return Ok(()) };
                         send_sealed(&mut socket, &mut session, &notification).await?;
                     }
+                    answer = answers.recv() => {
+                        if let Some(answer) = answer {
+                            send_sealed(&mut socket, &mut session, &answer).await?;
+                        }
+                    }
                     incoming = socket.next() => {
                         let Some(incoming) = incoming else { return Ok(()) };
                         match incoming? {
@@ -744,6 +767,15 @@ impl RelayHost {
                                 let request: Value = serde_json::from_slice(&plaintext)?;
                                 let response = match request["method"].as_str() {
                                     Some("pairing.provisionRelay") => self.provision_resume(&live, &connection, &request).await,
+                                    Some(method) if SLOW_METHODS.contains(&method) => {
+                                        let rpc = self.rpc.clone();
+                                        let peer = peer.clone();
+                                        let answers = answers_tx.clone();
+                                        tokio::spawn(async move {
+                                            let _ = answers.send(rpc.handle(&peer, &request).await);
+                                        });
+                                        continue;
+                                    }
                                     _ => self.rpc.handle(&peer, &request).await,
                                 };
                                 send_sealed(&mut socket, &mut session, &response).await?;
@@ -763,19 +795,26 @@ impl RelayHost {
         }
         .await;
         self.rpc.disconnect(&peer);
+        drop(cancel);
+        if let Some(senders) = self.state.lock().unwrap().connections.get_mut(&connection.relay_device_id) {
+            senders.retain(|sender| !sender.is_closed());
+        }
         result
     }
 
-    fn authenticate(&self, relay_device_id: &str, token: &str) -> Result<Device> {
+    fn admit(&self, relay_device_id: &str, token: &str, cancel: mpsc::UnboundedSender<()>) -> Result<Device> {
         let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         // The relay credential named the device; the token must be that
         // device's, so an invite cannot be used with another attachment's token.
-        let device = state.devices.get(relay_device_id).ok_or_else(|| anyhow!("device is not attached"))?;
+        let device = state.devices.get(relay_device_id).ok_or_else(|| anyhow!("device is not attached"))?.clone();
         if !bool::from(device.token_hash.ct_eq(&hash)) {
             bail!("device token refused");
         }
-        Ok(device.clone())
+        let senders = state.connections.entry(relay_device_id.to_string()).or_default();
+        senders.retain(|sender| !sender.is_closed());
+        senders.push(cancel);
+        Ok(device)
     }
 
     /// Install a resume credential for the device of an invite connection,
@@ -890,7 +929,7 @@ async fn assign(director_url: &str, relay_token: &str, relay_host_id: &str) -> R
             .timeout(CONNECT_TIMEOUT)
             .set("authorization", &format!("Bearer {token}"))
             .send_json(json!({ "v": 1, "relayHostId": host }))
-            .map_err(|error| anyhow!("relay assignment failed: {}", redact(&error.to_string())))?;
+            .map_err(|error| anyhow!("relay assignment failed: {}", protocol::redact(&error.to_string())))?;
         Ok(response.into_json()?)
     })
     .await??;
@@ -947,9 +986,6 @@ pub(crate) fn valid_base64url_32(value: &str) -> bool {
     value.len() == 43 && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-fn redact(message: &str) -> String {
-    regex::Regex::new(r"[A-Za-z0-9_\-.]{32,}").map(|re| re.replace_all(message, "[redacted]").into_owned()).unwrap_or_default()
-}
 
 pub(crate) fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()

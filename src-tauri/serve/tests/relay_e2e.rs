@@ -156,7 +156,7 @@ impl AttachSource for TestSource {
         let ticket: Value = ureq::post(&format!("{}/ticket", self.harness_control))
             .send_json(json!({ "relayHostId": self.relay_host_id, "runtimeGeneration": generation, "deviceId": self.device_id, "attachmentId": self.attachment_id }))?
             .into_json()?;
-        Ok(OpenOutcome::Ready(AttachGrant {
+        Ok(OpenOutcome::Ready(Box::new(AttachGrant {
             attachment_id: self.attachment_id.clone(),
             offer: decode_pairing_code(&code)?,
             ticket: Some(AttachTicket {
@@ -164,7 +164,7 @@ impl AttachSource for TestSource {
                 expires_at: ticket["expiresAt"].as_i64().unwrap(),
                 runtime_generation: generation,
             }),
-        }))
+        })))
     }
 }
 

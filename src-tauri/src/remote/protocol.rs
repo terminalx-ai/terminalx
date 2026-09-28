@@ -157,9 +157,12 @@ const IDEMPOTENCY_MAX: usize = 4096;
 /// Results of mutating calls by `(attachment, clientRequestId)`, kept for at
 /// least ten minutes so a resend after a reconnect returns the first result
 /// instead of writing or prompting twice.
+/// A stored outcome: the result, or an error's code and message.
+type Outcome = Result<Value, (String, String)>;
+
 #[derive(Default)]
 pub struct IdempotencyCache {
-    entries: HashMap<(String, String), (Instant, Result<Value, (String, String)>)>,
+    entries: HashMap<(String, String), (Instant, Outcome)>,
 }
 
 impl IdempotencyCache {
@@ -247,6 +250,12 @@ pub fn close_action(code: u16) -> CloseAction {
         4409 => CloseAction::Reassign,
         _ => CloseAction::Reconnect,
     }
+}
+
+/// Long opaque tokens (credentials, tickets) are cut from logged errors.
+pub fn redact(message: &str) -> String {
+    static TOKEN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    TOKEN.get_or_init(|| regex::Regex::new(r"[A-Za-z0-9_\-.]{32,}").expect("valid pattern")).replace_all(message, "[redacted]").into_owned()
 }
 
 pub const BACKOFF_FLOOR: Duration = Duration::from_millis(250);

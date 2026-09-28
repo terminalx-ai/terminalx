@@ -216,3 +216,17 @@ async fn git_reads_status_and_commits_once() {
         "invalid_params"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hello_and_cursors_follow_a_newer_registered_generation() {
+    let f = fixture();
+    f.rpc.set_generation(8);
+    let (peer, _events) = Peer::new("device".into(), Authority::Manage);
+    let hello = call(&f.rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["pty/1"] })).await.unwrap();
+    assert_eq!(hello["runtime"]["runtimeGeneration"], 8);
+    let created = call(&f.rpc, &peer, "pty.create", json!({ "clientRequestId": "request-gen-1" })).await.unwrap();
+    assert_eq!(
+        code(call(&f.rpc, &peer, "pty.attach", json!({ "ptyId": created["ptyId"], "sinceOffset": 0, "runtimeGeneration": 7 })).await),
+        "cursor_expired"
+    );
+}

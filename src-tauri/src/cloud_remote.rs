@@ -56,8 +56,9 @@ impl CloudRemote {
         Arc::new(Self { account, service, connections: Mutex::new(HashMap::new()) })
     }
 
+    /// Cheap: no Keychain load or token refresh, so it can run per frame.
     fn identity(&self) -> Option<Identity> {
-        self.account.context().map(|context| Identity { user_id: context.user_id, organization_id: context.organization_id })
+        self.account.current_identity().map(|(user_id, organization_id)| Identity { user_id, organization_id })
     }
 
     /// Stop connections made for an identity that is no longer current.
@@ -66,6 +67,9 @@ impl CloudRemote {
         tauri::async_runtime::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
+                if remote.connections.lock().unwrap().is_empty() {
+                    continue;
+                }
                 let current = remote.identity();
                 let stale: Vec<String> = {
                     let mut connections = remote.connections.lock().unwrap();
@@ -140,7 +144,18 @@ impl AttachSource for ApiSource {
         if workspace.workspace.org_id != self.identity.organization_id {
             anyhow::bail!("cloud_remote_identity_changed");
         }
+        let resuming = workspace.latest_operation.as_ref().is_some_and(|operation| {
+            matches!(operation.action, Some(crate::cloud_workspaces::OperationAction::Resume))
+                && matches!(
+                    operation.state,
+                    crate::cloud_workspaces::OperationState::Queued
+                        | crate::cloud_workspaces::OperationState::Running
+                        | crate::cloud_workspaces::OperationState::CancelRequested
+                )
+        });
         match workspace.workspace.state {
+            // Already waking (this or another client asked): wait, never ask twice.
+            WorkspaceState::Suspended if resuming => return Ok(OpenOutcome::WaitingForRuntime),
             WorkspaceState::Suspended if activation < Activation::Wake => return Ok(OpenOutcome::Suspended),
             WorkspaceState::Suspended => {
                 // Only an interactive action wakes compute.
@@ -223,7 +238,7 @@ pub async fn cloud_remote_attach_dev(
     struct DevSource(crate::remote::client::AttachGrant);
     impl AttachSource for DevSource {
         fn open(&self, _refresh: bool, _activation: Activation) -> anyhow::Result<OpenOutcome> {
-            Ok(OpenOutcome::Ready(self.0.clone()))
+            Ok(OpenOutcome::Ready(Box::new(self.0.clone())))
         }
     }
     let offer = crate::remote::client::decode_pairing_code(&pairing_code).map_err(|e| e.to_string())?;
