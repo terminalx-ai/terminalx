@@ -73,14 +73,18 @@ in `<data-dir>/cloud-workspace/` (mode 0700):
 - `host-key.json`: the X25519 relay host key. The relay host id is derived from it the
   same way the server does. It is written before the token is ever sent and is never
   regenerated, so every attempt names the same host. Rotating credentials must keep it.
-- `runtime.json`: workspace, organization, relay host id and runtime credential.
-  Rotating credentials deletes it before writing a new token.
+- `runtime.json`: workspace, organization, relay host id, runtime credential and the
+  SHA-256 of the token it was bought with. Rotating credentials deletes it before
+  writing a new token.
+- `lock`: held with `flock` while the runtime runs; a second runtime on the same data dir
+  refuses to start.
 
 Every step survives `kill -9`:
 
 1. Generate and durably write the host key (temp file, fsync, rename, fsync dir).
-2. If `runtime.json` exists, refresh with it. On success, delete a token a previous run
-   left behind. If the credential is rejected and a token is present, redeem the token.
+2. If `runtime.json` exists, refresh with it. On success, delete the token only if it is
+   the one already spent; a newly provisioned token stays. If the credential is rejected
+   and a new token is present, redeem the new token.
 3. Otherwise redeem the token. The token stays on disk until the credential is durably
    in `runtime.json`; only then is it deleted.
 4. If the process dies after the server committed the redeem but before the credential
@@ -88,13 +92,23 @@ Every step survives `kill -9`:
    replays the redeem for that key and rotates the credential (terminalx-saas, PRO-42).
    An older server rejects the replay: the token is still kept and the runtime exits 3.
 
-Exit codes: `3` means the server rejected the token or credential and a restart cannot
-help (the systemd unit sets `RestartPreventExitStatus=3`). `1` is transient, such as the
-API being unreachable. Both keep the token.
+Failures are retried in the process with backoff (1s doubling to 30s), not by systemd
+restarts, which would hit the unit's start limit during a short outage:
+
+- An unreachable API or a 5xx is retried until it answers.
+- A 401 is retried too, because the server also answers 401 while a workspace is briefly
+  in another state. Only when the token or credential has been rejected for 10 minutes
+  straight (the token's lifetime) does the runtime exit `3`. The unit sets
+  `RestartPreventExitStatus=3`, and the next credential rotation restarts it.
+- A missing or malformed token with no stored identity exits `3` at once. Local faults
+  (unreadable state, a host key that does not match the stored identity) exit `1`.
+
+The token is kept in every failure case.
 
 Requests carry `x-terminalx-cloud-workspace-runtime-version` and, on refresh,
 `x-terminalx-cloud-workspace-runtime-capabilities: organization-access-v1`. The `ready`
-line reports `capabilities` and `cloudWorkspace` (`workspaceId`, `relayHostId`). The
+line reports `cloudWorkspace` (`workspaceId`, `relayHostId`, `capabilities`), or `null`
+without a bootstrap. The
 session is refreshed every 30 seconds in the background.
 
 Debug builds honour `TERMINALX_SERVE_TEST_CRASH_AT=<step>`, which SIGKILLs the process at
@@ -109,6 +123,9 @@ step. Release builds compile it out.
   advertise `organization-setup-v*`, so the server does not send it.
 - **The `terminalx` agent CLI inside the runtime.** The CLI module links the desktop's
   computer-use and browser parsers, so it is still desktop-only.
-- **Cloud installation.** The saas bootstrap script still installs the AppImage. Switching
-  it to this binary behind a flag, and the signed, pinned linux-x64/arm64 artifact with an
-  atomic `current` symlink swap, are separate steps.
+- **A rejected credential in steady state.** The 30-second refresh loop logs it; stopping
+  the relay host belongs with its registration (PRO-13).
+- **The published artifact.** terminalx-saas installs this binary behind
+  `CLOUD_WORKSPACE_RUNTIME_KIND=terminalx-serve` (versioned directory, atomic `current`
+  swap, health check, rollback). A signed, pinned linux-x64/arm64 build is not published
+  yet.

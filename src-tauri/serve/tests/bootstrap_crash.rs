@@ -13,10 +13,14 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+
+/// A run that takes longer than this is a hang, not a slow test.
+const RUN_TIMEOUT: Duration = Duration::from_secs(60);
 
 const TOKEN: &str = "tokentokentokentokentokentokentokentokentok";
 
@@ -42,7 +46,10 @@ struct FakeServer {
 
 impl FakeServer {
     fn start(no_replay: bool) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        Self::start_on(TcpListener::bind("127.0.0.1:0").unwrap(), no_replay)
+    }
+
+    fn start_on(listener: TcpListener, no_replay: bool) -> Self {
         let origin = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         let mut state = State { no_replay, ..State::default() };
         state.tokens.insert(TOKEN.into(), None);
@@ -164,6 +171,10 @@ impl Vm {
     }
 
     fn run(&self, origin: &str, crash_at: Option<&str>) -> Output {
+        wait_with_timeout(self.spawn(origin, crash_at))
+    }
+
+    fn spawn(&self, origin: &str, crash_at: Option<&str>) -> Child {
         let mut command = Command::new(env!("CARGO_BIN_EXE_terminalx-serve"));
         command
             .args(["--runtime-kind", "cloud-workspace", "--self-test"])
@@ -174,12 +185,14 @@ impl Vm {
             .env("TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_ORIGIN", origin)
             .env("TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_TOKEN_PATH", &self.token_path)
             .env("SHELL", "/bin/sh")
+            // A rejection is final at once instead of after ten minutes.
+            .env("TERMINALX_SERVE_TEST_REJECTED_WINDOW_MS", "0")
             .env_remove("TERMINALX_HOME")
             .env_remove("TERMINALX_SERVE_TEST_CRASH_AT");
         if let Some(step) = crash_at {
             command.env("TERMINALX_SERVE_TEST_CRASH_AT", step);
         }
-        command.output().unwrap()
+        command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap()
     }
 
     fn state_dir(&self) -> PathBuf {
@@ -193,6 +206,19 @@ impl Vm {
     fn host_key(&self) -> Option<Vec<u8>> {
         std::fs::read(self.state_dir().join("host-key.json")).ok()
     }
+}
+
+fn wait_with_timeout(mut child: Child) -> Output {
+    let deadline = Instant::now() + RUN_TIMEOUT;
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!("terminalx-serve hung for {}s\nstderr:\n{}", RUN_TIMEOUT.as_secs(), String::from_utf8_lossy(&output.stderr));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    child.wait_with_output().unwrap()
 }
 
 fn read_json(path: &Path) -> Option<Value> {
@@ -227,6 +253,7 @@ fn assert_healthy(vm: &Vm, server: &FakeServer, output: &Output) {
     assert_eq!(ready["cloudWorkspace"]["relayHostId"], json!(hosts[0]));
     assert!(state.versions.iter().all(|version| version == &state.versions[0]) && !state.versions.is_empty());
     assert!(state.capabilities.iter().all(|capabilities| capabilities == "organization-access-v1"));
+    assert_eq!(ready["cloudWorkspace"]["capabilities"], json!(["organization-access-v1"]));
 }
 
 const STEPS: &[&str] = &[
@@ -307,11 +334,16 @@ fn a_rejected_token_exits_3_and_is_kept() {
     assert!(vm.token_path.exists());
 }
 
+/// An API that is down at boot is waited for in the process, not by
+/// systemd restarts that would hit the unit's start limit.
 #[test]
-fn an_unreachable_server_exits_1_and_keeps_the_token() {
+fn an_unreachable_server_is_retried_until_it_answers() {
     let vm = Vm::new();
     let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let output = vm.run(&format!("http://127.0.0.1:{port}"), None);
-    assert_eq!(output.status.code(), Some(1), "{}", describe(&output));
-    assert!(vm.token_path.exists());
+    let child = vm.spawn(&format!("http://127.0.0.1:{port}"), None);
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(vm.token_path.exists(), "the token is kept while the API is down");
+    let server = FakeServer::start_on(TcpListener::bind(("127.0.0.1", port)).unwrap(), false);
+    let output = wait_with_timeout(child);
+    assert_healthy(&vm, &server, &output);
 }

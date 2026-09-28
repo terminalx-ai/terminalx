@@ -190,10 +190,13 @@ fn run(options: Options) -> Result<()> {
             "projectRoot": runtime.project_root,
             "dataDir": data_dir,
             "socket": crate::hooks::socket_path().ok(),
-            "capabilities": crate::cloud_bootstrap::CAPABILITIES.split(',').collect::<Vec<_>>(),
             "cloudWorkspace": cloud.as_ref().map(|cloud| {
                 let session = cloud.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                json!({ "workspaceId": session.workspace_id, "relayHostId": session.relay_host_id })
+                json!({
+                    "workspaceId": session.workspace_id,
+                    "relayHostId": session.relay_host_id,
+                    "capabilities": [crate::cloud_bootstrap::CAPABILITIES],
+                })
             }),
         })
     );
@@ -211,13 +214,13 @@ fn run(options: Options) -> Result<()> {
 /// Redeem or refresh, then keep the session fresh in the background.
 /// TODO(PRO-13): register with the relay as a host with this session.
 fn bootstrap_cloud_workspace(data_dir: &std::path::Path) -> Result<Option<Arc<crate::cloud_bootstrap::Bootstrapped>>> {
-    use crate::cloud_bootstrap::{establish, Config, HttpApi};
+    use crate::cloud_bootstrap::{establish, Config, HttpApi, Policy};
     let Some(config) = Config::from_env(data_dir)? else {
         log::warn!("no cloud workspace bootstrap configured; serving without a cloud identity");
         return Ok(None);
     };
     let api = Arc::new(HttpApi::new(&config.origin));
-    let cloud = Arc::new(establish(&config, api.as_ref())?);
+    let cloud = Arc::new(establish(&config, api.as_ref(), &Policy::from_env())?);
     {
         let session = cloud.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         log::info!("cloud workspace {} bootstrapped as relay host {}", session.workspace_id, session.relay_host_id);

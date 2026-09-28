@@ -26,7 +26,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
@@ -34,7 +34,7 @@ use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 pub const ORIGIN_ENV: &str = "TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_ORIGIN";
 pub const TOKEN_PATH_ENV: &str = "TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_TOKEN_PATH";
@@ -138,15 +138,29 @@ struct HostKeyFile {
     secret: String,
 }
 
+impl Zeroize for HostKeyFile {
+    fn zeroize(&mut self) {
+        self.secret.zeroize();
+    }
+}
+
 /// What survives a restart once the token is spent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredIdentity {
     v: u8,
     workspace_id: String,
     organization_id: String,
     relay_host_id: String,
+    /// Which token bought the credential, so only that one is deleted.
+    token_sha256: String,
     runtime_credential: String,
+}
+
+impl Drop for StoredIdentity {
+    fn drop(&mut self) {
+        self.runtime_credential.zeroize();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -156,8 +170,11 @@ pub enum AccessMode {
     Organization,
 }
 
-/// The relay session the runtime registers with (PRO-13).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The relay session the runtime registers with (PRO-13). Not `Debug`: it
+/// carries the relay token and the attached devices' tokens.
+// TODO(PRO-13): the relay host reads the token, director and attachments.
+#[allow(dead_code)]
+#[derive(Clone)]
 pub struct Session {
     pub workspace_id: String,
     pub organization_id: String,
@@ -172,7 +189,7 @@ pub struct Session {
     pub revocations: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Redeemed {
     v: u8,
@@ -184,7 +201,7 @@ pub struct Redeemed {
     runtime_credential: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Refreshed {
     v: u8,
@@ -263,69 +280,152 @@ impl Api for HttpApi {
 /// A bootstrapped runtime: its session and what it needs to refresh it.
 pub struct Bootstrapped {
     pub key: HostKey,
-    pub session: Arc<Mutex<Session>>,
-    credential: String,
+    pub session: Mutex<Session>,
+    credential: Zeroizing<String>,
+    // Held for the life of the process: one runtime per state directory.
+    _lock: StateLock,
+}
+
+/// How long `establish` keeps trying.
+#[derive(Debug, Clone)]
+pub struct Policy {
+    pub backoff_start: Duration,
+    pub backoff_cap: Duration,
+    /// A 401 is also what the server answers while the workspace is briefly in
+    /// another state or its relay signing key is missing, so a rejection only
+    /// becomes permanent once it has lasted this long: the bootstrap token's
+    /// own lifetime.
+    pub rejected_window: Duration,
+    /// Stop retrying altogether after this long. `None` in production: a
+    /// cloud workspace has nothing better to do than wait for its API.
+    pub give_up_after: Option<Duration>,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self { backoff_start: Duration::from_secs(1), backoff_cap: Duration::from_secs(30), rejected_window: Duration::from_secs(10 * 60), give_up_after: None }
+    }
+}
+
+impl Policy {
+    /// The default, except that debug builds let the tests shorten the
+    /// rejection window with `TERMINALX_SERVE_TEST_REJECTED_WINDOW_MS`.
+    pub fn from_env() -> Self {
+        #[allow(unused_mut)]
+        let mut policy = Self::default();
+        #[cfg(debug_assertions)]
+        if let Some(ms) = std::env::var("TERMINALX_SERVE_TEST_REJECTED_WINDOW_MS").ok().and_then(|value| value.parse().ok()) {
+            policy.rejected_window = Duration::from_millis(ms);
+            policy.backoff_start = Duration::from_millis(50);
+        }
+        policy
+    }
+}
+
+/// One attempt's failure.
+enum Failure {
+    /// Retry: the server could not be reached, or it said no (which lasts
+    /// only so long before it counts).
+    Retry { error: anyhow::Error, rejected: Option<&'static str> },
+    /// No retry can help.
+    Fatal(anyhow::Error),
 }
 
 /// Establish the runtime's identity: refresh with the stored credential, or
-/// redeem the bootstrap token for one. Every step can be killed and retried.
-pub fn establish(config: &Config, api: &dyn Api) -> Result<Bootstrapped> {
+/// redeem the bootstrap token for one. Every step can be killed and retried,
+/// and a failure that may clear up is retried here, with backoff, rather than
+/// by systemd, whose start limit would give up within a minute.
+pub fn establish(config: &Config, api: &dyn Api, policy: &Policy) -> Result<Bootstrapped> {
     ensure_private_dir(&config.state_dir)?;
+    let lock = StateLock::acquire(&config.state_dir)?;
     let key = load_or_create_host_key(&config.state_dir)?;
     crash_point("host-key-persisted");
+    let mut delay = policy.backoff_start;
+    let mut rejected_since: Option<Instant> = None;
+    let started = Instant::now();
+    loop {
+        let (error, rejected) = match attempt(config, api, &key) {
+            Ok((session, credential)) => return Ok(Bootstrapped { key, session: Mutex::new(session), credential, _lock: lock }),
+            Err(Failure::Fatal(error)) => return Err(error),
+            Err(Failure::Retry { error, rejected }) => (error, rejected),
+        };
+        match rejected {
+            Some(code) => {
+                let since = *rejected_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= policy.rejected_window {
+                    return Err(anyhow::Error::new(Rejected(code)).context(format!("{error:#}")));
+                }
+            }
+            None => rejected_since = None,
+        }
+        if policy.give_up_after.is_some_and(|limit| started.elapsed() >= limit) {
+            return Err(error.context("gave up retrying"));
+        }
+        log::warn!("cloud workspace bootstrap: {error:#}; retrying in {}ms", delay.as_millis());
+        std::thread::sleep(delay);
+        delay = (delay * 2).min(policy.backoff_cap);
+    }
+}
+
+fn attempt(config: &Config, api: &dyn Api, key: &HostKey) -> Result<(Session, Zeroizing<String>), Failure> {
     let relay_host_id = key.relay_host_id();
-    if let Some(stored) = read_identity(&config.state_dir)? {
+    if let Some(stored) = read_identity(&config.state_dir).map_err(Failure::Fatal)? {
         if stored.relay_host_id != relay_host_id {
             // Only a hand-edited state dir gets here; guessing which half is
             // right could register a second identity.
-            bail!("the stored runtime identity belongs to a different host key");
+            return Err(Failure::Fatal(anyhow!("the stored runtime identity belongs to a different host key")));
         }
         match api.refresh(&stored.runtime_credential) {
             Ok(refreshed) => {
-                let session = session_from_refresh(refreshed, &relay_host_id)?;
+                let session = session_from_refresh(refreshed, &relay_host_id).map_err(Failure::Fatal)?;
                 if session.workspace_id != stored.workspace_id || session.organization_id != stored.organization_id {
-                    bail!("the server answered for a different workspace");
+                    return Err(Failure::Fatal(anyhow!("the server answered for a different workspace")));
                 }
                 // A previous run stored the credential but was stopped before
-                // it could delete the token.
-                remove_token(&config.token_path)?;
-                return Ok(Bootstrapped { key, session: Arc::new(Mutex::new(session)), credential: stored.runtime_credential });
+                // it could delete the token it spent. A different token is a
+                // newly provisioned one and stays.
+                remove_spent_token(&config.token_path, &stored.token_sha256).map_err(Failure::Fatal)?;
+                return Ok((session, Zeroizing::new(stored.runtime_credential.clone())));
             }
-            // The credential was revoked; a newly provisioned token, if one
-            // is there, is the way back in.
-            Err(CallError::Rejected) if config.token_path.exists() => {
-                log::warn!("the stored runtime credential was rejected; redeeming the bootstrap token");
+            // A newly provisioned token, if one is there, is the way back in.
+            Err(CallError::Rejected) if token_is_new(&config.token_path, &stored.token_sha256) => {
+                log::warn!("the stored runtime credential was rejected; redeeming the new bootstrap token");
             }
-            Err(CallError::Rejected) => return Err(Rejected("cloud_workspace_runtime_credential_rejected").into()),
-            Err(CallError::Transient(error)) => return Err(error.context("refresh the runtime session")),
+            Err(CallError::Rejected) => {
+                return Err(Failure::Retry { error: anyhow!("the stored runtime credential was rejected"), rejected: Some("cloud_workspace_runtime_credential_rejected") });
+            }
+            Err(CallError::Transient(error)) => return Err(Failure::Retry { error: error.context("refresh the runtime session"), rejected: None }),
         }
     }
-    let token = read_token(&config.token_path)?;
+    let token = read_token(&config.token_path).map_err(Failure::Fatal)?;
     crash_point("before-redeem");
-    let redeemed = match api.redeem(&token, &key) {
+    let redeemed = match api.redeem(&token, key) {
         Ok(redeemed) => redeemed,
-        // Kept on disk: a token the server does not know today is still the
-        // only evidence of what was provisioned.
-        Err(CallError::Rejected) => return Err(Rejected("cloud_workspace_bootstrap_token_rejected").into()),
-        Err(CallError::Transient(error)) => return Err(error.context("redeem the bootstrap token")),
+        // Kept on disk either way: the token is the only way in.
+        Err(CallError::Rejected) => {
+            return Err(Failure::Retry { error: anyhow!("the bootstrap token was rejected"), rejected: Some("cloud_workspace_bootstrap_token_rejected") });
+        }
+        Err(CallError::Transient(error)) => return Err(Failure::Retry { error: error.context("redeem the bootstrap token"), rejected: None }),
     };
     crash_point("after-redeem-response");
-    validate_redeemed(&redeemed)?;
+    validate_redeemed(&redeemed).map_err(Failure::Fatal)?;
     let stored = StoredIdentity {
         v: 1,
         workspace_id: redeemed.workspace_id.clone(),
         organization_id: redeemed.organization_id.clone(),
         relay_host_id: relay_host_id.clone(),
+        token_sha256: token_sha256(&token),
         runtime_credential: redeemed.runtime_credential.clone(),
     };
-    write_durable(&config.state_dir.join(STATE_FILE), &serde_json::to_vec(&stored)?)?;
+    let bytes = Zeroizing::new(serde_json::to_vec(&stored).map_err(|error| Failure::Fatal(error.into()))?);
+    write_durable(&config.state_dir.join(STATE_FILE), &bytes).map_err(Failure::Fatal)?;
     crash_point("identity-persisted");
-    remove_token(&config.token_path)?;
+    remove_spent_token(&config.token_path, &stored.token_sha256).map_err(Failure::Fatal)?;
     crash_point("token-removed");
     // The redeem answer has no attachments; ask for them now rather than at
     // the first tick.
     let session = match api.refresh(&stored.runtime_credential) {
-        Ok(refreshed) => session_from_refresh(refreshed, &relay_host_id)?,
+        Ok(refreshed) => session_from_refresh(refreshed, &relay_host_id).map_err(Failure::Fatal)?,
         Err(error) => {
             log::warn!("first refresh after redeem failed: {}", describe(&error));
             Session {
@@ -341,7 +441,7 @@ pub fn establish(config: &Config, api: &dyn Api) -> Result<Bootstrapped> {
             }
         }
     };
-    Ok(Bootstrapped { key, session: Arc::new(Mutex::new(session)), credential: stored.runtime_credential })
+    Ok((session, Zeroizing::new(stored.runtime_credential.clone())))
 }
 
 impl Bootstrapped {
@@ -446,7 +546,7 @@ fn canonical_origin(value: &str) -> bool {
 
 fn read_token(path: &Path) -> Result<String> {
     let raw = match fs::read_to_string(path) {
-        Ok(raw) => raw,
+        Ok(raw) => Zeroizing::new(raw),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(Rejected("cloud_workspace_bootstrap_token_missing").into());
         }
@@ -459,11 +559,61 @@ fn read_token(path: &Path) -> Result<String> {
     Ok(token.to_string())
 }
 
-fn remove_token(path: &Path) -> Result<()> {
+fn token_sha256(token: &str) -> String {
+    general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
+}
+
+/// The hash of the token file's token, if it holds a well-formed one.
+fn token_file_sha256(path: &Path) -> Option<String> {
+    let raw = Zeroizing::new(fs::read_to_string(path).ok()?);
+    let token = raw.trim();
+    is_base64url_32(token).then(|| token_sha256(token))
+}
+
+/// A token is on disk and it is not the one already spent.
+fn token_is_new(path: &Path, spent_sha256: &str) -> bool {
+    token_file_sha256(path).is_some_and(|sha| sha != spent_sha256)
+}
+
+/// Delete the token file only if it still holds the token that was spent: a
+/// token provisioned since then is the way back in once this credential dies.
+fn remove_spent_token(path: &Path, spent_sha256: &str) -> Result<()> {
+    if token_file_sha256(path).as_deref() != Some(spent_sha256) {
+        return Ok(());
+    }
     match fs::remove_file(path) {
         Ok(()) => sync_parent(path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(anyhow::Error::new(error).context("delete the spent bootstrap token")),
+    }
+}
+
+/// An exclusive lock on the state directory. Two runtimes on one directory
+/// could each generate a host key and leave the one on disk disagreeing with
+/// the one the server bound the token to.
+struct StateLock {
+    #[cfg(unix)]
+    _file: fs::File,
+}
+
+impl StateLock {
+    fn acquire(dir: &Path) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let path = dir.join("lock");
+            let file = fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).with_context(|| format!("open {}", path.display()))?;
+            // SAFETY: flock on a descriptor this function owns.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                bail!("another terminalx-serve is using {}", dir.display());
+            }
+            Ok(Self { _file: file })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = dir;
+            Ok(Self {})
+        }
     }
 }
 
@@ -473,8 +623,11 @@ fn load_or_create_host_key(dir: &Path) -> Result<HostKey> {
         Ok(bytes) => {
             // Never regenerated over a bad file: a new key is a new relay
             // host id, and the server has the old one on record.
+            let bytes = Zeroizing::new(bytes);
             let file: HostKeyFile = serde_json::from_slice(&bytes).context("parse the relay host key")?;
-            let secret = general_purpose::URL_SAFE_NO_PAD.decode(&file.secret).ok().and_then(|bytes| <[u8; 32]>::try_from(bytes).ok());
+            let file = Zeroizing::new(file);
+            let decoded = general_purpose::URL_SAFE_NO_PAD.decode(&file.secret).ok().map(Zeroizing::new);
+            let secret = decoded.as_deref().and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok());
             match (file.v, secret) {
                 (1, Some(secret)) => Ok(HostKey::from_secret(secret)),
                 _ => bail!("the relay host key file is malformed"),
@@ -482,8 +635,8 @@ fn load_or_create_host_key(dir: &Path) -> Result<HostKey> {
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let key = HostKey::generate();
-            let file = HostKeyFile { v: 1, secret: general_purpose::URL_SAFE_NO_PAD.encode(key.secret) };
-            write_durable(&path, &serde_json::to_vec(&file)?)?;
+            let file = Zeroizing::new(HostKeyFile { v: 1, secret: general_purpose::URL_SAFE_NO_PAD.encode(key.secret) });
+            write_durable(&path, &Zeroizing::new(serde_json::to_vec(&*file)?))?;
             Ok(key)
         }
         Err(error) => Err(anyhow::Error::new(error).context("read the relay host key")),
@@ -539,6 +692,8 @@ fn write_durable(path: &Path, bytes: &[u8]) -> Result<()> {
 fn sync_parent(path: &Path) -> Result<()> {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
+        // `bootstrap-token` alone has the empty path as its parent.
+        let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
         fs::File::open(parent).and_then(|dir| dir.sync_all()).with_context(|| format!("sync {}", parent.display()))?;
     }
     Ok(())
@@ -649,6 +804,11 @@ mod tests {
         general_purpose::URL_SAFE_NO_PAD.encode(StaticSecret::random_from_rng(OsRng).to_bytes())
     }
 
+    /// No waiting: the first failure is final, so no test can spin.
+    fn quick() -> Policy {
+        Policy { backoff_start: Duration::ZERO, backoff_cap: Duration::ZERO, rejected_window: Duration::ZERO, give_up_after: Some(Duration::ZERO) }
+    }
+
     fn setup(token: &str) -> (tempfile::TempDir, Config) {
         let dir = tempfile::tempdir().unwrap();
         let token_path = dir.path().join("bootstrap-token");
@@ -662,13 +822,38 @@ mod tests {
         let token = random_credential();
         let server = FakeServer::with_token(&token);
         let (_dir, config) = setup(&token);
-        let first = establish(&config, &server).unwrap();
+        let first = establish(&config, &server, &quick()).unwrap();
         assert!(!config.token_path.exists(), "the spent token is deleted");
         assert_eq!(first.session.lock().unwrap().access_mode, AccessMode::Organization);
-        let second = establish(&config, &server).unwrap();
+        let first_host = first.key.relay_host_id();
+        drop(first);
+        let second = establish(&config, &server, &quick()).unwrap();
         assert_eq!(server.redeems.borrow().len(), 1, "a restart refreshes instead of redeeming");
-        assert_eq!(first.key.relay_host_id(), second.key.relay_host_id());
+        assert_eq!(first_host, second.key.relay_host_id());
         assert_eq!(*server.refreshes.borrow(), 2);
+    }
+
+    #[test]
+    fn a_transient_failure_is_retried_until_it_clears() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Flaky(FakeServer, AtomicUsize);
+        impl Api for Flaky {
+            fn redeem(&self, token: &str, key: &HostKey) -> Result<Redeemed, CallError> {
+                if self.1.fetch_add(1, Ordering::SeqCst) < 3 {
+                    return Err(CallError::Transient(anyhow!("down")));
+                }
+                self.0.redeem(token, key)
+            }
+            fn refresh(&self, credential: &str) -> Result<Refreshed, CallError> {
+                self.0.refresh(credential)
+            }
+        }
+        let token = random_credential();
+        let server = Flaky(FakeServer::with_token(&token), AtomicUsize::new(0));
+        let (_dir, config) = setup(&token);
+        let policy = Policy { backoff_start: Duration::from_millis(1), backoff_cap: Duration::from_millis(5), rejected_window: Duration::ZERO, give_up_after: Some(Duration::from_secs(5)) };
+        establish(&config, &server, &policy).unwrap();
+        assert_eq!(server.1.load(Ordering::SeqCst), 4);
     }
 
     #[test]
@@ -677,17 +862,17 @@ mod tests {
         let server = FakeServer::with_token(&token);
         *server.down.borrow_mut() = true;
         let (_dir, config) = setup(&token);
-        assert!(establish(&config, &server).is_err());
+        assert!(establish(&config, &server, &quick()).is_err());
         assert!(config.token_path.exists());
         *server.down.borrow_mut() = false;
-        establish(&config, &server).unwrap();
+        establish(&config, &server, &quick()).unwrap();
         assert!(!config.token_path.exists());
     }
 
     #[test]
     fn a_rejected_token_is_kept_and_reported_as_permanent() {
         let (_dir, config) = setup(&random_credential());
-        let error = establish(&config, &FakeServer::default()).err().unwrap();
+        let error = establish(&config, &FakeServer::default(), &quick()).err().unwrap();
         assert!(error.downcast_ref::<Rejected>().is_some());
         assert!(config.token_path.exists());
     }
@@ -696,7 +881,7 @@ mod tests {
     fn a_missing_token_without_identity_is_permanent() {
         let (_dir, config) = setup("x");
         fs::remove_file(&config.token_path).unwrap();
-        let error = establish(&config, &FakeServer::default()).err().unwrap();
+        let error = establish(&config, &FakeServer::default(), &quick()).err().unwrap();
         assert_eq!(error.downcast_ref::<Rejected>().unwrap().0, "cloud_workspace_bootstrap_token_missing");
     }
 
@@ -705,20 +890,76 @@ mod tests {
         let token = random_credential();
         let server = FakeServer::with_token(&token);
         let (_dir, config) = setup(&token);
-        let first = establish(&config, &server).unwrap();
+        let first_host = establish(&config, &server, &quick()).unwrap().key.relay_host_id();
         // The worker re-issues on resume: a new token, the old credential dead.
         let fresh = random_credential();
         server.tokens.borrow_mut().insert(fresh.clone(), None);
         *server.credential.borrow_mut() = None;
         fs::write(&config.token_path, &fresh).unwrap();
-        let second = establish(&config, &server).unwrap();
-        assert_eq!(first.key.relay_host_id(), second.key.relay_host_id(), "same host identity after re-issue");
+        let second = establish(&config, &server, &quick()).unwrap();
+        assert_eq!(first_host, second.key.relay_host_id(), "same host identity after re-issue");
         assert_eq!(server.redeems.borrow().len(), 2);
         assert!(!config.token_path.exists());
+        drop(second);
         // And without a new token a dead credential is permanent.
         *server.credential.borrow_mut() = None;
-        let error = establish(&config, &server).err().unwrap();
+        let error = establish(&config, &server, &quick()).err().unwrap();
         assert!(error.downcast_ref::<Rejected>().is_some());
+    }
+
+    #[test]
+    fn a_newly_provisioned_token_survives_a_successful_refresh() {
+        let token = random_credential();
+        let server = FakeServer::with_token(&token);
+        let (_dir, config) = setup(&token);
+        drop(establish(&config, &server, &quick()).unwrap());
+        let fresh = random_credential();
+        fs::write(&config.token_path, &fresh).unwrap();
+        drop(establish(&config, &server, &quick()).unwrap());
+        assert_eq!(fs::read_to_string(&config.token_path).unwrap(), fresh, "only the spent token is deleted");
+        assert_eq!(server.redeems.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_rejection_is_retried_within_the_window() {
+        let token = random_credential();
+        let server = FakeServer::default();
+        let (_dir, config) = setup(&token);
+        let policy = Policy {
+            backoff_start: Duration::from_millis(10),
+            backoff_cap: Duration::from_millis(20),
+            rejected_window: Duration::from_millis(200),
+            give_up_after: Some(Duration::from_secs(5)),
+        };
+        let started = Instant::now();
+        let error = establish(&config, &server, &policy).err().unwrap();
+        assert!(error.downcast_ref::<Rejected>().is_some());
+        assert!(started.elapsed() >= Duration::from_millis(200));
+    }
+
+    #[test]
+    fn one_runtime_per_state_directory() {
+        let token = random_credential();
+        let server = FakeServer::with_token(&token);
+        let (_dir, config) = setup(&token);
+        let running = establish(&config, &server, &quick()).unwrap();
+        let error = establish(&config, &server, &quick()).err().unwrap();
+        assert!(format!("{error:#}").contains("another terminalx-serve"), "{error:#}");
+        drop(running);
+        establish(&config, &server, &quick()).unwrap();
+    }
+
+    #[test]
+    fn a_relative_token_path_can_be_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = random_credential();
+        let path = dir.path().join("bootstrap-token");
+        fs::write(&path, &token).unwrap();
+        // The parent of a bare file name is the empty path.
+        assert_eq!(Path::new("bootstrap-token").parent(), Some(Path::new("")));
+        sync_parent(Path::new("bootstrap-token")).unwrap();
+        remove_spent_token(&path, &token_sha256(&token)).unwrap();
+        assert!(!path.exists());
     }
 
     #[test]
@@ -730,7 +971,7 @@ mod tests {
         ensure_private_dir(&config.state_dir).unwrap();
         let key = load_or_create_host_key(&config.state_dir).unwrap();
         server.redeem(&token, &key).map_err(|_| ()).unwrap();
-        establish(&config, &server).unwrap();
+        establish(&config, &server, &quick()).unwrap();
         assert_eq!(*server.redeems.borrow(), vec![key.relay_host_id(); 2]);
     }
 
@@ -740,7 +981,7 @@ mod tests {
         let server = FakeServer::with_token(&token);
         server.redeem(&token, &HostKey::generate()).map_err(|_| ()).unwrap();
         let (_dir, config) = setup(&token);
-        let error = establish(&config, &server).err().unwrap();
+        let error = establish(&config, &server, &quick()).err().unwrap();
         assert!(error.downcast_ref::<Rejected>().is_some());
         assert!(config.token_path.exists());
     }
