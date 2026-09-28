@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Bot, Cloud, Loader2, Plug, Plus, TerminalSquare, X } from "lucide-react";
-import { mergeAgentEvents, type AgentEvent } from "@terminalx/portable/events";
 import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { TerminalView, createTerminal } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
+import { CloudAgentsView } from "./CloudAgents";
 import {
   api,
   devWorkspaceConnection,
@@ -32,6 +32,8 @@ interface OpenedWorkspace {
   connection: CloudWorkspaceConnection;
   name: string;
   provider: string | null;
+  /** The API state when it was opened (ready, suspended, provisioning); null for a development runtime. */
+  workspaceState: string | null;
 }
 
 const PROVIDER_NAMES: Record<string, string> = { box: "Boat", machine0: "Machine0", "local-docker": "Local Docker" };
@@ -79,15 +81,15 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
     };
   }, [connection]);
 
-  const open = useCallback(async (item: CloudWorkspaceListItem) => {
+  const open = useCallback(async (item: CloudWorkspaceListItem, wake: boolean) => {
     setError(null);
     try {
       // Opening a session is interactive: it may wake suspended compute.
       const next = await workspaceConnection(
         { kind: "cloud", organizationId: item.workspace.orgId, workspaceId: item.workspace.id },
-        item.workspace.state === "suspended" ? "wake" : "connect",
+        wake ? "wake" : "connect",
       );
-      if (next) setOpened({ connection: next, name: item.workspace.name, provider: item.workspace.provider });
+      if (next) setOpened({ connection: next, name: item.workspace.name, provider: item.workspace.provider, workspaceState: item.workspace.state });
     } catch (e) {
       setError(errorCode(e));
     }
@@ -96,7 +98,7 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
   const openDev = useCallback(async () => {
     setError(null);
     try {
-      setOpened({ connection: await devWorkspaceConnection(pairingCode.trim()), name: "Development runtime", provider: null });
+      setOpened({ connection: await devWorkspaceConnection(pairingCode.trim()), name: "Development runtime", provider: null, workspaceState: null });
     } catch (e) {
       setError(errorCode(e));
     }
@@ -128,10 +130,15 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
                   <span className="truncate text-sm">{item.workspace.name}</span>
                   <span className="text-xs text-muted-foreground">{item.workspace.state}</span>
                 </div>
+                {item.workspace.state === "suspended" && (
+                  <Button size="sm" variant="ghost" title="Read saved agent conversations without waking the workspace" onClick={() => void open(item, false)}>
+                    Open without waking
+                  </Button>
+                )}
                 <Button
                   size="sm"
                   disabled={!["ready", "suspended"].includes(item.workspace.state)}
-                  onClick={() => void open(item)}
+                  onClick={() => void open(item, item.workspace.state === "suspended")}
                 >
                   {item.workspace.state === "suspended" ? "Resume and open" : "Open session"}
                 </Button>
@@ -186,6 +193,7 @@ function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: Work
   const { connection } = opened;
   const client = connection.client;
   const key = workspaceTargetKey(connection.target);
+  const agentScope = connection.target.kind === "cloud" ? connection.target : { organizationId: "", workspaceId: key };
   const { terminals, selected } = useCloudTerminals(key);
   const [view, setView] = useState<View>({ kind: "terminal" });
   const [error, setError] = useState<string | null>(null);
@@ -308,7 +316,13 @@ function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: Work
         )}
       </div>
       <div className={view.kind === "agent" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
-        <RemoteAgent client={client} />
+        <CloudAgentsView
+          scope={{ organizationId: agentScope.organizationId, workspaceId: agentScope.workspaceId }}
+          client={client}
+          state={state}
+          workspaceState={opened.workspaceState}
+          wakeWorkspace={() => void connection.activate("wake").catch(() => undefined)}
+        />
       </div>
     </div>
   );
@@ -393,107 +407,6 @@ function inputErrorText(code: string): string {
       return "not connected to the workspace.";
     default:
       return code;
-  }
-}
-
-function RemoteAgent({ client }: { client: WorkspaceRpcClient }) {
-  const [agent, setAgent] = useState("claude");
-  const [prompt, setPrompt] = useState("");
-  const [tab, setTab] = useState<{ sessionId: string; tabId: string } | null>(null);
-  const [events, setEvents] = useState<AgentEvent[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!tab) return;
-    let stop: (() => void) | null = null;
-    let cancelled = false;
-    void client
-      .subscribeSession(tab.sessionId, tab.tabId, (event) => setEvents((current) => mergeAgentEvents(current, [event as AgentEvent])))
-      .then((unsubscribe) => (cancelled ? unsubscribe() : (stop = unsubscribe)))
-      .catch((e: unknown) => setError(errorCode(e)));
-    return () => {
-      cancelled = true;
-      stop?.();
-    };
-  }, [client, tab]);
-
-  const send = async () => {
-    const text = prompt.trim();
-    if (!text) return;
-    setBusy(true);
-    setError(null);
-    try {
-      if (!tab) {
-        const created = await client.mutate<{ sessionId: string; tabId: string }>("session.create", { agent, prompt: text });
-        setTab({ sessionId: created.sessionId, tabId: created.tabId });
-      } else {
-        // One id per prompt: a resend after a reconnect does not prompt twice.
-        await client.mutate("session.send", { sessionId: tab.sessionId, tabId: tab.tabId, text });
-      }
-      setPrompt("");
-    } catch (e) {
-      setError(errorCode(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="flex min-h-0 flex-1 flex-col gap-2 p-3" data-testid="cloud-agent">
-      <div className="min-h-0 flex-1 overflow-auto rounded-md border border-hairline p-2 text-xs">
-        {events.length === 0 && <p className="text-muted-foreground">{tab ? "Waiting for the agent…" : "Start an agent tab in the cloud workspace."}</p>}
-        {events.map((event) => {
-          const text = eventText(event);
-          return text ? (
-            <p key={event.seq} className="whitespace-pre-wrap py-0.5">
-              <span className="text-muted-foreground">{event.payload.type}: </span>
-              {text}
-            </p>
-          ) : null;
-        })}
-      </div>
-      {error && <p className="text-xs text-red-500">Agent: {error}</p>}
-      <div className="flex gap-2">
-        {!tab && (
-          <select aria-label="Agent" className="rounded-md border border-hairline bg-transparent px-2 text-xs" value={agent} onChange={(e) => setAgent(e.target.value)}>
-            <option value="claude">Claude</option>
-            <option value="codex">Codex</option>
-          </select>
-        )}
-        <input
-          aria-label="Prompt"
-          className="min-w-0 flex-1 rounded-md border border-hairline bg-transparent px-2 py-1 text-xs"
-          value={prompt}
-          onChange={(event) => setPrompt(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") void send();
-          }}
-          placeholder={tab ? "Message the agent" : "First prompt"}
-        />
-        <Button size="sm" disabled={busy || !prompt.trim()} onClick={() => void send()}>
-          {busy ? <Loader2 className="size-3.5 animate-spin" /> : tab ? "Send" : "Start"}
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-function eventText(event: AgentEvent): string | null {
-  const payload = event.payload;
-  switch (payload.type) {
-    case "user_message":
-    case "assistant_text":
-    case "status":
-      return payload.text;
-    case "turn_completed":
-      return payload.finalText ?? payload.status;
-    case "error":
-      return payload.message;
-    case "tool_call_started":
-      return payload.title ?? payload.name;
-    default:
-      return null;
   }
 }
 
