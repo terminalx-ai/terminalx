@@ -219,7 +219,7 @@ fn run(options: Options) -> Result<()> {
                 json!({
                     "workspaceId": session.workspace_id,
                     "relayHostId": session.relay_host_id,
-                    "capabilities": [crate::cloud_bootstrap::CAPABILITIES],
+                    "capabilities": crate::cloud_bootstrap::CAPABILITIES.split(',').collect::<Vec<_>>(),
                 })
             }),
             "agentGrants": crate::cloud_grants::status_json(),

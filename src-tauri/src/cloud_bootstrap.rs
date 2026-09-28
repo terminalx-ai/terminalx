@@ -45,8 +45,11 @@ pub const TOKEN_PATH_ENV: &str = "TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_TOKEN_PATH
 /// Advertised on refresh. The server adds a response field only for a
 /// capability the runtime names, because the refresh schema is strict.
 /// `organization-setup-v*` (first-run credentials and repository clone) is
-/// left out until this runtime can apply it.
-pub const CAPABILITIES: &str = "organization-access-v1";
+/// left out until this runtime can apply it. `agent-grants-v1` tells the
+/// server this runtime takes agent credentials only as sealed grants
+/// (`cloud_grants`), so first-run setup never carries stored agent logins.
+/// Comma-separated.
+pub const CAPABILITIES: &str = "organization-access-v1,agent-grants-v1";
 const CAPABILITIES_HEADER: &str = "x-terminalx-cloud-workspace-runtime-capabilities";
 pub(crate) const VERSION_HEADER: &str = "x-terminalx-cloud-workspace-runtime-version";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

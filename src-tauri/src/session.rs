@@ -1022,6 +1022,7 @@ impl SessionManager {
             // Settle before waiting for the OS. Late exits cannot reopen this turn.
             self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
             let pane = self.release_cli(&mut rt);
+            crate::cloud_grants::forget_launch(&key);
             rt.child = None;
             rt.child_pid = None;
             rt.engine = Engine::None;
@@ -1230,6 +1231,7 @@ impl SessionManager {
         }
         if respawn {
             self.host.kill(&rt.key());
+            crate::cloud_grants::forget_launch(&rt.key());
             rt.child = None;
             rt.child_pid = None;
             rt.engine = Engine::None;
@@ -1302,6 +1304,7 @@ impl SessionManager {
     /// The CLI process in a PTY pane exited. Hooks normally close the turn
     /// first; when they do not, the process death is a failed automation run.
     pub fn pane_exited(&self, pane_id: &str, code: Option<i32>) {
+        crate::cloud_grants::forget_launch(pane_id);
         let Some(tab_id) = pane_id.strip_prefix("tab:") else { return };
         let Some(entry) = index::load().ok().and_then(|sessions| sessions.into_iter().find(|session| session.tab(tab_id).is_some())) else { return };
         let Ok(rt_arc) = self.runtime(&entry.id, tab_id) else { return };
@@ -2259,6 +2262,7 @@ impl SessionManager {
         if rt.child_pid != Some(pid) {
             return; // an older child; the live one is unaffected
         }
+        crate::cloud_grants::forget_launch(&rt.key());
         rt.child = None;
         rt.child_pid = None;
         rt.engine = Engine::None;

@@ -22,7 +22,9 @@
 //!
 //! - **The grant key** is held in memory and written only to a tmpfs
 //!   directory ([`GRANT_DIR_ENV`], else `/dev/shm/terminalx-<uid>`, else
-//!   `$XDG_RUNTIME_DIR/terminalx`), so a crash-restart within one runtime
+//!   `$XDG_RUNTIME_DIR/terminalx`, each with a `ws-<hash of the workspace
+//!   id>` directory inside, so two runtimes under one account never share
+//!   one), so a crash-restart within one runtime
 //!   generation enrolls the same key again. Without a tmpfs directory it is
 //!   memory-only: a restart then enrolls a new key, which the server refuses
 //!   (`cloud_agent_grant_key_conflict`) until it rotates the generation, and
@@ -44,6 +46,28 @@
 //!
 //! Nothing here writes to the data directory, `~/.codex` or `~/.claude`.
 //!
+//! Time: a grant is judged by its own lifetime (`expiresAt - issuedAt`, less
+//! a skew allowance) counted from when it arrived on this machine's
+//! monotonic clock, and the next fetch by `refreshAfter - issuedAt`, so a VM
+//! clock that is off neither refuses grants nor hammers the server. Only
+//! when the server sent no grant at all is `refreshAfter` compared with the
+//! wall clock (bounded, with a 30 s fallback).
+//!
+//! When the runtime credential is rejected (401, or `is_rejected()` from the
+//! bootstrap refresh loop) or the server holds another key, every grant is
+//! dropped at once, the Codex file removed and the enrollment forgotten.
+//!
+//! Known limitations, to verify against a real `claude`:
+//!
+//! - Variables are set in the PTY's environment before the login shell runs,
+//!   so a profile that exports `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`
+//!   or `CURSOR_API_KEY` itself overrides the grant. Unset names are removed
+//!   after the profile (`env -u`), so those cannot shadow it.
+//! - Claude Code may ask once whether to use an `ANTHROPIC_API_KEY` it finds
+//!   in the environment, which would take the first prompt; and an
+//!   `apiKeyHelper` in settings outranks `CLAUDE_CODE_OAUTH_TOKEN`, so a
+//!   helper configured on the VM wins over an OAuth grant.
+//!
 //! A credential that is revoked, disconnected or unavailable, or that the
 //! server stops sending a grant for, stops being injected into new sessions
 //! and its Codex file is removed; running sessions are never killed. A rotated
@@ -56,8 +80,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -88,7 +112,17 @@ const KEY_REQUIRED: &str = "cloud_agent_grant_key_required";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// Fetch again this long before a grant expires.
-const EXPIRY_MARGIN_MS: u64 = 60_000;
+const EXPIRY_MARGIN: Duration = Duration::from_secs(60);
+/// Taken off every grant's lifetime: the request's transit, and the server
+/// stamping `issuedAt` a moment before the answer left.
+const SKEW_ALLOWANCE: Duration = Duration::from_secs(30);
+/// No grant is trusted for longer than this, whatever it says.
+const MAX_GRANT_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+/// When the server sent no grant (so there is no server time to measure
+/// `refreshAfter` from) and this VM's clock says it has already passed.
+const FALLBACK_REFRESH: Duration = Duration::from_secs(30);
+/// How long a Codex launch waits for the first sync.
+const FIRST_SYNC_WAIT: Duration = Duration::from_secs(5);
 const MIN_REFRESH: Duration = Duration::from_secs(5);
 const MAX_REFRESH: Duration = Duration::from_secs(15 * 60);
 const BACKOFF_START: Duration = Duration::from_secs(1);
@@ -180,6 +214,10 @@ pub struct CredentialEntry {
     pub version: u64,
     #[serde(default)]
     pub rotation: Option<String>,
+    /// Why a credential is not connected (`shared-use-policy`,
+    /// `token-expired`), when the server says.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -190,8 +228,9 @@ pub struct Fetched {
     pub runtime_generation: u64,
     pub key_thumbprint: String,
     pub refresh_after: u64,
-    pub grants: Vec<SealedGrant>,
-    pub credentials: Vec<CredentialEntry>,
+    /// Parsed one by one, so one malformed grant does not cost the others.
+    pub grants: Vec<Value>,
+    pub credentials: Vec<Value>,
 }
 
 const CONNECTED: &str = "connected";
@@ -463,8 +502,10 @@ fn load_or_create_key(root: Option<&Path>) -> GrantKey {
 
 // ------------------------------------------------------------ tmpfs directory
 
-/// Where the key and the Codex auth file may live, in order of preference:
-/// the override, `/dev/shm/terminalx-<uid>`, `$XDG_RUNTIME_DIR/terminalx`.
+/// The base directories the key and the Codex auth file may live under, in
+/// order of preference: the override, `/dev/shm/terminalx-<uid>`,
+/// `$XDG_RUNTIME_DIR/terminalx`. Each workspace gets its own directory
+/// inside ([`workspace_dir`]).
 fn candidate_roots(override_dir: Option<&str>, shm: &Path, xdg_runtime: Option<&str>, uid: u32) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(dir) = override_dir.map(str::trim).filter(|dir| !dir.is_empty()) {
@@ -479,10 +520,26 @@ fn candidate_roots(override_dir: Option<&str>, shm: &Path, xdg_runtime: Option<&
     out
 }
 
-/// Create `dir` (0700) and make sure it is a real directory this user owns:
-/// `/dev/shm` is shared, and another user could have made the name first.
+/// One runtime's directory under a base: two runtimes under one account
+/// never share a key or an auth file, and a restart of the same workspace
+/// finds its own key again.
+fn workspace_dir(base: &Path, workspace_id: &str) -> PathBuf {
+    let digest = general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(workspace_id.as_bytes()));
+    base.join(format!("ws-{}", &digest[..22]))
+}
+
+/// Create `dir` 0700 from the start and make sure it is a real directory this
+/// user owns: `/dev/shm` is shared, and another user could have made the name
+/// first.
 fn prepare_private_dir(dir: &Path) -> Result<()> {
-    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir).with_context(|| format!("create {}", dir.display()))?;
     let meta = fs::symlink_metadata(dir).with_context(|| format!("inspect {}", dir.display()))?;
     if !meta.is_dir() {
         bail!("{} is not a directory", dir.display());
@@ -499,9 +556,12 @@ fn prepare_private_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn select_root(candidates: Vec<PathBuf>) -> Option<PathBuf> {
-    for dir in candidates {
-        match prepare_private_dir(&dir) {
+/// The first base that can be made private, and this workspace's directory
+/// inside it.
+fn select_root(candidates: Vec<PathBuf>, workspace_id: &str) -> Option<PathBuf> {
+    for base in candidates {
+        let dir = workspace_dir(&base, workspace_id);
+        match prepare_private_dir(&base).and_then(|()| prepare_private_dir(&dir)) {
             Ok(()) => return Some(dir),
             Err(error) => log::warn!("agent grant directory: {error:#}"),
         }
@@ -509,7 +569,7 @@ fn select_root(candidates: Vec<PathBuf>) -> Option<PathBuf> {
     None
 }
 
-fn tmpfs_root() -> Option<PathBuf> {
+fn tmpfs_root(workspace_id: &str) -> Option<PathBuf> {
     #[cfg(unix)]
     // SAFETY: geteuid has no preconditions.
     let uid = unsafe { libc::geteuid() };
@@ -517,24 +577,33 @@ fn tmpfs_root() -> Option<PathBuf> {
     let uid = 0;
     let override_dir = std::env::var(GRANT_DIR_ENV).ok();
     let xdg = std::env::var("XDG_RUNTIME_DIR").ok();
-    select_root(candidate_roots(override_dir.as_deref(), Path::new("/dev/shm"), xdg.as_deref(), uid))
+    select_root(candidate_roots(override_dir.as_deref(), Path::new("/dev/shm"), xdg.as_deref(), uid), workspace_id)
 }
 
-/// Write `bytes` to `path` as 0600 through a temp file and a rename.
+/// Write `bytes` to `path` as 0600: a new temp file with a random name,
+/// created exclusively and never through a symlink, then renamed over `path`.
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    {
+    use rand_core::RngCore as _;
+    let mut nonce = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce);
+    let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", general_purpose::URL_SAFE_NO_PAD.encode(nonce)));
+    let written = (|| -> Result<()> {
         let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
         let mut file = options.open(&tmp).with_context(|| format!("create {}", tmp.display()))?;
         file.write_all(bytes)?;
+        fs::rename(&tmp, path).with_context(|| format!("rename into {}", path.display()))
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
-    fs::rename(&tmp, path).with_context(|| format!("rename into {}", path.display()))
+    written
 }
 
 fn remove_if_present(path: &Path) {
@@ -544,6 +613,7 @@ fn remove_if_present(path: &Path) {
         Err(error) => log::warn!("remove {}: {error}", path.display()),
     }
 }
+
 
 // ------------------------------------------------------------ the plaintext
 
@@ -689,7 +759,11 @@ struct ActiveGrant {
     grant_id: String,
     epoch: u64,
     version: u64,
+    /// The server's clock, for the status snapshot only.
     expires_at: u64,
+    /// When it stops being injected, on this machine's monotonic clock: the
+    /// grant's own lifetime from when it arrived, less [`SKEW_ALLOWANCE`].
+    usable_until: Instant,
     material: Material,
     /// The Codex `auth.json` written for it, if any.
     codex_file: Option<PathBuf>,
@@ -700,8 +774,8 @@ impl ActiveGrant {
         (self.credential_id.clone(), self.version, self.epoch)
     }
 
-    fn usable(&self, now: u64) -> bool {
-        self.expires_at > now && self.material.expires_at().is_none_or(|at| at > now)
+    fn usable(&self, now: Instant) -> bool {
+        now < self.usable_until
     }
 }
 
@@ -724,17 +798,28 @@ pub struct GrantStore {
     key: GrantKey,
     root: Option<PathBuf>,
     state: Mutex<State>,
+    /// Set once the first sync has finished, either way; a Codex launch
+    /// waits a moment for it ([`codex_auth_source`]).
+    first_sync: Mutex<bool>,
+    first_sync_done: Condvar,
 }
 
 pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|elapsed| elapsed.as_millis() as u64).unwrap_or(0)
 }
 
+/// What one fetch left behind.
+struct Applied {
+    wait: Duration,
+    offered: usize,
+    accepted: usize,
+}
+
 impl GrantStore {
-    /// The store for a bootstrapped workspace: the tmpfs root, and the key
-    /// persisted there (or a new one).
+    /// The store for a bootstrapped workspace: its tmpfs directory, and the
+    /// key persisted there (or a new one).
     pub fn open(workspace_id: String) -> Self {
-        let root = tmpfs_root();
+        let root = tmpfs_root(&workspace_id);
         match &root {
             Some(root) => log::info!("agent grants keep their key and Codex auth file in {}", root.display()),
             None => log::warn!("no tmpfs directory for agent grants: Codex file credentials are skipped"),
@@ -744,7 +829,7 @@ impl GrantStore {
     }
 
     fn new(workspace_id: String, key: GrantKey, root: Option<PathBuf>) -> Self {
-        Self { workspace_id, key, root, state: Mutex::new(State::default()) }
+        Self { workspace_id, key, root, state: Mutex::new(State::default()), first_sync: Mutex::new(false), first_sync_done: Condvar::new() }
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -753,6 +838,38 @@ impl GrantStore {
 
     fn codex_auth_path(&self) -> Option<PathBuf> {
         self.root.as_ref().map(|root| root.join(AGENT_HOMES).join(Provider::Codex.as_str()).join(CODEX_AUTH_FILE))
+    }
+
+    fn mark_first_sync(&self) {
+        let mut done = self.first_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !*done {
+            *done = true;
+            self.first_sync_done.notify_all();
+        }
+    }
+
+    /// Wait up to `timeout` for the first sync to finish. True once it has.
+    pub fn wait_first_sync(&self, timeout: Duration) -> bool {
+        let done = self.first_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (done, _) = self.first_sync_done.wait_timeout_while(done, timeout, |done| !*done).unwrap_or_else(|poisoned| poisoned.into_inner());
+        *done
+    }
+
+    /// Stop injecting everything, remove the Codex file and forget the
+    /// enrollment: the runtime was fenced, or its key is not the one the
+    /// server holds.
+    pub fn drop_all(&self, reason: &str) {
+        let mut state = self.state();
+        if !state.active.is_empty() {
+            log::warn!("{reason}: cloud agent credentials are no longer injected into new sessions");
+        }
+        state.active.clear();
+        state.enrollment = None;
+        if let Some(path) = self.codex_auth_path() {
+            remove_if_present(&path);
+        }
+        drop(state);
+        self.mark_first_sync();
     }
 
     fn ensure_enrolled(&self, api: &dyn GrantApi) -> Result<Enrollment, GrantCallError> {
@@ -770,22 +887,40 @@ impl GrantStore {
         Ok(enrollment)
     }
 
-    /// Enroll if needed, fetch, and apply. Returns when to fetch next (ms since
-    /// the epoch).
-    pub fn sync(&self, api: &dyn GrantApi, now: u64) -> Result<u64, GrantCallError> {
-        let outcome = self.sync_inner(api, now);
-        let mut state = self.state();
+    /// Enroll if needed, fetch, and apply. `received` is the local monotonic
+    /// time the answer is judged against; `wall` is only a fallback for
+    /// scheduling when the server sent no grant. Returns how long to wait
+    /// before the next fetch. Refusing every grant offered is an error, so the
+    /// caller backs off.
+    pub fn sync(&self, api: &dyn GrantApi, received: Instant, wall: u64) -> Result<Duration, GrantCallError> {
+        let outcome = self.sync_inner(api, received, wall);
         match &outcome {
-            Ok(_) => {
-                state.last_sync = Some(now);
-                state.last_error = None;
-            }
-            Err(error) => state.last_error = Some(error.to_string()),
+            Err(GrantCallError::Rejected) => self.drop_all("the grant API rejected the runtime credential"),
+            Err(GrantCallError::KeyConflict) => self.drop_all("the server holds another grant key for this runtime generation"),
+            _ => {}
         }
+        let outcome = match outcome {
+            Ok(applied) if applied.offered > 0 && applied.accepted == 0 => {
+                Err(GrantCallError::Transient(anyhow!("every one of the {} agent grants offered was refused", applied.offered)))
+            }
+            Ok(applied) => Ok(applied.wait),
+            Err(error) => Err(error),
+        };
+        {
+            let mut state = self.state();
+            match &outcome {
+                Ok(_) => {
+                    state.last_sync = Some(wall);
+                    state.last_error = None;
+                }
+                Err(error) => state.last_error = Some(error.to_string()),
+            }
+        }
+        self.mark_first_sync();
         outcome
     }
 
-    fn sync_inner(&self, api: &dyn GrantApi, now: u64) -> Result<u64, GrantCallError> {
+    fn sync_inner(&self, api: &dyn GrantApi, received: Instant, wall: u64) -> Result<Applied, GrantCallError> {
         let mut enrollment = self.ensure_enrolled(api)?;
         let fetched = match api.fetch(&enrollment.thumbprint) {
             // The generation rotated, or the server lost the key: enroll
@@ -798,10 +933,17 @@ impl GrantStore {
             }
             other => other?,
         };
-        self.apply(fetched, &enrollment, now).map_err(GrantCallError::Transient)
+        self.apply(fetched, &enrollment, received, wall).map_err(GrantCallError::Transient)
     }
 
-    fn accept(&self, sealed: &SealedGrant, credentials: &HashMap<Provider, CredentialEntry>, enrollment: &Enrollment, highest: &HashMap<String, u64>, now: u64) -> Result<Option<(Provider, ActiveGrant)>> {
+    fn accept(
+        &self,
+        sealed: &SealedGrant,
+        credentials: &HashMap<Provider, CredentialEntry>,
+        enrollment: &Enrollment,
+        highest: &HashMap<String, u64>,
+        received: Instant,
+    ) -> Result<Option<(Provider, ActiveGrant)>> {
         let header = &sealed.header;
         if header.workspace_id != self.workspace_id {
             bail!("the grant is for another workspace");
@@ -812,8 +954,8 @@ impl GrantStore {
         if header.key_thumbprint != enrollment.thumbprint {
             bail!("the grant is sealed to another key");
         }
-        if header.expires_at <= now {
-            bail!("the grant has expired");
+        if header.issued_at > header.expires_at {
+            bail!("the grant was issued after it expires");
         }
         if highest.get(&header.credential_id).is_some_and(|seen| header.epoch < *seen) {
             bail!("the grant's epoch {} is lower than one already accepted", header.epoch);
@@ -836,6 +978,17 @@ impl GrantStore {
         if plain_provider != header.provider {
             bail!("the grant's plaintext is for another provider");
         }
+        // Freshness is the grant's own lifetime from when it arrived, in the
+        // server's terms, so a VM clock that is off cannot refuse (or extend)
+        // it. A credential that says it ends sooner ends the grant sooner.
+        let mut lifetime_ms = header.expires_at - header.issued_at;
+        if let Some(material_expires) = material.expires_at() {
+            lifetime_ms = lifetime_ms.min(material_expires.saturating_sub(header.issued_at));
+        }
+        let lifetime = Duration::from_millis(lifetime_ms).min(MAX_GRANT_LIFETIME);
+        if lifetime <= SKEW_ALLOWANCE {
+            bail!("the grant expires on arrival");
+        }
         Ok(Some((
             provider,
             ActiveGrant {
@@ -844,13 +997,14 @@ impl GrantStore {
                 epoch: header.epoch,
                 version,
                 expires_at: header.expires_at,
+                usable_until: received + (lifetime - SKEW_ALLOWANCE),
                 material,
                 codex_file: None,
             },
         )))
     }
 
-    fn apply(&self, fetched: Fetched, enrollment: &Enrollment, now: u64) -> Result<u64> {
+    fn apply(&self, fetched: Fetched, enrollment: &Enrollment, received: Instant, wall: u64) -> Result<Applied> {
         if fetched.v != 1 {
             bail!("unsupported agent grants version {}", fetched.v);
         }
@@ -869,7 +1023,11 @@ impl GrantStore {
             bail!("the server listed too many grants or credentials");
         }
         let mut credentials: HashMap<Provider, CredentialEntry> = HashMap::new();
-        for entry in fetched.credentials {
+        for (index, raw) in fetched.credentials.into_iter().enumerate() {
+            let Ok(entry) = serde_json::from_value::<CredentialEntry>(raw) else {
+                log::warn!("skipping malformed cloud agent credential #{index}");
+                continue;
+            };
             let Some(provider) = Provider::parse(&entry.provider) else {
                 log::warn!("ignoring a cloud agent credential for unknown provider {:?}", entry.provider);
                 continue;
@@ -880,18 +1038,29 @@ impl GrantStore {
                 credentials.insert(provider, entry);
             }
         }
+        let offered = fetched.grants.len();
+        let mut sealed_grants = Vec::with_capacity(offered);
+        for (index, raw) in fetched.grants.into_iter().enumerate() {
+            match serde_json::from_value::<SealedGrant>(raw) {
+                Ok(sealed) => sealed_grants.push(sealed),
+                // The value may hold key material; only its position is logged.
+                Err(_) => log::warn!("skipping malformed agent grant #{index}"),
+            }
+        }
 
         let mut state = self.state();
         let mut next: HashMap<Provider, ActiveGrant> = HashMap::new();
-        for sealed in &fetched.grants {
-            match self.accept(sealed, &credentials, enrollment, &state.highest_epoch, now) {
+        let mut accepted = 0;
+        for sealed in &sealed_grants {
+            match self.accept(sealed, &credentials, enrollment, &state.highest_epoch, received) {
                 Ok(Some((provider, grant))) => {
-                    let better = next.get(&provider).is_none_or(|current| (grant.epoch, grant.expires_at) > (current.epoch, current.expires_at));
+                    accepted += 1;
+                    let better = next.get(&provider).is_none_or(|current| (grant.epoch, grant.usable_until) > (current.epoch, current.usable_until));
                     if better {
                         next.insert(provider, grant);
                     }
                 }
-                Ok(None) => {}
+                Ok(None) => accepted += 1,
                 Err(error) => log::warn!("refused agent grant {} for {}: {error:#}", sealed.header.grant_id, sealed.header.provider),
             }
         }
@@ -902,12 +1071,11 @@ impl GrantStore {
                 log::info!("cloud {} credential is {} (version {}, epoch {})", provider.as_str(), entry.state, entry.version, entry.epoch);
             }
         }
-        let launches = state.launches.clone();
         for (provider, old) in &state.active {
             match next.get(provider) {
                 None => log::info!("cloud {} credential no longer injected into new sessions; running sessions keep what they started with", provider.as_str()),
                 Some(new) if new.identity() != old.identity() => {
-                    let running = launches.values().filter(|(p, identity)| p == provider && *identity != new.identity()).count();
+                    let running = state.launches.values().filter(|(p, identity)| p == provider && *identity != new.identity()).count();
                     log::info!(
                         "cloud {} credential rotated to version {} (epoch {}); new sessions use it, {running} running session(s) need a restart to pick it up",
                         provider.as_str(),
@@ -930,11 +1098,20 @@ impl GrantStore {
         state.active = next;
         state.credentials = credentials;
 
-        let mut refresh_at = fetched.refresh_after;
+        // `refreshAfter` is on the server's clock: measure it from the
+        // server's "now" (the latest issuedAt), not from this VM's clock.
+        let server_now = sealed_grants.iter().map(|sealed| sealed.header.issued_at).filter(|issued| *issued > 0).max();
+        let mut wait = match server_now {
+            Some(server_now) => Duration::from_millis(fetched.refresh_after.saturating_sub(server_now)),
+            None => match fetched.refresh_after.saturating_sub(wall) {
+                0 => FALLBACK_REFRESH,
+                ms => Duration::from_millis(ms),
+            },
+        };
         for grant in state.active.values() {
-            refresh_at = refresh_at.min(grant.expires_at.saturating_sub(EXPIRY_MARGIN_MS));
+            wait = wait.min(grant.usable_until.saturating_duration_since(received).saturating_sub(EXPIRY_MARGIN));
         }
-        Ok(refresh_at)
+        Ok(Applied { wait: wait.clamp(MIN_REFRESH, MAX_REFRESH), offered, accepted })
     }
 
     /// Write the Codex auth file for a Codex grant, or remove it when there is
@@ -960,7 +1137,7 @@ impl GrantStore {
     }
 
     /// Drop grants that have expired, e.g. while the server was unreachable.
-    pub fn prune(&self, now: u64) {
+    pub fn prune(&self, now: Instant) {
         let mut state = self.state();
         let expired: Vec<Provider> = state.active.iter().filter(|(_, grant)| !grant.usable(now)).map(|(provider, _)| *provider).collect();
         for provider in expired {
@@ -975,7 +1152,7 @@ impl GrantStore {
 
     /// The environment for a new agent process: `Some` sets, `None` unsets.
     /// Empty when there is no usable grant for `provider`.
-    pub fn agent_env(&self, provider: Provider, now: u64) -> Vec<(String, Option<String>)> {
+    pub fn agent_env(&self, provider: Provider, now: Instant) -> Vec<(String, Option<String>)> {
         let state = self.state();
         let Some(grant) = state.active.get(&provider).filter(|grant| grant.usable(now)) else { return Vec::new() };
         let set = |name: &str, value: &str| (name.to_string(), Some(value.to_string()));
@@ -995,7 +1172,7 @@ impl GrantStore {
 
     /// [`Self::agent_env`], remembering which credential the session under
     /// `launch` started with.
-    pub fn agent_env_for_launch(&self, provider: Provider, launch: &str, now: u64) -> Vec<(String, Option<String>)> {
+    pub fn agent_env_for_launch(&self, provider: Provider, launch: &str, now: Instant) -> Vec<(String, Option<String>)> {
         let env = self.agent_env(provider, now);
         let mut state = self.state();
         let identity = if env.is_empty() { None } else { state.active.get(&provider).map(ActiveGrant::identity) };
@@ -1015,12 +1192,12 @@ impl GrantStore {
     }
 
     /// The Codex auth file new sessions should see, if there is a usable one.
-    pub fn codex_auth_file(&self, now: u64) -> Option<PathBuf> {
+    pub fn codex_auth_file(&self, now: Instant) -> Option<PathBuf> {
         self.state().active.get(&Provider::Codex).filter(|grant| grant.usable(now)).and_then(|grant| grant.codex_file.clone())
     }
 
     /// What the runtime knows about its cloud credentials. No secrets.
-    pub fn status(&self, now: u64) -> Value {
+    pub fn status(&self, now: Instant) -> Value {
         let state = self.state();
         let mut providers: Vec<Provider> = state.credentials.keys().chain(state.active.keys()).copied().collect();
         providers.sort();
@@ -1038,6 +1215,7 @@ impl GrantStore {
                     "state": entry.map(|entry| entry.state.clone()),
                     "version": entry.map(|entry| entry.version),
                     "epoch": entry.map(|entry| entry.epoch),
+                    "reason": entry.and_then(|entry| entry.reason.clone()),
                     "mode": grant.map(|grant| grant.material.mode()),
                     "grantId": grant.map(|grant| grant.grant_id.clone()),
                     "grantExpiresAt": grant.map(|grant| grant.expires_at),
@@ -1071,36 +1249,43 @@ impl Drop for GrantStore {
 
 // ------------------------------------------------------------ the loop
 
+/// One turn of the loop; returns how long to sleep before the next. While
+/// the runtime credential is rejected nothing is injected and nothing is
+/// fetched. Errors back off exponentially from [`BACKOFF_START`].
+fn step(store: &GrantStore, api: &dyn GrantApi, rejected: bool, backoff: &mut Duration) -> Duration {
+    if rejected {
+        store.drop_all("the runtime credential is rejected");
+        return REJECTED_PAUSE;
+    }
+    match store.sync(api, Instant::now(), now_ms()) {
+        Ok(wait) => {
+            *backoff = BACKOFF_START;
+            wait
+        }
+        Err(error) => {
+            match &error {
+                GrantCallError::KeyConflict => log::error!(
+                    "the server holds a different agent grant key for this runtime generation (the key was lost in a restart); agents run without cloud credentials until the generation rotates"
+                ),
+                error => log::warn!("fetch agent grants: {error}; retrying in {}s", backoff.as_secs()),
+            }
+            store.prune(Instant::now());
+            let wait = *backoff;
+            *backoff = (*backoff * 2).min(BACKOFF_CAP);
+            wait
+        }
+    }
+}
+
 /// Keep the grants fresh until the process ends: at the server's
 /// `refreshAfter`, before any grant expires, with backoff on errors, and
-/// paused while the runtime credential is rejected.
+/// paused (with nothing injected) while the runtime credential is rejected.
 pub fn spawn_sync_loop(store: Arc<GrantStore>, api: Arc<dyn GrantApi + Send + Sync>, rejected: impl Fn() -> bool + Send + 'static) {
     let spawned = std::thread::Builder::new().name("cloud-agent-grants".into()).spawn(move || {
-        let mut delay = BACKOFF_START;
+        let mut backoff = BACKOFF_START;
         loop {
-            if rejected() {
-                store.prune(now_ms());
-                std::thread::sleep(REJECTED_PAUSE);
-                continue;
-            }
-            match store.sync(api.as_ref(), now_ms()) {
-                Ok(next) => {
-                    delay = BACKOFF_START;
-                    let wait = Duration::from_millis(next.saturating_sub(now_ms())).clamp(MIN_REFRESH, MAX_REFRESH);
-                    std::thread::sleep(wait);
-                }
-                Err(error) => {
-                    match &error {
-                        GrantCallError::KeyConflict => log::error!(
-                            "the server holds a different agent grant key for this runtime generation (the key was lost in a restart); agents run without cloud credentials until the generation rotates"
-                        ),
-                        error => log::warn!("fetch agent grants: {error}; retrying in {}s", delay.as_secs()),
-                    }
-                    store.prune(now_ms());
-                    std::thread::sleep(delay);
-                    delay = (delay * 2).min(BACKOFF_CAP);
-                }
-            }
+            let wait = step(&store, api.as_ref(), rejected(), &mut backoff);
+            std::thread::sleep(wait);
         }
     });
     if let Err(error) = spawned {
@@ -1128,7 +1313,7 @@ fn installed() -> Option<&'static Arc<GrantStore>> {
 /// under `launch` for restart tracking. Empty outside a cloud workspace.
 pub fn agent_env_for_launch(harness: &str, launch: &str) -> Vec<(String, Option<String>)> {
     let (Some(store), Some(provider)) = (installed(), provider_of_harness(harness)) else { return Vec::new() };
-    store.agent_env_for_launch(provider, launch, now_ms())
+    store.agent_env_for_launch(provider, launch, Instant::now())
 }
 
 /// A session launched under `launch` has ended.
@@ -1149,12 +1334,20 @@ fn provider_of_harness(harness: &str) -> Option<Provider> {
 
 /// `None` outside a cloud workspace: the Codex home links the reader's
 /// `auth.json` as usual. Inside one, the grant's auth file, or `Some(None)`
-/// when there is none and the home must have no `auth.json` at all.
+/// when there is none and the home must have no `auth.json` at all. A launch
+/// right after start waits briefly for the first sync, so it does not start
+/// logged out (and tempt a `codex login` into the persistent home).
 pub fn codex_auth_source() -> Option<Option<PathBuf>> {
-    installed().map(|store| store.codex_auth_file(now_ms()))
+    let store = installed()?;
+    if !store.wait_first_sync(FIRST_SYNC_WAIT) {
+        log::warn!("the first agent grant sync has not finished; starting Codex without a cloud credential");
+    }
+    Some(store.codex_auth_file(Instant::now()))
 }
 
-/// Point `<managed>/auth.json` at the grant's auth file, or remove it.
+/// Point `<managed>/auth.json` at the grant's auth file, or remove whatever
+/// is there (a link, or a regular file a `codex login` wrote): in a cloud
+/// workspace the persistent home never holds a credential of its own.
 pub fn link_codex_auth(managed: &Path, source: Option<&Path>) -> Result<()> {
     let target = managed.join(CODEX_AUTH_FILE);
     if let Some(source) = source {
@@ -1179,7 +1372,7 @@ pub fn link_codex_auth(managed: &Path, source: Option<&Path>) -> Result<()> {
 
 /// The status snapshot for the control socket, in a cloud workspace.
 pub fn status_json() -> Option<Value> {
-    installed().map(|store| store.status(now_ms()))
+    installed().map(|store| store.status(Instant::now()))
 }
 
 /// Wrap `command` so `unset` names are removed from its environment after
@@ -1197,6 +1390,7 @@ pub fn unset_prefix(command: &str, unset: &[String]) -> String {
     out.push_str(command);
     out
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -1296,6 +1490,7 @@ mod tests {
         provider: &'static str,
         credential_id: &'static str,
         epoch: u64,
+        issued_at: u64,
         expires_at: u64,
         plaintext: String,
         workspace_id: &'static str,
@@ -1308,9 +1503,15 @@ mod tests {
         generation: RefCell<u64>,
         credentials: RefCell<Vec<CredentialEntry>>,
         grants: RefCell<Vec<Grant>>,
+        /// Sent as-is after the sealed ones.
+        raw_grants: RefCell<Vec<Value>>,
         enrolls: RefCell<usize>,
+        fetches: RefCell<usize>,
         /// Answer the next fetch with key_required, as after a rotation.
         forget_key: RefCell<bool>,
+        /// Answer everything with 401.
+        reject: RefCell<bool>,
+        refresh_after: RefCell<Option<u64>>,
         seq: RefCell<u8>,
     }
 
@@ -1324,7 +1525,15 @@ mod tests {
         fn credential(&self, provider: &str, id: &str, state: &str, epoch: u64, version: u64) {
             let mut list = self.credentials.borrow_mut();
             list.retain(|entry| entry.provider != provider);
-            list.push(CredentialEntry { provider: provider.into(), credential_id: id.into(), state: state.into(), epoch, version, rotation: Some("new-sessions".into()) });
+            list.push(CredentialEntry {
+                provider: provider.into(),
+                credential_id: id.into(),
+                state: state.into(),
+                epoch,
+                version,
+                rotation: Some("new-sessions".into()),
+                reason: None,
+            });
         }
 
         fn grant(&self, provider: &'static str, id: &'static str, epoch: u64, plaintext: Value) {
@@ -1333,6 +1542,7 @@ mod tests {
                 provider,
                 credential_id: id,
                 epoch,
+                issued_at: NOW,
                 expires_at: NOW + 15 * 60_000,
                 plaintext: plaintext.to_string(),
                 workspace_id: WORKSPACE,
@@ -1343,6 +1553,9 @@ mod tests {
 
     impl GrantApi for FakeServer {
         fn enroll(&self, key: &str) -> Result<Enrolled, GrantCallError> {
+            if *self.reject.borrow() {
+                return Err(GrantCallError::Rejected);
+            }
             *self.enrolls.borrow_mut() += 1;
             let mut enrolled = self.enrolled.borrow_mut();
             match enrolled.as_deref() {
@@ -1354,6 +1567,10 @@ mod tests {
         }
 
         fn fetch(&self, key_thumbprint: &str) -> Result<Fetched, GrantCallError> {
+            if *self.reject.borrow() {
+                return Err(GrantCallError::Rejected);
+            }
+            *self.fetches.borrow_mut() += 1;
             if std::mem::take(&mut *self.forget_key.borrow_mut()) {
                 *self.enrolled.borrow_mut() = None;
                 return Err(GrantCallError::KeyRequired);
@@ -1363,7 +1580,7 @@ mod tests {
             if thumbprint(&public) != key_thumbprint {
                 return Err(GrantCallError::KeyRequired);
             }
-            let grants = self
+            let mut grants: Vec<Value> = self
                 .grants
                 .borrow()
                 .iter()
@@ -1378,25 +1595,29 @@ mod tests {
                         epoch: grant.epoch,
                         runtime_generation: grant.generation,
                         grant_id: format!("grant_{seq}"),
-                        issued_at: NOW,
+                        issued_at: grant.issued_at,
                         expires_at: grant.expires_at,
                     };
-                    seal_with([seq; 32], [seq.wrapping_add(1); 32], [seq; 12], [seq.wrapping_add(2); 12], &public, header, grant.plaintext.as_bytes())
+                    let sealed = seal_with([seq; 32], [seq.wrapping_add(1); 32], [seq; 12], [seq.wrapping_add(2); 12], &public, header, grant.plaintext.as_bytes());
+                    serde_json::to_value(sealed).unwrap()
                 })
                 .collect();
+            grants.extend(self.raw_grants.borrow().iter().cloned());
+            let credentials = self.credentials.borrow().iter().map(|entry| serde_json::to_value(entry).unwrap()).collect();
             Ok(Fetched {
                 v: 1,
                 workspace_id: WORKSPACE.into(),
                 runtime_generation: *self.generation.borrow(),
                 key_thumbprint: key_thumbprint.into(),
-                refresh_after: NOW + 5 * 60_000,
+                refresh_after: self.refresh_after.borrow().unwrap_or(NOW + 5 * 60_000),
                 grants,
-                credentials: self.credentials.borrow().clone(),
+                credentials,
             })
         }
     }
 
     const NOW: u64 = 1_790_985_600_000;
+    const MINUTE: Duration = Duration::from_secs(60);
 
     fn store(root: Option<PathBuf>) -> GrantStore {
         GrantStore::new(WORKSPACE.into(), GrantKey::generate(), root)
@@ -1410,6 +1631,10 @@ mod tests {
         json!({"v": 1, "provider": "codex", "mode": "chatgpt-tokens", "accessToken": token, "idToken": "fake.id.token", "accountId": "acct_1", "expiresAt": NOW + 3_600_000, "version": 1})
     }
 
+    fn cursor_key() -> Value {
+        json!({"v": 1, "provider": "cursor", "mode": "api-key", "apiKey": "fake-cursor", "version": 1})
+    }
+
     fn value_of<'a>(env: &'a [(String, Option<String>)], name: &str) -> Option<&'a Option<String>> {
         env.iter().find(|(key, _)| key == name).map(|(_, value)| value)
     }
@@ -1420,14 +1645,14 @@ mod tests {
         server.credential("claude", "cred_c", "connected", 3, 4);
         server.grant("claude", "cred_c", 3, claude_oauth("fake-oauth-1", 4));
         let store = store(None);
-        let next = store.sync(&server, NOW).unwrap();
-        assert!(next > NOW && next <= NOW + 5 * 60_000);
-        let env = store.agent_env(Provider::Claude, NOW);
+        let t0 = Instant::now();
+        assert_eq!(store.sync(&server, t0, NOW).unwrap(), 5 * MINUTE, "refreshAfter measured from issuedAt");
+        let env = store.agent_env(Provider::Claude, t0);
         assert_eq!(value_of(&env, CLAUDE_OAUTH_ENV), Some(&Some("fake-oauth-1".to_string())));
         assert_eq!(value_of(&env, CLAUDE_API_KEY_ENV), Some(&None));
         assert_eq!(value_of(&env, CLAUDE_AUTH_TOKEN_ENV), Some(&None));
-        assert!(store.agent_env(Provider::Codex, NOW).is_empty());
-        let status = store.status(NOW);
+        assert!(store.agent_env(Provider::Codex, t0).is_empty());
+        let status = store.status(t0);
         assert_eq!(status["credentials"][0]["provider"], "claude");
         assert_eq!(status["credentials"][0]["injecting"], true);
         assert!(!status.to_string().contains("fake-oauth-1"), "the status carries no secret");
@@ -1439,25 +1664,27 @@ mod tests {
         server.credential("claude", "cred_c", "connected", 1, 1);
         server.grant("claude", "cred_c", 1, json!({"v": 1, "provider": "claude", "mode": "api-key", "apiKey": "fake-anthropic", "version": 1}));
         server.credential("cursor", "cred_u", "connected", 1, 1);
-        server.grant("cursor", "cred_u", 1, json!({"v": 1, "provider": "cursor", "mode": "api-key", "apiKey": "fake-cursor", "version": 1}));
+        server.grant("cursor", "cred_u", 1, cursor_key());
         server.credential("codex", "cred_x", "connected", 1, 1);
         server.grant("codex", "cred_x", 1, json!({"v": 1, "provider": "codex", "mode": "api-key", "apiKey": "fake-openai", "version": 1}));
         // Without tmpfs, a Codex API key goes through the environment.
         let store = store(None);
-        store.sync(&server, NOW).unwrap();
+        let t0 = Instant::now();
+        store.sync(&server, t0, NOW).unwrap();
         assert_eq!(
-            store.agent_env(Provider::Claude, NOW),
+            store.agent_env(Provider::Claude, t0),
             vec![(CLAUDE_API_KEY_ENV.into(), Some("fake-anthropic".into())), (CLAUDE_AUTH_TOKEN_ENV.into(), None), (CLAUDE_OAUTH_ENV.into(), None)]
         );
-        assert_eq!(store.agent_env(Provider::Cursor, NOW), vec![(CURSOR_API_KEY_ENV.into(), Some("fake-cursor".into()))]);
-        assert_eq!(store.agent_env(Provider::Codex, NOW), vec![(CODEX_API_KEY_ENV.into(), Some("fake-openai".into()))]);
-        assert!(store.codex_auth_file(NOW).is_none());
+        assert_eq!(store.agent_env(Provider::Cursor, t0), vec![(CURSOR_API_KEY_ENV.into(), Some("fake-cursor".into()))]);
+        assert_eq!(store.agent_env(Provider::Codex, t0), vec![(CODEX_API_KEY_ENV.into(), Some("fake-openai".into()))]);
+        assert!(store.codex_auth_file(t0).is_none());
         // ChatGPT tokens need the file, so without tmpfs there is nothing.
         server.grant("codex", "cred_x", 1, codex_chatgpt("fake-chatgpt"));
-        store.sync(&server, NOW).unwrap();
-        assert!(store.agent_env(Provider::Codex, NOW).is_empty());
-        // Past the grant's expiry nothing is injected.
-        assert!(store.agent_env(Provider::Claude, NOW + 16 * 60_000).is_empty());
+        store.sync(&server, t0, NOW).unwrap();
+        assert!(store.agent_env(Provider::Codex, t0).is_empty());
+        // Past the grant's lifetime (less the skew allowance) nothing is injected.
+        assert!(!store.agent_env(Provider::Claude, t0 + 14 * MINUTE).is_empty());
+        assert!(store.agent_env(Provider::Claude, t0 + 15 * MINUTE).is_empty());
     }
 
     #[test]
@@ -1467,8 +1694,9 @@ mod tests {
         server.credential("codex", "cred_x", "connected", 2, 5);
         server.grant("codex", "cred_x", 2, codex_chatgpt("fake-chatgpt-access"));
         let store = store(Some(dir.path().to_path_buf()));
-        store.sync(&server, NOW).unwrap();
-        let path = store.codex_auth_file(NOW).unwrap();
+        let t0 = Instant::now();
+        store.sync(&server, t0, NOW).unwrap();
+        let path = store.codex_auth_file(t0).unwrap();
         assert_eq!(path, dir.path().join("agent-homes/codex/auth.json"));
         let auth: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(auth["auth_mode"], "chatgpt");
@@ -1478,13 +1706,15 @@ mod tests {
         assert_eq!(auth["tokens"]["account_id"], "acct_1");
         assert_eq!(auth["tokens"]["refresh_token"], "");
         assert!(auth["last_refresh"].as_str().unwrap().ends_with('Z'));
-        assert_eq!(store.agent_env(Provider::Codex, NOW), vec![(CODEX_API_KEY_ENV.into(), None)]);
+        assert_eq!(store.agent_env(Provider::Codex, t0), vec![(CODEX_API_KEY_ENV.into(), None)]);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
             assert_eq!(fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
         }
+        // Only the auth file is left behind: no temp files.
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
 
         // The managed home links to it, and unlinks when it is gone.
         let managed = tempfile::tempdir().unwrap();
@@ -1494,12 +1724,29 @@ mod tests {
         assert_eq!(fs::read_link(managed.path().join("auth.json")).unwrap(), path);
 
         server.credential("codex", "cred_x", "revoked", 2, 5);
-        store.sync(&server, NOW).unwrap();
+        server.grants.borrow_mut().clear();
+        store.sync(&server, t0, NOW).unwrap();
         assert!(!path.exists(), "a revoked credential's file is removed");
-        assert!(store.agent_env(Provider::Codex, NOW).is_empty());
-        assert!(store.codex_auth_file(NOW).is_none());
+        assert!(store.agent_env(Provider::Codex, t0).is_empty());
+        assert!(store.codex_auth_file(t0).is_none());
         link_codex_auth(managed.path(), None).unwrap();
         assert!(managed.path().join("auth.json").symlink_metadata().is_err());
+    }
+
+    #[test]
+    fn a_regular_auth_file_in_the_managed_home_is_replaced_or_removed() {
+        let managed = tempfile::tempdir().unwrap();
+        let grant = tempfile::tempdir().unwrap();
+        let source = grant.path().join("auth.json");
+        fs::write(&source, "{}").unwrap();
+        // What a `codex login` against the managed home would leave.
+        fs::write(managed.path().join("auth.json"), "{\"tokens\":{\"refresh_token\":\"real\"}}").unwrap();
+        link_codex_auth(managed.path(), None).unwrap();
+        assert!(managed.path().join("auth.json").symlink_metadata().is_err());
+        fs::write(managed.path().join("auth.json"), "{\"tokens\":{\"refresh_token\":\"real\"}}").unwrap();
+        link_codex_auth(managed.path(), Some(&source)).unwrap();
+        #[cfg(unix)]
+        assert_eq!(fs::read_link(managed.path().join("auth.json")).unwrap(), source);
     }
 
     #[test]
@@ -1509,8 +1756,9 @@ mod tests {
         server.credential("codex", "cred_x", "connected", 1, 1);
         server.grant("codex", "cred_x", 1, json!({"v": 1, "provider": "codex", "mode": "api-key", "apiKey": "fake-openai", "version": 1}));
         let store = store(Some(dir.path().to_path_buf()));
-        store.sync(&server, NOW).unwrap();
-        let auth: Value = serde_json::from_slice(&fs::read(store.codex_auth_file(NOW).unwrap()).unwrap()).unwrap();
+        let t0 = Instant::now();
+        store.sync(&server, t0, NOW).unwrap();
+        let auth: Value = serde_json::from_slice(&fs::read(store.codex_auth_file(t0).unwrap()).unwrap()).unwrap();
         assert_eq!(auth, json!({"auth_mode": "apikey", "OPENAI_API_KEY": "fake-openai"}));
     }
 
@@ -1523,14 +1771,14 @@ mod tests {
         plaintext["refreshToken"] = json!("fake-refresh-SECRET");
         server.grant("codex", "cred_x", 1, plaintext);
         let store = store(Some(dir.path().to_path_buf()));
-        store.sync(&server, NOW).unwrap();
-        assert!(store.agent_env(Provider::Codex, NOW).is_empty());
+        let t0 = Instant::now();
+        assert!(store.sync(&server, t0, NOW).is_err(), "every grant refused is an error, for backoff");
+        assert!(store.agent_env(Provider::Codex, t0).is_empty());
         for entry in walk(dir.path()) {
             let bytes = fs::read(&entry).unwrap();
             assert!(!String::from_utf8_lossy(&bytes).contains("fake-refresh-SECRET"), "{} holds the refresh token", entry.display());
         }
         assert!(!dir.path().join("agent-homes/codex/auth.json").exists());
-        // And one that nests it under another name is refused too.
         assert!(parse_plaintext(br#"{"v":1,"provider":"codex","mode":"api-key","apiKey":"k","version":1,"refresh_token":"r"}"#).is_err());
     }
 
@@ -1556,15 +1804,17 @@ mod tests {
         let cases: Vec<(&str, Edit)> = vec![
             ("workspace", Box::new(|g: &mut Grant| g.workspace_id = "workspace_other")),
             ("generation", Box::new(|g: &mut Grant| g.generation = GENERATION + 1)),
-            ("expired", Box::new(|g: &mut Grant| g.expires_at = NOW)),
+            ("no lifetime", Box::new(|g: &mut Grant| g.expires_at = g.issued_at)),
+            ("lifetime within the skew allowance", Box::new(|g: &mut Grant| g.expires_at = g.issued_at + 20_000)),
+            ("issued after it expires", Box::new(|g: &mut Grant| g.issued_at = g.expires_at + 1)),
             ("stale epoch", Box::new(|g: &mut Grant| g.epoch = 2)),
             ("other credential", Box::new(|g: &mut Grant| g.credential_id = "cred_other")),
         ];
         for (name, edit) in cases {
             server.grant("claude", "cred_c", 3, claude_oauth("fake", 1));
             edit(&mut server.grants.borrow_mut()[0]);
-            store.sync(&server, NOW).unwrap();
-            assert!(store.agent_env(Provider::Claude, NOW).is_empty(), "{name} must be refused");
+            assert!(store.sync(&server, Instant::now(), NOW).is_err(), "{name}: a fully refused fetch is an error");
+            assert!(store.agent_env(Provider::Claude, Instant::now()).is_empty(), "{name} must be refused");
         }
         // A grant sealed to another key's thumbprint is refused as well.
         let state = store.state();
@@ -1579,11 +1829,67 @@ mod tests {
             runtime_generation: GENERATION,
             grant_id: "g".into(),
             issued_at: NOW,
-            expires_at: NOW + 60_000,
+            expires_at: NOW + 10 * 60_000,
         };
         let sealed = seal_with([1; 32], [2; 32], [3; 12], [4; 12], &store.key.public, header, claude_oauth("x", 1).to_string().as_bytes());
         let credentials = HashMap::from([(Provider::Claude, server.credentials.borrow()[0].clone())]);
-        assert!(store.accept(&sealed, &credentials, &enrollment, &state.highest_epoch, NOW).is_err());
+        assert!(store.accept(&sealed, &credentials, &enrollment, &state.highest_epoch, Instant::now()).is_err());
+    }
+
+    #[test]
+    fn a_skewed_vm_clock_neither_refuses_grants_nor_hot_loops() {
+        let server = FakeServer::new();
+        server.credential("claude", "cred_c", "connected", 1, 1);
+        server.grant("claude", "cred_c", 1, claude_oauth("fake", 1));
+        let t0 = Instant::now();
+        for wall in [NOW + 60 * 60_000, NOW - 60 * 60_000] {
+            *server.enrolled.borrow_mut() = None;
+            let store = store(None);
+            // The VM clock is an hour off; the grant is judged by its own
+            // lifetime and the next fetch by refreshAfter - issuedAt.
+            assert_eq!(store.sync(&server, t0, wall).unwrap(), 5 * MINUTE);
+            assert!(!store.agent_env(Provider::Claude, t0).is_empty());
+        }
+        // A short grant brings the next fetch forward, before it lapses.
+        server.grants.borrow_mut()[0].expires_at = NOW + 3 * 60_000;
+        *server.enrolled.borrow_mut() = None;
+        let store = store(None);
+        assert_eq!(store.sync(&server, t0, NOW + 60 * 60_000).unwrap(), 3 * MINUTE - SKEW_ALLOWANCE - EXPIRY_MARGIN);
+    }
+
+    #[test]
+    fn an_unavailable_credential_is_not_an_error_and_does_not_hot_loop() {
+        let server = FakeServer::new();
+        server.credential("claude", "cred_c", "unavailable", 1, 1);
+        server.credentials.borrow_mut()[0].reason = Some("token-expired".into());
+        *server.refresh_after.borrow_mut() = Some(NOW + 30_000);
+        let store = store(None);
+        let t0 = Instant::now();
+        // No grant to read the server's time from: the wall clock decides,
+        // and a clock already past refreshAfter waits the fallback.
+        assert_eq!(store.sync(&server, t0, NOW).unwrap(), Duration::from_secs(30));
+        assert_eq!(store.sync(&server, t0, NOW + 60 * 60_000).unwrap(), FALLBACK_REFRESH);
+        assert!(store.sync(&server, t0, NOW + 29_000).unwrap() >= MIN_REFRESH);
+        let status = store.status(t0);
+        assert_eq!(status["credentials"][0]["state"], "unavailable");
+        assert_eq!(status["credentials"][0]["reason"], "token-expired");
+        assert!(status["lastError"].is_null());
+    }
+
+    #[test]
+    fn one_malformed_grant_does_not_cost_the_others() {
+        let server = FakeServer::new();
+        server.credential("cursor", "cred_u", "connected", 1, 1);
+        server.grant("cursor", "cred_u", 1, cursor_key());
+        server.raw_grants.borrow_mut().push(json!({"v": 1, "alg": ALG, "header": {"workspaceId": WORKSPACE}, "ciphertext": "SECRET-LOOKING"}));
+        server.raw_grants.borrow_mut().push(json!("not even an object"));
+        let store = store(None);
+        store.sync(&server, Instant::now(), NOW).unwrap();
+        assert!(!store.agent_env(Provider::Cursor, Instant::now()).is_empty());
+        // And a server that adds fields to the answer is still understood.
+        let body = json!({"v": 1, "workspaceId": WORKSPACE, "runtimeGeneration": 7, "keyThumbprint": "t", "refreshAfter": 1, "grants": [], "credentials": [{"provider": "claude", "credentialId": "c", "state": "unavailable", "epoch": 1, "version": 1, "reason": "shared-use-policy", "futureField": true}], "futureField": {}});
+        let fetched: Fetched = serde_json::from_value(body).unwrap();
+        assert_eq!(fetched.credentials.len(), 1);
     }
 
     #[test]
@@ -1592,36 +1898,104 @@ mod tests {
         server.credential("claude", "cred_c", "connected", 5, 2);
         server.grant("claude", "cred_c", 5, claude_oauth("fake-new", 2));
         let store = store(None);
-        store.sync(&server, NOW).unwrap();
-        assert_eq!(value_of(&store.agent_env(Provider::Claude, NOW), CLAUDE_OAUTH_ENV), Some(&Some("fake-new".into())));
-        // The server (or someone replaying it) goes back to epoch 4.
+        let t0 = Instant::now();
+        store.sync(&server, t0, NOW).unwrap();
+        assert_eq!(value_of(&store.agent_env(Provider::Claude, t0), CLAUDE_OAUTH_ENV), Some(&Some("fake-new".into())));
         server.credential("claude", "cred_c", "connected", 4, 1);
         server.grant("claude", "cred_c", 4, claude_oauth("fake-old", 1));
-        store.sync(&server, NOW).unwrap();
-        assert!(store.agent_env(Provider::Claude, NOW).is_empty(), "the rolled-back grant is not injected");
+        assert!(store.sync(&server, t0, NOW).is_err());
+        assert!(store.agent_env(Provider::Claude, t0).is_empty(), "the rolled-back grant is not injected");
     }
 
     #[test]
     fn enrollment_is_idempotent_and_reenrolls_once_on_key_required() {
         let server = FakeServer::new();
         let store = store(None);
-        store.sync(&server, NOW).unwrap();
-        store.sync(&server, NOW).unwrap();
+        let t0 = Instant::now();
+        store.sync(&server, t0, NOW).unwrap();
+        store.sync(&server, t0, NOW).unwrap();
         assert_eq!(*server.enrolls.borrow(), 1, "one enrollment serves every fetch");
         *server.forget_key.borrow_mut() = true;
         *server.generation.borrow_mut() = GENERATION + 1;
-        store.sync(&server, NOW).unwrap();
+        store.sync(&server, t0, NOW).unwrap();
         assert_eq!(*server.enrolls.borrow(), 2);
-        assert_eq!(store.status(NOW)["runtimeGeneration"], GENERATION + 1);
-        // The same key enrolling again is fine; a different one conflicts.
+        assert_eq!(store.status(t0)["runtimeGeneration"], GENERATION + 1);
         server.enroll(&store.key.public_key_b64()).unwrap();
-        let other = store_with_other_key();
-        assert!(matches!(other.sync(&server, NOW), Err(GrantCallError::KeyConflict)));
-        assert!(other.status(NOW)["lastError"].is_string());
+        let other = self::store(None);
+        assert!(matches!(other.sync(&server, t0, NOW), Err(GrantCallError::KeyConflict)));
+        assert!(other.status(t0)["lastError"].is_string());
     }
 
-    fn store_with_other_key() -> GrantStore {
-        store(None)
+    #[test]
+    fn a_fenced_runtime_drops_every_grant_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = FakeServer::new();
+        server.credential("codex", "cred_x", "connected", 1, 1);
+        server.grant("codex", "cred_x", 1, codex_chatgpt("fake"));
+        server.credential("cursor", "cred_u", "connected", 1, 1);
+        server.grant("cursor", "cred_u", 1, cursor_key());
+        let store = store(Some(dir.path().to_path_buf()));
+        let mut backoff = BACKOFF_START;
+        let fill = |store: &GrantStore, backoff: &mut Duration| {
+            assert_eq!(step(store, &server, false, backoff), 5 * MINUTE);
+            assert!(store.codex_auth_file(Instant::now()).is_some());
+            assert!(!store.agent_env(Provider::Cursor, Instant::now()).is_empty());
+        };
+        let emptied = |store: &GrantStore| {
+            let now = Instant::now();
+            assert!(store.agent_env(Provider::Cursor, now).is_empty());
+            assert!(store.agent_env(Provider::Codex, now).is_empty());
+            assert!(!dir.path().join("agent-homes/codex/auth.json").exists());
+            assert_eq!(store.status(now)["enrolled"], false);
+        };
+
+        // The bootstrap refresh loop saw the credential rejected.
+        fill(&store, &mut backoff);
+        assert_eq!(step(&store, &server, true, &mut backoff), REJECTED_PAUSE);
+        emptied(&store);
+
+        // The grant API itself answers 401.
+        fill(&store, &mut backoff);
+        *server.reject.borrow_mut() = true;
+        assert_eq!(step(&store, &server, false, &mut backoff), BACKOFF_START);
+        emptied(&store);
+        assert_eq!(step(&store, &server, false, &mut backoff), BACKOFF_START * 2, "errors back off");
+        *server.reject.borrow_mut() = false;
+
+        // Another key holds the generation.
+        fill(&store, &mut backoff);
+        assert_eq!(backoff, BACKOFF_START, "a success resets the backoff");
+        *server.enrolled.borrow_mut() = Some(GrantKey::generate().public_key_b64());
+        *server.forget_key.borrow_mut() = false;
+        store.state().enrollment = None;
+        step(&store, &server, false, &mut backoff);
+        emptied(&store);
+    }
+
+    #[test]
+    fn refusing_every_grant_backs_off() {
+        let server = FakeServer::new();
+        server.credential("claude", "cred_c", "connected", 1, 1);
+        server.grant("claude", "cred_c", 1, claude_oauth("fake", 1));
+        server.grants.borrow_mut()[0].workspace_id = "workspace_other";
+        let store = store(None);
+        let mut backoff = BACKOFF_START;
+        let waits: Vec<Duration> = (0..4).map(|_| step(&store, &server, false, &mut backoff)).collect();
+        assert_eq!(waits, vec![BACKOFF_START, BACKOFF_START * 2, BACKOFF_START * 4, BACKOFF_START * 8]);
+    }
+
+    #[test]
+    fn a_codex_launch_can_wait_for_the_first_sync() {
+        let server = FakeServer::new();
+        let store = Arc::new(store(None));
+        assert!(!store.wait_first_sync(Duration::from_millis(10)));
+        let waiter = {
+            let store = store.clone();
+            std::thread::spawn(move || store.wait_first_sync(Duration::from_secs(5)))
+        };
+        store.sync(&server, Instant::now(), NOW).unwrap();
+        assert!(waiter.join().unwrap());
+        assert!(store.wait_first_sync(Duration::ZERO));
     }
 
     #[test]
@@ -1630,21 +2004,22 @@ mod tests {
         server.credential("claude", "cred_c", "connected", 1, 1);
         server.grant("claude", "cred_c", 1, claude_oauth("fake-v1", 1));
         let store = store(None);
-        store.sync(&server, NOW).unwrap();
-        let first = store.agent_env_for_launch(Provider::Claude, "tab:a", NOW);
+        let t0 = Instant::now();
+        store.sync(&server, t0, NOW).unwrap();
+        let first = store.agent_env_for_launch(Provider::Claude, "tab:a", t0);
         assert_eq!(value_of(&first, CLAUDE_OAUTH_ENV), Some(&Some("fake-v1".into())));
-        assert_eq!(store.status(NOW)["credentials"][0]["restartRequired"], false);
+        assert_eq!(store.status(t0)["credentials"][0]["restartRequired"], false);
 
         server.credential("claude", "cred_c", "connected", 2, 2);
         server.grant("claude", "cred_c", 2, claude_oauth("fake-v2", 2));
-        store.sync(&server, NOW).unwrap();
-        let second = store.agent_env_for_launch(Provider::Claude, "tab:b", NOW);
+        store.sync(&server, t0, NOW).unwrap();
+        let second = store.agent_env_for_launch(Provider::Claude, "tab:b", t0);
         assert_eq!(value_of(&second, CLAUDE_OAUTH_ENV), Some(&Some("fake-v2".into())));
-        let status = store.status(NOW);
+        let status = store.status(t0);
         assert_eq!(status["credentials"][0]["restartRequired"], true);
         assert_eq!(status["credentials"][0]["restartRequiredSessions"], 1);
         store.forget_launch("tab:a");
-        assert_eq!(store.status(NOW)["credentials"][0]["restartRequiredSessions"], 0);
+        assert_eq!(store.status(t0)["credentials"][0]["restartRequiredSessions"], 0);
     }
 
     #[test]
@@ -1652,24 +2027,27 @@ mod tests {
         for state in ["disconnected", "unavailable", "revoked"] {
             let server = FakeServer::new();
             server.credential("cursor", "cred_u", "connected", 1, 1);
-            server.grant("cursor", "cred_u", 1, json!({"v": 1, "provider": "cursor", "mode": "api-key", "apiKey": "fake", "version": 1}));
+            server.grant("cursor", "cred_u", 1, cursor_key());
             let store = store(None);
-            store.sync(&server, NOW).unwrap();
-            assert!(!store.agent_env(Provider::Cursor, NOW).is_empty());
+            let t0 = Instant::now();
+            store.sync(&server, t0, NOW).unwrap();
+            assert!(!store.agent_env(Provider::Cursor, t0).is_empty());
             server.credential("cursor", "cred_u", state, 1, 1);
-            store.sync(&server, NOW).unwrap();
-            assert!(store.agent_env(Provider::Cursor, NOW).is_empty(), "{state} is not injected");
-            assert_eq!(store.status(NOW)["credentials"][0]["state"], state);
+            server.grants.borrow_mut().clear();
+            store.sync(&server, t0, NOW).unwrap();
+            assert!(store.agent_env(Provider::Cursor, t0).is_empty(), "{state} is not injected");
+            assert_eq!(store.status(t0)["credentials"][0]["state"], state);
         }
         // A connected credential the server sent no grant for is dropped too.
         let server = FakeServer::new();
         server.credential("cursor", "cred_u", "connected", 1, 1);
-        server.grant("cursor", "cred_u", 1, json!({"v": 1, "provider": "cursor", "mode": "api-key", "apiKey": "fake", "version": 1}));
+        server.grant("cursor", "cred_u", 1, cursor_key());
         let store = store(None);
-        store.sync(&server, NOW).unwrap();
+        let t0 = Instant::now();
+        store.sync(&server, t0, NOW).unwrap();
         server.grants.borrow_mut().clear();
-        store.sync(&server, NOW).unwrap();
-        assert!(store.agent_env(Provider::Cursor, NOW).is_empty());
+        store.sync(&server, t0, NOW).unwrap();
+        assert!(store.agent_env(Provider::Cursor, t0).is_empty());
     }
 
     #[test]
@@ -1686,21 +2064,12 @@ mod tests {
         server.credential("codex", "cred_x", "connected", 1, 1);
         server.grant("codex", "cred_x", 1, codex_chatgpt("fake"));
         let store = store(Some(dir.path().to_path_buf()));
-        store.sync(&server, NOW).unwrap();
-        let path = store.codex_auth_file(NOW).unwrap();
-        store.prune(NOW + 16 * 60_000);
+        let t0 = Instant::now();
+        store.sync(&server, t0, NOW).unwrap();
+        let path = store.codex_auth_file(t0).unwrap();
+        store.prune(t0 + 16 * MINUTE);
         assert!(!path.exists());
-        assert!(store.codex_auth_file(NOW).is_none());
-    }
-
-    #[test]
-    fn the_next_fetch_comes_before_a_grant_expires() {
-        let server = FakeServer::new();
-        server.credential("claude", "cred_c", "connected", 1, 1);
-        server.grant("claude", "cred_c", 1, claude_oauth("fake", 1));
-        server.grants.borrow_mut()[0].expires_at = NOW + 2 * 60_000;
-        let store = store(None);
-        assert_eq!(store.sync(&server, NOW).unwrap(), NOW + 2 * 60_000 - EXPIRY_MARGIN_MS);
+        assert!(store.codex_auth_file(t0).is_none());
     }
 
     #[test]
@@ -1714,24 +2083,45 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn the_grant_directory_is_private_and_the_key_survives_a_restart() {
+    fn each_workspace_gets_a_private_directory_and_keeps_its_key_across_a_restart() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("grants");
+        let base = dir.path().join("grants");
         // The first usable candidate wins; a file in the way is skipped.
         let blocked = dir.path().join("blocked");
         fs::write(&blocked, "").unwrap();
-        assert_eq!(select_root(vec![blocked, root.clone()]), Some(root.clone()));
-        assert_eq!(fs::metadata(&root).unwrap().permissions().mode() & 0o777, 0o700);
+        let root = select_root(vec![blocked, base.clone()], WORKSPACE).unwrap();
+        assert_eq!(root.parent(), Some(base.as_path()));
+        assert_eq!(select_root(vec![base.clone()], WORKSPACE), Some(root.clone()), "a restart finds the same directory");
+        let other = select_root(vec![base.clone()], "workspace_other").unwrap();
+        assert_ne!(other, root, "two workspaces never share a directory");
+        for dir in [&base, &root, &other] {
+            assert_eq!(fs::metadata(dir).unwrap().permissions().mode() & 0o777, 0o700);
+        }
         let first = load_or_create_key(Some(&root));
         assert_eq!(fs::metadata(root.join(KEY_FILE)).unwrap().permissions().mode() & 0o777, 0o600);
         let second = load_or_create_key(Some(&root));
         assert_eq!(first.thumbprint(), second.thumbprint(), "a restart enrolls the same key");
+        assert_ne!(load_or_create_key(Some(&other)).thumbprint(), first.thumbprint());
         assert_ne!(load_or_create_key(None).thumbprint(), first.thumbprint());
         // A symlink planted where the directory should be is refused.
         let planted = dir.path().join("planted");
         std::os::unix::fs::symlink(dir.path(), &planted).unwrap();
         assert!(prepare_private_dir(&planted).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_write_never_follows_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere");
+        fs::write(&target, "untouched").unwrap();
+        let path = dir.path().join("auth.json");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        write_private(&path, b"new").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "untouched", "the rename replaces the link, not what it points at");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_file());
     }
 
     #[test]
