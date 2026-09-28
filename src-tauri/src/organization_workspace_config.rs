@@ -81,7 +81,9 @@ impl Client {
         Self { base, agent: ureq::AgentBuilder::new().timeout(timeout).redirects(0).build() }
     }
 
-    fn request(&self, context: &AccountContext, method: Method, tail: &[&str], body: Option<Value>) -> Result<Map<String, Value>, ConfigError> {
+    /// `body` is serialized JSON, in a buffer wiped once sent: it can hold a
+    /// secret value.
+    fn request(&self, context: &AccountContext, method: Method, tail: &[&str], body: Option<Zeroizing<Vec<u8>>>) -> Result<Map<String, Value>, ConfigError> {
         let mut url = self.base.clone();
         {
             let mut segments = url.path_segments_mut().map_err(|_| local(UNAVAILABLE))?;
@@ -92,12 +94,7 @@ impl Client {
         let lost = if mutation { OUTCOME_UNKNOWN } else { UNAVAILABLE };
         let request = self.agent.request(method.verb(), url.as_str()).set("authorization", &format!("Bearer {}", context.access_token));
         let response = match body {
-            // The body can hold a secret value: serialize into a buffer that
-            // is wiped once sent.
-            Some(body) => {
-                let bytes = Zeroizing::new(serde_json::to_vec(&body).map_err(|_| local(INVALID))?);
-                request.set("content-type", "application/json").send_bytes(&bytes)
-            }
+            Some(bytes) => request.set("content-type", "application/json").send_bytes(&bytes),
             None => request.call(),
         };
         match response {
@@ -134,6 +131,26 @@ fn http_error(status: u16, response: ureq::Response) -> ConfigError {
     ConfigError { code, status: Some(status), retry_after_seconds: None }
 }
 
+fn json_body(value: &impl serde::Serialize) -> Result<Zeroizing<Vec<u8>>, ConfigError> {
+    serde_json::to_vec(value).map(Zeroizing::new).map_err(|_| local(INVALID))
+}
+
+/// A secret's body, serialized straight from borrowed text so the value is
+/// never copied into a `serde_json::Value` that would not be wiped.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SecretBody<'a> {
+    value: &'a str,
+    runtime_access: &'a str,
+}
+
+/// A vault name: the naming pattern only. Whether a name may be stored is
+/// the server's call; delete and bind must still work for any stored name.
+fn is_secret_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    name.len() <= 128 && chars.next().is_some_and(|c| c.is_ascii_uppercase() || c == '_') && chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
 fn has_exact_keys(value: &Value, keys: &[&str]) -> bool {
     value.as_object().is_some_and(|object| object.len() == keys.len() && keys.iter().all(|key| object.contains_key(*key)))
 }
@@ -159,7 +176,7 @@ impl WorkspaceConfigService {
         Self { account, client: Client::new(Url::parse(base).unwrap(), Duration::from_secs(2)) }
     }
 
-    fn run(&self, expected_revision: Option<&str>, method: Method, tail: &[&str], body: Option<Value>) -> Result<Value, ConfigError> {
+    fn run(&self, expected_revision: Option<&str>, method: Method, tail: &[&str], body: Option<Zeroizing<Vec<u8>>>) -> Result<Value, ConfigError> {
         let context = self.account.context().ok_or_else(|| local("account_signed_out"))?;
         if context.organization_id.is_empty() {
             return Err(local("account_organization_unavailable"));
@@ -188,7 +205,7 @@ impl WorkspaceConfigService {
         if !has_exact_keys(layer, &keys) {
             return Err(local(INVALID));
         }
-        self.run(Some(context_revision), Method::Put, &["organization"], Some(layer.clone()))
+        self.run(Some(context_revision), Method::Put, &["organization"], Some(json_body(layer)?))
     }
 
     pub fn update_repository(&self, layer: &Value, context_revision: &str) -> Result<Value, ConfigError> {
@@ -196,7 +213,7 @@ impl WorkspaceConfigService {
         if !has_exact_keys(layer, &keys) {
             return Err(local(INVALID));
         }
-        self.run(Some(context_revision), Method::Put, &["repository"], Some(layer.clone()))
+        self.run(Some(context_revision), Method::Put, &["repository"], Some(json_body(layer)?))
     }
 
     pub fn workspace(&self, workspace_id: &str) -> Result<Value, ConfigError> {
@@ -210,7 +227,7 @@ impl WorkspaceConfigService {
         if !is_path_segment(workspace_id) || !has_exact_keys(layer, &LAYER_KEYS) {
             return Err(local(INVALID));
         }
-        self.run(Some(context_revision), Method::Put, &["workspaces", workspace_id], Some(layer.clone()))
+        self.run(Some(context_revision), Method::Put, &["workspaces", workspace_id], Some(json_body(layer)?))
     }
 
     pub fn secrets(&self) -> Result<Value, ConfigError> {
@@ -221,26 +238,26 @@ impl WorkspaceConfigService {
         if !crate::cloud_config::is_injectable_name(name) || value.is_empty() || !matches!(runtime_access, "private-workspaces" | "all-workspaces") {
             return Err(local("cloud_workspace_secret_invalid"));
         }
-        let body = json!({ "value": value.as_str(), "runtimeAccess": runtime_access });
+        let body = json_body(&SecretBody { value: value.as_str(), runtime_access })?;
         self.run(Some(context_revision), Method::Put, &["secrets", name], Some(body))
     }
 
     pub fn delete_secret(&self, name: &str, context_revision: &str) -> Result<Value, ConfigError> {
-        if !crate::cloud_config::is_injectable_name(name) {
+        if !is_secret_name(name) {
             return Err(local("cloud_workspace_secret_invalid"));
         }
         self.run(Some(context_revision), Method::Delete, &["secrets", name], None)
     }
 
     pub fn bind_secret(&self, name: &str, scope: &str, target: &str, env_name: &str, context_revision: &str) -> Result<Value, ConfigError> {
-        if !crate::cloud_config::is_injectable_name(name) || !crate::cloud_config::is_injectable_name(env_name) || !matches!(scope, "organization" | "repository" | "workspace") {
+        if !is_secret_name(name) || !crate::cloud_config::is_injectable_name(env_name) || !matches!(scope, "organization" | "repository" | "workspace") {
             return Err(local(INVALID));
         }
         self.run(
             Some(context_revision),
             Method::Post,
             &["secrets", name, "bindings"],
-            Some(json!({ "scope": scope, "target": target, "envName": env_name })),
+            Some(json_body(&json!({ "scope": scope, "target": target, "envName": env_name }))?),
         )
     }
 
@@ -345,6 +362,16 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_secret_under_a_reserved_name_can_still_be_deleted_and_bound_elsewhere() {
+        let (base, server) = serve_once("200 OK", r#"{"secrets":[],"canEdit":true}"#);
+        service(&base).delete_secret("GITHUB_TOKEN", &revision()).unwrap();
+        assert!(server.join().unwrap().starts_with("DELETE /v1/desktop/orgs/org-1/cloud-workspace-config/secrets/GITHUB_TOKEN "));
+        let (base, server) = serve_once("200 OK", r#"{"secrets":[],"canEdit":true}"#);
+        service(&base).bind_secret("GITHUB_TOKEN", "organization", "", "GH_PAT", &revision()).unwrap();
+        assert!(server.join().unwrap().contains(r#""envName":"GH_PAT""#));
+    }
+
+    #[test]
     fn binds_and_unbinds_with_the_right_routes() {
         let (base, server) = serve_once("200 OK", r#"{"secrets":[],"canEdit":true}"#);
         service(&base).bind_secret("NPM_TOKEN", "repository", "github.com/acme/app", "NPM_TOKEN", &revision()).unwrap();
@@ -364,6 +391,7 @@ mod tests {
         assert_eq!(service.update_workspace("ws_1", &layer, "stale").unwrap_err().code, "account_context_changed");
         assert_eq!(service.update_organization(&layer, &revision()).unwrap_err().code, INVALID);
         assert_eq!(service.update_workspace("../x", &layer, &revision()).unwrap_err().code, INVALID);
+        assert_eq!(service.bind_secret("GITHUB_TOKEN", "organization", "", "GITHUB_TOKEN", &revision()).unwrap_err().code, INVALID);
         assert_eq!(
             service.put_secret("HCLOUD_TOKEN", Zeroizing::new("x".into()), "all-workspaces", &revision()).unwrap_err().code,
             "cloud_workspace_secret_invalid"

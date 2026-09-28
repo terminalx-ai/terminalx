@@ -127,6 +127,28 @@ it("edits a repository layer with its own version", async () => {
   expect(await screen.findByText(/Running agent sessions are unaffected/)).toBeTruthy();
 });
 
+it("keeps unsaved organization edits when a save is refused", async () => {
+  api.updateOrganization.mockRejectedValue({ code: "cloud_workspace_config_mcp_invalid", status: 422, retryAfterSeconds: null });
+  render(<OrganizationWorkspaceConfig contextRevision="account-1" />);
+  fireEvent.change(await screen.findByLabelText("Organization prompt"), { target: { value: "New rules." } });
+  fireEvent.click(screen.getByRole("button", { name: "Save organization defaults" }));
+  expect(await screen.findByText(/An MCP server was refused/)).toBeTruthy();
+  await waitFor(() => expect(api.organization).toHaveBeenCalledTimes(2));
+  expect((screen.getByLabelText("Organization prompt") as HTMLTextAreaElement).value).toBe("New rules.");
+});
+
+it("refuses to save one repository's draft over another configured repository", async () => {
+  api.organization.mockResolvedValue(
+    view({ repositories: [...view().repositories, { ...view().repositories[0], scopeKey: "github.com/acme/b", version: 4 }] }),
+  );
+  render(<OrganizationWorkspaceConfig contextRevision="account-1" />);
+  fireEvent.click(await screen.findByRole("button", { name: "Edit github.com/acme/app" }));
+  fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "https://github.com/Acme/B.git" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save repository configuration" }));
+  expect(await screen.findByText(/github.com\/acme\/b is already configured/)).toBeTruthy();
+  expect(api.updateRepository).not.toHaveBeenCalled();
+});
+
 it("shows secrets masked, saves a value write-only and clears the field", async () => {
   api.putSecret.mockResolvedValue(vault());
   render(<OrganizationWorkspaceConfig contextRevision="account-1" />);

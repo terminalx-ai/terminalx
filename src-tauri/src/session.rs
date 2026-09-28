@@ -1321,7 +1321,12 @@ impl SessionManager {
     /// The CLI process in a PTY pane exited. Hooks normally close the turn
     /// first; when they do not, the process death is a failed automation run.
     pub fn pane_exited(&self, pane_id: &str, code: Option<i32>) {
-        crate::cloud_grants::forget_launch(pane_id);
+        // A delayed exit from a replaced pane must not forget what its
+        // successor was launched with (its grant, its configuration and MCP
+        // file).
+        if !self.terminals.is_running(pane_id) {
+            crate::cloud_grants::forget_launch(pane_id);
+        }
         let Some(tab_id) = pane_id.strip_prefix("tab:") else { return };
         let Some(entry) = index::load().ok().and_then(|sessions| sessions.into_iter().find(|session| session.tab(tab_id).is_some())) else { return };
         let Ok(rt_arc) = self.runtime(&entry.id, tab_id) else { return };

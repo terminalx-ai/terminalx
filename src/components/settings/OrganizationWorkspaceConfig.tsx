@@ -58,6 +58,14 @@ function LayerFields({ label, draft, disabled, onChange }: { label: string; draf
   );
 }
 
+const normalizeRepository = (value: string) =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/^https:\/\//, "")
+    .replace(/\.git$/, "")
+    .replace(/\/+$/, "");
+
 const parseDraft = (draft: LayerDraft) => {
   const env = parseEnvText(draft.env);
   if ("error" in env) return { error: env.error };
@@ -78,13 +86,16 @@ export function OrganizationWorkspaceConfig({ contextRevision }: { contextRevisi
   const [locked, setLocked] = useState("");
   const [repository, setRepository] = useState("");
   const [repoDraft, setRepoDraft] = useState<LayerDraft>({ env: "", prompt: "", mcp: "" });
+  // The configured repository the draft was loaded from, and its version.
+  const [repoBase, setRepoBase] = useState<{ key: string; version: number } | null>(null);
   const [secretName, setSecretName] = useState("");
   const [secretValue, setSecretValue] = useState("");
   const [secretAccess, setSecretAccess] = useState<SecretRuntimeAccess>("private-workspaces");
   const [binding, setBinding] = useState<{ name: string; scope: ConfigScope; target: string; envName: string }>({ name: "", scope: "organization", target: "", envName: "" });
   const contextEpoch = useRef(0);
 
-  const load = useCallback(async () => {
+  // A reload after a failed save keeps the admin's unsaved drafts.
+  const load = useCallback(async (resetDrafts = true) => {
     const context = contextEpoch.current;
     setLoading(true);
     try {
@@ -92,6 +103,7 @@ export function OrganizationWorkspaceConfig({ contextRevision }: { contextRevisi
       if (context !== contextEpoch.current) return;
       setView(next);
       setSecrets(vault);
+      if (!resetDrafts) return;
       setOrgDraft(layerDraft(next.organization));
       setOverrides(next.organization.memberOverrides ?? { env: true, prompt: true, mcpServers: false });
       setLocked(next.organization.lockedEnvKeys.join(", "));
@@ -128,7 +140,7 @@ export function OrganizationWorkspaceConfig({ contextRevision }: { contextRevisi
       // A draft the webview refused never left it: keep it and say why.
       const local = (failure as { code?: string; message?: string } | null)?.code === LOCAL ? (failure as { message: string }).message : null;
       setError(local ?? configErrorMessage(failure));
-      if (!local) void load();
+      if (!local) void load(false);
     } finally {
       if (context === contextEpoch.current) setBusy(null);
     }
@@ -145,7 +157,8 @@ export function OrganizationWorkspaceConfig({ contextRevision }: { contextRevisi
 
   const revision = view.contextRevision;
   const canEdit = view.canEdit;
-  const repositoryLayer = view.repositories.find((layer) => layer.scopeKey === repository.trim().toLowerCase());
+  const repositoryKey = normalizeRepository(repository);
+  const repositoryLayer = view.repositories.find((layer) => layer.scopeKey === repositoryKey);
 
   const saveOrganization = () =>
     void run("organization", async () => {
@@ -162,7 +175,13 @@ export function OrganizationWorkspaceConfig({ contextRevision }: { contextRevisi
     void run("repository", async () => {
       const parsed = parseDraft(repoDraft);
       if ("error" in parsed) throw { code: LOCAL, message: parsed.error };
-      const result = await workspaceConfig.updateRepository(repository.trim(), { expectedVersion: repositoryLayer?.version ?? 0, ...parsed.edit }, revision);
+      // Saving over a configured repository needs a draft loaded from it, so
+      // one repository's settings never silently replace another's.
+      if (repositoryLayer && repoBase?.key !== repositoryLayer.scopeKey)
+        throw { code: LOCAL, message: `${repositoryLayer.scopeKey} is already configured. Click Edit on it first so its current settings are not overwritten.` };
+      const expectedVersion = repositoryLayer && repoBase ? repoBase.version : 0;
+      const result = await workspaceConfig.updateRepository(repository.trim(), { expectedVersion, ...parsed.edit }, revision);
+      setRepoBase({ key: result.layer.scopeKey, version: result.layer.version });
       await load();
       return impactMessage(result.impact);
     });
@@ -187,7 +206,7 @@ export function OrganizationWorkspaceConfig({ contextRevision }: { contextRevisi
     <div className="rounded-lg border border-hairline p-3">
       <div className="flex items-center justify-between">
         <div className="text-sm font-medium">Workspace configuration</div>
-        <Button variant="ghost" size="icon-xs" aria-label="Refresh workspace configuration" disabled={loading} onClick={() => void load()}>
+        <Button variant="ghost" size="icon-xs" aria-label="Refresh workspace configuration" disabled={loading} onClick={() => void load(true)}>
           <RefreshCw className={loading ? "animate-spin" : undefined} />
         </Button>
       </div>
@@ -261,6 +280,7 @@ export function OrganizationWorkspaceConfig({ contextRevision }: { contextRevisi
                     onClick={() => {
                       setRepository(layer.scopeKey);
                       setRepoDraft(layerDraft(layer));
+                      setRepoBase({ key: layer.scopeKey, version: layer.version });
                     }}
                   >
                     Edit

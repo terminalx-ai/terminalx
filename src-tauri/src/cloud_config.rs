@@ -284,9 +284,10 @@ fn launch_file_name(launch: &str) -> String {
     format!("{}.json", digest.iter().take(12).map(|byte| format!("{byte:02x}")).collect::<String>())
 }
 
-fn env_var_for_header(server: &str, header: &str) -> String {
-    let clean = |text: &str| text.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' }).collect::<String>();
-    format!("TERMINALX_MCP_{}_{}", clean(server), clean(header))
+/// The variable a Codex MCP header secret travels in: numbered per launch,
+/// so two servers (or two spellings of one header) can never share one.
+fn header_var(index: usize) -> String {
+    format!("MCP_HEADER_SECRET_{index}")
 }
 
 impl ConfigStore {
@@ -448,10 +449,13 @@ impl ConfigStore {
 
     /// Claude's `--mcp-config` document; `None` for a server whose secret is
     /// unavailable.
-    fn claude_mcp_json(&self, state: &State, servers: &[McpServer], now: Instant) -> (Map<String, Value>, bool) {
+    fn claude_mcp_json(&self, state: &State, servers: &[McpServer], now: Instant, allow_secrets: bool) -> Map<String, Value> {
         let mut out = Map::new();
-        let mut uses_secret = false;
         for server in servers {
+            if !allow_secrets && server.secret_names().next().is_some() {
+                log::warn!("no tmpfs directory: MCP server {:?} needs a secret and is skipped for Claude", server.name);
+                continue;
+            }
             let resolve = |map: &Option<BTreeMap<String, String>>| -> Option<Map<String, Value>> {
                 let mut resolved = Map::new();
                 for (key, secret) in map.iter().flatten() {
@@ -462,7 +466,6 @@ impl ConfigStore {
             let entry = match server.transport.as_str() {
                 "stdio" => {
                     let Some(mut env) = resolve(&server.secret_env) else { continue };
-                    uses_secret |= !env.is_empty();
                     for (key, value) in server.env.iter().flatten() {
                         env.insert(key.clone(), Value::String(value.clone()));
                     }
@@ -474,7 +477,6 @@ impl ConfigStore {
                 }
                 "http" => {
                     let Some(mut headers) = resolve(&server.secret_headers) else { continue };
-                    uses_secret |= !headers.is_empty();
                     for (key, value) in server.headers.iter().flatten() {
                         headers.insert(key.clone(), Value::String(value.clone()));
                     }
@@ -484,13 +486,18 @@ impl ConfigStore {
             };
             out.insert(server.name.clone(), entry);
         }
-        (out, uses_secret)
+        out
     }
 
     /// Codex `-c` overrides. Secret values are passed as variables and named
     /// in the override, never written into it.
     fn codex_mcp_args(&self, state: &State, servers: &[McpServer], env: &mut Vec<(String, String)>, now: Instant) -> String {
         let mut args = String::new();
+        // Every variable already set for this session: a server whose secret
+        // would need a name that is taken (or that the runtime owns) is
+        // skipped rather than handed someone else's value.
+        let mut taken: HashMap<String, String> = env.iter().cloned().collect();
+        let mut headers_used = 0;
         for server in servers {
             let mut table = toml::Table::new();
             let mut secret_vars = Vec::new();
@@ -508,6 +515,10 @@ impl ConfigStore {
                     }
                     let mut names = Vec::new();
                     for (var, secret) in server.secret_env.iter().flatten() {
+                        if !is_injectable_name(var) || taken.contains_key(var) || secret_vars.iter().any(|(name, _)| name == var) {
+                            resolved = false;
+                            continue;
+                        }
                         match self.secret(state, secret, now) {
                             Some(value) => {
                                 secret_vars.push((var.clone(), value.to_string()));
@@ -530,7 +541,13 @@ impl ConfigStore {
                     for (header, secret) in server.secret_headers.iter().flatten() {
                         match self.secret(state, secret, now) {
                             Some(value) => {
-                                let var = env_var_for_header(&server.name, header);
+                                let var = loop {
+                                    headers_used += 1;
+                                    let candidate = header_var(headers_used);
+                                    if !taken.contains_key(&candidate) {
+                                        break candidate;
+                                    }
+                                };
                                 secret_vars.push((var.clone(), value.to_string()));
                                 from_env.insert(header.clone(), toml::Value::String(var));
                             }
@@ -544,9 +561,10 @@ impl ConfigStore {
                 _ => resolved = false,
             }
             if !resolved {
-                log::warn!("skipping MCP server {:?} for Codex: a secret it needs is unavailable", server.name);
+                log::warn!("skipping MCP server {:?} for Codex: a secret it needs is unavailable or its variable name is taken", server.name);
                 continue;
             }
+            taken.extend(secret_vars.iter().cloned());
             env.extend(secret_vars);
             let inline = toml::Value::Table(table).to_string();
             args.push_str(&format!(" -c {}", quote(&format!("mcp_servers.{}={}", server.name, inline.trim()))));
@@ -576,10 +594,9 @@ impl ConfigStore {
                     args.push_str(&format!(" --append-system-prompt {}", quote(&prompt)));
                 }
                 if !config.mcp_servers.is_empty() {
-                    let (servers, uses_secret) = self.claude_mcp_json(&state, &config.mcp_servers, now);
-                    let document = json!({ "mcpServers": servers }).to_string();
                     match self.grants.private_root() {
                         Some(root) => {
+                            let document = json!({ "mcpServers": self.claude_mcp_json(&state, &config.mcp_servers, now, true) }).to_string();
                             let dir = root.join(MCP_DIR);
                             let path = dir.join(launch_file_name(launch));
                             let written = crate::cloud_grants::prepare_private_dir(&dir).and_then(|()| crate::cloud_grants::write_private(&path, document.as_bytes()));
@@ -591,10 +608,14 @@ impl ConfigStore {
                                 Err(error) => log::warn!("write the MCP config for a new session: {error:#}"),
                             }
                         }
-                        // Without tmpfs only a document with no secret in it
-                        // may travel, and then on the command line.
-                        None if !uses_secret => args.push_str(&format!(" --mcp-config {}", quote(&document))),
-                        None => log::warn!("no tmpfs directory: MCP servers that need a secret are skipped for Claude"),
+                        // Without tmpfs only servers with no secret may travel,
+                        // and then on the command line.
+                        None => {
+                            let servers = self.claude_mcp_json(&state, &config.mcp_servers, now, false);
+                            if !servers.is_empty() {
+                                args.push_str(&format!(" --mcp-config {}", quote(&json!({ "mcpServers": servers }).to_string())));
+                            }
+                        }
                     }
                 }
             }
@@ -607,6 +628,8 @@ impl ConfigStore {
             }
             _ => {}
         }
+        // Whatever path a name took, the runtime's own never leave here.
+        env.retain(|(name, _)| is_injectable_name(name) || name.starts_with("MCP_HEADER_SECRET_"));
         state.launches.insert(launch.to_string(), config.revision.clone());
         LaunchConfig { env, args }
     }
@@ -836,11 +859,45 @@ mod tests {
     }
 
     #[test]
-    fn claude_without_tmpfs_skips_mcp_servers_that_need_secrets() {
-        let store = synced("ws-notmpfs", json!({}), Some(json!({ "NPM_TOKEN": SECRET, "SEARCH_TOKEN": OTHER_SECRET })), None);
+    fn claude_without_tmpfs_skips_only_the_mcp_servers_that_need_secrets() {
+        let (store, grants) = store("ws-notmpfs", None);
+        let inner = grants.clone();
+        let api = fake(&grants, move |thumbprint| {
+            let mut body = response(&inner, thumbprint, "rev-1", json!({}), Some(json!({ "NPM_TOKEN": SECRET, "SEARCH_TOKEN": OTHER_SECRET })));
+            body["mcpServers"].as_array_mut().unwrap().push(json!({ "name": "plain", "transport": "stdio", "command": "mcp-plain" }));
+            Ok(body)
+        });
+        store.sync(&api, &api, Instant::now(), 0).unwrap();
         let config = store.launch_config("claude", "pane", Instant::now());
-        assert!(!config.args.contains("--mcp-config"));
-        assert!(!config.args.contains(SECRET));
+        assert!(config.args.contains("--mcp-config"));
+        assert!(config.args.contains("mcp-plain"));
+        assert!(!config.args.contains("\"docs\"") && !config.args.contains("\"search\""));
+        assert!(!config.args.contains(SECRET) && !config.args.contains(OTHER_SECRET));
+    }
+
+    #[test]
+    fn codex_mcp_secrets_never_collide_or_replace_runtime_names() {
+        let (store, grants) = store("ws-collide", None);
+        let inner = grants.clone();
+        let api = fake(&grants, move |thumbprint| {
+            let mut body = response(&inner, thumbprint, "rev-1", json!({}), Some(json!({ "NPM_TOKEN": SECRET, "SEARCH_TOKEN": OTHER_SECRET })));
+            body["mcpServers"] = json!([
+                { "name": "a", "transport": "stdio", "command": "a", "secretEnv": { "API_KEY_A": "NPM_TOKEN" } },
+                { "name": "b", "transport": "stdio", "command": "b", "secretEnv": { "API_KEY_A": "SEARCH_TOKEN" } },
+                { "name": "home", "transport": "stdio", "command": "c", "secretEnv": { "CODEX_HOME": "NPM_TOKEN" } },
+                { "name": "my-search", "transport": "http", "url": "https://a.example", "secretHeaders": { "X-Key": "NPM_TOKEN" } },
+                { "name": "my_search", "transport": "http", "url": "https://b.example", "secretHeaders": { "X_Key": "SEARCH_TOKEN" } }
+            ]);
+            Ok(body)
+        });
+        store.sync(&api, &api, Instant::now(), 0).unwrap();
+        let config = store.launch_config("codex", "pane", Instant::now());
+        assert!(config.args.contains("mcp_servers.a=") && !config.args.contains("mcp_servers.b="));
+        assert!(!config.args.contains("mcp_servers.home="));
+        assert!(!config.env.iter().any(|(name, _)| name == "CODEX_HOME"));
+        assert_eq!(config.env.iter().filter(|(name, _)| name == "API_KEY_A").count(), 1);
+        assert!(config.env.contains(&("MCP_HEADER_SECRET_1".into(), SECRET.into())));
+        assert!(config.env.contains(&("MCP_HEADER_SECRET_2".into(), OTHER_SECRET.into())));
     }
 
     #[test]
@@ -850,10 +907,10 @@ mod tests {
         assert!(config.args.contains("developer_instructions="));
         assert!(config.args.contains("mcp_servers.docs="));
         assert!(config.args.contains("env_vars = [\"DOCS_KEY\"]"));
-        assert!(config.args.contains("env_http_headers = { Authorization = \"TERMINALX_MCP_SEARCH_AUTHORIZATION\" }"));
+        assert!(config.args.contains("env_http_headers = { Authorization = \"MCP_HEADER_SECRET_1\" }"));
         assert!(!config.args.contains(SECRET) && !config.args.contains(OTHER_SECRET));
         assert!(config.env.contains(&("DOCS_KEY".into(), SECRET.into())));
-        assert!(config.env.contains(&("TERMINALX_MCP_SEARCH_AUTHORIZATION".into(), OTHER_SECRET.into())));
+        assert!(config.env.contains(&("MCP_HEADER_SECRET_1".into(), OTHER_SECRET.into())));
     }
 
     #[test]
