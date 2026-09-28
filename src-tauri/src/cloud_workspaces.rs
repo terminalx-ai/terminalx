@@ -13,7 +13,6 @@ use url::Url;
 
 use crate::account::{AccountContext, AccountManager};
 
-const ACCOUNT_BASE_URL: &str = "https://login.terminalx.ai";
 const CONTRACT: &str = "providers-v1";
 const SUPPORTED_PROVIDERS: &str = "machine0,box";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -559,7 +558,7 @@ struct Client {
 impl Client {
     fn production() -> Self {
         Self {
-            base: Url::parse(ACCOUNT_BASE_URL).expect("valid account service URL"),
+            base: Url::parse(&crate::account::api_base_url()).expect("valid account service URL"),
             timeout: REQUEST_TIMEOUT,
         }
     }
@@ -890,6 +889,36 @@ impl CloudWorkspaceService {
                 Some(workspace_id),
                 RequestRisk::Mutation,
             )
+        })
+    }
+
+    /// `POST .../cloud-workspaces/:id/open?attachTicket=1`: the attachment
+    /// for this installation, with its pairing code and an attach ticket once
+    /// the runtime answered it (PRO-13). Returns the organization it was
+    /// made for, so the caller can refuse a response from a switched account.
+    pub fn open_attachment(
+        &self,
+        workspace_id: &str,
+        client_installation_id: &str,
+        refresh_pairing: bool,
+    ) -> Result<(String, Value), CloudWorkspaceClientError> {
+        if !valid_resource_id(workspace_id) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        self.run(RequestRisk::Mutation, |client, context| {
+            let mut body = json!({ "clientInstallationId": client_installation_id });
+            if refresh_pairing {
+                body["refreshPairing"] = json!(true);
+            }
+            let result: Value = client.request(
+                context,
+                &["cloud-workspaces", workspace_id, "open"],
+                Some(("attachTicket", "1")),
+                Some(body),
+                None,
+                RequestRisk::Mutation,
+            )?;
+            Ok((context.organization_id.clone(), result))
         })
     }
 

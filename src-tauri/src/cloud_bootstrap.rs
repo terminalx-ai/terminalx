@@ -123,6 +123,11 @@ impl HostKey {
         general_purpose::STANDARD.encode(self.public)
     }
 
+    /// The secret, for the relay host's proof and E2EE (PRO-13).
+    pub(crate) fn secret(&self) -> [u8; 32] {
+        self.secret
+    }
+
     /// Matches the server's `deriveRelayHostId`.
     pub fn relay_host_id(&self) -> String {
         general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(self.public))[..16].to_string()
@@ -299,6 +304,9 @@ pub struct Bootstrapped {
     pub key: HostKey,
     pub session: Mutex<Session>,
     credential: Zeroizing<String>,
+    /// Set while the server rejects the runtime credential (the workspace
+    /// was revoked or rotated); the relay host stops serving meanwhile.
+    rejected: std::sync::atomic::AtomicBool,
     // Held for the life of the process: one runtime per state directory.
     _lock: StateLock,
 }
@@ -362,7 +370,7 @@ pub fn establish(config: &Config, api: &dyn Api, policy: &Policy) -> Result<Boot
     let started = Instant::now();
     loop {
         let (error, rejected) = match attempt(config, api, &key) {
-            Ok((session, credential)) => return Ok(Bootstrapped { key, session: Mutex::new(session), credential, _lock: lock }),
+            Ok((session, credential)) => return Ok(Bootstrapped { key, session: Mutex::new(session), credential, rejected: std::sync::atomic::AtomicBool::new(false), _lock: lock }),
             Err(Failure::Fatal(error)) => return Err(error),
             Err(Failure::Retry { error, rejected }) => (error, rejected),
         };
@@ -464,7 +472,14 @@ fn attempt(config: &Config, api: &dyn Api, key: &HostKey) -> Result<(Session, Ze
 impl Bootstrapped {
     /// Refresh once, replacing the session on success.
     pub fn refresh(&self, api: &dyn Api) -> Result<(), CallError> {
-        let refreshed = api.refresh(&self.credential)?;
+        let refreshed = match api.refresh(&self.credential) {
+            Err(CallError::Rejected) => {
+                self.rejected.store(true, std::sync::atomic::Ordering::SeqCst);
+                return Err(CallError::Rejected);
+            }
+            other => other?,
+        };
+        self.rejected.store(false, std::sync::atomic::Ordering::SeqCst);
         let relay_host_id = self.key.relay_host_id();
         let session = session_from_refresh(refreshed, &relay_host_id).map_err(CallError::Transient)?;
         let mut current = self.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -475,13 +490,32 @@ impl Bootstrapped {
         Ok(())
     }
 
+    /// Whether the server currently rejects the runtime credential.
+    pub fn is_rejected(&self) -> bool {
+        self.rejected.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Publish the pairing code the relay host made for an attachment
+    /// (`POST /v1/cloud-workspace-bootstrap/attachments/:id/complete`, PRO-13).
+    pub fn complete_attachment(&self, api: &HttpApi, attachment_id: &str, pairing_code: &str) -> Result<(), CallError> {
+        if !attachment_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')) || attachment_id.is_empty() || attachment_id.len() > 128 {
+            return Err(CallError::Transient(anyhow!("invalid attachment id")));
+        }
+        let _: serde_json::Value = api.post(
+            &format!("/v1/cloud-workspace-bootstrap/attachments/{attachment_id}/complete"),
+            &self.credential,
+            serde_json::json!({ "pairingCode": pairing_code }),
+            None,
+        )?;
+        Ok(())
+    }
+
     /// Keep the relay token fresh in the background until the process ends.
     pub fn spawn_refresh_loop(self: Arc<Self>, api: Arc<dyn Api + Send + Sync>) {
         let spawned = std::thread::Builder::new().name("cloud-refresh".into()).spawn(move || loop {
             std::thread::sleep(REFRESH_INTERVAL);
             if let Err(error) = self.refresh(api.as_ref()) {
-                // TODO(PRO-13): a rejected credential means the workspace was
-                // revoked; stop serving the relay once it is registered.
+                // A rejection also sets `rejected`, which stops the relay host.
                 log::warn!("refresh the cloud workspace session: {}", describe(&error));
             }
         });

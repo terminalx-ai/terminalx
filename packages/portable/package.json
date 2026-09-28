@@ -8,6 +8,7 @@
     "./dashboard": "./src/dashboard.ts",
     "./events": "./src/events.ts",
     "./rpc": "./src/rpc.ts",
-    "./transcript": "./src/transcript.ts"
+    "./transcript": "./src/transcript.ts",
+    "./workspace": "./src/workspace.ts"
   }
 }

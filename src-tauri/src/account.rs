@@ -21,6 +21,32 @@ use uuid::Uuid;
 pub const STATUS_EVENT: &str = "account_status";
 
 const API_BASE_URL: &str = "https://login.terminalx.ai";
+/// Debug builds only: point the account service (and everything built on it,
+/// such as cloud workspaces) at a local stack, e.g. terminalx-saas
+/// `bun run cloud:local:up` at `http://127.0.0.1:42220`.
+pub const DEV_API_BASE_URL_ENV: &str = "TERMINALX_DEV_API_BASE_URL";
+
+/// The account service origin. A release build always uses production; a
+/// debug build honors [`DEV_API_BASE_URL_ENV`] when it is an HTTPS origin or
+/// a loopback HTTP one.
+pub(crate) fn api_base_url() -> String {
+    dev_api_base_url(cfg!(debug_assertions), std::env::var(DEV_API_BASE_URL_ENV).ok().as_deref())
+        .unwrap_or_else(|| API_BASE_URL.to_string())
+}
+
+fn dev_api_base_url(debug_build: bool, value: Option<&str>) -> Option<String> {
+    if !debug_build {
+        return None;
+    }
+    let url = Url::parse(value?.trim()).ok()?;
+    let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
+    let allowed = url.scheme() == "https" || (url.scheme() == "http" && loopback);
+    if !allowed || url.path() != "/" || url.query().is_some() || !url.username().is_empty() {
+        log::warn!("ignoring {DEV_API_BASE_URL_ENV}: expected an HTTPS or loopback HTTP origin");
+        return None;
+    }
+    Some(url.origin().ascii_serialization())
+}
 const AUTHORIZE_PATH: &str = "/v1/desktop/auth/authorize";
 const SESSION_PATH: &str = "/v1/desktop/auth/session";
 const REFRESH_PATH: &str = "/v1/desktop/auth/refresh";
@@ -247,6 +273,13 @@ impl AccountManager {
             relay_entitled: session.capabilities.flags.get("relay.use") == Some(&true),
             generation: inner.generation,
         })
+    }
+
+    /// The signed-in user and active organization as last loaded, without a
+    /// Keychain load or token refresh: cheap enough to poll.
+    pub(crate) fn current_identity(&self) -> Option<(String, String)> {
+        let inner = self.inner.lock().unwrap();
+        inner.session.as_ref().map(|session| (session.cloud.user_id.clone(), session.cloud.active_org_id.clone().unwrap_or_default()))
     }
 
     /// Fence native service responses against sign-out or account replacement.
@@ -731,7 +764,7 @@ fn code_challenge(verifier: &str) -> String {
 }
 
 fn authorize_url(pending: &PendingAuth) -> Result<Url> {
-    let mut url = Url::parse(&format!("{API_BASE_URL}{AUTHORIZE_PATH}"))?;
+    let mut url = Url::parse(&format!("{}{AUTHORIZE_PATH}", api_base_url()))?;
     url.query_pairs_mut()
         .append_pair("client_id", CLIENT_ID)
         .append_pair("response_type", "code")
@@ -746,7 +779,7 @@ fn authorize_url(pending: &PendingAuth) -> Result<Url> {
 }
 
 fn endpoint(path: &str) -> String {
-    format!("{API_BASE_URL}{path}")
+    format!("{}{path}", api_base_url())
 }
 
 fn exchange_code(pending: &PendingAuth, code: &str) -> Result<DesktopSession, CloudError> {
@@ -1098,5 +1131,15 @@ mod tests {
     #[test]
     fn default_keychain_service_is_application_scoped() {
         assert_eq!(keychain_service_name("com.example.test"), "com.example.test.account");
+    }
+
+    #[test]
+    fn dev_api_base_url_is_debug_only_and_origin_only() {
+        assert_eq!(dev_api_base_url(true, Some("http://127.0.0.1:42220")).as_deref(), Some("http://127.0.0.1:42220"));
+        assert_eq!(dev_api_base_url(true, Some("https://staging.example/")).as_deref(), Some("https://staging.example"));
+        assert_eq!(dev_api_base_url(false, Some("http://127.0.0.1:42220")), None, "release builds ignore it");
+        assert_eq!(dev_api_base_url(true, Some("http://api.example")), None, "plain HTTP only on loopback");
+        assert_eq!(dev_api_base_url(true, Some("https://api.example/v1")), None);
+        assert_eq!(dev_api_base_url(true, None), None);
     }
 }

@@ -15,8 +15,6 @@ use url::Url;
 
 use crate::account::{AccountContext, AccountManager};
 
-// Same service as `pairing::cloud::ACCOUNT_BASE_URL` and the cloud workspace client.
-const ACCOUNT_BASE_URL: &str = "https://login.terminalx.ai";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const RESPONSE_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_RETRY_AFTER_SECONDS: u64 = 60 * 60;
@@ -198,7 +196,7 @@ impl OrganizationMembersService {
     pub fn new(account: Arc<AccountManager>) -> Self {
         Self {
             account,
-            client: Client::new(Url::parse(ACCOUNT_BASE_URL).expect("valid account service URL"), REQUEST_TIMEOUT),
+            client: Client::new(Url::parse(&crate::account::api_base_url()).expect("valid account service URL"), REQUEST_TIMEOUT),
         }
     }
 
