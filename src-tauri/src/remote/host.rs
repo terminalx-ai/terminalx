@@ -36,7 +36,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const SILENCE_TIMEOUT: Duration = Duration::from_secs(90);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 /// Answered from their own task (see `serve_connection`).
-const SLOW_METHODS: &[&str] = &["git.push", "git.pull", "git.commit", "git.checkout", "session.create", "session.send", "session.close"];
+const SLOW_METHODS: &[&str] =
+    &["git.push", "git.pull", "git.commit", "git.checkout", "session.create", "session.send", "session.close", "fs.search"];
 
 /// One pending attachment, as `/v1/cloud-workspace-bootstrap/refresh` lists it.
 #[derive(Clone, Deserialize)]

@@ -29,6 +29,7 @@ export const MUTATING_METHODS = new Set([
   "session.configure",
   "pty.create",
   "fs.write",
+  "fs.writePart",
   "fs.rename",
   "fs.delete",
   "fs.mkdir",
@@ -534,6 +535,30 @@ export class WorkspaceRpcClient {
   /** Ask the runtime to poll the command mailbox now rather than at its next interval. */
   async nudgeMailbox(): Promise<void> {
     await this.call("session.nudge", {});
+  }
+
+  /**
+   * Changes under a workspace directory (`fs.watch`). `onChange` gets the
+   * changed workspace-relative paths, or null after a reconnect, when
+   * changes made while away were not seen and everything shown should be
+   * re-read.
+   */
+  watchFiles(path: string, onChange: (paths: string[] | null) => void): Promise<() => void> {
+    let resumed = false;
+    return this.subscribe({
+      method: "fs.watch",
+      params: { path },
+      resumeParams: () => ({}),
+      onReplay: () => {
+        if (resumed) onChange(null);
+        resumed = true;
+      },
+      listener: (notification) => {
+        if (notification.event !== "fs.changed") return;
+        const paths = notification.params.paths;
+        if (Array.isArray(paths)) onChange(paths.filter((entry): entry is string => typeof entry === "string"));
+      },
+    });
   }
 
   /** Every notification the runtime sends, including broadcasts such as `session.tabs`. */

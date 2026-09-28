@@ -85,6 +85,10 @@ pub const METHODS: &[Method] = &[
     method("fs.stat", "fs/1", Participate, false),
     method("fs.read", "fs/1", Participate, false),
     method("fs.write", "fs/1", Manage, true),
+    // PRO-24: large writes are staged part by part, then committed by fs.write.
+    method("fs.writePart", "fs/1", Manage, true),
+    method("fs.search", "fs/1", Participate, false),
+    method("fs.cancel", "fs/1", Participate, false),
     method("fs.rename", "fs/1", Manage, true),
     method("fs.delete", "fs/1", Manage, true),
     method("fs.mkdir", "fs/1", Manage, true),

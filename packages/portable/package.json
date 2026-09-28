@@ -9,6 +9,7 @@
     "./events": "./src/events.ts",
     "./rpc": "./src/rpc.ts",
     "./transcript": "./src/transcript.ts",
-    "./workspace": "./src/workspace.ts"
+    "./workspace": "./src/workspace.ts",
+    "./workspaceFiles": "./src/workspaceFiles.ts"
   }
 }

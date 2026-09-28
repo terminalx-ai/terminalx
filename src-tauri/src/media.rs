@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, LazyLock},
+    sync::Arc,
 };
 
 use axum::{
@@ -15,25 +15,14 @@ use axum::{
 };
 use futures_util::StreamExt;
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::{
     io::{AsyncReadExt, AsyncSeekExt},
     sync::OnceCell,
 };
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
 
-#[derive(Deserialize)]
-pub struct MediaType {
-    pub mime: String,
-}
-
-pub fn media_type(path: &Path) -> Option<&'static MediaType> {
-    static TYPES: LazyLock<HashMap<String, MediaType>> = LazyLock::new(|| {
-        serde_json::from_str(include_str!("../../src/lib/mediaTypes.json"))
-            .expect("valid media format table")
-    });
-    TYPES.get(&path.extension()?.to_str()?.to_ascii_lowercase())
-}
+pub use crate::media_types::media_type;
 
 struct Grant {
     path: PathBuf,

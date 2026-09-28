@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { fs, type DirEntry } from "@/lib/api";
+import { fs } from "@/lib/api";
 import { useWorkingChanges } from "@/lib/changes";
 import { getDraft, setDraft } from "@/lib/drafts";
 import { openFile, useEditors } from "@/lib/editors";
+import { fileErrorText, StaleRequestError, type FileSource, type SourceEntry } from "@/lib/workspaceFiles";
 import { cn } from "@/lib/cn";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "@/components/ui/menu";
 import type { ChangeStatus } from "@/types/session";
@@ -15,6 +16,8 @@ interface Row {
   name: string;
   isDir: boolean;
   depth: number;
+  /** A symlink out of the workspace: listed, never opened. */
+  escapes?: boolean;
 }
 
 interface FileTreeViewProps {
@@ -28,6 +31,8 @@ interface FileTreeViewProps {
   /** Any string that changes when an agent's status does; bumps the git refresh. */
   statusKey?: string;
   refreshTick?: number;
+  /** A cloud workspace's files (PRO-24); the local checkout at `root` when absent. */
+  source?: FileSource;
 }
 
 const BADGE: Record<ChangeStatus, string> = { added: "A", modified: "M", deleted: "D", renamed: "R" };
@@ -47,7 +52,7 @@ const TINT: Record<ChangeStatus, string> = {
  * usual file actions.
  */
 export function FileTreeView(props: FileTreeViewProps) {
-  return <RootedFileTreeView key={props.root} {...props} />;
+  return <RootedFileTreeView key={`${props.source?.key ?? "local"}:${props.root}`} {...props} />;
 }
 
 function RootedFileTreeView({
@@ -59,8 +64,9 @@ function RootedFileTreeView({
   mentionTabId,
   statusKey = "",
   refreshTick = 0,
+  source,
 }: FileTreeViewProps) {
-  const [children, setChildren] = useState<Record<string, DirEntry[] | undefined>>({});
+  const [children, setChildren] = useState<Record<string, SourceEntry[] | undefined>>({});
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set([""]));
   const [error, setError] = useState<string | null>(null);
   const [focus, setFocus] = useState<string>("");
@@ -72,14 +78,27 @@ function RootedFileTreeView({
   const load = useCallback(
     async (rel: string) => {
       try {
-        const list = await fs.listDir(root, rel);
+        const list: SourceEntry[] = source ? await source.listDir(rel) : await fs.listDir(root, rel);
         setChildren((c) => ({ ...c, [rel]: list }));
         setError(null);
       } catch (e) {
-        setError(String(e));
+        if (e instanceof StaleRequestError) return;
+        if (source) {
+          // A directory that went away (deleted by an agent) just closes.
+          if (rel && typeof e === "object" && e && "code" in e && e.code === "not_found") {
+            setChildren((c) => ({ ...c, [rel]: undefined }));
+            setExpanded((x) => {
+              const n = new Set(x);
+              n.delete(rel);
+              return n;
+            });
+            return;
+          }
+          setError(fileErrorText(e));
+        } else setError(String(e));
       }
     },
-    [root],
+    [root, source],
   );
 
   // First listing on show; a refresh re-lists every directory still open.
@@ -93,15 +112,45 @@ function RootedFileTreeView({
     setTick((t) => t + 1);
   }, [refreshTick]);
 
+  // A cloud workspace says what changed: re-list the open directories that
+  // hold a changed path (all of them after a reconnect) and re-read Git
+  // status, a beat later so a burst of writes is one refresh.
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
+  useEffect(() => {
+    if (!active || !source?.watch) return;
+    let timer: number | undefined;
+    const pending = new Set<string>();
+    let everything = false;
+    const stop = source.watch((paths) => {
+      if (paths === null) everything = true;
+      else for (const path of paths) pending.add(path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "");
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        for (const rel of expandedRef.current) if (everything || pending.has(rel)) void load(rel);
+        pending.clear();
+        everything = false;
+        setTick((t) => t + 1);
+      }, 300);
+    });
+    return () => {
+      window.clearTimeout(timer);
+      stop();
+    };
+  }, [active, source, load]);
+
   // Git status: cheap enough to poll gently while the tree is on screen, and
   // re-read the moment an agent's status changes, which is when files move.
+  // A cloud workspace's is re-read on its change notifications instead.
   useEffect(() => {
-    if (!active || !isGit) return;
+    if (!active || !isGit || source) return;
     setTick((t) => t + 1);
     const id = window.setInterval(() => setTick((t) => t + 1), 5000);
     return () => window.clearInterval(id);
   }, [active, statusKey, isGit]);
-  const changes = useWorkingChanges(root, active && isGit, tick);
+  const localChanges = useWorkingChanges(root, active && isGit && !source, tick);
+  const cloudChanges = useSourceChanges(source, active && isGit, tick);
+  const changes = source ? cloudChanges : localChanges;
   const { fileStatus, dirsWithChanges } = useMemo(() => {
     const fileStatus = new Map<string, ChangeStatus>();
     const dirsWithChanges = new Set<string>();
@@ -135,7 +184,7 @@ function RootedFileTreeView({
       const list = children[rel];
       if (!list) return;
       for (const e of list) {
-        out.push({ path: e.path, name: e.name, isDir: e.isDir, depth });
+        out.push({ path: e.path, name: e.name, isDir: e.isDir, depth, escapes: e.escapes });
         if (e.isDir && expanded.has(e.path)) walk(e.path, depth + 1);
       }
     };
@@ -146,10 +195,11 @@ function RootedFileTreeView({
   const activate = useCallback(
     (row: Row) => {
       setFocus(row.path);
+      if (row.escapes) return;
       if (row.isDir) toggle(row.path);
-      else openFile(sessionId, root, row.path);
+      else openFile(sessionId, root, row.path, undefined, root, source?.key);
     },
-    [sessionId, root, toggle],
+    [sessionId, root, toggle, source],
   );
 
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -254,17 +304,23 @@ function RootedFileTreeView({
                   <span className="w-3 shrink-0" />
                 )}
                 <FileTypeIcon name={row.name} isDir={row.isDir} isOpen={open} isRoot={row.path === ""} size={16} className="shrink-0" />
-                <span className={cn("min-w-0 flex-1 truncate", row.path === "" && "font-medium text-foreground", status && TINT[status])}>{row.name}</span>
+                <span
+                  className={cn("min-w-0 flex-1 truncate", row.path === "" && "font-medium text-foreground", status && TINT[status], row.escapes && "italic text-faint")}
+                  title={row.escapes ? "A link outside the workspace. It is not followed." : undefined}
+                >
+                  {row.name}
+                </span>
+                {row.escapes && <span className="shrink-0 text-[10px] text-faint">link outside</span>}
                 {status && <span className={cn("shrink-0 text-[10px] font-medium tabular-nums", TINT[status])}>{BADGE[status]}</span>}
                 {dirty && <span aria-label="Contains changes" className="size-1.5 shrink-0 rounded-full bg-warning/80" />}
               </div>
             </ContextMenuTrigger>
             <ContextMenuContent>
-              {!row.isDir && <ContextMenuItem onSelect={() => openFile(sessionId, root, row.path)}>Open</ContextMenuItem>}
+              {!row.isDir && !row.escapes && <ContextMenuItem onSelect={() => activate(row)}>Open</ContextMenuItem>}
               {row.isDir && row.path !== "" && <ContextMenuItem onSelect={() => toggle(row.path)}>{open ? "Collapse" : "Expand"}</ContextMenuItem>}
-              <ContextMenuItem onSelect={() => void revealItemInDir(abs(row.path)).catch(() => {})}>Reveal in Finder</ContextMenuItem>
+              {!source && <ContextMenuItem onSelect={() => void revealItemInDir(abs(row.path)).catch(() => {})}>Reveal in Finder</ContextMenuItem>}
               <ContextMenuSeparator />
-              <ContextMenuItem onSelect={() => copy(abs(row.path))}>Copy path</ContextMenuItem>
+              {!source && <ContextMenuItem onSelect={() => copy(abs(row.path))}>Copy path</ContextMenuItem>}
               <ContextMenuItem disabled={row.path === ""} onSelect={() => copy(row.path)}>
                 Copy relative path
               </ContextMenuItem>
@@ -278,4 +334,21 @@ function RootedFileTreeView({
       {children[""] !== undefined && !children[""]?.length && <div className="px-3 py-2 text-xs text-faint">Empty.</div>}
     </div>
   );
+}
+
+/** A cloud workspace's Git status as the tree badges it. */
+function useSourceChanges(source: FileSource | undefined, active: boolean, tick: number) {
+  const [files, setFiles] = useState<{ path: string; status: ChangeStatus }[]>([]);
+  useEffect(() => {
+    if (!source?.changes || !active) return;
+    let cancelled = false;
+    source
+      .changes()
+      .then((next) => !cancelled && setFiles(next))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [source, active, tick]);
+  return { files };
 }

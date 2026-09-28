@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import mediaTypes from "./mediaTypes.json";
 import { extOf, fileName } from "@/lib/paths";
+import { discardStashedBuffers } from "@/lib/workspaceFiles";
 
 /**
  * Open files per session. They live in an editor pane beside the transcript,
@@ -26,6 +27,11 @@ export interface EditorEntry {
   workspaceRoot: string;
   /** Absolute project root the relative path hangs off. */
   root: string;
+  /**
+   * The file source (lib/workspaceFiles) for a cloud workspace's file; the
+   * local checkout at `root` when absent.
+   */
+  source?: string;
   rel: string;
   name: string;
   dirty: boolean;
@@ -80,7 +86,7 @@ let nonce = 0;
  * Open (or focus) a file in the session's pane. A jump target implies the
  * reader wants a line, which only source can show, so it forces source mode.
  */
-export function openFile(sessionId: string, root: string, rel: string, at?: { line: number; col?: number }, workspaceRoot = root) {
+export function openFile(sessionId: string, root: string, rel: string, at?: { line: number; col?: number }, workspaceRoot = root, source?: string) {
   const existing = state.editors.find((e) => e.sessionId === sessionId && e.root === root && e.rel === rel);
   const kind = fileKind(rel);
   const jump = at && kind === "text" ? { ...at, nonce: ++nonce } : undefined;
@@ -99,6 +105,7 @@ export function openFile(sessionId: string, root: string, rel: string, at?: { li
     sessionId,
     workspaceRoot,
     root,
+    ...(source ? { source } : {}),
     rel,
     name: fileName(rel),
     dirty: false,
@@ -131,6 +138,7 @@ export async function closeEditor(id: string) {
   const e = state.editors.find((x) => x.id === id);
   if (!e) return;
   if (e.dirty && !(await confirmDiscard([e.name]))) return;
+  discardStashedBuffers([id]);
   const rest = state.editors.filter((x) => x.id !== id);
   const siblings = rest.filter((x) => x.sessionId === e.sessionId);
   const wasActive = state.active[e.sessionId] === id;
@@ -148,10 +156,21 @@ export async function closeAllEditors(sessionId: string) {
   const mine = state.editors.filter((x) => x.sessionId === sessionId);
   if (!mine.length) return;
   if (!(await confirmDiscard(mine.filter((x) => x.dirty).map((x) => x.name)))) return;
+  discardStashedBuffers(mine.map((x) => x.id));
   set({
     editors: state.editors.filter((x) => x.sessionId !== sessionId),
     active: { ...state.active, [sessionId]: null },
   });
+}
+
+/** Drop editors without asking, e.g. a signed-out identity's cloud files. */
+export function dropEditors(match: (entry: EditorEntry) => boolean) {
+  const gone = state.editors.filter(match);
+  if (!gone.length) return;
+  discardStashedBuffers(gone.map((e) => e.id));
+  const active = { ...state.active };
+  for (const e of gone) if (active[e.sessionId] === e.id) active[e.sessionId] = null;
+  set({ editors: state.editors.filter((e) => !match(e)), active });
 }
 
 export function setActiveEditor(sessionId: string, id: string | null) {

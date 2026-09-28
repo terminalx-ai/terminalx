@@ -20,11 +20,12 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Segmented } from "@/components/ui/controls";
 import { Markdown } from "@/components/chat/Markdown";
 import { Button } from "@/components/ui/button";
-import { api, fs } from "@/lib/api";
+import { api } from "@/lib/api";
 import { registerLiveEditor } from "@/lib/editorViews";
 import { languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
 import { diffLines } from "@/lib/diff";
-import { clearJump, editorLinkContext, isMarkdown, setEditorDirty, setViewMode, type EditorEntry, type ViewMode } from "@/lib/editors";
+import { clearJump, editorLinkContext, getEditors, isMarkdown, setEditorDirty, setViewMode, type EditorEntry, type ViewMode } from "@/lib/editors";
+import { changedSince, fileErrorText, isConflict, stashBuffer, takeStashedBuffer, useFileSource, type FileState } from "@/lib/workspaceFiles";
 import { keycaps } from "@/lib/hotkeys";
 import { cn } from "@/lib/cn";
 import { FindBar, findPanel, type FindPanelHandle } from "./FindPanel";
@@ -99,29 +100,40 @@ function gitMarks(head: string, now: string): Map<number, Mark> {
 
 /**
  * A file open for editing. ⌘S saves; the tab shows a dot while the buffer
- * differs from disk. Every two seconds the file's mtime is compared with the
- * one last read: a clean buffer follows the disk silently, a dirty one shows
- * a banner and lets the reader choose.
+ * differs from disk. A local file's mtime is compared with the one last read
+ * every two seconds; a cloud workspace's file (PRO-24) is re-checked when
+ * the runtime reports it changed, and after every reconnect. A clean buffer
+ * follows the file silently, a dirty one shows a banner and lets the reader
+ * choose. A cloud save is conditional on the content the buffer was based
+ * on, so an edit made meanwhile (by an agent, or another device) is never
+ * overwritten without an explicit choice, and an unsaved cloud buffer
+ * survives reconnects and the workspace page closing.
  */
 export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: boolean }) {
   const host = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const savedDoc = useRef<string>("");
-  const mtime = useRef<number>(0);
+  const fileState = useRef<FileState>({ version: "" });
   const headDoc = useRef<string | null>(null);
-  const [status, setStatus] = useState<"loading" | "ready" | "binary" | "error">("loading");
+  const [status, setStatus] = useState<"loading" | "ready" | "binary" | "error" | "offline">("loading");
   const [error, setError] = useState<string | null>(null);
   const [changedOnDisk, setChangedOnDisk] = useState(false);
+  // A cloud save was refused: the file changed since the buffer was read.
+  const [conflict, setConflict] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [truncated, setTruncated] = useState(false);
   // The ⌘F bar while it is open; its element belongs to CodeMirror, its contents to React.
   const [find, setFind] = useState<FindPanelHandle | null>(null);
   // The buffer as text, for the markdown preview; refreshed a beat after edits.
   const [docText, setDocText] = useState("");
+  const source = useFileSource(entry.source, entry.root);
+  const cloud = source?.kind === "cloud";
+  const readOnly = !!source?.readOnly;
   const abs = `${entry.root}/${entry.rel}`;
   const markdown = isMarkdown(entry.rel);
   const preview = markdown && entry.viewMode === "preview";
   const linkContext = useMemo(() => editorLinkContext(entry), [entry]);
+  const describeError = useCallback((e: unknown) => (cloud ? fileErrorText(e) : String(e)), [cloud]);
 
   const updateMarks = useCallback(() => {
     const view = viewRef.current;
@@ -129,59 +141,99 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
     view.dispatch({ effects: setMarks.of(gitMarks(headDoc.current, view.state.doc.toString())) });
   }, []);
 
-  const save = useCallback(async () => {
-    const view = viewRef.current;
-    if (!view) return;
-    const text = view.state.doc.toString();
-    try {
-      mtime.current = await fs.writeText(abs, text);
+  const markSaved = useCallback(
+    (text: string, state: FileState) => {
+      fileState.current = state;
       savedDoc.current = text;
       setDirty(false);
       setEditorDirty(entry.id, false);
       setChangedOnDisk(false);
+      setConflict(false);
       setError(null);
+    },
+    [entry.id],
+  );
+
+  /** `base`: the content hash the save is conditional on; the buffer's own by default. */
+  const write = useCallback(
+    async (base: string | undefined) => {
+      const view = viewRef.current;
+      if (!view || !source || source.readOnly) return;
+      const text = view.state.doc.toString();
+      try {
+        markSaved(text, await source.writeText(entry.rel, text, base));
+      } catch (e) {
+        if (isConflict(e)) setConflict(true);
+        else setError(describeError(e));
+      }
+    },
+    [source, entry.rel, markSaved, describeError],
+  );
+
+  const save = useCallback(() => write(fileState.current.etag), [write]);
+
+  /** Resolve a conflict in favour of the buffer: overwrite what is there now, knowingly. */
+  const overwrite = useCallback(async () => {
+    if (!source) return;
+    try {
+      const now = await source.stat(entry.rel);
+      // Gone meanwhile: recreate it, still refusing if it reappears first.
+      await write(now ? (now.etag ?? fileState.current.etag) : undefined);
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e));
     }
-  }, [abs, entry.id]);
+  }, [source, entry.rel, write, describeError]);
 
   const reloadFromDisk = useCallback(async () => {
     const view = viewRef.current;
-    if (!view) return;
+    if (!view || !source) return;
     try {
-      const f = await fs.readText(abs);
-      mtime.current = f.mtimeMs;
-      savedDoc.current = f.content;
+      const f = await source.readText(entry.rel);
       view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: f.content } });
       setDocText(f.content);
-      setDirty(false);
-      setEditorDirty(entry.id, false);
-      setChangedOnDisk(false);
+      markSaved(f.content, { version: f.version, etag: f.etag });
       updateMarks();
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e));
     }
-  }, [abs, entry.id, updateMarks]);
+  }, [source, entry.rel, markSaved, updateMarks, describeError]);
 
-  // Mount: read the file, build the editor, fetch HEAD for the gutter.
+  // Mount: read the file (or restore an unsaved cloud buffer), build the
+  // editor, fetch HEAD for the gutter.
   useEffect(() => {
     const el = host.current;
     if (!el) return;
+    if (!source) {
+      setStatus("offline");
+      return;
+    }
     let cancelled = false;
     let markTimer: number | undefined;
     let unregister: (() => void) | undefined;
     (async () => {
       try {
-        const f = await fs.readText(abs);
-        if (cancelled) return;
-        if (f.binary) {
-          setStatus("binary");
-          return;
+        const stash = source.kind === "cloud" ? takeStashedBuffer(entry.id) : undefined;
+        let doc: string;
+        if (stash) {
+          doc = stash.text;
+          savedDoc.current = stash.saved;
+          fileState.current = stash.state;
+        } else {
+          const f = await source.readText(entry.rel);
+          if (cancelled) return;
+          if (f.binary) {
+            setStatus("binary");
+            return;
+          }
+          doc = f.content;
+          savedDoc.current = f.content;
+          fileState.current = { version: f.version, etag: f.etag };
+          setTruncated(f.truncated);
         }
-        mtime.current = f.mtimeMs;
-        savedDoc.current = f.content;
-        setTruncated(f.truncated);
-        setDocText(f.content);
+        setDocText(doc);
+        const restoredDirty = doc !== savedDoc.current;
+        setDirty(restoredDirty);
+        setEditorDirty(entry.id, restoredDirty);
         let textTimer: number | undefined;
         const extensions: Extension[] = [
           raccoonTheme,
@@ -198,6 +250,8 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
           highlightSelectionMatches(),
           findPanel(setFind),
           languageFor(entry.rel),
+          EditorState.readOnly.of(source.readOnly),
+          EditorView.editable.of(!source.readOnly),
           keymap.of([
             { key: "Mod-s", run: () => (void save(), true) },
             ...closeBracketsKeymap,
@@ -217,10 +271,16 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
             textTimer = window.setTimeout(() => setDocText(u.state.doc.toString()), 150);
           }),
         ];
-        const view = new EditorView({ parent: el, state: EditorState.create({ doc: f.content, extensions }) });
+        const view = new EditorView({ parent: el, state: EditorState.create({ doc, extensions }) });
         viewRef.current = view;
         unregister = registerLiveEditor(abs, { view, isDirty: () => view.state.doc.toString() !== savedDoc.current, save });
         setStatus("ready");
+        if (stash) {
+          // Restored after being away: the file may have moved on meanwhile.
+          const now = await source.stat(entry.rel).catch(() => fileState.current);
+          if (!cancelled && changedSince(fileState.current, now)) setChangedOnDisk(true);
+        }
+        if (source.kind !== "local") return;
         try {
           const tree = await api.headTree(entry.root);
           if (cancelled || !tree) return;
@@ -234,7 +294,7 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
       } catch (e) {
         if (!cancelled) {
           setStatus("error");
-          setError(String(e));
+          setError(describeError(e));
         }
       }
     })();
@@ -242,11 +302,17 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
       cancelled = true;
       window.clearTimeout(markTimer);
       unregister?.();
-      viewRef.current?.destroy();
+      const view = viewRef.current;
+      // A cloud buffer with unsaved text outlives its view while its editor
+      // is still open (the workspace page closed, or the source went away).
+      if (view && source.kind === "cloud" && view.state.doc.toString() !== savedDoc.current && getEditors().editors.some((e) => e.id === entry.id)) {
+        stashBuffer(entry.id, { text: view.state.doc.toString(), saved: savedDoc.current, state: fileState.current });
+      }
+      view?.destroy();
       viewRef.current = null;
       setFind(null);
     };
-  }, [abs, entry.id, entry.rel, entry.root, save, updateMarks]);
+  }, [abs, entry.id, entry.rel, entry.root, source, save, updateMarks, describeError]);
 
   // Jump to a line when asked (from search results or the tree).
   useEffect(() => {
@@ -266,17 +332,30 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
     if (visible && status === "ready" && !preview) requestAnimationFrame(() => viewRef.current?.focus());
   }, [visible, status, preview]);
 
-  // Watch the disk while visible.
+  // Follow the file: a clean buffer reloads, a dirty one asks.
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  const checkForChange = useCallback(async () => {
+    if (!source) return;
+    const now = await source.stat(entry.rel).catch(() => undefined);
+    if (now === undefined || !changedSince(fileState.current, now)) return;
+    if (!dirtyRef.current) void reloadFromDisk();
+    else setChangedOnDisk(true);
+  }, [source, entry.rel, reloadFromDisk]);
+
+  // A local file is polled while visible; a cloud one is re-checked when the
+  // runtime says it changed, or after a reconnect (`null`: changes missed).
   useEffect(() => {
-    if (!visible || status !== "ready") return;
-    const t = window.setInterval(async () => {
-      const m = await fs.mtime(abs).catch(() => null);
-      if (m == null || m === mtime.current) return;
-      if (!dirty) void reloadFromDisk();
-      else setChangedOnDisk(true);
-    }, 2000);
+    if (status !== "ready" || !source) return;
+    if (source.watch) {
+      return source.watch((paths) => {
+        if (paths === null || paths.includes(entry.rel)) void checkForChange();
+      });
+    }
+    if (!visible) return;
+    const t = window.setInterval(() => void checkForChange(), 2000);
     return () => window.clearInterval(t);
-  }, [visible, status, abs, dirty, reloadFromDisk]);
+  }, [visible, status, source, entry.rel, checkForChange]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -285,7 +364,9 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
           {entry.rel}
         </span>
         {truncated && <span className="text-warning">first 4 MB shown</span>}
+        {cloud && <span className="text-faint" data-testid="editor-cloud-file">cloud workspace</span>}
         <span className="ml-auto flex items-center gap-1">
+          {readOnly && <span className="text-faint">read-only</span>}
           {dirty && <span className="text-faint">unsaved</span>}
           {markdown && (
             <Segmented<ViewMode>
@@ -298,17 +379,36 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
               ]}
             />
           )}
-          <Button variant="ghost" size="icon-xs" aria-label="Reveal in Finder" onClick={() => void revealItemInDir(abs).catch(() => {})}>
-            <FolderOpen />
-          </Button>
-          <Button variant="ghost" size="xs" onClick={() => void save()} disabled={!dirty} aria-label="Save">
+          {!cloud && (
+            <Button variant="ghost" size="icon-xs" aria-label="Reveal in Finder" onClick={() => void revealItemInDir(abs).catch(() => {})}>
+              <FolderOpen />
+            </Button>
+          )}
+          <Button variant="ghost" size="xs" onClick={() => void save()} disabled={!dirty || readOnly || !source} aria-label="Save">
             <Save className="size-3.5" />
             Save
             <kbd className="ml-1 text-[10px] text-faint">{keycaps("mod+s").join("")}</kbd>
           </Button>
         </span>
       </div>
-      {changedOnDisk && (
+      {conflict && (
+        <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 bg-destructive/10 px-3 py-1.5 text-xs text-foreground" data-testid="editor-conflict">
+          <AlertTriangle className="size-3.5 text-destructive" />
+          Not saved: this file changed in the workspace since you opened it. Your changes are still here.
+          <span className="ml-auto flex gap-1">
+            <Button variant="outline" size="xs" onClick={() => void overwrite()}>
+              Overwrite with mine
+            </Button>
+            <Button variant="outline" size="xs" onClick={() => void reloadFromDisk()}>
+              Discard mine and reload
+            </Button>
+            <Button variant="ghost" size="xs" onClick={() => void navigator.clipboard?.writeText(viewRef.current?.state.doc.toString() ?? "").catch(() => {})}>
+              Copy mine
+            </Button>
+          </span>
+        </div>
+      )}
+      {changedOnDisk && !conflict && (
         <div className="flex shrink-0 items-center gap-2 bg-warning/10 px-3 py-1.5 text-xs text-foreground">
           <AlertTriangle className="size-3.5 text-warning" />
           This file changed on disk while you were editing.
@@ -321,14 +421,21 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
         </div>
       )}
       {error && <div className="shrink-0 px-3 py-1.5 text-xs text-destructive">{error}</div>}
-      {status === "binary" && <div className="p-4 text-sm text-muted-foreground">Cannot preview {entry.name}. This binary format is unsupported. Use Reveal in Finder to open it externally.</div>}
+      {status === "binary" && (
+        <div className="p-4 text-sm text-muted-foreground">
+          Cannot preview {entry.name}. {cloud ? "It is binary or not UTF-8 text." : "This binary format is unsupported. Use Reveal in Finder to open it externally."}
+        </div>
+      )}
       {status === "loading" && <div className="p-4 text-sm text-muted-foreground">Loading…</div>}
+      {status === "offline" && (
+        <div className="p-4 text-sm text-muted-foreground">Open the cloud workspace to read {entry.name}. Unsaved changes are kept until then.</div>
+      )}
       {preview && status === "ready" && (
         <div className="min-h-0 flex-1 overflow-auto scrollbar-thin px-6 py-4 select-text">
           <Markdown
             text={docText}
             className="prose-chat"
-            linkContext={linkContext}
+            linkContext={cloud ? undefined : linkContext}
           />
         </div>
       )}

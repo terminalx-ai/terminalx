@@ -27,7 +27,7 @@ const MIN_W = 320;
  * be closed to see the conversation again. In narrow columns, the editor
  * fills the column until hidden or closed, keeping both surfaces usable.
  */
-export function EditorSplit({ sessionId, active }: { sessionId: string; active: boolean }) {
+export function EditorSplit({ sessionId, active, fill = false }: { sessionId: string; active: boolean; fill?: boolean }) {
   const prefs = usePrefs();
   const ed = useEditors();
   const editors = ed.editors.filter((e) => e.sessionId === sessionId);
@@ -91,18 +91,22 @@ export function EditorSplit({ sessionId, active }: { sessionId: string; active: 
   return (
     <div
       ref={root}
-      className="absolute inset-0 z-10 flex h-full w-full min-w-0 shrink-0 flex-col border-l border-hairline bg-background @min-[768px]/editor-host:relative @min-[768px]/editor-host:w-(--editor-w) @min-[768px]/editor-host:max-w-[calc(100%-360px)]"
+      className={cn(
+        "absolute inset-0 z-10 flex h-full w-full min-w-0 shrink-0 flex-col border-l border-hairline bg-background",
+        // Beside a transcript it takes a resizable share; alone (a cloud workspace's files) it fills.
+        !fill && "@min-[768px]/editor-host:relative @min-[768px]/editor-host:w-(--editor-w) @min-[768px]/editor-host:max-w-[calc(100%-360px)]",
+      )}
       onPointerDownCapture={() => setLastFocused("editor")}
       onFocusCapture={() => setLastFocused("editor")}
     >
-      <div
+      {!fill && <div
         role="separator"
         aria-orientation="vertical"
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={onUp}
         className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-ring/30"
-      />
+      />}
       <div className="flex h-8 shrink-0 items-center gap-0.5 border-b border-hairline bg-well/40 pl-1 pr-1" role="tablist" aria-label="Open files">
         <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto scrollbar-thin">
           {editors.map((e) => {

@@ -3,3 +3,4 @@ export * from "./events";
 export * from "./rpc";
 export * from "./transcript";
 export * from "./workspace";
+export * from "./workspaceFiles";

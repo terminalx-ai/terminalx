@@ -227,7 +227,7 @@ pub fn read_text(path: &Path) -> Result<TextFile> {
 }
 
 pub fn write_text(path: &Path, content: &str) -> Result<u64> {
-    anyhow::ensure!(crate::media::media_type(path).is_none(), "Media files are read-only in the file pane");
+    anyhow::ensure!(crate::media_types::media_type(path).is_none(), "Media files are read-only in the file pane");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -487,14 +487,37 @@ impl Rewriter {
 /// skipped, capped by hit count so a broad query returns promptly. With a
 /// replacement, each hit also carries what its matches would become.
 pub fn search_text(root: &Path, query: &str, regex: bool, case_sensitive: bool, limit: usize, replacement: Option<&str>) -> Result<TextSearch> {
+    let never = std::sync::atomic::AtomicBool::new(false);
+    Ok(search_text_under(root, root, query, regex, case_sensitive, limit, replacement, &never)?.0)
+}
+
+/// [`search_text`] over the tree at `base` (inside `root`, which hit paths
+/// are relative to), stopping between files once `cancel` is set. The flag
+/// says whether it stopped early.
+#[allow(clippy::too_many_arguments)]
+pub fn search_text_under(
+    root: &Path,
+    base: &Path,
+    query: &str,
+    regex: bool,
+    case_sensitive: bool,
+    limit: usize,
+    replacement: Option<&str>,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<(TextSearch, bool)> {
     if query.is_empty() {
-        return Ok(TextSearch { hits: vec![], files: 0, capped: false });
+        return Ok((TextSearch { hits: vec![], files: 0, capped: false }, false));
     }
     let rw = Rewriter::new(query, replacement, regex, case_sensitive)?;
     let mut hits = Vec::new();
     let mut files = 0usize;
     let mut capped = false;
-    'files: for entry in text_files(root) {
+    let mut cancelled = false;
+    'files: for entry in text_files(base) {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            cancelled = true;
+            break;
+        }
         let Some(bytes) = searchable_bytes(entry.path()) else { continue };
         let text = String::from_utf8_lossy(&bytes);
         let rel = rel_of(root, entry.path());
@@ -513,7 +536,7 @@ pub fn search_text(root: &Path, query: &str, regex: bool, case_sensitive: bool, 
             files += 1;
         }
     }
-    Ok(TextSearch { hits, files, capped })
+    Ok((TextSearch { hits, files, capped }, cancelled))
 }
 
 /// One line's matches as character offsets (the editor addresses columns in
