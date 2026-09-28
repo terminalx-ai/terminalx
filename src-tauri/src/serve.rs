@@ -3,12 +3,12 @@
 //! so the agents in the cloud run the same harnesses, hooks socket, control
 //! socket, transcript store and git/worktree code as the desktop app.
 //!
+//! A cloud workspace runtime redeems its bootstrap token (or refreshes the
+//! stored credential) before anything else starts; see `cloud_bootstrap`.
+//!
 //! Not here yet:
 //! - TODO(PRO-13): register with the relay as a host (outbound only) and serve
 //!   the portable RPC surface from `BroadcastSink::subscribe`.
-//! - TODO(PRO-12): redeem the one-time bootstrap token
-//!   (`/v1/cloud-workspace-bootstrap/redeem` + `/refresh`) and persist the
-//!   runtime identity atomically before registering.
 //! - The `terminalx` agent CLI, which is still built into the desktop binary
 //!   only; agents in a cloud workspace reach this runtime through its control
 //!   socket.
@@ -40,6 +40,10 @@ Options:
   --self-test            Start, run one shell in a PTY, then exit
   -V, --version          Print the version
   -h, --help             Print this help
+
+A cloud-workspace runtime bootstraps from $TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_ORIGIN
+and $TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_TOKEN_PATH when they are set. It exits
+with 3 when the server rejects the token or credential for good.
 
 The agent CLIs' hooks call back into this binary as `terminalx-serve hook
 <Event>` and `terminalx-serve statusline`.";
@@ -138,7 +142,11 @@ pub fn main() -> i32 {
         Ok(()) => 0,
         Err(error) => {
             log::error!("terminalx-serve: {error:#}");
-            1
+            if error.downcast_ref::<crate::cloud_bootstrap::Rejected>().is_some() {
+                crate::cloud_bootstrap::REJECTED_EXIT_CODE
+            } else {
+                1
+            }
         }
     }
 }
@@ -164,6 +172,12 @@ fn run(options: Options) -> Result<()> {
         bail!("pass --data-dir (or set TERMINALX_HOME); terminalx-serve will not share the desktop app's ~/.raccoon");
     }
     let data_dir = crate::store::root().context("open the state directory")?;
+    // The identity comes first: nothing is served until the runtime knows
+    // which workspace it is, and a rejected token stops here.
+    let cloud = match options.runtime_kind {
+        RuntimeKind::CloudWorkspace => bootstrap_cloud_workspace(&data_dir)?,
+        RuntimeKind::Local => None,
+    };
     let tokio = tokio::runtime::Builder::new_multi_thread().enable_all().build().context("start the async runtime")?;
     let _entered = tokio.enter();
     let runtime = start(&options)?;
@@ -176,6 +190,14 @@ fn run(options: Options) -> Result<()> {
             "projectRoot": runtime.project_root,
             "dataDir": data_dir,
             "socket": crate::hooks::socket_path().ok(),
+            "cloudWorkspace": cloud.as_ref().map(|cloud| {
+                let session = cloud.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                json!({
+                    "workspaceId": session.workspace_id,
+                    "relayHostId": session.relay_host_id,
+                    "capabilities": [crate::cloud_bootstrap::CAPABILITIES],
+                })
+            }),
         })
     );
     let outcome = if options.self_test {
@@ -187,6 +209,24 @@ fn run(options: Options) -> Result<()> {
     shutdown(&runtime);
     println!("{}", json!({ "type": "stopped", "ok": outcome.is_ok() }));
     outcome
+}
+
+/// Redeem or refresh, then keep the session fresh in the background.
+/// TODO(PRO-13): register with the relay as a host with this session.
+fn bootstrap_cloud_workspace(data_dir: &std::path::Path) -> Result<Option<Arc<crate::cloud_bootstrap::Bootstrapped>>> {
+    use crate::cloud_bootstrap::{establish, Config, HttpApi, Policy};
+    let Some(config) = Config::from_env(data_dir)? else {
+        log::warn!("no cloud workspace bootstrap configured; serving without a cloud identity");
+        return Ok(None);
+    };
+    let api = Arc::new(HttpApi::new(&config.origin));
+    let cloud = Arc::new(establish(&config, api.as_ref(), &Policy::from_env())?);
+    {
+        let session = cloud.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        log::info!("cloud workspace {} bootstrapped as relay host {}", session.workspace_id, session.relay_host_id);
+    }
+    cloud.clone().spawn_refresh_loop(api);
+    Ok(Some(cloud))
 }
 
 /// The desktop's `setup`, less everything that needs a window.
