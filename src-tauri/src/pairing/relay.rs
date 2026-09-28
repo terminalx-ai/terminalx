@@ -6,14 +6,13 @@ use anyhow::{anyhow, bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
-use tokio_tungstenite::tungstenite::{
-    client::IntoClientRequest, http::HeaderValue, Message,
-};
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 
 use crate::account::AccountContext;
 
 use super::cloud::{self, RelayAssignment};
 use super::crypto::{answer_relay_challenge, HostKeypair, RelayProofContext};
+use super::diagnostics::{Category, Event, Failure, Stage};
 use super::model::RelayPairingOffer;
 use super::{pairing_websocket_config, PairingManager};
 
@@ -299,44 +298,94 @@ struct HostHello<'a> {
 }
 
 pub async fn supervise(manager: Arc<PairingManager>) {
-    let mut attempts = 0u32;
+    supervise_with(manager, |manager, context, retry| {
+        Box::pin(connect_once(manager, context, retry))
+    })
+    .await;
+}
+
+#[derive(Default)]
+struct RetryState {
+    attempts: u32,
+    reconnect: bool,
+}
+
+impl RetryState {
+    fn connected(&mut self, manager: &PairingManager, live: RelayLive) {
+        manager.record_relay_diagnostic(Event::Connected, self.attempts, None);
+        self.attempts = 0;
+        manager.set_relay_connected(live);
+    }
+}
+
+async fn supervise_with<F>(manager: Arc<PairingManager>, mut connect: F)
+where
+    F: for<'a> FnMut(
+        Arc<PairingManager>,
+        AccountContext,
+        &'a mut RetryState,
+    ) -> futures_util::future::BoxFuture<'a, Result<()>>,
+{
+    let mut retry = RetryState::default();
+    let mut entitlement_reported = false;
     loop {
         if manager.is_stopped() {
             return;
         }
         let Some(context) = manager.account_context() else {
-            attempts = 0;
+            retry = RetryState::default();
+            entitlement_reported = false;
             manager.set_relay_off();
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         };
         if !manager.relay_permitted(&context) {
-            attempts = 0;
+            retry = RetryState::default();
+            entitlement_reported = false;
             manager.set_relay_off();
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         }
         if !context.relay_entitled {
-            manager.set_relay_unavailable("Relay is unavailable for this account.", attempts);
+            let failure = Failure {
+                stage: Stage::Authorization,
+                category: Category::Entitlement,
+                http_status: None,
+            };
+            if !entitlement_reported {
+                manager.record_relay_diagnostic(Event::Failed, 0, Some(failure));
+                entitlement_reported = true;
+            }
+            retry = RetryState::default();
+            manager.set_relay_unavailable(failure.message(), 0);
             tokio::time::sleep(Duration::from_secs(30)).await;
             continue;
         }
-        attempts = attempts.saturating_add(1);
-        manager.set_relay_connecting(attempts);
-        match connect_once(manager.clone(), context, attempts > 1).await {
+        entitlement_reported = false;
+        retry.attempts = retry.attempts.saturating_add(1);
+        manager.set_relay_connecting(retry.attempts);
+        let result = connect(manager.clone(), context, &mut retry).await;
+        retry.reconnect = true;
+        // Clear the live sender on every exit, including a graceful remote close.
+        manager.clear_relay();
+        if manager.is_stopped() {
+            manager.set_relay_off();
+            return;
+        }
+        match result {
             Ok(()) => {
-                attempts = 0;
+                manager.set_relay_connecting(retry.attempts);
             }
             Err(error) => {
-                log::warn!("relay connection ended: {error:#}");
-                manager.clear_relay();
-                manager.set_relay_unavailable(reconnect_message(attempts), attempts);
+                let failure = Failure::from_error(&error);
+                manager.record_relay_diagnostic(Event::Failed, retry.attempts, Some(failure));
+                manager.set_relay_unavailable(failure.message(), retry.attempts);
             }
         }
         if manager.is_stopped() {
             return;
         }
-        tokio::time::sleep(backoff(attempts)).await;
+        tokio::time::sleep(backoff(retry.attempts)).await;
     }
 }
 
@@ -348,31 +397,24 @@ fn backoff(attempt: u32) -> Duration {
     Duration::from_millis(BACKOFF_MS[index.min(BACKOFF_MS.len() - 1)])
 }
 
-fn reconnect_message(attempt: u32) -> &'static str {
-    if attempt >= 12 {
-        "Relay is still unavailable. Check your network connection, then retry."
-    } else if attempt >= 3 {
-        "Relay connection failed. Retrying automatically."
-    } else {
-        "Relay is temporarily unavailable. Retrying automatically."
-    }
-}
-
 async fn connect_once(
     manager: Arc<PairingManager>,
     context: AccountContext,
-    reconnect: bool,
+    retry: &mut RetryState,
 ) -> Result<()> {
-    let keypair = manager.host_key(true)?;
+    let reconnect = retry.reconnect;
+    let keypair = manager.host_key(true).context(Stage::LocalIdentity)?;
     let relay_host_id = keypair.host_id();
     let public_key_b64 = keypair.public_key_b64();
     let context_for_http = context.clone();
     let authorization = tokio::task::spawn_blocking(move || {
         cloud::relay_authorization(&context_for_http, &relay_host_id, &public_key_b64)
     })
-    .await??;
+    .await
+    .context(Stage::Authorization)?
+    .context(Stage::Authorization)?;
     if authorization.expires_at <= now_ms() {
-        bail!("relay authorization expired before use");
+        return Err(anyhow!(Category::Authentication).context(Stage::Authorization));
     }
     let relay_host_id = keypair.host_id();
     let relay_jwt = authorization.relay_token.clone();
@@ -380,7 +422,9 @@ async fn connect_once(
         let relay_host_id = relay_host_id.clone();
         move || cloud::relay_assignment(&authorization, &relay_host_id, reconnect)
     })
-    .await??;
+    .await
+    .context(Stage::Assignment)?
+    .context(Stage::Assignment)?;
     let (socket, ack) = open_control(&context, &keypair, &assignment, &relay_jwt).await?;
     let (tx, rx) = mpsc::unbounded_channel();
     let live = RelayLive {
@@ -390,9 +434,11 @@ async fn connect_once(
         relay_host_id: keypair.host_id(),
         generation: ack.generation,
     };
-    manager.set_relay_connected(live.clone());
+    retry.connected(&manager, live.clone());
     manager.relay_ready(context.clone(), live.clone()).await;
-    control_loop(manager, socket, rx, live, context, keypair).await
+    control_loop(manager, socket, rx, live, context, keypair)
+        .await
+        .context(Stage::ControlSession)
 }
 
 type ControlSocket =
@@ -404,100 +450,109 @@ async fn open_control(
     assignment: &RelayAssignment,
     relay_jwt: &str,
 ) -> Result<(ControlSocket, HostHelloAck)> {
-    let url = websocket_url(&assignment.cell_url, "/v1/host/control")?;
-    let mut request = url.into_client_request()?;
-    request.headers_mut().insert(
-        "authorization",
-        HeaderValue::from_str(&format!("Bearer {relay_jwt}"))?,
-    );
-    let (mut socket, _) = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        tokio_tungstenite::connect_async_with_config(
-            request,
-            Some(pairing_websocket_config()),
-            false,
-        ),
-    )
+    let mut socket = async {
+        let url = websocket_url(&assignment.cell_url, "/v1/host/control")?;
+        let mut request = url.into_client_request()?;
+        request.headers_mut().insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {relay_jwt}"))?,
+        );
+        let (socket, _) = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            tokio_tungstenite::connect_async_with_config(
+                request,
+                Some(pairing_websocket_config()),
+                false,
+            ),
+        )
+        .await
+        .context(Category::Timeout)??;
+        Ok::<_, anyhow::Error>(socket)
+    }
     .await
-    .map_err(|_| anyhow!("relay control connection timed out"))??;
-    socket
-        .send(Message::Text(
-            serde_json::to_string(&HostHello {
-                kind: "host-hello",
-                v: 1,
+    .context(Stage::ControlConnect)?;
+    async {
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&HostHello {
+                    kind: "host-hello",
+                    v: 1,
+                    relay_host_id: &keypair.host_id(),
+                    assignment_epoch: assignment.assignment_epoch,
+                    host_public_key_b64: keypair.public_key_b64(),
+                    app_version: env!("CARGO_PKG_VERSION"),
+                })?
+                .into(),
+            ))
+            .await?;
+        let challenge_value = next_control_json(&mut socket).await?;
+        let challenge: HostChallenge = serde_json::from_value(challenge_value)
+            .context("relay returned an invalid host challenge")?;
+        if challenge.kind != "host-challenge"
+            || !valid_opaque_id(&challenge.challenge_id)
+            || challenge.ciphertext_b64.is_empty()
+            || challenge.ciphertext_b64.len() > 16 * 1024
+            || challenge.expires_at < 0
+        {
+            bail!("relay did not challenge the host key");
+        }
+        let proof = answer_relay_challenge(
+            keypair,
+            &challenge.challenge_id,
+            &challenge.relay_ephemeral_public_key_b64,
+            &challenge.nonce_b64,
+            &challenge.ciphertext_b64,
+            challenge.expires_at,
+            &RelayProofContext {
+                relay_origin: &assignment.cell_url,
+                user_id: &context.user_id,
+                profile_id: &context.profile_id,
+                organization_id: &context.organization_id,
                 relay_host_id: &keypair.host_id(),
                 assignment_epoch: assignment.assignment_epoch,
-                host_public_key_b64: keypair.public_key_b64(),
-                app_version: env!("CARGO_PKG_VERSION"),
-            })?
-            .into(),
-        ))
-        .await?;
-    let challenge_value = next_control_json(&mut socket).await?;
-    let challenge: HostChallenge = serde_json::from_value(challenge_value)
-        .context("relay returned an invalid host challenge")?;
-    if challenge.kind != "host-challenge"
-        || !valid_opaque_id(&challenge.challenge_id)
-        || challenge.ciphertext_b64.is_empty()
-        || challenge.ciphertext_b64.len() > 16 * 1024
-        || challenge.expires_at < 0
-    {
-        bail!("relay did not challenge the host key");
-    }
-    let proof = answer_relay_challenge(
-        keypair,
-        &challenge.challenge_id,
-        &challenge.relay_ephemeral_public_key_b64,
-        &challenge.nonce_b64,
-        &challenge.ciphertext_b64,
-        challenge.expires_at,
-        &RelayProofContext {
-            relay_origin: &assignment.cell_url,
-            user_id: &context.user_id,
-            profile_id: &context.profile_id,
-            organization_id: &context.organization_id,
-            relay_host_id: &keypair.host_id(),
-            assignment_epoch: assignment.assignment_epoch,
-            previous_generation: None,
-            resume_requested: false,
-            now_ms: now_ms(),
-        },
-    )?;
-    socket
-        .send(Message::Text(
-            serde_json::to_string(&serde_json::json!({
-                "type": "host-challenge-ack",
-                "challengeId": challenge.challenge_id,
-                "proofB64": proof,
-            }))?
-            .into(),
-        ))
-        .await?;
-    let ack: HostHelloAck = serde_json::from_value(next_control_json(&mut socket).await?)
-        .context("relay returned an invalid host acknowledgement")?;
-    if ack.kind != "host-hello-ack"
-        || ack.v != 1
-        || ack.generation == 0
-        || !valid_base64url_32(&ack.control_resume_secret)
-        || ack.lease_expires_at <= now_ms()
-        || ack.active_conn_ids.len() > 8
-        || ack.pending_conns.len() > 8
-    {
-        bail!("relay returned an invalid host acknowledgement");
-    }
-    for pending in &ack.pending_conns {
-        if !valid_opaque_id(&pending.conn_id) || !valid_base64url_32(&pending.conn_ticket) {
-            bail!("relay returned an invalid pending connection");
+                previous_generation: None,
+                resume_requested: false,
+                now_ms: now_ms(),
+            },
+        )?;
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&serde_json::json!({
+                    "type": "host-challenge-ack",
+                    "challengeId": challenge.challenge_id,
+                    "proofB64": proof,
+                }))?
+                .into(),
+            ))
+            .await?;
+        let ack: HostHelloAck = serde_json::from_value(next_control_json(&mut socket).await?)
+            .context("relay returned an invalid host acknowledgement")?;
+        if ack.kind != "host-hello-ack"
+            || ack.v != 1
+            || ack.generation == 0
+            || !valid_base64url_32(&ack.control_resume_secret)
+            || ack.lease_expires_at <= now_ms()
+            || ack.active_conn_ids.len() > 8
+            || ack.pending_conns.len() > 8
+        {
+            bail!("relay returned an invalid host acknowledgement");
         }
+        for pending in &ack.pending_conns {
+            if !valid_opaque_id(&pending.conn_id) || !valid_base64url_32(&pending.conn_ticket) {
+                bail!("relay returned an invalid pending connection");
+            }
+        }
+        Ok((socket, ack))
     }
-    Ok((socket, ack))
+    .await
+    .context(Stage::HostProof)
 }
 
 async fn next_control_json(socket: &mut ControlSocket) -> Result<serde_json::Value> {
     let message = tokio::time::timeout(CONNECT_TIMEOUT, socket.next())
         .await
-        .map_err(|_| anyhow!("relay proof timed out"))?
-        .ok_or_else(|| anyhow!("relay closed during host proof"))??;
+        .context(Category::Timeout)?
+        .ok_or_else(|| anyhow!(Category::Network))??;
     match message {
         Message::Text(text) => serde_json::from_str(&text).context("decode relay control message"),
         _ => bail!("relay sent a non-text control message"),
@@ -582,10 +637,10 @@ async fn control_loop(
                 }
             },
             incoming = tokio::time::timeout(SILENCE_TIMEOUT, socket.next()) => {
-                let incoming = incoming.map_err(|_| anyhow!("relay control became silent"))?
-                    .ok_or_else(|| anyhow!("relay control closed"))??;
+                let incoming = incoming.context(Category::Timeout)?
+                    .ok_or_else(|| anyhow!(Category::Network))??;
                 let Message::Text(text) = incoming else {
-                    if matches!(incoming, Message::Close(_)) { return Ok(()); }
+                    if matches!(incoming, Message::Close(_)) { return Err(anyhow!(Category::Network)); }
                     bail!("relay sent a non-text control message");
                 };
                 let value: serde_json::Value = serde_json::from_str(&text)?;
@@ -643,11 +698,11 @@ async fn control_loop(
                         let keypair = keypair.clone();
                         tauri::async_runtime::spawn(async move {
                             if let Err(error) = manager.handle_relay_connection(cell, host_id, generation, keypair, connection).await {
-                                log::debug!("relay data connection ended: {error:#}");
+                                log::debug!("relay data connection ended: {:?}", Failure::from_error(&error));
                             }
                         });
                     }
-                    Some("drain") => bail!("relay cell requested reassignment"),
+                    Some("drain") => return Err(anyhow!(Category::ServiceUnavailable)),
                     Some("control-error") => {
                         let error: ControlError = serde_json::from_value(value)?;
                         if error.kind != "control-error" || error.code.is_empty() || error.code.len() > 128 {
@@ -656,7 +711,7 @@ async fn control_loop(
                         let Some(req_id) = error.req_id else {
                             bail!("relay rejected a control request without an id");
                         };
-                        let message = || anyhow!("relay rejected the request: {}", error.code);
+                        let message = || anyhow!("Relay could not complete the request. Please retry.");
                         if let Some(respond) = pending_invites.remove(&req_id) {
                             let _ = respond.send(Err(message()));
                         } else if let Some(respond) = pending_installs.remove(&req_id) {
@@ -824,8 +879,6 @@ mod tests {
         assert_eq!(backoff(11), Duration::from_secs(60));
         assert_eq!(backoff(12), Duration::from_secs(90));
         assert_eq!(backoff(99), Duration::from_secs(90));
-        assert_eq!(reconnect_message(3), "Relay connection failed. Retrying automatically.");
-        assert_eq!(reconnect_message(12), "Relay is still unavailable. Check your network connection, then retry.");
     }
 
     #[test]
@@ -877,3 +930,7 @@ mod tests {
             .is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "relay_tests.rs"]
+mod recovery_tests;
