@@ -140,20 +140,30 @@ async fn writes_are_optimistic_and_a_resend_does_not_write_twice() {
     );
 }
 
+/// Output from the next event on until `marker`, returning the offset after
+/// it. Earlier bytes may have come with the attach answer or been skipped
+/// while waiting for another event, so contiguity is checked from the first
+/// event seen here, never assumed from offset 0.
 async fn output_until(events: &mut Notifications, marker: &str) -> (String, u64) {
     let mut output = Vec::new();
-    let mut end = 0;
+    let mut end: Option<u64> = None;
     // A real shell starting on a loaded machine; the wait is on its output.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
-        let event = tokio::time::timeout_at(deadline, events.recv()).await.expect("terminal answered").unwrap();
+        let event = match tokio::time::timeout_at(deadline, events.recv()).await {
+            Ok(event) => event.unwrap(),
+            Err(_) => panic!("no {marker} in the terminal's output: {:?}", String::from_utf8_lossy(&output)),
+        };
         if event["event"] == "pty.output" {
             let chunk = STANDARD.decode(event["params"]["data"].as_str().unwrap()).unwrap();
-            assert_eq!(event["params"]["offset"].as_u64().unwrap(), end, "offsets are contiguous");
-            end += chunk.len() as u64;
+            let offset = event["params"]["offset"].as_u64().unwrap();
+            if let Some(end) = end {
+                assert_eq!(offset, end, "offsets are contiguous");
+            }
+            end = Some(offset + chunk.len() as u64);
             output.extend(chunk);
             if String::from_utf8_lossy(&output).contains(marker) {
-                return (String::from_utf8_lossy(&output).into_owned(), end);
+                return (String::from_utf8_lossy(&output).into_owned(), end.unwrap());
             }
         }
     }
