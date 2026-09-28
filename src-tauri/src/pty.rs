@@ -12,8 +12,8 @@ use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
 use portable_pty::{CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
 
+use crate::sink::EventSink;
 const COALESCE: Duration = Duration::from_millis(8);
 const MAX_CHUNK: usize = 32 * 1024;
 /// Enough raw output to reconstruct a useful terminal tail on a newly attached
@@ -37,12 +37,12 @@ struct Pane {
 
 pub struct Terminals {
     panes: Mutex<HashMap<String, Pane>>,
-    app: Mutex<Option<AppHandle>>,
+    sink: Mutex<Option<Arc<dyn EventSink>>>,
 }
 
 impl Default for Terminals {
     fn default() -> Self {
-        Self { panes: Mutex::new(HashMap::new()), app: Mutex::new(None) }
+        Self { panes: Mutex::new(HashMap::new()), sink: Mutex::new(None) }
     }
 }
 
@@ -80,7 +80,7 @@ pub struct PaneSpec<'a> {
     pub env: &'a [(String, String)],
 }
 
-fn shell() -> String {
+pub(crate) fn shell() -> String {
     std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| {
         if cfg!(target_os = "macos") {
             "/bin/zsh".into()
@@ -119,12 +119,12 @@ impl Terminals {
     /// `env` is set inside the PTY before the command runs. An agent tab uses
     /// it to tell the CLI — and every hook the CLI spawns, since a hook is a
     /// grandchild of this shell — which tab it belongs to.
-    pub fn spawn(&self, app: AppHandle, id: &str, spec: PaneSpec<'_>) -> Result<()> {
+    pub fn spawn(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>) -> Result<()> {
         if self.panes.lock().unwrap().contains_key(id) {
             return Ok(());
         }
         let PaneSpec { cwd, cols, rows, command, env } = spec;
-        *self.app.lock().unwrap() = Some(app.clone());
+        *self.sink.lock().unwrap() = Some(sink.clone());
         let pty = portable_pty::native_pty_system();
         let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("openpty: {e}"))?;
         let sh = shell();
@@ -172,7 +172,7 @@ impl Terminals {
         let scrollback = Arc::new(Mutex::new(VecDeque::with_capacity(SCROLLBACK_BYTES)));
 
         {
-            let app = app.clone();
+            let sink = sink.clone();
             let id = id.to_string();
             let alive = alive.clone();
             let last_output = last_output.clone();
@@ -196,7 +196,7 @@ impl Terminals {
                             let data = base64::engine::general_purpose::STANDARD.encode(&acc);
                             append_scrollback(&scrollback, &acc);
                             *last_output.lock().unwrap() = Some(Instant::now());
-                            let _ = app.emit("pty_data", PtyData { id: id.clone(), data });
+                            sink.emit("pty_data", &PtyData { id: id.clone(), data });
                             acc.clear();
                             window_start = None;
                         }
@@ -205,18 +205,18 @@ impl Terminals {
                 if !acc.is_empty() {
                     let data = base64::engine::general_purpose::STANDARD.encode(&acc);
                     append_scrollback(&scrollback, &acc);
-                    let _ = app.emit("pty_data", PtyData { id: id.clone(), data });
+                    sink.emit("pty_data", &PtyData { id: id.clone(), data });
                 }
                 *alive.lock().unwrap() = false;
-                let _ = app.emit(crate::status::resources::CHANGED_EVENT, ());
+                sink.emit(crate::status::resources::CHANGED_EVENT, &());
             })?;
         }
         {
-            let app = app.clone();
+            let sink = sink.clone();
             let id = id.to_string();
             std::thread::Builder::new().name(format!("pty-wait-{id}")).spawn(move || {
                 let code = child.wait().ok().map(|s| s.exit_code() as i32);
-                let _ = app.emit("pty_exit", PtyExit { id, code });
+                sink.emit("pty_exit", &PtyExit { id, code });
             })?;
         }
         self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, writer, pid, alive, last_output, scrollback, cwd: cwd.to_string() });
@@ -325,8 +325,8 @@ impl Terminals {
     }
 
     fn changed(&self) {
-        if let Some(app) = self.app.lock().unwrap().as_ref() {
-            let _ = app.emit(crate::status::resources::CHANGED_EVENT, ());
+        if let Some(sink) = self.sink.lock().unwrap().as_ref() {
+            sink.emit(crate::status::resources::CHANGED_EVENT, &());
         }
     }
 }

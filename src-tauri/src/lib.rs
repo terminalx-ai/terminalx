@@ -1,49 +1,78 @@
+// The desktop app is the default build. Without the `desktop` feature the
+// crate is the headless runtime behind `terminalx-serve`: no Tauri, WebView,
+// GTK or audio, and none of the modules that only exist to serve a window.
+// Much of the shared code is reached only from Tauri commands, hence the
+// allowances there.
+#![cfg_attr(not(feature = "desktop"), allow(dead_code, unused_imports))]
+
+#[cfg(feature = "desktop")]
 mod account;
+#[cfg(feature = "desktop")]
 mod automations;
 mod binpath;
+#[cfg(feature = "desktop")]
 pub mod browser;
+#[cfg(feature = "desktop")]
 pub mod cli;
+#[cfg(feature = "desktop")]
 mod commands;
+#[cfg(feature = "desktop")]
 mod cloud_workspaces;
+#[cfg(feature = "desktop")]
 pub mod computer;
 mod control;
 #[cfg(windows)]
 mod pipe_transport;
+#[cfg(feature = "desktop")]
 mod dictation;
+#[cfg(feature = "desktop")]
 mod transcription;
 mod events;
+#[cfg(feature = "desktop")]
 mod files;
+#[cfg(feature = "desktop")]
 mod media;
 mod git;
 mod github;
 mod harness;
 pub mod hooks;
 mod issues;
+#[cfg(feature = "desktop")]
 mod installation;
 mod models;
 mod names;
+#[cfg(feature = "desktop")]
 mod pairing;
 mod pty;
 mod session;
+mod session_ops;
+pub mod serve;
+mod sink;
 mod recovery;
 mod continuation;
 pub mod skills;
 mod store;
 mod status;
 mod stats;
+#[cfg(feature = "desktop")]
 mod star_nag;
 mod summaries;
 mod workspaces;
 
+#[cfg(feature = "desktop")]
 use std::sync::Arc;
-use tauri::{Listener, Manager};
+#[cfg(feature = "desktop")]
+use tauri::Manager;
 
+#[cfg(feature = "desktop")]
 const DEEP_LINK_SCHEMES: [&str; 2] = ["terminalx", "terminalx-next"];
 
+#[cfg(feature = "desktop")]
 fn supports_deep_link_scheme(scheme: &str) -> bool {
     DEEP_LINK_SCHEMES.contains(&scheme)
 }
 
+#[cfg(feature = "desktop")]
 pub struct AppState {
     pub account: Arc<account::AccountManager>,
     pub cloud_workspaces: Arc<cloud_workspaces::CloudWorkspaceService>,
@@ -64,12 +93,14 @@ pub struct AppState {
     manager: std::sync::Mutex<Option<session::SessionManager>>,
 }
 
+#[cfg(feature = "desktop")]
 impl AppState {
     pub fn manager(&self) -> Option<session::SessionManager> {
         self.manager.lock().unwrap().clone()
     }
 }
 
+#[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -114,7 +145,7 @@ pub fn run() {
         .manage(state)
         .setup(move |app| {
             account.configure(&app.config().identifier)?;
-            pairing.configure(app.handle(), &app.config().identifier)?;
+            pairing.configure(Arc::new(app.handle().clone()), app.path().app_log_dir().ok(), &app.config().identifier)?;
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
@@ -147,8 +178,10 @@ pub fn run() {
                 log::error!("initialize activity history: {error:#}");
             }
             let control_endpoint = hooks::prepare_control()?;
+            let sink: Arc<dyn sink::EventSink> = Arc::new(app.handle().clone());
             let manager = session::SessionManager::new(
-                app.handle().clone(),
+                sink.clone(),
+                Arc::new(app.handle().clone()),
                 host.clone(),
                 terminals.clone(),
                 codex_models.clone(),
@@ -156,10 +189,11 @@ pub fn run() {
                 control_endpoint.clone(),
             );
             *app.state::<AppState>().manager.lock().unwrap() = Some(manager.clone());
+            pairing.attach_sessions(manager.clone());
             // The agent CLIs' hooks reach the app through this socket; without
             // it a PTY-first tab still runs, it just cannot report or ask.
             let hooked = manager.clone();
-            let service = control::ControlService::new(app.handle().clone(), manager.clone(), control_endpoint.clone(), computer.clone(), browser.clone());
+            let service = control::ControlService::new(sink.clone(), manager.clone(), control_endpoint.clone(), computer.clone(), browser.clone());
             match hooks::serve(control_endpoint, move |frame| hooked.on_hook(frame), move |request| service.handle(request)) {
                 Ok(path) => log::info!("hook socket at {}", path.display()),
                 Err(e) => log::warn!("hook socket: {e:#}"),
@@ -185,24 +219,8 @@ pub fn run() {
                     store::activity::report_error(message.into());
                 }
             });
-            let exited = manager.clone();
-            app.listen("pty_exit", move |event| {
-                if let Ok(exit) = serde_json::from_str::<pty::PtyExit>(event.payload()) {
-                    exited.pane_exited(&exit.id, exit.code);
-                }
-            });
-            // No child survives a restart: a tab persisted mid-turn or waiting
-            // is idle now, whatever the index says.
-            let _ = store::index::update(|sessions| {
-                for s in sessions.iter_mut() {
-                    for t in s.tabs.iter_mut() {
-                        if matches!(t.status, store::index::TabStatus::InProgress | store::index::TabStatus::Waiting) {
-                            t.status = store::index::TabStatus::Idle;
-                        }
-                    }
-                }
-                Ok(())
-            });
+            manager.follow_pane_exits();
+            session::idle_orphaned_tabs();
             automations::start_scheduler(app.handle().clone());
             // The built-in browser: sweep daemons a crashed run left behind,
             // then keep this run's own daemons warm and its page list honest.
@@ -415,7 +433,7 @@ pub fn run() {
         });
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 mod tests {
     use super::supports_deep_link_scheme;
 

@@ -20,7 +20,6 @@ use base64::{engine::general_purpose, Engine};
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use tauri::{AppHandle, Emitter, Listener, Manager};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
@@ -30,6 +29,8 @@ use tokio_tungstenite::{
 use uuid::Uuid;
 
 use crate::account::{AccountContext, AccountManager};
+use crate::session::SessionManager;
+use crate::sink::EventSink;
 
 use self::crypto::{
     begin_e2ee_session, encode_pairing_offer, random_token, seal_account_offer, token_hash,
@@ -62,7 +63,9 @@ pub struct PairingManager {
     diagnostics: Mutex<diagnostics::DiagnosticLog>,
     secrets: PairingSecrets,
     registry: DeviceRegistry,
-    app: OnceLock<AppHandle>,
+    sink: OnceLock<Arc<dyn EventSink>>,
+    /// Set once the session manager exists, which is after `configure`.
+    sessions: OnceLock<SessionManager>,
     inner: Mutex<Inner>,
     epoch: AtomicU64,
     stopped: AtomicBool,
@@ -90,7 +93,8 @@ impl PairingManager {
             diagnostics: Mutex::new(diagnostics::DiagnosticLog::default()),
             secrets: PairingSecrets::default(),
             registry: DeviceRegistry::default(),
-            app: OnceLock::new(),
+            sink: OnceLock::new(),
+            sessions: OnceLock::new(),
             inner: Mutex::new(Inner::default()),
             epoch: AtomicU64::new(0),
             stopped: AtomicBool::new(false),
@@ -100,34 +104,50 @@ impl PairingManager {
         }
     }
 
-    pub fn configure(self: &Arc<Self>, app: &AppHandle, app_identifier: &str) -> Result<()> {
-        match app.path().app_log_dir() {
-            Ok(directory) => {
+    pub fn configure(
+        self: &Arc<Self>,
+        sink: Arc<dyn EventSink>,
+        log_dir: Option<std::path::PathBuf>,
+        app_identifier: &str,
+    ) -> Result<()> {
+        match log_dir {
+            Some(directory) => {
                 if self.diagnostics.lock().unwrap().configure(directory).is_err() {
                     log::warn!("relay diagnostics unavailable (category=local-storage)");
                 }
             }
-            Err(_) => log::warn!("relay diagnostics unavailable (category=local-storage)"),
+            None => log::warn!("relay diagnostics unavailable (category=local-storage)"),
         }
         self.secrets.configure(app_identifier)?;
         for device_id in self.registry.remove_unclaimed()? {
             self.secrets.delete_device_token(&device_id)?;
         }
-        self.app
-            .set(app.clone())
+        self.sink
+            .set(sink.clone())
             .map_err(|_| anyhow!("pairing manager was already configured"))?;
-        self.mobile.configure(app)?;
+        self.mobile.configure(sink.clone())?;
         let events = self.clone();
-        app.listen("agent_event", move |event| {
-            events.mobile.capture_agent_event(&events, event.payload());
-        });
+        sink.listen(
+            "agent_event",
+            Box::new(move |payload| {
+                events.mobile.capture_agent_event(&events, payload);
+            }),
+        );
         let statuses = self.clone();
-        app.listen("tab_status", move |_| {
-            statuses.mobile.broadcast_sessions_changed();
-        });
+        sink.listen(
+            "tab_status",
+            Box::new(move |_| {
+                statuses.mobile.broadcast_sessions_changed();
+            }),
+        );
         let manager = self.clone();
         tauri::async_runtime::spawn(async move { relay::supervise(manager).await });
         Ok(())
+    }
+
+    /// Mobile clients read and drive tabs through the session manager.
+    pub fn attach_sessions(&self, sessions: SessionManager) {
+        let _ = self.sessions.set(sessions);
     }
 
     pub fn status(&self) -> PairingStatus {
@@ -1149,8 +1169,8 @@ impl PairingManager {
     }
 
     fn emit(&self) {
-        if let Some(app) = self.app.get() {
-            let _ = app.emit(STATUS_EVENT, self.snapshot());
+        if let Some(sink) = self.sink.get() {
+            sink.emit(STATUS_EVENT, &self.snapshot());
         }
     }
 

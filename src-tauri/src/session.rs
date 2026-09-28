@@ -24,7 +24,6 @@ use std::time::Instant;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager};
 
 use crate::events::*;
 use crate::recovery::{self, RecoveryKind};
@@ -32,6 +31,7 @@ use crate::harness::host::{Host, LiveChild, Sink, SpawnSpec};
 use crate::harness::{acp, claude, codex, opencode, tui, Action, CliKind, HarnessId};
 use crate::hooks::{HookFrame, HookReply, Origin};
 use crate::store::index::{self, TabEntry, TabStatus};
+use crate::sink::{EventSink, SessionObserver};
 use crate::{git, pty, store};
 
 #[derive(Clone)]
@@ -264,9 +264,25 @@ impl TabRuntime {
     }
 }
 
+/// No child survives a restart: a tab persisted mid-turn or waiting is idle
+/// now, whatever the index says.
+pub fn idle_orphaned_tabs() {
+    let _ = index::update(|sessions| {
+        for s in sessions.iter_mut() {
+            for t in s.tabs.iter_mut() {
+                if matches!(t.status, TabStatus::InProgress | TabStatus::Waiting) {
+                    t.status = TabStatus::Idle;
+                }
+            }
+        }
+        Ok(())
+    });
+}
+
 #[derive(Clone)]
 pub struct SessionManager {
-    app: AppHandle,
+    sink: Arc<dyn EventSink>,
+    observer: Arc<dyn SessionObserver>,
     host: Arc<Host>,
     terminals: Arc<pty::Terminals>,
     codex_models: Arc<codex::models::Cache>,
@@ -394,7 +410,8 @@ pub fn pty_first(harness: &str) -> Option<CliKind> {
 
 impl SessionManager {
     pub fn new(
-        app: AppHandle,
+        sink: Arc<dyn EventSink>,
+        observer: Arc<dyn SessionObserver>,
         host: Arc<Host>,
         terminals: Arc<pty::Terminals>,
         codex_models: Arc<codex::models::Cache>,
@@ -402,7 +419,8 @@ impl SessionManager {
         control: crate::hooks::ControlEndpoint,
     ) -> Self {
         let manager = Self {
-            app,
+            sink,
+            observer,
             host,
             terminals,
             codex_models,
@@ -424,6 +442,23 @@ impl SessionManager {
             }
         });
         manager
+    }
+
+    /// Settle a PTY-first tab when the pane its CLI ran in exits.
+    pub fn follow_pane_exits(&self) {
+        let exited = self.clone();
+        self.sink.listen(
+            "pty_exit",
+            Box::new(move |payload| {
+                if let Ok(exit) = serde_json::from_str::<pty::PtyExit>(payload) {
+                    exited.pane_exited(&exit.id, exit.code);
+                }
+            }),
+        );
+    }
+
+    pub fn terminals(&self) -> &Arc<pty::Terminals> {
+        &self.terminals
     }
 
     fn runtime(&self, session_id: &str, tab_id: &str) -> Result<Arc<Mutex<TabRuntime>>> {
@@ -486,13 +521,13 @@ impl SessionManager {
         }
         if ev.subagent.is_none() && matches!(&ev.payload, Payload::UserMessage { .. }) {
             match store::conversation_titles::name_tab(&ev.session_id, &ev.tab_id) {
-                Ok(Some(session)) => { let _ = self.app.emit("session_updated", session); }
+                Ok(Some(session)) => self.sink.emit("session_updated", &session),
                 Ok(None) => {}
                 Err(error) => log::warn!("name conversation: {error:#}"),
             }
         }
-        self.app.state::<crate::AppState>().star_nag.observe(&self.app, &ev);
-        let _ = self.app.emit("agent_event", &ev);
+        self.observer.agent_event(&ev);
+        self.sink.emit("agent_event", &ev);
         ev
     }
 
@@ -519,8 +554,8 @@ impl SessionManager {
             Ok(Some(total)) => {
                 // #110's reminder can subscribe without scanning transcripts
                 // or treating hydration/tab creation as fresh usage.
-                let _ = self.app.emit("agent_work_started", total);
-                self.app.state::<crate::AppState>().star_nag.work_started(&self.app, total as u64);
+                self.sink.emit("agent_work_started", &total);
+                self.observer.work_started(total as u64);
             }
             Ok(None) => {}
             Err(error) => log::error!("record app activity: {error:#}"),
@@ -532,8 +567,8 @@ impl SessionManager {
             return;
         }
         rt.status = status;
-        self.app.state::<crate::AppState>().star_nag.status(&self.app, rt.key(), status);
-        let _ = self.app.emit("tab_status", TabStatusEvent { session_id: rt.session_id.clone(), tab_id: rt.tab_id.clone(), status });
+        self.observer.tab_status(rt.key(), status);
+        self.sink.emit("tab_status", &TabStatusEvent { session_id: rt.session_id.clone(), tab_id: rt.tab_id.clone(), status });
         let (sid, tid) = (rt.session_id.clone(), rt.tab_id.clone());
         // Serialize status writes under the runtime lock so an old running
         // write cannot overwrite a newer waiting/idle state.
@@ -639,7 +674,7 @@ impl SessionManager {
     }
 
     fn emit_usage(&self) {
-        let _ = self.app.emit(crate::status::usage::EVENT, self.usage_snapshot());
+        self.sink.emit(crate::status::usage::EVENT, &self.usage_snapshot());
     }
 
     pub fn pending_permissions(&self) -> Vec<PendingPermission> {
@@ -920,7 +955,7 @@ impl SessionManager {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         rt.queued.clear();
-        self.app.state::<crate::AppState>().star_nag.interrupted(&rt.key());
+        self.observer.interrupted(&rt.key());
         if rt.child.is_none() && !matches!(rt.engine, Engine::Cli(_)) {
             return Ok(());
         }
@@ -1265,7 +1300,7 @@ impl SessionManager {
         drop(rt);
         if turn_was_open {
             let detail = code.map(|value| format!(" with exit code {value}")).unwrap_or_else(|| " from a signal".into());
-            crate::automations::fail_from_hook(&self.app, &entry.id, tab_id, &format!("The agent process exited{detail} before the automation turn completed."));
+            self.observer.automation_failed(&entry.id, tab_id, &format!("The agent process exited{detail} before the automation turn completed."));
         }
     }
 
@@ -1282,7 +1317,7 @@ impl SessionManager {
 
     fn announce_pane(&self, rt: &TabRuntime) {
         if let Some(ev) = Self::pane_event(rt) {
-            let _ = self.app.emit("tab_pty", ev);
+            self.sink.emit("tab_pty", &ev);
         }
     }
 
@@ -1327,7 +1362,7 @@ impl SessionManager {
         let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: 120, rows: 30, command: Some(&launch.command), env: &env };
-        self.terminals.spawn(self.app.clone(), &pane, spec).context("start the agent's CLI")?;
+        self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI")?;
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         rt.engine = Engine::Cli(CliTab {
             usage_account,
@@ -1864,7 +1899,7 @@ impl SessionManager {
                 }
                 drop(rt);
                 if frame.event == "UserPromptSubmit" {
-                    crate::automations::mark_running_from_hook(&self.app, &frame.session, &frame.tab);
+                    self.observer.automation_running(&frame.session, &frame.tab);
                 }
             }
             // The CLI is asking in its own TUI, which means our permission
@@ -1885,8 +1920,7 @@ impl SessionManager {
                 self.forget_tool_answers(&mut rt);
                 self.close_open_turn(&mut rt, TurnStatus::Ok, final_text);
                 drop(rt);
-                crate::automations::complete_from_hook(
-                    &self.app,
+                self.observer.automation_completed(
                     &frame.session,
                     &frame.tab,
                     frame.payload["last_assistant_message"].as_str().map(String::from),
@@ -1898,7 +1932,7 @@ impl SessionManager {
                 self.forget_tool_answers(&mut rt);
                 self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
                 drop(rt);
-                crate::automations::fail_from_hook(&self.app, &frame.session, &frame.tab, "The automation turn was interrupted.");
+                self.observer.automation_failed(&frame.session, &frame.tab, "The automation turn was interrupted.");
             }
             "SessionEnd" => {
                 let mut rt = rt_arc.lock().unwrap();
@@ -1907,8 +1941,7 @@ impl SessionManager {
                 self.set_status(&mut rt, TabStatus::Idle);
                 drop(rt);
                 if turn_was_open {
-                    crate::automations::fail_from_hook(
-                        &self.app,
+                    self.observer.automation_failed(
                         &frame.session,
                         &frame.tab,
                         "The agent session ended before the automation turn completed.",

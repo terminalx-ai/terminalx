@@ -6,6 +6,7 @@
 //! - shared JSON (`index.json`, `projects.json`, `settings.json`) is rewritten
 //!   whole under a process-wide lock and lands via write-temp + rename.
 
+#[cfg(feature = "desktop")]
 pub mod automations;
 pub mod activity;
 pub mod index;

@@ -4,38 +4,20 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager};
 
-use crate::store::index::{self, AutomationRef, IssueRef, SessionEntry, TabEntry, TabStatus};
+use crate::store::index::{self, SessionEntry, TabEntry, TabStatus};
 use crate::store::projects::{self, Project};
 use crate::{git, harness, names, store};
 
+pub use crate::session_ops::{NewSession, NewTab};
+pub(crate) use crate::session_ops::create_session_blocking;
+use crate::session_ops::{
+    available_worktree_name, delete_workspace_entries, new_tab_entry, notify_sessions_deleted,
+    notify_workspace_deleted, notify_workspace_settled, remove_session_entries, sessions_in_workspace,
+};
+
 type CmdResult<T> = Result<T, String>;
-
-pub(crate) const WORKSPACES_CHANGED_EVENT: &str = "workspaces_changed";
-pub(crate) const SESSION_DELETED_EVENT: &str = "session_deleted";
-
-/// Tell the frontend a workspace is gone: its sessions were removed outright,
-/// so each goes out as a deletion rather than an update.
-pub(crate) fn notify_workspace_deleted<R: Runtime>(app: &AppHandle<R>, project_path: &str, removed: &[SessionEntry]) {
-    notify_sessions_deleted(app, removed);
-    let _ = app.emit(WORKSPACES_CHANGED_EVENT, project_path);
-}
-
-/// Sessions that a workspace still on disk stops hosting: settling a worktree
-/// keeps the session alive at the project root, so these go out as updates.
-pub(crate) fn notify_workspace_settled<R: Runtime>(app: &AppHandle<R>, project_path: &str, moved: &[SessionEntry]) {
-    for session in moved {
-        let _ = app.emit("session_updated", session);
-    }
-    let _ = app.emit(WORKSPACES_CHANGED_EVENT, project_path);
-}
-
-pub(crate) fn notify_sessions_deleted<R: Runtime>(app: &AppHandle<R>, removed: &[SessionEntry]) {
-    for session in removed {
-        let _ = app.emit(SESSION_DELETED_EVENT, &session.id);
-    }
-}
 
 fn err<E: std::fmt::Display>(e: E) -> String {
     format!("{e:#}")
@@ -481,88 +463,6 @@ pub async fn stats_usage_refresh(state: State<'_, AppState>, scope: String, gene
         .map_err(err)?
 }
 
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NewTab {
-    pub harness: String,
-    #[serde(default)]
-    pub model: String,
-    #[serde(default)]
-    pub effort: Option<String>,
-    #[serde(default)]
-    pub permission_mode: Option<String>,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NewSession {
-    pub project_path: String,
-    #[serde(default)]
-    pub title: Option<String>,
-    pub use_worktree: bool,
-    #[serde(default)]
-    pub base_ref: Option<String>,
-    /// A requested worktree name (an issue slug); sanitised and made unique.
-    #[serde(default)]
-    pub worktree_name: Option<String>,
-    /// Explicit acknowledgement that a requested worktree should be skipped.
-    #[serde(default)]
-    pub on_main: bool,
-    #[serde(default)]
-    pub issue: Option<IssueRef>,
-    #[serde(default)]
-    pub automation: Option<AutomationRef>,
-    /// An existing workspace to run in instead of a new worktree.
-    #[serde(default)]
-    pub cwd: Option<String>,
-    /// The first agent conversation. Omitted when a checkout is opened directly.
-    #[serde(default)]
-    pub tab: Option<NewTab>,
-}
-
-fn validate_session_target(req: &NewSession) -> CmdResult<()> {
-    let requested_worktree = req.worktree_name.as_deref().is_some_and(|name| !name.trim().is_empty());
-    if !req.use_worktree && requested_worktree && !req.on_main {
-        return Err("A requested worktree can only be skipped when onMain is explicitly true.".into());
-    }
-    Ok(())
-}
-
-fn available_worktree_name(project: &Path, requested: Option<&str>, excluding: Option<&str>) -> CmdResult<String> {
-    let claimed = index::load().map(|sessions| index::claimed_worktree_names(&sessions)).unwrap_or_default();
-    let mut taken = git::taken_worktree_names(project, &claimed);
-    if let Some(excluding) = excluding {
-        taken.retain(|name| name != excluding);
-    }
-    match requested.filter(|name| !name.trim().is_empty()) {
-        Some(requested) => names::requested(requested, &taken)
-            .ok_or_else(|| "Workspace names must contain at least one letter or number.".into()),
-        None => Ok(names::unclaimed(&taken)),
-    }
-}
-
-fn new_tab_entry(t: &NewTab) -> TabEntry {
-    TabEntry {
-        id: uuid::Uuid::now_v7().to_string(),
-        harness: t.harness.clone(),
-        title: None,
-        model: t.model.clone(),
-        effort: t.effort.clone(),
-        permission_mode: t
-            .permission_mode
-            .clone()
-            .unwrap_or_else(|| index::DEFAULT_PERMISSION_MODE.into()),
-        provider_session_id: None,
-        status: TabStatus::Idle,
-        created: index::now(),
-        modified: index::now(),
-        context_used: None,
-        context_max: None,
-        fork_from: None,
-        unknown: BTreeMap::new(),
-    }
-}
-
 /// Create a session: an index entry around an existing checkout, or a new
 /// worktree and its first tab. The index entry lands before anything else can
 /// fail after it, so a session whose agent never starts is still visible and
@@ -572,72 +472,6 @@ pub async fn create_session(app: AppHandle, req: NewSession) -> CmdResult<Sessio
     tauri::async_runtime::spawn_blocking(move || create_session_blocking(&app, req))
         .await
         .map_err(err)?
-}
-
-pub(crate) fn create_session_blocking(app: &AppHandle, req: NewSession) -> CmdResult<SessionEntry> {
-    let entry = create_session_entry(req)?;
-    let _ = app.emit("session_created", &entry);
-    Ok(entry)
-}
-
-fn create_session_entry(req: NewSession) -> CmdResult<SessionEntry> {
-    validate_session_target(&req)?;
-    let project = projects::canonical_directory(&req.project_path).map_err(err)?;
-    let project_path = Path::new(&project);
-    let id = uuid::Uuid::now_v7().to_string();
-    let now = index::now();
-    let requested_title = req.title.clone().filter(|t| !t.trim().is_empty());
-    let first_tab = req.tab.as_ref().map(new_tab_entry);
-    let has_agent = first_tab.is_some();
-
-    let mut entry = SessionEntry {
-        id: id.clone(),
-        project_path: project.clone(),
-        cwd: project.clone(),
-        worktree_name: None,
-        branch: git::current_branch(project_path),
-        base_ref: None,
-        worktree_removed: false,
-        removed_workspace: None,
-        issue: req.issue.clone(),
-        automation: req.automation.clone(),
-        title: String::new(),
-        created: now.clone(),
-        modified: now,
-        archived: false,
-        pinned: false,
-        active_tab: first_tab.as_ref().map(|tab| tab.id.clone()),
-        tabs: first_tab.into_iter().collect(),
-        unknown: BTreeMap::new(),
-    };
-
-    if let Some(cwd) = req.cwd.as_deref().filter(|c| !c.is_empty()) {
-        let cwd = projects::canonical_directory(cwd).map_err(err)?;
-        entry.branch = git::current_branch(Path::new(&cwd));
-        entry.cwd = cwd;
-    } else if has_agent && req.use_worktree && git::is_repo(project_path) {
-        let name = available_worktree_name(project_path, req.worktree_name.as_deref(), None)?;
-        let wt = git::create_worktree(project_path, &name, req.base_ref.as_deref()).map_err(err)?;
-        entry.cwd = wt.path;
-        entry.worktree_name = Some(wt.name);
-        entry.branch = Some(wt.branch);
-        entry.base_ref = Some(wt.base_tree);
-    }
-
-    entry.title = requested_title.unwrap_or_else(|| {
-        if has_agent {
-            "New session".into()
-        } else {
-            entry.branch.clone().unwrap_or_else(|| projects::project_name(&entry.cwd))
-        }
-    });
-
-    index::update(|sessions| {
-        sessions.push(entry.clone());
-        Ok(())
-    })
-    .map_err(err)?;
-    Ok(entry)
 }
 
 #[tauri::command]
@@ -754,29 +588,6 @@ pub async fn delete_session(app: AppHandle, session_id: String, remove_worktree:
 
 /// Drop sessions from the index along with their transcript logs and
 /// attachments. Callers stop whatever the tabs were running first.
-pub(crate) fn remove_session_entries(doomed: &[SessionEntry]) -> CmdResult<()> {
-    if doomed.is_empty() {
-        return Ok(());
-    }
-    let ids: std::collections::HashSet<&str> = doomed.iter().map(|s| s.id.as_str()).collect();
-    index::update(|sessions| {
-        sessions.retain(|s| !ids.contains(s.id.as_str()));
-        Ok(())
-    })
-    .map_err(err)?;
-    let sessions_dir = store::sessions_dir().ok();
-    let attachments_dir = store::root().ok().map(|root| root.join("attachments"));
-    for session in doomed {
-        if let Some(dir) = &sessions_dir {
-            let _ = std::fs::remove_dir_all(dir.join(&session.id));
-        }
-        if let Some(dir) = &attachments_dir {
-            let _ = std::fs::remove_dir_all(dir.join(&session.id));
-        }
-    }
-    Ok(())
-}
-
 // ------------------------------------------------------------------ harnesses
 
 #[tauri::command]
@@ -1462,7 +1273,7 @@ pub fn gh_available() -> bool {
 #[tauri::command]
 pub fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, cwd: String, cols: u16, rows: u16, command: Option<String>) -> CmdResult<()> {
     let spec = crate::pty::PaneSpec { cwd: &cwd, cols: cols.max(2), rows: rows.max(1), command: command.as_deref(), env: &[] };
-    state.terminals.spawn(app, &id, spec).map_err(err)
+    state.terminals.spawn(std::sync::Arc::new(app), &id, spec).map_err(err)
 }
 
 #[tauri::command]
@@ -1722,10 +1533,10 @@ mod command_tests {
     use std::path::Path;
     use std::process::Command;
 
-    use super::{
-        create_session_entry, delete_workspace_entries, new_tab_entry,
-        notify_workspace_deleted, rename_workspace_entries, validate_session_target, NewSession,
-        NewTab,
+    use super::{rename_workspace_entries, NewSession, NewTab};
+    use crate::session_ops::{
+        create_session_entry, delete_workspace_entries, new_tab_entry, notify_workspace_deleted,
+        validate_session_target,
     };
 
     fn git(cwd: &Path, args: &[&str]) -> String {
@@ -2222,22 +2033,6 @@ pub async fn workspace_disposition(project_path: String, path: String) -> CmdRes
     .map_err(err)?
 }
 
-pub(crate) fn sessions_in_workspace(path: &Path) -> CmdResult<Vec<SessionEntry>> {
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    index::load()
-        .map(|sessions| {
-            sessions
-                .into_iter()
-                .filter(|session| {
-                    std::fs::canonicalize(&session.cwd)
-                        .map(|cwd| cwd == target)
-                        .unwrap_or_else(|_| Path::new(&session.cwd) == target)
-                })
-                .collect()
-        })
-        .map_err(err)
-}
-
 fn mark_workspace_sessions_removed(project_path: &str, affected: &[SessionEntry]) -> CmdResult<Vec<SessionEntry>> {
     let project = std::fs::canonicalize(project_path).unwrap_or_else(|_| PathBuf::from(project_path));
     let affected_ids: std::collections::HashSet<_> = affected.iter().map(|session| session.id.clone()).collect();
@@ -2254,18 +2049,6 @@ fn mark_workspace_sessions_removed(project_path: &str, affected: &[SessionEntry]
         Ok(moved)
     })
     .map_err(err)
-}
-
-/// Delete a workspace together with every session that ran in it: index
-/// entries, transcript logs and attachments. Returns the removed sessions so
-/// callers can announce them. Tabs must already be stopped.
-pub(crate) fn delete_workspace_entries(project_path: &str, path: &str, delete_branch: bool) -> CmdResult<Vec<SessionEntry>> {
-    let project = std::fs::canonicalize(project_path).unwrap_or_else(|_| PathBuf::from(project_path));
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
-    let affected = sessions_in_workspace(&target)?;
-    crate::workspaces::delete(&project, &target, delete_branch).map_err(err)?;
-    remove_session_entries(&affected)?;
-    Ok(affected)
 }
 
 /// Remove a worktree and, with it, the sessions that lived there.

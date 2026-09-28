@@ -1,0 +1,16 @@
+[package]
+name = "terminalx-serve"
+version = "0.2.2"
+description = "Headless TerminalX runtime for cloud workspaces"
+authors = ["Paresh Dudhat"]
+edition = "2021"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "terminalx-serve"
+path = "src/main.rs"
+
+[dependencies]
+# Without the default `desktop` feature: no Tauri, WebView, GTK or audio.
+raccoon = { path = "..", default-features = false }
