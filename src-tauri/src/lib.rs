@@ -21,6 +21,8 @@ pub mod cli;
 #[cfg(feature = "desktop")]
 mod commands;
 #[cfg(feature = "desktop")]
+mod cloud_agent_client;
+#[cfg(feature = "desktop")]
 mod cloud_remote;
 #[cfg(feature = "desktop")]
 mod cloud_workspaces;
@@ -124,7 +126,11 @@ pub fn run() {
     let pairing = Arc::new(pairing::PairingManager::new(account.clone()));
     let cloud_workspaces = Arc::new(cloud_workspaces::CloudWorkspaceService::new(account.clone()));
     let organization_members = Arc::new(organization_members::OrganizationMembersService::new(account.clone()));
-    let cloud_remote = cloud_remote::CloudRemote::new(account.clone(), cloud_workspaces.clone());
+    let agent_keys = Arc::new(cloud_agent_client::KeychainKeys::default());
+    let cloud_agents = Arc::new(
+        cloud_agent_client::CloudAgentClient::new(account.clone(), agent_keys.clone()).expect("open the cloud agent store under TERMINALX_HOME"),
+    );
+    let cloud_remote = cloud_remote::CloudRemote::new(account.clone(), cloud_workspaces.clone(), cloud_agents.clone());
     // The resource directory is only known once Tauri is up; the service
     // resolves the helper lazily, so it can be built before `setup`.
     let computer = Arc::new(computer::ComputerService::new(None));
@@ -159,7 +165,9 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(state)
         .manage(cloud_remote.clone())
+        .manage(cloud_agents)
         .setup(move |app| {
+            agent_keys.configure(&app.config().identifier);
             cloud_remote.watch_identity(app.handle().clone());
             account.configure(&app.config().identifier)?;
             pairing.configure(Arc::new(app.handle().clone()), app.path().app_log_dir().ok(), &app.config().identifier)?;
@@ -276,6 +284,15 @@ pub fn run() {
             cloud_remote::cloud_remote_send,
             cloud_remote::cloud_remote_activate,
             cloud_remote::cloud_remote_detach,
+            cloud_agent_client::cloud_agent_enqueue,
+            cloud_agent_client::cloud_agent_outbox,
+            cloud_agent_client::cloud_agent_outbox_sync,
+            cloud_agent_client::cloud_agent_cancel,
+            cloud_agent_client::cloud_agent_checkpoints,
+            cloud_agent_client::cloud_agent_checkpoint,
+            cloud_agent_client::cloud_agent_has_key,
+            cloud_agent_client::cloud_agent_cache_load,
+            cloud_agent_client::cloud_agent_cache_save,
             commands::pairing_status,
             commands::pairing_generate,
             commands::pairing_revoke,
