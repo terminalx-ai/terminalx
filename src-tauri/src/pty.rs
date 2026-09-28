@@ -179,35 +179,55 @@ impl Terminals {
             let alive = alive.clone();
             let last_output = last_output.clone();
             let scrollback = scrollback.clone();
+            // Reading blocks until the program writes again, so it gets a
+            // thread of its own: the emitter below must be able to send what
+            // it gathered when the window closes even if the program has
+            // gone quiet (a prompt waiting for input), not on its next write.
+            let (chunks, gathered) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
             std::thread::Builder::new().name(format!("pty-read-{id}")).spawn(move || {
                 let mut buf = vec![0u8; 16 * 1024];
-                let mut acc: Vec<u8> = Vec::with_capacity(MAX_CHUNK);
-                let mut window_start: Option<Instant> = None;
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            acc.extend_from_slice(&buf[..n]);
-                            let start = *window_start.get_or_insert_with(Instant::now);
-                            // Gather a little more if it is arriving fast, so one emit
-                            // carries a burst rather than each read costing an eval.
-                            if acc.len() < MAX_CHUNK && start.elapsed() < COALESCE {
-                                std::thread::sleep(COALESCE.saturating_sub(start.elapsed()).min(Duration::from_millis(4)));
-                                continue;
+                            if chunks.send(buf[..n].to_vec()).is_err() {
+                                break;
                             }
-                            let data = base64::engine::general_purpose::STANDARD.encode(&acc);
-                            append_scrollback(&scrollback, &acc);
-                            *last_output.lock().unwrap() = Some(Instant::now());
-                            sink.emit("pty_data", &PtyData { id: id.clone(), data });
-                            acc.clear();
-                            window_start = None;
                         }
                     }
                 }
-                if !acc.is_empty() {
-                    let data = base64::engine::general_purpose::STANDARD.encode(&acc);
-                    append_scrollback(&scrollback, &acc);
+            })?;
+            std::thread::Builder::new().name(format!("pty-emit-{id}")).spawn(move || {
+                let flush = |acc: &mut Vec<u8>| {
+                    let data = base64::engine::general_purpose::STANDARD.encode(&*acc);
+                    append_scrollback(&scrollback, acc);
+                    *last_output.lock().unwrap() = Some(Instant::now());
                     sink.emit("pty_data", &PtyData { id: id.clone(), data });
+                    acc.clear();
+                };
+                let mut acc: Vec<u8> = Vec::with_capacity(MAX_CHUNK);
+                let mut open = true;
+                while open {
+                    let Ok(first) = gathered.recv() else { break };
+                    acc.extend_from_slice(&first);
+                    // Gather a little more if it is arriving fast, so one emit
+                    // carries a burst rather than each read costing an eval.
+                    let start = Instant::now();
+                    while acc.len() < MAX_CHUNK {
+                        let left = COALESCE.saturating_sub(start.elapsed());
+                        if left.is_zero() {
+                            break;
+                        }
+                        match gathered.recv_timeout(left) {
+                            Ok(more) => acc.extend_from_slice(&more),
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                open = false;
+                                break;
+                            }
+                        }
+                    }
+                    flush(&mut acc);
                 }
                 *alive.lock().unwrap() = false;
                 sink.emit(crate::status::resources::CHANGED_EVENT, &());
@@ -341,6 +361,37 @@ impl Terminals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_is_sent_when_the_program_goes_quiet_not_on_its_next_write() {
+        let sink = Arc::new(crate::sink::BroadcastSink::new(64));
+        let (sent, received) = std::sync::mpsc::channel::<Vec<u8>>();
+        let sent = Mutex::new(sent);
+        sink.listen(
+            "pty_data",
+            Box::new(move |payload| {
+                if let Ok(data) = serde_json::from_str::<PtyData>(payload) {
+                    let _ = sent.lock().unwrap().send(base64::engine::general_purpose::STANDARD.decode(data.data).unwrap());
+                }
+            }),
+        );
+        let terminals = Terminals::new();
+        let dir = tempfile::tempdir().unwrap();
+        // The pauses end each earlier batch, so the last piece opens a batch
+        // of its own, and then the program writes nothing more for minutes.
+        let command = "sh -c 'printf a; sleep 1; printf b; sleep 1; printf quiet-end; exec sleep 600'";
+        let spec = PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some(command), env: &[] };
+        terminals.spawn(sink, "quiet", spec).unwrap();
+        let mut output = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !String::from_utf8_lossy(&output).contains("quiet-end") {
+            let chunk = received
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|_| panic!("output held back while the program is quiet: {:?}", String::from_utf8_lossy(&output)));
+            output.extend(chunk);
+        }
+        terminals.kill_all();
+    }
 
     #[test]
     fn scrollback_retains_only_the_newest_bounded_bytes() {
