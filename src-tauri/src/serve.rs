@@ -7,8 +7,9 @@
 //! stored credential) before anything else starts; see `cloud_bootstrap`.
 //! It then records its memory baseline (`memory_baseline`) and reports its
 //! activity to the API so an unused workspace can be suspended
-//! (`cloud_activity`), and fetches the agent credentials its agents run with
-//! (`cloud_grants`).
+//! (`cloud_activity`), fetches the agent credentials its agents run with
+//! (`cloud_grants`), and installs the GitHub credential helper and `gh` shim
+//! (`cloud_github`).
 //!
 //! Not here yet:
 //! - TODO(PRO-13): register with the relay as a host (outbound only) and serve
@@ -55,7 +56,8 @@ and $TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_TOKEN_PATH when they are set. It exits
 with 3 when the server rejects the token or credential for good.
 
 The agent CLIs' hooks call back into this binary as `terminalx-serve hook
-<Event>` and `terminalx-serve statusline`.";
+<Event>` and `terminalx-serve statusline`; Git and the `gh` shim of a cloud
+workspace as `terminalx-serve github-auth`.";
 
 /// What the runtime is serving, reported by `status` on the control socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +139,10 @@ pub fn main() -> i32 {
         return 0;
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // So is Git's credential helper and the `gh` shim (`cloud_github`).
+    if args.first().map(String::as_str) == Some(crate::cloud_github::SUBCOMMAND) {
+        return crate::cloud_github::run_cli(&args[1..]);
+    }
     let options = match parse(&args) {
         Ok(Command::Serve(options)) => options,
         Ok(Command::Help) => {
@@ -203,6 +209,10 @@ fn run(options: Options) -> Result<()> {
     // the workspace's credentials once they arrive.
     if let (Some((cloud, origin)), false) = (&cloud, options.self_test) {
         start_agent_grants(cloud.clone(), origin);
+        // Before anything reads `binpath::login_path`, which puts the `gh`
+        // shim first.
+        let workspace_id = cloud.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).workspace_id.clone();
+        crate::cloud_github::install_at_boot(&data_dir.join(crate::cloud_bootstrap::STATE_DIR), origin, &workspace_id);
     }
     let runtime = start(&options)?;
     if let (Some((cloud, origin)), false) = (&cloud, options.self_test) {

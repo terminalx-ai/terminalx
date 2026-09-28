@@ -13,6 +13,7 @@ mod binpath;
 mod cloud_activity;
 mod cloud_bootstrap;
 pub mod cloud_agents;
+mod cloud_github;
 mod cloud_grants;
 #[cfg(feature = "desktop")]
 pub mod browser;
