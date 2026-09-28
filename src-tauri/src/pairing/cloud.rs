@@ -12,7 +12,6 @@ use super::model::{
     CAPABILITY,
 };
 
-pub const ACCOUNT_BASE_URL: &str = "https://login.terminalx.ai";
 pub const RELAY_DIRECTOR_URL: &str = "https://relay.terminalx.ai";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -57,7 +56,7 @@ struct RevocationList {
 
 pub fn register_host(context: &AccountContext, payload: &HostBindingPayload) -> Result<()> {
     request_unit(
-        ACCOUNT_BASE_URL,
+        &crate::account::api_base_url(),
         "/v1/desktop/host-account-bindings",
         "POST",
         Some(serde_json::to_value(payload)?),
@@ -72,7 +71,7 @@ pub fn heartbeat(
     reachability: &str,
 ) -> Result<()> {
     request_unit(
-        ACCOUNT_BASE_URL,
+        &crate::account::api_base_url(),
         &format!("/v1/desktop/host-account-bindings/{host_id}/heartbeat"),
         "POST",
         Some(json!({
@@ -86,7 +85,7 @@ pub fn heartbeat(
 
 pub fn unbind(context: &AccountContext, host_id: &str, generation: u64) -> Result<()> {
     request_unit(
-        ACCOUNT_BASE_URL,
+        &crate::account::api_base_url(),
         &format!("/v1/desktop/host-account-bindings/{host_id}"),
         "DELETE",
         Some(json!({ "bindingGeneration": generation, "reason": "host-sign-out" })),
@@ -100,7 +99,7 @@ pub fn pending_grants(
     generation: u64,
 ) -> Result<Vec<AccountPairingGrant>> {
     request_json::<GrantList>(
-        ACCOUNT_BASE_URL,
+        &crate::account::api_base_url(),
         &format!("/v1/desktop/host-account-bindings/{host_id}/pairing-grant-requests?bindingGeneration={generation}"),
         "GET",
         None,
@@ -116,7 +115,7 @@ pub fn publish_envelope(
     envelope: &AccountPairingEnvelope,
 ) -> Result<()> {
     request_unit(
-        ACCOUNT_BASE_URL,
+        &crate::account::api_base_url(),
         &format!("/v1/desktop/host-account-bindings/{host_id}/pairing-grant-requests/{request_id}/envelope"),
         "PUT",
         Some(serde_json::to_value(envelope)?),
@@ -131,7 +130,7 @@ pub fn reject_grant(
     generation: u64,
 ) -> Result<()> {
     request_unit(
-        ACCOUNT_BASE_URL,
+        &crate::account::api_base_url(),
         &format!("/v1/desktop/host-account-bindings/{host_id}/pairing-grant-requests/{request_id}/reject"),
         "POST",
         Some(json!({ "bindingGeneration": generation, "reason": "mint-failed" })),
@@ -145,7 +144,7 @@ pub fn pending_revocations(
     generation: u64,
 ) -> Result<Vec<AccountPairingRevocation>> {
     request_json::<RevocationList>(
-        ACCOUNT_BASE_URL,
+        &crate::account::api_base_url(),
         &format!("/v1/desktop/host-account-bindings/{host_id}/revocations?bindingGeneration={generation}"),
         "GET",
         None,
@@ -161,7 +160,7 @@ pub fn acknowledge_revocation(
     generation: u64,
 ) -> Result<()> {
     request_unit(
-        ACCOUNT_BASE_URL,
+        &crate::account::api_base_url(),
         &format!(
             "/v1/desktop/host-account-bindings/{host_id}/revocations/{revocation_id}/acknowledge"
         ),
@@ -177,7 +176,7 @@ pub fn relay_authorization(
     host_public_key_b64: &str,
 ) -> Result<RelayAuthorization> {
     relay_authorization_at(
-        ACCOUNT_BASE_URL,
+        &crate::account::api_base_url(),
         context,
         relay_host_id,
         host_public_key_b64,

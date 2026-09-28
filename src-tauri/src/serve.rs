@@ -37,6 +37,11 @@ Options:
                          runtime never takes over the desktop app's ~/.raccoon
   --runtime-kind <kind>  local (default) or cloud-workspace; cloud-workspace
                          requires --project-root
+  --relay-link <file>    Register with the relay as a host and serve the
+                         workspace RPC (terminals, files, Git, sessions),
+                         with the relay session read from a JSON file; for
+                         local development and the relay integration test
+                         (cloud workspaces get it from the bootstrap)
   --self-test            Start, run one shell in a PTY, then exit
   -V, --version          Print the version
   -h, --help             Print this help
@@ -70,6 +75,7 @@ pub struct Options {
     pub data_dir: Option<PathBuf>,
     pub runtime_kind: RuntimeKind,
     pub self_test: bool,
+    pub relay_link: Option<PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -80,7 +86,8 @@ enum Command {
 }
 
 fn parse(args: &[String]) -> Result<Command> {
-    let mut options = Options { project_root: None, data_dir: None, runtime_kind: RuntimeKind::Local, self_test: false };
+    let mut options =
+        Options { project_root: None, data_dir: None, runtime_kind: RuntimeKind::Local, self_test: false, relay_link: None };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let (flag, inline) = match arg.split_once('=') {
@@ -105,12 +112,16 @@ fn parse(args: &[String]) -> Result<Command> {
                     other => bail!("unknown runtime kind {other}; expected local or cloud-workspace"),
                 }
             }
+            "--relay-link" => options.relay_link = Some(PathBuf::from(value(flag)?)),
             "--self-test" if inline.is_none() => options.self_test = true,
             other => bail!("unknown argument {other}"),
         }
     }
     if options.runtime_kind == RuntimeKind::CloudWorkspace && options.project_root.is_none() {
         bail!("--runtime-kind cloud-workspace requires --project-root");
+    }
+    if options.relay_link.is_some() && options.project_root.is_none() {
+        bail!("--relay-link requires --project-root: the relay serves one workspace");
     }
     Ok(Command::Serve(options))
 }
@@ -156,6 +167,7 @@ struct Runtime {
     sink: Arc<BroadcastSink>,
     host: Arc<crate::harness::host::Host>,
     terminals: Arc<crate::pty::Terminals>,
+    manager: crate::session::SessionManager,
     project_root: Option<String>,
 }
 
@@ -200,6 +212,9 @@ fn run(options: Options) -> Result<()> {
             }),
         })
     );
+    if let (Some(link), Some(root)) = (&options.relay_link, &runtime.project_root) {
+        tokio.block_on(start_relay_host(&runtime, link, root, &data_dir))?;
+    }
     let outcome = if options.self_test {
         self_test(&runtime, &tokio)
     } else {
@@ -268,7 +283,34 @@ fn start(options: &Options) -> Result<Runtime> {
         .context("listen on the hook and control socket")?;
     log::info!("hook socket at {}", socket.display());
     crate::session::idle_orphaned_tabs();
-    Ok(Runtime { sink, host, terminals, project_root })
+    Ok(Runtime { sink, host, terminals, manager, project_root })
+}
+
+/// Serve the workspace through the relay with a file-backed link, and report
+/// each registration state as a JSON line on stdout.
+async fn start_relay_host(runtime: &Runtime, link: &std::path::Path, root: &str, data_dir: &std::path::Path) -> Result<()> {
+    let link: Arc<dyn crate::remote::host::RuntimeLink> =
+        Arc::new(crate::remote::host::FileLink::open(link).context("open the relay link")?);
+    let host = crate::remote::host::serve_workspace(
+        link,
+        PathBuf::from(root),
+        runtime.sink.clone(),
+        runtime.terminals.clone(),
+        Some(runtime.manager.clone()),
+        Some(data_dir.join("run").join("remote-devices.json")),
+    )
+    .await?;
+    let mut status = host.status();
+    tokio::spawn(async move {
+        loop {
+            let current = status.borrow_and_update().clone();
+            println!("{}", json!({ "type": "relay", "status": current }));
+            if status.changed().await.is_err() {
+                return;
+            }
+        }
+    });
+    Ok(())
 }
 
 fn shutdown(runtime: &Runtime) {
@@ -400,6 +442,7 @@ mod tests {
                 data_dir: Some("/var/lib/terminalx".into()),
                 runtime_kind: RuntimeKind::CloudWorkspace,
                 self_test: false,
+                relay_link: None,
             })
         );
     }

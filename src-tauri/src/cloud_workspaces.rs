@@ -13,7 +13,6 @@ use url::Url;
 
 use crate::account::{AccountContext, AccountManager};
 
-const ACCOUNT_BASE_URL: &str = "https://login.terminalx.ai";
 const CONTRACT: &str = "providers-v1";
 const SUPPORTED_PROVIDERS: &str = "machine0,box";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -559,7 +558,7 @@ struct Client {
 impl Client {
     fn production() -> Self {
         Self {
-            base: Url::parse(ACCOUNT_BASE_URL).expect("valid account service URL"),
+            base: Url::parse(&crate::account::api_base_url()).expect("valid account service URL"),
             timeout: REQUEST_TIMEOUT,
         }
     }

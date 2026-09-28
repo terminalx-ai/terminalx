@@ -47,6 +47,8 @@ mod names;
 #[cfg(feature = "desktop")]
 mod pairing;
 mod pty;
+mod relay_e2ee;
+pub mod remote;
 mod session;
 mod session_ops;
 pub mod serve;

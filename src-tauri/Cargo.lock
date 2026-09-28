@@ -5530,9 +5530,14 @@ dependencies = [
 name = "terminalx-serve"
 version = "0.2.2"
 dependencies = [
+ "anyhow",
+ "base64 0.22.1",
  "raccoon",
  "serde_json",
  "tempfile",
+ "tokio",
+ "ureq",
+ "uuid",
 ]
 
 [[package]]
