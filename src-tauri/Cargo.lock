@@ -4042,6 +4042,7 @@ dependencies = [
  "crypto_secretbox",
  "dirs",
  "env_logger",
+ "flate2",
  "futures-util",
  "hkdf 0.12.4",
  "hmac 0.12.1",

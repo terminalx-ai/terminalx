@@ -173,6 +173,9 @@ struct Runtime {
     terminals: Arc<crate::pty::Terminals>,
     manager: crate::session::SessionManager,
     project_root: Option<String>,
+    /// Agent tabs of the project that were mid-turn when the previous
+    /// runtime process ended (PRO-22), before they are reset to idle.
+    interrupted: Vec<(String, String)>,
 }
 
 fn run(options: Options) -> Result<()> {
@@ -234,7 +237,14 @@ fn run(options: Options) -> Result<()> {
     };
     // The self-test checks the local runtime only.
     if let (Some(link), Some(root), false) = (link, &runtime.project_root, options.self_test) {
-        start_relay_host(&runtime, link, root, &data_dir);
+        let agents = match start_cloud_agents(&runtime, root, &data_dir, cloud.as_ref(), options.relay_link.as_deref()) {
+            Ok(agents) => Some(agents),
+            Err(error) => {
+                log::error!("cloud agent tabs: {error:#}");
+                None
+            }
+        };
+        start_relay_host(&runtime, link, root, &data_dir, agents);
     }
     let outcome = if options.self_test {
         self_test(&runtime, &tokio)
@@ -361,20 +371,107 @@ fn start(options: &Options) -> Result<Runtime> {
     let socket = crate::hooks::serve(control_endpoint, move |frame| hooked.on_hook(frame), move |request| service.handle(request))
         .context("listen on the hook and control socket")?;
     log::info!("hook socket at {}", socket.display());
+    let interrupted = project_root.as_deref().map(crate::cloud_agents::interrupted_tabs).unwrap_or_default();
     crate::session::idle_orphaned_tabs();
-    Ok(Runtime { sink, host, terminals, manager, project_root })
+    Ok(Runtime { sink, host, terminals, manager, project_root, interrupted })
 }
 
 /// Serve the workspace through the relay in the background, and report
 /// each registration state as a JSON line on stdout.
-fn start_relay_host(runtime: &Runtime, link: Arc<dyn crate::remote::host::RuntimeLink>, root: &str, data_dir: &std::path::Path) {
+/// Agent tabs, keys, the command mailbox and transcript checkpoints
+/// (PRO-22). The mailbox API is the bootstrap's in a cloud workspace, or a
+/// development link file's `mailbox` section.
+fn start_cloud_agents(
+    runtime: &Runtime,
+    root: &str,
+    data_dir: &std::path::Path,
+    cloud: Option<&(Arc<crate::cloud_bootstrap::Bootstrapped>, String)>,
+    relay_link: Option<&std::path::Path>,
+) -> Result<Arc<crate::cloud_agents::CloudAgents>> {
+    use crate::cloud_agents::{api::HttpMailboxApi, CloudAgents, Identity, ManagerOps};
+    let ops = Arc::new(ManagerOps { manager: runtime.manager.clone(), root: root.to_string() });
+    let mut generation = 0;
+    let api: Option<(Arc<dyn crate::cloud_agents::api::MailboxApi>, Identity)> = match (cloud, relay_link) {
+        (Some((cloud, origin)), _) => {
+            let session = cloud.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+            generation = crate::remote::host::token_identity(&session.relay_token).map(|id| id.runtime_generation).unwrap_or(0);
+            let credential_source = cloud.clone();
+            let credential: crate::cloud_agents::api::Credential = Arc::new(move || Some(credential_source.runtime_credential()));
+            Some((
+                Arc::new(HttpMailboxApi::new(origin, credential)),
+                Identity { organization_id: session.organization_id, workspace_id: session.workspace_id },
+            ))
+        }
+        (None, Some(path)) => dev_mailbox(path)?.map(|(origin, credential, identity)| {
+            let credential = zeroize::Zeroizing::new(credential);
+            let credential: crate::cloud_agents::api::Credential = Arc::new(move || Some(credential.clone()));
+            (Arc::new(HttpMailboxApi::new(&origin, credential)) as Arc<dyn crate::cloud_agents::api::MailboxApi>, identity)
+        }),
+        (None, None) => None,
+    };
+    let agents = CloudAgents::open(&CloudAgents::state_dir(data_dir), ops, Some(runtime.sink.clone()), api, generation)?;
+    agents.mark_interrupted_turns(&runtime.interrupted);
+    agents.start();
+    if let Some((cloud, _)) = cloud {
+        watch_access(agents.clone(), cloud.clone());
+    }
+    Ok(agents)
+}
+
+/// A development link file's mailbox: `(origin, runtime credential, identity)`.
+fn dev_mailbox(path: &std::path::Path) -> Result<Option<(String, String, crate::cloud_agents::Identity)>> {
+    let link: serde_json::Value = serde_json::from_slice(&std::fs::read(path).with_context(|| format!("read {}", path.display()))?)?;
+    let Some(mailbox) = link.get("mailbox") else { return Ok(None) };
+    let text = |name: &str| mailbox.get(name).and_then(serde_json::Value::as_str).map(str::to_string).with_context(|| format!("mailbox.{name} is required"));
+    Ok(Some((
+        text("origin")?,
+        text("runtimeCredential")?,
+        crate::cloud_agents::Identity { organization_id: text("organizationId")?, workspace_id: text("workspaceId")? },
+    )))
+}
+
+/// Rotate the workspace content key when access narrows (contract §13): the
+/// workspace becomes private, or an attachment is revoked.
+fn watch_access(agents: Arc<crate::cloud_agents::CloudAgents>, cloud: Arc<crate::cloud_bootstrap::Bootstrapped>) {
+    let snapshot = move || {
+        let session = cloud.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let revoked: std::collections::BTreeSet<String> =
+            session.revocations.iter().filter_map(|revocation| revocation.get("id").and_then(serde_json::Value::as_str).map(str::to_string)).collect();
+        (session.access_mode, revoked)
+    };
+    let _ = std::thread::Builder::new().name("cloud-key-rotation".into()).spawn(move || {
+        let (mut mode, mut revoked) = snapshot();
+        loop {
+            std::thread::sleep(Duration::from_secs(10));
+            let (next_mode, next_revoked) = snapshot();
+            let narrowed = mode == crate::cloud_bootstrap::AccessMode::Organization && next_mode == crate::cloud_bootstrap::AccessMode::Private;
+            let newly_revoked = next_revoked.difference(&revoked).next().is_some();
+            if narrowed || newly_revoked {
+                match agents.rotate_key() {
+                    Ok(key_id) => log::info!("rotated the workspace content key to {key_id} after access narrowed"),
+                    Err(error) => log::error!("rotate the workspace content key: {error:#}"),
+                }
+            }
+            mode = next_mode;
+            revoked.extend(next_revoked);
+        }
+    });
+}
+
+fn start_relay_host(
+    runtime: &Runtime,
+    link: Arc<dyn crate::remote::host::RuntimeLink>,
+    root: &str,
+    data_dir: &std::path::Path,
+    agents: Option<Arc<crate::cloud_agents::CloudAgents>>,
+) {
     let sink = runtime.sink.clone();
     let terminals = runtime.terminals.clone();
     let manager = runtime.manager.clone();
     let root = PathBuf::from(root);
     let devices = data_dir.join("run").join("remote-devices.json");
     tokio::spawn(async move {
-        let host = match crate::remote::host::serve_workspace(link, root, sink, terminals, Some(manager), Some(devices)).await {
+        let host = match crate::remote::host::serve_workspace(link, root, sink, terminals, Some(manager), Some(devices), agents.clone()).await {
             Ok(host) => host,
             Err(error) => {
                 log::error!("relay host: {error:#}");
@@ -384,8 +481,13 @@ fn start_relay_host(runtime: &Runtime, link: Arc<dyn crate::remote::host::Runtim
         let mut status = host.status();
         loop {
             let current = status.borrow_and_update().clone();
-            if matches!(current, crate::remote::host::HostStatus::Registered { .. }) {
+            if let crate::remote::host::HostStatus::Registered { runtime_generation, .. } = &current {
                 crate::cloud_activity::registered();
+                // Lease after every registration (contract §11.4).
+                if let Some(agents) = &agents {
+                    agents.set_generation(*runtime_generation);
+                    agents.poll.raise();
+                }
             }
             println!("{}", json!({ "type": "relay", "status": current }));
             if status.changed().await.is_err() {

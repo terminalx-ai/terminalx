@@ -16,7 +16,7 @@
 import { PortableRpcClient, type RpcCallResult, type RpcErrorData, type RpcResponse, type RpcWireRequest } from "./rpc";
 
 export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
-export const WORKSPACE_CAPABILITIES = ["pty/1", "fs/1", "git/1", "session/1"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "fs/1", "git/1", "session/1", "keys/1"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 
 /** How much a caller may cost: only an interactive action may wake compute. */
@@ -26,6 +26,7 @@ export const MUTATING_METHODS = new Set([
   "session.create",
   "session.close",
   "session.send",
+  "session.configure",
   "pty.create",
   "fs.write",
   "fs.rename",
@@ -55,6 +56,45 @@ export type WorkspaceConnectionState =
 
 /** Who drives a terminal's input and size: this client, another device, or nobody. */
 export type PtyControl = "you" | "other" | "none";
+
+/** An agent process on the runtime. A tab whose process ended keeps its saved conversation. */
+export type AgentProcessState = "running" | "exited" | "not-started";
+export type AgentTabStatus = "idle" | "in_progress" | "waiting" | "completed";
+
+/** An agent tab as `session.tabs` and `session.configure` describe it (docs/CLOUD-AGENT-TABS.md). */
+export interface AgentTabInfo {
+  sessionId: string;
+  tabId: string;
+  title: string | null;
+  harness: string;
+  model: string;
+  effort: string | null;
+  permissionMode: string;
+  status: AgentTabStatus;
+  process: AgentProcessState;
+  pendingPermissions: { requestId: string; toolName: string; input: unknown; options: unknown[] }[];
+  followUps: { clientCommandId: string; text: string }[];
+  lastSeq: number;
+  created: string;
+  modified: string;
+}
+
+/** `session.status`: a subscribed tab's turn or process state changed. */
+export interface AgentTabStatusChange {
+  sessionId: string;
+  tabId: string;
+  status: AgentTabStatus;
+  /** Not sent by the runtime with a status change (it arrives with `session.tabs`). */
+  process?: AgentProcessState;
+}
+
+export interface SessionSubscribeOptions {
+  /** Resume after this cursor instead of replaying the whole transcript. */
+  sinceCursor?: string;
+  /** The cursor after each event or replay, to keep for the next subscription. */
+  onCursor?(cursor: string | undefined): void;
+  onStatus?(change: AgentTabStatusChange): void;
+}
 
 /** A terminal as `pty.create`, `pty.list` and `pty.attach` describe it. */
 export interface PtyInfo {
@@ -151,6 +191,7 @@ export class WorkspaceRpcClient {
   private readonly rpc: PortableRpcClient;
   private readonly responseListeners = new Set<(response: RpcResponse) => void>();
   private readonly stateListeners = new Set<(state: WorkspaceConnectionState) => void>();
+  private readonly notificationListeners = new Set<(notification: WorkspaceNotification) => void>();
   private readonly detach: (() => void)[] = [];
   private readonly subscriptions = new Map<string, Subscription>();
   private readonly inputs = new Map<string, PtyInput>();
@@ -435,25 +476,70 @@ export class WorkspaceRpcClient {
   }
 
   /** An agent tab's events, replayed after the last cursor seen. */
-  subscribeSession(sessionId: string, tabId: string, onEvent: (event: unknown) => void): Promise<() => void> {
-    let cursor: string | undefined;
+  subscribeSession(sessionId: string, tabId: string, onEvent: (event: unknown) => void, options: SessionSubscribeOptions = {}): Promise<() => void> {
+    let cursor: string | undefined = options.sinceCursor;
+    const moved = (next: string | undefined) => {
+      cursor = next;
+      options.onCursor?.(next);
+    };
     return this.subscribe({
       method: "session.subscribe",
       params: { sessionId, tabId },
       resumeParams: () => (cursor ? { sinceCursor: cursor } : {}),
       onReplay: (result) => {
         for (const entry of (result.events as { cursor: string; event: unknown }[] | undefined) ?? []) onEvent(entry.event);
-        if (typeof result.cursor === "string") cursor = result.cursor;
+        if (typeof result.cursor === "string") moved(result.cursor);
       },
       listener: (notification) => {
+        if (notification.event === "session.status") {
+          const params = notification.params as unknown as AgentTabStatusChange;
+          options.onStatus?.({ sessionId: params.sessionId, tabId: params.tabId, status: params.status, process: params.process });
+          return;
+        }
         if (notification.event !== "session.event") return;
-        cursor = String(notification.params.cursor);
+        moved(String(notification.params.cursor));
         onEvent(notification.params.event);
       },
-      onCursorExpired: () => {
-        cursor = undefined;
-      },
+      // Another runtime generation: the snapshot that follows starts over.
+      onCursorExpired: () => moved(undefined),
     });
+  }
+
+  /** Every agent tab on the runtime, with its turn and process state. */
+  async listAgentTabs(): Promise<AgentTabInfo[]> {
+    const result = await this.call<{ tabs?: AgentTabInfo[] }>("session.tabs");
+    return result.tabs ?? [];
+  }
+
+  /** A new agent tab: one session with one agent process. */
+  createAgentTab(params: { agent: string; model?: string; effort?: string | null; mode?: string; title?: string }): Promise<{ sessionId: string; tabId: string; tab?: AgentTabInfo }> {
+    const defined = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""));
+    return this.mutate("session.create", defined);
+  }
+
+  /** Stop a tab's agent process; `remove` also drops the tab and its checkpoints. */
+  closeAgentTab(sessionId: string, tabId?: string, remove = false): Promise<{ sessionId: string }> {
+    return this.mutate("session.close", { sessionId, ...(tabId ? { tabId } : {}), ...(remove ? { remove: true } : {}) });
+  }
+
+  async configureAgentTab(params: { sessionId: string; tabId: string; model?: string; effort?: string | null; mode?: string }): Promise<AgentTabInfo> {
+    const result = await this.mutate<{ tab: AgentTabInfo }>("session.configure", params);
+    return result.tab;
+  }
+
+  async markAgentTabRead(sessionId: string, tabId: string): Promise<void> {
+    await this.call("session.markRead", { sessionId, tabId });
+  }
+
+  /** Ask the runtime to poll the command mailbox now rather than at its next interval. */
+  async nudgeMailbox(): Promise<void> {
+    await this.call("session.nudge", {});
+  }
+
+  /** Every notification the runtime sends, including broadcasts such as `session.tabs`. */
+  onNotification(listener: (notification: WorkspaceNotification) => void): () => void {
+    this.notificationListeners.add(listener);
+    return () => this.notificationListeners.delete(listener);
   }
 
   close(): void {
@@ -461,6 +547,7 @@ export class WorkspaceRpcClient {
     for (const stop of this.detach) stop();
     this.rpc.close("Workspace connection closed");
     this.subscriptions.clear();
+    this.notificationListeners.clear();
     for (const input of this.inputs.values()) for (const entry of input.pending.splice(0)) entry.reject(new Error("Workspace connection closed"));
     this.inputs.clear();
     this.transport.close();
@@ -563,6 +650,7 @@ export class WorkspaceRpcClient {
     }
     if (typeof record.event === "string" && record.params && typeof record.params === "object") {
       const notification = record as unknown as WorkspaceNotification;
+      for (const listener of this.notificationListeners) listener(notification);
       const target = notification.params.subscriptionId;
       let routed = false;
       for (const subscription of this.subscriptions.values()) {

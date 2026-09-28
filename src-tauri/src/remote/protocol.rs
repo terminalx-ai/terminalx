@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 
 /// Namespace versions this build speaks, in preference order.
-pub const CAPABILITIES: [&str; 4] = ["pty/1", "fs/1", "git/1", "session/1"];
+pub const CAPABILITIES: [&str; 5] = ["pty/1", "fs/1", "git/1", "session/1", "keys/1"];
 
 /// Authority an attachment grants, from the API's `authority` (`manage` →
 /// runtime scope, `participate` → session scope).
@@ -59,6 +59,17 @@ pub const METHODS: &[Method] = &[
     // Participate may send only to sessions shared with it; the server checks.
     method("session.send", "session/1", Participate, true),
     method("session.subscribe", "session/1", Participate, false),
+    // PRO-22: agent tabs. Sends, steers, stops and permission decisions
+    // come through the API mailbox, never as live calls (docs/CLOUD-AGENT-TABS.md).
+    method("session.tabs", "session/1", Participate, false),
+    method("session.configure", "session/1", Manage, true),
+    method("session.markRead", "session/1", Participate, false),
+    method("session.nudge", "session/1", Participate, false),
+    // The workspace content key travels only over the E2EE channel. It
+    // opens every tab's checkpoint, so only `manage` gets it until tabs can
+    // be shared with participants.
+    method("keys.get", "keys/1", Manage, false),
+    method("keys.rotate", "keys/1", Manage, true),
     method("session.unsubscribe", "session/1", Participate, false),
     method("pty.create", "pty/1", Manage, true),
     method("pty.list", "pty/1", Participate, false),

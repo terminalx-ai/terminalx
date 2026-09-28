@@ -18,6 +18,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 
 use crate::account::AccountManager;
+use crate::cloud_agent_client::CloudAgentClient;
 use crate::cloud_workspaces::{CloudWorkspaceService, WorkspaceState};
 use crate::remote::client::{open_outcome, AttachSource, ClientEvent, ClientState, OpenOutcome, Supervisor};
 use crate::remote::protocol::Activation;
@@ -48,12 +49,16 @@ struct Attached {
 pub struct CloudRemote {
     account: Arc<AccountManager>,
     service: Arc<CloudWorkspaceService>,
+    agents: Arc<CloudAgentClient>,
     connections: Mutex<HashMap<String, Attached>>,
 }
 
+/// Request ids the desktop itself sends; their answers never reach the web view.
+const KEYS_REQUEST_PREFIX: &str = "keys-";
+
 impl CloudRemote {
-    pub fn new(account: Arc<AccountManager>, service: Arc<CloudWorkspaceService>) -> Arc<Self> {
-        Arc::new(Self { account, service, connections: Mutex::new(HashMap::new()) })
+    pub fn new(account: Arc<AccountManager>, service: Arc<CloudWorkspaceService>, agents: Arc<CloudAgentClient>) -> Arc<Self> {
+        Arc::new(Self { account, service, agents, connections: Mutex::new(HashMap::new()) })
     }
 
     /// Cheap: no Keychain load or token refresh, so it can run per frame.
@@ -67,6 +72,10 @@ impl CloudRemote {
         tauri::async_runtime::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
+                // Keys, outbox and cache of a previous identity are dropped.
+                let agents = remote.agents.clone();
+                let observed = remote.account.current_identity();
+                let _ = tauri::async_runtime::spawn_blocking(move || agents.observe_identity(observed)).await;
                 if remote.connections.lock().unwrap().is_empty() {
                     continue;
                 }
@@ -93,18 +102,54 @@ impl CloudRemote {
     }
 
     /// Called from an async command, so inside the Tauri runtime.
-    fn start(&self, app: &AppHandle, identity: Option<Identity>, source: Arc<dyn AttachSource>, activation: Activation) -> String {
+    /// `workspace_id` names the cloud workspace whose content keys this
+    /// connection fetches (`keys.get`) once connected; none for a dev attach.
+    fn start(&self, app: &AppHandle, identity: Option<Identity>, workspace_id: Option<String>, source: Arc<dyn AttachSource>, activation: Activation) -> String {
         let connection_id = format!("cloud-{}", uuid::Uuid::new_v4().simple());
         let (events, mut receiver) = mpsc::unbounded_channel();
         let supervisor = Supervisor::start(source, activation, events);
-        self.connections.lock().unwrap().insert(connection_id.clone(), Attached { supervisor, identity });
+        self.connections.lock().unwrap().insert(connection_id.clone(), Attached { supervisor: supervisor.clone(), identity: identity.clone() });
         let app = app.clone();
         let id = connection_id.clone();
+        let agents = self.agents.clone();
         tauri::async_runtime::spawn(async move {
+            let mut keys_request: Option<String> = None;
+            // Whether this connection was granted `keys/1` (fetch keys on it).
+            let mut keys_granted = false;
+            let fetch_keys = |keys_request: &mut Option<String>| {
+                let request = format!("{KEYS_REQUEST_PREFIX}{}", uuid::Uuid::new_v4().simple());
+                if supervisor.send(serde_json::json!({ "id": request, "method": "keys.get", "params": {} })) {
+                    *keys_request = Some(request);
+                }
+            };
             while let Some(event) = receiver.recv().await {
                 let payload = match event {
-                    ClientEvent::State(state) => RemoteEvent::State { connection_id: id.clone(), state },
-                    ClientEvent::Message(message) => RemoteEvent::Message { connection_id: id.clone(), message },
+                    ClientEvent::State(state) => {
+                        keys_granted = matches!(&state, ClientState::Connected { capabilities, .. } if capabilities.iter().any(|capability| capability == "keys/1"))
+                            && identity.is_some()
+                            && workspace_id.is_some();
+                        if keys_granted {
+                            fetch_keys(&mut keys_request);
+                        }
+                        RemoteEvent::State { connection_id: id.clone(), state }
+                    }
+                    ClientEvent::Message(message) => match intercept(&message) {
+                        Intercept::KeysAnswer => {
+                            if message.get("id").and_then(Value::as_str) == keys_request.as_deref() {
+                                keys_request = None;
+                                store_keys(&agents, identity.as_ref(), workspace_id.as_deref(), message);
+                            }
+                            continue;
+                        }
+                        // The runtime rotated the workspace key: take the new one.
+                        Intercept::KeysChanged => {
+                            if keys_granted {
+                                fetch_keys(&mut keys_request);
+                            }
+                            continue;
+                        }
+                        Intercept::Forward => RemoteEvent::Message { connection_id: id.clone(), message },
+                    },
                 };
                 let _ = app.emit(EVENT, payload);
             }
@@ -219,7 +264,8 @@ pub async fn cloud_remote_attach(
         workspace_id: target.workspace_id,
         installation_id: installation_id()?,
     });
-    Ok(remote.start(&app, Some(identity), source, activation))
+    let workspace_id = source.workspace_id.clone();
+    Ok(remote.start(&app, Some(identity), Some(workspace_id), source, activation))
 }
 
 /// Debug builds only: attach with a pairing code (and optional ticket)
@@ -243,7 +289,7 @@ pub async fn cloud_remote_attach_dev(
     }
     let offer = crate::remote::client::decode_pairing_code(&pairing_code).map_err(|e| e.to_string())?;
     let grant = crate::remote::client::AttachGrant { attachment_id: "dev".into(), offer, ticket };
-    Ok(remote.start(&app, None, Arc::new(DevSource(grant)), Activation::Connect))
+    Ok(remote.start(&app, None, None, Arc::new(DevSource(grant)), Activation::Connect))
 }
 
 #[tauri::command]
@@ -266,4 +312,55 @@ pub fn cloud_remote_detach(remote: tauri::State<'_, Arc<CloudRemote>>, connectio
         attached.supervisor.stop();
     }
     Ok(())
+}
+
+/// Keep what `keys.get` answered, for the identity the connection was made for.
+fn store_keys(agents: &Arc<CloudAgentClient>, identity: Option<&Identity>, workspace_id: Option<&str>, message: Value) {
+    let (Some(identity), Some(workspace_id)) = (identity.cloned(), workspace_id.map(str::to_string)) else { return };
+    if message.get("ok").and_then(Value::as_bool) != Some(true) {
+        log::warn!("keys.get refused: {}", message.pointer("/error/code").and_then(Value::as_str).unwrap_or("unknown"));
+        return;
+    }
+    let agents = agents.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = message.get("result").cloned().unwrap_or(Value::Null);
+        if let Err(error) = agents.store_keys(&identity.user_id, &identity.organization_id, &workspace_id, &result) {
+            log::warn!("store cloud workspace keys: {error:#}");
+        }
+    });
+}
+
+/// What the desktop does with a frame from the runtime before the web view
+/// sees it: key traffic stays in Rust.
+#[derive(Debug, PartialEq, Eq)]
+enum Intercept {
+    /// The answer to a `keys.get` this module sent.
+    KeysAnswer,
+    /// `keys.changed`: the workspace key rotated; fetch it again.
+    KeysChanged,
+    Forward,
+}
+
+fn intercept(message: &Value) -> Intercept {
+    if message.get("id").and_then(Value::as_str).is_some_and(|id| id.starts_with(KEYS_REQUEST_PREFIX)) {
+        return Intercept::KeysAnswer;
+    }
+    if message.get("event").and_then(Value::as_str) == Some("keys.changed") {
+        return Intercept::KeysChanged;
+    }
+    Intercept::Forward
+}
+
+#[cfg(test)]
+mod intercept_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn key_answers_and_rotations_never_reach_the_web_view() {
+        assert_eq!(intercept(&json!({ "id": "keys-abc", "ok": true, "result": { "keys": [] } })), Intercept::KeysAnswer);
+        assert_eq!(intercept(&json!({ "event": "keys.changed", "params": {} })), Intercept::KeysChanged);
+        assert_eq!(intercept(&json!({ "id": "req-1", "ok": true, "result": {} })), Intercept::Forward);
+        assert_eq!(intercept(&json!({ "event": "session.tabs", "params": { "tabs": [] } })), Intercept::Forward);
+    }
 }

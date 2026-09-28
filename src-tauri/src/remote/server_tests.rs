@@ -476,3 +476,113 @@ async fn attach_replays_the_ring_in_frames_and_reports_what_it_lost() {
     }
     assert!(first.len() + rest.len() >= PTY_RING_BYTES - 64 * 1024, "the whole ring was replayed");
 }
+
+struct NoAgents;
+
+impl crate::cloud_agents::AgentOps for NoAgents {
+    fn tabs(&self) -> Vec<crate::cloud_agents::AgentTabInfo> {
+        Vec::new()
+    }
+    fn busy(&self, _: &str, _: &str) -> bool {
+        false
+    }
+    fn send(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn stop(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn respond(&self, _: &str, _: &str, _: &str, _: &str) -> Result<(), crate::cloud_agents::DecisionError> {
+        Err(crate::cloud_agents::DecisionError::NotPending)
+    }
+    fn answer(&self, _: &str, _: &str, _: &str, _: HashMap<String, String>) -> Result<(), crate::cloud_agents::DecisionError> {
+        Err(crate::cloud_agents::DecisionError::NotPending)
+    }
+    fn configure(&self, _: &str, _: &str, _: &crate::cloud_agents::Settings) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn note(&self, _: &str, _: &str, _: &str) {}
+    fn events(&self, _: &str, _: &str) -> anyhow::Result<Vec<Value>> {
+        Ok(Vec::new())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_workspace_key_is_handed_out_over_keys_1_and_only_managers_rotate_it() {
+    let f = fixture();
+    let agents = crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), Arc::new(NoAgents), None, None, 7).unwrap();
+    f.rpc.set_agents(agents.clone());
+    let (manager, _events) = Peer::new("device-manage".into(), Authority::Manage);
+    call(&f.rpc, &manager, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["session/1"] })).await.unwrap();
+    assert_eq!(code(call(&f.rpc, &manager, "keys.get", json!({})).await), "capability_not_granted");
+    let (participant, _events) = Peer::new("device-phone".into(), Authority::Participate);
+    let hello = call(&f.rpc, &participant, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["session/1", "keys/1"] })).await.unwrap();
+    assert_eq!(hello["capabilities"], json!(["session/1", "keys/1"]));
+    assert_eq!(agents.attached(), 2, "each connection that said hello counts as attached");
+    // The key opens every tab's checkpoint; participants see no tabs.
+    assert_eq!(code(call(&f.rpc, &participant, "keys.get", json!({})).await), "forbidden");
+    let (keyholder, _events) = Peer::new("device-desk".into(), Authority::Manage);
+    call(&f.rpc, &keyholder, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["keys/1"] })).await.unwrap();
+    let handout = call(&f.rpc, &keyholder, "keys.get", json!({})).await.unwrap();
+    let (current, key) = agents.keys.current().unwrap();
+    assert_eq!(handout["currentKeyId"], current);
+    assert_eq!(handout["keys"][0]["key"], crate::cloud_agents::crypto::b64(&key));
+    assert_eq!(code(call(&f.rpc, &participant, "keys.rotate", json!({ "clientRequestId": "request-0001" })).await), "forbidden");
+    // Nothing is shared with a participant, so it sees no agent tabs.
+    assert_eq!(call(&f.rpc, &participant, "session.tabs", json!({})).await.unwrap()["tabs"], json!([]));
+    assert_eq!(
+        code(call(&f.rpc, &participant, "session.configure", json!({ "sessionId": "s", "tabId": "t", "clientRequestId": "request-0002" })).await),
+        "forbidden"
+    );
+    f.rpc.disconnect(&participant);
+    f.rpc.disconnect(&participant);
+    assert_eq!(agents.attached(), 2, "a connection is counted once");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_rotates_the_key_and_nudges_the_mailbox() {
+    let f = fixture();
+    let agents = crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), Arc::new(NoAgents), None, None, 7).unwrap();
+    f.rpc.set_agents(agents.clone());
+    let (manager, _events) = Peer::new("device-manage".into(), Authority::Manage);
+    call(&f.rpc, &manager, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["session/1", "keys/1"] })).await.unwrap();
+    let before = agents.keys.current().unwrap().0;
+    let rotated = call(&f.rpc, &manager, "keys.rotate", json!({ "clientRequestId": "request-0001" })).await.unwrap();
+    assert_ne!(rotated["currentKeyId"], before);
+    let again = call(&f.rpc, &manager, "keys.rotate", json!({ "clientRequestId": "request-0001" })).await.unwrap();
+    assert_eq!(again, rotated, "a resent rotation is not a second rotation");
+    agents.poll.wait(Duration::ZERO);
+    call(&f.rpc, &manager, "session.nudge", json!({})).await.unwrap();
+    assert!(agents.poll.wait(Duration::ZERO));
+    assert_eq!(code(call(&f.rpc, &manager, "session.configure", json!({ "sessionId": "s", "tabId": "t", "clientRequestId": "request-0003" })).await), "not_found");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rotation_tells_key_holders_to_fetch_the_new_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let sink = Arc::new(BroadcastSink::new(64));
+    let terminals = Arc::new(Terminals::new());
+    let rpc = WorkspaceRpc::new(&root, 7, sink.clone(), terminals, None).unwrap();
+    let agents = crate::cloud_agents::CloudAgents::open(&root.join("agents"), Arc::new(NoAgents), Some(sink), None, 7).unwrap();
+    rpc.set_agents(agents.clone());
+    let (holder, mut holder_events) = Peer::new("device-desk".into(), Authority::Manage);
+    call(&rpc, &holder, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["keys/1"] })).await.unwrap();
+    let (other, mut other_events) = Peer::new("device-other".into(), Authority::Manage);
+    call(&rpc, &other, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["fs/1"] })).await.unwrap();
+    agents.rotate_key().unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(5), holder_events.recv()).await.unwrap().unwrap();
+    assert_eq!(event["event"], "keys.changed");
+    assert!(tokio::time::timeout(Duration::from_millis(50), other_events.recv()).await.is_err(), "only key holders are told");
+}
+
+#[test]
+fn session_cursors_expire_with_the_runtime_process() {
+    let f = fixture();
+    let cursor = f.rpc.cursor(30);
+    assert_eq!(f.rpc.parse_cursor(&cursor).unwrap(), 30);
+    // A restarted runtime (same generation, new process) refuses it.
+    let restarted = fixture();
+    assert_eq!(restarted.rpc.parse_cursor(&cursor).unwrap_err().code, "cursor_expired");
+    assert_eq!(f.rpc.parse_cursor("7:30").unwrap_err().code, "cursor_expired", "the pre-PRO-22 form");
+}

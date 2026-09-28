@@ -1,0 +1,353 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use serde_json::{json, Value};
+
+use super::super::api::{Actor, Ack, AckOutcome, CallError, Checkpoint, Leased, MailboxApi, PutOutcome};
+use super::super::{checkpoints, crypto, AgentOps, AgentTabInfo, CloudAgents, DecisionError, Identity, Settings};
+use super::*;
+use crate::store::index::TabStatus;
+
+#[derive(Default)]
+struct FakeOps {
+    busy: Mutex<bool>,
+    sent: Mutex<Vec<String>>,
+    stops: Mutex<u32>,
+    pending: Mutex<Vec<String>>,
+    decisions: Mutex<Vec<(String, String)>>,
+    notes: Mutex<Vec<String>>,
+    settings: Mutex<Vec<Settings>>,
+}
+
+impl AgentOps for FakeOps {
+    fn tabs(&self) -> Vec<AgentTabInfo> {
+        vec![AgentTabInfo {
+            session_id: "s1".into(),
+            tab_id: "tab-1".into(),
+            title: None,
+            harness: "claude".into(),
+            model: String::new(),
+            effort: None,
+            permission_mode: "default".into(),
+            status: if *self.busy.lock().unwrap() { TabStatus::InProgress } else { TabStatus::Idle },
+            process: "running",
+            pending_permissions: Vec::new(),
+            follow_ups: Vec::new(),
+            last_seq: 0,
+            created: String::new(),
+            modified: String::new(),
+        }]
+    }
+    fn busy(&self, _: &str, _: &str) -> bool {
+        *self.busy.lock().unwrap()
+    }
+    fn send(&self, _: &str, _: &str, text: &str) -> anyhow::Result<()> {
+        self.sent.lock().unwrap().push(text.into());
+        *self.busy.lock().unwrap() = true;
+        Ok(())
+    }
+    fn stop(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        *self.stops.lock().unwrap() += 1;
+        *self.busy.lock().unwrap() = false;
+        Ok(())
+    }
+    fn respond(&self, _: &str, _: &str, request_id: &str, option_id: &str) -> Result<(), DecisionError> {
+        let mut pending = self.pending.lock().unwrap();
+        let Some(at) = pending.iter().position(|id| id == request_id) else { return Err(DecisionError::NotPending) };
+        pending.remove(at);
+        self.decisions.lock().unwrap().push((request_id.into(), option_id.into()));
+        Ok(())
+    }
+    fn answer(&self, _: &str, _: &str, _: &str, _: HashMap<String, String>) -> Result<(), DecisionError> {
+        Err(DecisionError::NotPending)
+    }
+    fn configure(&self, _: &str, _: &str, settings: &Settings) -> anyhow::Result<()> {
+        self.settings.lock().unwrap().push(settings.clone());
+        Ok(())
+    }
+    fn note(&self, _: &str, _: &str, text: &str) {
+        self.notes.lock().unwrap().push(text.into());
+    }
+    fn events(&self, _: &str, _: &str) -> anyhow::Result<Vec<Value>> {
+        Ok((1..=3).map(|seq| json!({ "seq": seq, "payload": { "type": "assistant_text", "text": format!("line {seq}") } })).collect())
+    }
+}
+
+/// The server half, as the contract describes it, in memory.
+#[derive(Default)]
+struct FakeApi {
+    queue: Mutex<Vec<Lease>>,
+    acks: Mutex<Vec<(String, String, Ack)>>,
+    fail_acks: Mutex<u32>,
+    stale_generation_once: Mutex<bool>,
+    checkpoints: Mutex<Vec<(String, Checkpoint)>>,
+    stale_puts: Mutex<u32>,
+}
+
+impl MailboxApi for FakeApi {
+    fn lease(&self, _: &str, _: u32) -> Result<Leased, CallError> {
+        Ok(Leased { leases: std::mem::take(&mut *self.queue.lock().unwrap()), outcome_unknown: Vec::new() })
+    }
+    fn ack(&self, command_id: &str, token: &str, ack: &Ack) -> Result<AckOutcome, CallError> {
+        self.acks.lock().unwrap().push((command_id.into(), token.into(), ack.clone()));
+        let mut failing = self.fail_acks.lock().unwrap();
+        if *failing > 0 {
+            *failing -= 1;
+            return Err(CallError::Transient(anyhow::anyhow!("network")));
+        }
+        if std::mem::take(&mut *self.stale_generation_once.lock().unwrap()) {
+            return Ok(AckOutcome::StaleGeneration);
+        }
+        Ok(AckOutcome::Settled)
+    }
+    fn put_checkpoint(&self, tab_id: &str, checkpoint: &Checkpoint) -> Result<PutOutcome, CallError> {
+        let mut stale = self.stale_puts.lock().unwrap();
+        if *stale > 0 {
+            *stale -= 1;
+            return Ok(PutOutcome::Stale);
+        }
+        self.checkpoints.lock().unwrap().push((tab_id.into(), checkpoint.clone()));
+        Ok(PutOutcome::Stored)
+    }
+    fn delete_checkpoint(&self, _: &str) -> Result<(), CallError> {
+        Ok(())
+    }
+}
+
+struct Harness {
+    _dir: tempfile::TempDir,
+    agents: Arc<CloudAgents>,
+    ops: Arc<FakeOps>,
+    api: Arc<FakeApi>,
+}
+
+fn identity() -> Identity {
+    Identity { organization_id: "org_1".into(), workspace_id: "ws_1".into() }
+}
+
+fn harness() -> Harness {
+    let dir = tempfile::tempdir().unwrap();
+    let ops = Arc::new(FakeOps::default());
+    let api = Arc::new(FakeApi::default());
+    let agents = CloudAgents::open(dir.path(), ops.clone(), None, Some((api.clone(), identity())), 7).unwrap();
+    Harness { _dir: dir, agents, ops, api }
+}
+
+fn reopen(h: &Harness) -> Arc<CloudAgents> {
+    CloudAgents::open(h._dir.path(), h.ops.clone(), None, Some((h.api.clone(), identity())), 7).unwrap()
+}
+
+/// A lease as a client would have made it: the command encrypted under
+/// the runtime's current key.
+fn lease(agents: &CloudAgents, id: &str, kind: &str, body: Value) -> Lease {
+    lease_for(agents, id, "tab-1", kind, body)
+}
+
+fn lease_for(agents: &CloudAgents, id: &str, tab_id: &str, kind: &str, body: Value) -> Lease {
+    let (key_id, key) = agents.keys.current().unwrap();
+    let aad = crypto::command_aad("org_1", "ws_1", tab_id, id, kind, &key_id);
+    let (iv, ciphertext) = crypto::seal(&key, body.to_string().as_bytes(), &aad).unwrap();
+    Lease {
+        command_id: format!("command_{id}"),
+        client_command_id: id.into(),
+        tab_id: tab_id.into(),
+        kind: kind.into(),
+        sequence: 1,
+        key_id,
+        iv,
+        ciphertext,
+        actor: Actor { user_id: "u1".into(), authority: "manage".into() },
+        created_at: now_ms(),
+        redelivery: false,
+        lease_token: format!("token-{id}"),
+        runtime_generation: 7,
+    }
+}
+
+fn open_receipt(agents: &CloudAgents, lease: &Lease, receipt: &Receipt) -> Value {
+    let key = agents.keys.get(&lease.key_id).unwrap();
+    let aad = crypto::receipt_aad("org_1", "ws_1", &lease.client_command_id, &receipt.outcome, &lease.key_id);
+    let bytes = crypto::open(&key, receipt.result_iv.as_ref().unwrap(), receipt.result_ciphertext.as_ref().unwrap(), &aad).unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[test]
+fn a_send_is_applied_once_and_a_redelivery_answers_from_its_receipt() {
+    let h = harness();
+    let first = lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "hello", "model": "opus" }));
+    let receipt = handle(&h.agents, &first);
+    assert_eq!(receipt.outcome, "applied");
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["hello"]);
+    assert_eq!(h.ops.settings.lock().unwrap()[0].model.as_deref(), Some("opus"));
+    assert_eq!(open_receipt(&h.agents, &first, &receipt)["queued"], false);
+    // Redelivered (a lost ack), and again after a runtime restart.
+    let again = Lease { lease_token: "token-2".into(), redelivery: true, ..first.clone() };
+    assert_eq!(handle(&h.agents, &again), receipt);
+    assert_eq!(handle(&reopen(&h), &again), receipt, "the receipt survives a restart byte for byte");
+    assert_eq!(h.ops.sent.lock().unwrap().len(), 1, "never sent twice");
+}
+
+#[test]
+fn a_send_while_busy_is_queued_durably_and_goes_out_when_the_turn_ends() {
+    let h = harness();
+    *h.ops.busy.lock().unwrap() = true;
+    let receipt = handle(&h.agents, &lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "next" })));
+    assert_eq!(receipt.outcome, "applied");
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+    assert_eq!(h.agents.tab("tab-1").unwrap().follow_ups[0].text, "next");
+    // A restart keeps it; a second send queues behind it even when idle.
+    let agents = reopen(&h);
+    *h.ops.busy.lock().unwrap() = false;
+    handle(&agents, &lease(&agents, "c2", "send", json!({ "v": 1, "text": "after" })));
+    assert!(h.ops.sent.lock().unwrap().is_empty(), "order is kept behind the queued follow-up");
+    agents.nudge_follow_ups("tab-1");
+    assert_eq!(agents.dispatch_follow_ups(), 1);
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["next"]);
+    // Busy again: the second waits for the next turn to end.
+    agents.nudge_follow_ups("tab-1");
+    assert_eq!(agents.dispatch_follow_ups(), 0);
+    *h.ops.busy.lock().unwrap() = false;
+    agents.nudge_follow_ups("tab-1");
+    assert_eq!(agents.dispatch_follow_ups(), 1);
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["next", "after"]);
+}
+
+#[test]
+fn steer_goes_into_the_running_turn_now() {
+    let h = harness();
+    *h.ops.busy.lock().unwrap() = true;
+    assert_eq!(handle(&h.agents, &lease(&h.agents, "c1", "steer", json!({ "v": 1, "text": "use tabs" }))).outcome, "applied");
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["use tabs"]);
+}
+
+#[test]
+fn a_command_interrupted_mid_apply_is_never_applied_again_except_stop() {
+    let h = harness();
+    let send = lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "hi" }));
+    h.agents.receipts.applying("c1").unwrap();
+    let receipt = handle(&reopen(&h), &send);
+    assert_eq!((receipt.outcome.as_str(), receipt.category.as_deref()), ("outcome-unknown", Some("runtime-interrupted")));
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+    let stop = lease(&h.agents, "c2", "stop", json!({ "v": 1 }));
+    h.agents.receipts.applying("c2").unwrap();
+    assert_eq!(handle(&h.agents, &stop).outcome, "applied");
+    assert_eq!(*h.ops.stops.lock().unwrap(), 1);
+}
+
+#[test]
+fn stop_drops_queued_follow_ups_and_lists_them_in_its_receipt() {
+    let h = harness();
+    *h.ops.busy.lock().unwrap() = true;
+    handle(&h.agents, &lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "queued" })));
+    let stop = lease(&h.agents, "c2", "stop", json!({ "v": 1 }));
+    let receipt = handle(&h.agents, &stop);
+    assert_eq!(open_receipt(&h.agents, &stop, &receipt)["droppedFollowUps"], json!(["c1"]));
+    assert!(h.agents.tab("tab-1").unwrap().follow_ups.is_empty());
+    assert_eq!(h.ops.notes.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn permission_decisions_apply_once_and_a_settled_request_is_rejected() {
+    let h = harness();
+    h.ops.pending.lock().unwrap().push("req-1".into());
+    let decide = lease(&h.agents, "c1", "permission-decision", json!({ "v": 1, "requestId": "req-1", "optionId": "allow" }));
+    assert_eq!(handle(&h.agents, &decide).outcome, "applied");
+    assert_eq!(handle(&h.agents, &Lease { lease_token: "t2".into(), ..decide }).outcome, "applied");
+    assert_eq!(h.ops.decisions.lock().unwrap().len(), 1);
+    // A second command for the same request (another device) is definitely not applied.
+    let late = handle(&h.agents, &lease(&h.agents, "c2", "permission-decision", json!({ "v": 1, "requestId": "req-1", "optionId": "deny" })));
+    assert_eq!((late.outcome.as_str(), late.category.as_deref()), ("rejected", Some("request-not-pending")));
+}
+
+#[test]
+fn unreadable_misrouted_unauthorized_or_unknown_commands_are_rejected_untouched() {
+    let h = harness();
+    let mut unknown_key = lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "x" }));
+    unknown_key.key_id = "missing".into();
+    assert_eq!(handle(&h.agents, &unknown_key).category.as_deref(), Some("key-unknown"));
+    // Encrypted for another tab, delivered under this one.
+    let mut moved = lease_for(&h.agents, "c2", "tab-2", "send", json!({ "v": 1, "text": "x" }));
+    moved.tab_id = "tab-1".into();
+    assert_eq!(handle(&h.agents, &moved).category.as_deref(), Some("decrypt-failed"));
+    let participant = Lease { actor: Actor { user_id: "u2".into(), authority: "participate".into() }, ..lease(&h.agents, "c3", "send", json!({ "v": 1, "text": "x" })) };
+    assert_eq!(handle(&h.agents, &participant).category.as_deref(), Some("forbidden"));
+    assert_eq!(handle(&h.agents, &lease_for(&h.agents, "c4", "tab-9", "send", json!({ "v": 1, "text": "x" }))).category.as_deref(), Some("tab-unknown"));
+    assert_eq!(handle(&h.agents, &lease(&h.agents, "c5", "send", json!({ "v": 1, "text": " " }))).category.as_deref(), Some("payload-invalid"));
+    assert_eq!(handle(&h.agents, &lease(&h.agents, "c6", "send", json!({ "v": 2, "text": "x" }))).category.as_deref(), Some("payload-invalid"));
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_rotated_key_still_opens_queued_commands_within_its_grace() {
+    let h = harness();
+    let queued = lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "before rotation" }));
+    h.agents.keys.rotate(now_ms()).unwrap();
+    assert_eq!(handle(&h.agents, &queued).outcome, "applied");
+}
+
+#[test]
+fn a_lost_ack_is_retried_with_the_same_token_and_bytes_and_stale_generation_polls_again() {
+    let h = harness();
+    let first = lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "hi" }));
+    h.api.queue.lock().unwrap().push(first.clone());
+    *h.api.fail_acks.lock().unwrap() = 1;
+    let mut unacked = Vec::new();
+    assert!(poll_once(&h.agents, &mut unacked).unwrap());
+    assert_eq!(unacked.len(), 1);
+    assert!(!poll_once(&h.agents, &mut unacked).unwrap());
+    assert!(unacked.is_empty());
+    let acks = h.api.acks.lock().unwrap().clone();
+    assert_eq!(acks.len(), 2);
+    assert_eq!(acks[0], acks[1], "the retry sends the same token and the same sealed receipt");
+    assert_eq!(h.ops.sent.lock().unwrap().len(), 1);
+
+    *h.api.stale_generation_once.lock().unwrap() = true;
+    h.api.queue.lock().unwrap().push(lease(&h.agents, "c2", "stop", json!({ "v": 1 })));
+    poll_once(&h.agents, &mut unacked).unwrap();
+    assert!(h.agents.poll.wait(std::time::Duration::ZERO), "a stale generation asks for another lease round");
+}
+
+#[test]
+fn checkpoints_are_sealed_for_the_workspace_and_move_to_a_new_epoch_when_stale() {
+    let h = harness();
+    checkpoints::upload(&h.agents, "tab-1").unwrap();
+    *h.api.stale_puts.lock().unwrap() = 1;
+    checkpoints::upload(&h.agents, "tab-1").unwrap();
+    let stored = h.api.checkpoints.lock().unwrap().clone();
+    assert_eq!(stored.len(), 2);
+    let (first, second) = (&stored[0].1, &stored[1].1);
+    assert_eq!((first.epoch, first.version), (7, 1));
+    assert_eq!((second.epoch, second.version), (8, 1), "a stale cursor starts a new epoch");
+    let key = h.agents.keys.get(&second.key_id).unwrap();
+    let ciphertext = crypto::unb64(&second.ciphertext).unwrap();
+    assert_eq!(crypto::sha256_hex(&ciphertext), second.sha256);
+    let aad = crypto::checkpoint_aad("org_1", "ws_1", "tab-1", second.epoch, second.version, 1, &second.key_id);
+    let packed = crypto::open_raw(&key, &crypto::unb64(&second.iv).unwrap(), &ciphertext, &aad).unwrap();
+    let projection: Value = serde_json::from_slice(&crypto::gunzip(&packed, 1 << 22).unwrap()).unwrap();
+    assert_eq!(projection["events"].as_array().unwrap().len(), 3);
+    assert_eq!(projection["sessionId"], "s1");
+    // Another tab's AAD does not open it.
+    let other = crypto::checkpoint_aad("org_1", "ws_1", "tab-2", second.epoch, second.version, 1, &second.key_id);
+    assert!(crypto::open_raw(&key, &crypto::unb64(&second.iv).unwrap(), &ciphertext, &other).is_err());
+}
+
+#[test]
+fn a_projection_keeps_the_newest_whole_events_within_its_budget() {
+    let h = harness();
+    let full = checkpoints::projection(&h.agents, "tab-1", 1 << 20).unwrap();
+    assert_eq!(full["truncated"], false);
+    let one = full["events"][2].to_string().len() + 1;
+    let cut = checkpoints::projection(&h.agents, "tab-1", one * 2).unwrap();
+    assert_eq!(cut["truncated"], true);
+    assert_eq!(cut["events"].as_array().unwrap().iter().map(|e| e["seq"].as_u64().unwrap()).collect::<Vec<_>>(), vec![2, 3]);
+}
+
+#[test]
+fn a_removed_tab_never_uploads_again_and_its_delete_is_retried() {
+    let h = harness();
+    h.agents.checkpoints.remove("tab-1");
+    h.agents.checkpoints.mark("tab-1", true);
+    let now = std::time::Instant::now();
+    checkpoints::flush(&h.agents, now);
+    assert!(h.api.checkpoints.lock().unwrap().is_empty(), "late events of a removed tab upload nothing");
+}
