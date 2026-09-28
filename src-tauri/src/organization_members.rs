@@ -15,6 +15,7 @@ use url::Url;
 
 use crate::account::{AccountContext, AccountManager};
 
+// Same service as `pairing::cloud::ACCOUNT_BASE_URL` and the cloud workspace client.
 const ACCOUNT_BASE_URL: &str = "https://login.terminalx.ai";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const RESPONSE_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
@@ -65,6 +66,11 @@ pub struct OrganizationRoster {
     pub pending_invites: Vec<PendingInvite>,
     pub viewer_role: String,
     pub can_manage_members: bool,
+    /// False when invites would be refused (personal or unentitled
+    /// organization); older servers omit it and the webview falls back to
+    /// `can_manage_members`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_invite: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite: Option<IssuedInvite>,
     /// Filled natively so the webview can fence its next mutation.
@@ -115,10 +121,14 @@ fn known_error_code(code: &str) -> bool {
 
 struct Client {
     base: Url,
-    timeout: Duration,
+    agent: ureq::Agent,
 }
 
 impl Client {
+    fn new(base: Url, timeout: Duration) -> Self {
+        Self { base, agent: ureq::AgentBuilder::new().timeout(timeout).redirects(0).build() }
+    }
+
     fn request<T: DeserializeOwned>(
         &self,
         context: &AccountContext,
@@ -130,8 +140,11 @@ impl Client {
             .map_err(|_| OrganizationMembersError::local("organization_members_unavailable"))?
             .extend(["v1", "desktop", "orgs", context.organization_id.as_str()])
             .extend(tail.iter().copied());
-        let agent = ureq::AgentBuilder::new().timeout(self.timeout).redirects(0).build();
-        let request = agent
+        // Once a mutation is sent, a lost or unreadable response says nothing
+        // about whether the server applied it.
+        let lost = if body.is_some() { "organization_members_outcome_unknown" } else { "organization_members_unavailable" };
+        let request = self
+            .agent
             .request(if body.is_some() { "POST" } else { "GET" }, url.as_str())
             .set("authorization", &format!("Bearer {}", context.access_token));
         let response = match body {
@@ -139,12 +152,12 @@ impl Client {
             None => request.call(),
         };
         match response {
-            Ok(response) => serde_json::from_slice(&bounded_body(response)?)
-                .map_err(|_| OrganizationMembersError::local("organization_members_unavailable")),
+            Ok(response) => bounded_body(response)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .ok_or_else(|| OrganizationMembersError::local(lost)),
             Err(ureq::Error::Status(status, response)) => Err(http_error(status, response)),
-            Err(ureq::Error::Transport(_)) => {
-                Err(OrganizationMembersError::local("organization_members_unavailable"))
-            }
+            Err(ureq::Error::Transport(_)) => Err(OrganizationMembersError::local(lost)),
         }
     }
 }
@@ -185,10 +198,7 @@ impl OrganizationMembersService {
     pub fn new(account: Arc<AccountManager>) -> Self {
         Self {
             account,
-            client: Client {
-                base: Url::parse(ACCOUNT_BASE_URL).expect("valid account service URL"),
-                timeout: REQUEST_TIMEOUT,
-            },
+            client: Client::new(Url::parse(ACCOUNT_BASE_URL).expect("valid account service URL"), REQUEST_TIMEOUT),
         }
     }
 
@@ -196,7 +206,7 @@ impl OrganizationMembersService {
     fn for_test(account: Arc<AccountManager>, base: &str) -> Self {
         Self {
             account,
-            client: Client { base: Url::parse(base).unwrap(), timeout: Duration::from_secs(2) },
+            client: Client::new(Url::parse(base).unwrap(), Duration::from_secs(2)),
         }
     }
 
@@ -222,9 +232,15 @@ impl OrganizationMembersService {
         if expected_revision.is_some_and(|expected| expected != revision) {
             return Err(OrganizationMembersError::local("account_context_changed"));
         }
+        let mutation = body.is_some();
         let result = self.client.request::<OrganizationRoster>(&context, tail, body);
         if !self.account.is_current(&context) {
-            return Err(OrganizationMembersError::local("account_context_changed"));
+            // A mutation that was sent may still have been applied.
+            return Err(OrganizationMembersError::local(if mutation {
+                "account_context_changed_after_send"
+            } else {
+                "account_context_changed"
+            }));
         }
         let mut roster = result?;
         roster.context_revision = revision;
@@ -425,6 +441,20 @@ mod tests {
         server.join().unwrap();
         assert_eq!(error.code, "organization_members_unavailable");
         assert_eq!(error.status, Some(500));
+    }
+
+    #[test]
+    fn reports_an_unknown_outcome_when_a_sent_mutation_loses_its_response() {
+        let (base, server) = serve_once("200 OK", "", "not json");
+        let revision = AccountManager::context_revision(&context());
+        let error = service(&base).remove("user-2", &revision).unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.code, "organization_members_outcome_unknown");
+
+        let (base, server) = serve_once("200 OK", "", "not json");
+        let error = service(&base).list().unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.code, "organization_members_unavailable");
     }
 
     #[test]

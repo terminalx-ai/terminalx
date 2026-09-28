@@ -77,6 +77,9 @@ export function OrganizationMembers({
     try {
       const next = await run(roster.contextRevision);
       if (current !== contextEpoch.current) return null;
+      // Newer than any list read still in flight; retire those reads.
+      loadSeq.current += 1;
+      setLoading(false);
       setRoster(next);
       return next;
     } catch (failure) {
@@ -92,6 +95,8 @@ export function OrganizationMembers({
 
   const invite = async (address: string, inviteRole: AssignableRole) => {
     const next = await mutate(`invite:${address}`, (revision) => organizationMembers.invite(address, inviteRole, revision));
+    // A deduplicated resend leaves the earlier link valid, so keep showing it.
+    if (next?.invite?.deduplicated && issued?.email === address) return;
     if (next?.invite) {
       setIssued(next.invite);
       setCopied(false);
@@ -121,6 +126,7 @@ export function OrganizationMembers({
 
   const self = accountEmail.trim().toLowerCase();
   const manage = roster.canManageMembers;
+  const canInvite = manage && roster.canInvite !== false;
   const trimmed = email.trim();
   const emailInvalid = trimmed.length > 0 && !isInvitableEmail(trimmed);
   const alreadyMember = roster.members.some((member) => member.email.toLowerCase() === trimmed.toLowerCase());
@@ -165,16 +171,25 @@ export function OrganizationMembers({
                 key={pending.email}
                 invite={pending}
                 manage={manage}
+                canResend={canInvite}
                 busy={busy}
                 onResend={() => void invite(pending.email, pending.role === "admin" ? "admin" : "member")}
-                onRevoke={() => void mutate(`revoke:${pending.email}`, (revision) => organizationMembers.revokeInvite(pending.email, revision))}
+                onRevoke={() =>
+                  void mutate(`revoke:${pending.email}`, (revision) => organizationMembers.revokeInvite(pending.email, revision)).then((next) => {
+                    // The revoked link no longer works; stop offering it.
+                    if (next) setIssued((shown) => (shown?.email === pending.email ? null : shown));
+                  })
+                }
               />
             ))}
           </ul>
         </>
       )}
 
-      {manage && (
+      {manage && !canInvite && (
+        <p className="mt-3 text-[11px] text-muted-foreground">This organization cannot invite members.</p>
+      )}
+      {canInvite && (
         <form
           className="mt-3 flex flex-col gap-1.5"
           onSubmit={(event) => {
@@ -301,12 +316,14 @@ function MemberRow({
 function InviteRow({
   invite,
   manage,
+  canResend,
   busy,
   onResend,
   onRevoke,
 }: {
   invite: PendingInvite;
   manage: boolean;
+  canResend: boolean;
   busy: string | null;
   onResend: () => void;
   onRevoke: () => void;
@@ -323,9 +340,11 @@ function InviteRow({
       </div>
       {manage && (
         <>
-          <Button variant="ghost" size="xs" disabled={Boolean(busy)} onClick={onResend} aria-label={`Resend invite to ${invite.email}`}>
-            {busy === `invite:${invite.email}` ? <Loader2 className="animate-spin" /> : "Resend"}
-          </Button>
+          {canResend && (
+            <Button variant="ghost" size="xs" disabled={Boolean(busy)} onClick={onResend} aria-label={`Resend invite to ${invite.email}`}>
+              {busy === `invite:${invite.email}` ? <Loader2 className="animate-spin" /> : "Resend"}
+            </Button>
+          )}
           <Button variant="ghost" size="xs" disabled={Boolean(busy)} onClick={onRevoke} aria-label={`Revoke invite to ${invite.email}`}>
             {busy === `revoke:${invite.email}` ? <Loader2 className="animate-spin" /> : "Revoke"}
           </Button>
@@ -337,7 +356,11 @@ function InviteRow({
 
 function IssuedNotice({ invite, copied, onCopied }: { invite: IssuedInvite; copied: boolean; onCopied: () => void }) {
   if (invite.deduplicated) {
-    return <p className="mt-2 text-[11px] text-muted-foreground">An invite to {invite.email} was already sent moments ago.</p>;
+    return (
+      <p className="mt-2 text-[11px] text-muted-foreground">
+        An invite to {invite.email} was sent moments ago, so no new email went out. Resend after a minute if it did not arrive.
+      </p>
+    );
   }
   return (
     <div className="mt-2 rounded-md bg-well p-2 text-[11px]" role="status">

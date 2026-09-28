@@ -179,3 +179,50 @@ it("reloads for a new account context and ignores the previous context's late re
   await Promise.resolve();
   expect(screen.queryByRole("listitem", { name: "member@example.com" })).toBeNull();
 });
+
+it("hides invite and resend when the organization cannot invite, but keeps revoke", async () => {
+  api.list.mockResolvedValue(roster({ canInvite: false }));
+  await renderAs();
+  expect(screen.queryByRole("textbox", { name: "Invite email" })).toBeNull();
+  expect(screen.getByText("This organization cannot invite members.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Resend invite/ })).toBeNull();
+  expect(screen.getByRole("button", { name: "Revoke invite to pending@example.com" })).toBeTruthy();
+});
+
+it("stops offering a link once its invite is revoked", async () => {
+  api.invite.mockResolvedValue(
+    roster({
+      invite: { email: "pending@example.com", role: "member", inviteUrl: "https://console.test/invite/old", emailSent: false, deduplicated: false },
+    }),
+  );
+  api.revokeInvite.mockResolvedValue(roster({ pendingInvites: [] }));
+  await renderAs();
+  fireEvent.click(screen.getByRole("button", { name: "Resend invite to pending@example.com" }));
+  await screen.findByText("https://console.test/invite/old");
+  fireEvent.click(screen.getByRole("button", { name: "Revoke invite to pending@example.com" }));
+  await waitFor(() => expect(screen.queryByText("https://console.test/invite/old")).toBeNull());
+});
+
+it("keeps a mutation result when an older refresh finishes after it", async () => {
+  let stale!: (value: OrganizationRoster) => void;
+  await renderAs();
+  api.list.mockReturnValueOnce(new Promise((resolve) => (stale = resolve)));
+  api.remove.mockResolvedValue(roster({ members: roster().members.filter((m) => m.userId !== "member-1") }));
+  fireEvent.click(screen.getByRole("button", { name: "Refresh members" }));
+  fireEvent.click(screen.getByRole("button", { name: "Remove member@example.com" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm removal" }));
+  await waitFor(() => expect(screen.queryByRole("listitem", { name: "member@example.com" })).toBeNull());
+  stale(roster());
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(screen.queryByRole("listitem", { name: "member@example.com" })).toBeNull();
+  expect((screen.getByRole("button", { name: "Refresh members" }) as HTMLButtonElement).disabled).toBe(false);
+});
+
+it("says the outcome is unknown when a sent change loses its response", async () => {
+  api.remove.mockRejectedValue({ code: "organization_members_outcome_unknown", status: null, retryAfterSeconds: null });
+  await renderAs();
+  fireEvent.click(screen.getByRole("button", { name: "Remove member@example.com" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm removal" }));
+  await screen.findByText(/may or may not have been applied/);
+});

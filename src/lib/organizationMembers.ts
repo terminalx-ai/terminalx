@@ -36,6 +36,8 @@ export interface OrganizationRoster {
   pendingInvites: PendingInvite[];
   viewerRole: string;
   canManageMembers: boolean;
+  /** False for a personal or unentitled organization; absent on older servers. */
+  canInvite?: boolean;
   invite?: IssuedInvite;
   contextRevision: string;
 }
@@ -72,6 +74,12 @@ export function membersErrorMessage(error: unknown): string {
   switch (code) {
     case "invalid_email":
       return "Enter a valid email address.";
+    case "invalid_request":
+      return "That request was not valid. Check the details and try again.";
+    case "organization_members_outcome_unknown":
+      return "TerminalX lost the response, so the change may or may not have been applied. The list has been refreshed; check it before trying again.";
+    case "account_context_changed_after_send":
+      return "Your account or organization changed while this was saving, so it may have been applied. Check the list before trying again.";
     case "already_member":
       return "That person is already a member of this organization.";
     case "invite_recently_sent":
