@@ -130,7 +130,7 @@ impl HttpMailboxApi {
         Self { origin: origin.trim_end_matches('/').to_string(), credential, agent }
     }
 
-    fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<(u16, Value), CallError> {
+    pub(crate) fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<(u16, Value), CallError> {
         let credential = (self.credential)().ok_or(CallError::Rejected)?;
         let bearer = Zeroizing::new(format!("Bearer {}", credential.as_str()));
         let request = self

@@ -407,7 +407,7 @@ fn start_cloud_agents(
     use crate::cloud_agents::{api::HttpMailboxApi, CloudAgents, Identity, ManagerOps};
     let ops = Arc::new(ManagerOps { manager: runtime.manager.clone(), root: root.to_string() });
     let mut generation = 0;
-    let api: Option<(Arc<dyn crate::cloud_agents::api::MailboxApi>, Identity)> = match (cloud, relay_link) {
+    let api: Option<(Arc<HttpMailboxApi>, Identity)> = match (cloud, relay_link) {
         (Some((cloud, origin)), _) => {
             let session = cloud.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
             generation = crate::remote::host::token_identity(&session.relay_token).map(|id| id.runtime_generation).unwrap_or(0);
@@ -421,17 +421,48 @@ fn start_cloud_agents(
         (None, Some(path)) => dev_mailbox(path)?.map(|(origin, credential, identity)| {
             let credential = zeroize::Zeroizing::new(credential);
             let credential: crate::cloud_agents::api::Credential = Arc::new(move || Some(credential.clone()));
-            (Arc::new(HttpMailboxApi::new(&origin, credential)) as Arc<dyn crate::cloud_agents::api::MailboxApi>, identity)
+            (Arc::new(HttpMailboxApi::new(&origin, credential)), identity)
         }),
         (None, None) => None,
     };
+    let http = api.as_ref().map(|(http, _)| http.clone());
+    let api = api.map(|(http, identity)| (http as Arc<dyn crate::cloud_agents::api::MailboxApi>, identity));
     let agents = CloudAgents::open(&CloudAgents::state_dir(data_dir), ops, Some(runtime.sink.clone()), api, generation)?;
     agents.mark_interrupted_turns(&runtime.interrupted);
     agents.start();
     if let Some((cloud, _)) = cloud {
         watch_access(agents.clone(), cloud.clone());
     }
+    if let Some(http) = http {
+        start_launch(runtime, root, data_dir, http, &agents);
+    }
     Ok(agents)
+}
+
+/// Consume the workspace's launch intent (PRO-21): its repositories, work
+/// branch and first prompt, applied once (`cloud_agents::launch`).
+fn start_launch(
+    runtime: &Runtime,
+    root: &str,
+    data_dir: &std::path::Path,
+    api: Arc<crate::cloud_agents::api::HttpMailboxApi>,
+    agents: &Arc<crate::cloud_agents::CloudAgents>,
+) {
+    use crate::cloud_agents::launch::{GitCheckout, Launcher, ManagerStarter, Store};
+    let launcher = Launcher {
+        api,
+        starter: Arc::new(ManagerStarter {
+            manager: runtime.manager.clone(),
+            sink: runtime.sink.clone(),
+            root: root.to_string(),
+            agents: Arc::downgrade(agents),
+        }),
+        checkout: Arc::new(GitCheckout),
+        store: Store::open(&crate::cloud_agents::CloudAgents::state_dir(data_dir)),
+        incarnation: agents.receipts.incarnation().to_string(),
+        root: std::path::PathBuf::from(root),
+    };
+    let _ = std::thread::Builder::new().name("cloud-launch".into()).spawn(move || launcher.run());
 }
 
 /// A development link file's mailbox: `(origin, runtime credential, identity)`.

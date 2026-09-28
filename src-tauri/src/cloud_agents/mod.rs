@@ -12,6 +12,7 @@ pub mod api;
 pub mod checkpoints;
 pub mod crypto;
 pub mod keys;
+pub mod launch;
 pub mod mailbox;
 pub mod receipts;
 
