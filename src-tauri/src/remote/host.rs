@@ -867,6 +867,7 @@ pub async fn serve_workspace(
     terminals: Arc<crate::pty::Terminals>,
     sessions: Option<crate::session::SessionManager>,
     devices_path: Option<PathBuf>,
+    agents: Option<Arc<crate::cloud_agents::CloudAgents>>,
 ) -> Result<Arc<RelayHost>> {
     let mut attempt = 0u32;
     let generation = loop {
@@ -881,6 +882,10 @@ pub async fn serve_workspace(
         }
     };
     let rpc = WorkspaceRpc::new(&root, generation, sink, terminals, sessions)?;
+    if let Some(agents) = agents {
+        agents.set_generation(generation);
+        rpc.set_agents(agents);
+    }
     let host = RelayHost::new(link, rpc, devices_path);
     tokio::spawn(host.clone().run());
     Ok(host)

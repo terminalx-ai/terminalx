@@ -642,6 +642,20 @@ impl SessionManager {
             .collect()
     }
 
+    /// Whether the tab has a turn open (sent and not yet settled).
+    pub fn turn_open(&self, session_id: &str, tab_id: &str) -> bool {
+        self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).is_some_and(|runtime| runtime.lock().unwrap().turn_open)
+    }
+
+    /// Publish into a tab's transcript from outside its harness: the cloud
+    /// runtime's own notes (a follow-up dropped by a stop, a turn that ended
+    /// with the runtime).
+    pub fn publish_external(&self, session_id: &str, tab_id: &str, payload: Payload) -> Result<AgentEvent> {
+        let rt_arc = self.runtime(session_id, tab_id)?;
+        let mut rt = rt_arc.lock().unwrap();
+        Ok(self.publish(&mut rt, payload, None))
+    }
+
     pub fn is_running(&self, session_id: &str, tab_id: &str) -> bool {
         let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
         runtime.is_some_and(|runtime| {

@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
 use super::protocol::{self, Authority, IdempotencyCache, RpcError, PROTOCOL};
+use crate::cloud_agents::CloudAgents;
 use crate::events::AgentEvent;
 use crate::pty::{PaneSpec, PtyData, PtyExit, Terminals};
 use crate::session::SessionManager;
@@ -205,6 +206,11 @@ pub struct WorkspaceRpc {
     /// Sessions a `participate` attachment may see. Nothing shares a session
     /// yet, so participants see none (fail closed).
     shared_sessions: Mutex<HashSet<String>>,
+    /// Agent tabs, keys and the mailbox (PRO-22); absent in tests without them.
+    agents: OnceLock<Arc<CloudAgents>>,
+    /// Connections that said hello, for workspace-wide notifications.
+    peers: Mutex<HashMap<u64, Weak<Peer>>>,
+    tabs_changed: Arc<tokio::sync::Notify>,
 }
 
 impl WorkspaceRpc {
@@ -232,6 +238,9 @@ impl WorkspaceRpc {
             idempotency: Mutex::new(IdempotencyCache::default()),
             in_flight: Mutex::new(HashMap::new()),
             shared_sessions: Mutex::new(HashSet::new()),
+            agents: OnceLock::new(),
+            peers: Mutex::new(HashMap::new()),
+            tabs_changed: Arc::new(tokio::sync::Notify::new()),
         });
         // Listeners run inline on the emitting thread, so no output is lost
         // to a lagging broadcast and offsets stay exact.
@@ -255,6 +264,17 @@ impl WorkspaceRpc {
         );
         let weak = Arc::downgrade(&rpc);
         sink.listen(
+            "tab_status",
+            Box::new(move |payload| {
+                if let (Some(rpc), Ok(status)) = (weak.upgrade(), serde_json::from_str::<Value>(payload)) {
+                    rpc.on_tab_status(status);
+                }
+            }),
+        );
+        let notify = rpc.tabs_changed.clone();
+        sink.listen(crate::cloud_agents::TABS_CHANGED, Box::new(move |_| notify.notify_one()));
+        let weak = Arc::downgrade(&rpc);
+        sink.listen(
             "agent_event",
             Box::new(move |payload| {
                 if let (Some(rpc), Ok(event)) = (weak.upgrade(), serde_json::from_str::<AgentEvent>(payload)) {
@@ -267,6 +287,48 @@ impl WorkspaceRpc {
 
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
+    }
+
+    /// Serve agent tabs and keys from `agents`, and tell connections when
+    /// the tab list changes. Call inside a Tokio runtime.
+    pub fn set_agents(self: &Arc<Self>, agents: Arc<CloudAgents>) {
+        if self.agents.set(agents).is_err() {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        let notify = self.tabs_changed.clone();
+        tokio::spawn(async move {
+            loop {
+                notify.notified().await;
+                // Coalesce a burst (a turn settling changes several things).
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                let Some(rpc) = weak.upgrade() else { return };
+                let Some(agents) = rpc.agents.get().cloned() else { continue };
+                let Ok(tabs) = tokio::task::spawn_blocking(move || agents.tabs()).await else { continue };
+                rpc.broadcast_tabs(&tabs);
+            }
+        });
+    }
+
+    fn agents(&self) -> Result<&Arc<CloudAgents>, RpcError> {
+        self.agents.get().ok_or_else(|| RpcError::new("unavailable", "agent tabs are not served by this runtime"))
+    }
+
+    fn broadcast_tabs(&self, tabs: &[crate::cloud_agents::AgentTabInfo]) {
+        let peers: Vec<Arc<Peer>> = {
+            let mut peers = self.peers.lock().unwrap();
+            peers.retain(|_, peer| peer.strong_count() > 0);
+            peers.values().filter_map(Weak::upgrade).collect()
+        };
+        let shared = self.shared_sessions.lock().unwrap().clone();
+        for peer in peers {
+            if !peer.granted.lock().unwrap().as_ref().is_some_and(|granted| granted.contains("session/1")) {
+                continue;
+            }
+            let visible: Vec<_> =
+                tabs.iter().filter(|tab| peer.authority == Authority::Manage || shared.contains(&tab.session_id)).collect();
+            peer.notify("session.tabs", json!({ "tabs": visible }));
+        }
     }
 
     /// Follow the relay host when it registers a newer generation.
@@ -290,6 +352,11 @@ impl WorkspaceRpc {
         if method == "rpc.hello" {
             let granted = protocol::negotiate(&params)?;
             *peer.granted.lock().unwrap() = Some(granted.iter().cloned().collect());
+            if self.peers.lock().unwrap().insert(peer.id, Arc::downgrade(peer)).is_none() {
+                if let Some(agents) = self.agents.get() {
+                    agents.client_attached();
+                }
+            }
             return Ok(json!({
                 "protocol": PROTOCOL,
                 "runtime": { "version": self.version, "runtimeGeneration": self.generation(), "epoch": self.epoch },
@@ -385,12 +452,34 @@ impl WorkspaceRpc {
             "session.close" => self.session_close(params),
             "session.send" => self.session_send(peer, params),
             "session.subscribe" => self.session_subscribe(peer, params),
+            "session.tabs" => self.session_tabs(peer),
+            "session.configure" => self.session_configure(peer, params),
+            "session.markRead" => self.session_mark_read(peer, params),
+            "session.nudge" => {
+                self.agents()?.poll.raise();
+                Ok(json!({}))
+            }
+            "keys.get" => Ok(self.agents()?.keys.handout(crate::cloud_agents::now_ms())),
+            "keys.rotate" => {
+                let agents = self.agents()?;
+                agents.keys.rotate(crate::cloud_agents::now_ms()).map_err(RpcError::internal)?;
+                // New checkpoints go out under the new key.
+                for tab in agents.tabs() {
+                    agents.checkpoints.mark(&tab.tab_id, true);
+                }
+                Ok(json!({ "currentKeyId": agents.keys.current().map(|(id, _)| id) }))
+            }
             other => Err(RpcError::new("method_not_found", format!("{other} is not a workspace method"))),
         }
     }
 
     /// Drop everything a closed connection subscribed to.
     pub fn disconnect(&self, peer: &Peer) {
+        if self.peers.lock().unwrap().remove(&peer.id).is_some() {
+            if let Some(agents) = self.agents.get() {
+                agents.client_detached();
+            }
+        }
         let doomed: Vec<(String, Subscription)> = {
             let mut subscriptions = self.subscriptions.lock().unwrap();
             let ids: Vec<String> =
@@ -1255,7 +1344,11 @@ impl WorkspaceRpc {
             Some(prompt) => Some(manager.send(&entry.id, &tab.id, prompt, Vec::new()).map_err(RpcError::internal)?),
             None => None,
         };
-        Ok(json!({ "sessionId": entry.id, "tabId": tab.id, "session": entry, "outcome": outcome }))
+        let info = self.agents.get().and_then(|agents| {
+            agents.changed(Some(&tab.id), true);
+            agents.tab(&tab.id)
+        });
+        Ok(json!({ "sessionId": entry.id, "tabId": tab.id, "session": entry, "outcome": outcome, "tab": info }))
     }
 
     fn session_close(&self, params: Value) -> Result<Value, RpcError> {
@@ -1267,8 +1360,30 @@ impl WorkspaceRpc {
             .filter(|session| session.project_path == self.root.to_string_lossy())
             .ok_or_else(|| RpcError::not_found("no such session"))?;
         let only = params.get("tabId").and_then(Value::as_str);
-        for tab in session.tabs.iter().filter(|tab| only.is_none_or(|id| id == tab.id)) {
-            manager.stop(&session.id, &tab.id).map_err(RpcError::internal)?;
+        let closing: Vec<String> = session.tabs.iter().filter(|tab| only.is_none_or(|id| id == tab.id)).map(|tab| tab.id.clone()).collect();
+        for tab_id in &closing {
+            if manager.is_running(&session.id, tab_id) {
+                manager.stop(&session.id, tab_id).map_err(RpcError::internal)?;
+            }
+        }
+        if params.get("remove").and_then(Value::as_bool) == Some(true) {
+            index::update(|sessions| {
+                if let Some(entry) = sessions.iter_mut().find(|entry| entry.id == session.id) {
+                    entry.tabs.retain(|tab| !closing.contains(&tab.id));
+                }
+                sessions.retain(|entry| entry.id != session.id || !entry.tabs.is_empty());
+                Ok(())
+            })
+            .map_err(RpcError::internal)?;
+            if let Some(agents) = self.agents.get() {
+                for tab_id in &closing {
+                    let _ = agents.follow_ups.clear(tab_id);
+                    agents.checkpoints.remove(tab_id);
+                }
+            }
+        }
+        if let Some(agents) = self.agents.get() {
+            agents.changed(None, false);
         }
         Ok(json!({ "sessionId": session.id }))
     }
@@ -1349,6 +1464,51 @@ impl WorkspaceRpc {
             "events": replay,
             "cursor": self.cursor(last_seq),
         }))
+    }
+
+    fn session_tabs(&self, peer: &Peer) -> Result<Value, RpcError> {
+        let visible: HashSet<String> = self.visible_sessions(peer)?.into_iter().map(|session| session.id).collect();
+        let tabs: Vec<_> = self.agents()?.tabs().into_iter().filter(|tab| visible.contains(&tab.session_id)).collect();
+        Ok(json!({ "tabs": tabs }))
+    }
+
+    /// The agent tab `(sessionId, tabId)` names, if the caller may see it.
+    fn visible_tab(&self, peer: &Peer, params: &Value) -> Result<crate::cloud_agents::AgentTabInfo, RpcError> {
+        let session = self.visible_session(peer, required_str(params, "sessionId")?)?;
+        let tab_id = required_str(params, "tabId")?;
+        self.agents()?
+            .tab(tab_id)
+            .filter(|tab| tab.session_id == session.id)
+            .ok_or_else(|| RpcError::not_found("no such tab"))
+    }
+
+    fn session_configure(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let tab = self.visible_tab(peer, &params)?;
+        let settings = crate::cloud_agents::Settings::from_json(&params).map_err(|error| RpcError::invalid(error.to_string()))?;
+        let agents = self.agents()?;
+        agents.ops.configure(&tab.session_id, &tab.tab_id, &settings).map_err(RpcError::internal)?;
+        agents.changed(Some(&tab.tab_id), true);
+        Ok(json!({ "tab": agents.tab(&tab.tab_id) }))
+    }
+
+    fn session_mark_read(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let tab = self.visible_tab(peer, &params)?;
+        self.manager()?.mark_read(&tab.session_id, &tab.tab_id).map_err(RpcError::internal)?;
+        Ok(json!({}))
+    }
+
+    /// Runs on the emitting thread under the tab's lock: only notify.
+    fn on_tab_status(&self, status: Value) {
+        let (Some(session_id), Some(tab_id)) = (status["sessionId"].as_str(), status["tabId"].as_str()) else { return };
+        let subs = self.session_subs.lock().unwrap();
+        for (subscription_id, sub) in subs.iter() {
+            if sub.session_id == session_id && sub.tab_id == tab_id {
+                sub.peer.notify(
+                    "session.status",
+                    json!({ "subscriptionId": subscription_id, "sessionId": session_id, "tabId": tab_id, "status": status["status"] }),
+                );
+            }
+        }
     }
 
     fn on_agent_event(&self, event: AgentEvent) {

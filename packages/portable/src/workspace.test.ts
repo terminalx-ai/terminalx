@@ -24,6 +24,7 @@ class FakeRuntime implements WorkspaceTransport {
   output = "";
   writes: string[] = [];
   created = 0;
+  agentEvents: { seq: number; id: string }[] = [];
   private cache = new Map<string, unknown>();
   private applied = new Map<string, number>();
   private subscription = 0;
@@ -111,6 +112,24 @@ class FakeRuntime implements WorkspaceTransport {
           rows: 24,
         });
       }
+      case "session.subscribe": {
+        this.subscription++;
+        const since = typeof params.sinceCursor === "string" ? Number(params.sinceCursor.split(":")[1]) : 0;
+        if (typeof params.sinceCursor === "string" && !params.sinceCursor.startsWith(`${this.generation}:`)) {
+          return { id: frame.id, ok: false, error: { code: "cursor_expired", message: "other generation" } };
+        }
+        const events = this.agentEvents.filter((event) => event.seq > since).map((event) => ({ cursor: `${this.generation}:${event.seq}`, event }));
+        return ok({ subscriptionId: `sub-${this.subscription}`, events, cursor: `${this.generation}:${this.agentEvents.at(-1)?.seq ?? since}` });
+      }
+      case "session.tabs":
+        return ok({ tabs: [{ sessionId: "s1", tabId: "t1", status: "idle", process: "running" }] });
+      case "session.configure": {
+        const result = { tab: { sessionId: params.sessionId, tabId: params.tabId, model: params.model } };
+        this.cache.set(key!, result);
+        return ok(result);
+      }
+      case "session.nudge":
+        return ok({});
       default:
         return { id: frame.id, ok: false, error: { code: "method_not_found", message: frame.method } };
     }
@@ -339,6 +358,54 @@ describe("workspace RPC client", () => {
     await settle();
     expect(runtime.sent.map((frame) => frame.method)).toEqual(["pty.attach"]);
     attachment.detach();
+    client.close();
+  });
+
+  it("resumes an agent tab from a kept cursor, reports cursors and status, and starts over for a new generation", async () => {
+    const runtime = new FakeRuntime();
+    runtime.agentEvents = [1, 2, 3].map((seq) => ({ seq, id: `e${seq}` }));
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    const seen: number[] = [];
+    const cursors: (string | undefined)[] = [];
+    const statuses: string[] = [];
+    await client.subscribeSession("s1", "t1", (event) => seen.push((event as { seq: number }).seq), {
+      sinceCursor: "7:2",
+      onCursor: (cursor) => cursors.push(cursor),
+      onStatus: (change) => statuses.push(`${change.status}/${change.process}`),
+    });
+    expect(seen).toEqual([3]);
+    expect(runtime.sent[0]!.params).toMatchObject({ sessionId: "s1", tabId: "t1", sinceCursor: "7:2" });
+    runtime.deliver({ event: "session.event", params: { subscriptionId: "sub-1", cursor: "7:4", event: { seq: 4 } } });
+    runtime.deliver({ event: "session.status", params: { subscriptionId: "sub-1", sessionId: "s1", tabId: "t1", status: "in_progress", process: "running" } });
+    expect(seen).toEqual([3, 4]);
+    expect(cursors.at(-1)).toBe("7:4");
+    expect(statuses).toEqual(["in_progress/running"]);
+    // A runtime of another generation cannot resume the cursor: a full replay follows.
+    runtime.drop();
+    runtime.generation = 8;
+    runtime.connect();
+    await settle();
+    await settle();
+    expect(seen).toEqual([3, 4, 1, 2, 3]);
+    expect(cursors).toContain(undefined);
+    client.close();
+  });
+
+  it("lists and configures agent tabs, gives configure a stable request id, and hands broadcasts to listeners", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    const broadcasts: string[] = [];
+    client.onNotification((notification) => broadcasts.push(notification.event));
+    expect(await client.listAgentTabs()).toEqual([{ sessionId: "s1", tabId: "t1", status: "idle", process: "running" }]);
+    const tab = await client.configureAgentTab({ sessionId: "s1", tabId: "t1", model: "opus" });
+    expect(tab).toMatchObject({ model: "opus" });
+    const configure = runtime.sent.find((frame) => frame.method === "session.configure")!;
+    expect(typeof (configure.params as Record<string, unknown>).clientRequestId).toBe("string");
+    await client.nudgeMailbox();
+    runtime.deliver({ event: "session.tabs", params: { tabs: [] } });
+    expect(broadcasts).toEqual(["session.tabs"]);
     client.close();
   });
 });

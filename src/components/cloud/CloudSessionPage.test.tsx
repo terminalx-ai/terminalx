@@ -36,6 +36,14 @@ vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} proposeDimension
 vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class { onContextLoss() {} dispose() {} } }));
 vi.mock("@/lib/theme", () => ({ useTheme: () => ({ resolvedMode: "dark" }) }));
 vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+// The agent tabs have their own tests (CloudAgents.test.tsx); here only what the page hands them.
+const agentViews = vi.hoisted(() => [] as Record<string, unknown>[]);
+vi.mock("./CloudAgents", () => ({
+  CloudAgentsView: (props: Record<string, unknown>) => {
+    agentViews.push(props);
+    return <div data-testid="cloud-agents-stub" />;
+  },
+}));
 vi.mock("@/lib/api", () => ({
   api: { cloudWorkspaces: vi.fn() },
   pty: {},
@@ -247,6 +255,17 @@ describe("cloud workspace session page", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Close Terminal 1" }));
     await waitFor(() => expect(client.killPty).toHaveBeenCalledWith("remote-pty-1"));
     await waitFor(() => expect(screen.queryByTestId("cloud-terminal-tab")).toBeNull());
+  });
+
+  it("opens a suspended workspace's saved agent chats without waking it", async () => {
+    vi.mocked(workspaceConnection).mockResolvedValue({ ...fakeConnection(), target: { kind: "cloud", organizationId: "org-1", workspaceId: "ws-asleep" } } as never);
+    render(<CloudSessionPage onBack={() => undefined} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open without waking" }));
+    await waitFor(() =>
+      expect(workspaceConnection).toHaveBeenCalledWith({ kind: "cloud", organizationId: "org-1", workspaceId: "ws-asleep" }, "connect"),
+    );
+    await screen.findByTestId("cloud-agents-stub");
+    expect(agentViews.at(-1)).toMatchObject({ scope: { organizationId: "org-1", workspaceId: "ws-asleep" }, workspaceState: "suspended" });
   });
 
   it("does not offer a session for a workspace that is still provisioning", async () => {

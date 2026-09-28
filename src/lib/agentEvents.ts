@@ -158,6 +158,44 @@ export async function loadTab(sessionId: string, tabId: string) {
   touch(k, true);
 }
 
+/** The tab's log as it stands, outside React. */
+export function getTabLog(sessionId: string, tabId: string): TabLog {
+  return logs.get(key(sessionId, tabId)) ?? EMPTY;
+}
+
+/**
+ * Merge committed events by seq: a cached or checkpointed transcript, or a
+ * replay that may overlap what is already shown. Newer copies of a seq win.
+ */
+export function mergeTabEvents(sessionId: string, tabId: string, events: AgentEvent[]) {
+  const k = key(sessionId, tabId);
+  const log = getLog(k);
+  const committed = events.filter((ev) => ev.payload.type !== "delta");
+  if (committed.length) {
+    const bySeq = new Map(log.events.map((ev) => [ev.seq, ev]));
+    for (const ev of committed) bySeq.set(ev.seq, ev);
+    log.events = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+    const last = log.events[log.events.length - 1]?.payload.type;
+    if (last === "turn_completed" || last === "user_message") log.stream = [];
+  }
+  log.loaded = true;
+  touch(k, true);
+}
+
+/** The newest committed seq of a tab's log (0 when empty). */
+export function lastSeq(sessionId: string, tabId: string): number {
+  const events = getTabLog(sessionId, tabId).events;
+  for (let i = events.length - 1; i >= 0; i--) if (events[i].payload.type !== "delta") return events[i].seq;
+  return 0;
+}
+
+/** Forget a tab's log, e.g. a cloud tab that was closed. */
+export function dropTabLog(sessionId: string, tabId: string) {
+  const k = key(sessionId, tabId);
+  logs.delete(k);
+  touch(k, true);
+}
+
 export function setTabStatus(sessionId: string, tabId: string, status: TabStatus) {
   const k = key(sessionId, tabId);
   const log = getLog(k);

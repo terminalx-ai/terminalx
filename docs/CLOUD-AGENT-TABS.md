@@ -57,10 +57,10 @@ Every plaintext is JSON with `"v": 1`. It is AES-256-GCM encrypted with AAD
 | `stop` | `{ v }` | Interrupts the turn and drops the tab's queued follow-ups (listed in the receipt). |
 | `permission-decision` | `{ v, requestId, optionId }` or `{ v, requestId, answers }` | Answers that pending request. If it is no longer pending, the command is `rejected` with `request-not-pending`. |
 
-The receipt plaintext is `{ v: 1, outcome, category?, queued?, droppedFollowUps? }`. It is
+The receipt plaintext is `{ v: 1, outcome, category?, queued?, droppedFollowUps?, requestId?, message? }`. It is
 encrypted with AAD `["terminalx-agent-command-result/1", organizationId, workspaceId, clientCommandId, outcome, keyId]`
-under the current key, and `resultIv`/`resultCiphertext` carry it. The key id is the one that encrypted the command
-when that key is still known. Otherwise it is the current key.
+under the command's own key (`keyId` is the command's), which its author holds. A command whose key is unknown gets a
+receipt with no body; its category (`key-unknown`) is enough.
 
 Rejection categories are `key-unknown`, `decrypt-failed`, `payload-invalid`, `tab-unknown`, `forbidden`,
 `request-not-pending`, `agent-unavailable` and `apply-failed`.
