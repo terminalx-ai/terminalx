@@ -892,11 +892,17 @@ mod tests {
 
     #[test]
     fn a_refusal_is_not_papered_over_by_the_cache() {
-        let dir = tempfile::tempdir().unwrap();
-        seed(dir.path(), Some("acme/api"), "ghs_still_valid", NOW + 2 * MINUTE);
-        let api = FakeApi::new(|_| Err(refused(409, "github_installation_revoked")));
-        assert_eq!(resolve_token(dir.path(), Some("acme/api"), &api, &now).unwrap_err().code.as_deref(), Some("github_installation_revoked"));
-        assert!(read_cached(&dir.path().join(format!("{}.json", cache_key(Some("acme/api"))))).is_none());
+        // A revoked or suspended installation is final (the server no longer
+        // falls back to a scoped credential for it), unlike an outage.
+        for code in ["github_installation_revoked", "github_installation_suspended"] {
+            let dir = tempfile::tempdir().unwrap();
+            seed(dir.path(), Some("acme/api"), "ghs_still_valid", NOW + 2 * MINUTE);
+            let api = FakeApi::new(move |_| Err(refused(409, code)));
+            let error = resolve_token(dir.path(), Some("acme/api"), &api, &now).unwrap_err();
+            assert_eq!(error.code.as_deref(), Some(code));
+            assert!(!error.is_outage());
+            assert!(read_cached(&dir.path().join(format!("{}.json", cache_key(Some("acme/api"))))).is_none());
+        }
     }
 
     #[test]

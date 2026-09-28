@@ -7,6 +7,7 @@ import {
   MAX_SELECTED_REPOSITORIES,
   REPOSITORY_STATE_LABEL,
   fixedOnGithub,
+  attemptErrorMessage,
   githubAppErrorCode,
   githubAppErrorMessage,
   organizationGithubApp,
@@ -136,7 +137,7 @@ export function OrganizationGithubApp({
           setNotice(`Connected ${next.installation?.accountLogin ?? "the installation"}. Choose which repositories cloud workspaces can use.`);
           void load();
         } else if (next.state === "failed") {
-          setError(githubAppErrorMessage({ code: next.errorCode ?? "" }));
+          setError(attemptErrorMessage(next.errorCode));
         } else if (ATTEMPT_END_MESSAGE[next.state]) {
           setNotice(ATTEMPT_END_MESSAGE[next.state]);
         }
@@ -387,7 +388,7 @@ export function OrganizationGithubApp({
               <div className="flex items-center gap-2 text-muted-foreground">
                 <Loader2 className="size-3.5 animate-spin" />
                 {attempt.browserOpened
-                  ? "Finish installing the app on GitHub in your browser. This updates when GitHub sends you back."
+                  ? "Finish in your browser: install the app on GitHub, then confirm the organization on the TerminalX page. This updates once you confirm."
                   : "Your browser did not open. Open the install page to continue."}
               </div>
               <div className="mt-1.5 flex gap-2">

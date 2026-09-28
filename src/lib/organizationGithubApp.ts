@@ -113,12 +113,25 @@ export function githubAppErrorCode(error: unknown): string {
 }
 
 /** Why a connect attempt did not connect, or why a call was refused. */
+const ALREADY_CONNECTED =
+  "This GitHub installation is already connected to another TerminalX organization. An admin of that organization must disconnect it first.";
+
+/** Why a connect attempt failed (its `errorCode`). */
+export function attemptErrorMessage(code: string | undefined): string {
+  // Checked when the browser confirmed the organization: the initiating
+  // admin was demoted while the attempt waited.
+  if (code === "organization_admin_required") return "You are no longer an admin of this organization.";
+  return githubAppErrorMessage({ code: code ?? "" });
+}
+
 export function githubAppErrorMessage(error: unknown): string {
   switch (githubAppErrorCode(error)) {
     case "github_app_not_configured":
       return "The GitHub App is not configured on this server.";
     case "github_installation_unverified":
       return "GitHub did not confirm that you can see this installation. Install the app while signed in to GitHub as an owner of the account, then try again.";
+    case "github_installation_already_connected":
+      return ALREADY_CONNECTED;
     case "github_installation_pending_approval":
       return "The installation is waiting for an owner of the GitHub organization to approve it. Connect again once it is approved.";
     case "github_app_unavailable":

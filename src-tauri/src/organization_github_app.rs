@@ -187,6 +187,7 @@ fn known_error_code(code: &str) -> bool {
             | "github_app_unavailable"
             | "github_installation_unverified"
             | "github_installation_pending_approval"
+            | "github_installation_already_connected"
             | "github_installation_suspended"
             | "github_installation_revoked"
             | "github_repository_not_accessible"

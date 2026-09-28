@@ -116,7 +116,7 @@ it("connects: opens the install page, polls until connected, then reloads", asyn
   await renderPanel();
   expect(screen.getByText("No GitHub installation is connected yet.")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
-  await screen.findByText(/Finish installing the app on GitHub/);
+  await screen.findByText(/install the app on GitHub, then confirm the organization on the TerminalX page/);
   expect(api.connect).toHaveBeenCalledWith("rev-1");
   await screen.findByText(/Connected acme\. Choose which repositories/);
   expect(api.attempt).toHaveBeenCalledTimes(2);
@@ -135,6 +135,31 @@ it("explains a failed connect attempt and stops polling", async () => {
   await screen.findByText(/waiting for an owner of the GitHub organization to approve it/);
   await new Promise((resolve) => setTimeout(resolve, 30));
   expect(api.attempt).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  ["github_installation_already_connected", /already connected to another TerminalX organization\. An admin of that organization must disconnect it first/],
+  ["organization_admin_required", /You are no longer an admin of this organization/],
+  ["some_future_code", /could not reach the account service/],
+])("explains a connect attempt that failed with %s", async (errorCode, message) => {
+  api.connect.mockResolvedValue({ attemptId: "att_1", state: "waiting", browserOpened: true });
+  api.attempt.mockResolvedValue({ attemptId: "att_1", state: "failed", errorCode, browserOpened: false });
+  await renderPanel();
+  fireEvent.click(screen.getByRole("button", { name: "Connect another installation" }));
+  await screen.findByText(message);
+});
+
+it("shows an attempt canceled on the TerminalX confirmation page as canceled, not an error", async () => {
+  api.connect.mockResolvedValue({ attemptId: "att_1", state: "waiting", browserOpened: true });
+  api.attempt.mockResolvedValue({ attemptId: "att_1", state: "canceled", browserOpened: false });
+  await renderPanel();
+  fireEvent.click(screen.getByRole("button", { name: "Connect another installation" }));
+  await screen.findByText("Connection canceled.");
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.queryByText(/could not reach/)).toBeNull();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(api.attempt).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("button", { name: "Connect another installation" })).toBeTruthy();
 });
 
 it("cancels a waiting attempt", async () => {
