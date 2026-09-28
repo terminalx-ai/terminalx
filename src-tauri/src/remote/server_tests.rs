@@ -143,7 +143,8 @@ async fn writes_are_optimistic_and_a_resend_does_not_write_twice() {
 async fn output_until(events: &mut Notifications, marker: &str) -> (String, u64) {
     let mut output = Vec::new();
     let mut end = 0;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    // A real shell starting on a loaded machine; the wait is on its output.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
         let event = tokio::time::timeout_at(deadline, events.recv()).await.expect("terminal answered").unwrap();
         if event["event"] == "pty.output" {
@@ -239,7 +240,7 @@ async fn peer_for(rpc: &Arc<WorkspaceRpc>, device: &str, authority: Authority) -
 
 /// The next notification named `event`, skipping others.
 async fn next_event(events: &mut Notifications, event: &str) -> Value {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
         let next = tokio::time::timeout_at(deadline, events.recv()).await.unwrap_or_else(|_| panic!("no {event}")).unwrap();
         if next["event"] == event {
@@ -395,58 +396,83 @@ async fn exit_and_close_are_reported_and_nothing_targets_a_closed_terminal() {
     assert!(!f.terminals.is_live(&running_id));
 }
 
+/// Terminal output the test makes itself, delivered exactly as a PTY
+/// read would be, so no shell's timing is involved.
+fn inject(f: &Fixture, pty_id: &str, bytes: &[u8]) {
+    f.rpc.on_pty_data(PtyData { id: pty_id.to_string(), data: STANDARD.encode(bytes) });
+}
+
+/// The next event, however long a loaded machine takes to produce it.
+async fn next(events: &mut Notifications) -> Value {
+    tokio::time::timeout(Duration::from_secs(60), events.recv()).await.expect("an event").unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_connection_that_cannot_keep_up_is_told_to_resume_from_its_offset() {
     let f = fixture();
     let (peer, mut events) = manager_peer(&f.rpc).await;
     let pty_id = call(&f.rpc, &peer, "pty.create", json!({ "clientRequestId": "request-lag-1" })).await.unwrap()["ptyId"].as_str().unwrap().to_string();
-    call(&f.rpc, &peer, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
-    // Nobody drains this connection while the terminal floods it.
-    call(&f.rpc, &peer, "pty.write", json!({ "ptyId": pty_id, "data": "head -c 6000000 /dev/zero | tr '\\0' 'a'; echo; echo flood-done\n", "seq": 1 }))
-        .await
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !f.rpc.ptys.lock().unwrap()[&pty_id].subscribers.is_empty() {
-        assert!(Instant::now() < deadline, "the lagging stream was never ended");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(peer.queued.load(Ordering::SeqCst) <= MAX_QUEUED_OUTPUT + MAX_FRAME_BYTES, "queued output stays bounded");
+    let attached = call(&f.rpc, &peer, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    let subscription = attached["subscriptionId"].as_str().unwrap().to_string();
+    let mut end = attached["end"].as_u64().unwrap();
+    // The connection's transport is this far behind: the next output ends
+    // its stream instead of queueing more.
+    peer.queued.fetch_add(MAX_QUEUED_OUTPUT + 1, Ordering::SeqCst);
+    inject(&f, &pty_id, b"while-lagging-marker");
     // What it did get is contiguous, and ends with where to resume.
-    let mut end = 0u64;
     let lagged_at = loop {
-        let event = events.recv().await.unwrap();
+        let event = next(&mut events).await;
         match event["event"].as_str() {
             Some("pty.output") => {
                 assert_eq!(event["params"]["offset"].as_u64(), Some(end));
                 end += STANDARD.decode(event["params"]["data"].as_str().unwrap()).unwrap().len() as u64;
             }
-            Some("pty.lagged") => break event["params"]["offset"].as_u64().unwrap(),
+            Some("pty.lagged") => {
+                assert_eq!(event["params"]["subscriptionId"], subscription.as_str());
+                break event["params"]["offset"].as_u64().unwrap();
+            }
             _ => {}
         }
     };
-    assert_eq!(lagged_at, end);
-    // Resuming replays from the ring; bytes older than it are reported, not faked.
-    let (resumed_peer, mut resumed) = manager_peer(&f.rpc).await;
-    let replay = call(&f.rpc, &resumed_peer, "pty.attach", json!({ "ptyId": pty_id, "sinceOffset": end, "runtimeGeneration": 7 })).await.unwrap();
-    assert!(replay["offset"].as_u64().unwrap() >= end);
-    assert!(STANDARD.decode(replay["data"].as_str().unwrap()).unwrap().len() <= REPLAY_CHUNK, "a replay never outgrows one frame");
-    assert_eq!(replay["truncated"], json!(replay["offset"].as_u64().unwrap() > end));
-    let tail = String::from_utf8_lossy(&STANDARD.decode(replay["data"].as_str().unwrap()).unwrap()).into_owned();
-    if !tail.contains("flood-done") {
-        output_until_from(&mut resumed, "flood-done", replay["end"].as_u64().unwrap()).await;
-    }
+    assert_eq!(lagged_at, end, "lagged names the first byte not sent");
+    assert!(!f.rpc.ptys.lock().unwrap()[&pty_id].subscribers.contains_key(&subscription), "the stream ended");
+    assert!(!f.rpc.subscriptions.lock().unwrap().contains_key(&subscription));
+    // Once the link has caught up, the client resumes from that byte.
+    peer.queued.fetch_sub(MAX_QUEUED_OUTPUT + 1, Ordering::SeqCst);
+    let resumed = call(&f.rpc, &peer, "pty.attach", json!({ "ptyId": pty_id, "sinceOffset": lagged_at, "runtimeGeneration": 7 })).await.unwrap();
+    assert_eq!((resumed["offset"].as_u64(), resumed["truncated"].as_bool()), (Some(lagged_at), Some(false)));
+    let replayed = String::from_utf8_lossy(&STANDARD.decode(resumed["data"].as_str().unwrap()).unwrap()).into_owned();
+    assert!(replayed.contains("while-lagging-marker"), "{replayed}");
 }
 
-async fn output_until_from(events: &mut Notifications, marker: &str, mut end: u64) {
-    let mut output = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while !String::from_utf8_lossy(&output).contains(marker) {
-        let event = tokio::time::timeout_at(deadline, events.recv()).await.expect("terminal answered").unwrap();
+#[tokio::test(flavor = "multi_thread")]
+async fn attach_replays_the_ring_in_frames_and_reports_what_it_lost() {
+    let f = fixture();
+    let (peer, _events) = manager_peer(&f.rpc).await;
+    let pty_id = call(&f.rpc, &peer, "pty.create", json!({ "clientRequestId": "request-ring-1" })).await.unwrap()["ptyId"].as_str().unwrap().to_string();
+    // More than the ring holds, ending with a marker.
+    let flood = vec![b'a'; PTY_RING_BYTES + 512 * 1024];
+    for chunk in flood.chunks(32 * 1024) {
+        inject(&f, &pty_id, chunk);
+    }
+    inject(&f, &pty_id, b"ring-end-marker");
+    let (reader, mut events) = manager_peer(&f.rpc).await;
+    let replay = call(&f.rpc, &reader, "pty.attach", json!({ "ptyId": pty_id, "sinceOffset": 0, "runtimeGeneration": 7 })).await.unwrap();
+    assert_eq!(replay["truncated"], true, "bytes older than the ring are reported, not faked");
+    let first = STANDARD.decode(replay["data"].as_str().unwrap()).unwrap();
+    assert_eq!(first.len(), REPLAY_CHUNK, "a replay never outgrows one frame");
+    // The rest of the ring follows as ordinary output, in order, before anything live.
+    let mut end = replay["end"].as_u64().unwrap();
+    let mut rest = Vec::new();
+    while !String::from_utf8_lossy(&rest).contains("ring-end-marker") {
+        let event = next(&mut events).await;
         if event["event"] == "pty.output" {
             assert_eq!(event["params"]["offset"].as_u64(), Some(end));
             let chunk = STANDARD.decode(event["params"]["data"].as_str().unwrap()).unwrap();
+            assert!(chunk.len() <= REPLAY_CHUNK);
             end += chunk.len() as u64;
-            output.extend(chunk);
+            rest.extend(chunk);
         }
     }
+    assert!(first.len() + rest.len() >= PTY_RING_BYTES - 64 * 1024, "the whole ring was replayed");
 }
