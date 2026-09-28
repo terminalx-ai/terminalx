@@ -263,21 +263,44 @@ fn bootstrap_cloud_workspace(data_dir: &std::path::Path) -> Result<Option<(Arc<c
 /// it suspends the workspace only when nobody uses it (`cloud_activity`).
 fn report_activity(runtime: &Runtime, cloud: Arc<crate::cloud_bootstrap::Bootstrapped>, origin: &str) {
     use crate::cloud_activity::{note, spawn_reporter, Counts, Kind};
-    // A turn that starts or produces output publishes one of these.
-    for event in ["agent_work_started", "agent_event"] {
-        runtime.sink.listen(event, Box::new(|_| note(Kind::AgentTurn)));
-    }
+    // A turn that starts or produces output publishes one of these. A
+    // recovery marker is the runtime's own bookkeeping, not use.
+    runtime.sink.listen("agent_work_started", Box::new(|_| note(Kind::AgentTurn)));
+    runtime.sink.listen(
+        "agent_event",
+        Box::new(|payload| {
+            #[derive(serde::Deserialize)]
+            struct Event {
+                payload: Tagged,
+            }
+            #[derive(serde::Deserialize)]
+            struct Tagged {
+                #[serde(rename = "type")]
+                kind: String,
+            }
+            if serde_json::from_str::<Event>(payload).is_ok_and(|event| event.payload.kind != "recovery") {
+                note(Kind::AgentTurn);
+            }
+        }),
+    );
     let manager = runtime.manager.clone();
-    let counts = move || Counts {
-        active_turns: manager.running_tabs().iter().filter(|tab| tab.status == crate::store::index::TabStatus::InProgress).count(),
-        pending_approvals: manager.pending_permissions().len(),
+    let counts = move || {
+        let (active_turns, pending_approvals) = manager.turn_counts();
+        Counts { active_turns, pending_approvals }
     };
     let api = crate::cloud_bootstrap::HttpApi::new(origin);
-    spawn_reporter(counts, move |report| match cloud.report_activity(&api, report) {
-        Ok(()) => true,
-        Err(error) => {
-            log::warn!("report activity: {}", crate::cloud_bootstrap::describe(&error));
-            false
+    spawn_reporter(counts, move |report| {
+        // The refresh loop notices a revoked credential; until it is
+        // accepted again a report could only be refused.
+        if cloud.is_rejected() {
+            return false;
+        }
+        match cloud.report_activity(&api, report) {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("report activity: {}", crate::cloud_bootstrap::describe(&error));
+                false
+            }
         }
     });
 }

@@ -41,7 +41,7 @@ fn record_with(path: &Path, boot_id: &str, oom_kill: u64, generation: u64, recor
         "oomKill": oom_kill,
         "recordedAt": recorded_at,
     });
-    write_atomic(path, baseline.to_string().as_bytes())
+    crate::cloud_bootstrap::write_durable(path, baseline.to_string().as_bytes())
 }
 
 /// `oom_kill` from `/proc/vmstat`; 0 on a kernel too old to count it.
@@ -50,24 +50,6 @@ fn oom_kill(vmstat: &str) -> u64 {
         .lines()
         .find_map(|line| line.strip_prefix("oom_kill ").and_then(|value| value.trim().parse().ok()))
         .unwrap_or(0)
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let temporary = path.with_extension("json.new");
-    {
-        use std::io::Write as _;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temporary).with_context(|| format!("create {}", temporary.display()))?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-    std::fs::rename(&temporary, path).with_context(|| format!("rename into {}", path.display()))
 }
 
 fn now_ms() -> u64 {

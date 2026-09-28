@@ -149,7 +149,10 @@ impl Schedule {
         if since.is_some_and(|since| since < MIN_INTERVAL) {
             return None;
         }
-        let counts = observed.counts;
+        let counts = Counts {
+            active_turns: observed.counts.active_turns.min(MAX_COUNT),
+            pending_approvals: observed.counts.pending_approvals.min(MAX_COUNT),
+        };
         let keepalive = counts.busy() && since.is_none_or(|since| since >= KEEPALIVE);
         let due = self.registration_unreported || self.pending != 0 || counts != self.last_counts || keepalive;
         due.then(|| {
@@ -157,8 +160,8 @@ impl Schedule {
             json!({
                 "v": 1,
                 "activity": activity,
-                "activeTurns": counts.active_turns.min(MAX_COUNT),
-                "pendingApprovals": counts.pending_approvals.min(MAX_COUNT),
+                "activeTurns": counts.active_turns,
+                "pendingApprovals": counts.pending_approvals,
             })
         })
     }
@@ -172,6 +175,7 @@ impl Schedule {
         }
         self.pending = 0;
         self.registration_unreported = false;
+        // What was sent, already clamped.
         self.last_counts = Counts {
             active_turns: report["activeTurns"].as_u64().unwrap_or(0) as usize,
             pending_approvals: report["pendingApprovals"].as_u64().unwrap_or(0) as usize,
@@ -313,7 +317,9 @@ mod tests {
     fn counts_are_clamped_to_the_contract() {
         let start = Instant::now();
         let mut schedule = Schedule::default();
-        let report = step(&mut schedule, start, observed(&[], 0, 1, Counts { active_turns: 20_000, pending_approvals: 3 })).unwrap();
+        let many = Counts { active_turns: 20_000, pending_approvals: 3 };
+        let report = step(&mut schedule, start, observed(&[], 0, 1, many)).unwrap();
         assert_eq!(report["activeTurns"], 10_000);
+        assert!(step(&mut schedule, secs(start, 20), observed(&[], 0, 1, many)).is_none(), "unchanged once clamped");
     }
 }
