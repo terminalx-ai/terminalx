@@ -31,6 +31,10 @@
 //! an approval acked from its receipt after a redelivery, steering, stop,
 //! a turn finishing while nobody is attached (and its checkpoint), and a
 //! runtime restart (receipts, keys and the dead turn reported honestly).
+//!
+//! PRO-24 (`cloud_files_…`): files in bounded parts, change notifications,
+//! a save refused after an agent's edit and made after a reconnect, a staged
+//! large write, bounded search, symlink escapes and a participant's limits.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -1026,4 +1030,147 @@ async fn cloud_agent_tabs_run_through_the_mailbox_and_survive_disconnects_and_re
     desk.until_tab(&mut feeds, &a_tab, "the resumed reply", |f| has(f, "after the restart")).await;
     desk.supervisor.stop();
     drop(runtime);
+}
+
+// ---------------------------------------------------------------- PRO-24
+
+/// Read a whole file part by part under the first part's version, as the
+/// desktop client does; every part crossed the relay within its frame.
+async fn read_file(client: &mut Client, path: &str) -> (Vec<u8>, Value) {
+    let first = client.ok("fs.read", json!({ "path": path })).await;
+    let mut bytes = match first.get("text") {
+        Some(text) => text.as_str().unwrap().as_bytes().to_vec(),
+        None => STANDARD.decode(first["dataB64"].as_str().unwrap()).unwrap(),
+    };
+    let mut eof = first["eof"].as_bool().unwrap();
+    while !eof {
+        let part = client.ok("fs.read", json!({ "path": path, "offset": bytes.len(), "version": first["version"] })).await;
+        bytes.extend(STANDARD.decode(part["dataB64"].as_str().unwrap()).unwrap());
+        eof = part["eof"].as_bool().unwrap();
+    }
+    (bytes, first)
+}
+
+/// PRO-24: a cloud workspace's files over the relay: bounded parts, change
+/// notifications, conflict detection against an agent's edit, a save after a
+/// reconnect, bounded search, symlink escapes and participant limits.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs terminalx-saas, bun and Redis: scripts/remote-runtime/e2e.sh"]
+async fn cloud_files_are_browsed_edited_and_searched_through_the_relay() {
+    let harness = Harness::start();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("ws");
+    let outside = dir.path().join("outside");
+    let data = PathBuf::from(format!("/tmp/tx-e2e-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]));
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), "needle from outside").unwrap();
+    std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    // 1.5 MB of media: several parts, each within the relay's 1 MiB frame.
+    let media: Vec<u8> = (0..1_500_000u32).map(|index| (index.wrapping_mul(2654435761) >> 24) as u8).collect();
+    std::fs::write(root.join("clip.png"), &media).unwrap();
+    let many: String = (0..5000).map(|line| format!("let needle_{line} = {line}; // {}\n", "x".repeat(200))).collect();
+    std::fs::write(root.join("src/many.rs"), many).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+
+    let mut secret = [0u8; 32];
+    secret[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    secret[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    let relay_host_id = relay_host_id_for_secret(secret);
+    let relay_token = harness.post("/runtime-token", json!({ "relayHostId": relay_host_id, "runtimeGeneration": 7 }))["relayToken"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let link = dir.path().join("link.json");
+    let tokens: Vec<String> = (0..2).map(|_| uuid::Uuid::new_v4().simple().to_string()).collect();
+    write_link(
+        &link,
+        &secret,
+        &relay_token,
+        &harness.director,
+        json!([attachment("att-desk", "desktop-desk", &tokens[0], "runtime"), attachment("att-phone", "mobile-phone", &tokens[1], "session")]),
+    );
+    let runtime = Runtime::start(&root, &data, &link);
+    runtime.wait_for_relay("registered");
+    let pairing_dir = dir.path().join("link.json.attachments");
+    let mut desk = Client::start(source(&harness, &pairing_dir, "att-desk", "desktop-desk", &relay_host_id));
+    desk.connected().await;
+
+    // The tree: a link out of the workspace is listed, never followed.
+    let watch = desk.ok("fs.watch", json!({})).await;
+    let subscription = watch["subscriptionId"].as_str().unwrap().to_string();
+    let listing = desk.ok("fs.list", json!({})).await;
+    let entry = |name: &str| listing["entries"].as_array().unwrap().iter().find(|entry| entry["name"] == name).cloned();
+    assert_eq!(entry("clip.png").unwrap()["mediaType"], "image/png");
+    #[cfg(unix)]
+    {
+        assert_eq!(entry("escape").unwrap()["escapes"], true);
+        assert_eq!(desk.refused("fs.read", json!({ "path": "escape/secret.txt" })).await, "path_forbidden");
+        assert_eq!(desk.refused("fs.list", json!({ "path": "escape" })).await, "path_forbidden");
+    }
+
+    // A large binary file, read in parts under one version.
+    let (bytes, first) = read_file(&mut desk, "clip.png").await;
+    assert_eq!(bytes, media);
+    assert_eq!(first["binary"], true);
+
+    // The editor reads a file; an agent in the workspace edits it meanwhile.
+    let opened = desk.ok("fs.read", json!({ "path": "src/main.rs" })).await;
+    std::fs::write(root.join("src/main.rs"), "fn main() { agent(); }\n").unwrap();
+    let changed = desk
+        .notification(|n| {
+            n["event"] == "fs.changed"
+                && n["params"]["subscriptionId"] == subscription.as_str()
+                && n["params"]["paths"].as_array().is_some_and(|paths| paths.iter().any(|path| path == "src/main.rs"))
+        })
+        .await;
+    assert!(changed["params"]["paths"].as_array().unwrap().iter().all(|path| !path.as_str().unwrap().starts_with("escape/")));
+    let stale_save = json!({ "path": "src/main.rs", "text": "fn main() { mine(); }\n", "expectedEtag": opened["etag"], "clientRequestId": "e2e-save-0001" });
+    assert_eq!(desk.refused("fs.write", stale_save).await, "conflict");
+    assert_eq!(std::fs::read_to_string(root.join("src/main.rs")).unwrap(), "fn main() { agent(); }\n");
+
+    // Resolved explicitly, but the connection drops before the save: the
+    // unsaved buffer is saved after the reconnect, once.
+    let current = desk.ok("fs.stat", json!({ "path": "src/main.rs" })).await;
+    harness.post("/restart-cell", json!({}));
+    desk.state(|state| matches!(state, ClientState::Reconnecting { .. })).await;
+    desk.connected().await;
+    let save = json!({ "path": "src/main.rs", "text": "fn main() { mine(); }\n", "expectedEtag": current["etag"], "clientRequestId": "e2e-save-0002" });
+    let saved = desk.ok("fs.write", save.clone()).await;
+    assert_eq!(desk.ok("fs.write", save).await, saved, "a resend is the first save's answer");
+    assert_eq!(std::fs::read_to_string(root.join("src/main.rs")).unwrap(), "fn main() { mine(); }\n");
+
+    // A large write: staged part by part, committed at once.
+    let big: Vec<u8> = media.iter().rev().copied().collect();
+    let part_bytes = 384 * 1024;
+    for (index, part) in big.chunks(part_bytes).enumerate() {
+        let params = json!({ "uploadId": "e2e-upload-01", "offset": index * part_bytes, "dataB64": STANDARD.encode(part), "clientRequestId": format!("e2e-part-{index:04}") });
+        desk.ok("fs.writePart", params).await;
+    }
+    let commit = json!({ "path": "clip.png", "uploadId": "e2e-upload-01", "size": big.len(), "expectedEtag": first["etag"], "clientRequestId": "e2e-commit-01" });
+    desk.ok("fs.write", commit).await;
+    assert_eq!(std::fs::read(root.join("clip.png")).unwrap(), big);
+
+    // Search: bounded, never through the escaping link, and cancellable.
+    let found = desk.ok("fs.search", json!({ "searchId": "e2e-search-01", "query": "needle", "maxResults": 1000 })).await;
+    let hits = found["hits"].as_array().unwrap();
+    assert!(!hits.is_empty() && hits.len() <= 1000);
+    assert_eq!(found["capped"], true);
+    assert!(hits.iter().all(|hit| hit["path"] == "src/many.rs"), "nothing from outside the workspace");
+    assert_eq!(desk.ok("fs.cancel", json!({ "searchId": "e2e-search-02" })).await["cancelled"], false);
+
+    // A participant reads and searches, and cannot change anything.
+    let mut phone = Client::start(source(&harness, &pairing_dir, "att-phone", "mobile-phone", &relay_host_id));
+    phone.connected().await;
+    assert_eq!(phone.ok("fs.read", json!({ "path": "src/main.rs" })).await["text"], "fn main() { mine(); }\n");
+    phone.ok("fs.search", json!({ "searchId": "e2e-search-03", "query": "mine" })).await;
+    let write = json!({ "path": "src/main.rs", "text": "x", "clientRequestId": "e2e-phone-0001" });
+    assert_eq!(phone.refused("fs.write", write).await, "forbidden");
+    let part = json!({ "uploadId": "e2e-upload-02", "offset": 0, "dataB64": "eA==", "clientRequestId": "e2e-phone-0002" });
+    assert_eq!(phone.refused("fs.writePart", part).await, "forbidden");
+    phone.supervisor.stop();
+    desk.supervisor.stop();
+    drop(runtime);
+    let _ = std::fs::remove_dir_all(&data);
 }

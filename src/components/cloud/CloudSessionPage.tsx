@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Bot, Cloud, Loader2, Plug, Plus, TerminalSquare, X } from "lucide-react";
+import { ArrowLeft, Bot, Cloud, FolderTree, Loader2, Plug, Plus, TerminalSquare, X } from "lucide-react";
 import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { TerminalView, createTerminal } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
 import { CloudAgentsView } from "./CloudAgents";
+import { CloudFilesView } from "./CloudFiles";
 import {
   api,
   devWorkspaceConnection,
@@ -187,7 +188,7 @@ function ExecutionLocation({ provider, name }: { provider: string | null; name: 
   );
 }
 
-type View = { kind: "terminal" } | { kind: "agent" };
+type View = { kind: "terminal" } | { kind: "agent" } | { kind: "files" };
 
 function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: WorkspaceConnectionState }) {
   const { connection } = opened;
@@ -196,6 +197,8 @@ function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: Work
   const agentScope = connection.target.kind === "cloud" ? connection.target : { organizationId: "", workspaceId: key };
   const { terminals, selected } = useCloudTerminals(key);
   const [view, setView] = useState<View>({ kind: "terminal" });
+  const [filesShown, setFilesShown] = useState(false);
+  if (view.kind === "files" && !filesShown) setFilesShown(true);
   const [error, setError] = useState<string | null>(null);
   const { resolvedMode } = useTheme();
   const mode = useRef(resolvedMode);
@@ -291,6 +294,15 @@ function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: Work
         >
           <Bot className="size-3.5" /> Agent
         </Button>
+        <Button
+          size="sm"
+          role="tab"
+          aria-selected={view.kind === "files"}
+          variant={view.kind === "files" ? "secondary" : "ghost"}
+          onClick={() => setView({ kind: "files" })}
+        >
+          <FolderTree className="size-3.5" /> Files
+        </Button>
       </div>
       {!connected && <div className="px-4 py-1 text-xs text-muted-foreground">{describe(state)}</div>}
       {error && <p className="px-4 py-1 text-xs text-red-500">Terminal: {error}</p>}
@@ -324,6 +336,12 @@ function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: Work
           wakeWorkspace={() => void connection.activate("wake").catch(() => undefined)}
         />
       </div>
+      {/* Mounted once first shown, then kept: open files and unsaved text stay. */}
+      {filesShown && (
+        <div className={view.kind === "files" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+          <CloudFilesView workspaceKey={key} name={opened.name} client={client} state={state} active={view.kind === "files"} />
+        </div>
+      )}
     </div>
   );
 }

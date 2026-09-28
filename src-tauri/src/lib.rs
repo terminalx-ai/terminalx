@@ -46,10 +46,10 @@ mod dictation;
 #[cfg(feature = "desktop")]
 mod transcription;
 mod events;
-#[cfg(feature = "desktop")]
 mod files;
 #[cfg(feature = "desktop")]
 mod media;
+mod media_types;
 mod git;
 mod github;
 mod harness;

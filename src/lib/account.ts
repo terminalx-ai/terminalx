@@ -2,6 +2,8 @@ import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, closeWorkspaceConnections, errorMessage, type AccountStatus } from "@/lib/api";
 import { resetCloudTerminals } from "@/lib/cloudTerminals";
+import { dropEditors } from "@/lib/editors";
+import { resetCloudFiles } from "@/lib/workspaceFiles";
 
 interface AccountState {
   status: AccountStatus;
@@ -31,6 +33,8 @@ function applyStatus(status: AccountStatus) {
   if (scopeOf(state.status) !== scopeOf(status)) {
     closeWorkspaceConnections();
     resetCloudTerminals();
+    resetCloudFiles();
+    dropEditors((entry) => !!entry.source);
   }
   set({ status, ready: true });
   scheduleRefresh(status);

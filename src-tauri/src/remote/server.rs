@@ -13,7 +13,7 @@
 //! - Mutations are answered from the idempotency cache when resent.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -21,9 +21,9 @@ use std::time::{Duration, Instant};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
+use super::files::WorkspaceFiles;
 use super::protocol::{self, Authority, IdempotencyCache, RpcError, PROTOCOL};
 use crate::cloud_agents::CloudAgents;
 use crate::events::AgentEvent;
@@ -36,9 +36,7 @@ pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_PTYS: usize = 16;
 const MAX_EXITED_PTYS: usize = 8;
 const PTY_RING_BYTES: usize = 1024 * 1024;
-const MAX_READ_BYTES: u64 = 768 * 1024;
 const MAX_DIFF_BYTES: usize = 768 * 1024;
-const MAX_LIST_ENTRIES: usize = 5000;
 const PTY_PREFIX: &str = "remote-pty-";
 /// Largest single `pty.write`; a paste is split by the client.
 pub const MAX_WRITE_BYTES: usize = 64 * 1024;
@@ -183,6 +181,7 @@ type Gate = Arc<tokio::sync::Mutex<()>>;
 
 pub struct WorkspaceRpc {
     root: PathBuf,
+    files: Arc<WorkspaceFiles>,
     /// The generation the relay host registered with; offsets and cursors
     /// are bound to it.
     generation: AtomicU64,
@@ -224,6 +223,7 @@ impl WorkspaceRpc {
     ) -> anyhow::Result<Arc<Self>> {
         let root = std::fs::canonicalize(root)?;
         let rpc = Arc::new(Self {
+            files: Arc::new(WorkspaceFiles::new(root.clone())),
             root,
             generation: AtomicU64::new(generation),
             epoch: format!("epoch-{}", uuid::Uuid::new_v4().simple()),
@@ -382,7 +382,13 @@ impl WorkspaceRpc {
                 "runtime": { "version": self.version, "runtimeGeneration": self.generation(), "epoch": self.epoch },
                 "capabilities": granted,
                 "authority": peer.authority,
-                "limits": { "maxFrameBytes": MAX_FRAME_BYTES, "maxPtys": MAX_PTYS, "maxWriteBytes": MAX_WRITE_BYTES },
+                "limits": {
+                    "maxFrameBytes": MAX_FRAME_BYTES,
+                    "maxPtys": MAX_PTYS,
+                    "maxWriteBytes": MAX_WRITE_BYTES,
+                    "fsPartBytes": super::files::PART_BYTES,
+                    "fsMaxFileBytes": super::files::MAX_FILE_BYTES,
+                },
             }));
         }
         let Some(spec) = protocol::find_method(method) else {
@@ -448,13 +454,16 @@ impl WorkspaceRpc {
             "pty.kill" => self.pty_kill(params),
             "pty.attach" => self.pty_attach(peer, params),
             "pty.detach" | "session.unsubscribe" | "fs.unwatch" => self.unsubscribe(peer, params),
-            "fs.list" => self.fs_list(params),
-            "fs.stat" => self.fs_stat(params),
-            "fs.read" => self.fs_read(params),
-            "fs.write" => self.fs_write(params),
-            "fs.rename" => self.fs_rename(params),
-            "fs.delete" => self.fs_delete(params),
-            "fs.mkdir" => self.fs_mkdir(params),
+            "fs.list" => self.files.list(&params),
+            "fs.stat" => self.files.stat(&params),
+            "fs.read" => self.files.read(&params),
+            "fs.write" => self.files.write(&peer.device_id, &params),
+            "fs.writePart" => self.files.write_part(&peer.device_id, &params),
+            "fs.rename" => self.files.rename(&params),
+            "fs.delete" => self.files.delete(&params),
+            "fs.mkdir" => self.files.mkdir(&params),
+            "fs.search" => self.files.search(peer.id, &params),
+            "fs.cancel" => self.files.cancel(peer.id, &params),
             "fs.watch" => self.fs_watch(peer, params),
             "git.status" => self.git_status(params),
             "git.diff" => self.git_diff(params),
@@ -490,6 +499,7 @@ impl WorkspaceRpc {
 
     /// Drop everything a closed connection subscribed to.
     pub fn disconnect(&self, peer: &Peer) {
+        self.files.disconnect(peer.id);
         if self.peers.lock().unwrap().remove(&peer.id).is_some() {
             if let Some(agents) = self.agents.get() {
                 agents.client_detached();
@@ -943,210 +953,48 @@ impl WorkspaceRpc {
         }
     }
 
-    // ---- files -----------------------------------------------------------
+    // ---- files (remote/files.rs) -------------------------------------------
 
-    /// A workspace-relative path, lexically: no root, drive or `..`.
-    fn lexical(&self, relative: &str) -> Result<PathBuf, RpcError> {
-        if relative.len() > 4096 || relative.contains('\0') {
-            return Err(RpcError::new("path_forbidden", "invalid path"));
-        }
-        let mut clean = PathBuf::new();
-        for component in Path::new(relative).components() {
-            match component {
-                Component::Normal(part) => clean.push(part),
-                Component::CurDir => {}
-                _ => return Err(RpcError::new("path_forbidden", "paths are workspace-relative and may not leave it")),
-            }
-        }
-        Ok(self.root.join(clean))
-    }
-
-    /// An existing path, resolved through symlinks, still inside the workspace.
     fn existing_path(&self, relative: &str) -> Result<PathBuf, RpcError> {
-        let path = self.lexical(relative)?;
-        let resolved = std::fs::canonicalize(&path).map_err(|_| RpcError::not_found("no such path"))?;
-        if !resolved.starts_with(&self.root) {
-            return Err(RpcError::new("path_forbidden", "the path resolves outside the workspace"));
-        }
-        Ok(resolved)
+        self.files.existing_path(relative)
     }
 
-    /// A directory entry itself, not what it may link to: its parent must
-    /// resolve inside the workspace.
-    fn entry_path(&self, relative: &str) -> Result<PathBuf, RpcError> {
-        let path = self.lexical(relative)?;
-        if path == self.root {
-            return Err(RpcError::new("path_forbidden", "the workspace root cannot be replaced"));
-        }
-        let parent = path.parent().ok_or_else(|| RpcError::new("path_forbidden", "invalid path"))?;
-        let parent = std::fs::canonicalize(parent).map_err(|_| RpcError::not_found("the parent directory does not exist"))?;
-        if !parent.starts_with(&self.root) {
-            return Err(RpcError::new("path_forbidden", "the path resolves outside the workspace"));
-        }
-        Ok(parent.join(path.file_name().expect("a normal component")))
+    #[cfg(test)]
+    pub(super) fn files_for_tests(&self) -> Arc<WorkspaceFiles> {
+        self.files.clone()
     }
 
-    /// A path to write through: a symlink there must point inside the workspace.
-    fn new_path(&self, relative: &str) -> Result<PathBuf, RpcError> {
-        let path = self.entry_path(relative)?;
-        if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
-            return self.existing_path(relative);
-        }
-        Ok(path)
+    fn lexical(&self, relative: &str) -> Result<PathBuf, RpcError> {
+        self.files.lexical(relative)
     }
 
     fn relative(&self, path: &Path) -> String {
-        path.strip_prefix(&self.root).unwrap_or(path).to_string_lossy().into_owned()
-    }
-
-    fn fs_list(&self, params: Value) -> Result<Value, RpcError> {
-        let dir = self.existing_path(params.get("path").and_then(Value::as_str).unwrap_or(""))?;
-        let mut entries = Vec::new();
-        for entry in std::fs::read_dir(&dir).map_err(RpcError::internal)? {
-            let Ok(entry) = entry else { continue };
-            let Ok(meta) = entry.metadata() else { continue };
-            entries.push(stat_json(&entry.file_name().to_string_lossy(), &meta));
-            if entries.len() >= MAX_LIST_ENTRIES {
-                break;
-            }
-        }
-        entries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-        Ok(json!({ "path": self.relative(&dir), "entries": entries, "truncated": entries.len() >= MAX_LIST_ENTRIES }))
-    }
-
-    fn fs_stat(&self, params: Value) -> Result<Value, RpcError> {
-        let path = self.existing_path(required_str(&params, "path")?)?;
-        let meta = std::fs::metadata(&path).map_err(RpcError::internal)?;
-        let mut stat = stat_json(&self.relative(&path), &meta);
-        if meta.is_file() && meta.len() <= MAX_READ_BYTES {
-            stat["etag"] = json!(etag(&std::fs::read(&path).map_err(RpcError::internal)?));
-        }
-        Ok(stat)
-    }
-
-    fn fs_read(&self, params: Value) -> Result<Value, RpcError> {
-        let path = self.existing_path(required_str(&params, "path")?)?;
-        let meta = std::fs::metadata(&path).map_err(RpcError::internal)?;
-        if !meta.is_file() {
-            return Err(RpcError::invalid("not a file"));
-        }
-        if meta.len() > MAX_READ_BYTES {
-            return Err(RpcError::new("too_large", format!("files over {MAX_READ_BYTES} bytes cannot be read remotely")));
-        }
-        let bytes = std::fs::read(&path).map_err(RpcError::internal)?;
-        let tag = etag(&bytes);
-        Ok(match String::from_utf8(bytes) {
-            Ok(text) => json!({ "path": self.relative(&path), "text": text, "etag": tag, "size": meta.len() }),
-            Err(error) => json!({ "path": self.relative(&path), "dataB64": STANDARD.encode(error.as_bytes()), "etag": tag, "size": meta.len() }),
-        })
-    }
-
-    fn fs_write(&self, params: Value) -> Result<Value, RpcError> {
-        let path = self.new_path(required_str(&params, "path")?)?;
-        let bytes = match (params.get("text").and_then(Value::as_str), params.get("dataB64").and_then(Value::as_str)) {
-            (Some(text), None) => text.as_bytes().to_vec(),
-            (None, Some(data)) => STANDARD.decode(data).map_err(|_| RpcError::invalid("dataB64 is not base64"))?,
-            _ => return Err(RpcError::invalid("pass exactly one of text or dataB64")),
-        };
-        if bytes.len() as u64 > MAX_READ_BYTES {
-            return Err(RpcError::new("too_large", "the file is too large to write remotely"));
-        }
-        // `expectedEtag`: a string must match the current file, null means the
-        // file must not exist yet, absent writes unconditionally.
-        if let Some(expected) = params.get("expectedEtag") {
-            let current = match std::fs::read(&path) {
-                Ok(current) => Some(etag(&current)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => return Err(RpcError::internal(error)),
-            };
-            if expected.as_str().map(str::to_string) != current {
-                return Err(RpcError::new("conflict", "the file changed since it was read"));
-            }
-        }
-        if path.is_dir() {
-            return Err(RpcError::invalid("the path is a directory"));
-        }
-        let temporary = path.with_file_name(format!(
-            ".{}.terminalx-{}",
-            path.file_name().unwrap().to_string_lossy(),
-            uuid::Uuid::new_v4().simple()
-        ));
-        std::fs::write(&temporary, &bytes).map_err(RpcError::internal)?;
-        if let Err(error) = std::fs::rename(&temporary, &path) {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(RpcError::internal(error));
-        }
-        Ok(json!({ "path": self.relative(&path), "etag": etag(&bytes), "size": bytes.len() }))
-    }
-
-    fn fs_rename(&self, params: Value) -> Result<Value, RpcError> {
-        let from = self.entry_path(required_str(&params, "from")?)?;
-        let to = self.entry_path(required_str(&params, "to")?)?;
-        if std::fs::symlink_metadata(&from).is_err() {
-            return Err(RpcError::not_found("no such path"));
-        }
-        if std::fs::symlink_metadata(&to).is_ok() {
-            return Err(RpcError::new("conflict", "the destination exists"));
-        }
-        std::fs::rename(&from, &to).map_err(RpcError::internal)?;
-        Ok(json!({ "from": self.relative(&from), "to": self.relative(&to) }))
-    }
-
-    fn fs_delete(&self, params: Value) -> Result<Value, RpcError> {
-        let relative = required_str(&params, "path")?;
-        // Delete the link itself, never what it points at.
-        let path = self.entry_path(relative)?;
-        let meta = std::fs::symlink_metadata(&path).map_err(|_| RpcError::not_found("no such path"))?;
-        if meta.is_dir() {
-            if params.get("recursive").and_then(Value::as_bool) == Some(true) {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_dir(&path)
-            }
-        } else {
-            std::fs::remove_file(&path)
-        }
-        .map_err(RpcError::internal)?;
-        Ok(json!({ "path": self.relative(&path) }))
-    }
-
-    fn fs_mkdir(&self, params: Value) -> Result<Value, RpcError> {
-        let path = self.new_path(required_str(&params, "path")?)?;
-        match std::fs::create_dir(&path) {
-            Ok(()) => Ok(json!({ "path": self.relative(&path), "created": true })),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => {
-                Ok(json!({ "path": self.relative(&path), "created": false }))
-            }
-            Err(error) => Err(RpcError::internal(error)),
-        }
+        self.files.relative(path)
     }
 
     fn fs_watch(&self, peer: &Arc<Peer>, params: Value) -> Result<Value, RpcError> {
-        use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
-        let path = self.existing_path(params.get("path").and_then(Value::as_str).unwrap_or(""))?;
-        let subscription_id = Self::subscription_id();
-        let root = self.root.clone();
-        let notify_peer = peer.clone();
-        let id = subscription_id.clone();
-        let mut debouncer = new_debouncer(Duration::from_millis(250), move |result: DebounceEventResult| {
-            let Ok(events) = result else { return };
-            let paths: Vec<String> = events
-                .iter()
-                .filter_map(|event| event.path.strip_prefix(&root).ok())
-                .filter(|path| !path.starts_with(".git"))
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect();
-            if !paths.is_empty() {
-                notify_peer.notify("fs.changed", json!({ "subscriptionId": id, "paths": paths }));
-            }
-        })
-        .map_err(RpcError::internal)?;
-        debouncer.watcher().watch(&path, RecursiveMode::Recursive).map_err(RpcError::internal)?;
-        self.subscriptions
+        let watching = self
+            .subscriptions
             .lock()
             .unwrap()
-            .insert(subscription_id.clone(), Subscription::Fs { peer: peer.id, _watcher: Box::new(debouncer) });
-        Ok(json!({ "subscriptionId": subscription_id, "path": self.relative(&path) }))
+            .values()
+            .filter(|sub| matches!(sub, Subscription::Fs { peer: owner, .. } if *owner == peer.id))
+            .count();
+        if watching >= super::files::MAX_WATCHES_PER_PEER {
+            return Err(RpcError::new("backpressure", "too many file watches on this connection"));
+        }
+        let subscription_id = Self::subscription_id();
+        let notify_peer = peer.clone();
+        let id = subscription_id.clone();
+        let (watcher, path) = self.files.watcher(params.get("path").and_then(Value::as_str).unwrap_or(""), move |paths| {
+            let params = match paths {
+                Some(paths) => json!({ "subscriptionId": id, "paths": paths }),
+                None => json!({ "subscriptionId": id, "paths": [], "overflow": true }),
+            };
+            notify_peer.notify("fs.changed", params);
+        })?;
+        self.subscriptions.lock().unwrap().insert(subscription_id.clone(), Subscription::Fs { peer: peer.id, _watcher: watcher });
+        Ok(json!({ "subscriptionId": subscription_id, "path": path }))
     }
 
     // ---- git -------------------------------------------------------------
@@ -1579,27 +1427,6 @@ fn parse<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, RpcError> {
 
 fn required_str<'a>(params: &'a Value, name: &str) -> Result<&'a str, RpcError> {
     params.get(name).and_then(Value::as_str).ok_or_else(|| RpcError::invalid(format!("{name} is required")))
-}
-
-fn etag(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest[..16].iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn stat_json(name: &str, meta: &std::fs::Metadata) -> Value {
-    let kind = if meta.is_dir() {
-        "directory"
-    } else if meta.is_file() {
-        "file"
-    } else {
-        "other"
-    };
-    let modified = meta
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|elapsed| elapsed.as_millis() as u64);
-    json!({ "name": name, "kind": kind, "size": meta.len(), "modifiedMs": modified })
 }
 
 fn valid_ref_name(name: &str) -> bool {

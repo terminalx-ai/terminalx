@@ -4,9 +4,14 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { fs, type MediaFile } from "@/lib/api";
 import type { EditorEntry } from "@/lib/editors";
+import { changedSince, fileErrorText, useFileSource, type FileState } from "@/lib/workspaceFiles";
 
 /** A media tab never mounts CodeMirror or registers a saveable buffer. */
 export function MediaPane({ entry, visible }: { entry: EditorEntry; visible: boolean }) {
+  return entry.source ? <CloudMediaPane entry={entry} visible={visible} /> : <LocalMediaPane entry={entry} visible={visible} />;
+}
+
+function LocalMediaPane({ entry, visible }: { entry: EditorEntry; visible: boolean }) {
   const pane = useRef<HTMLDivElement>(null);
   const [media, setMedia] = useState<MediaFile | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -90,6 +95,83 @@ export function MediaPane({ entry, visible }: { entry: EditorEntry; visible: boo
         <PlaybackSurface key={media.token} src={media.url} name={entry.name} video={entry.kind === "video"} visible={visible && !changed}
           onError={() => setError("The format or codec is unsupported, the file is damaged, or it could not be loaded.")} />
       ) : <p role="status" className="p-4 text-sm text-muted-foreground">Loading {entry.name}…</p>}
+    </div>
+  );
+}
+
+/**
+ * A cloud workspace's media file (PRO-24): read from the runtime in parts
+ * into an object URL, dropped when the tab closes or the file is reloaded.
+ */
+function CloudMediaPane({ entry, visible }: { entry: EditorEntry; visible: boolean }) {
+  const pane = useRef<HTMLDivElement>(null);
+  const source = useFileSource(entry.source, entry.root);
+  const [media, setMedia] = useState<{ url: string; state: FileState } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [revision, setRevision] = useState(0);
+  const [changed, setChanged] = useState(false);
+
+  useEffect(() => {
+    if (!visible) return;
+    const frame = requestAnimationFrame(() => pane.current?.focus({ preventScroll: true }));
+    return () => cancelAnimationFrame(frame);
+  }, [visible]);
+
+  useEffect(() => {
+    setMedia(null);
+    setError(null);
+    setChanged(false);
+    if (!source?.readMedia) return;
+    let cancelled = false;
+    let release: (() => void) | undefined;
+    void source.readMedia(entry.rel).then((file) => {
+      if (cancelled) file.release();
+      else {
+        release = file.release;
+        setMedia({ url: file.url, state: file.state });
+      }
+    }).catch((e) => { if (!cancelled) setError(fileErrorText(e)); });
+    return () => {
+      cancelled = true;
+      release?.();
+    };
+  }, [source, entry.rel, revision]);
+
+  useEffect(() => {
+    if (!media || !source?.watch) return;
+    return source.watch((paths) => {
+      if (paths !== null && !paths.includes(entry.rel)) return;
+      void source.stat(entry.rel).then((now) => {
+        if (!now) setError("This file no longer exists in the workspace.");
+        else if (changedSince(media.state, now)) setChanged(true);
+      }).catch(() => {});
+    });
+  }, [media, source, entry.rel]);
+
+  const reload = () => { setMedia(null); setRevision((n) => n + 1); };
+  return (
+    <div ref={pane} tabIndex={-1} className="flex h-full min-h-0 flex-col outline-none" data-testid="cloud-media" onKeyDownCapture={(e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); e.stopPropagation(); }
+    }}>
+      <div className="flex min-h-8 shrink-0 items-center gap-2 border-b border-hairline px-3 text-xs">
+        <span className="min-w-0 truncate text-muted-foreground" title={entry.rel}>{entry.rel}</span>
+        <span className="ml-auto shrink-0 text-faint">Read-only · cloud workspace</span>
+        <Button variant="ghost" size="icon-xs" aria-label="Reload media" onClick={reload}><RotateCcw /></Button>
+      </div>
+      {changed && !error && <div className="flex items-center gap-2 bg-warning/10 px-3 py-2 text-xs">
+        File changed in the workspace. Reload to view the latest version.
+        <Button variant="outline" size="xs" onClick={reload}>Reload</Button>
+      </div>}
+      {!source ? <p role="status" className="p-4 text-sm text-muted-foreground">Open the cloud workspace to view {entry.name}.</p>
+        : error ? <div role="alert" className="space-y-3 p-4 text-sm text-muted-foreground">
+          <p>Cannot preview {entry.name}.</p><p>{error}</p>
+          <Button variant="outline" size="sm" onClick={reload}>Retry</Button>
+        </div> : media ? entry.kind === "image" ? (
+          <ImageSurface key={media.url} src={media.url} name={entry.name} onError={() => setError("The image format is unsupported or the file is damaged.")} />
+        ) : (
+          <PlaybackSurface key={media.url} src={media.url} name={entry.name} video={entry.kind === "video"} visible={visible && !changed}
+            onError={() => setError("The format or codec is unsupported, the file is damaged, or it could not be loaded.")} />
+        ) : <p role="status" className="p-4 text-sm text-muted-foreground">Loading {entry.name} from the workspace…</p>}
     </div>
   );
 }
