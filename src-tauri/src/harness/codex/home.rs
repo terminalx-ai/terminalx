@@ -18,6 +18,9 @@
 //!   desktop helper, which has nothing to do with a Raccoon tab), nor is
 //!   `projects` (Raccoon trusts only the checkouts it opened).
 //!
+//! In a cloud workspace (`cloud_grants`) `auth.json` links instead to the
+//! workspace's credential on tmpfs, and is absent while there is none.
+//!
 //! Raccoon itself never writes into the reader's home — it is read, and
 //! linked to. What the links mean is that Codex keeps its own house: a
 //! refreshed token lands in the reader's `auth.json`, a plugin cache in their
@@ -305,11 +308,22 @@ pub fn prepare(cwd: &str, exe: &Path) -> Result<Prepared> {
 /// against a real `codex` without touching either of the real ones.
 fn prepare_in(managed: &Path, user: Option<PathBuf>, cwd: &str, exe: &Path) -> Result<bool> {
     let user = user.filter(|u| u.is_dir());
+    // In a cloud workspace the account is the workspace's, from a grant on
+    // tmpfs (`cloud_grants`), never the reader's own `auth.json`.
+    let cloud_auth = crate::cloud_grants::codex_auth_source();
     if let Some(user) = &user {
         for name in LINKED {
+            if *name == "auth.json" && cloud_auth.is_some() {
+                continue;
+            }
             if let Err(e) = link(managed, user, name) {
                 log::warn!("codex home: {e:#}");
             }
+        }
+    }
+    if let Some(source) = &cloud_auth {
+        if let Err(e) = crate::cloud_grants::link_codex_auth(managed, source.as_deref()) {
+            log::warn!("codex home: {e:#}");
         }
     }
 

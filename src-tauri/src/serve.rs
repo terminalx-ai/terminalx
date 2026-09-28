@@ -7,7 +7,8 @@
 //! stored credential) before anything else starts; see `cloud_bootstrap`.
 //! It then records its memory baseline (`memory_baseline`) and reports its
 //! activity to the API so an unused workspace can be suspended
-//! (`cloud_activity`).
+//! (`cloud_activity`), and fetches the agent credentials its agents run with
+//! (`cloud_grants`).
 //!
 //! Not here yet:
 //! - TODO(PRO-13): register with the relay as a host (outbound only) and serve
@@ -195,6 +196,11 @@ fn run(options: Options) -> Result<()> {
     };
     let tokio = tokio::runtime::Builder::new_multi_thread().enable_all().build().context("start the async runtime")?;
     let _entered = tokio.enter();
+    // Installed before any agent can start, so the first one already gets
+    // the workspace's credentials once they arrive.
+    if let (Some((cloud, origin)), false) = (&cloud, options.self_test) {
+        start_agent_grants(cloud.clone(), origin);
+    }
     let runtime = start(&options)?;
     if let (Some((cloud, origin)), false) = (&cloud, options.self_test) {
         report_activity(&runtime, cloud.clone(), origin);
@@ -213,9 +219,10 @@ fn run(options: Options) -> Result<()> {
                 json!({
                     "workspaceId": session.workspace_id,
                     "relayHostId": session.relay_host_id,
-                    "capabilities": [crate::cloud_bootstrap::CAPABILITIES],
+                    "capabilities": crate::cloud_bootstrap::CAPABILITIES.split(',').collect::<Vec<_>>(),
                 })
             }),
+            "agentGrants": crate::cloud_grants::status_json(),
         })
     );
     // The relay host: from the bootstrap in a cloud workspace, or from a
@@ -257,6 +264,17 @@ fn bootstrap_cloud_workspace(data_dir: &std::path::Path) -> Result<Option<(Arc<c
     cloud.record_memory_baseline();
     cloud.clone().spawn_refresh_loop(api);
     Ok(Some((cloud, config.origin)))
+}
+
+/// Enroll the grant key and keep the agents' cloud credentials fresh in the
+/// background (`cloud_grants`).
+fn start_agent_grants(cloud: Arc<crate::cloud_bootstrap::Bootstrapped>, origin: &str) {
+    use crate::cloud_grants::{install, spawn_sync_loop, GrantStore, HttpGrantApi};
+    let workspace_id = cloud.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).workspace_id.clone();
+    let store = Arc::new(GrantStore::open(workspace_id));
+    install(store.clone());
+    let api = Arc::new(HttpGrantApi::new(origin, cloud.clone()));
+    spawn_sync_loop(store, api, move || cloud.is_rejected());
 }
 
 /// Tell the API about agent turns, terminal input and attached clients, so

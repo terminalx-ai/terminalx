@@ -738,12 +738,16 @@ impl SessionManager {
 
     fn spawn_child(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, program: &Path, args: &[String], cwd: &str) -> Result<()> {
         let sink = Arc::new(TabSink { manager: self.clone(), rt: rt_arc.clone() });
-        let env = vec![
+        let mut env = vec![
             ("RACCOON_SESSION_ID".to_string(), rt.session_id.clone()),
             ("RACCOON_TAB_ID".to_string(), rt.tab_id.clone()),
             (crate::hooks::CONTROL_SOCKET_ENV.to_string(), self.control.socket.to_string_lossy().into_owned()),
             (crate::hooks::CONTROL_TOKEN_ENV.to_string(), self.control.token.clone()),
         ];
+        // A cloud workspace's agent credentials (`cloud_grants`). Only Cursor
+        // runs this way, and its grant only sets a variable.
+        let harness = program.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        env.extend(crate::cloud_grants::agent_env_for_launch(&harness, &rt.key()).into_iter().filter_map(|(name, value)| value.map(|value| (name, value))));
         let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env }, sink)?;
         rt.child_pid = Some(child.pid);
         rt.child = Some(child);
@@ -1018,6 +1022,7 @@ impl SessionManager {
             // Settle before waiting for the OS. Late exits cannot reopen this turn.
             self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
             let pane = self.release_cli(&mut rt);
+            crate::cloud_grants::forget_launch(&key);
             rt.child = None;
             rt.child_pid = None;
             rt.engine = Engine::None;
@@ -1226,6 +1231,7 @@ impl SessionManager {
         }
         if respawn {
             self.host.kill(&rt.key());
+            crate::cloud_grants::forget_launch(&rt.key());
             rt.child = None;
             rt.child_pid = None;
             rt.engine = Engine::None;
@@ -1298,6 +1304,7 @@ impl SessionManager {
     /// The CLI process in a PTY pane exited. Hooks normally close the turn
     /// first; when they do not, the process death is a failed automation run.
     pub fn pane_exited(&self, pane_id: &str, code: Option<i32>) {
+        crate::cloud_grants::forget_launch(pane_id);
         let Some(tab_id) = pane_id.strip_prefix("tab:") else { return };
         let Some(entry) = index::load().ok().and_then(|sessions| sessions.into_iter().find(|session| session.tab(tab_id).is_some())) else { return };
         let Ok(rt_arc) = self.runtime(&entry.id, tab_id) else { return };
@@ -1371,9 +1378,19 @@ impl SessionManager {
             CliKind::Codex => self.codex_launch(rt, entry, tab, &exe, &mut env)?,
         };
 
+        // A cloud workspace's agent credentials (`cloud_grants`); names to
+        // unset are dropped after the login shell's profile has run.
+        let mut unset = Vec::new();
+        for (name, value) in crate::cloud_grants::agent_env_for_launch(&tab.harness, &pane) {
+            match value {
+                Some(value) => env.push((name, value)),
+                None => unset.push(name),
+            }
+        }
+        let spawned = crate::cloud_grants::unset_prefix(&launch.command, &unset);
         let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);
-        let spec = pty::PaneSpec { cwd: &entry.cwd, cols: 120, rows: 30, command: Some(&launch.command), env: &env };
+        let spec = pty::PaneSpec { cwd: &entry.cwd, cols: 120, rows: 30, command: Some(&spawned), env: &env };
         self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI")?;
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         rt.engine = Engine::Cli(CliTab {
@@ -1551,6 +1568,7 @@ impl SessionManager {
     fn release_cli(&self, rt: &mut TabRuntime) -> Option<String> {
         let Engine::Cli(p) = &rt.engine else { return None };
         let pane = p.pane_id.clone();
+        crate::cloud_grants::forget_launch(&pane);
         for request_id in rt.pending.drain().map(|(id, _)| id).collect::<Vec<_>>() {
             self.publish(rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true }, None);
         }
@@ -2244,6 +2262,7 @@ impl SessionManager {
         if rt.child_pid != Some(pid) {
             return; // an older child; the live one is unaffected
         }
+        crate::cloud_grants::forget_launch(&rt.key());
         rt.child = None;
         rt.child_pid = None;
         rt.engine = Engine::None;
