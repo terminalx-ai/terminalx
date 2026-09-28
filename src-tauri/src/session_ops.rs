@@ -223,6 +223,8 @@ pub(crate) fn delete_workspace_entries(project_path: &str, path: &str, delete_br
     Ok(affected)
 }
 
+/// Drop sessions from the index along with their transcript logs and
+/// attachments. Callers stop whatever the tabs were running first.
 pub(crate) fn remove_session_entries(doomed: &[SessionEntry]) -> Result<()> {
     if doomed.is_empty() {
         return Ok(());

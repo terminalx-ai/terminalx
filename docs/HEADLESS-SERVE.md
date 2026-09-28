@@ -38,7 +38,7 @@ terminalx-serve --project-root /workspace --data-dir /var/lib/terminalx --runtim
 | Flag | Meaning |
 | --- | --- |
 | `--project-root <dir>` | Registers the directory as a project; agents run in it |
-| `--data-dir <dir>` | State directory (sets `TERMINALX_HOME`); defaults to `$TERMINALX_HOME`, then `~/.raccoon` |
+| `--data-dir <dir>` | State directory (sets `TERMINALX_HOME`). Required unless `TERMINALX_HOME` is set: the runtime never falls back to the desktop app's `~/.raccoon` |
 | `--runtime-kind <kind>` | `local` (default) or `cloud-workspace`, which requires `--project-root`. Reported as `runtimeKind` by the control `status` command |
 | `--self-test` | Start, run the login shell in a PTY, type a command, wait for its answer and exit, then stop |
 

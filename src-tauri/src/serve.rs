@@ -21,6 +21,8 @@ use anyhow::{bail, Context, Result};
 use base64::Engine as _;
 use serde_json::json;
 
+use tokio::sync::broadcast::error::RecvError;
+
 use crate::sink::{BroadcastSink, EventSink, NoObserver};
 
 const USAGE: &str = "\
@@ -31,7 +33,8 @@ Usage: terminalx-serve [options]
 Options:
   --project-root <dir>   Register <dir> as a project and run agents in it
   --data-dir <dir>       State directory (sessions, transcripts, sockets);
-                         defaults to $TERMINALX_HOME, then ~/.raccoon
+                         required unless $TERMINALX_HOME is set, so the
+                         runtime never takes over the desktop app's ~/.raccoon
   --runtime-kind <kind>  local (default) or cloud-workspace; cloud-workspace
                          requires --project-root
   --self-test            Start, run one shell in a PTY, then exit
@@ -155,6 +158,10 @@ fn run(options: Options) -> Result<()> {
         std::fs::create_dir_all(dir).with_context(|| format!("create data dir {}", dir.display()))?;
         let dir = std::fs::canonicalize(dir).with_context(|| format!("resolve data dir {}", dir.display()))?;
         std::env::set_var("TERMINALX_HOME", &dir);
+    } else if crate::store::state_home_env().is_none() {
+        // The default home belongs to the desktop app: its socket, control
+        // token and tab statuses would all be taken over.
+        bail!("pass --data-dir (or set TERMINALX_HOME); terminalx-serve will not share the desktop app's ~/.raccoon");
     }
     let data_dir = crate::store::root().context("open the state directory")?;
     let tokio = tokio::runtime::Builder::new_multi_thread().enable_all().build().context("start the async runtime")?;
@@ -172,7 +179,7 @@ fn run(options: Options) -> Result<()> {
         })
     );
     let outcome = if options.self_test {
-        self_test(&runtime)
+        self_test(&runtime, &tokio)
     } else {
         tokio.block_on(wait_for_shutdown_signal());
         Ok(())
@@ -263,7 +270,7 @@ const EXIT_DRAIN: Duration = Duration::from_secs(3);
 
 /// Run the reader's login shell in a PTY, type one command into it and wait
 /// for its answer and its exit: the same path an agent tab's CLI takes.
-fn self_test(runtime: &Runtime) -> Result<()> {
+fn self_test(runtime: &Runtime, tokio: &tokio::runtime::Runtime) -> Result<()> {
     let mut events = runtime.sink.subscribe();
     let cwd = match &runtime.project_root {
         Some(root) => root.clone(),
@@ -272,9 +279,10 @@ fn self_test(runtime: &Runtime) -> Result<()> {
     let sink: Arc<dyn EventSink> = runtime.sink.clone();
     let spec = crate::pty::PaneSpec { cwd: &cwd, cols: 80, rows: 24, command: None, env: &[] };
     runtime.terminals.spawn(sink, SELF_TEST_PANE, spec).context("spawn a shell PTY")?;
-    // The marker only appears once the shell has evaluated the arithmetic;
-    // the echoed input line carries the unexpanded form.
-    runtime.terminals.write(SELF_TEST_PANE, b"echo terminalx-serve-$((6*7))-ok; exit 0\n")?;
+    // The marker only appears once `sh` has evaluated the arithmetic; the
+    // echoed input line carries the unexpanded form. The line itself is
+    // valid in fish and nushell as well as POSIX shells.
+    runtime.terminals.write(SELF_TEST_PANE, b"sh -c 'echo terminalx-serve-$((6*7))-ok'; exit 0\n")?;
     let deadline = Instant::now() + SELF_TEST_TIMEOUT;
     let mut output = Vec::new();
     // The exit is reported by the waiter thread, the last output by the
@@ -302,7 +310,15 @@ fn self_test(runtime: &Runtime) -> Result<()> {
             bail!("the shell did not answer and exit within {}s; output: {}", SELF_TEST_TIMEOUT.as_secs(), String::from_utf8_lossy(&output));
         }
         let wait = if exited.is_some() { remaining.min(Duration::from_millis(50)) } else { remaining };
-        let Some(event) = events.blocking_recv_timeout(wait) else { continue };
+        let event = match tokio.block_on(tokio::time::timeout(wait, events.recv())) {
+            Ok(Ok(event)) => event,
+            Ok(Err(RecvError::Lagged(skipped))) => {
+                log::warn!("self-test skipped {skipped} events");
+                continue;
+            }
+            Ok(Err(RecvError::Closed)) => bail!("the event stream closed"),
+            Err(_elapsed) => continue,
+        };
         let payload: serde_json::Value = serde_json::from_str(&event.payload)?;
         if payload["id"] != SELF_TEST_PANE {
             continue;
@@ -324,27 +340,6 @@ fn self_test(runtime: &Runtime) -> Result<()> {
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|window| window == needle)
-}
-
-trait RecvTimeout {
-    fn blocking_recv_timeout(&mut self, timeout: Duration) -> Option<crate::sink::Published>;
-}
-
-impl RecvTimeout for tokio::sync::broadcast::Receiver<crate::sink::Published> {
-    /// Poll rather than block: the self-test runs on the main thread, outside
-    /// the async runtime, and a lagging receiver just skips ahead.
-    fn blocking_recv_timeout(&mut self, timeout: Duration) -> Option<crate::sink::Published> {
-        use tokio::sync::broadcast::error::TryRecvError;
-        let deadline = Instant::now() + timeout;
-        loop {
-            match self.try_recv() {
-                Ok(event) => return Some(event),
-                Err(TryRecvError::Lagged(skipped)) => log::warn!("self-test skipped {skipped} events"),
-                Err(TryRecvError::Empty) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
-                Err(TryRecvError::Empty | TryRecvError::Closed) => return None,
-            }
-        }
-    }
 }
 
 #[cfg(test)]

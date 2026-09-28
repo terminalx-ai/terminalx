@@ -105,7 +105,9 @@ jobs:
         run: cargo build --locked --bin terminalx-serve
       - name: No GUI crates in its dependency tree
         working-directory: src-tauri/serve
-        run: "! cargo tree --locked -e normal,build | grep -E '(^|[^a-z])(tauri|wry|webkit2gtk|gtk|cpal|alsa-sys)[ -]'"
+        run: |
+          cargo tree --locked -e normal,build > "$RUNNER_TEMP/serve-tree.txt"
+          ! grep -E '(^|[^a-z])(tauri|wry|webkit2gtk|gtk|cpal|alsa-sys)[ -]' "$RUNNER_TEMP/serve-tree.txt"
       - name: Clippy
         working-directory: src-tauri/serve
         run: cargo clippy --locked --all-targets -- -D warnings

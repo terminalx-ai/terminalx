@@ -15,7 +15,7 @@ fn main() {
     // into clang's builtins runtime. Rust links with `-nodefaultlibs`, so that
     // archive has to be named explicitly or release links fail on
     // `___isPlatformVersionAtLeast`.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "desktop"))]
     link_clang_builtins();
     // `terminalx-serve` builds without the desktop feature: no Tauri context,
     // bundle resources or sidecars to check.
@@ -79,7 +79,7 @@ fn ensure_agent_browser_stand_in() {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "desktop"))]
 fn link_clang_builtins() {
     use std::path::PathBuf;
     use std::process::Command;

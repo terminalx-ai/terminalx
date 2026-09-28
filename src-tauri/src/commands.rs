@@ -586,8 +586,6 @@ pub async fn delete_session(app: AppHandle, session_id: String, remove_worktree:
     .map_err(err)?
 }
 
-/// Drop sessions from the index along with their transcript logs and
-/// attachments. Callers stop whatever the tabs were running first.
 // ------------------------------------------------------------------ harnesses
 
 #[tauri::command]

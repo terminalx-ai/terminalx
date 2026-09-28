@@ -26,6 +26,16 @@ desktop = [
     "dep:tauri-plugin-notification",
     "dep:tauri-plugin-updater",
     "dep:cpal",
+    # macOS only: keychain, AppKit alerts, dictation and local transcription.
+    "dep:security-framework",
+    "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-av-foundation",
+    "dep:objc2-avf-audio",
+    "dep:block2",
+    "dep:objc2-foundation",
+    "dep:objc2-speech",
+    "dep:transcribe-cpp",
 ]
 
 [[bin]]
@@ -98,15 +108,15 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-security-framework = "3.7"
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSAlert", "NSApplication", "NSButton", "NSControl", "NSDockTile", "NSSecureTextField", "NSTextField", "NSWindow", "NSResponder", "NSView", "NSColor"] }
-objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "block2"] }
-objc2-avf-audio = { version = "0.3", features = ["AVAudioEngine", "AVAudioNode", "AVAudioIONode", "AVAudioBuffer", "AVAudioFormat", "AVAudioTime", "AVAudioTypes", "block2"] }
-block2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry", "NSBundle", "NSDictionary"] }
-objc2-speech = { version = "0.3", default-features = false, features = ["std", "SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFSpeechRecognitionTaskHint", "SFTranscription", "SFTranscriptionSegment", "SFErrors", "block2", "objc2-avf-audio"] }
-transcribe-cpp = { version = "0.2", default-features = false, features = ["metal"] }
+security-framework = { version = "3.7", optional = true }
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", features = ["NSAlert", "NSApplication", "NSButton", "NSControl", "NSDockTile", "NSSecureTextField", "NSTextField", "NSWindow", "NSResponder", "NSView", "NSColor"], optional = true }
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "block2"], optional = true }
+objc2-avf-audio = { version = "0.3", features = ["AVAudioEngine", "AVAudioNode", "AVAudioIONode", "AVAudioBuffer", "AVAudioFormat", "AVAudioTime", "AVAudioTypes", "block2"], optional = true }
+block2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry", "NSBundle", "NSDictionary"], optional = true }
+objc2-speech = { version = "0.3", default-features = false, features = ["std", "SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFSpeechRecognitionTaskHint", "SFTranscription", "SFTranscriptionSegment", "SFErrors", "block2", "objc2-avf-audio"], optional = true }
+transcribe-cpp = { version = "0.2", default-features = false, features = ["metal"], optional = true }
 
 [profile.dev]
 incremental = true

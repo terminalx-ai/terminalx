@@ -66,7 +66,8 @@ mod desktop {
 
     impl<R: Runtime> EventSink for AppHandle<R> {
         fn emit_raw(&self, event: &str, payload: Box<RawValue>) {
-            let _ = Emitter::emit(self, event, payload);
+            // Already JSON: hand Tauri the buffer rather than serializing it again.
+            let _ = Emitter::emit_str(self, event, String::from(Box::<str>::from(payload)));
         }
 
         fn listen(&self, event: &str, handler: Handler) -> ListenerId {
