@@ -285,7 +285,7 @@ impl HttpGrantApi {
         Self { origin: origin.to_string(), agent, cloud }
     }
 
-    fn post<T: serde::de::DeserializeOwned>(&self, path: &str, body: Value) -> Result<T, GrantCallError> {
+    pub(crate) fn post<T: serde::de::DeserializeOwned>(&self, path: &str, body: Value) -> Result<T, GrantCallError> {
         #[derive(Deserialize)]
         struct ErrorBody {
             error: String,
@@ -606,7 +606,7 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     written
 }
 
-fn remove_if_present(path: &Path) {
+pub(crate) fn remove_if_present(path: &Path) {
     match fs::remove_file(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1136,6 +1136,30 @@ impl GrantStore {
         }
     }
 
+    pub(crate) fn workspace_id(&self) -> &str {
+        &self.workspace_id
+    }
+
+    /// The private tmpfs directory of this workspace, if there is one.
+    pub(crate) fn private_root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
+    /// The enrolled key's thumbprint and runtime generation, enrolling first
+    /// if needed; `fresh` forgets the enrollment and enrolls again (after a
+    /// `cloud_agent_grant_key_required`). Shared with `cloud_config`.
+    pub(crate) fn enrollment(&self, api: &dyn GrantApi, fresh: bool) -> Result<(String, u64), GrantCallError> {
+        if fresh {
+            self.state().enrollment = None;
+        }
+        self.ensure_enrolled(api).map(|enrollment| (enrollment.thumbprint, enrollment.runtime_generation))
+    }
+
+    /// Open something sealed to this runtime's grant key.
+    pub(crate) fn open_sealed(&self, sealed: &SealedGrant) -> Result<Zeroizing<Vec<u8>>> {
+        open(&self.key.secret, sealed)
+    }
+
     /// Drop grants that have expired, e.g. while the server was unreachable.
     pub fn prune(&self, now: Instant) {
         let mut state = self.state();
@@ -1305,7 +1329,7 @@ pub fn install(store: Arc<GrantStore>) {
     }
 }
 
-fn installed() -> Option<&'static Arc<GrantStore>> {
+pub(crate) fn installed() -> Option<&'static Arc<GrantStore>> {
     STORE.get()
 }
 
@@ -1318,6 +1342,7 @@ pub fn agent_env_for_launch(harness: &str, launch: &str) -> Vec<(String, Option<
 
 /// A session launched under `launch` has ended.
 pub fn forget_launch(launch: &str) {
+    crate::cloud_config::forget_launch(launch);
     if let Some(store) = installed() {
         store.forget_launch(launch);
     }
@@ -1391,6 +1416,24 @@ pub fn unset_prefix(command: &str, unset: &[String]) -> String {
     out
 }
 
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    pub fn grant_store(workspace: &str, root: Option<PathBuf>) -> GrantStore {
+        GrantStore::new(workspace.into(), GrantKey::generate(), root)
+    }
+
+    pub fn enrolled(public_b64: &str, generation: u64) -> Enrolled {
+        let raw: [u8; 32] = general_purpose::STANDARD.decode(public_b64).unwrap().try_into().unwrap();
+        Enrolled { v: 1, key_thumbprint: thumbprint(&raw), runtime_generation: generation }
+    }
+
+    pub fn seal_to(store: &GrantStore, header: GrantHeader, plaintext: &[u8]) -> SealedGrant {
+        seal_with([7; 32], [9; 32], [1; 12], [2; 12], &store.key.public, header, plaintext)
+    }
+}
 
 #[cfg(test)]
 mod tests {

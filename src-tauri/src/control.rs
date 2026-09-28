@@ -338,6 +338,9 @@ impl ControlService {
                 if let Some(grants) = crate::cloud_grants::status_json() {
                     status["agentGrants"] = grants;
                 }
+                if let Some(config) = crate::cloud_config::status_json() {
+                    status["workspaceConfig"] = config;
+                }
                 Ok(status)
             }
             "projects.list" => {
