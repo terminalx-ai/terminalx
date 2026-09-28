@@ -125,13 +125,71 @@ export interface OrganizationComputeError {
   retryAfterSeconds: number | null;
 }
 
+const malformed = (): OrganizationComputeError => ({ code: "organization_compute_unavailable", status: null, retryAfterSeconds: null });
+const isObject = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+const allowList = (value: unknown): Record<string, string[]> =>
+  isObject(value)
+    ? Object.fromEntries(
+        Object.entries(value).flatMap(([provider, ids]) =>
+          Array.isArray(ids) ? [[provider, ids.filter((id): id is string => typeof id === "string")]] : [],
+        ),
+      )
+    : {};
+const list = <T>(value: unknown): T[] => (Array.isArray(value) ? (value as T[]) : []);
+
+// The native layer forwards the server's JSON as-is; anything a different
+// server build leaves out is defaulted here, and a payload without the core
+// fields becomes an ordinary "unavailable" error instead of a render crash.
+export function normalizePolicyView(value: unknown): ComputePolicyView {
+  if (!isObject(value) || !isObject(value.policy) || !isObject(value.counts) || typeof value.policy.version !== "number") throw malformed();
+  const policy = value.policy;
+  const number = (field: unknown) => (typeof field === "number" ? field : null);
+  return {
+    policy: {
+      version: policy.version as number,
+      maxWorkspaces: number(policy.maxWorkspaces) ?? 1,
+      maxRunningWorkspaces: number(policy.maxRunningWorkspaces),
+      maxIdleSuspendMinutes: number(policy.maxIdleSuspendMinutes),
+      allowedMachineClasses: allowList(policy.allowedMachineClasses),
+      allowedLocations: allowList(policy.allowedLocations),
+      provisioningPaused: policy.provisioningPaused === true,
+      pausedReason: typeof policy.pausedReason === "string" ? policy.pausedReason : null,
+      pausedAt: number(policy.pausedAt),
+      pausedBy: typeof policy.pausedBy === "string" ? policy.pausedBy : null,
+      updatedBy: typeof policy.updatedBy === "string" ? policy.updatedBy : null,
+      updatedAt: number(policy.updatedAt),
+    },
+    canEdit: value.canEdit === true,
+    counts: { workspaces: number(value.counts.workspaces) ?? 0, running: number(value.counts.running) ?? 0 },
+    workspaceCeiling: number(value.workspaceCeiling) ?? Math.max(number(policy.maxWorkspaces) ?? 1, 1),
+    contextRevision: typeof value.contextRevision === "string" ? value.contextRevision : "",
+  };
+}
+
+export function normalizeUsageReport(value: unknown): ComputeUsageReport {
+  if (!isObject(value) || !isObject(value.period) || typeof value.period.start !== "number") throw malformed();
+  const providers = list<ComputeProviderUsage>(value.providers).filter(
+    (provider) => isObject(provider) && isObject(provider.measured) && isObject(provider.estimate) && isObject(provider.providerReported),
+  );
+  return {
+    generatedAt: typeof value.generatedAt === "number" ? value.generatedAt : Date.now(),
+    period: { start: value.period.start, end: typeof value.period.end === "number" ? value.period.end : Date.now() },
+    counts: isObject(value.counts) ? (value.counts as unknown as ComputeCounts) : { workspaces: 0, running: 0 },
+    providers,
+    workspaces: list<ComputeWorkspaceUsage>(value.workspaces),
+    retained: list<ComputeRetainedResource>(value.retained).filter(isObject),
+    alerts: list<ComputeAlert>(value.alerts).filter(isObject),
+    contextRevision: typeof value.contextRevision === "string" ? value.contextRevision : "",
+  };
+}
+
 export const organizationCompute = {
-  policy: () => invoke<ComputePolicyView>("organization_compute_policy"),
-  usage: () => invoke<ComputeUsageReport>("organization_compute_usage"),
+  policy: () => invoke<unknown>("organization_compute_policy").then(normalizePolicyView),
+  usage: () => invoke<unknown>("organization_compute_usage").then(normalizeUsageReport),
   updatePolicy: (policy: ComputePolicyEdit, contextRevision: string) =>
-    invoke<ComputePolicyView>("organization_compute_policy_update", { policy, contextRevision }),
+    invoke<unknown>("organization_compute_policy_update", { policy, contextRevision }).then(normalizePolicyView),
   setProvisioningPaused: (expectedVersion: number, paused: boolean, reason: string | null, contextRevision: string) =>
-    invoke<ComputePolicyView>("organization_compute_provisioning_pause", { expectedVersion, paused, reason, contextRevision }),
+    invoke<unknown>("organization_compute_provisioning_pause", { expectedVersion, paused, reason, contextRevision }).then(normalizePolicyView),
 };
 
 export const PROVIDER_LABEL: Record<string, string> = { machine0: "Machine0", box: "Box", hetzner: "Hetzner" };

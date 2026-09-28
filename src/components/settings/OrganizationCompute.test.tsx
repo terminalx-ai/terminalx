@@ -184,3 +184,29 @@ it("drops results that land after the account context changed", async () => {
   await Promise.resolve();
   expect(screen.getByLabelText("Compute status").textContent).toContain("of 9");
 });
+
+it("keeps unsaved limit edits and the pause reason when a pause fails", async () => {
+  api.setProvisioningPaused.mockRejectedValueOnce({ code: "organization_compute_unavailable", status: 503, retryAfterSeconds: null });
+  render(<OrganizationCompute contextRevision="account-1" />);
+  fireEvent.change(await screen.findByLabelText("Maximum workspaces"), { target: { value: "7" } });
+  fireEvent.change(screen.getByLabelText("Pause reason"), { target: { value: "Budget review" } });
+  fireEvent.click(screen.getByRole("button", { name: "Pause new workspaces" }));
+  await screen.findByText(/could not reach the account service/);
+  await waitFor(() => expect(api.policy).toHaveBeenCalledTimes(2));
+  expect((screen.getByLabelText("Maximum workspaces") as HTMLInputElement).value).toBe("7");
+  expect((screen.getByLabelText("Pause reason") as HTMLInputElement).value).toBe("Budget review");
+});
+
+it("keeps allow lists for providers this build does not edit and shows the pause once", async () => {
+  api.policy.mockResolvedValue(
+    view({}, { provisioningPaused: true, allowedLocations: { "local-docker": ["local"] } }),
+  );
+  api.usage.mockResolvedValue(report({ alerts: [{ code: "provisioning-paused", severity: "info" }] }));
+  api.updatePolicy.mockResolvedValue(view());
+  render(<OrganizationCompute contextRevision="account-1" />);
+  expect(await screen.findAllByText(/New workspaces are paused/)).toHaveLength(1);
+  fireEvent.click(screen.getByRole("button", { name: "Save limits" }));
+  await waitFor(() =>
+    expect(api.updatePolicy).toHaveBeenCalledWith(expect.objectContaining({ allowedLocations: { "local-docker": ["local"] } }), "rev-1"),
+  );
+});

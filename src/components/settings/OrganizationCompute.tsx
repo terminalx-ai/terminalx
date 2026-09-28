@@ -40,13 +40,16 @@ const limitValue = (text: string, ceiling: number): number | null => {
   return Number.isInteger(value) && value >= 1 && value <= ceiling ? value : null;
 };
 
-const allowLists = (texts: Record<string, string>): Record<string, string[]> =>
-  Object.fromEntries(
+// Providers this build does not edit keep whatever the server holds for them.
+const allowLists = (texts: Record<string, string>, stored: Record<string, string[]>): Record<string, string[]> => ({
+  ...Object.fromEntries(Object.entries(stored).filter(([provider]) => !(COMPUTE_PROVIDERS as readonly string[]).includes(provider))),
+  ...Object.fromEntries(
     Object.entries(texts).flatMap(([provider, text]) => {
       const ids = parseAllowList(text);
       return ids ? [[provider, ids]] : [];
     }),
-  );
+  ),
+});
 
 const formatTime = (timestamp: number | null | undefined) => (timestamp ? new Date(timestamp).toLocaleString() : "never");
 
@@ -58,9 +61,26 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
   const [usageError, setUsageError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [draft, setDraft] = useState<LimitsDraft | null>(null);
+  // Unsaved limit edits survive refreshes and pause toggles.
+  const [dirty, setDirty] = useState(false);
   const [reason, setReason] = useState("");
   const contextEpoch = useRef(0);
   const loadSeq = useRef(0);
+
+  const dirtyRef = useRef(false);
+  dirtyRef.current = dirty;
+
+  const loadUsage = useCallback(async (fresh: () => boolean) => {
+    try {
+      const report = await organizationCompute.usage();
+      if (fresh()) {
+        setUsage(report);
+        setUsageError(null);
+      }
+    } catch (failure) {
+      if (fresh()) setUsageError(computeErrorMessage(failure));
+    }
+  }, []);
 
   const load = useCallback(async (keepError = false) => {
     const current = ++loadSeq.current;
@@ -71,30 +91,23 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
       const next = await organizationCompute.policy();
       if (!fresh()) return;
       setView(next);
-      setDraft(draftFrom(next.policy));
+      setDraft((current) => (current && dirtyRef.current ? current : draftFrom(next.policy)));
       if (!keepError) setError(null);
-      if (next.canEdit) {
-        try {
-          const report = await organizationCompute.usage();
-          if (fresh()) {
-            setUsage(report);
-            setUsageError(null);
-          }
-        } catch (failure) {
-          if (fresh()) setUsageError(computeErrorMessage(failure));
-        }
-      } else setUsage(null);
+      if (next.canEdit) await loadUsage(fresh);
+      else setUsage(null);
     } catch (failure) {
       if (fresh()) setError(computeErrorMessage(failure));
     } finally {
       if (fresh()) setLoading(false);
     }
-  }, []);
+  }, [loadUsage]);
 
   useEffect(() => {
     setView(null);
     setUsage(null);
+    setUsageError(null);
     setDraft(null);
+    setDirty(false);
     setBusy(null);
     setError(null);
     void load();
@@ -103,22 +116,30 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
     };
   }, [contextRevision, load]);
 
-  const mutate = async (key: string, run: (current: ComputePolicyView) => Promise<ComputePolicyView>) => {
-    if (!view || busy) return;
+  const mutate = async (key: string, run: (current: ComputePolicyView) => Promise<ComputePolicyView>): Promise<boolean> => {
+    if (!view || busy) return false;
     const context = contextEpoch.current;
     setBusy(key);
     setError(null);
     try {
       const next = await run(view);
-      if (context !== contextEpoch.current) return;
+      if (context !== contextEpoch.current) return false;
+      // Newer than any policy read still in flight; retire those reads.
+      const current = ++loadSeq.current;
+      setLoading(false);
       setView(next);
-      setDraft(draftFrom(next.policy));
-      // Usage alerts depend on the new limits; re-read everything.
-      void load();
+      if (key === "limits" || !dirtyRef.current) {
+        setDraft(draftFrom(next.policy));
+        setDirty(false);
+      }
+      // Alerts depend on the new policy; only the usage report needs a re-read.
+      if (next.canEdit) void loadUsage(() => current === loadSeq.current && context === contextEpoch.current);
+      return true;
     } catch (failure) {
-      if (context !== contextEpoch.current) return;
+      if (context !== contextEpoch.current) return false;
       setError(computeErrorMessage(failure));
       void load(true);
+      return false;
     } finally {
       if (context === contextEpoch.current) setBusy(null);
     }
@@ -151,6 +172,13 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
   const maxRunning = runningText ? limitValue(runningText, ceiling) : null;
   const runningInvalid = Boolean(runningText) && (maxRunning === null || (maxWorkspaces !== null && maxRunning > maxWorkspaces));
   const limitsInvalid = maxWorkspaces === null || runningInvalid;
+  // The paused banner already says this.
+  const alerts = (usage?.alerts ?? []).filter((alert) => alert.code !== "provisioning-paused");
+  const idleOptions = [...new Set([...IDLE_CAP_OPTIONS, ...(policy.maxIdleSuspendMinutes === null ? [] : [policy.maxIdleSuspendMinutes])])].sort((a, b) => a - b);
+  const change = (next: LimitsDraft) => {
+    setDraft(next);
+    setDirty(true);
+  };
 
   const saveLimits = () =>
     void mutate("limits", (current) =>
@@ -160,8 +188,8 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
           maxWorkspaces: maxWorkspaces!,
           maxRunningWorkspaces: maxRunning,
           maxIdleSuspendMinutes: draft.maxIdleSuspendMinutes ? Number(draft.maxIdleSuspendMinutes) : null,
-          allowedMachineClasses: allowLists(draft.machineClasses),
-          allowedLocations: allowLists(draft.locations),
+          allowedMachineClasses: allowLists(draft.machineClasses, current.policy.allowedMachineClasses),
+          allowedLocations: allowLists(draft.locations, current.policy.allowedLocations),
         },
         current.contextRevision,
       ),
@@ -175,7 +203,9 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
         current.policy.provisioningPaused ? null : reason.trim() || null,
         current.contextRevision,
       ),
-    ).then(() => setReason(""));
+    ).then((saved) => {
+      if (saved) setReason("");
+    });
 
   return (
     <div className="rounded-lg border border-hairline p-3">
@@ -206,9 +236,9 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
         </p>
       )}
 
-      {usage && usage.alerts.length > 0 && (
+      {alerts.length > 0 && (
         <ul aria-label="Compute alerts" className="mt-2 flex flex-col gap-1">
-          {usage.alerts.map((alert, index) => (
+          {alerts.map((alert, index) => (
             <li
               key={`${alert.code}:${alert.provider ?? ""}:${alert.workspaceId ?? ""}:${index}`}
               className={`text-[11px] ${alert.severity === "info" ? "text-muted-foreground" : "text-amber-600 dark:text-amber-400"}`}
@@ -259,7 +289,7 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
                   className={inputClass}
                   value={draft.maxWorkspaces}
                   disabled={Boolean(busy)}
-                  onChange={(event) => setDraft({ ...draft, maxWorkspaces: event.target.value })}
+                  onChange={(event) => change({ ...draft, maxWorkspaces: event.target.value })}
                 />
               </label>
               <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
@@ -271,7 +301,7 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
                   className={inputClass}
                   value={draft.maxRunningWorkspaces}
                   disabled={Boolean(busy)}
-                  onChange={(event) => setDraft({ ...draft, maxRunningWorkspaces: event.target.value })}
+                  onChange={(event) => change({ ...draft, maxRunningWorkspaces: event.target.value })}
                 />
               </label>
               <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
@@ -281,10 +311,10 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
                   className={inputClass}
                   value={draft.maxIdleSuspendMinutes}
                   disabled={Boolean(busy)}
-                  onChange={(event) => setDraft({ ...draft, maxIdleSuspendMinutes: event.target.value })}
+                  onChange={(event) => change({ ...draft, maxIdleSuspendMinutes: event.target.value })}
                 >
                   <option value="">No limit</option>
-                  {IDLE_CAP_OPTIONS.map((minutes) => (
+                  {idleOptions.map((minutes) => (
                     <option key={minutes} value={String(minutes)}>
                       {minutes} min
                     </option>
@@ -304,7 +334,7 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
                   className={inputClass}
                   value={draft.machineClasses[provider]}
                   disabled={Boolean(busy)}
-                  onChange={(event) => setDraft({ ...draft, machineClasses: { ...draft.machineClasses, [provider]: event.target.value } })}
+                  onChange={(event) => change({ ...draft, machineClasses: { ...draft.machineClasses, [provider]: event.target.value } })}
                 />
                 <input
                   aria-label={`Allowed regions for ${providerLabel(provider)}`}
@@ -312,7 +342,7 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
                   className={inputClass}
                   value={draft.locations[provider]}
                   disabled={Boolean(busy)}
-                  onChange={(event) => setDraft({ ...draft, locations: { ...draft.locations, [provider]: event.target.value } })}
+                  onChange={(event) => change({ ...draft, locations: { ...draft.locations, [provider]: event.target.value } })}
                 />
               </div>
             ))}
@@ -328,7 +358,7 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
         <div className="mt-3 text-[11px] leading-relaxed text-muted-foreground" aria-label="Compute limits">
           <p>Only owners and admins can change compute limits.</p>
           {policy.maxIdleSuspendMinutes !== null && <p>Workspaces must suspend after at most {policy.maxIdleSuspendMinutes} idle minutes.</p>}
-          {COMPUTE_PROVIDERS.filter((provider) => policy.allowedMachineClasses[provider] || policy.allowedLocations[provider]).map((provider) => (
+          {[...new Set([...Object.keys(policy.allowedMachineClasses), ...Object.keys(policy.allowedLocations)])].sort().map((provider) => (
             <p key={provider}>
               {providerLabel(provider)}: sizes {policy.allowedMachineClasses[provider]?.join(", ") ?? "any"}; regions{" "}
               {policy.allowedLocations[provider]?.join(", ") ?? "any"}

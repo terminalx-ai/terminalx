@@ -173,7 +173,10 @@ impl OrganizationComputeService {
         let mutation = body.is_some();
         let result = self.client.request(&context, method, tail, body);
         if !self.account.is_current(&context) {
-            return Err(OrganizationComputeError::local(if mutation {
+            // A definite HTTP refusal means nothing was applied, even if the
+            // context changed meanwhile.
+            let refused = matches!(&result, Err(error) if error.status.is_some());
+            return Err(OrganizationComputeError::local(if mutation && !refused {
                 "account_context_changed_after_send"
             } else {
                 "account_context_changed"
@@ -248,6 +251,34 @@ mod tests {
         }
     }
 
+    /// Read one full HTTP request, body included, so a reply never races the upload.
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut buffer).unwrap_or(0);
+            request.extend_from_slice(&buffer[..read]);
+            let text = String::from_utf8_lossy(&request);
+            if let Some(end) = text.find("\r\n\r\n") {
+                let length = text[..end]
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().ok()).flatten()
+                    })
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    break;
+                }
+            }
+            if read == 0 {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&request).into_owned()
+    }
+
     fn serve_once(status: &str, body: &str) -> (String, thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -257,31 +288,9 @@ mod tests {
         );
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0_u8; 4096];
-            loop {
-                let read = stream.read(&mut buffer).unwrap_or(0);
-                request.extend_from_slice(&buffer[..read]);
-                let text = String::from_utf8_lossy(&request);
-                if let Some(end) = text.find("\r\n\r\n") {
-                    let length = text[..end]
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().ok()).flatten()
-                        })
-                        .unwrap_or(0);
-                    if request.len() >= end + 4 + length {
-                        break;
-                    }
-                }
-                if read == 0 {
-                    break;
-                }
-            }
+            let request = read_request(&mut stream);
             stream.write_all(response.as_bytes()).unwrap();
-            String::from_utf8_lossy(&request).into_owned()
+            request
         });
         (base, handle)
     }
@@ -353,6 +362,32 @@ mod tests {
         let error = service(&base).usage().unwrap_err();
         server.join().unwrap();
         assert_eq!(error.code, UNAVAILABLE);
+    }
+
+    #[test]
+    fn a_refused_edit_is_not_reported_as_possibly_applied_after_a_switch() {
+        let account = Arc::new(AccountManager::default());
+        account.set_context_for_test(Some(context()));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let signer = account.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request(&mut stream);
+            signer.set_context_for_test(None);
+            let body = r#"{"error":"cloud_compute_policy_conflict"}"#;
+            let response = format!(
+                "HTTP/1.1 409 Conflict\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let revision = AccountManager::context_revision(&context());
+        let error = OrganizationComputeService::for_test(account, &base)
+            .set_provisioning_paused(1, true, None, &revision)
+            .unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.code, "account_context_changed");
     }
 
     #[test]
