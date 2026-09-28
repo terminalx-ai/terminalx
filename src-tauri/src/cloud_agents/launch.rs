@@ -380,10 +380,11 @@ fn validate(claim: &Claim) -> Result<()> {
 }
 
 /// The same rules as `git check-ref-format --branch` for the names the server
-/// hands out, checked before any of them reaches git.
+/// hands out, checked before any of them reaches git; at most 200 characters,
+/// the server's cap (contract §19.1).
 pub fn valid_branch(name: &str) -> bool {
     !name.is_empty()
-        && name.len() <= 255
+        && name.len() <= 200
         && !name.starts_with(['-', '/', '.'])
         && !name.ends_with(['/', '.'])
         && !name.ends_with(".lock")

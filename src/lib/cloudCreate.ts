@@ -47,7 +47,7 @@ export type FormErrors = Partial<Record<"name" | "provider" | "repositories" | "
 
 /** `git check-ref-format --branch`, for the names a person types. */
 export function validBranch(name: string): boolean {
-  if (!name || name.length > 255 || name === "@") return false;
+  if (!name || name.length > 200 || name === "@") return false;
   if (/^[-/.]/.test(name) || /[/.]$/.test(name) || name.endsWith(".lock")) return false;
   if (name.includes("..") || name.includes("@{") || name.includes("//")) return false;
   // eslint-disable-next-line no-control-regex

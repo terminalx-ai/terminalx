@@ -73,6 +73,8 @@ const clientError = (code: string, retryWithSameIdempotencyKey: boolean): CloudW
 describe("validation", () => {
   it("follows git's branch rules", () => {
     for (const good of ["main", "feature/fast-launch", "release-1.2"]) expect(validBranch(good)).toBe(true);
+    expect(validBranch("a".repeat(200))).toBe(true);
+    expect(validBranch("a".repeat(201))).toBe(false);
     for (const bad of ["", "-x", "a..b", "a b", "a~1", "a:b", "a.lock", "a/", "/a", ".a", "a//b", "a@{1}", "@"]) expect(validBranch(bad)).toBe(false);
   });
 
