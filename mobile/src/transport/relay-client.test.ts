@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { atPairingStage } from "../pairing/errors";
 import { RelayClient } from "./relay-client";
 
 class FakeSocket {
@@ -40,4 +41,17 @@ describe("direct E2EE transport", () => {
     client.close();
     await expect(connecting).rejects.toThrow("Relay connection closed");
   });
+  it("reports a rejected encrypted host response at the verification stage", async () => {
+    const socket = new FakeSocket();
+    const client = new RelayClient({ transport: "direct", endpoint: "ws://192.0.2.10:4040", deviceToken: "test-token",
+      desktopPublicKeyB64: btoa(String.fromCharCode(...new Uint8Array(32).fill(4))),
+      createSocket: () => socket as unknown as WebSocket,
+    });
+    const connecting = atPairingStage("transport", () => client.connect(), "direct");
+    socket.onopen?.();
+    socket.onmessage?.({ data: JSON.stringify({ type: "e2ee_ready", unexpected: "private data" }) });
+    await expect(connecting).rejects.toMatchObject({ stage: "host-verification", category: "invalid-response", path: "direct" });
+    expect(socket.readyState).toBe(3);
+  });
+
 });

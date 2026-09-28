@@ -2,6 +2,7 @@ import "@testing-library/dom";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PairingStatus } from "@/types/pairing";
+import type { QRCodeToDataURLOptions } from "qrcode";
 
 const empty: PairingStatus = {
   relay: { phase: "off", message: null, attempt: 0 },
@@ -46,7 +47,7 @@ const localReady: PairingStatus = {
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
-  qr: vi.fn(async () => "data:image/png;base64,qr"),
+  qr: vi.fn(async (_value: string, _options: QRCodeToDataURLOptions) => "data:image/png;base64,qr"),
   signIn: vi.fn(),
 }));
 
@@ -87,6 +88,12 @@ describe("paired devices settings", () => {
     await screen.findByText("typed-fallback");
     expect(mocks.invoke).toHaveBeenCalledWith("pairing_generate", { connectionMode: "automatic" });
     expect(mocks.qr).toHaveBeenCalledWith(ready.activePairing?.pairingUrl, expect.any(Object));
+    const qrOptions = mocks.qr.mock.calls.at(-1)![1];
+    // Preserve the QR quiet zone and sufficient source pixels per module as
+    // offers grow. A fixed bitmap width undersamples dense relay offers.
+    expect(qrOptions.margin).toBeGreaterThanOrEqual(4);
+    expect(qrOptions.scale).toBeGreaterThanOrEqual(4);
+    expect(qrOptions.width).toBeUndefined();
     expect(screen.getByText("Priya's iPhone")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("radio", { name: /LAN/ }));

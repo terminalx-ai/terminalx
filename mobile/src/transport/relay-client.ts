@@ -26,6 +26,9 @@ export class RelayOuterError extends Error {
   }
 }
 
+/** The encrypted peer response failed authentication or protocol validation. */
+export class RelayHandshakeError extends Error {}
+
 type RelayClientOptions =
   | {
       transport?: "relay";
@@ -173,13 +176,13 @@ export class RelayClient {
       return;
     }
     if (!this.handshakeReady) {
-      if (typeof raw !== "string" || !this.session.acceptReady(parseJson(raw))) throw new Error("Invalid E2EE ready");
+      if (typeof raw !== "string" || !this.session.acceptReady(parseJson(raw))) throw new RelayHandshakeError("Invalid E2EE ready");
       this.handshakeReady = true;
       this.socket.send(this.session.sealText(JSON.stringify({ type: "e2ee_auth", v: 2, transcriptHashB64: this.session.transcriptHashB64, deviceToken: this.options.deviceToken })));
       return;
     }
     const plaintext = typeof raw === "string" ? this.session.openText(raw) : this.session.openBinary(await bytesFromSocket(raw));
-    if (plaintext === null) throw new Error("Invalid or out-of-order E2EE frame");
+    if (plaintext === null) throw new RelayHandshakeError("Invalid or out-of-order E2EE frame");
     if (typeof plaintext !== "string") {
       this.handleTerminalBinary(plaintext);
       return;
@@ -187,7 +190,7 @@ export class RelayClient {
     const text = plaintext;
     const value = parseJson(text);
     if (!this.authenticated) {
-      if (!isAuthenticated(value, this.session.transcriptHashB64)) throw new Error("E2EE device authentication rejected");
+      if (!isAuthenticated(value, this.session.transcriptHashB64)) throw new RelayHandshakeError("E2EE device authentication rejected");
       this.authenticated = true;
       if (this.options.transport !== "direct" && this.options.credentialKind === "resume") {
         const reqId = `confirm-${encodeBase64Url(secureRandom.bytes(16))}`;

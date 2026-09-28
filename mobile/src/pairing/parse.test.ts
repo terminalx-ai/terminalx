@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { sha256 } from "@noble/hashes/sha256";
 import { base64Url } from "./bytes";
-import { parsePairingCode } from "./parse";
+import { parsePairingCode, requirePairingCode } from "./parse";
 
 const now = 1_900_000_000_000;
 const publicKey = new Uint8Array(32).fill(7);
@@ -53,5 +53,23 @@ describe("pairing payload parsing", () => {
 
   it("rejects a relay host id that is not derived from the pinned desktop key", () => {
     expect(parsePairingCode(encode({ ...offer, relay: { ...offer.relay, relayHostId: "AbCdEf0123_-xyZ9" } }), () => now)).toBeNull();
+  });
+});
+
+
+describe("actionable parsing failures", () => {
+  it("distinguishes expiration from an invalid offer", () => {
+    expect(() => requirePairingCode(encode({ ...offer, relay: { ...offer.relay, inviteExpiresAt: now } }), () => now)).toThrow("This pairing offer expired");
+    expect(() => requirePairingCode("private text or an incomplete link", () => now)).toThrow("parsing/invalid-offer");
+  });
+  it("does not echo schema input or an unknown field into the error", () => {
+    const privateText = "private name, token, and network address";
+    try { requirePairingCode(encode({ ...offer, deviceToken: { privateText } }), () => now); }
+    catch (error) {
+      expect(String(error)).toContain("parsing/invalid-offer");
+      expect(String(error)).not.toContain(privateText);
+      return;
+    }
+    throw new Error("Expected invalid-offer");
   });
 });

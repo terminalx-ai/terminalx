@@ -1,4 +1,5 @@
 import { createPairingOfferSchema, type PairingOffer } from "./contracts";
+import { PairingError } from "./errors";
 
 const INPUT_LIMIT = 128 * 1_024 + 1_024;
 
@@ -19,18 +20,26 @@ export function extractPairingCodeFromUrl(value: string): string | null {
 }
 
 export function parsePairingCode(input: string, now: () => number = Date.now): PairingOffer | null {
-  const trimmed = input.trim();
-  if (!trimmed || trimmed.length > INPUT_LIMIT) return null;
-  try {
-    const encoded = /^terminalx:\/\//i.test(trimmed) ? extractPairingCodeFromUrl(trimmed) : trimmed;
-    if (!encoded || encoded.length > 128 * 1_024) return null;
-    const padded = encoded.replace(/-/g, "+").replace(/_/g, "/").padEnd(encoded.length + ((4 - (encoded.length % 4)) % 4), "=");
-    return createParsedOffer(atob(padded), now);
-  } catch {
-    return null;
-  }
+  try { return requirePairingCode(input, now); } catch { return null; }
 }
 
-function createParsedOffer(json: string, now: () => number): PairingOffer {
-  return createPairingOfferSchema(now).parse(JSON.parse(json));
+export function requirePairingCode(input: string, now: () => number = Date.now): PairingOffer {
+  try {
+    const trimmed = input.trim();
+    if (!trimmed || trimmed.length > INPUT_LIMIT) throw new Error();
+    const encoded = /^terminalx:\/\//i.test(trimmed) ? extractPairingCodeFromUrl(trimmed) : trimmed;
+    if (!encoded || encoded.length > 128 * 1_024) throw new Error();
+    const padded = encoded.replace(/-/g, "+").replace(/_/g, "/").padEnd(encoded.length + ((4 - (encoded.length % 4)) % 4), "=");
+    const value = JSON.parse(atob(padded));
+    const parsed = createPairingOfferSchema(now).safeParse(value);
+    if (parsed.success) return parsed.data;
+    if (parsed.error.issues.every((issue) => issue.path.join(".") === "relay.inviteExpiresAt") &&
+        typeof value?.relay?.inviteExpiresAt === "number" && value.relay.inviteExpiresAt <= now()) {
+      throw new PairingError("parsing", "expired-offer");
+    }
+    throw new Error();
+  } catch (error) {
+    if (error instanceof PairingError) throw error;
+    throw new PairingError("parsing", "invalid-offer");
+  }
 }

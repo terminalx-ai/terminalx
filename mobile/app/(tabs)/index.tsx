@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Modal, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from "react-native";
-import { CameraView, useCameraPermissions } from "expo-camera";
+import { useCameraPermissions } from "expo-camera";
 import { useRouter } from "expo-router";
 import { ChevronRight, Keyboard, QrCode, X } from "lucide-react-native";
 import { ACCOUNT_PAIRING_CAPABILITY } from "@mobile/pairing/contracts";
@@ -9,6 +9,7 @@ import { accountHostIdentityMatches } from "@mobile/pairing/account";
 import { useApp } from "@mobile/state/AppProvider";
 import { Button, Card, EmptyState, Screen, SectionTitle, StatusDot } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
+import { PairingScanner } from "@mobile/ui/PairingScanner";
 
 export default function MachinesScreen() {
   const app = useApp();
@@ -83,22 +84,106 @@ function PairingSheet({ visible, error, onClearError, onClose, onPair }: { visib
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [scanned, setScanned] = useState(false);
-  const selectMode = (next: "scan" | "type") => { onClearError(); setScanned(false); setMode(next); };
+  // Native callbacks can arrive before React commits the busy state.
+  const inFlight = useRef(false);
+  const scanLocked = useRef(false);
+  const visibleRef = useRef(visible);
+  const [cameraGeneration, setCameraGeneration] = useState(0);
+  useEffect(() => {
+    visibleRef.current = visible;
+    if (!visible && !inFlight.current) {
+      setCode("");
+      setScanned(false);
+      scanLocked.current = false;
+      setMode("scan");
+    }
+    return () => { visibleRef.current = false; };
+  }, [visible]);
+  const selectMode = (next: "scan" | "type") => {
+    if (inFlight.current) return;
+    onClearError();
+    scanLocked.current = false;
+    setScanned(false);
+    setCameraGeneration((value) => value + 1);
+    setMode(next);
+  };
+  const close = () => { if (!inFlight.current) onClose(); };
   const submit = async (value: string) => {
-    if (busy || !value.trim()) return;
+    if (inFlight.current || !visibleRef.current || !value.trim()) return;
+    inFlight.current = true;
     setBusy(true);
+    onClearError();
     setCode(value);
     try {
       await onPair(value);
       setCode("");
       setScanned(false);
     } catch {
-      // The provider records a redacted, actionable error for the retry card.
+      // Pause on the failed QR until an explicit retry/rescan to avoid a loop
+      // redeeming the same one-time offer while it remains in the camera frame.
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   };
-  return <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}><View style={[styles.modal, { backgroundColor: palette.page }]}><View style={styles.modalHeader}><Text style={[styles.modalTitle, { color: palette.ink }]}>Pair a Mac</Text><Pressable accessibilityRole="button" accessibilityLabel="Close" onPress={onClose} hitSlop={12}><X color={palette.ink} /></Pressable></View><View style={[styles.segment, { backgroundColor: palette.raised }]}><Pressable accessibilityRole="button" onPress={() => selectMode("scan")} style={[styles.segmentItem, mode === "scan" && { backgroundColor: palette.card }]}><QrCode size={16} color={mode === "scan" ? palette.ink : palette.muted} /><Text style={{ color: mode === "scan" ? palette.ink : palette.muted }}>Scan</Text></Pressable><Pressable accessibilityRole="button" onPress={() => selectMode("type")} style={[styles.segmentItem, mode === "type" && { backgroundColor: palette.card }]}><Keyboard size={16} color={mode === "type" ? palette.ink : palette.muted} /><Text style={{ color: mode === "type" ? palette.ink : palette.muted }}>Type code</Text></Pressable></View>{mode === "scan" ? permission?.granted ? <CameraView style={styles.camera} barcodeScannerSettings={{ barcodeTypes: ["qr"] }} onBarcodeScanned={scanned ? undefined : ({ data }) => { setScanned(true); setCode(data); void submit(data); }}><View style={styles.scanFrame} /></CameraView> : <View style={styles.cameraPermission}><Text style={[styles.heroDetail, { color: palette.muted }]}>Camera access is requested only to scan a pairing QR shown on your Mac.</Text><Button label="Allow camera" onPress={() => void requestPermission()} /></View> : <View style={styles.codeForm}><Text style={[styles.detail, { color: palette.muted }]}>Paste the full pairing link or its code. Pairing grants expire and can be used only once.</Text><TextInput value={code} onChangeText={(value) => { onClearError(); setCode(value); }} autoCapitalize="none" autoCorrect={false} multiline placeholder="terminalx://pair?code=…" placeholderTextColor={palette.faint} style={[styles.codeInput, { color: palette.ink, backgroundColor: palette.card, borderColor: palette.border }]} /><Button label={busy ? "Connecting · Requesting secure credential" : "Pair securely"} disabled={busy || !code.trim()} onPress={() => void submit(code)} /></View>}{error ? <Card style={[styles.errorPanel, { borderColor: `${palette.danger}66` }]}><Text style={[styles.errorTitle, { color: palette.ink }]}>Pairing didn’t finish</Text><Text style={[styles.detail, { color: palette.muted }]}>{error}</Text><View style={styles.actions}><Button label="Retry" kind="secondary" style={styles.flex} disabled={busy || !code.trim()} onPress={() => void submit(code)} /><Button label="Use QR code" kind="secondary" style={styles.flex} onPress={() => selectMode("scan")} /></View></Card> : null}</View></Modal>;
+  const scan = ({ data }: { data: string }) => {
+    if (scanLocked.current || inFlight.current || !visibleRef.current) return;
+    scanLocked.current = true;
+    setScanned(true);
+    void submit(data);
+  };
+  if (!visible) return null;
+
+  return (
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={close}>
+      <View style={[styles.modal, { backgroundColor: palette.page }]}>
+        <View style={styles.modalHeader}>
+          <Text style={[styles.modalTitle, { color: palette.ink }]}>Pair a Mac</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel="Close" onPress={close} disabled={busy} hitSlop={12}>
+            <X color={palette.ink} />
+          </Pressable>
+        </View>
+        <View style={[styles.segment, { backgroundColor: palette.raised }]}>
+          <Pressable accessibilityRole="button" disabled={busy} onPress={() => selectMode("scan")} style={[styles.segmentItem, mode === "scan" && { backgroundColor: palette.card }]}>
+            <QrCode size={16} color={mode === "scan" ? palette.ink : palette.muted} />
+            <Text style={{ color: mode === "scan" ? palette.ink : palette.muted }}>Scan</Text>
+          </Pressable>
+          <Pressable accessibilityRole="button" disabled={busy} onPress={() => selectMode("type")} style={[styles.segmentItem, mode === "type" && { backgroundColor: palette.card }]}>
+            <Keyboard size={16} color={mode === "type" ? palette.ink : palette.muted} />
+            <Text style={{ color: mode === "type" ? palette.ink : palette.muted }}>Type code</Text>
+          </Pressable>
+        </View>
+        {mode === "scan" ? permission?.granted ? (
+          <PairingScanner key={cameraGeneration} enabled={!busy && !scanned} onScan={scan} />
+        ) : (
+          <View style={styles.cameraPermission}>
+            <Text style={[styles.heroDetail, { color: palette.muted }]}>Camera access is requested only to scan a pairing QR shown on your Mac.</Text>
+            <Button label="Allow camera" onPress={() => void requestPermission()} />
+          </View>
+        ) : (
+          <View style={styles.codeForm}>
+            <Text style={[styles.detail, { color: palette.muted }]}>Paste the full pairing link or its code. Pairing grants expire and can be used only once.</Text>
+            <TextInput value={code} onChangeText={(value) => { onClearError(); setCode(value); }}
+              editable={!busy} autoCapitalize="none" autoCorrect={false} multiline placeholder="terminalx://pair?code=…"
+              placeholderTextColor={palette.faint} style={[styles.codeInput, { color: palette.ink, backgroundColor: palette.card, borderColor: palette.border }]} />
+            <Button label={busy ? "Pairing securely…" : "Pair securely"} disabled={busy || !code.trim()} onPress={() => void submit(code)} />
+          </View>
+        )}
+        {mode === "scan" && busy ? <Text style={[styles.detail, { color: palette.muted }]}>QR decoded. Pairing securely…</Text> : null}
+        {mode === "scan" && scanned && !busy ? <Button label="Scan again" kind="secondary" onPress={() => selectMode("scan")} /> : null}
+        {error ? (
+          <Card style={[styles.errorPanel, { borderColor: `${palette.danger}66` }]}>
+            <Text style={[styles.errorTitle, { color: palette.ink }]}>Pairing didn’t finish</Text>
+            <Text style={[styles.detail, { color: palette.muted }]}>{error}</Text>
+            <View style={styles.actions}>
+              <Button label="Retry" kind="secondary" style={styles.flex} disabled={busy || !code.trim()} onPress={() => void submit(code)} />
+              <Button label="Use QR code" kind="secondary" style={styles.flex} disabled={busy} onPress={() => selectMode("scan")} />
+            </View>
+          </Card>
+        ) : null}
+      </View>
+    </Modal>
+  );
 }
 
 function connectionLabel(stage: string, attempt: number) {
@@ -140,8 +225,6 @@ const styles = StyleSheet.create({
   modalTitle: { fontSize: 24, fontWeight: "700" },
   segment: { flexDirection: "row", padding: 3, borderRadius: 10 },
   segmentItem: { flex: 1, minHeight: 38, borderRadius: 8, flexDirection: "row", gap: 7, alignItems: "center", justifyContent: "center" },
-  camera: { flex: 1, borderRadius: 18, overflow: "hidden", alignItems: "center", justifyContent: "center" },
-  scanFrame: { width: 230, height: 230, borderRadius: 24, borderWidth: 3, borderColor: "white" },
   cameraPermission: { flex: 1, justifyContent: "center", gap: 16, paddingHorizontal: 28 },
   codeForm: { gap: 14 },
   codeInput: { minHeight: 120, borderWidth: StyleSheet.hairlineWidth, borderRadius: 14, padding: 14, textAlignVertical: "top", fontSize: 15 },
