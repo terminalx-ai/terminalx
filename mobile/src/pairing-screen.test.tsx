@@ -17,7 +17,7 @@ vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Keyboa
 vi.mock("react-native", () => {
   const Box = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
-    View: Box, Text: Box, RefreshControl: () => null,
+    View: Box, Text: Box, RefreshControl: () => null, Platform: { OS: "android" },
     Modal: ({ visible, children }: any) => visible ? <div>{children}</div> : null,
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
     Pressable: ({ children, onPress, disabled, accessibilityLabel }: any) => <button disabled={disabled} aria-label={accessibilityLabel} onClick={onPress}>{children}</button>,

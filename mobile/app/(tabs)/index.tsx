@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Modal, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from "react-native";
-import { CameraView, useCameraPermissions } from "expo-camera";
+import { useCameraPermissions } from "expo-camera";
 import { useRouter } from "expo-router";
 import { ChevronRight, Keyboard, QrCode, X } from "lucide-react-native";
 import { ACCOUNT_PAIRING_CAPABILITY } from "@mobile/pairing/contracts";
@@ -9,6 +9,7 @@ import { accountHostIdentityMatches } from "@mobile/pairing/account";
 import { useApp } from "@mobile/state/AppProvider";
 import { Button, Card, EmptyState, Screen, SectionTitle, StatusDot } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
+import { PairingScanner } from "@mobile/ui/PairingScanner";
 
 export default function MachinesScreen() {
   const app = useApp();
@@ -135,11 +136,8 @@ function PairingSheet({ visible, error, onClearError, onClose, onPair }: { visib
         <Pressable accessibilityRole="button" disabled={busy} onPress={() => selectMode("type")} style={[styles.segmentItem, mode === "type" && { backgroundColor: palette.card }]}><Keyboard size={16} color={mode === "type" ? palette.ink : palette.muted} /><Text style={{ color: mode === "type" ? palette.ink : palette.muted }}>Type code</Text></Pressable>
       </View>
       {visible && mode === "scan" ? permission?.granted ? <>
-        {/* Expo Camera 57: off = continuous autofocus; on = focus once, then lock. */}
-        <CameraView key={cameraGeneration} style={styles.camera} facing="back" autofocus="off" barcodeScannerSettings={{ barcodeTypes: ["qr"] }} onBarcodeScanned={scanned || busy ? undefined : scan}>
-          <View style={styles.scanFrame} />
-        </CameraView>
-        <Text style={[styles.detail, { color: palette.muted }]}>{busy ? "QR decoded. Pairing securely…" : "Keep the whole QR in view. Move the phone slightly farther away if it looks blurry."}</Text>
+        <PairingScanner key={cameraGeneration} enabled={!scanned && !busy} onScan={scan} />
+        {busy ? <Text style={[styles.detail, { color: palette.muted }]}>QR decoded. Pairing securely…</Text> : null}
         <Button label={scanned ? "Scan again" : "Restart camera"} kind="secondary" disabled={busy} onPress={() => selectMode("scan")} />
       </> : <View style={styles.cameraPermission}><Text style={[styles.heroDetail, { color: palette.muted }]}>Camera access is requested only to scan a pairing QR shown on your Mac.</Text><Button label="Allow camera" onPress={() => void requestPermission()} /></View> : mode === "type" ? <View style={styles.codeForm}>
         <Text style={[styles.detail, { color: palette.muted }]}>Paste the full pairing link or its code. Pairing grants expire and can be used only once.</Text>
@@ -193,8 +191,6 @@ const styles = StyleSheet.create({
   modalTitle: { fontSize: 24, fontWeight: "700" },
   segment: { flexDirection: "row", padding: 3, borderRadius: 10 },
   segmentItem: { flex: 1, minHeight: 38, borderRadius: 8, flexDirection: "row", gap: 7, alignItems: "center", justifyContent: "center" },
-  camera: { flex: 1, borderRadius: 18, overflow: "hidden", alignItems: "center", justifyContent: "center" },
-  scanFrame: { width: 230, height: 230, borderRadius: 24, borderWidth: 3, borderColor: "white" },
   cameraPermission: { flex: 1, justifyContent: "center", gap: 16, paddingHorizontal: 28 },
   codeForm: { gap: 14 },
   codeInput: { minHeight: 120, borderWidth: StyleSheet.hairlineWidth, borderRadius: 14, padding: 14, textAlignVertical: "top", fontSize: 15 },

@@ -95,7 +95,9 @@ export function DevicesTab() {
     let current = true;
     setQrDataUrl(null);
     if (offer && !expired) {
-      void QRCode.toDataURL(offer.pairingUrl, { errorCorrectionLevel: "M", margin: 2, width: 220 })
+      // Dense relay offers need a full quiet zone and a bitmap that scales
+      // with the number of QR modules, rather than squeezing into 220 pixels.
+      void QRCode.toDataURL(offer.pairingUrl, { errorCorrectionLevel: "M", margin: 4, scale: 8 })
         .then((url) => {
           if (current) setQrDataUrl(url);
         })
@@ -181,20 +183,23 @@ export function DevicesTab() {
           </Button>
         ) : (
           <div className="mt-3 rounded-lg border border-hairline bg-well p-3">
-            <div className="flex gap-4">
-              <div className="flex size-[132px] shrink-0 items-center justify-center overflow-hidden rounded-md bg-white">
+            <div className="flex flex-wrap items-start gap-4">
+              <div className="flex aspect-square w-[320px] max-w-full shrink-0 items-center justify-center overflow-hidden rounded-md bg-white">
                 {qrDataUrl ? (
                   <img src={qrDataUrl} alt="TerminalX phone pairing QR code" className="size-full" />
                 ) : (
                   <Loader2 className="size-5 animate-spin text-black/50" />
                 )}
               </div>
-              <div className="min-w-0 flex-1">
+              <div className="min-w-[200px] flex-1">
                 <div className="text-xs font-medium">Ready for {Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, "0")}</div>
                 <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
                   {offer.connectionMode === "automatic"
                     ? "Includes direct and Relay paths. The phone uses the first secure connection that succeeds."
                     : "Available only on this Wi-Fi or Tailscale; the code contains no Relay invite."}
+                </p>
+                <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                  Keep the entire QR code in view. Move your phone back until it is sharp.
                 </p>
                 <Button className="mt-3" variant="outline" size="xs" onClick={() => void copyCode()}>
                   {copied ? <Check /> : <Copy />} {copied ? "Copied" : "Copy pairing code"}
