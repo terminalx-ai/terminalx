@@ -13,11 +13,16 @@ import {
   attachCloudAgentTab,
   configureCloudAgentTab,
   decideCloudAgent,
+  DEV_SCOPE_NOTICE,
+  flushCloudAgentCache,
   getCloudAgents,
   loadCloudAgents,
   refreshFromCheckpoint,
   resetCloudAgents,
+  SAVE_DEBOUNCE_MS,
   sendToCloudAgent,
+  steerCloudAgent,
+  stopCloudAgent,
   POLL_MAX_MS,
 } from "./cloudAgents";
 import { getTabLog } from "./agentEvents";
@@ -265,5 +270,97 @@ describe("cloud agent tabs store", () => {
     const client = fakeClient();
     await configureCloudAgentTab(scope, "t-1", { model: "sonnet" }, client);
     expect(client.configureAgentTab).toHaveBeenCalledWith({ sessionId: "s-1", tabId: "t-1", model: "sonnet" });
+  });
+
+  it("keeps an offline setting across a restart, and a change made while a send is queued goes with the next one", async () => {
+    vi.useFakeTimers();
+    applyLiveTabs(scope, [tabInfo()]);
+    await configureCloudAgentTab(scope, "t-1", { model: "opus" }, null);
+    await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS + 1);
+    expect(backend.cache["t-1"]!.pendingConfig).toEqual({ model: "opus" });
+
+    // The app restarts: the cache brings the unsent setting back.
+    resetCloudAgents();
+    await loadCloudAgents(scope);
+    expect(getCloudAgents(scope).tabs[0]!.pendingConfig).toEqual({ model: "opus" });
+
+    // A change lands while the send is being enqueued: it is not dropped.
+    let release!: () => void;
+    const original = backend.handle;
+    mocks.invoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "cloud_agent_enqueue") await new Promise<void>((resolve) => (release = resolve));
+      return original(cmd, args);
+    });
+    const sending = sendToCloudAgent(scope, "t-1", "go", null);
+    await vi.advanceTimersByTimeAsync(0);
+    await configureCloudAgentTab(scope, "t-1", { effort: "high" }, null);
+    release();
+    await sending;
+    expect(backend.calls.find((c) => c.cmd === "cloud_agent_enqueue")!.args.payload).toEqual({ text: "go", model: "opus" });
+    expect(getCloudAgents(scope).tabs[0]!.pendingConfig).toEqual({ model: "opus", effort: "high" });
+  });
+
+  it("runs one outbox polling loop per workspace however many commands are sent while a sync is in flight", async () => {
+    vi.useFakeTimers();
+    applyLiveTabs(scope, [tabInfo()]);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const original = backend.handle;
+    mocks.invoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd !== "cloud_agent_outbox_sync") return original(cmd, args);
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+      inFlight--;
+      return original(cmd, args);
+    });
+    await sendToCloudAgent(scope, "t-1", "one", null);
+    await vi.advanceTimersByTimeAsync(1_000); // the first sync starts and hangs for 5 s
+    await sendToCloudAgent(scope, "t-1", "two", null);
+    await sendToCloudAgent(scope, "t-1", "three", null);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(maxInFlight).toBe(1);
+    const syncs = backend.count("cloud_agent_outbox_sync");
+    // One chain: at most one sync per (5 s sync + its delay) window.
+    expect(syncs).toBeLessThanOrEqual(4);
+  });
+
+  it("keeps the process state when a status change does not carry it", async () => {
+    applyLiveTabs(scope, [tabInfo({ process: "exited" })]);
+    const client = fakeClient();
+    await attachCloudAgentTab(scope, "t-1", client);
+    const onStatus = (client.subscribeSession.mock.calls[0]![3] as { onStatus: (change: Record<string, unknown>) => void }).onStatus;
+    onStatus({ sessionId: "s-1", tabId: "t-1", status: "in_progress" });
+    expect(getCloudAgents(scope).tabs[0]!.info).toMatchObject({ status: "in_progress", process: "exited" });
+  });
+
+  it("merges by event id, and a saved event replaces an unsaved indicator whose seq a restarted runtime reused", async () => {
+    applyLiveTabs(scope, [tabInfo()]);
+    const client = fakeClient();
+    await attachCloudAgentTab(scope, "t-1", client);
+    const onEvent = client.subscribeSession.mock.calls[0]![2];
+    onEvent(ev(1, { type: "assistant_text", text: "hello" }));
+    onEvent({ ...ev(2, { type: "usage_update", inputTokens: 1 } as unknown as Payload), id: "usage-before-restart" });
+    // The runtime restarted: its next saved event takes seq 2, and the full resync replays seq 1 again.
+    onEvent(ev(1, { type: "assistant_text", text: "hello" }));
+    onEvent({ ...ev(2, { type: "status", text: "The workspace runtime restarted" }), id: "status-after-restart" });
+    const events = getTabLog("s-1", "t-1").events;
+    expect(events.map((e) => e.id)).toEqual(["t-1-e1", "status-after-restart"]);
+  });
+
+  it("sends over live RPC for a development runtime and refuses what needs the mailbox", async () => {
+    const dev = { organizationId: "", workspaceId: "dev-runtime" };
+    await loadCloudAgents(dev);
+    expect(backend.calls).toEqual([]);
+    applyLiveTabs(dev, [tabInfo()]);
+    const client = Object.assign(fakeClient(), { mutate: vi.fn(async () => ({})) });
+    const entry = await sendToCloudAgent(dev, "t-1", "hello", client);
+    expect(client.mutate).toHaveBeenCalledWith("session.send", { sessionId: "s-1", tabId: "t-1", text: "hello" });
+    expect(entry.state).toBe("applied");
+    await expect(steerCloudAgent(dev, "t-1", "x", client)).rejects.toThrow(DEV_SCOPE_NOTICE);
+    await expect(stopCloudAgent(dev, "t-1", client)).rejects.toThrow(DEV_SCOPE_NOTICE);
+    await expect(decideCloudAgent(dev, "t-1", { requestId: "r", optionId: "allow" }, client)).rejects.toThrow(DEV_SCOPE_NOTICE);
+    await flushCloudAgentCache(dev);
+    expect(backend.calls).toEqual([]);
   });
 });

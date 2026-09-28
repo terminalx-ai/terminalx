@@ -163,18 +163,29 @@ export function getTabLog(sessionId: string, tabId: string): TabLog {
   return logs.get(key(sessionId, tabId)) ?? EMPTY;
 }
 
+/** Indicators the runtime never saves; their seq may be reused after it restarts. */
+function transient(ev: AgentEvent) {
+  return ev.payload.type === "usage_update" || ev.payload.type === "model_request_started";
+}
+
 /**
- * Merge committed events by seq: a cached or checkpointed transcript, or a
- * replay that may overlap what is already shown. Newer copies of a seq win.
+ * Merge committed events: a cached or checkpointed transcript, or a replay
+ * that may overlap what is already shown. Events are the same event only by
+ * id (a newer copy wins). A seq alone proves nothing: a restarted runtime
+ * reuses the seqs of indicators it never saved, so a saved event replaces a
+ * transient one at its seq instead of being dropped as a duplicate.
  */
 export function mergeTabEvents(sessionId: string, tabId: string, events: AgentEvent[]) {
   const k = key(sessionId, tabId);
   const log = getLog(k);
   const committed = events.filter((ev) => ev.payload.type !== "delta");
   if (committed.length) {
-    const bySeq = new Map(log.events.map((ev) => [ev.seq, ev]));
-    for (const ev of committed) bySeq.set(ev.seq, ev);
-    log.events = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+    const byId = new Map(log.events.map((ev) => [ev.id, ev]));
+    for (const ev of committed) byId.set(ev.id, ev);
+    const savedSeqs = new Set([...byId.values()].filter((ev) => !transient(ev)).map((ev) => ev.seq));
+    log.events = [...byId.values()]
+      .filter((ev) => !(transient(ev) && savedSeqs.has(ev.seq)))
+      .sort((a, b) => a.seq - b.seq);
     const last = log.events[log.events.length - 1]?.payload.type;
     if (last === "turn_completed" || last === "user_message") log.stream = [];
   }

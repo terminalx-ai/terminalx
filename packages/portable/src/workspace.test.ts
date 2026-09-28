@@ -372,15 +372,16 @@ describe("workspace RPC client", () => {
     await client.subscribeSession("s1", "t1", (event) => seen.push((event as { seq: number }).seq), {
       sinceCursor: "7:2",
       onCursor: (cursor) => cursors.push(cursor),
-      onStatus: (change) => statuses.push(`${change.status}/${change.process}`),
+      // The process is not part of a status change; it comes with `session.tabs`.
+      onStatus: (change) => statuses.push(`${change.status}/${change.process ?? "-"}`),
     });
     expect(seen).toEqual([3]);
     expect(runtime.sent[0]!.params).toMatchObject({ sessionId: "s1", tabId: "t1", sinceCursor: "7:2" });
     runtime.deliver({ event: "session.event", params: { subscriptionId: "sub-1", cursor: "7:4", event: { seq: 4 } } });
-    runtime.deliver({ event: "session.status", params: { subscriptionId: "sub-1", sessionId: "s1", tabId: "t1", status: "in_progress", process: "running" } });
+    runtime.deliver({ event: "session.status", params: { subscriptionId: "sub-1", sessionId: "s1", tabId: "t1", status: "in_progress" } });
     expect(seen).toEqual([3, 4]);
     expect(cursors.at(-1)).toBe("7:4");
-    expect(statuses).toEqual(["in_progress/running"]);
+    expect(statuses).toEqual(["in_progress/-"]);
     // A runtime of another generation cannot resume the cursor: a full replay follows.
     runtime.drop();
     runtime.generation = 8;

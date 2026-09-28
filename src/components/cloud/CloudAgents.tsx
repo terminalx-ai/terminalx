@@ -13,7 +13,9 @@ import {
   configureCloudAgentTab,
   createCloudAgentTab,
   decideCloudAgent,
+  DEV_SCOPE_NOTICE,
   errorText,
+  isDevScope,
   flushCloudAgentCache,
   loadCloudAgents,
   markCloudAgentRead,
@@ -336,6 +338,7 @@ const KEY_MISSING = "cloud_agent_key_missing";
 function commandError(e: unknown): string {
   const code = errorText(e);
   if (code === KEY_MISSING) return "Connect to this workspace once so this device can encrypt commands for it.";
+  if (code === DEV_SCOPE_NOTICE) return DEV_SCOPE_NOTICE;
   return `Could not queue the command (${code}).`;
 }
 
@@ -469,6 +472,11 @@ function CloudAgentPane({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="cloud-agent-pane">
+      {isDevScope(scope) && (
+        <p className="border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground" data-testid="cloud-agent-dev-notice">
+          {DEV_SCOPE_NOTICE}
+        </p>
+      )}
       {endedMidTurn && (
         <p className="border-b border-hairline bg-warning/10 px-3 py-1.5 text-xs" data-testid="cloud-agent-exited">
           Agent process ended — the saved conversation resumes on your next message.
@@ -487,7 +495,7 @@ function CloudAgentPane({
           onAnswerQuestions={(requestId, answers) => decide({ requestId, answers })}
           footer={
             <div className="flex flex-col">
-              {live && draft.trim() && (
+              {live && draft.trim() && !isDevScope(scope) && (
                 <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-4 text-xs text-muted-foreground">
                   <span>Send now queues it for when the agent pauses.</span>
                   <Button size="xs" variant="outline" onClick={() => void steer()}>
