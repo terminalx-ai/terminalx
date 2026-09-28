@@ -18,7 +18,7 @@
 //! and is dropped when the signed-in identity changes.
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -144,7 +144,7 @@ impl KeyStore for KeychainKeys {
 #[cfg(not(target_os = "macos"))]
 fn secret_file(organization_id: &str, workspace_id: &str) -> Result<PathBuf> {
     let dir = crate::store::root()?.join("cloud-agent-keys");
-    ensure_private_dir(&dir)?;
+    crate::cloud_bootstrap::ensure_private_dir(&dir)?;
     Ok(dir.join(format!("{organization_id}--{workspace_id}.json")))
 }
 
@@ -318,8 +318,17 @@ fn valid_id(value: &str) -> bool {
     (1..=128).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+use crate::cloud_agents::now_ms;
+
+/// Whether an HTTP refusal is worth retrying with the same envelope: the API
+/// may simply not have taken it yet. Everything else is final.
+fn retryable(status: u16, code: &str) -> bool {
+    match status {
+        401 | 408 | 425 => true,
+        // A full mailbox is a definite answer; other 429s are rate limits.
+        429 => code != "cloud_workspace_agent_mailbox_full",
+        _ => status >= 500,
+    }
 }
 
 pub struct CloudAgentClient {
@@ -329,6 +338,10 @@ pub struct CloudAgentClient {
     root: PathBuf,
     /// Serializes every read-modify-write of the stored files.
     lock: Mutex<()>,
+    /// Per workspace directory: held across "is it still unsent?" and its
+    /// POST, and across a cancel, so a cancelled command is never posted.
+    send_locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
+    agent: ureq::Agent,
     /// The identity last observed, so a change drops the old one's data.
     observed: Mutex<Option<(String, String)>>,
 }
@@ -340,7 +353,8 @@ impl CloudAgentClient {
     }
 
     pub fn with(accounts: Arc<dyn AccountSource>, keys: Arc<dyn KeyStore>, base: Url, root: PathBuf) -> Self {
-        Self { accounts, keys, base, root, lock: Mutex::new(()), observed: Mutex::new(None) }
+        let agent = ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).redirects(0).build();
+        Self { accounts, keys, base, root, lock: Mutex::new(()), send_locks: Mutex::new(HashMap::new()), agent, observed: Mutex::new(None) }
     }
 
     /// The current account, which must be in `organization_id`.
@@ -350,6 +364,10 @@ impl CloudAgentClient {
             return Err("cloud_remote_organization_mismatch".into());
         }
         Ok(ctx)
+    }
+
+    fn send_lock(&self, dir: &Path) -> Arc<Mutex<()>> {
+        self.send_locks.lock().unwrap().entry(dir.to_path_buf()).or_default().clone()
     }
 
     fn dir(&self, ctx: &Ctx, workspace_id: &str) -> Result<PathBuf, String> {
@@ -495,10 +513,19 @@ impl CloudAgentClient {
         };
         // Durable before the network: a crash after the POST still resends it.
         self.edit_outbox(&dir, |entries| entries.push(stored.clone()))?;
-        self.post_envelope(&ctx, workspace_id, &dir, &stored)
+        self.post_envelope(&ctx, workspace_id, &dir, &stored.client_command_id)?.ok_or_else(|| "cloud_agent_command_unknown".into())
     }
 
-    fn post_envelope(&self, ctx: &Ctx, workspace_id: &str, dir: &Path, stored: &Stored) -> Result<OutboxEntry, String> {
+    /// POST a stored envelope if it is still unsent. `None` when it is not
+    /// (sent meanwhile, or cancelled).
+    fn post_envelope(&self, ctx: &Ctx, workspace_id: &str, dir: &Path, client_command_id: &str) -> Result<Option<OutboxEntry>, String> {
+        let send_lock = self.send_lock(dir);
+        let _sending = send_lock.lock().unwrap();
+        let stored = {
+            let _guard = self.lock.lock().unwrap();
+            self.load_outbox(dir)?.into_iter().find(|entry| entry.client_command_id == client_command_id)
+        };
+        let Some(stored) = stored.filter(|entry| entry.state == "unsent") else { return Ok(None) };
         let reply = self.call(ctx, "POST", workspace_id, &["agent-commands"], &[], Some(&stored.envelope()));
         let id = stored.client_command_id.clone();
         self.edit_outbox(dir, |entries| {
@@ -516,7 +543,7 @@ impl CloudAgentClient {
                 }
                 // Kept unsent: nothing proves the API has or lacks it.
                 Reply::Unreachable => entry.error = Some("cloud_agent_command_pending_retry".into()),
-                Reply::Refused(status, code) if status == 401 || status >= 500 => entry.error = Some(code),
+                Reply::Refused(status, code) if retryable(status, &code) => entry.error = Some(code),
                 // The API refused it for good and stored nothing (or stored
                 // another payload under this id): it will never run.
                 Reply::Refused(_, code) => {
@@ -526,8 +553,7 @@ impl CloudAgentClient {
                 }
             }
             Some(entry.view())
-        })?
-        .ok_or_else(|| "cloud_agent_command_unknown".into())
+        })
     }
 
     fn apply_server(&self, organization_id: &str, workspace_id: &str, dir: &Path, entry: &mut Stored, command: ServerCommand) {
@@ -581,7 +607,7 @@ impl CloudAgentClient {
             self.load_outbox(&dir)?.into_iter().filter(|entry| entry.state == "unsent").collect()
         };
         for entry in &unsent {
-            self.post_envelope(&ctx, workspace_id, &dir, entry)?;
+            self.post_envelope(&ctx, workspace_id, &dir, &entry.client_command_id)?;
         }
         let pending: Vec<String> = {
             let _guard = self.lock.lock().unwrap();
@@ -626,6 +652,9 @@ impl CloudAgentClient {
         if !valid_id(client_command_id) {
             return Err("cloud_agent_request_invalid".into());
         }
+        // No resend of this workspace's envelopes runs while a cancel does.
+        let send_lock = self.send_lock(&dir);
+        let _sending = send_lock.lock().unwrap();
         let known = self.outbox(organization_id, workspace_id, None)?.into_iter().find(|entry| entry.client_command_id == client_command_id);
         let known = known.ok_or("cloud_agent_command_unknown")?;
         if !TERMINAL_STATES.contains(&known.state.as_str()) {
@@ -817,8 +846,8 @@ impl CloudAgentClient {
         for (name, value) in query {
             url.query_pairs_mut().append_pair(name, value);
         }
-        let agent = ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).redirects(0).build();
-        let request = agent
+        let request = self
+            .agent
             .request(method, url.as_str())
             .set("authorization", &format!("Bearer {}", ctx.access_token.as_str()))
             .set("content-type", "application/json");
@@ -859,16 +888,6 @@ fn prune(entries: &mut Vec<Stored>) {
     entries.retain(|entry| !dropped.contains(&entry.client_command_id));
 }
 
-fn ensure_private_dir(dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?)),
@@ -877,31 +896,11 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     }
 }
 
-/// Temp file, fsync, rename, fsync the directory: the file is either the
-/// old or the new contents after a crash.
+/// Durable replace (`cloud_bootstrap::write_durable`) in a private directory.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().ok_or_else(|| anyhow!("no parent directory"))?;
-    ensure_private_dir(dir)?;
-    let tmp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4().simple()));
-    {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&tmp).with_context(|| format!("create {}", tmp.display()))?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-    if let Err(error) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(error).with_context(|| format!("rename into {}", path.display()));
-    }
-    #[cfg(unix)]
-    std::fs::File::open(dir).and_then(|dir| dir.sync_all()).with_context(|| format!("sync {}", dir.display()))?;
-    Ok(())
+    crate::cloud_bootstrap::ensure_private_dir(dir)?;
+    crate::cloud_bootstrap::write_durable(path, bytes)
 }
 
 // ---------------------------------------------------------------- Tauri

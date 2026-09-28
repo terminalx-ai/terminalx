@@ -178,6 +178,55 @@ fn a_conflict_or_refusal_settles_the_command_as_rejected() {
 }
 
 #[test]
+fn a_rate_limit_keeps_the_command_for_a_resend_but_a_full_mailbox_is_final() {
+    let full = Arc::new(Mutex::new(false));
+    let seen = full.clone();
+    let base = serve(Arc::new(move |_, _, _| {
+        let error = if *seen.lock().unwrap() { "cloud_workspace_agent_mailbox_full" } else { "rate_limited" };
+        Some((429, json!({ "error": error })))
+    }));
+    let fixture = fixture(&base);
+    give_key(&fixture);
+    let limited = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "one" })).unwrap();
+    assert_eq!(limited.state, "unsent", "a rate limit is not a refusal");
+    for status in [408u16, 425, 401, 503] {
+        assert!(retryable(status, "x"), "{status}");
+    }
+    assert!(!retryable(422, "cloud_workspace_request_invalid"));
+    assert!(!retryable(409, "cloud_workspace_agent_command_conflict"));
+    *full.lock().unwrap() = true;
+    let refused = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "two" })).unwrap();
+    assert_eq!((refused.state.as_str(), refused.category.as_deref()), ("rejected", Some("cloud_workspace_agent_mailbox_full")));
+}
+
+#[test]
+fn a_command_cancelled_before_the_api_has_it_is_never_posted_afterwards() {
+    let posts = Arc::new(AtomicUsize::new(0));
+    let counted = posts.clone();
+    let base = serve(Arc::new(move |_, path, _| {
+        if path.ends_with("/cancel") {
+            return Some((404, json!({ "error": "cloud_workspace_agent_command_not_found" })));
+        }
+        if path.ends_with("/agent-commands") {
+            counted.fetch_add(1, Ordering::SeqCst);
+            // The first POST never gets an answer.
+            return None;
+        }
+        Some((200, json!({ "commands": [] })))
+    }));
+    let fixture = fixture(&base);
+    give_key(&fixture);
+    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" })).unwrap();
+    assert_eq!(entry.state, "unsent");
+    assert_eq!(fixture.client.cancel(ORG, WS, &entry.client_command_id).unwrap().state, "cancelled");
+    // A resend that took its snapshot before the cancel re-checks under the send lock.
+    let dir = fixture.client.dir(&fixture.account.context().unwrap(), WS).unwrap();
+    assert!(fixture.client.post_envelope(&fixture.account.context().unwrap(), WS, &dir, &entry.client_command_id).unwrap().is_none());
+    fixture.client.outbox_sync(ORG, WS).unwrap();
+    assert_eq!(posts.load(Ordering::SeqCst), 1, "only the original POST, never one after the cancel");
+}
+
+#[test]
 fn invalid_commands_are_refused_before_anything_is_stored() {
     let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
     give_key(&fixture);

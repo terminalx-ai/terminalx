@@ -114,30 +114,42 @@ impl CloudRemote {
         let agents = self.agents.clone();
         tauri::async_runtime::spawn(async move {
             let mut keys_request: Option<String> = None;
+            // Whether this connection was granted `keys/1` (fetch keys on it).
+            let mut keys_granted = false;
+            let fetch_keys = |keys_request: &mut Option<String>| {
+                let request = format!("{KEYS_REQUEST_PREFIX}{}", uuid::Uuid::new_v4().simple());
+                if supervisor.send(serde_json::json!({ "id": request, "method": "keys.get", "params": {} })) {
+                    *keys_request = Some(request);
+                }
+            };
             while let Some(event) = receiver.recv().await {
                 let payload = match event {
                     ClientEvent::State(state) => {
-                        if let (ClientState::Connected { capabilities, .. }, Some(_), Some(_)) = (&state, &identity, &workspace_id) {
-                            if capabilities.iter().any(|capability| capability == "keys/1") {
-                                let request = format!("{KEYS_REQUEST_PREFIX}{}", uuid::Uuid::new_v4().simple());
-                                if supervisor.send(serde_json::json!({ "id": request, "method": "keys.get", "params": {} })) {
-                                    keys_request = Some(request);
-                                }
-                            }
+                        keys_granted = matches!(&state, ClientState::Connected { capabilities, .. } if capabilities.iter().any(|capability| capability == "keys/1"))
+                            && identity.is_some()
+                            && workspace_id.is_some();
+                        if keys_granted {
+                            fetch_keys(&mut keys_request);
                         }
                         RemoteEvent::State { connection_id: id.clone(), state }
                     }
-                    ClientEvent::Message(message) => {
-                        let request = message.get("id").and_then(Value::as_str);
-                        if request.is_some_and(|request| request.starts_with(KEYS_REQUEST_PREFIX)) {
-                            if request == keys_request.as_deref() {
+                    ClientEvent::Message(message) => match intercept(&message) {
+                        Intercept::KeysAnswer => {
+                            if message.get("id").and_then(Value::as_str) == keys_request.as_deref() {
                                 keys_request = None;
                                 store_keys(&agents, identity.as_ref(), workspace_id.as_deref(), message);
                             }
                             continue;
                         }
-                        RemoteEvent::Message { connection_id: id.clone(), message }
-                    }
+                        // The runtime rotated the workspace key: take the new one.
+                        Intercept::KeysChanged => {
+                            if keys_granted {
+                                fetch_keys(&mut keys_request);
+                            }
+                            continue;
+                        }
+                        Intercept::Forward => RemoteEvent::Message { connection_id: id.clone(), message },
+                    },
                 };
                 let _ = app.emit(EVENT, payload);
             }
@@ -316,4 +328,39 @@ fn store_keys(agents: &Arc<CloudAgentClient>, identity: Option<&Identity>, works
             log::warn!("store cloud workspace keys: {error:#}");
         }
     });
+}
+
+/// What the desktop does with a frame from the runtime before the web view
+/// sees it: key traffic stays in Rust.
+#[derive(Debug, PartialEq, Eq)]
+enum Intercept {
+    /// The answer to a `keys.get` this module sent.
+    KeysAnswer,
+    /// `keys.changed`: the workspace key rotated; fetch it again.
+    KeysChanged,
+    Forward,
+}
+
+fn intercept(message: &Value) -> Intercept {
+    if message.get("id").and_then(Value::as_str).is_some_and(|id| id.starts_with(KEYS_REQUEST_PREFIX)) {
+        return Intercept::KeysAnswer;
+    }
+    if message.get("event").and_then(Value::as_str) == Some("keys.changed") {
+        return Intercept::KeysChanged;
+    }
+    Intercept::Forward
+}
+
+#[cfg(test)]
+mod intercept_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn key_answers_and_rotations_never_reach_the_web_view() {
+        assert_eq!(intercept(&json!({ "id": "keys-abc", "ok": true, "result": { "keys": [] } })), Intercept::KeysAnswer);
+        assert_eq!(intercept(&json!({ "event": "keys.changed", "params": {} })), Intercept::KeysChanged);
+        assert_eq!(intercept(&json!({ "id": "req-1", "ok": true, "result": {} })), Intercept::Forward);
+        assert_eq!(intercept(&json!({ "event": "session.tabs", "params": { "tabs": [] } })), Intercept::Forward);
+    }
 }

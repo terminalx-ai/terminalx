@@ -84,7 +84,8 @@ export interface AgentTabStatusChange {
   sessionId: string;
   tabId: string;
   status: AgentTabStatus;
-  process: AgentProcessState;
+  /** Not sent by the runtime with a status change (it arrives with `session.tabs`). */
+  process?: AgentProcessState;
 }
 
 export interface SessionSubscribeOptions {

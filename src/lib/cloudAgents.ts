@@ -64,6 +64,10 @@ interface Store {
   snapshot: CloudAgentsSnapshot;
   listeners: Set<() => void>;
   poll: ReturnType<typeof setTimeout> | null;
+  /** A sync is in flight; the loop reschedules itself when it returns. */
+  polling: boolean;
+  /** Asked to poll again soon while a sync was in flight. */
+  pollKick: boolean;
   pollDelay: number;
   saves: Map<string, ReturnType<typeof setTimeout>>;
   /** Decisions being enqueued right now, by request id. */
@@ -77,6 +81,17 @@ export const SAVE_DEBOUNCE_MS = 500;
 const CACHE_EVENTS = 2_000;
 
 const stores = new Map<string, Store>();
+
+/**
+ * A runtime attached by pairing code for development: no organization, so no
+ * API mailbox, keys, checkpoints or cache. Prompts go over live RPC; steering,
+ * stopping and decisions need a cloud workspace.
+ */
+export function isDevScope(scope: CloudAgentScope): boolean {
+  return !scope.organizationId;
+}
+
+export const DEV_SCOPE_NOTICE = "Steering, stopping and permission decisions need a cloud workspace; this development runtime only takes prompts.";
 
 export function cloudAgentsKey(scope: CloudAgentScope): string {
   return `${scope.organizationId}:${scope.workspaceId}`;
@@ -99,6 +114,8 @@ function store(scope: CloudAgentScope): Store {
       snapshot: EMPTY,
       listeners: new Set(),
       poll: null,
+      polling: false,
+      pollKick: false,
       pollDelay: POLL_FIRST_MS,
       saves: new Map(),
       deciding: new Set(),
@@ -210,6 +227,7 @@ function scheduleSave(s: Store, tabId: string) {
 }
 
 async function saveNow(s: Store, tabId: string) {
+  if (isDevScope(s.scope)) return;
   const tab = s.tabs.get(tabId);
   if (!tab || tab.placeholder || !tab.info.sessionId) return;
   const events = getTabLog(tab.info.sessionId, tabId).events.filter((ev) => ev.payload.type !== "delta").slice(-CACHE_EVENTS);
@@ -220,6 +238,7 @@ async function saveNow(s: Store, tabId: string) {
     checkpoint: tab.checkpoint,
     unread: tab.unread,
     completed: tab.completed,
+    pendingConfig: tab.pendingConfig,
     updatedAt: Date.now(),
   };
   try {
@@ -248,6 +267,11 @@ export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
   const s = store(scope);
   if (s.loaded) return Promise.resolve();
   if (s.loading) return s.loading;
+  if (isDevScope(scope)) {
+    s.loaded = true;
+    publish(s);
+    return Promise.resolve();
+  }
   s.loading = (async () => {
     try {
       const cached = await cloudAgentApi.cacheLoad(scope);
@@ -258,6 +282,7 @@ export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
         tab.checkpoint = entry.checkpoint ?? null;
         tab.unread = entry.unread;
         tab.completed = entry.completed;
+        tab.pendingConfig = entry.pendingConfig ?? null;
         s.tabs.set(tabId, tab);
         if (entry.tab.sessionId && entry.events?.length) mergeTabEvents(entry.tab.sessionId, tabId, entry.events);
       }
@@ -359,7 +384,7 @@ function forgetTab(s: Store, tab: CloudAgentTab) {
   if (pending) clearTimeout(pending);
   s.saves.delete(tab.tabId);
   if (tab.info.sessionId) dropTabLog(tab.info.sessionId, tab.tabId);
-  void cloudAgentApi.cacheSave(s.scope, tab.tabId, null).catch(() => undefined);
+  if (!isDevScope(s.scope)) void cloudAgentApi.cacheSave(s.scope, tab.tabId, null).catch(() => undefined);
 }
 
 export async function syncLiveTabs(scope: CloudAgentScope, client: WorkspaceRpcClient) {
@@ -419,7 +444,8 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
         if (!current) return;
         noteStatus(current, change.status);
         if (change.status === "completed" && isViewed(scope, tabId)) current.unread = false;
-        current.info = { ...current.info, status: change.status, process: change.process };
+        // The runtime reports the process in `session.tabs`, not with a status.
+        current.info = { ...current.info, status: change.status, process: change.process ?? current.info.process };
         publish(s);
         scheduleSave(s, tabId);
       },
@@ -563,20 +589,37 @@ async function enqueue(
 
 /** A prompt: now if the agent is idle, else queued as a follow-up by the runtime. */
 export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null) {
-  const tab = store(scope).tabs.get(tabId);
-  const config = tab?.pendingConfig ?? {};
-  const entry = await enqueue(scope, tabId, "send", { text, ...config }, client);
-  const current = store(scope).tabs.get(tabId);
-  if (current && tab?.pendingConfig) current.pendingConfig = null;
+  const s = store(scope);
+  const tab = s.tabs.get(tabId);
+  if (isDevScope(scope)) return sendOverLiveRpc(scope, tabId, text, client);
+  const sent = tab?.pendingConfig ?? null;
+  const entry = await enqueue(scope, tabId, "send", { text, ...(sent ?? {}) }, client);
+  // Only what went out is settled; a change made meanwhile waits for the next.
+  const current = s.tabs.get(tabId);
+  if (current && sent && current.pendingConfig === sent) {
+    current.pendingConfig = null;
+    scheduleSave(s, tabId);
+  }
   return entry;
+}
+
+/** A development runtime has no mailbox: the legacy live `session.send`. */
+async function sendOverLiveRpc(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null): Promise<OutboxEntry> {
+  const tab = store(scope).tabs.get(tabId);
+  if (!client || client.connection.state !== "connected" || !tab?.info.sessionId) throw new Error("The development runtime is not connected");
+  await client.mutate("session.send", { sessionId: tab.info.sessionId, tabId, text });
+  const now = Date.now();
+  return { clientCommandId: `live-${now}`, tabId, kind: "send", text, state: "applied", createdAt: now, updatedAt: now };
 }
 
 /** Into the running turn now. */
 export function steerCloudAgent(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null) {
+  if (isDevScope(scope)) return Promise.reject(new Error(DEV_SCOPE_NOTICE));
   return enqueue(scope, tabId, "steer", { text }, client);
 }
 
 export function stopCloudAgent(scope: CloudAgentScope, tabId: string, client: WorkspaceRpcClient | null) {
+  if (isDevScope(scope)) return Promise.reject(new Error(DEV_SCOPE_NOTICE));
   return enqueue(scope, tabId, "stop", {}, client);
 }
 
@@ -590,6 +633,7 @@ export async function decideCloudAgent(
   decision: { requestId: string; optionId: string } | { requestId: string; answers: Record<string, string> },
   client: WorkspaceRpcClient | null,
 ): Promise<OutboxEntry | null> {
+  if (isDevScope(scope)) throw new Error(DEV_SCOPE_NOTICE);
   const s = store(scope);
   const existing = decisionFor(s.outbox, decision.requestId);
   if (existing) return existing;
@@ -631,25 +675,37 @@ export async function cancelCloudAgentCommand(scope: CloudAgentScope, clientComm
  */
 export function startOutboxPolling(scope: CloudAgentScope) {
   const s = store(scope);
+  if (isDevScope(scope)) return;
   s.pollDelay = POLL_FIRST_MS;
+  // One loop per workspace: a running sync picks the kick up when it returns.
+  if (s.polling) {
+    s.pollKick = true;
+    return;
+  }
   if (s.poll) return;
   const tick = async () => {
     s.poll = null;
+    s.polling = true;
     let changed = false;
     try {
       const before = JSON.stringify(s.outbox.map((e) => [e.clientCommandId, e.state, e.updatedAt]));
       const entries = await cloudAgentApi.outboxSync(s.scope);
-      if (!stores.has(cloudAgentsKey(s.scope)) || stores.get(cloudAgentsKey(s.scope)) !== s) return;
+      if (stores.get(cloudAgentsKey(s.scope)) !== s) return;
       for (const entry of entries) upsert(s, entry);
       changed = JSON.stringify(s.outbox.map((e) => [e.clientCommandId, e.state, e.updatedAt])) !== before;
       if (changed) publish(s);
     } catch (error) {
       s.error = errorText(error);
       publish(s);
+    } finally {
+      s.polling = false;
     }
+    if (stores.get(cloudAgentsKey(s.scope)) !== s) return;
+    const kicked = s.pollKick;
+    s.pollKick = false;
     if (!s.outbox.some((entry) => !TERMINAL_OUTBOX_STATES.has(entry.state))) return;
-    s.pollDelay = changed ? POLL_FIRST_MS : Math.min(POLL_MAX_MS, s.pollDelay * 2);
-    s.poll = setTimeout(() => void tick(), s.pollDelay);
+    s.pollDelay = changed || kicked ? POLL_FIRST_MS : Math.min(POLL_MAX_MS, s.pollDelay * 2);
+    if (!s.poll) s.poll = setTimeout(() => void tick(), s.pollDelay);
   };
   s.poll = setTimeout(() => void tick(), s.pollDelay);
 }
