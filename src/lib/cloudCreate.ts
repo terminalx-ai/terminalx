@@ -307,6 +307,7 @@ const FAILURES: Record<string, string> = {
   "runtime-interrupted": "The workspace restarted while starting the agent. The prompt may not have been sent.",
   "runtime-storage-replaced": "The workspace lost its state while starting the agent. The prompt may not have been sent.",
   "payload-invalid": "The launch settings were not accepted by the workspace.",
+  "launch-intent-unavailable": "The first prompt could not be read back on the server, so it was not sent.",
 };
 
 /** Why a launch failed, from the operation or the launch category. */
