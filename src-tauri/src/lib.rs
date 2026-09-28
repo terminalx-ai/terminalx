@@ -396,6 +396,7 @@ pub fn run() {
             commands::read_image_file,
             commands::invalidate_file_index,
             commands::git_commit,
+            commands::git_identity,
             commands::git_push,
             commands::git_pull,
             commands::git_discard,

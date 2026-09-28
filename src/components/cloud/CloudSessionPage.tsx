@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Bot, Cloud, FolderTree, Loader2, Plug, Plus, TerminalSquare, X } from "lucide-react";
+import { ArrowLeft, Bot, Cloud, FolderTree, GitBranch, Loader2, Plug, Plus, TerminalSquare, X } from "lucide-react";
 import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { TerminalView, createTerminal } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
 import { CloudAgentsView } from "./CloudAgents";
 import { CloudFilesView } from "./CloudFiles";
+import { CloudGitView } from "./CloudGit";
 import {
   api,
   devWorkspaceConnection,
@@ -188,7 +189,7 @@ function ExecutionLocation({ provider, name }: { provider: string | null; name: 
   );
 }
 
-type View = { kind: "terminal" } | { kind: "agent" } | { kind: "files" };
+type View = { kind: "terminal" } | { kind: "agent" } | { kind: "files" } | { kind: "git" };
 
 function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: WorkspaceConnectionState }) {
   const { connection } = opened;
@@ -199,6 +200,8 @@ function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: Work
   const [view, setView] = useState<View>({ kind: "terminal" });
   const [filesShown, setFilesShown] = useState(false);
   if (view.kind === "files" && !filesShown) setFilesShown(true);
+  const [gitShown, setGitShown] = useState(false);
+  if (view.kind === "git" && !gitShown) setGitShown(true);
   const [error, setError] = useState<string | null>(null);
   const { resolvedMode } = useTheme();
   const mode = useRef(resolvedMode);
@@ -303,6 +306,15 @@ function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: Work
         >
           <FolderTree className="size-3.5" /> Files
         </Button>
+        <Button
+          size="sm"
+          role="tab"
+          aria-selected={view.kind === "git"}
+          variant={view.kind === "git" ? "secondary" : "ghost"}
+          onClick={() => setView({ kind: "git" })}
+        >
+          <GitBranch className="size-3.5" /> Git
+        </Button>
       </div>
       {!connected && <div className="px-4 py-1 text-xs text-muted-foreground">{describe(state)}</div>}
       {error && <p className="px-4 py-1 text-xs text-red-500">Terminal: {error}</p>}
@@ -340,6 +352,11 @@ function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: Work
       {filesShown && (
         <div className={view.kind === "files" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
           <CloudFilesView workspaceKey={key} name={opened.name} client={client} state={state} active={view.kind === "files"} />
+        </div>
+      )}
+      {gitShown && (
+        <div className={view.kind === "git" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+          <CloudGitView workspaceKey={key} client={client} state={state} active={view.kind === "git"} />
         </div>
       )}
     </div>

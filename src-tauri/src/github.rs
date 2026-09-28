@@ -58,9 +58,9 @@ pub struct PullRequest {
     pub author: String,
 }
 
-const FIELDS: &str = "number,title,url,state,isDraft,baseRefName,headRefName,additions,deletions,mergeable,reviewDecision,statusCheckRollup,body,author";
+pub(crate) const FIELDS: &str = "number,title,url,state,isDraft,baseRefName,headRefName,additions,deletions,mergeable,reviewDecision,statusCheckRollup,body,author";
 
-fn parse_pr(v: &Value) -> PullRequest {
+pub(crate) fn parse_pr(v: &Value) -> PullRequest {
     let checks = v["statusCheckRollup"]
         .as_array()
         .map(|a| {

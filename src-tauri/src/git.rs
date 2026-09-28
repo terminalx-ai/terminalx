@@ -630,6 +630,20 @@ pub fn checkout_branch(cwd: &Path, name: &str, create: bool) -> Result<()> {
     Ok(())
 }
 
+/// This person's Git identity (`user.name`, `user.email` from their global
+/// config), which authors the commits they make in a cloud workspace.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Identity {
+    pub name: String,
+    pub email: String,
+}
+
+pub fn global_identity() -> Option<Identity> {
+    let home = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
+    let get = |key: &str| run(&home, &["config", "--global", "--get", key]).ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+    Some(Identity { name: get("user.name")?, email: get("user.email")? })
+}
+
 pub fn remote_url(cwd: &Path) -> Option<String> {
     run(cwd, &["remote", "get-url", "origin"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }

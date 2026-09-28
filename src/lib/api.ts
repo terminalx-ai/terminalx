@@ -231,6 +231,8 @@ export const api = {
 
   // git
   workStatus: (cwd: string) => invoke<WorkStatus>("work_status", { cwd }),
+  /** The person's global Git identity; it authors their commits in cloud workspaces. */
+  gitIdentity: () => invoke<{ name: string; email: string } | null>("git_identity"),
   listBranches: (cwd: string) => invoke<BranchInfo[]>("list_branches", { cwd }),
   snapshotTree: (cwd: string) => invoke<string>("snapshot_tree", { cwd }),
   headTree: (cwd: string) => invoke<string | null>("head_tree", { cwd }),

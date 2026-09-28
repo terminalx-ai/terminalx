@@ -16,7 +16,7 @@
 import { PortableRpcClient, type RpcCallResult, type RpcErrorData, type RpcResponse, type RpcWireRequest } from "./rpc";
 
 export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
-export const WORKSPACE_CAPABILITIES = ["pty/1", "fs/1", "git/1", "session/1", "keys/1"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "fs/1", "git/1", "session/1", "keys/1", "lifecycle/1"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 
 /** How much a caller may cost: only an interactive action may wake compute. */
@@ -39,6 +39,10 @@ export const MUTATING_METHODS = new Set([
   "git.unstage",
   "git.push",
   "git.pull",
+  "git.fetch",
+  "git.prCreate",
+  "git.prReady",
+  "git.prMerge",
 ]);
 
 export type WorkspaceConnectionState =

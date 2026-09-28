@@ -100,7 +100,12 @@ struct Runtime {
 
 impl Runtime {
     fn start(root: &Path, data: &Path, link: &Path) -> Self {
+        Self::start_with_env(root, data, link, &[])
+    }
+
+    fn start_with_env(root: &Path, data: &Path, link: &Path, env: &[(&str, &Path)]) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_terminalx-serve"))
+            .envs(env.iter().map(|(key, value)| (*key, *value)))
             .args(["--runtime-kind", "cloud-workspace", "--project-root"])
             .arg(root)
             .arg("--data-dir")
@@ -327,7 +332,7 @@ async fn desktop_drives_a_remote_runtime_through_the_relay() {
     let mut client = Client::start(source.clone());
     let ClientState::Connected { runtime_generation, capabilities, authority, .. } = client.connected().await else { unreachable!() };
     assert_eq!(runtime_generation, 7);
-    assert_eq!(capabilities, ["pty/1", "fs/1", "git/1", "session/1", "keys/1"]);
+    assert_eq!(capabilities, ["pty/1", "fs/1", "git/1", "session/1", "keys/1", "lifecycle/1"]);
     assert_eq!(authority, "manage");
 
     // A terminal, created once even when the create is resent.
@@ -1169,6 +1174,145 @@ async fn cloud_files_are_browsed_edited_and_searched_through_the_relay() {
     assert_eq!(phone.refused("fs.write", write).await, "forbidden");
     let part = json!({ "uploadId": "e2e-upload-02", "offset": 0, "dataB64": "eA==", "clientRequestId": "e2e-phone-0002" });
     assert_eq!(phone.refused("fs.writePart", part).await, "forbidden");
+    phone.supervisor.stop();
+    desk.supervisor.stop();
+    drop(runtime);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["-c", "user.name=Seed", "-c", "user.email=seed@example.com", "-c", "init.defaultBranch=main", "-c", "commit.gpgsign=false"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// PRO-27: review, commit, push and a draft pull request in a two-repository
+/// cloud workspace, through the relay. A local bare repository stands in for
+/// GitHub's Git side and `scripts/remote-runtime/fake-gh` for its API.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs terminalx-saas, bun and Redis: scripts/remote-runtime/e2e.sh"]
+async fn cloud_git_reviews_commits_pushes_and_opens_a_draft_pr_through_the_relay() {
+    assert!(std::process::Command::new("python3").arg("--version").output().is_ok(), "the fake gh needs python3");
+    let harness = Harness::start();
+    let dir = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let root = base.join("ws");
+    let data = PathBuf::from(format!("/tmp/tx-e2e-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]));
+    std::fs::create_dir_all(&root).unwrap();
+    // The remote, with `main` and `develop`, cloned twice into the workspace.
+    let remote = base.join("remote.git");
+    git(&base, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+    let seed = base.join("seed");
+    git(&base, &["clone", "-q", remote.to_str().unwrap(), seed.to_str().unwrap()]);
+    std::fs::write(seed.join("README.md"), "hello\n").unwrap();
+    git(&seed, &["add", "."]);
+    git(&seed, &["commit", "-q", "-m", "seed"]);
+    git(&seed, &["push", "-q", "origin", "HEAD:refs/heads/main", "HEAD:refs/heads/develop"]);
+    git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    for name in ["app", "lib"] {
+        git(&root, &["clone", "-q", remote.to_str().unwrap(), name]);
+    }
+    let github = base.join("github");
+    std::fs::create_dir_all(&github).unwrap();
+    let fake_gh = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/remote-runtime/fake-gh");
+    let gh = base.join("gh");
+    std::fs::write(&gh, format!("#!/bin/sh\nFAKE_GH_STATE='{}' exec '{}' \"$@\"\n", github.display(), fake_gh.display())).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut secret = [0u8; 32];
+    secret[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    secret[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    let relay_host_id = relay_host_id_for_secret(secret);
+    let relay_token = harness.post("/runtime-token", json!({ "relayHostId": relay_host_id, "runtimeGeneration": 7 }))["relayToken"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let link = base.join("link.json");
+    let tokens: Vec<String> = (0..2).map(|_| uuid::Uuid::new_v4().simple().to_string()).collect();
+    write_link(
+        &link,
+        &secret,
+        &relay_token,
+        &harness.director,
+        json!([attachment("att-desk", "desktop-desk", &tokens[0], "runtime"), attachment("att-phone", "mobile-phone", &tokens[1], "session")]),
+    );
+    let runtime = Runtime::start_with_env(&root, &data, &link, &[("TERMINALX_SERVE_GH", gh.as_path())]);
+    runtime.wait_for_relay("registered");
+    let pairing_dir = base.join("link.json.attachments");
+    let mut desk = Client::start(source(&harness, &pairing_dir, "att-desk", "desktop-desk", &relay_host_id));
+    desk.connected().await;
+
+    // Two repositories: nothing is done in "whichever" of them.
+    let listed = desk.ok("git.repositories", json!({})).await;
+    let names: Vec<&str> = listed["repositories"].as_array().unwrap().iter().map(|repo| repo["repo"].as_str().unwrap()).collect();
+    assert_eq!(names, ["app", "lib"]);
+    assert_eq!(desk.refused("git.status", json!({})).await, "ambiguous_repository");
+
+    // Edit on a new branch, review, commit as the person.
+    desk.ok("git.checkout", json!({ "repo": "app", "branch": "feature/e2e", "create": true, "clientRequestId": "e2e-git-0001" })).await;
+    desk.ok("fs.write", json!({ "path": "app/README.md", "text": "hello\ncloud\n", "clientRequestId": "e2e-git-0002" })).await;
+    let changes = desk.ok("git.workingChanges", json!({ "repo": "app" })).await;
+    assert_eq!(changes["files"][0]["path"], "README.md");
+    let pair = desk.ok("git.fileContents", json!({ "repo": "app", "path": "README.md", "base": changes["head"] })).await;
+    assert_eq!(pair, json!({ "before": "hello\n", "after": "hello\ncloud\n" }));
+    let author = json!({ "name": "Ada Lovelace", "email": "ada@example.com" });
+    let no_author = json!({ "repo": "app", "message": "Say cloud", "clientRequestId": "e2e-git-0003" });
+    assert_eq!(desk.refused("git.commit", no_author).await, "invalid_params");
+    desk.ok("git.commit", json!({ "repo": "app", "message": "Say cloud", "author": author, "clientRequestId": "e2e-git-0004" })).await;
+    assert_eq!(git(&root.join("app"), &["log", "-1", "--format=%an <%ae>"]), "Ada Lovelace <ada@example.com>");
+
+    // Push; the connection drops before the answer is read: the resend is
+    // answered from the first push, and a later retry asks the remote first.
+    let push = json!({ "repo": "app", "clientRequestId": "e2e-git-0005" });
+    let pushed = desk.ok("git.push", push.clone()).await;
+    assert_eq!(pushed["pushed"], true);
+    harness.post("/restart-cell", json!({}));
+    desk.state(|state| matches!(state, ClientState::Reconnecting { .. })).await;
+    desk.connected().await;
+    assert_eq!(desk.ok("git.push", push).await, pushed);
+    let retry = desk.ok("git.push", json!({ "repo": "app", "clientRequestId": "e2e-git-0006" })).await;
+    assert_eq!((retry["pushed"].clone(), retry["reconciled"].clone()), (json!(false), json!(true)));
+    assert_eq!(git(&remote, &["rev-parse", "refs/heads/feature/e2e"]), pushed["head"].as_str().unwrap());
+
+    // GitHub refuses the workspace's token: reported as such, nothing created.
+    std::fs::write(github.join("auth-expired"), "").unwrap();
+    let create = |id: &str| json!({ "repo": "app", "title": "Say cloud", "body": "From the cloud", "base": "develop", "draft": true, "clientRequestId": id });
+    assert_eq!(desk.refused("git.prCreate", create("e2e-git-0007")).await, "auth_failed");
+    std::fs::remove_file(github.join("auth-expired")).unwrap();
+
+    // A draft pull request into the chosen base, created once.
+    let created = desk.ok("git.prCreate", create("e2e-git-0008")).await;
+    assert_eq!((created["created"].clone(), created["pr"]["isDraft"].clone(), created["pr"]["base"].clone()), (json!(true), json!(true), json!("develop")));
+    let again = desk.ok("git.prCreate", create("e2e-git-0009")).await;
+    assert_eq!((again["existing"].clone(), again["pr"]["number"].clone()), (json!(true), created["pr"]["number"].clone()));
+    let prs = desk.ok("git.prs", json!({ "repo": "app" })).await;
+    assert_eq!(prs["prs"].as_array().unwrap().len(), 1);
+
+    // Unpublished work before an archive: an uncommitted file in lib.
+    std::fs::write(root.join("lib/scratch.txt"), "s").unwrap();
+    let facts = desk.ok("lifecycle.dispositionFacts", json!({})).await;
+    let repos = facts["repositories"].as_array().unwrap();
+    assert_eq!(repos[0]["path"], "app");
+    assert_eq!(repos[0]["openPullRequests"][0]["number"], created["pr"]["number"]);
+    assert_eq!(repos[0]["unpushedCommits"], 0);
+    assert_eq!(repos[1]["dirtyFiles"], 1);
+
+    // A participant reads, and cannot publish.
+    let mut phone = Client::start(source(&harness, &pairing_dir, "att-phone", "mobile-phone", &relay_host_id));
+    phone.connected().await;
+    assert_eq!(phone.ok("git.status", json!({ "repo": "app" })).await["branch"], "feature/e2e");
+    phone.ok("lifecycle.dispositionFacts", json!({})).await;
+    assert_eq!(phone.refused("git.push", json!({ "repo": "app", "clientRequestId": "e2e-phone-git-1" })).await, "forbidden");
+    assert_eq!(phone.refused("git.prCreate", json!({ "repo": "app", "title": "x", "clientRequestId": "e2e-phone-git-2" })).await, "forbidden");
     phone.supervisor.stop();
     desk.supervisor.stop();
     drop(runtime);

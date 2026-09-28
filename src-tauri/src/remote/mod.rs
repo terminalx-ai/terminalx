@@ -5,12 +5,14 @@
 //! - [`server`]: what `terminalx-serve` answers (terminals, files, Git, agent
 //!   sessions).
 //! - [`files`]: `fs/1`, the workspace's files as the runtime serves them.
+//! - [`git`]: `git/1` and the repository facts of `lifecycle/1`.
 //! - [`host`]: the runtime's outbound relay registration.
 //! - [`client`]: the desktop's attach, E2EE and supervision.
 
 pub mod bootstrap_link;
 pub mod client;
 pub mod files;
+pub mod git;
 pub mod host;
 pub mod protocol;
 pub mod server;

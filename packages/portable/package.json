@@ -10,6 +10,7 @@
     "./rpc": "./src/rpc.ts",
     "./transcript": "./src/transcript.ts",
     "./workspace": "./src/workspace.ts",
-    "./workspaceFiles": "./src/workspaceFiles.ts"
+    "./workspaceFiles": "./src/workspaceFiles.ts",
+    "./workspaceGit": "./src/workspaceGit.ts"
   }
 }
