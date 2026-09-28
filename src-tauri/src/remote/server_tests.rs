@@ -519,7 +519,11 @@ async fn the_workspace_key_is_handed_out_over_keys_1_and_only_managers_rotate_it
     let hello = call(&f.rpc, &participant, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["session/1", "keys/1"] })).await.unwrap();
     assert_eq!(hello["capabilities"], json!(["session/1", "keys/1"]));
     assert_eq!(agents.attached(), 2, "each connection that said hello counts as attached");
-    let handout = call(&f.rpc, &participant, "keys.get", json!({})).await.unwrap();
+    // The key opens every tab's checkpoint; participants see no tabs.
+    assert_eq!(code(call(&f.rpc, &participant, "keys.get", json!({})).await), "forbidden");
+    let (keyholder, _events) = Peer::new("device-desk".into(), Authority::Manage);
+    call(&f.rpc, &keyholder, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["keys/1"] })).await.unwrap();
+    let handout = call(&f.rpc, &keyholder, "keys.get", json!({})).await.unwrap();
     let (current, key) = agents.keys.current().unwrap();
     assert_eq!(handout["currentKeyId"], current);
     assert_eq!(handout["keys"][0]["key"], crate::cloud_agents::crypto::b64(&key));
@@ -532,7 +536,7 @@ async fn the_workspace_key_is_handed_out_over_keys_1_and_only_managers_rotate_it
     );
     f.rpc.disconnect(&participant);
     f.rpc.disconnect(&participant);
-    assert_eq!(agents.attached(), 1, "a connection is counted once");
+    assert_eq!(agents.attached(), 2, "a connection is counted once");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -551,4 +555,34 @@ async fn a_manager_rotates_the_key_and_nudges_the_mailbox() {
     call(&f.rpc, &manager, "session.nudge", json!({})).await.unwrap();
     assert!(agents.poll.wait(Duration::ZERO));
     assert_eq!(code(call(&f.rpc, &manager, "session.configure", json!({ "sessionId": "s", "tabId": "t", "clientRequestId": "request-0003" })).await), "not_found");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rotation_tells_key_holders_to_fetch_the_new_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let sink = Arc::new(BroadcastSink::new(64));
+    let terminals = Arc::new(Terminals::new());
+    let rpc = WorkspaceRpc::new(&root, 7, sink.clone(), terminals, None).unwrap();
+    let agents = crate::cloud_agents::CloudAgents::open(&root.join("agents"), Arc::new(NoAgents), Some(sink), None, 7).unwrap();
+    rpc.set_agents(agents.clone());
+    let (holder, mut holder_events) = Peer::new("device-desk".into(), Authority::Manage);
+    call(&rpc, &holder, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["keys/1"] })).await.unwrap();
+    let (other, mut other_events) = Peer::new("device-other".into(), Authority::Manage);
+    call(&rpc, &other, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["fs/1"] })).await.unwrap();
+    agents.rotate_key().unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(5), holder_events.recv()).await.unwrap().unwrap();
+    assert_eq!(event["event"], "keys.changed");
+    assert!(tokio::time::timeout(Duration::from_millis(50), other_events.recv()).await.is_err(), "only key holders are told");
+}
+
+#[test]
+fn session_cursors_expire_with_the_runtime_process() {
+    let f = fixture();
+    let cursor = f.rpc.cursor(30);
+    assert_eq!(f.rpc.parse_cursor(&cursor).unwrap(), 30);
+    // A restarted runtime (same generation, new process) refuses it.
+    let restarted = fixture();
+    assert_eq!(restarted.rpc.parse_cursor(&cursor).unwrap_err().code, "cursor_expired");
+    assert_eq!(f.rpc.parse_cursor("7:30").unwrap_err().code, "cursor_expired", "the pre-PRO-22 form");
 }

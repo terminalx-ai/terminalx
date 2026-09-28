@@ -447,13 +447,8 @@ fn watch_access(agents: Arc<crate::cloud_agents::CloudAgents>, cloud: Arc<crate:
             let narrowed = mode == crate::cloud_bootstrap::AccessMode::Organization && next_mode == crate::cloud_bootstrap::AccessMode::Private;
             let newly_revoked = next_revoked.difference(&revoked).next().is_some();
             if narrowed || newly_revoked {
-                match agents.keys.rotate(crate::cloud_agents::now_ms()) {
-                    Ok(key_id) => {
-                        log::info!("rotated the workspace content key to {key_id} after access narrowed");
-                        for tab in agents.tabs() {
-                            agents.checkpoints.mark(&tab.tab_id, true);
-                        }
-                    }
+                match agents.rotate_key() {
+                    Ok(key_id) => log::info!("rotated the workspace content key to {key_id} after access narrowed"),
                     Err(error) => log::error!("rotate the workspace content key: {error:#}"),
                 }
             }

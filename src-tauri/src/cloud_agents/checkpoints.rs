@@ -40,7 +40,9 @@ pub struct Checkpoints {
     cursors: Mutex<Cursors>,
     dirty: Mutex<HashMap<String, Dirty>>,
     last_upload: Mutex<HashMap<String, Instant>>,
-    removed: Mutex<Vec<String>>,
+    /// Removed tabs: whether their checkpoints are deleted yet, and when to
+    /// try again. A removed tab never uploads again.
+    removed: Mutex<HashMap<String, (bool, Option<Instant>)>>,
     signal: Signal,
 }
 
@@ -57,7 +59,7 @@ impl Checkpoints {
             cursors: Mutex::new(cursors),
             dirty: Mutex::new(HashMap::new()),
             last_upload: Mutex::new(HashMap::new()),
-            removed: Mutex::new(Vec::new()),
+            removed: Mutex::new(HashMap::new()),
             signal: Signal::default(),
         })
     }
@@ -65,6 +67,10 @@ impl Checkpoints {
     /// The tab changed. `urgent` uploads now; otherwise at most once per
     /// coalescing window.
     pub fn mark(&self, tab_id: &str, urgent: bool) {
+        // A removed tab's late events (its process exiting) upload nothing.
+        if self.removed.lock().unwrap().contains_key(tab_id) {
+            return;
+        }
         let mut dirty = self.dirty.lock().unwrap();
         let entry = dirty.entry(tab_id.to_string()).or_insert(Dirty { urgent: false, not_before: None });
         entry.urgent |= urgent;
@@ -74,8 +80,8 @@ impl Checkpoints {
 
     /// The tab was removed: drop its checkpoints on the server.
     pub fn remove(&self, tab_id: &str) {
+        self.removed.lock().unwrap().insert(tab_id.to_string(), (false, None));
         self.dirty.lock().unwrap().remove(tab_id);
-        self.removed.lock().unwrap().push(tab_id.to_string());
         self.signal.raise();
     }
 
@@ -124,6 +130,10 @@ impl Checkpoints {
 pub fn projection(agents: &CloudAgents, tab_id: &str, budget: usize) -> Result<Value> {
     let tab = agents.tab(tab_id).ok_or_else(|| anyhow!("no such tab"))?;
     let events = agents.ops.events(&tab.session_id, tab_id)?;
+    Ok(project(&tab, &events, budget))
+}
+
+fn project(tab: &super::AgentTabInfo, events: &[Value], budget: usize) -> Value {
     let mut kept = Vec::new();
     let mut size = 0;
     for event in events.iter().rev() {
@@ -136,7 +146,7 @@ pub fn projection(agents: &CloudAgents, tab_id: &str, budget: usize) -> Result<V
     }
     let truncated = kept.len() < events.len();
     kept.reverse();
-    Ok(json!({
+    json!({
         "v": 1,
         "sessionId": tab.session_id,
         "tabId": tab.tab_id,
@@ -153,7 +163,7 @@ pub fn projection(agents: &CloudAgents, tab_id: &str, budget: usize) -> Result<V
         "events": kept,
         "truncated": truncated,
         "updatedAt": now_ms(),
-    }))
+    })
 }
 
 /// Build, seal and upload one tab's checkpoint.
@@ -164,10 +174,13 @@ pub fn upload(agents: &CloudAgents, tab_id: &str) -> Result<(), CallError> {
         return Ok(());
     }
     let (key_id, key) = agents.keys.current().ok_or_else(|| transient(anyhow!("no workspace content key")))?;
+    // Removed meanwhile: nothing to upload.
+    let Some(tab) = agents.tab(tab_id) else { return Ok(()) };
+    let events = agents.ops.events(&tab.session_id, tab_id).map_err(transient)?;
     // Halve the event budget until the compressed ciphertext fits.
     let mut budget = PROJECTION_BUDGET;
     let packed = loop {
-        let projection = projection(agents, tab_id, budget).map_err(transient)?;
+        let projection = project(&tab, &events, budget);
         let packed = crypto::gzip(projection.to_string().as_bytes()).map_err(transient)?;
         if packed.len() + 16 <= crypto::MAX_CHECKPOINT_CIPHERTEXT || budget < 4096 {
             break packed;
@@ -212,11 +225,26 @@ pub fn run(agents: &CloudAgents) {
 
 /// Upload every due tab and delete removed ones.
 pub fn flush(agents: &CloudAgents, now: Instant) {
-    let removed: Vec<String> = std::mem::take(&mut *agents.checkpoints.removed.lock().unwrap());
+    let removed: Vec<String> = agents
+        .checkpoints
+        .removed
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, (deleted, retry))| !deleted && retry.is_none_or(|at| now >= at))
+        .map(|(tab, _)| tab.clone())
+        .collect();
     for tab_id in removed {
-        if let Some(api) = &agents.api {
-            if let Err(error) = api.delete_checkpoint(&tab_id) {
+        let Some(api) = &agents.api else { break };
+        let outcome = api.delete_checkpoint(&tab_id);
+        let mut pending = agents.checkpoints.removed.lock().unwrap();
+        match outcome {
+            Ok(()) => {
+                pending.insert(tab_id, (true, None));
+            }
+            Err(error) => {
                 log::warn!("delete checkpoints of {tab_id}: {error}");
+                pending.insert(tab_id, (false, Some(now + RETRY)));
             }
         }
     }

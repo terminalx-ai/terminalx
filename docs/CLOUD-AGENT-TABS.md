@@ -36,12 +36,16 @@ State lives under `<data dir>/cloud-agent/` (0700 directory, 0600 files):
 ### Keys (`keys/1`, §13)
 
 - A WCK is 32 random bytes; `keyId` is 16 random bytes base64url.
-- `keys.get` (participate) → `{ currentKeyId, keys: [{ keyId, key, createdAt, retiredAt? }] }`
-  (`key` base64url). Retired keys stay listed for 7 days so queued commands and
+- `keys.get` (manage) → `{ currentKeyId, keys: [{ keyId, key, createdAt, retiredAt? }] }`
+  (`key` base64url). The contract allows `participate`, but the key opens
+  every tab's checkpoint and nothing is shared with participants yet, so the
+  runtime fails closed. Retired keys stay listed for 7 days so queued commands and
   old checkpoints still decrypt.
 - `keys.rotate` (manage, idempotent) → `{ currentKeyId }`.
 - The runtime rotates by itself when the bootstrap session's `accessMode`
-  narrows to `private` or a new revocation arrives.
+  narrows to `private` or a new revocation arrives. After any rotation,
+  connections with `keys/1` get a `keys.changed` notification and fetch the
+  keys again.
 - A command whose `keyId` is unknown, or was retired more than 24 h before the
   command was created, is rejected with category `key-unknown`.
 
@@ -131,7 +135,11 @@ with the same token; `stale-lease` is final; `stale-generation` leases again.
 ```
 
 Subscribers of `session.subscribe` also get `session.status` notifications:
-`{ subscriptionId, sessionId, tabId, status, process }`. Tab list changes
+`{ subscriptionId, sessionId, tabId, status }` (the process state comes with
+`session.tabs`). Cursors are `<generation>:<process epoch>:<seq>`: a restarted
+runtime numbers events again from the last saved one, so a cursor from
+before a restart is `cursor_expired` and the client resyncs from a full
+replay, merging by event id. Tab list changes
 are sent to every connection with `session/1` as `session.tabs` with
 `{ tabs }` (no subscription id).
 

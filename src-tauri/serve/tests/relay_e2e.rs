@@ -1000,9 +1000,13 @@ async fn cloud_agent_tabs_run_through_the_mailbox_and_survive_disconnects_and_re
     assert_ne!(a_info["status"], "in_progress", "{a_info}");
     // A cursor does not survive a runtime restart: seqs restart from the
     // last persisted event, so a live-only event seen before the restart
-    // (usage) shares its seq with a new one after it, and resuming from that
-    // cursor would skip the new one. Resync each tab from a full replay.
-    // TODO(PRO-22): bind cursors to the runtime epoch, then resume by cursor here.
+    // (usage) could share its seq with a new one after it. The runtime says
+    // so with cursor_expired, and the client resyncs from a full replay.
+    let stale = feeds[&b_tab].cursor.clone().expect("a cursor from before the restart");
+    assert_eq!(
+        desk.refused("session.subscribe", json!({ "sessionId": b_session, "tabId": b_tab, "sinceCursor": stale })).await,
+        "cursor_expired"
+    );
     feeds.remove(&a_tab);
     feeds.remove(&b_tab);
     desk.subscribe_tab(&mut feeds, &b_session, &b_tab).await;

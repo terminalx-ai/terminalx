@@ -35,6 +35,9 @@ pub use receipts::FollowUp;
 /// Emitted on the sink when the tab list or a tab's runtime state changed,
 /// so the workspace RPC tells attached clients.
 pub const TABS_CHANGED: &str = "cloud_agent_tabs_changed";
+/// Emitted when the workspace content key rotated, so connected clients
+/// fetch the new one (`keys.changed`).
+pub const KEYS_CHANGED: &str = "cloud_agent_keys_changed";
 
 /// The workspace the mailbox and checkpoints belong to; part of every AAD.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,8 +196,11 @@ impl AgentOps for ManagerOps {
     }
 
     fn busy(&self, session_id: &str, tab_id: &str) -> bool {
+        // A tab left `waiting` by a lapsed request after a restart has no
+        // process and no turn: it is not busy, and a prompt goes straight in.
         self.manager.turn_open(session_id, tab_id)
-            || matches!(self.manager.status_of(session_id, tab_id), TabStatus::InProgress | TabStatus::Waiting)
+            || (self.manager.is_running(session_id, tab_id)
+                && matches!(self.manager.status_of(session_id, tab_id), TabStatus::InProgress | TabStatus::Waiting))
     }
 
     fn send(&self, session_id: &str, tab_id: &str, text: &str) -> Result<()> {
@@ -383,6 +389,19 @@ impl CloudAgents {
         }
     }
 
+    /// Retire the current key for a new one: new checkpoints are sealed
+    /// with it and connected clients are told to fetch it.
+    pub fn rotate_key(&self) -> Result<String> {
+        let key_id = self.keys.rotate(now_ms())?;
+        if let Some(sink) = &self.sink {
+            sink.emit(KEYS_CHANGED, &serde_json::json!({ "currentKeyId": key_id }));
+        }
+        for tab in self.tabs() {
+            self.checkpoints.mark(&tab.tab_id, true);
+        }
+        Ok(key_id)
+    }
+
     /// A tab's turn may have ended: send its next follow-up if so.
     pub fn nudge_follow_ups(&self, tab_id: &str) {
         let mut pending = self.dispatch.lock().unwrap();
@@ -438,9 +457,9 @@ impl CloudAgents {
                     let (Some(agents), Ok(status)) = (weak.upgrade(), serde_json::from_str::<Status>(payload)) else { return };
                     // Listeners run on the emitting thread, under the tab's
                     // lock: only queue work here.
-                    if matches!(status.status, TabStatus::Idle | TabStatus::Completed) {
-                        agents.nudge_follow_ups(&status.tab_id);
-                    }
+                    // Any change may end a turn; the dispatcher checks.
+                    let _ = status.status;
+                    agents.nudge_follow_ups(&status.tab_id);
                     agents.changed(Some(&status.tab_id), true);
                 }),
             );

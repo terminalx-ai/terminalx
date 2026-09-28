@@ -275,6 +275,15 @@ impl WorkspaceRpc {
         sink.listen(crate::cloud_agents::TABS_CHANGED, Box::new(move |_| notify.notify_one()));
         let weak = Arc::downgrade(&rpc);
         sink.listen(
+            crate::cloud_agents::KEYS_CHANGED,
+            Box::new(move |_| {
+                if let Some(rpc) = weak.upgrade() {
+                    rpc.notify_granted("keys/1", "keys.changed", json!({}));
+                }
+            }),
+        );
+        let weak = Arc::downgrade(&rpc);
+        sink.listen(
             "agent_event",
             Box::new(move |payload| {
                 if let (Some(rpc), Ok(event)) = (weak.upgrade(), serde_json::from_str::<AgentEvent>(payload)) {
@@ -314,12 +323,23 @@ impl WorkspaceRpc {
         self.agents.get().ok_or_else(|| RpcError::new("unavailable", "agent tabs are not served by this runtime"))
     }
 
+    fn live_peers(&self) -> Vec<Arc<Peer>> {
+        let mut peers = self.peers.lock().unwrap();
+        peers.retain(|_, peer| peer.strong_count() > 0);
+        peers.values().filter_map(Weak::upgrade).collect()
+    }
+
+    /// Tell every connection that was granted `capability`.
+    fn notify_granted(&self, capability: &str, event: &str, params: Value) {
+        for peer in self.live_peers() {
+            if peer.granted.lock().unwrap().as_ref().is_some_and(|granted| granted.contains(capability)) {
+                peer.notify(event, params.clone());
+            }
+        }
+    }
+
     fn broadcast_tabs(&self, tabs: &[crate::cloud_agents::AgentTabInfo]) {
-        let peers: Vec<Arc<Peer>> = {
-            let mut peers = self.peers.lock().unwrap();
-            peers.retain(|_, peer| peer.strong_count() > 0);
-            peers.values().filter_map(Weak::upgrade).collect()
-        };
+        let peers = self.live_peers();
         let shared = self.shared_sessions.lock().unwrap().clone();
         for peer in peers {
             if !peer.granted.lock().unwrap().as_ref().is_some_and(|granted| granted.contains("session/1")) {
@@ -461,13 +481,8 @@ impl WorkspaceRpc {
             }
             "keys.get" => Ok(self.agents()?.keys.handout(crate::cloud_agents::now_ms())),
             "keys.rotate" => {
-                let agents = self.agents()?;
-                agents.keys.rotate(crate::cloud_agents::now_ms()).map_err(RpcError::internal)?;
-                // New checkpoints go out under the new key.
-                for tab in agents.tabs() {
-                    agents.checkpoints.mark(&tab.tab_id, true);
-                }
-                Ok(json!({ "currentKeyId": agents.keys.current().map(|(id, _)| id) }))
+                let key_id = self.agents()?.rotate_key().map_err(RpcError::internal)?;
+                Ok(json!({ "currentKeyId": key_id }))
             }
             other => Err(RpcError::new("method_not_found", format!("{other} is not a workspace method"))),
         }
@@ -1531,15 +1546,19 @@ impl WorkspaceRpc {
         }
     }
 
-    /// Cursors are opaque to clients and bound to this runtime generation.
+    /// Cursors are opaque to clients and bound to this runtime generation
+    /// and process: a restarted runtime numbers events again from the last
+    /// saved one, so a live-only event seen before the restart can share its
+    /// seq with a new one after it. Such a cursor is expired, not resumed.
     fn cursor(&self, seq: u64) -> String {
-        format!("{}:{seq}", self.generation())
+        format!("{}:{}:{seq}", self.generation(), self.epoch)
     }
 
     fn parse_cursor(&self, cursor: &str) -> Result<u64, RpcError> {
-        let expired = || RpcError::new("cursor_expired", "the cursor belongs to another runtime generation");
-        let (generation, seq) = cursor.split_once(':').ok_or_else(expired)?;
-        if generation.parse::<u64>().ok() != Some(self.generation()) {
+        let expired = || RpcError::new("cursor_expired", "the cursor belongs to another runtime generation or process");
+        let mut parts = cursor.splitn(3, ':');
+        let (Some(generation), Some(epoch), Some(seq)) = (parts.next(), parts.next(), parts.next()) else { return Err(expired()) };
+        if generation.parse::<u64>().ok() != Some(self.generation()) || epoch != self.epoch {
             return Err(expired());
         }
         seq.parse().map_err(|_| expired())

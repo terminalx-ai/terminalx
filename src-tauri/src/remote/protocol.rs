@@ -65,8 +65,10 @@ pub const METHODS: &[Method] = &[
     method("session.configure", "session/1", Manage, true),
     method("session.markRead", "session/1", Participate, false),
     method("session.nudge", "session/1", Participate, false),
-    // The workspace content key travels only over the E2EE channel.
-    method("keys.get", "keys/1", Participate, false),
+    // The workspace content key travels only over the E2EE channel. It
+    // opens every tab's checkpoint, so only `manage` gets it until tabs can
+    // be shared with participants.
+    method("keys.get", "keys/1", Manage, false),
     method("keys.rotate", "keys/1", Manage, true),
     method("session.unsubscribe", "session/1", Participate, false),
     method("pty.create", "pty/1", Manage, true),

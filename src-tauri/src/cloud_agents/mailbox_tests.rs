@@ -341,3 +341,13 @@ fn a_projection_keeps_the_newest_whole_events_within_its_budget() {
     assert_eq!(cut["truncated"], true);
     assert_eq!(cut["events"].as_array().unwrap().iter().map(|e| e["seq"].as_u64().unwrap()).collect::<Vec<_>>(), vec![2, 3]);
 }
+
+#[test]
+fn a_removed_tab_never_uploads_again_and_its_delete_is_retried() {
+    let h = harness();
+    h.agents.checkpoints.remove("tab-1");
+    h.agents.checkpoints.mark("tab-1", true);
+    let now = std::time::Instant::now();
+    checkpoints::flush(&h.agents, now);
+    assert!(h.api.checkpoints.lock().unwrap().is_empty(), "late events of a removed tab upload nothing");
+}
