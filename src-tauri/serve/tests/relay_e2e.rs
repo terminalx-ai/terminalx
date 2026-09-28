@@ -36,6 +36,8 @@ use raccoon_lib::remote::protocol::Activation;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
+mod common;
+
 const WAIT: Duration = Duration::from_secs(45);
 
 struct Harness {
@@ -656,4 +658,323 @@ async fn cloud_terminals_keep_identity_order_and_ownership_through_the_relay() {
     desk.supervisor.stop();
     drop(runtime);
     let _ = std::fs::remove_dir_all(&data);
+}
+
+// ---------------------------------------------------------------- PRO-22
+
+/// A tab's committed agent events as one client saw them, from subscription
+/// replays and live `session.event` notifications.
+#[derive(Default)]
+struct Feed {
+    events: Vec<Value>,
+    cursor: Option<String>,
+}
+
+impl Feed {
+    fn texts(&self, kind: &str) -> Vec<String> {
+        common::agent::texts(&self.events, kind)
+    }
+
+    fn count(&self, kind: &str) -> usize {
+        common::agent::count(&self.events, kind)
+    }
+
+    /// Take one event. Seqs only grow: an older one must be a replay of an
+    /// event already held (a resubscribe's overlap), never a new one.
+    fn push(&mut self, event: Value, cursor: Option<String>) {
+        let seq = event["seq"].as_u64().expect("an event seq");
+        if let Some(last) = self.events.last().and_then(|e| e["seq"].as_u64()) {
+            if seq <= last {
+                assert!(self.events.iter().any(|e| e["id"] == event["id"]), "an event went back in time: {seq} after {last}");
+                return;
+            }
+        }
+        self.events.push(event);
+        if cursor.is_some() {
+            self.cursor = cursor;
+        }
+    }
+}
+
+type Feeds = std::collections::HashMap<String, Feed>;
+
+impl Client {
+    async fn subscribe_tab(&mut self, feeds: &mut Feeds, session_id: &str, tab_id: &str) -> String {
+        let feed = feeds.entry(tab_id.to_string()).or_default();
+        let mut params = json!({ "sessionId": session_id, "tabId": tab_id });
+        if let Some(cursor) = &feed.cursor {
+            params["sinceCursor"] = json!(cursor);
+        }
+        let result = self.ok("session.subscribe", params).await;
+        let feed = feeds.get_mut(tab_id).unwrap();
+        for entry in result["events"].as_array().unwrap() {
+            feed.push(entry["event"].clone(), entry["cursor"].as_str().map(String::from));
+        }
+        if let Some(cursor) = result["cursor"].as_str() {
+            feed.cursor = Some(cursor.to_string());
+        }
+        result["subscriptionId"].as_str().unwrap().to_string()
+    }
+
+    /// Route every `session.event` notification into its tab's feed.
+    fn route_session_events(&mut self, feeds: &mut Feeds) {
+        let (events, rest): (Vec<Value>, Vec<Value>) = std::mem::take(&mut self.notifications).into_iter().partition(|n| n["event"] == "session.event");
+        self.notifications = rest;
+        for notification in events {
+            let event = notification["params"]["event"].clone();
+            let tab = event["tabId"].as_str().unwrap_or_default().to_string();
+            feeds.entry(tab).or_default().push(event, notification["params"]["cursor"].as_str().map(String::from));
+        }
+    }
+
+    /// Wait until `done` holds for a tab's feed.
+    async fn until_tab(&mut self, feeds: &mut Feeds, tab_id: &str, what: &str, done: impl Fn(&Feed) -> bool) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            self.route_session_events(feeds);
+            if feeds.get(tab_id).is_some_and(&done) {
+                return;
+            }
+            match tokio::time::timeout_at(deadline, self.events.recv()).await {
+                Ok(Some(ClientEvent::Message(message))) => self.notifications.push(message),
+                Ok(Some(ClientEvent::State(state))) => self.states.push(state),
+                Ok(None) => panic!("{what}: the client stopped"),
+                Err(_) => panic!("{what}: timed out; {:?}", feeds.get(tab_id).map(|f| common::agent::kinds(&f.events))),
+            }
+        }
+    }
+}
+
+/// The workspace content keys a client got from `keys.get`.
+async fn workspace_keys(client: &mut Client) -> (String, std::collections::HashMap<String, [u8; 32]>) {
+    let keys = client.ok("keys.get", json!({})).await;
+    let map = keys["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| (k["keyId"].as_str().unwrap().to_string(), raccoon_lib::cloud_agents::crypto::key_from_b64(k["key"].as_str().unwrap()).unwrap()))
+        .collect();
+    (keys["currentKeyId"].as_str().unwrap().to_string(), map)
+}
+
+/// Block the test (not the runtime) until a mailbox command settles.
+fn settled(mailbox: &common::mailbox::FakeMailbox, id: &str) -> common::mailbox::Command {
+    tokio::task::block_in_place(|| mailbox.settled(id, Duration::from_secs(90)))
+}
+
+fn has(feed: &Feed, text: &str) -> bool {
+    feed.texts("assistant_text").iter().any(|t| t == text)
+}
+
+/// PRO-22: agent tabs of a cloud workspace. The agent is the fake Claude Code
+/// under the real harness; commands travel only through the (fake) API
+/// mailbox, encrypted under the key the runtime handed out over the relay.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs terminalx-saas, bun and Redis: scripts/remote-runtime/e2e.sh"]
+async fn cloud_agent_tabs_run_through_the_mailbox_and_survive_disconnects_and_restarts() {
+    use common::agent::{AgentWorld, Serve};
+    use common::mailbox::FakeMailbox;
+
+    assert!(std::process::Command::new("python3").arg("--version").output().is_ok(), "the fake agent needs python3");
+    let harness = Harness::start();
+    let world = AgentWorld::new();
+    let mailbox = FakeMailbox::start(7);
+    let mut secret = [0u8; 32];
+    secret[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    secret[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    let relay_host_id = relay_host_id_for_secret(secret);
+    let relay_token = harness.post("/runtime-token", json!({ "relayHostId": relay_host_id, "runtimeGeneration": 7 }))["relayToken"].as_str().unwrap().to_string();
+    let link_dir = tempfile::tempdir().unwrap();
+    let link = link_dir.path().join("link.json");
+    let device_token = uuid::Uuid::new_v4().simple().to_string();
+    std::fs::write(
+        &link,
+        json!({
+            "v": 1, "hostSecretB64": STANDARD.encode(secret), "relayToken": relay_token, "directorUrl": harness.director,
+            "attachments": [attachment("att-agents", "desktop-agents", &device_token, "runtime")],
+            "mailbox": mailbox.link_section(),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let start = || {
+        let mut command = world.command();
+        command.args(["--runtime-kind", "cloud-workspace", "--relay-link"]).arg(&link);
+        let serve = Serve::start(command, &world.data);
+        common::agent::wait_until("relay registration", || {
+            serve.lines.lock().unwrap().iter().rev().find(|l| l["type"] == "relay" && l["status"]["state"] == "registered").cloned()
+        });
+        serve
+    };
+    let mut runtime = start();
+    let pairing_dir = link_dir.path().join("link.json.attachments");
+    let desk_source = || source(&harness, &pairing_dir, "att-agents", "desktop-agents", &relay_host_id);
+    let mut desk = Client::start(desk_source());
+    let ClientState::Connected { capabilities, .. } = desk.connected().await else { unreachable!() };
+    assert!(capabilities.iter().any(|c| c == "keys/1"), "{capabilities:?}");
+    let (key_id, keys) = workspace_keys(&mut desk).await;
+    let key = keys[&key_id];
+    let mut feeds = Feeds::new();
+    let send = |tab: &str, kind: &str, plaintext: Value| mailbox.enqueue(&key_id, &key, tab, kind, plaintext, "manage");
+
+    // Two agent tabs, each its own process and conversation.
+    let a = desk.ok("session.create", json!({ "agent": "claude", "mode": "manual", "clientRequestId": "e2e-agent-create-a" })).await;
+    let b = desk.ok("session.create", json!({ "agent": "claude", "mode": "manual", "clientRequestId": "e2e-agent-create-b" })).await;
+    let (a_session, a_tab) = (a["sessionId"].as_str().unwrap().to_string(), a["tabId"].as_str().unwrap().to_string());
+    let (b_session, b_tab) = (b["sessionId"].as_str().unwrap().to_string(), b["tabId"].as_str().unwrap().to_string());
+    assert_ne!(a_tab, b_tab);
+    let listed = desk.ok("session.tabs", json!({})).await;
+    assert_eq!(listed["tabs"].as_array().unwrap().len(), 2, "{listed}");
+    desk.subscribe_tab(&mut feeds, &a_session, &a_tab).await;
+    desk.subscribe_tab(&mut feeds, &b_session, &b_tab).await;
+    let first_a = send(&a_tab, "send", json!({ "v": 1, "text": "slow:8:400" }));
+    let first_b = send(&b_tab, "send", json!({ "v": 1, "text": "echo:from B" }));
+    desk.ok("session.nudge", json!({})).await;
+    desk.until_tab(&mut feeds, &b_tab, "B's reply", |f| has(f, "from B")).await;
+    assert_eq!(settled(&mailbox, &first_b).state, "applied");
+
+    // The stream is cut mid-turn: a new connection resumes from the cursor,
+    // with nothing lost and nothing twice.
+    desk.until_tab(&mut feeds, &a_tab, "A's second chunk", |f| has(f, "chunk 2 of 8")).await;
+    desk.supervisor.stop();
+    let mut desk = Client::start(desk_source());
+    desk.connected().await;
+    desk.subscribe_tab(&mut feeds, &a_session, &a_tab).await;
+    desk.subscribe_tab(&mut feeds, &b_session, &b_tab).await;
+    desk.until_tab(&mut feeds, &a_tab, "A's turn to end", |f| f.count("turn_completed") >= 1).await;
+    assert_eq!(settled(&mailbox, &first_a).state, "applied");
+    let chunks = feeds[&a_tab].texts("assistant_text");
+    assert_eq!(chunks, (1..=8).map(|i| format!("chunk {i} of 8")).collect::<Vec<_>>(), "every chunk once, in order");
+    assert!(!feeds[&b_tab].texts("assistant_text").iter().any(|t| t.starts_with("chunk")), "the conversations stay apart");
+
+    // A follow-up sent while the tab is busy waits for the turn, then goes.
+    let long = send(&a_tab, "send", json!({ "v": 1, "text": "slow:5:400" }));
+    desk.ok("session.nudge", json!({})).await;
+    desk.until_tab(&mut feeds, &a_tab, "the long turn", |f| has(f, "chunk 1 of 5")).await;
+    let follow_up = send(&a_tab, "send", json!({ "v": 1, "text": "echo:the follow-up" }));
+    desk.ok("session.nudge", json!({})).await;
+    assert_eq!(settled(&mailbox, &long).state, "applied");
+    assert_eq!(settled(&mailbox, &follow_up).state, "applied");
+    let receipt = mailbox.receipt(&follow_up, &keys).expect("an encrypted receipt");
+    assert_eq!(receipt["queued"], true, "{receipt}");
+    desk.until_tab(&mut feeds, &a_tab, "the follow-up's reply", |f| has(f, "the follow-up")).await;
+    {
+        let events = &feeds[&a_tab].events;
+        let last_chunk = events.iter().position(|e| e["payload"]["text"] == "chunk 5 of 5").unwrap();
+        let prompt = events.iter().rposition(|e| e["payload"]["type"] == "user_message" && e["payload"]["text"] == "echo:the follow-up").unwrap();
+        assert!(prompt > last_chunk, "the follow-up went after the turn it waited for");
+    }
+    assert_eq!(feeds[&a_tab].texts("user_message").iter().filter(|t| *t == "echo:the follow-up").count(), 1);
+
+    // A waiting approval, answered through the mailbox exactly once even
+    // though the first ack is lost and the lease is redelivered.
+    let ask = send(&b_tab, "send", json!({ "v": 1, "text": "ask:touch approved.txt" }));
+    desk.ok("session.nudge", json!({})).await;
+    desk.until_tab(&mut feeds, &b_tab, "the permission card", |f| f.count("permission_requested") >= 1).await;
+    settled(&mailbox, &ask);
+    let request = feeds[&b_tab].events.iter().find(|e| e["payload"]["type"] == "permission_requested").unwrap()["payload"]["requestId"].as_str().unwrap().to_string();
+    let listed = desk.ok("session.tabs", json!({})).await;
+    let b_info = listed["tabs"].as_array().unwrap().iter().find(|t| t["tabId"] == b_tab.as_str()).unwrap().clone();
+    assert_eq!(b_info["status"], "waiting", "{b_info}");
+    assert_eq!(b_info["pendingPermissions"][0]["requestId"], request.as_str());
+    let decision = send(&b_tab, "permission-decision", json!({ "v": 1, "requestId": request, "optionId": "allow" }));
+    mailbox.fail_acks(&decision, u32::MAX);
+    desk.ok("session.nudge", json!({})).await;
+    desk.until_tab(&mut feeds, &b_tab, "the allowed tool", |f| has(f, "allowed: touch approved.txt")).await;
+    tokio::task::block_in_place(|| common::agent::wait_until("a lost ack", || mailbox.acks_for(&decision).iter().any(|(_, status)| *status == 503).then_some(())));
+    mailbox.state.lock().unwrap().fail_acks.clear();
+    mailbox.expire_leases();
+    desk.ok("session.nudge", json!({})).await;
+    let applied = settled(&mailbox, &decision);
+    assert_eq!(applied.state, "applied", "the redelivery acks the stored receipt: {applied:?}");
+    assert!(applied.lease_count >= 2, "it was redelivered: {applied:?}");
+    assert_eq!(feeds[&b_tab].count("permission_requested"), 1);
+    assert_eq!(feeds[&b_tab].texts("assistant_text").iter().filter(|t| t.starts_with("allowed:")).count(), 1);
+    // The same decision again is a new command: refused as not pending, not applied twice.
+    let again = send(&b_tab, "permission-decision", json!({ "v": 1, "requestId": request, "optionId": "allow" }));
+    desk.ok("session.nudge", json!({})).await;
+    let refused = settled(&mailbox, &again);
+    assert_eq!((refused.state.as_str(), refused.category.as_deref()), ("rejected", Some("request-not-pending")));
+
+    // Steering reaches the running turn; stop ends it.
+    let running = send(&a_tab, "send", json!({ "v": 1, "text": "slow:40:300" }));
+    desk.ok("session.nudge", json!({})).await;
+    desk.until_tab(&mut feeds, &a_tab, "the turn to steer", |f| has(f, "chunk 2 of 40")).await;
+    let steer = send(&a_tab, "steer", json!({ "v": 1, "text": "prefer the shorter path" }));
+    desk.ok("session.nudge", json!({})).await;
+    desk.until_tab(&mut feeds, &a_tab, "the steer's answer", |f| has(f, "steered: prefer the shorter path")).await;
+    assert_eq!(settled(&mailbox, &steer).state, "applied");
+    assert_eq!(settled(&mailbox, &running).state, "applied");
+    let stop = send(&a_tab, "stop", json!({ "v": 1 }));
+    desk.ok("session.nudge", json!({})).await;
+    assert_eq!(settled(&mailbox, &stop).state, "applied");
+    desk.until_tab(&mut feeds, &a_tab, "the stopped turn", |f| {
+        f.events.iter().any(|e| e["payload"]["type"] == "turn_completed" && e["payload"]["status"] == "aborted")
+    })
+    .await;
+    assert!(!has(&feeds[&a_tab], "chunk 40 of 40"), "stop ended the turn");
+
+    // The user goes away mid-turn; the turn finishes without them, and the
+    // transcript is all there on the next attach and in the checkpoint.
+    let away = send(&b_tab, "send", json!({ "v": 1, "text": "slow:6:300" }));
+    desk.ok("session.nudge", json!({})).await;
+    desk.until_tab(&mut feeds, &b_tab, "the unattended turn", |f| has(f, "chunk 1 of 6")).await;
+    desk.supervisor.stop();
+    assert_eq!(settled(&mailbox, &away).state, "applied");
+    let checkpoint = tokio::task::block_in_place(|| {
+        common::agent::wait_until("B's checkpoint of the finished turn", || {
+            mailbox
+                .checkpoint(&b_tab, &keys)
+                .filter(|(_, _, projection)| common::agent::texts(projection["events"].as_array().unwrap(), "assistant_text").contains(&"chunk 6 of 6".to_string()))
+        })
+    });
+    assert_eq!(checkpoint.2["tabId"], b_tab.as_str());
+    let mut desk = Client::start(desk_source());
+    desk.connected().await;
+    desk.subscribe_tab(&mut feeds, &a_session, &a_tab).await;
+    desk.subscribe_tab(&mut feeds, &b_session, &b_tab).await;
+    desk.until_tab(&mut feeds, &b_tab, "the recovered transcript", |f| has(f, "chunk 6 of 6")).await;
+    assert_eq!(feeds[&b_tab].texts("assistant_text").iter().filter(|t| t.starts_with("chunk ")).count(), 6);
+
+    // The runtime dies mid-turn and comes back on the same disk: a command it
+    // applied but could not ack is acked from its receipt, not sent again,
+    // and the interrupted tab says its process ended.
+    let dying = send(&a_tab, "send", json!({ "v": 1, "text": "slow:60:300" }));
+    desk.ok("session.nudge", json!({})).await;
+    desk.until_tab(&mut feeds, &a_tab, "the doomed turn", |f| has(f, "chunk 2 of 60")).await;
+    let unacked = send(&b_tab, "send", json!({ "v": 1, "text": "echo:before the restart" }));
+    mailbox.fail_acks(&unacked, u32::MAX);
+    desk.ok("session.nudge", json!({})).await;
+    desk.until_tab(&mut feeds, &b_tab, "the unacked reply", |f| has(f, "before the restart")).await;
+    tokio::task::block_in_place(|| common::agent::wait_until("the lost ack", || mailbox.acks_for(&unacked).iter().any(|(_, s)| *s == 503).then_some(())));
+    runtime.kill();
+    desk.state(|state| matches!(state, ClientState::Reconnecting { .. } | ClientState::WaitingForRuntime)).await;
+    mailbox.state.lock().unwrap().fail_acks.clear();
+    mailbox.expire_leases();
+    let incarnations = mailbox.state.lock().unwrap().incarnations.len();
+    runtime = start();
+    desk.connected().await;
+    assert_eq!(settled(&mailbox, &unacked).state, "applied");
+    assert_eq!(mailbox.state.lock().unwrap().incarnations.len(), incarnations, "the receipt store survived the restart");
+    assert_eq!(settled(&mailbox, &dying).state, "applied");
+    let (key_after, keys_after) = workspace_keys(&mut desk).await;
+    assert_eq!(key_after, key_id, "the workspace key survived the restart");
+    let tabs = desk.ok("session.tabs", json!({})).await;
+    let a_info = tabs["tabs"].as_array().unwrap().iter().find(|t| t["tabId"] == a_tab.as_str()).unwrap().clone();
+    assert_ne!(a_info["process"], "running", "{a_info}");
+    assert_ne!(a_info["status"], "in_progress", "{a_info}");
+    desk.subscribe_tab(&mut feeds, &b_session, &b_tab).await;
+    let b_replies = feeds[&b_tab].texts("assistant_text");
+    assert_eq!(b_replies.iter().filter(|t| *t == "before the restart").count(), 1, "applied once: {b_replies:?}");
+    let a_checkpoint = mailbox.checkpoint(&a_tab, &keys_after).expect("A's checkpoint");
+    assert!(common::agent::texts(a_checkpoint.2["events"].as_array().unwrap(), "assistant_text").contains(&"chunk 2 of 60".to_string()));
+
+    // The tab resumes its saved conversation on the next prompt.
+    let resumed = send(&a_tab, "send", json!({ "v": 1, "text": "echo:after the restart" }));
+    desk.ok("session.nudge", json!({})).await;
+    assert_eq!(settled(&mailbox, &resumed).state, "applied");
+    desk.subscribe_tab(&mut feeds, &a_session, &a_tab).await;
+    desk.until_tab(&mut feeds, &a_tab, "the resumed reply", |f| has(f, "after the restart")).await;
+    desk.supervisor.stop();
+    drop(runtime);
 }

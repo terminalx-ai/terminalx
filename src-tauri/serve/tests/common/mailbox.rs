@@ -87,6 +87,9 @@ pub struct State {
     pub incarnations: Vec<String>,
     pub deleted_checkpoints: Vec<String>,
     pub lease_ttl: Duration,
+    /// Acks of these commands answer 503 without settling, this many more
+    /// times (`u32::MAX`: until cleared), as a lost ack response would.
+    pub fail_acks: HashMap<String, u32>,
     next: u64,
 }
 
@@ -185,6 +188,10 @@ impl FakeMailbox {
         }
     }
 
+    pub fn fail_acks(&self, client_command_id: &str, times: u32) {
+        self.state.lock().unwrap().fail_acks.insert(client_command_id.to_string(), times);
+    }
+
     pub fn acks_for(&self, client_command_id: &str) -> Vec<(String, u16)> {
         self.state.lock().unwrap().acks.iter().filter(|(id, _, _)| id == client_command_id).map(|(_, outcome, status)| (outcome.clone(), *status)).collect()
     }
@@ -232,6 +239,7 @@ fn serve(stream: TcpStream, state: &Mutex<State>) {
     let reason = match status {
         200 => "OK",
         401 => "Unauthorized",
+        503 => "Service Unavailable",
         404 => "Not Found",
         409 => "Conflict",
         _ => "Error",
@@ -337,8 +345,13 @@ fn ack(command_id: &str, body: &Value, state: &mut State) -> (u16, Value) {
     if !matches!(outcome.as_str(), "applied" | "rejected" | "outcome-unknown") {
         return (401, json!({ "error": "cloud_workspace_bootstrap_invalid" }));
     }
+    let client_id = state.commands[index].client_command_id.clone();
+    if let Some(left) = state.fail_acks.get_mut(&client_id).filter(|left| **left > 0) {
+        *left = left.saturating_sub(if *left == u32::MAX { 0 } else { 1 });
+        state.acks.push((client_id, outcome, 503));
+        return (503, json!({ "error": "unavailable" }));
+    }
     let command = &mut state.commands[index];
-    let client_id = command.client_command_id.clone();
     let (status, reply) = if command.settled() {
         match &command.settled_by {
             Some((by, settled_outcome)) if *by == token && *settled_outcome == outcome => (200, json!({ "acknowledged": true, "command": command.json() })),
