@@ -51,6 +51,9 @@ export async function selectTranscriptionInput(selected: string | null) {
   update({ saving: true, error: null });
   try {
     await transcription.setInput(selected);
+    // A surface mounted during the save may have read the old preference.
+    // Its delayed response must not replace the newly persisted selection.
+    revision++;
     update({ loaded: true, selected });
   } catch (error) {
     update({ error: errorMessage(error) });

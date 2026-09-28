@@ -1,4 +1,4 @@
-import { atPairingStage, PairingError, preferPairingFailure } from "./errors";
+import { PairingFailure, pairingStep } from "./errors";
 import { directEndpoints } from "../transport/direct-endpoints";
 import { sha256 } from "@noble/hashes/sha256";
 import { z } from "zod";
@@ -11,7 +11,7 @@ import {
   type PairingOffer,
 } from "./contracts";
 import { base64Url, utf8 } from "./bytes";
-import { RelayClient } from "../transport/relay-client";
+import { RelayClient, RelayOuterError } from "../transport/relay-client";
 import { loadOrCreateE2EESecretKey } from "../transport/e2ee-keypair";
 import { savePairedHost, type StoredHost } from "../store/hosts";
 import {
@@ -44,12 +44,12 @@ export async function pairFromOffer(args: {
   provenance: StoredHost["provenance"];
 }): Promise<StoredHost> {
   const { offer } = args;
-  const clientSecretKey = await atPairingStage("persistence", loadOrCreateE2EESecretKey);
+  const clientSecretKey = await pairingStep("persistence", loadOrCreateE2EESecretKey);
   if (!offer.relay) return pairDirect(args, clientSecretKey);
-  const existing = await atPairingStage("persistence", readPairingJournal);
-  if (existing && !journalMatchesOffer(existing, offer)) await atPairingStage("persistence", clearPairingJournal);
+  const existing = await pairingStep("persistence", readPairingJournal);
+  if (existing && !journalMatchesOffer(existing, offer)) await pairingStep("persistence", clearPairingJournal);
   if (existing && journalMatchesOffer(existing, offer)) return recoverPairing(existing, clientSecretKey);
-  const journal = await atPairingStage("persistence", () => createPairingJournal({
+  const journal = await pairingStep("persistence", () => createPairingJournal({
     ...args,
     offer: offer as PairingOffer & { relay: NonNullable<PairingOffer["relay"]> },
   }));
@@ -57,8 +57,8 @@ export async function pairFromOffer(args: {
 }
 
 export async function recoverPendingPairing(): Promise<StoredHost | null> {
-  const journal = await atPairingStage("persistence", readPairingJournal);
-  return journal ? recoverPairing(journal, await atPairingStage("persistence", loadOrCreateE2EESecretKey)) : null;
+  const journal = await pairingStep("persistence", readPairingJournal);
+  return journal ? recoverPairing(journal, await pairingStep("persistence", loadOrCreateE2EESecretKey)) : null;
 }
 
 async function finishNewPairing(journal: PairingJournal, clientSecretKey: Uint8Array): Promise<StoredHost> {
@@ -67,7 +67,7 @@ async function finishNewPairing(journal: PairingJournal, clientSecretKey: Uint8A
   if (offer.relay.inviteExpiresAt > Date.now()) candidates.push(inviteCandidate(offer, clientSecretKey));
   const winner = await firstVerified(candidates);
   try {
-    const { installed, endpoints } = await atPairingStage("credential-installation", () => provisionCredential(winner, journal), winner.path);
+    const { installed, endpoints } = await provisionCredential(winner, journal);
     return publishCommitted(journal, installed, endpoints);
   } finally {
     winner.client.close();
@@ -82,27 +82,27 @@ async function recoverPairing(journal: PairingJournal, clientSecretKey: Uint8Arr
   ];
   if (offer.relay.inviteExpiresAt > Date.now()) candidates.push(async () => inviteCandidate(offer, clientSecretKey));
 
-  let lastError: unknown;
+  let lastError: unknown = new Error("Pairing recovery has no usable credential");
   for (const createCandidate of candidates) {
     let candidate: PairingCandidate | null = null;
     try {
       candidate = await createCandidate();
       await verifyCandidate(candidate);
-      const endpoints = await atPairingStage("credential-installation", () => pairingEndpoints(candidate!.client, journal.metadata.installReqId), candidate.path);
+      const endpoints = await pairingEndpoints(candidate.client, journal.metadata.installReqId);
       if (endpoints.installStatus?.state === "committed") {
         return publishCommitted(journal, endpoints.installStatus.result, endpoints);
       }
       if (candidate.credentialKind !== "resume") {
-        const provisioned = await atPairingStage("credential-installation", () => provisionCredential(candidate!, journal), candidate.path);
+        const provisioned = await provisionCredential(candidate, journal);
         return publishCommitted(journal, provisioned.installed, provisioned.endpoints);
       }
     } catch (cause) {
-      lastError = preferPairingFailure(lastError, cause);
+      lastError = cause;
     } finally {
       candidate?.client.close();
     }
   }
-  throw lastError ?? new PairingError("credential-installation", "credential-rejected");
+  throw lastError;
 }
 
 async function pairDirect(args: {
@@ -122,7 +122,7 @@ async function pairDirect(args: {
       lastConnectedAt: Date.now(),
       provenance: args.provenance,
     };
-    await atPairingStage("persistence", () => savePairedHost(host, { v: 1, deviceToken: args.offer.deviceToken }));
+    await pairingStep("persistence", () => savePairedHost(host, { v: 1, deviceToken: args.offer.deviceToken }));
     return host;
   } finally {
     client.close();
@@ -151,7 +151,7 @@ function firstVerified(candidates: PairingCandidate[]): Promise<PairingCandidate
         });
       }).catch((error: unknown) => {
         candidate.client.close();
-        lastError = preferPairingFailure(lastError, error);
+        lastError = error;
         failures++;
         if (!settled && failures === candidates.length && successes.length === 0) reject(lastError);
       });
@@ -160,12 +160,18 @@ function firstVerified(candidates: PairingCandidate[]): Promise<PairingCandidate
 }
 
 async function verifyCandidate(candidate: PairingCandidate): Promise<void> {
-  await atPairingStage("transport", () => candidate.client.connect(), candidate.path);
-  await atPairingStage("host-verification", async () => {
+  await pairingStep("transport", async () => {
+    try { await candidate.client.connect(); }
+    catch (cause) {
+      if (cause instanceof RelayOuterError) throw new PairingFailure("transport", cause.code >= 4000 ? "relay-rejected" : "connection-failed", cause.code);
+      throw cause;
+    }
+  });
+  await pairingStep("host-verification", async () => {
     const status = await candidate.client.request("status.get");
-    if (!status.ok) throw new Error("Host status refused");
+    if (!status.ok) throw new PairingFailure("host-verification");
     HostStatusSchema.parse(status.value);
-  }, candidate.path);
+  });
 }
 
 function directCandidate(offer: PairingOffer, clientSecretKey: Uint8Array): PairingCandidate {
@@ -241,12 +247,16 @@ async function resolveResumeRelay(
 }
 
 async function provisionCredential(candidate: PairingCandidate, journal: PairingJournal) {
+  return pairingStep("credential-installation", () => installCredential(candidate, journal));
+}
+
+async function installCredential(candidate: PairingCandidate, journal: PairingJournal) {
   const resumeHash = base64Url(sha256(utf8(journal.secrets.pendingResumeToken)));
   const provision = await candidate.client.request("pairing.provisionRelay", {
     reqId: journal.metadata.installReqId,
     newResumeTokenHash: resumeHash,
   });
-  if (!provision.ok) throw new Error("Credential installation refused");
+  if (!provision.ok) throw new Error(`${provision.refusal.code}: ${provision.refusal.message}`);
   const installed = DeviceCredentialInstalledSchema.parse(provision.value);
   const expectedMode = candidate.path === "direct" ? "authenticated-direct" : "relay-basis";
   if (installed.reqId !== journal.metadata.installReqId || installed.authorizationMode !== expectedMode) {
@@ -258,9 +268,11 @@ async function provisionCredential(candidate: PairingCandidate, journal: Pairing
 }
 
 async function pairingEndpoints(client: RelayClient, installReqId: string) {
-  const response = await client.request("pairing.getEndpoints", { installReqId });
-  if (!response.ok) throw new Error("Pairing endpoints refused");
-  return PairingGetEndpointsResultSchema.parse(response.value);
+  return pairingStep("credential-installation", async () => {
+    const response = await client.request("pairing.getEndpoints", { installReqId });
+    if (!response.ok) throw new PairingFailure("credential-installation");
+    return PairingGetEndpointsResultSchema.parse(response.value);
+  });
 }
 
 async function publishCommitted(
@@ -268,7 +280,7 @@ async function publishCommitted(
   installed: DeviceCredentialInstalled,
   endpoints: Awaited<ReturnType<typeof pairingEndpoints>>,
 ): Promise<StoredHost> {
-  if (!endpoints.relay) throw new PairingError("credential-installation", "invalid-response");
+  if (!endpoints.relay) throw new PairingFailure("credential-installation");
   const offer = offerFromJournal(journal);
   const resumeToken = journal.secrets.pendingResumeToken;
   const resumeHash = base64Url(sha256(utf8(resumeToken)));
@@ -282,7 +294,7 @@ async function publishCommitted(
     lastConnectedAt: Date.now(),
     provenance: journal.metadata.provenance,
   };
-  await atPairingStage("persistence", () => savePairedHost(host, {
+  await pairingStep("persistence", () => savePairedHost(host, {
     v: 1,
     deviceToken: offer.deviceToken,
     current: {
@@ -292,7 +304,7 @@ async function publishCommitted(
       expiresAt: installed.resumeExpiresAt,
     },
   }));
-  await atPairingStage("persistence", clearPairingJournal);
+  await pairingStep("persistence", clearPairingJournal);
   return host;
 }
 

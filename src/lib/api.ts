@@ -128,6 +128,8 @@ export const api = {
   // are resolved natively, so account tokens never cross this boundary.
   cloudProviders: () => invoke<CloudProviderSummaryResponse>("cloud_providers"),
   cloudProvider: (provider: CloudWorkspaceProviderId) => invoke<CloudProviderConnection>("cloud_provider", { provider }),
+  cloudProviderDisconnect: (provider: CloudWorkspaceProviderId, contextRevision: string, disposition: "retain" | "destroy") =>
+    invoke<CloudProviderConnection>("cloud_provider_disconnect", { provider, contextRevision, disposition }),
   cloudProviderConnect: (provider: CloudWorkspaceProviderId, input: CloudProviderConnectInput) =>
     invoke<CloudProviderConnection>("cloud_provider_connect", { provider, input }),
   cloudWorkspaceSetup: (provider: CloudWorkspaceProviderId) =>
@@ -283,6 +285,11 @@ export interface CloudProviderConnection {
   credentialFingerprint: string | null;
   connectedAt: number | null;
   lastValidatedAt: number | null;
+  credentialVersion?: number | null;
+  providerAccount?: string | null;
+  operationsBlocked?: boolean | null;
+  disconnectDisposition?: "retain" | "destroy" | null;
+  resources?: CloudProviderResource[] | null;
 }
 
 export interface CloudProviderConnectInput {
@@ -1000,3 +1007,16 @@ export const transcription = {
   setInput: (device: string | null) => invoke<void>("transcription_set_input", { device }),
   setMute: (mute: boolean) => invoke<void>("transcription_set_mute", { mute }),
 };
+
+export interface CloudProviderResource {
+  id: string;
+  name: string;
+  state: string;
+  releaseDisposition: string | null;
+  activeHourlyMicros: number | null;
+  suspendedMonthlyMicros: number | null;
+  currency: string;
+  operationState: string | null;
+  cleanupRequired: boolean;
+  kind: "workspace" | "runtime" | "build" | "legacy-operation";
+}

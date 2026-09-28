@@ -7,9 +7,9 @@ import { HostApi, type SessionSummary } from "../data/host-api";
 import { handleNotificationEvent, restoreLocalNotifications } from "../notifications/local";
 import { discoverMachines, pairDiscoveredMachine, signOutPairing, type InstallationState } from "../pairing/account";
 import type { AccountHost } from "../pairing/account-client";
-import { atPairingStage, PairingError } from "../pairing/errors";
+import { pairingStep } from "../pairing/errors";
 import { pairFromOffer, recoverPendingPairing } from "../pairing/pair";
-import { requirePairingCode } from "../pairing/parse";
+import { parsePairingCodeOrThrow } from "../pairing/parse";
 import { readHostCredential, readHosts, removeHost, type StoredHost } from "../store/hosts";
 import { HostConnection, type ConnectionLogEntry, type ConnectionStage } from "../transport/connection";
 
@@ -215,44 +215,27 @@ export function AppProvider({ children }: PropsWithChildren) {
     }
   }, [refreshCloudSession, refreshMachines, session]);
 
-  const pairingLogSequence = useRef(0);
-  const recordPairing = useCallback((level: ConnectionLogEntry["level"], message: string, detail?: string) => {
-    const at = Date.now();
-    const id = `pairing-${at}-${++pairingLogSequence.current}`;
-    setLogs((existing) => {
-      const next = [...existing, { id, at, level, message, detail }].slice(-200);
-      void AsyncStorage.setItem(LOG_KEY, JSON.stringify(next)).catch(() => undefined);
-      return next;
-    });
-  }, []);
-
   const pairCode = useCallback(async (code: string) => {
     setLoadingMachines(true);
     setError(null);
-    recordPairing("info", "Pairing started");
     try {
-      const offer = requirePairingCode(code);
+      const offer = parsePairingCodeOrThrow(code);
       await pairFromOffer({ offer, label: "Paired Mac", provenance: { kind: "explicit" } });
-      await atPairingStage("persistence", loadHosts);
-      recordPairing("success", "Pairing completed", "Host saved");
+      await pairingStep("persistence", loadHosts);
     } catch (cause) {
-      // Unexpected errors are also bounded: native/server text can contain
-      // addresses or credentials that a token-length regex would miss.
-      const failure = cause instanceof PairingError ? cause : new PairingError("transport", "connection-failed");
-      setError(failure.message);
-      recordPairing("error", "Pairing failed", `${failure.stage}/${failure.category}${failure.path ? `/${failure.path}` : ""}`);
-      throw failure;
+      setError(readableError(cause));
+      throw cause;
     } finally {
       setLoadingMachines(false);
     }
-  }, [loadHosts, recordPairing]);
+  }, [loadHosts]);
 
   const retryPairing = useCallback(async () => {
     setLoadingMachines(true);
     setError(null);
     try {
       await recoverPendingPairing();
-      await loadHosts();
+      await pairingStep("persistence", loadHosts);
     } catch (cause) {
       setError(readableError(cause));
       throw cause;

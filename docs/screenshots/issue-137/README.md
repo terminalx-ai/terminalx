@@ -1,6 +1,27 @@
 # Issue #137: transcription audio input
 
-The implementation is complete; the required recording check with two distinct inputs is **blocked by hardware availability**. This Mac exposes only one input, “Paresh’s AirPods Pro #3.” System default resolves to that same input, so the two preferences do not count as two devices. No PR was opened while that acceptance check remained incomplete.
+## September 16 follow-up
+
+The existing implementation was rechecked, and two remaining edge cases were fixed:
+
+- A known unavailable-input fallback stays visible during Starting, Listening, and Finishing instead of being replaced by the unavailable device's preferred name.
+- A delayed preference read from a surface mounted during a save cannot overwrite the newly saved choice.
+
+Regression coverage now includes these cases, closing an open picker when recording starts, passive rendering for both composer targets, and selection synchronization in both directions between the composer controls and the actual Transcription settings component.
+
+Validation on this checkout:
+
+- `pnpm check`: TypeScript and 450 frontend tests pass (73 files), including 20 focused picker/permission tests.
+- `pnpm build`, native development build, and `cargo clippy --all-targets -- -D warnings`: pass.
+- `cargo test`: 471 pass, four ignored.
+- **The previously outstanding two-input recording check passed.** The native composer listed and selected `MacBook Pro Microphone` and `iPhone Microphone`. Both recordings reached Listening and Finishing, disabled the picker, returned text to the composer, and restored the picker afterward. The built-in input transcribed a spoken test sentence played through the speakers; the iPhone input returned repeated “Hello” speech. This verifies capture and completion, not comparative recognition accuracy. [Native iPhone recording result](two-input-validation.png).
+- Selecting the built-in input in the composer was reflected in Transcription settings. The isolated `settings.json` then confirmed the saved iPhone selection.
+
+The test app used this worktree's frontend on port 1537 and `TERMINALX_HOME=/tmp/terminalx-137-validation`, with Parakeet selected from an existing local model. No agent prompt was submitted. The test app was stopped after verification.
+
+## September 8 validation archive
+
+At the original validation, the required recording check with two distinct inputs was blocked by hardware availability: that Mac exposed only “Paresh’s AirPods Pro #3.” System default resolved to that same input. The follow-up above closes that hardware check; the original evidence below remains available.
 
 ## Native application evidence
 

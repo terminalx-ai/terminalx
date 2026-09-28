@@ -89,6 +89,36 @@ describe("transcription input picker", () => {
     expect((screen.getByRole("button") as HTMLButtonElement).disabled).toBe(true);
     expect(invoke).not.toHaveBeenCalledWith("transcription_inputs");
   });
+  it.each(["starting", "listening", "finishing"])("preserves a known fallback while %s and closes the picker", async (phase) => {
+    devices = [{ id: "Built-in", name: "Built-in", isDefault: true }];
+    const view = render(<TranscriptionInputPicker compact />);
+    await open();
+    recording.phase = phase;
+    view.rerender(<TranscriptionInputPicker compact />);
+    expect(screen.queryByRole("menu")).toBeNull();
+    const button = screen.getByRole<HTMLButtonElement>("button", { name: /System default · fallback/ });
+    expect(button.disabled).toBe(true);
+    expect(button.title).toContain("Studio Microphone is unavailable");
+    expect(selected).toBe("Studio Microphone");
+  });
+  it("does not let a surface mounted during a save restore an older preference", async () => {
+    const { selectTranscriptionInput } = await import("@/lib/transcriptionInput");
+    render(<TranscriptionInputPicker compact />);
+    await open();
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    let finishSave!: () => void;
+    let finishRead!: (value: { inputDevice: string }) => void;
+    invoke.mockImplementation((command: string) => {
+      if (command === "transcription_set_input") return new Promise<void>((resolve) => { finishSave = resolve; });
+      if (command === "transcription_preferences") return new Promise<{ inputDevice: string }>((resolve) => { finishRead = resolve; });
+    });
+    let saving!: Promise<void>;
+    act(() => { saving = selectTranscriptionInput("Built-in"); });
+    render(<TranscriptionInputPicker />);
+    await act(async () => { finishSave(); await saving; });
+    await act(async () => { finishRead({ inputDevice: "Studio Microphone" }); });
+    expect(screen.getAllByRole("button", { name: /Built-in/ })).toHaveLength(2);
+  });
   it("keeps the persisted choice after a failed save and exposes the error", async () => {
     render(<TranscriptionInputPicker />);
     await open();

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { sha256 } from "@noble/hashes/sha256";
 import { base64Url } from "./bytes";
-import { parsePairingCode, requirePairingCode } from "./parse";
+import { parsePairingCode, parsePairingCodeOrThrow } from "./parse";
 
 const now = 1_900_000_000_000;
 const publicKey = new Uint8Array(32).fill(7);
@@ -57,19 +57,12 @@ describe("pairing payload parsing", () => {
 });
 
 
-describe("actionable parsing failures", () => {
-  it("distinguishes expiration from an invalid offer", () => {
-    expect(() => requirePairingCode(encode({ ...offer, relay: { ...offer.relay, inviteExpiresAt: now } }), () => now)).toThrow("This pairing offer expired");
-    expect(() => requirePairingCode("private text or an incomplete link", () => now)).toThrow("parsing/invalid-offer");
-  });
-  it("does not echo schema input or an unknown field into the error", () => {
-    const privateText = "private name, token, and network address";
-    try { requirePairingCode(encode({ ...offer, deviceToken: { privateText } }), () => now); }
-    catch (error) {
-      expect(String(error)).toContain("parsing/invalid-offer");
-      expect(String(error)).not.toContain(privateText);
-      return;
-    }
-    throw new Error("Expected invalid-offer");
+describe("safe pairing parse errors", () => {
+  it("distinguishes expiry from a malformed offer and gives a fresh-offer action", () => {
+    expect(() => parsePairingCodeOrThrow(encode({ ...offer, relay: { ...offer.relay, inviteExpiresAt: now } }), () => now)).toThrow("[pairing:parsing/expired-offer]");
+    expect(() => parsePairingCodeOrThrow("private-name or partial code", () => now)).toThrow("[pairing:parsing/invalid-offer]");
+    expect(() => parsePairingCodeOrThrow(encode({ ...offer, unknownPrivateField: "secret" }), () => now)).toThrow("Generate a fresh offer");
+    try { parsePairingCodeOrThrow(encode({ ...offer, unknownPrivateField: "secret" }), () => now); }
+    catch (cause) { expect(String(cause)).not.toMatch(/unknownPrivateField|secret/); }
   });
 });

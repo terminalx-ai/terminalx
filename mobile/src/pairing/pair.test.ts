@@ -1,133 +1,121 @@
+import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { pairFromOffer } from "./pair";
-import { requirePairingCode } from "./parse";
-import { hostIdForPublicKey } from "./contracts";
-import { readHosts, readHostCredential } from "../store/hosts";
+import { pairFromOffer, recoverPendingPairing } from "./pair";
+import { parsePairingCode } from "./parse";
+import { hostIdForPublicKey, type DeviceCredentialInstalled, type PairingOffer } from "./contracts";
+import { readHostCredential, readHosts } from "../store/hosts";
 import { readPairingJournal } from "./journal";
 
-const mocks = vi.hoisted(() => ({
+// Keep parsing, orchestration, install reconciliation, journal and host storage real.
+// Only the native storage/entropy boundary and encrypted RPC peer are simulated.
+const state = vi.hoisted(() => ({
   storage: new Map<string, string>(), secrets: new Map<string, string>(),
-  path: "relay", failure: "", savesFail: false,
-  clients: [] as { path: string; closed: boolean }[],
-  installs: 0, installed: null as any,
+  installed: null as DeviceCredentialInstalled | null,
+  direct: false, relay: false, failSave: false,
+  status: { protocolVersion: 2, product: "TerminalX", deviceScope: "driver" },
+  provisionError: null as string | null,
+  calls: [] as string[],
 }));
-vi.mock("expo-crypto", () => ({ getRandomBytesAsync: async (length: number) => new Uint8Array(length).fill(9) }));
+vi.mock("expo-crypto", () => ({ getRandomBytesAsync: async (length: number) => new Uint8Array(randomBytes(length)) }));
 vi.mock("expo-secure-store", () => ({
   WHEN_UNLOCKED_THIS_DEVICE_ONLY: 1,
-  getItemAsync: async (key: string) => mocks.secrets.get(key) ?? null,
-  setItemAsync: async (key: string, value: string) => { mocks.secrets.set(key, value); },
-  deleteItemAsync: async (key: string) => { mocks.secrets.delete(key); },
+  getItemAsync: async (key: string) => state.secrets.get(key) ?? null,
+  setItemAsync: async (key: string, value: string) => { state.secrets.set(key, value); },
+  deleteItemAsync: async (key: string) => { state.secrets.delete(key); },
 }));
 vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
-  getItem: async (key: string) => mocks.storage.get(key) ?? null,
+  getItem: async (key: string) => state.storage.get(key) ?? null,
   setItem: async (key: string, value: string) => {
-    if (mocks.savesFail && key === "terminalx:mobile:hosts:v1") throw new Error("private storage detail");
-    mocks.storage.set(key, value);
+    if (state.failSave && key.includes(":hosts:")) throw new Error("storage failure with private details");
+    state.storage.set(key, value);
   },
-  removeItem: async (key: string) => { mocks.storage.delete(key); },
+  removeItem: async (key: string) => { state.storage.delete(key); },
 } }));
-vi.mock("../transport/relay-client", () => {
-  class RelayOuterError extends Error { constructor(readonly code: number) { super("relay refused"); } }
-  return {
-  RelayOuterError,
-  RelayHandshakeError: class extends Error {},
+vi.mock("../transport/relay-client", () => ({
+  RelayOuterError: class extends Error { constructor(readonly code: number) { super(`relay_outer_${code}`); } },
   RelayClient: class {
-    path: string;
-    closed = false;
-    constructor(options: any) { this.path = options.transport ?? "relay"; mocks.clients.push(this); }
+    constructor(private options: { transport?: string; credentialKind?: string }) {}
     async connect() {
-      if (mocks.failure === "relay-refused") {
-        if (this.path === "relay") throw new RelayOuterError(4001);
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      if (mocks.failure === "transport" || this.path !== mocks.path) throw new Error("private network address");
+      if (!(this.options.transport === "direct" ? state.direct : state.relay)) throw new Error("network unavailable");
+      if (this.options.credentialKind === "resume" && !state.installed) throw new Error("resume unavailable");
     }
-    async request(method: string, params?: any) {
-      if (method === "status.get") return { ok: true, value: {
-        protocolVersion: mocks.failure === "verification" ? 999 : 2, product: "TerminalX", deviceScope: "driver",
-      } };
+    close() {}
+    async request(method: string, params?: { reqId?: string }) {
+      state.calls.push(method);
+      if (method === "status.get") return { ok: true, value: state.status };
       if (method === "pairing.provisionRelay") {
-        if (mocks.failure === "installation") return { ok: false, refusal: { code: "forbidden", message: "private token and device name" } };
-        mocks.installs++;
-        mocks.installed = { v: 1, reqId: params.reqId, authorizationMode: this.path === "direct" ? "authenticated-direct" : "relay-basis", currentVersion: 1, resumeExpiresAt: Date.now() + 60_000 };
-        return { ok: true, value: mocks.installed };
+        if (state.provisionError) return { ok: false, refusal: { code: "unavailable", message: state.provisionError } };
+        state.installed = { v: 1, reqId: params!.reqId!, authorizationMode: this.options.transport === "direct" ? "authenticated-direct" : "relay-basis", currentVersion: 1, resumeExpiresAt: Date.now() + 86_400_000 };
+        return { ok: true, value: state.installed };
       }
       if (method === "pairing.getEndpoints") return { ok: true, value: {
-        v: 1, relay: endpoints,
-        installStatus: mocks.installed ? { v: 1, reqId: params.installReqId, state: "committed", result: mocks.installed } : { v: 1, reqId: params.installReqId, state: "not-found" },
+        v: 1, relay: endpoint, directEndpoints: ["ws://example.test:6768"],
+        installStatus: { v: 1, reqId: state.installed!.reqId, state: "committed", result: state.installed },
       } };
-      throw new Error("Unexpected RPC method");
+      throw new Error("Unexpected RPC");
     }
-    close() { this.closed = true; }
   },
-}; });
-const publicKeyB64 = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
-const endpoints = { v: 1, directorUrl: "https://relay.example.test", cellUrl: "https://relay.example.test", assignmentEpoch: 1, relayHostId: hostIdForPublicKey(publicKeyB64)!, e2eeFraming: 2 };
-const makeOffer = (relay = true) => ({ v: 2, endpoint: "ws://192.0.2.4:4040", publicKeyB64, deviceToken: "test-device-token", scope: "mobile", ...(relay ? { relay: { ...endpoints, inviteToken: "A".repeat(43), inviteExpiresAt: Date.now() + 60_000 } } : {}) });
-const code = (offer = makeOffer()) => btoa(JSON.stringify(offer)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-const pair = (input = code()) => pairFromOffer({ offer: requirePairingCode(input), label: "Test Mac", provenance: { kind: "explicit" } });
+}));
+const key = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
+const endpoint = { v: 1, directorUrl: "https://relay.example.test", cellUrl: "https://relay.example.test", assignmentEpoch: 1, relayHostId: hostIdForPublicKey(key)!, e2eeFraming: 2 };
+const freshOffer = () => ({ v: 2, endpoint: "ws://example.test:6768", publicKeyB64: key, deviceToken: "synthetic-test-token", scope: "mobile", relay: { ...endpoint, inviteToken: "A".repeat(43), inviteExpiresAt: Date.now() + 60_000 } });
+const pair = (offer: PairingOffer) => pairFromOffer({ offer, label: "Test host", provenance: { kind: "explicit" } });
+
 beforeEach(() => {
-  mocks.storage.clear(); mocks.secrets.clear(); mocks.clients = []; mocks.path = "relay"; mocks.failure = "";
-  mocks.savesFail = false; mocks.installs = 0; mocks.installed = null;
-  vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("director unavailable")));
+  state.storage.clear(); state.secrets.clear(); state.installed = null; state.calls = [];
+  state.direct = false; state.relay = false; state.failSave = false; state.provisionError = null;
+  state.status = { protocolVersion: 2, product: "TerminalX", deviceScope: "driver" };
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ...endpoint, leaseExpiresAt: Date.now() + 60_000 }))));
 });
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe("shared QR/manual pairing flow", () => {
-  it.each(["code", "QR"])("installs and persists a %s relay offer when LAN is unavailable", async (kind) => {
-    const input = code();
-    const host = await pair(kind === "QR" ? `terminalx://pair?code=${input}` : input);
+describe.each(["QR", "manual"])("%s pairing orchestration", (entry) => {
+  it.each(["direct", "relay"])("saves a usable host and resume credential over %s", async (path) => {
+    state.direct = path === "direct"; state.relay = path === "relay";
+    const code = btoa(JSON.stringify(freshOffer()));
+    const offer = parsePairingCode(entry === "QR" ? `terminalx://pair?code=${encodeURIComponent(code)}` : code)!;
+    const host = await pair(offer);
     expect(await readHosts()).toEqual([host]);
-    expect(await readHostCredential(host.id)).toMatchObject({ deviceToken: "test-device-token", current: { version: 1 } });
+    expect(await readHostCredential(host.id)).toMatchObject({ deviceToken: offer.deviceToken, current: { version: 1 } });
     expect(await readPairingJournal()).toBeNull();
-    expect(mocks.installs).toBe(1);
-    expect(mocks.clients.every((client) => client.closed)).toBe(true);
+    expect(state.calls).toContain("pairing.provisionRelay");
+    expect(state.installed?.authorizationMode).toBe(path === "direct" ? "authenticated-direct" : "relay-basis");
   });
-  it.each([true, false])("pairs over LAN with relay included: %s", async (relay) => {
-    mocks.path = "direct";
-    const host = await pair(code(makeOffer(relay)));
-    expect(await readHosts()).toEqual([host]);
-    expect(mocks.installs).toBe(relay ? 1 : 0);
-  });
-  it.each([
-    ["transport", "transport", "connection-failed"],
-    ["verification", "host-verification", "invalid-response"],
-    ["installation", "credential-installation", "credential-rejected"],
-  ])("reports a safe category for %s failures without publishing a host", async (failure, stage, category) => {
-    mocks.failure = failure;
-    const pairing = pair();
-    await expect(pairing).rejects.toMatchObject({ stage, category });
-    await expect(pairing).rejects.not.toThrow("private");
-    expect(await readHosts()).toEqual([]);
-    expect(await readPairingJournal()).not.toBeNull();
-    expect(mocks.clients.every((client) => client.closed)).toBe(true);
-  });
-  it("recovers a committed install after saving the host fails", async () => {
-    const input = code();
-    mocks.savesFail = true;
-    await expect(pair(input)).rejects.toMatchObject({ stage: "persistence", category: "storage-unavailable" });
-    expect(await readPairingJournal()).not.toBeNull();
-    mocks.savesFail = false;
-    const host = await pair(input);
-    expect(await readHosts()).toEqual([host]);
-    expect(mocks.installs).toBe(1);
-    expect(await readPairingJournal()).toBeNull();
-  });
-  it("retains relay refusal diagnostics when an unreachable LAN endpoint fails later", async () => {
-    mocks.failure = "relay-refused";
-    await expect(pair()).rejects.toMatchObject({ stage: "transport", category: "relay-refused", path: "relay" });
-  });
+});
 
-  it("allows a fresh offer after the relay refuses an old one", async () => {
-    mocks.failure = "relay-refused";
-    await expect(pair()).rejects.toMatchObject({ category: "relay-refused" });
-    mocks.failure = "";
-    const fresh = makeOffer();
-    fresh.relay!.inviteToken = "B".repeat(43);
-    const host = await pair(code(fresh));
-    expect(await readHosts()).toEqual([host]);
-    expect(await readPairingJournal()).toBeNull();
-  });
+it("pairs a direct-only offer without provisioning a relay credential", async () => {
+  state.direct = true;
+  const { relay: _, ...direct } = freshOffer();
+  const host = await pair(parsePairingCode(btoa(JSON.stringify(direct)))!);
+  expect(await readHosts()).toEqual([host]);
+  expect((await readHostCredential(host.id))?.current).toBeUndefined();
+  expect(state.calls).toEqual(["status.get"]);
+});
 
+it("recovers a committed install after saving the host failed", async () => {
+  state.relay = true; state.failSave = true;
+  await expect(pair(parsePairingCode(btoa(JSON.stringify(freshOffer())))!)).rejects.toThrow();
+  expect(await readHosts()).toEqual([]);
+  expect(await readPairingJournal()).not.toBeNull();
+  state.failSave = false;
+  const host = await recoverPendingPairing();
+  expect(await readHosts()).toEqual([host]);
+  expect(await readPairingJournal()).toBeNull();
+  expect(state.calls.filter((method) => method === "pairing.provisionRelay")).toHaveLength(1);
+});
+
+it.each([
+  ["transport", "connection-failed"],
+  ["host-verification", "invalid-host"],
+  ["credential-installation", "credential-rejected"],
+  ["persistence", "save-failed"],
+])("reports a safe %s failure without peer or storage details", async (stage, category) => {
+  state.relay = stage !== "transport";
+  if (stage === "host-verification") state.status.product = "private-name.example.test";
+  if (stage === "credential-installation") state.provisionError = "private-name.example.test at 192.0.2.42 token=secret";
+  if (stage === "persistence") state.failSave = true;
+  const cause = await pair(parsePairingCode(btoa(JSON.stringify(freshOffer())))!).catch((error: unknown) => error);
+  expect(cause).toMatchObject({ stage, category });
+  expect(String(cause)).not.toMatch(/private|192\.0\.2|token=secret/);
 });

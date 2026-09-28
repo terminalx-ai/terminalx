@@ -103,6 +103,30 @@ pub struct CloudProviderConnectionResponse {
     pub credential_fingerprint: Option<String>,
     pub connected_at: Option<i64>,
     pub last_validated_at: Option<i64>,
+    pub credential_version: Option<i64>,
+    pub provider_account: Option<String>,
+    pub operations_blocked: Option<bool>,
+    pub disconnect_disposition: Option<DisconnectDisposition>,
+    pub resources: Option<Vec<CloudProviderResource>>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DisconnectDisposition { Retain, Destroy }
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudProviderResource {
+    pub id: String,
+    pub name: String,
+    pub state: String,
+    pub release_disposition: Option<ReleaseDisposition>,
+    pub active_hourly_micros: Option<i64>,
+    pub suspended_monthly_micros: Option<i64>,
+    pub currency: String,
+    pub operation_state: Option<String>,
+    pub cleanup_required: bool,
+    pub kind: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -734,6 +758,28 @@ impl CloudWorkspaceService {
         ensure_connection(result, authorization.provider)
     }
 
+    pub fn disconnect_provider(
+        &self,
+        provider: CloudWorkspaceProviderId,
+        context_revision: String,
+        disposition: DisconnectDisposition,
+    ) -> Result<CloudProviderConnectionResponse, CloudWorkspaceClientError> {
+        let authorization = self.authorize_connect(provider)?;
+        if context_revision != AccountManager::context_revision(&authorization.context)
+            || !self.account.is_current(&authorization.context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        let result = self.client.request(
+            &authorization.context,
+            &["cloud-providers", provider.as_str(), "disconnect"],
+            None, Some(json!({ "disposition": disposition })), None, RequestRisk::Mutation,
+        )?;
+        if !self.account.is_current(&authorization.context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        ensure_connection(result, provider)
+    }
+
     pub fn setup(
         &self,
         provider: CloudWorkspaceProviderId,
@@ -981,6 +1027,8 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_provider_connection_required"
             | "cloud_provider_connection_attention_required"
             | "cloud_provider_operation_in_progress"
+            | "cloud_provider_account_mismatch"
+            | "cloud_provider_disposition_required"
             | "cloud_provider_credential_invalid"
             | "cloud_provider_rate_limited"
             | "cloud_provider_invalid_response"
@@ -1376,6 +1424,42 @@ mod tests {
         assert!(captured
             .text
             .starts_with("GET /v1/desktop/orgs/org-1/cloud-providers/box HTTP/1.1"));
+    }
+
+    #[test]
+    fn provider_disconnect_projects_safe_metadata_and_uses_existing_endpoint() {
+        let body = r#"{"provider":"box","state":"attention-required","canManage":true,"credentialVersion":4,"providerAccount":"Original account","operationsBlocked":true,"disconnectDisposition":"destroy","resources":[],"credentialCiphertext":"must-not-cross","credential":"must-not-cross"}"#;
+        let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
+        let client = Client::for_test(&base, Duration::from_secs(2));
+        let result: CloudProviderConnectionResponse = client.request(&context(), &["cloud-providers", "box", "disconnect"], None, Some(json!({"disposition": DisconnectDisposition::Destroy})), None, RequestRisk::Mutation).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-providers/box/disconnect HTTP/1.1"));
+        assert_eq!(serde_json::from_str::<Value>(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap(), json!({"disposition":"destroy"}));
+        let projected = serde_json::to_value(result).unwrap();
+        assert_eq!(projected["credentialVersion"], 4);
+        assert_eq!(projected["providerAccount"], "Original account");
+        assert!(!projected.to_string().contains("must-not-cross"));
+        assert!(!captured.extra_request);
+    }
+
+    #[test]
+    fn provider_disconnect_denies_members_before_any_mutation() {
+        let (base, _, request) = serve_once(response("200 OK", r#"{"provider":"box","state":"connected","canManage":false}"#, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.disconnect_provider(CloudWorkspaceProviderId::Box, AccountManager::context_revision(&context()), DisconnectDisposition::Retain).unwrap_err();
+        assert_eq!(error.code, "organization_admin_required");
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("GET "));
+        assert!(!captured.extra_request);
+    }
+
+    #[test]
+    fn provider_disconnect_fences_stale_organization_before_mutation() {
+        let (base, _, request) = serve_once(response("200 OK", r#"{"provider":"box","state":"connected","canManage":true}"#, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.disconnect_provider(CloudWorkspaceProviderId::Box, "old-context".into(), DisconnectDisposition::Destroy).unwrap_err();
+        assert_eq!(error.code, "account_context_changed");
+        assert!(!request.join().unwrap().extra_request);
     }
 
     #[test]

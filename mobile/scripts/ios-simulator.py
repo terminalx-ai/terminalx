@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import platform
 import plistlib
 import struct
@@ -11,13 +12,18 @@ from pathlib import Path
 
 
 MOBILE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(MOBILE.parent / "scripts"))
+
+from verify_packaged_icons import verify_app as verify_icons
 
 
 def run(*args, **kwargs):
-    return subprocess.run(args, check=True, cwd=MOBILE, **kwargs)
+    return subprocess.run(args, check=True, cwd=MOBILE,
+                          env={**os.environ, "APP_VARIANT": "production"}, **kwargs)
 
 
 def verify_app(app):
+    print(json.dumps(verify_icons(app, "ios", "production"), indent=2), flush=True)
     info = plistlib.loads((app / "Info.plist").read_bytes())
     if info.get("CFBundleSupportedPlatforms") != ["iPhoneSimulator"]:
         raise ValueError("Expected an iOS simulator app")

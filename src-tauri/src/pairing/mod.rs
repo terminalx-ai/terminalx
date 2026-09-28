@@ -5,6 +5,7 @@
 
 mod cloud;
 mod crypto;
+mod diagnostics;
 mod mobile;
 mod model;
 mod registry;
@@ -19,7 +20,7 @@ use base64::{engine::general_purpose, Engine};
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use tauri::{AppHandle, Emitter, Listener};
+use tauri::{AppHandle, Emitter, Listener, Manager};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
@@ -58,6 +59,7 @@ struct Inner {
 
 pub struct PairingManager {
     account: Arc<AccountManager>,
+    diagnostics: Mutex<diagnostics::DiagnosticLog>,
     secrets: PairingSecrets,
     registry: DeviceRegistry,
     app: OnceLock<AppHandle>,
@@ -85,6 +87,7 @@ impl PairingManager {
     pub fn new(account: Arc<AccountManager>) -> Self {
         Self {
             account,
+            diagnostics: Mutex::new(diagnostics::DiagnosticLog::default()),
             secrets: PairingSecrets::default(),
             registry: DeviceRegistry::default(),
             app: OnceLock::new(),
@@ -98,6 +101,14 @@ impl PairingManager {
     }
 
     pub fn configure(self: &Arc<Self>, app: &AppHandle, app_identifier: &str) -> Result<()> {
+        match app.path().app_log_dir() {
+            Ok(directory) => {
+                if self.diagnostics.lock().unwrap().configure(directory).is_err() {
+                    log::warn!("relay diagnostics unavailable (category=local-storage)");
+                }
+            }
+            Err(_) => log::warn!("relay diagnostics unavailable (category=local-storage)"),
+        }
         self.secrets.configure(app_identifier)?;
         for device_id in self.registry.remove_unclaimed()? {
             self.secrets.delete_device_token(&device_id)?;
@@ -375,6 +386,31 @@ impl PairingManager {
         self.secrets
             .host_key(create)?
             .ok_or_else(|| anyhow!("host identity is unavailable"))
+    }
+
+    fn record_relay_diagnostic(
+        &self,
+        event: diagnostics::Event,
+        attempt: u32,
+        failure: Option<diagnostics::Failure>,
+    ) {
+        // Only typed allowlisted data reaches either sink. A disk error must not
+        // stop connection recovery or reveal the user's filesystem path.
+        if let Some(failure) = failure {
+            log::warn!(
+                "relay failure stage={:?} category={:?} http_status={:?} attempt={}",
+                failure.stage, failure.category, failure.http_status, attempt
+            );
+        }
+        if self
+            .diagnostics
+            .lock()
+            .unwrap()
+            .record(event, attempt, failure)
+            .is_err()
+        {
+            log::warn!("relay diagnostics write failed (category=local-storage)");
+        }
     }
 
     pub(super) fn set_relay_off(&self) {

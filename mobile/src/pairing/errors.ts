@@ -1,48 +1,30 @@
-import { ZodError } from "zod";
-import { RelayHandshakeError, RelayOuterError } from "../transport/relay-client";
-
 export type PairingStage = "parsing" | "transport" | "host-verification" | "credential-installation" | "persistence";
-export type PairingPath = "direct" | "relay";
-type PairingCategory = "invalid-offer" | "expired-offer" | "connection-failed" | "relay-refused" | "invalid-response" | "credential-rejected" | "storage-unavailable";
+export type PairingCategory = "invalid-offer" | "expired-offer" | "connection-failed" | "relay-rejected" | "invalid-host" | "credential-rejected" | "save-failed";
 
-const guidance: Record<PairingCategory, string> = {
-  "invalid-offer": "Copy the full pairing code or scan a fresh QR code from Settings → Devices on your Mac.",
-  "expired-offer": "This pairing offer expired. Generate a fresh offer in Settings → Devices on your Mac.",
-  "connection-failed": "Couldn’t establish a secure connection. Keep your Mac awake, check connectivity, then retry. If the offer was already used, generate a fresh one.",
-  "relay-refused": "The relay refused this connection. The offer may be expired or already used. Generate a fresh offer on your Mac and try again.",
-  "invalid-response": "The Mac’s secure pairing response could not be verified. Check that both apps are up to date, then generate a fresh offer.",
-  "credential-rejected": "The Mac could not finish installing the pairing credential. Retry to recover this attempt, or generate a fresh offer.",
-  "storage-unavailable": "The phone could not save pairing data. Unlock the phone and retry to recover this attempt.",
+const recovery: Record<PairingCategory, string> = {
+  "invalid-offer": "This pairing code is invalid or unsupported. Generate a fresh offer in Settings → Devices on your Mac and copy the full code.",
+  "expired-offer": "This pairing offer has expired. Generate a fresh offer in Settings → Devices on your Mac. Check both devices’ clocks if a new offer also expires immediately.",
+  "connection-failed": "Couldn’t establish a secure connection to your Mac. Keep TerminalX open, check Relay and your network, then retry. If this offer was already used, generate a fresh one.",
+  "relay-rejected": "Relay rejected this pairing attempt. The offer may have expired or already been used. Retry to recover an interrupted pairing, or generate a fresh offer on your Mac.",
+  "invalid-host": "Couldn’t verify the Mac’s secure pairing response. Update both apps and generate a fresh pairing offer.",
+  "credential-rejected": "Couldn’t finish installing the pairing credential. Keep TerminalX open on your Mac and retry to recover this attempt. If it still fails, generate a fresh offer.",
+  "save-failed": "Couldn’t save the pairing on this phone. Unlock the phone and retry to recover the pairing.",
+};
+const categoryForStage: Record<PairingStage, PairingCategory> = {
+  parsing: "invalid-offer", transport: "connection-failed", "host-verification": "invalid-host",
+  "credential-installation": "credential-rejected", persistence: "save-failed",
 };
 
-/** Only bounded categories cross into UI/logs; never forward server, schema or storage error text. */
-export class PairingError extends Error {
-  constructor(readonly stage: PairingStage, readonly category: PairingCategory, readonly path?: PairingPath) {
-    super(`${guidance[category]} (${stage}/${category}${path ? `/${path}` : ""})`);
-    this.name = "PairingError";
+/** Only allowlisted diagnostics cross into UI/logs; never attach a raw cause. */
+export class PairingFailure extends Error {
+  constructor(readonly stage: PairingStage, readonly category: PairingCategory = categoryForStage[stage], relayCode?: number) {
+    const code = typeof relayCode === "number" && Number.isInteger(relayCode) && relayCode >= 1000 && relayCode <= 4999 ? `/${relayCode}` : "";
+    super(`${recovery[category]} [pairing:${stage}/${category}${code}]`);
+    this.name = "PairingFailure";
   }
 }
 
-export async function atPairingStage<T>(stage: PairingStage, operation: () => Promise<T>, path?: PairingPath): Promise<T> {
-  try {
-    return await operation();
-  } catch (error) {
-    if (error instanceof PairingError) throw error;
-    if (error instanceof RelayHandshakeError) throw new PairingError("host-verification", "invalid-response", path);
-    const category: PairingCategory = stage === "persistence" ? "storage-unavailable"
-      : error instanceof RelayOuterError && error.code >= 4000 && error.code <= 4999 ? "relay-refused"
-      : stage === "host-verification" || error instanceof ZodError ? "invalid-response"
-      : stage === "credential-installation" ? "credential-rejected" : "connection-failed";
-    throw new PairingError(stage, category, path);
-  }
-}
-
-/** Preserve the most advanced failure; an unreachable LAN dial must not hide a relay refusal. */
-export function preferPairingFailure(previous: unknown, next: unknown): unknown {
-  const priority = (error: unknown) => {
-    if (!(error instanceof PairingError)) return -1;
-    const stage = { parsing: 0, transport: 1, "host-verification": 2, "credential-installation": 3, persistence: 4 }[error.stage];
-    return stage * 2 + (error.path === "relay" ? 1 : 0);
-  };
-  return priority(previous) > priority(next) ? previous : next;
+export async function pairingStep<T>(stage: PairingStage, operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); }
+  catch (cause) { throw cause instanceof PairingFailure ? cause : new PairingFailure(stage); }
 }

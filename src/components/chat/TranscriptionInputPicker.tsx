@@ -19,10 +19,10 @@ export function TranscriptionInputPicker({ compact = false }: { compact?: boolea
   // after enumeration, so do not claim the saved device is actively recording.
   let label = input.loaded ? input.selected ?? "System default" : "Input unknown";
   if (input.loaded) {
-    if (phase !== "idle") label = `Preferred: ${input.selected ?? "System default"}`;
-    else if (noInputs) label = "No audio inputs";
+    if (noInputs) label = "No audio inputs";
     else if (needsDefault && noDefault) label = "No default input";
     else if (missing) label = "System default · fallback";
+    else if (phase !== "idle") label = `Preferred: ${input.selected ?? "System default"}`;
   }
   let detail = `Preferred input: ${input.selected ?? "System default"}. If unavailable when recording starts, the system default is used.`;
   if (!input.loaded) detail = "Could not read the saved audio input. Open to retry.";

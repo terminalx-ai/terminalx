@@ -199,7 +199,7 @@ impl AccountManager {
             },
             organizations: vec![],
             capabilities: Capabilities {
-                flags: BTreeMap::new(),
+                flags: BTreeMap::from([("relay.use".into(), context.relay_entitled)]),
                 refreshed_at: 1,
             },
         });

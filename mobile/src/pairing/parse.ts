@@ -1,5 +1,5 @@
+import { PairingFailure } from "./errors";
 import { createPairingOfferSchema, type PairingOffer } from "./contracts";
-import { PairingError } from "./errors";
 
 const INPUT_LIMIT = 128 * 1_024 + 1_024;
 
@@ -20,26 +20,28 @@ export function extractPairingCodeFromUrl(value: string): string | null {
 }
 
 export function parsePairingCode(input: string, now: () => number = Date.now): PairingOffer | null {
-  try { return requirePairingCode(input, now); } catch { return null; }
+  try { return parsePairingCodeOrThrow(input, now); }
+  catch { return null; }
 }
 
-export function requirePairingCode(input: string, now: () => number = Date.now): PairingOffer {
+export function parsePairingCodeOrThrow(input: string, now: () => number = Date.now): PairingOffer {
+  const trimmed = input.trim();
+  if (!trimmed || trimmed.length > INPUT_LIMIT) throw new PairingFailure("parsing");
   try {
-    const trimmed = input.trim();
-    if (!trimmed || trimmed.length > INPUT_LIMIT) throw new Error();
     const encoded = /^terminalx:\/\//i.test(trimmed) ? extractPairingCodeFromUrl(trimmed) : trimmed;
-    if (!encoded || encoded.length > 128 * 1_024) throw new Error();
+    if (!encoded || encoded.length > 128 * 1_024) throw new PairingFailure("parsing");
     const padded = encoded.replace(/-/g, "+").replace(/_/g, "/").padEnd(encoded.length + ((4 - (encoded.length % 4)) % 4), "=");
     const value = JSON.parse(atob(padded));
-    const parsed = createPairingOfferSchema(now).safeParse(value);
-    if (parsed.success) return parsed.data;
-    if (parsed.error.issues.every((issue) => issue.path.join(".") === "relay.inviteExpiresAt") &&
-        typeof value?.relay?.inviteExpiresAt === "number" && value.relay.inviteExpiresAt <= now()) {
-      throw new PairingError("parsing", "expired-offer");
+    const timestamp = now();
+    const result = createPairingOfferSchema(() => timestamp).safeParse(value);
+    if (result.success) return result.data;
+    // Only classify expiry when all other schema and pinned-host checks passed.
+    if (result.error.issues.every((issue) => issue.path.join(".") === "relay.inviteExpiresAt") &&
+        typeof value?.relay?.inviteExpiresAt === "number" && value.relay.inviteExpiresAt <= timestamp) {
+      throw new PairingFailure("parsing", "expired-offer");
     }
-    throw new Error();
-  } catch (error) {
-    if (error instanceof PairingError) throw error;
-    throw new PairingError("parsing", "invalid-offer");
+    throw new PairingFailure("parsing");
+  } catch (cause) {
+    throw cause instanceof PairingFailure ? cause : new PairingFailure("parsing");
   }
 }

@@ -117,8 +117,7 @@ export function DevicesTab() {
   };
 
   const signedIn = account.status.state === "signed-in";
-  const relayUnavailable = pairing.status.relay.phase === "offline" || pairing.status.relay.phase === "off";
-  const canGenerate = connectionMode === "local-only" || (signedIn && !relayUnavailable);
+  const canGenerate = connectionMode === "local-only" || (signedIn && pairing.status.relay.phase === "connected");
 
   const changeConnectionMode = (next: PairingConnectionMode) => {
     if (next === connectionMode) return;
@@ -173,9 +172,8 @@ export function DevicesTab() {
             {pairing.status.relay.phase === "connected"
               ? "Relay is ready. Nearby phones may connect directly over LAN; other networks use Relay."
               : pairing.status.relay.phase === "connecting"
-                ? "Relay is reconnecting. You can still create a code for a nearby LAN connection."
-                : "Relay is unavailable for this account or network. Create a LAN code instead, or retry when Relay becomes available."}
-            {pairing.status.relay.message && pairing.status.relay.phase === "offline" ? ` ${pairing.status.relay.message}` : ""}
+                ? "Relay is reconnecting. Choose LAN to create a code for a nearby connection."
+                : pairing.status.relay.message ?? "Relay is not connected. Choose LAN to pair, or wait for Relay to reconnect."}
           </div>
         )}
         {!offer || expired ? (
