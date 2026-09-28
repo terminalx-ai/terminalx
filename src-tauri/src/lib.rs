@@ -28,6 +28,8 @@ mod cloud_remote;
 #[cfg(feature = "desktop")]
 mod cloud_workspaces;
 #[cfg(feature = "desktop")]
+mod organization_github_app;
+#[cfg(feature = "desktop")]
 mod organization_members;
 #[cfg(feature = "desktop")]
 mod organization_compute;
@@ -94,6 +96,7 @@ pub struct AppState {
     pub cloud_workspaces: Arc<cloud_workspaces::CloudWorkspaceService>,
     pub organization_members: Arc<organization_members::OrganizationMembersService>,
     pub organization_compute: Arc<organization_compute::OrganizationComputeService>,
+    pub organization_github_app: Arc<organization_github_app::OrganizationGithubAppService>,
     pub pairing: Arc<pairing::PairingManager>,
     pub host: Arc<harness::host::Host>,
     pub terminals: Arc<pty::Terminals>,
@@ -135,6 +138,7 @@ pub fn run() {
         cloud_agent_client::CloudAgentClient::new(account.clone(), agent_keys.clone()).expect("open the cloud agent store under TERMINALX_HOME"),
     );
     let organization_compute = Arc::new(organization_compute::OrganizationComputeService::new(account.clone()));
+    let organization_github_app = Arc::new(organization_github_app::OrganizationGithubAppService::new(account.clone()));
     let cloud_remote = cloud_remote::CloudRemote::new(account.clone(), cloud_workspaces.clone(), cloud_agents.clone());
     // The resource directory is only known once Tauri is up; the service
     // resolves the helper lazily, so it can be built before `setup`.
@@ -145,6 +149,7 @@ pub fn run() {
         cloud_workspaces,
         organization_members,
         organization_compute,
+        organization_github_app,
         pairing: pairing.clone(),
         host: host.clone(),
         terminals: terminals.clone(),
@@ -276,6 +281,14 @@ pub fn run() {
             commands::organization_compute_usage,
             commands::organization_compute_policy_update,
             commands::organization_compute_provisioning_pause,
+            commands::organization_github_app,
+            commands::organization_github_app_connect,
+            commands::organization_github_app_attempt,
+            commands::organization_github_app_attempt_cancel,
+            commands::organization_github_app_repositories,
+            commands::organization_github_app_repositories_save,
+            commands::organization_github_app_disconnect,
+            commands::organization_github_app_open,
             commands::cloud_providers,
             commands::cloud_provider,
             commands::cloud_provider_connect,
