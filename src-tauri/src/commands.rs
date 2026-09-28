@@ -86,6 +86,63 @@ pub async fn organization_select(
     }).await.map_err(err)?.map_err(err)
 }
 
+// ------------------------------------------------------ organization members
+
+type MembersResult = Result<crate::organization_members::OrganizationRoster, crate::organization_members::OrganizationMembersError>;
+
+async fn members_call(
+    state: tauri::State<'_, crate::AppState>,
+    operation: impl FnOnce(&crate::organization_members::OrganizationMembersService) -> MembersResult + Send + 'static,
+) -> MembersResult {
+    let service = state.organization_members.clone();
+    tauri::async_runtime::spawn_blocking(move || operation(&service))
+        .await
+        .map_err(|_| crate::organization_members::OrganizationMembersError::local("organization_members_unavailable"))?
+}
+
+#[tauri::command]
+pub async fn organization_members(state: tauri::State<'_, crate::AppState>) -> MembersResult {
+    members_call(state, |service| service.list()).await
+}
+
+#[tauri::command]
+pub async fn organization_member_invite(
+    email: String,
+    role: String,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> MembersResult {
+    members_call(state, move |service| service.invite(&email, &role, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_invite_revoke(
+    email: String,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> MembersResult {
+    members_call(state, move |service| service.revoke_invite(&email, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_member_role_update(
+    user_id: String,
+    role: String,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> MembersResult {
+    members_call(state, move |service| service.update_role(&user_id, &role, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_member_remove(
+    user_id: String,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> MembersResult {
+    members_call(state, move |service| service.remove(&user_id, &context_revision)).await
+}
+
 // --------------------------------------------------------- cloud workspaces
 
 macro_rules! cloud_command {

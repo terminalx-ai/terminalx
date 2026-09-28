@@ -20,6 +20,8 @@ mod commands;
 #[cfg(feature = "desktop")]
 mod cloud_workspaces;
 #[cfg(feature = "desktop")]
+mod organization_members;
+#[cfg(feature = "desktop")]
 pub mod computer;
 mod control;
 #[cfg(windows)]
@@ -77,6 +79,7 @@ fn supports_deep_link_scheme(scheme: &str) -> bool {
 pub struct AppState {
     pub account: Arc<account::AccountManager>,
     pub cloud_workspaces: Arc<cloud_workspaces::CloudWorkspaceService>,
+    pub organization_members: Arc<organization_members::OrganizationMembersService>,
     pub pairing: Arc<pairing::PairingManager>,
     pub host: Arc<harness::host::Host>,
     pub terminals: Arc<pty::Terminals>,
@@ -112,6 +115,7 @@ pub fn run() {
     let account = Arc::new(account::AccountManager::default());
     let pairing = Arc::new(pairing::PairingManager::new(account.clone()));
     let cloud_workspaces = Arc::new(cloud_workspaces::CloudWorkspaceService::new(account.clone()));
+    let organization_members = Arc::new(organization_members::OrganizationMembersService::new(account.clone()));
     // The resource directory is only known once Tauri is up; the service
     // resolves the helper lazily, so it can be built before `setup`.
     let computer = Arc::new(computer::ComputerService::new(None));
@@ -119,6 +123,7 @@ pub fn run() {
     let state = AppState {
         account: account.clone(),
         cloud_workspaces,
+        organization_members,
         pairing: pairing.clone(),
         host: host.clone(),
         terminals: terminals.clone(),
@@ -237,6 +242,11 @@ pub fn run() {
             commands::account_sign_out,
             commands::organization_create,
             commands::organization_select,
+            commands::organization_members,
+            commands::organization_member_invite,
+            commands::organization_invite_revoke,
+            commands::organization_member_role_update,
+            commands::organization_member_remove,
             commands::cloud_providers,
             commands::cloud_provider,
             commands::cloud_provider_connect,
