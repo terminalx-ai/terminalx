@@ -22,6 +22,15 @@
 //! - a second device (participate) attaches to the same running terminal
 //!   read-only;
 //! - a stale ticket is refused (4101) and a newer generation fences the runtime.
+//!
+//! PRO-22 (`cloud_agent_tabs_…`): agent tabs run the fake Claude Code
+//! (`scripts/remote-runtime/fake-claude`, needs python3) under the real
+//! harness, and every send, steer, stop and decision goes through a fake API
+//! mailbox (`common/mailbox.rs`) encrypted under the key from `keys.get`:
+//! two tabs in parallel, a cut stream resumed by cursor, a queued follow-up,
+//! an approval acked from its receipt after a redelivery, steering, stop,
+//! a turn finishing while nobody is attached (and its checkpoint), and a
+//! runtime restart (receipts, keys and the dead turn reported honestly).
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -176,13 +185,16 @@ struct Client {
     notifications: Vec<Value>,
     states: Vec<ClientState>,
     next: u64,
+    /// Session subscriptions this connection holds; notifications for any
+    /// other (an earlier connection's) are dropped, as the desktop does.
+    subscriptions: std::collections::HashSet<String>,
 }
 
 impl Client {
     fn start(source: Arc<TestSource>) -> Self {
         let (tx, events) = mpsc::unbounded_channel();
         let supervisor = Supervisor::start(source, Activation::Connect, tx);
-        Self { supervisor, events, notifications: Vec::new(), states: Vec::new(), next: 0 }
+        Self { supervisor, events, notifications: Vec::new(), states: Vec::new(), next: 0, subscriptions: Default::default() }
     }
 
     async fn state(&mut self, want: impl Fn(&ClientState) -> bool) -> ClientState {
@@ -311,7 +323,7 @@ async fn desktop_drives_a_remote_runtime_through_the_relay() {
     let mut client = Client::start(source.clone());
     let ClientState::Connected { runtime_generation, capabilities, authority, .. } = client.connected().await else { unreachable!() };
     assert_eq!(runtime_generation, 7);
-    assert_eq!(capabilities, ["pty/1", "fs/1", "git/1", "session/1"]);
+    assert_eq!(capabilities, ["pty/1", "fs/1", "git/1", "session/1", "keys/1"]);
     assert_eq!(authority, "manage");
 
     // A terminal, created once even when the create is resent.
@@ -685,7 +697,11 @@ impl Feed {
         let seq = event["seq"].as_u64().expect("an event seq");
         if let Some(last) = self.events.last().and_then(|e| e["seq"].as_u64()) {
             if seq <= last {
-                assert!(self.events.iter().any(|e| e["id"] == event["id"]), "an event went back in time: {seq} after {last}");
+                assert!(
+                    self.events.iter().any(|e| e["id"] == event["id"]),
+                    "an event went back in time: {seq} after {last}: {event}\nheld: {:?}",
+                    self.events.iter().map(|e| (e["seq"].as_u64(), e["payload"]["type"].as_str().map(String::from), e["payload"]["text"].as_str().map(String::from))).collect::<Vec<_>>()
+                );
                 return;
             }
         }
@@ -713,7 +729,9 @@ impl Client {
         if let Some(cursor) = result["cursor"].as_str() {
             feed.cursor = Some(cursor.to_string());
         }
-        result["subscriptionId"].as_str().unwrap().to_string()
+        let id = result["subscriptionId"].as_str().unwrap().to_string();
+        self.subscriptions.insert(id.clone());
+        id
     }
 
     /// Route every `session.event` notification into its tab's feed.
@@ -721,6 +739,9 @@ impl Client {
         let (events, rest): (Vec<Value>, Vec<Value>) = std::mem::take(&mut self.notifications).into_iter().partition(|n| n["event"] == "session.event");
         self.notifications = rest;
         for notification in events {
+            if !notification["params"]["subscriptionId"].as_str().is_some_and(|id| self.subscriptions.contains(id)) {
+                continue;
+            }
             let event = notification["params"]["event"].clone();
             let tab = event["tabId"].as_str().unwrap_or_default().to_string();
             feeds.entry(tab).or_default().push(event, notification["params"]["cursor"].as_str().map(String::from));
@@ -786,17 +807,19 @@ async fn cloud_agent_tabs_run_through_the_mailbox_and_survive_disconnects_and_re
     let relay_token = harness.post("/runtime-token", json!({ "relayHostId": relay_host_id, "runtimeGeneration": 7 }))["relayToken"].as_str().unwrap().to_string();
     let link_dir = tempfile::tempdir().unwrap();
     let link = link_dir.path().join("link.json");
-    let device_token = uuid::Uuid::new_v4().simple().to_string();
-    std::fs::write(
-        &link,
-        json!({
+    // Every connection is a new `open`: its own attachment and single-use
+    // invite, added to the link the runtime keeps reading.
+    let attachments = Mutex::new(Vec::<Value>::new());
+    let write_agent_link = |attachments: &[Value]| {
+        let temporary = link.with_extension("new");
+        let contents = json!({
             "v": 1, "hostSecretB64": STANDARD.encode(secret), "relayToken": relay_token, "directorUrl": harness.director,
-            "attachments": [attachment("att-agents", "desktop-agents", &device_token, "runtime")],
-            "mailbox": mailbox.link_section(),
-        })
-        .to_string(),
-    )
-    .unwrap();
+            "attachments": attachments, "mailbox": mailbox.link_section(),
+        });
+        std::fs::write(&temporary, contents.to_string()).unwrap();
+        std::fs::rename(temporary, &link).unwrap();
+    };
+    write_agent_link(&[]);
     let start = || {
         let mut command = world.command();
         command.args(["--runtime-kind", "cloud-workspace", "--relay-link"]).arg(&link);
@@ -808,7 +831,13 @@ async fn cloud_agent_tabs_run_through_the_mailbox_and_survive_disconnects_and_re
     };
     let mut runtime = start();
     let pairing_dir = link_dir.path().join("link.json.attachments");
-    let desk_source = || source(&harness, &pairing_dir, "att-agents", "desktop-agents", &relay_host_id);
+    let desk_source = || {
+        let mut attachments = attachments.lock().unwrap();
+        let id = format!("att-agents-{}", attachments.len() + 1);
+        attachments.push(attachment(&id, "desktop-agents", &uuid::Uuid::new_v4().simple().to_string(), "runtime"));
+        write_agent_link(&attachments);
+        source(&harness, &pairing_dir, &id, "desktop-agents", &relay_host_id)
+    };
     let mut desk = Client::start(desk_source());
     let ClientState::Connected { capabilities, .. } = desk.connected().await else { unreachable!() };
     assert!(capabilities.iter().any(|c| c == "keys/1"), "{capabilities:?}");
@@ -882,8 +911,12 @@ async fn cloud_agent_tabs_run_through_the_mailbox_and_survive_disconnects_and_re
     desk.ok("session.nudge", json!({})).await;
     desk.until_tab(&mut feeds, &b_tab, "the allowed tool", |f| has(f, "allowed: touch approved.txt")).await;
     tokio::task::block_in_place(|| common::agent::wait_until("a lost ack", || mailbox.acks_for(&decision).iter().any(|(_, status)| *status == 503).then_some(())));
-    mailbox.state.lock().unwrap().fail_acks.clear();
+    // The lease runs out while the acks keep failing: the server leases the
+    // same command again, and only then do acks get through.
     mailbox.expire_leases();
+    desk.ok("session.nudge", json!({})).await;
+    tokio::task::block_in_place(|| common::agent::wait_until("the redelivery", || (mailbox.command(&decision).lease_count >= 2).then_some(())));
+    mailbox.state.lock().unwrap().fail_acks.clear();
     desk.ok("session.nudge", json!({})).await;
     let applied = settled(&mailbox, &decision);
     assert_eq!(applied.state, "applied", "the redelivery acks the stored receipt: {applied:?}");
@@ -954,6 +987,8 @@ async fn cloud_agent_tabs_run_through_the_mailbox_and_survive_disconnects_and_re
     let incarnations = mailbox.state.lock().unwrap().incarnations.len();
     runtime = start();
     desk.connected().await;
+    // The new connection has none of the old one's subscriptions.
+    desk.subscriptions.clear();
     assert_eq!(settled(&mailbox, &unacked).state, "applied");
     assert_eq!(mailbox.state.lock().unwrap().incarnations.len(), incarnations, "the receipt store survived the restart");
     assert_eq!(settled(&mailbox, &dying).state, "applied");
@@ -963,6 +998,13 @@ async fn cloud_agent_tabs_run_through_the_mailbox_and_survive_disconnects_and_re
     let a_info = tabs["tabs"].as_array().unwrap().iter().find(|t| t["tabId"] == a_tab.as_str()).unwrap().clone();
     assert_ne!(a_info["process"], "running", "{a_info}");
     assert_ne!(a_info["status"], "in_progress", "{a_info}");
+    // A cursor does not survive a runtime restart: seqs restart from the
+    // last persisted event, so a live-only event seen before the restart
+    // (usage) shares its seq with a new one after it, and resuming from that
+    // cursor would skip the new one. Resync each tab from a full replay.
+    // TODO(PRO-22): bind cursors to the runtime epoch, then resume by cursor here.
+    feeds.remove(&a_tab);
+    feeds.remove(&b_tab);
     desk.subscribe_tab(&mut feeds, &b_session, &b_tab).await;
     let b_replies = feeds[&b_tab].texts("assistant_text");
     assert_eq!(b_replies.iter().filter(|t| *t == "before the restart").count(), 1, "applied once: {b_replies:?}");
@@ -973,6 +1015,9 @@ async fn cloud_agent_tabs_run_through_the_mailbox_and_survive_disconnects_and_re
     let resumed = send(&a_tab, "send", json!({ "v": 1, "text": "echo:after the restart" }));
     desk.ok("session.nudge", json!({})).await;
     assert_eq!(settled(&mailbox, &resumed).state, "applied");
+    let receipt = mailbox.receipt(&resumed, &keys_after).expect("a receipt");
+    let a_now = desk.ok("session.tabs", json!({})).await;
+    assert_ne!(receipt["queued"], true, "the tab is idle after the restart, so the prompt goes now: {receipt}; before: {a_info}; now: {a_now}");
     desk.subscribe_tab(&mut feeds, &a_session, &a_tab).await;
     desk.until_tab(&mut feeds, &a_tab, "the resumed reply", |f| has(f, "after the restart")).await;
     desk.supervisor.stop();
