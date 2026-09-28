@@ -666,9 +666,8 @@ impl WorkspaceRpc {
         let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
         let changed = pty.controller.as_deref() != Some(peer.device_id.as_str());
         pty.controller = Some(peer.device_id.clone());
-        if let (Some((cols, rows)), None) = (size, pty.exit) {
-            self.apply_size(&pty_id, pty, cols, rows)?;
-        }
+        // Control first, so a device that just lost it takes the new size as
+        // a viewer instead of ignoring it as its own.
         if changed {
             for (subscription_id, subscriber) in &pty.subscribers {
                 subscriber.notify(
@@ -676,6 +675,9 @@ impl WorkspaceRpc {
                     json!({ "subscriptionId": subscription_id, "ptyId": pty_id, "control": pty.control_for(subscriber) }),
                 );
             }
+        }
+        if let (Some((cols, rows)), None) = (size, pty.exit) {
+            self.apply_size(&pty_id, pty, cols, rows)?;
         }
         Ok(self.describe_pty(&pty_id, pty, peer))
     }
@@ -690,9 +692,30 @@ impl WorkspaceRpc {
         // SIGTERM, then SIGKILL after a grace period, to the whole group.
         self.terminals.kill(&pty_id);
         if exited {
-            self.ptys.lock().unwrap().remove(&pty_id);
+            let ended = Self::remove_pty(&mut self.ptys.lock().unwrap(), &pty_id);
+            self.forget_subscriptions(ended);
         }
         Ok(json!({ "ptyId": pty_id }))
+    }
+
+    /// Drop a terminal's entry, telling everyone still watching it that it
+    /// is gone. Returns their subscriptions, to forget once unlocked.
+    fn remove_pty(ptys: &mut HashMap<String, PtyState>, pty_id: &str) -> Vec<String> {
+        let Some(pty) = ptys.remove(pty_id) else { return Vec::new() };
+        for (subscription_id, peer) in &pty.subscribers {
+            peer.notify("pty.closed", json!({ "subscriptionId": subscription_id, "ptyId": pty_id }));
+        }
+        pty.subscribers.into_keys().collect()
+    }
+
+    fn forget_subscriptions(&self, ended: Vec<String>) {
+        if ended.is_empty() {
+            return;
+        }
+        let mut subscriptions = self.subscriptions.lock().unwrap();
+        for subscription_id in ended {
+            subscriptions.remove(&subscription_id);
+        }
     }
 
     fn pty_attach(&self, peer: &Arc<Peer>, params: Value) -> Result<Value, RpcError> {
@@ -719,9 +742,10 @@ impl WorkspaceRpc {
         let (first, rest) = replay.split_at(replay.len().min(REPLAY_CHUNK));
         let mut at = from + first.len() as u64;
         for chunk in rest.chunks(REPLAY_CHUNK) {
-            let data = STANDARD.encode(chunk);
-            let size = data.len();
-            peer.notify_sized("pty.output", json!({ "subscriptionId": subscription_id, "ptyId": pty_id, "offset": at, "data": data }), size);
+            // Bounded by the ring, so it does not count toward the lag
+            // threshold: attaching several full terminals at once is not a
+            // slow link.
+            peer.notify("pty.output", json!({ "subscriptionId": subscription_id, "ptyId": pty_id, "offset": at, "data": STANDARD.encode(chunk) }));
             at += chunk.len() as u64;
         }
         pty.subscribers.insert(subscription_id.clone(), peer.clone());
@@ -779,6 +803,7 @@ impl WorkspaceRpc {
     }
 
     fn on_pty_exit(&self, exit: PtyExit) {
+        let mut ended = Vec::new();
         let evicted = {
             let mut ptys = self.ptys.lock().unwrap();
             let Some(pty) = ptys.get_mut(&exit.id) else { return };
@@ -791,7 +816,7 @@ impl WorkspaceRpc {
                 );
             }
             if pty.closed {
-                ptys.remove(&exit.id);
+                ended.extend(Self::remove_pty(&mut ptys, &exit.id));
             }
             // Exited terminals keep their output for a late reader, up to a
             // bound: the oldest are dropped first.
@@ -801,12 +826,13 @@ impl WorkspaceRpc {
             if exited.len() > MAX_EXITED_PTYS {
                 exited.sort();
                 for (_, id) in exited.drain(..exited.len() - MAX_EXITED_PTYS) {
-                    ptys.remove(&id);
+                    ended.extend(Self::remove_pty(&mut ptys, &id));
                     evicted.push(id);
                 }
             }
             evicted
         };
+        self.forget_subscriptions(ended);
         // Release the evicted terminals' PTYs too, not only their output.
         for id in evicted {
             self.terminals.kill(&id);

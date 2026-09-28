@@ -17,6 +17,7 @@ import {
   cloudTerminalFactory,
   createCloudTerminal,
   detachCloudTerminals,
+  errorCode,
   selectCloudTerminal,
   syncCloudTerminals,
   takeControl,
@@ -206,9 +207,10 @@ function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: Work
         // A workspace with no shell gets one on the first connect only; after
         // that tabs are the user's, and a restarted runtime's ended tabs are
         // never quietly replaced by new shells.
+        if (cancelled) return;
         const first = !autoCreated.current;
         autoCreated.current = true;
-        if (!cancelled && first && live.length === 0 && manage) {
+        if (first && live.length === 0 && manage) {
           await createCloudTerminal(key, client, { cols: 100, rows: 30 }, base);
         }
       } catch (e) {
@@ -518,7 +520,3 @@ function describe(state: WorkspaceConnectionState): string {
   }
 }
 
-function errorCode(error: unknown): string {
-  if (error && typeof error === "object" && "code" in error) return String((error as { code: unknown }).code);
-  return error instanceof Error ? error.message : String(error);
-}

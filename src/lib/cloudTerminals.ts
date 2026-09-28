@@ -78,7 +78,6 @@ export function cloudTerminalsOf(workspace: string): WorkspaceTerminals {
 interface Binding {
   client: WorkspaceRpcClient;
   attachment: PtyAttachment | null;
-  cursor?: PtyCursor;
 }
 const bindings = new Map<string, Binding>();
 /** Where each terminal's view left off, kept across connections. */
@@ -106,7 +105,8 @@ function fromInfo(workspace: string, info: PtyInfo): CloudTerminal {
   };
 }
 
-function errorText(error: unknown): string {
+/** A refusal's code, or the error's message. */
+export function errorCode(error: unknown): string {
   if (error && typeof error === "object" && "code" in error) return String((error as { code: unknown }).code);
   return error instanceof Error ? error.message : String(error);
 }
@@ -133,7 +133,7 @@ export function cloudTerminalFactory(workspace: string, terminal: CloudTerminal,
         .then(() => {
           if (current()?.inputError) patch(workspace, terminal.id, { inputError: null });
         })
-        .catch((error: unknown) => patch(workspace, terminal.id, { inputError: errorText(error) }));
+        .catch((error: unknown) => patch(workspace, terminal.id, { inputError: errorCode(error) }));
     };
     instance.term.onData(send);
     instance.term.onBinary(send);
@@ -164,7 +164,14 @@ async function attach(workspace: string, client: WorkspaceRpcClient, terminal: C
       const current = cloudTerminalsOf(workspace).terminals.find((item) => item.id === terminal.id);
       if (current && !current.exited) patch(workspace, terminal.id, { exited: true, exitCode: code });
     },
-    onControl: (control) => patch(workspace, terminal.id, { control }),
+    onControl: (control) => {
+      patch(workspace, terminal.id, { control });
+      // A viewer shows the program at the controller's size.
+      const current = cloudTerminalsOf(workspace).terminals.find((item) => item.id === terminal.id);
+      if (control !== "you" && current && (instance.term.cols !== current.cols || instance.term.rows !== current.rows)) {
+        instance.term.resize(current.cols, current.rows);
+      }
+    },
     onResize: (cols, rows) => {
       patch(workspace, terminal.id, { cols, rows });
       const current = cloudTerminalsOf(workspace).terminals.find((item) => item.id === terminal.id);
@@ -237,7 +244,12 @@ export async function closeCloudTerminal(workspace: string, client: WorkspaceRpc
   if (!terminal) return;
   if (!terminal.gone) {
     if (!client) throw new Error("Not connected to the workspace");
-    await client.killPty(terminal.ptyId);
+    try {
+      await client.killPty(terminal.ptyId);
+    } catch (error) {
+      // Already closed elsewhere: closing the tab is all that is left.
+      if (errorCode(error) !== "not_found") throw error;
+    }
   }
   bindings.get(id)?.attachment?.detach();
   bindings.delete(id);

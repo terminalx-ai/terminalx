@@ -261,6 +261,38 @@ describe("workspace RPC client", () => {
     client.close();
   });
 
+  it("reports a terminal closed elsewhere and does not resume it", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    const gone: string[] = [];
+    await client.attachPty("p1", { onData: () => undefined, onGone: (reason) => gone.push(reason) });
+    runtime.deliver({ event: "pty.closed", params: { subscriptionId: "sub-1", ptyId: "p1" } });
+    expect(gone).toEqual(["closed"]);
+    runtime.drop();
+    runtime.connect();
+    await settle();
+    expect(runtime.sent.filter((frame) => frame.method === "pty.attach")).toHaveLength(1);
+    client.close();
+  });
+
+  it("keeps trying to resume a lagged stream while the link is up", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids, 20);
+    runtime.connect();
+    let seen = "";
+    await client.attachPty("p1", { onData: (bytes) => (seen += new TextDecoder().decode(bytes)) });
+    runtime.loseAnswers = true;
+    runtime.deliver({ event: "pty.lagged", params: { subscriptionId: "sub-1", ptyId: "p1", offset: 0 } });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    runtime.loseAnswers = false;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(runtime.sent.filter((frame) => frame.method === "pty.attach").length).toBeGreaterThanOrEqual(3);
+    runtime.typeOutput("back");
+    expect(seen).toBe("back");
+    client.close();
+  });
+
   it("never re-attaches or types into a terminal whose runtime restarted", async () => {
     const runtime = new FakeRuntime();
     const client = new WorkspaceRpcClient(runtime, ids);

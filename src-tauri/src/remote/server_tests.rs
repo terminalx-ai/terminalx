@@ -354,8 +354,9 @@ async fn one_controller_owns_input_and_size_and_viewers_follow() {
     // announced to every viewer.
     let taken = call(&f.rpc, &laptop, "pty.control", json!({ "ptyId": pty_id, "cols": 100, "rows": 30 })).await.unwrap();
     assert_eq!((taken["control"].as_str(), taken["cols"].as_u64(), taken["rows"].as_u64()), (Some("you"), Some(100), Some(30)));
-    assert_eq!(next_event(&mut desk_events, "pty.resized").await["cols"], 100);
+    // The loser hears it lost control before the new size, so it follows the size as a viewer.
     assert_eq!(next_event(&mut desk_events, "pty.control").await["control"], "other");
+    assert_eq!(next_event(&mut desk_events, "pty.resized").await["cols"], 100);
     assert_eq!(next_event(&mut laptop_events, "pty.control").await["control"], "you");
     assert_eq!(code(call(&f.rpc, &desk, "pty.resize", json!({ "ptyId": pty_id, "cols": 80, "rows": 24 })).await), "not_controller");
     call(&f.rpc, &laptop, "pty.write", json!({ "ptyId": pty_id, "data": "stty size\n", "seq": 1, "writerId": "l" })).await.unwrap();
@@ -375,8 +376,13 @@ async fn exit_and_close_are_reported_and_nothing_targets_a_closed_terminal() {
     // Still listed, with its output, until it is closed.
     let listed = call(&f.rpc, &peer, "pty.list", json!({})).await.unwrap();
     assert_eq!(listed["terminals"][0]["exited"], true);
+    let (watcher, mut watcher_events) = peer_for(&f.rpc, "device-watcher", Authority::Participate).await;
+    let watching = call(&f.rpc, &watcher, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
     call(&f.rpc, &peer, "pty.kill", json!({ "ptyId": pty_id })).await.unwrap();
     assert_eq!(call(&f.rpc, &peer, "pty.list", json!({})).await.unwrap()["terminals"], json!([]));
+    // Whoever still watched it is told, and its subscription is gone.
+    assert_eq!(next_event(&mut watcher_events, "pty.closed").await["subscriptionId"], watching["subscriptionId"]);
+    assert!(!f.rpc.subscriptions.lock().unwrap().contains_key(watching["subscriptionId"].as_str().unwrap()));
     assert_eq!(code(call(&f.rpc, &peer, "pty.attach", json!({ "ptyId": pty_id })).await), "not_found");
 
     // Closing a running terminal ends its process and then its entry.

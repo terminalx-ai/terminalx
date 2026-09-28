@@ -156,6 +156,8 @@ export class WorkspaceRpcClient {
   private readonly inputs = new Map<string, PtyInput>();
   /** Notifications for a subscription whose id is not known yet (its answer is still being handled). */
   private unrouted: WorkspaceNotification[] = [];
+  /** Subscribe requests awaiting their answer. */
+  private resuming = 0;
   /** The runtime process each known terminal belongs to. */
   private readonly ptyEpochs = new Map<string, string>();
   private state: WorkspaceConnectionState = { state: "idle" };
@@ -376,6 +378,7 @@ export class WorkspaceRpcClient {
           : { sinceOffset: cursor.offset, runtimeGeneration: this.generation, epoch };
       },
       beforeResume: () => {
+        if (gone) return false;
         const epoch = this.ptyEpochs.get(ptyId);
         const runtimeEpoch = this.state.state === "connected" ? this.state.runtimeEpoch : undefined;
         if (epoch && runtimeEpoch && epoch !== runtimeEpoch) {
@@ -415,6 +418,10 @@ export class WorkspaceRpcClient {
             break;
           case "pty.resized":
             handlers.onResize?.(Number(params.cols), Number(params.rows));
+            break;
+          case "pty.closed":
+            // Closed by another client, or dropped from the exited-terminal limit.
+            markGone("closed");
             break;
           case "pty.lagged":
             // The runtime ended this stream because the link fell behind;
@@ -480,7 +487,12 @@ export class WorkspaceRpcClient {
         spec.listener(notification, () => {
           if (this.subscriptions.get(localId) !== subscription) return;
           subscription.serverId = undefined;
-          if (this.state.state === "connected") void subscription.resume().catch(() => undefined);
+          // Keep trying while the link is up; a reconnect resumes it anyway.
+          const retry = (attempt: number) => {
+            if (this.closed || this.state.state !== "connected" || this.subscriptions.get(localId) !== subscription || subscription.serverId) return;
+            subscription.resume().catch(() => setTimeout(() => retry(attempt + 1), Math.min(10_000, 250 * 2 ** attempt)));
+          };
+          retry(0);
         }),
       onReplay: spec.onReplay,
       resume: async () => {
@@ -489,11 +501,21 @@ export class WorkspaceRpcClient {
           return;
         }
         let result: RpcCallResult<Record<string, unknown>>;
-        result = await this.rpc.request(spec.method, { ...spec.params, ...spec.resumeParams() });
+        this.resuming++;
+        try {
+          result = await this.rpc.request(spec.method, { ...spec.params, ...spec.resumeParams() });
+        } finally {
+          this.resuming--;
+        }
         if (!result.ok && result.refusal.code === "cursor_expired") {
           // Another runtime generation: resync from a full snapshot.
           spec.onCursorExpired?.();
-          result = await this.rpc.request(spec.method, spec.params);
+          this.resuming++;
+          try {
+            result = await this.rpc.request(spec.method, spec.params);
+          } finally {
+            this.resuming--;
+          }
         }
         if (!result.ok && spec.onRefused?.(new WorkspaceRpcError(result.refusal.code, result.refusal.message, spec.method))) {
           this.subscriptions.delete(localId);
@@ -507,6 +529,7 @@ export class WorkspaceRpcClient {
           this.unrouted = this.unrouted.filter((notification) => notification.params.subscriptionId !== subscription.serverId);
           for (const notification of early) subscription.listener(notification);
         }
+        if (this.resuming === 0) this.unrouted = [];
       },
     };
     this.assertGranted(spec.method);
@@ -548,7 +571,9 @@ export class WorkspaceRpcClient {
           routed = true;
         }
       }
-      if (!routed && target) {
+      // Only a subscription whose answer is still on its way can own it;
+      // anything else is for a stream this client already ended.
+      if (!routed && target && this.resuming > 0) {
         this.unrouted.push(notification);
         if (this.unrouted.length > 256) this.unrouted.shift();
       }
