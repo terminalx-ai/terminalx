@@ -75,12 +75,23 @@ fn is_executable(p: &Path) -> bool {
     }
 }
 
+static PRIORITY_DIR: OnceLock<String> = OnceLock::new();
+#[cfg_attr(windows, allow(dead_code))]
+static LOGIN_PATH: OnceLock<String> = OnceLock::new();
+
+/// Put `dir` before every other directory in [`login_path`], so a shim in it
+/// (the cloud workspace's `gh`, see `cloud_github`) wins over the real
+/// binary. Only takes effect before `login_path` is first read; returns
+/// whether it did.
+pub fn set_priority_dir(dir: &std::path::Path) -> bool {
+    LOGIN_PATH.get().is_none() && PRIORITY_DIR.set(dir.to_string_lossy().into_owned()).is_ok()
+}
+
 /// The user's login-shell `PATH`, read once. Everything the app spawns gets
 /// this so agents can find `git`, `gh`, `node` and each other.
 #[cfg(unix)]
 pub fn login_path() -> String {
-    static P: OnceLock<String> = OnceLock::new();
-    P.get_or_init(|| {
+    LOGIN_PATH.get_or_init(|| {
         let inherited = std::env::var("PATH").unwrap_or_default();
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
         let from_shell = Command::new(&shell)
@@ -92,7 +103,8 @@ pub fn login_path() -> String {
             .unwrap_or_default();
         let mut seen = std::collections::HashSet::new();
         let mut parts: Vec<String> = Vec::new();
-        for dir in known_dirs().iter().map(|p| p.to_string_lossy().into_owned()).chain(from_shell.split(':').map(String::from)).chain(inherited.split(':').map(String::from)) {
+        let priority = PRIORITY_DIR.get().cloned();
+        for dir in priority.into_iter().chain(known_dirs().iter().map(|p| p.to_string_lossy().into_owned())).chain(from_shell.split(':').map(String::from)).chain(inherited.split(':').map(String::from)) {
             if dir.is_empty() || !seen.insert(dir.clone()) {
                 continue;
             }
@@ -145,7 +157,8 @@ fn resolve_uncached(name: &str) -> Option<PathBuf> {
 #[cfg(windows)]
 pub fn login_path() -> String {
     let inherited = std::env::var_os("PATH").unwrap_or_default();
-    let paths = known_dirs().into_iter().chain(std::env::split_paths(&inherited));
+    let priority = PRIORITY_DIR.get().map(PathBuf::from);
+    let paths = priority.into_iter().chain(known_dirs()).chain(std::env::split_paths(&inherited));
     std::env::join_paths(paths).unwrap_or(inherited).to_string_lossy().into_owned()
 }
 

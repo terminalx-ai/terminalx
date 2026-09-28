@@ -49,14 +49,17 @@ pub const TOKEN_PATH_ENV: &str = "TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_TOKEN_PATH
 /// server this runtime takes agent credentials only as sealed grants
 /// (`cloud_grants`), so first-run setup never carries stored agent logins.
 /// Comma-separated.
-pub const CAPABILITIES: &str = "organization-access-v1,agent-grants-v1";
+/// `github-broker-v1` tells it this runtime installs the GitHub token shim
+/// (`cloud_github`) and takes GitHub tokens only from
+/// `/v1/cloud-workspace-bootstrap/github-token`, never in first-run setup.
+pub const CAPABILITIES: &str = "organization-access-v1,agent-grants-v1,github-broker-v1";
 const CAPABILITIES_HEADER: &str = "x-terminalx-cloud-workspace-runtime-capabilities";
 pub(crate) const VERSION_HEADER: &str = "x-terminalx-cloud-workspace-runtime-version";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
-const STATE_DIR: &str = "cloud-workspace";
+pub(crate) const STATE_DIR: &str = "cloud-workspace";
 const HOST_KEY_FILE: &str = "host-key.json";
 const STATE_FILE: &str = "runtime.json";
 /// Next to the bootstrap token, in the runtime's state root
@@ -788,6 +791,13 @@ fn load_or_create_host_key(dir: &Path) -> Result<HostKey> {
         }
         Err(error) => Err(anyhow::Error::new(error).context("read the relay host key")),
     }
+}
+
+/// The runtime credential stored in `state_dir`, for a short-lived process
+/// that runs beside the runtime (the GitHub credential helper,
+/// `cloud_github`). It holds no lock: the file is only ever replaced whole.
+pub(crate) fn stored_runtime_credential(state_dir: &Path) -> Result<Option<Zeroizing<String>>> {
+    Ok(read_identity(state_dir)?.map(|stored| Zeroizing::new(stored.runtime_credential.clone())))
 }
 
 fn read_identity(dir: &Path) -> Result<Option<StoredIdentity>> {

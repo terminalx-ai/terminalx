@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Check, Loader2, Pencil } from "lucide-react";
 import { OrganizationCompute } from "./OrganizationCompute";
+import { OrganizationGithubApp } from "./OrganizationGithubApp";
 import { OrganizationMembers } from "./OrganizationMembers";
 import { OrganizationOnboarding } from "./OrganizationOnboarding";
 import { AccountAvatar } from "@/components/account/AccountAvatar";
@@ -46,6 +47,7 @@ export function AccountTab() {
         <OrganizationOnboarding key={identity.email} organizationName={identity.organization} accountEmail={identity.email} contextRevision={status.context?.revision ?? ""} organizations={status.organizations ?? []} />
         {identity.organization && <OrganizationMembers accountEmail={identity.email} contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationCompute contextRevision={status.context?.revision ?? ""} />}
+        {identity.organization && <OrganizationGithubApp contextRevision={status.context?.revision ?? ""} />}
         {pairing.status.host && (
           <div className="rounded-lg border border-hairline px-3 py-3">
             <div className="text-xs font-medium">What this Mac shares</div>

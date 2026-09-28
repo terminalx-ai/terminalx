@@ -190,6 +190,98 @@ pub async fn organization_compute_provisioning_pause(
     .await
 }
 
+// -------------------------------------------------- organization GitHub App
+
+type GithubAppResult<T> = Result<T, crate::organization_github_app::GithubAppError>;
+
+async fn github_app_call<T: Send + 'static>(
+    state: tauri::State<'_, crate::AppState>,
+    operation: impl FnOnce(&crate::organization_github_app::OrganizationGithubAppService) -> GithubAppResult<T> + Send + 'static,
+) -> GithubAppResult<T> {
+    let service = state.organization_github_app.clone();
+    tauri::async_runtime::spawn_blocking(move || operation(&service))
+        .await
+        .map_err(|_| crate::organization_github_app::GithubAppError::local("github_app_request_failed"))?
+}
+
+#[tauri::command]
+pub async fn organization_github_app(
+    state: tauri::State<'_, crate::AppState>,
+) -> GithubAppResult<crate::organization_github_app::GithubAppSummary> {
+    github_app_call(state, |service| service.summary()).await
+}
+
+#[tauri::command]
+pub async fn organization_github_app_connect(
+    context_revision: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> GithubAppResult<crate::organization_github_app::ConnectAttempt> {
+    use tauri_plugin_opener::OpenerExt;
+    github_app_call(state, move |service| {
+        service.connect(&context_revision, |url| app.opener().open_url(url, None::<&str>).is_ok())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn organization_github_app_attempt(
+    attempt_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> GithubAppResult<crate::organization_github_app::ConnectAttempt> {
+    github_app_call(state, move |service| service.attempt(&attempt_id)).await
+}
+
+#[tauri::command]
+pub async fn organization_github_app_attempt_cancel(
+    attempt_id: String,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> GithubAppResult<crate::organization_github_app::ConnectAttempt> {
+    github_app_call(state, move |service| service.cancel_attempt(&attempt_id, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_github_app_repositories(
+    installation_id: String,
+    query: String,
+    refresh: bool,
+    state: tauri::State<'_, crate::AppState>,
+) -> GithubAppResult<crate::organization_github_app::LiveRepositories> {
+    github_app_call(state, move |service| service.repositories(&installation_id, &query, refresh)).await
+}
+
+#[tauri::command]
+pub async fn organization_github_app_repositories_save(
+    repositories: Vec<crate::organization_github_app::RepositoryChoice>,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> GithubAppResult<()> {
+    github_app_call(state, move |service| service.save_repositories(&repositories, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_github_app_disconnect(
+    installation_id: String,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> GithubAppResult<()> {
+    github_app_call(state, move |service| service.disconnect(&installation_id, &context_revision)).await
+}
+
+/// Open a GitHub page (an installation's settings) in the browser. Anything
+/// that is not on https://github.com is refused.
+#[tauri::command]
+pub fn organization_github_app_open(url: String, app: tauri::AppHandle) -> GithubAppResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    if !crate::organization_github_app::allowed_github_url(&url) {
+        return Err(crate::organization_github_app::GithubAppError::local("invalid_request"));
+    }
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|_| crate::organization_github_app::GithubAppError::local("github_app_browser_failed"))
+}
+
 // --------------------------------------------------------- cloud workspaces
 
 macro_rules! cloud_command {

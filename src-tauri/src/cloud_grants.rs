@@ -531,7 +531,7 @@ fn workspace_dir(base: &Path, workspace_id: &str) -> PathBuf {
 /// Create `dir` 0700 from the start and make sure it is a real directory this
 /// user owns: `/dev/shm` is shared, and another user could have made the name
 /// first.
-fn prepare_private_dir(dir: &Path) -> Result<()> {
+pub(crate) fn prepare_private_dir(dir: &Path) -> Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -569,7 +569,7 @@ fn select_root(candidates: Vec<PathBuf>, workspace_id: &str) -> Option<PathBuf> 
     None
 }
 
-fn tmpfs_root(workspace_id: &str) -> Option<PathBuf> {
+pub(crate) fn tmpfs_root(workspace_id: &str) -> Option<PathBuf> {
     #[cfg(unix)]
     // SAFETY: geteuid has no preconditions.
     let uid = unsafe { libc::geteuid() };
@@ -582,7 +582,7 @@ fn tmpfs_root(workspace_id: &str) -> Option<PathBuf> {
 
 /// Write `bytes` to `path` as 0600: a new temp file with a random name,
 /// created exclusively and never through a symlink, then renamed over `path`.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     use rand_core::RngCore as _;
     let mut nonce = [0u8; 12];
     OsRng.fill_bytes(&mut nonce);
