@@ -30,11 +30,14 @@ export interface FileSource {
   /**
    * Replace a file's text. `baseEtag` is the content the buffer was based
    * on: a cloud workspace refuses the save with a conflict if the file
-   * changed since (undefined overwrites, only as an explicit choice).
+   * changed since. Null: the file must not exist. Undefined overwrites.
    */
-  writeText(rel: string, text: string, baseEtag: string | undefined): Promise<FileState>;
-  /** The file's current state, or null when it is gone. */
-  stat(rel: string): Promise<FileState | null>;
+  writeText(rel: string, text: string, baseEtag: string | null | undefined): Promise<FileState>;
+  /**
+   * The file's current state, or null when it is gone. `etag` asks for the
+   * content hash even of a large file (a cloud save needs it).
+   */
+  stat(rel: string, options?: { etag?: boolean }): Promise<FileState | null>;
   /** Changed paths as they happen; null means "re-read everything" (after a reconnect). */
   watch?(listener: (paths: string[] | null) => void): () => void;
   /** Git status of changed files, for the tree's badges. */
@@ -179,9 +182,9 @@ export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnl
       const written = await live(writeRemoteFile(client, rel, text, baseEtag));
       return { version: written.version ?? "", etag: written.etag };
     },
-    stat: async (rel) => {
+    stat: async (rel, options) => {
       try {
-        const stat = await live(statRemote(client, rel));
+        const stat = await live(statRemote(client, rel, options));
         return { version: stat.version ?? String(stat.modifiedMs), etag: stat.etag };
       } catch (error) {
         if (error instanceof Error && "code" in error && (error as { code: string }).code === "not_found") return null;

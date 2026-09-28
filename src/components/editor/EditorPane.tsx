@@ -154,9 +154,9 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
     [entry.id],
   );
 
-  /** `base`: the content hash the save is conditional on; the buffer's own by default. */
+  /** `base`: the content hash the save is conditional on (null: the file must not exist). */
   const write = useCallback(
-    async (base: string | undefined) => {
+    async (base: string | null | undefined) => {
       const view = viewRef.current;
       if (!view || !source || source.readOnly) return;
       const text = view.state.doc.toString();
@@ -172,13 +172,22 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
 
   const save = useCallback(() => write(fileState.current.etag), [write]);
 
-  /** Resolve a conflict in favour of the buffer: overwrite what is there now, knowingly. */
+  /**
+   * Resolve a conflict in favour of the buffer: overwrite what is there now,
+   * knowingly — still conditional on that version, so a change after this
+   * choice is another conflict, never lost.
+   */
   const overwrite = useCallback(async () => {
     if (!source) return;
     try {
-      const now = await source.stat(entry.rel);
-      // Gone meanwhile: recreate it, still refusing if it reappears first.
-      await write(now ? (now.etag ?? fileState.current.etag) : undefined);
+      const now = await source.stat(entry.rel, { etag: true });
+      if (now && source.kind === "cloud" && !now.etag) {
+        setError("The file in the workspace is too large to compare; it was not overwritten.");
+        return;
+      }
+      // Gone meanwhile: recreate it, refusing if it reappears first (a
+      // cloud save conditional on "must not exist").
+      await write(now ? now.etag : null);
     } catch (e) {
       setError(describeError(e));
     }
@@ -338,7 +347,14 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
   const checkForChange = useCallback(async () => {
     if (!source) return;
     const now = await source.stat(entry.rel).catch(() => undefined);
-    if (now === undefined || !changedSince(fileState.current, now)) return;
+    if (now === undefined) return;
+    if (now === null) {
+      // Gone (deleted, or mid-rename by another tool). A local file keeps
+      // its buffer quietly until it is back; a cloud one says so.
+      if (source.kind === "cloud") setChangedOnDisk(true);
+      return;
+    }
+    if (!changedSince(fileState.current, now)) return;
     if (!dirtyRef.current) void reloadFromDisk();
     else setChangedOnDisk(true);
   }, [source, entry.rel, reloadFromDisk]);

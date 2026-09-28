@@ -117,6 +117,16 @@ function RootedFileTreeView({
   // status, a beat later so a burst of writes is one refresh.
   const expandedRef = useRef(expanded);
   expandedRef.current = expanded;
+  // Changes made while the tree was hidden were not heard: catch up on showing it again.
+  const shownBefore = useRef(false);
+  useEffect(() => {
+    if (!active || !source) return;
+    if (shownBefore.current) {
+      for (const rel of expandedRef.current) void load(rel);
+      setTick((t) => t + 1);
+    }
+    shownBefore.current = true;
+  }, [active, source, load]);
   useEffect(() => {
     if (!active || !source?.watch) return;
     let timer: number | undefined;

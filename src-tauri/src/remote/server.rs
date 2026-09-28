@@ -959,6 +959,11 @@ impl WorkspaceRpc {
         self.files.existing_path(relative)
     }
 
+    #[cfg(test)]
+    pub(super) fn files_for_tests(&self) -> Arc<WorkspaceFiles> {
+        self.files.clone()
+    }
+
     fn lexical(&self, relative: &str) -> Result<PathBuf, RpcError> {
         self.files.lexical(relative)
     }
@@ -982,7 +987,11 @@ impl WorkspaceRpc {
         let notify_peer = peer.clone();
         let id = subscription_id.clone();
         let (watcher, path) = self.files.watcher(params.get("path").and_then(Value::as_str).unwrap_or(""), move |paths| {
-            notify_peer.notify("fs.changed", json!({ "subscriptionId": id, "paths": paths }));
+            let params = match paths {
+                Some(paths) => json!({ "subscriptionId": id, "paths": paths }),
+                None => json!({ "subscriptionId": id, "paths": [], "overflow": true }),
+            };
+            notify_peer.notify("fs.changed", params);
         })?;
         self.subscriptions.lock().unwrap().insert(subscription_id.clone(), Subscription::Fs { peer: peer.id, _watcher: watcher });
         Ok(json!({ "subscriptionId": subscription_id, "path": path }))

@@ -539,9 +539,9 @@ export class WorkspaceRpcClient {
 
   /**
    * Changes under a workspace directory (`fs.watch`). `onChange` gets the
-   * changed workspace-relative paths, or null after a reconnect, when
-   * changes made while away were not seen and everything shown should be
-   * re-read.
+   * changed workspace-relative paths, or null when everything shown should
+   * be re-read: after a reconnect (changes made while away were not seen)
+   * or a burst too large to name.
    */
   watchFiles(path: string, onChange: (paths: string[] | null) => void): Promise<() => void> {
     let resumed = false;
@@ -555,6 +555,8 @@ export class WorkspaceRpcClient {
       },
       listener: (notification) => {
         if (notification.event !== "fs.changed") return;
+        // Too many to name (an install, a checkout): re-read everything.
+        if (notification.params.overflow === true) return onChange(null);
         const paths = notification.params.paths;
         if (Array.isArray(paths)) onChange(paths.filter((entry): entry is string => typeof entry === "string"));
       },

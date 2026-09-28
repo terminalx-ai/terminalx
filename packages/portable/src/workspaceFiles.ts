@@ -126,8 +126,9 @@ export async function listRemoteDir(client: WorkspaceRpcClient, path: string): P
   return client.call<RemoteListing>("fs.list", { path: remotePath(path) });
 }
 
-export async function statRemote(client: WorkspaceRpcClient, path: string): Promise<RemoteStat> {
-  return client.call<RemoteStat>("fs.stat", { path: remotePath(path) });
+/** `etag`: hash files up to the remote limit too, not only small ones. */
+export async function statRemote(client: WorkspaceRpcClient, path: string, options: { etag?: boolean } = {}): Promise<RemoteStat> {
+  return client.call<RemoteStat>("fs.stat", { path: remotePath(path), ...(options.etag ? { etag: true } : {}) });
 }
 
 interface ReadPart {
@@ -145,7 +146,7 @@ interface ReadPart {
 
 export interface ReadOptions {
   signal?: AbortSignal;
-  /** Refuse files larger than this (`too_large`) before reading any part. */
+  /** Refuse files larger than this (`too_large`) after the first part. */
   maxBytes?: number;
 }
 
@@ -166,13 +167,9 @@ export async function readRemoteFile(client: WorkspaceRpcClient, path: string, o
 }
 
 async function readOnce(client: WorkspaceRpcClient, path: string, { signal, maxBytes }: ReadOptions): Promise<RemoteFile> {
-  if (maxBytes !== undefined) {
-    const stat = await statRemote(client, path);
-    abortIfNeeded(signal);
-    if (stat.size > maxBytes) throw new WorkspaceRpcError("too_large", `${path} is larger than ${maxBytes} bytes`, "fs.read");
-  }
   const first = await client.call<ReadPart>("fs.read", { path });
   abortIfNeeded(signal);
+  if (maxBytes !== undefined && first.size > maxBytes) throw new WorkspaceRpcError("too_large", `${path} is larger than ${maxBytes} bytes`, "fs.read");
   if (first.text !== undefined) {
     return {
       path: first.path,
@@ -199,7 +196,8 @@ async function readOnce(client: WorkspaceRpcClient, path: string, { signal, maxB
   let text: string | null = null;
   if (!binary) {
     try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      // Keep a byte order mark, as a single-part read does: saving must not drop it.
+      text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
     } catch {
       text = null;
     }

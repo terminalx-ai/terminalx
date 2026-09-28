@@ -15,6 +15,12 @@ struct Fixture {
     rpc: Arc<WorkspaceRpc>,
 }
 
+impl Fixture {
+    fn rpc_files(&self) -> Arc<WorkspaceFiles> {
+        self.rpc.files_for_tests()
+    }
+}
+
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap().join("workspace");
@@ -332,4 +338,61 @@ async fn a_change_in_the_workspace_is_notified_without_staging_temporaries() {
         seen.extend(event["params"]["paths"].as_array().unwrap().iter().map(|path| path.as_str().unwrap().to_string()));
     }
     assert!(seen.iter().all(|path| !is_staging_name(path)), "{seen:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_to_an_ancestor_lists_under_the_path_asked_for() {
+    let f = fixture();
+    let (peer, _events) = peer(&f.rpc, "device-p", Authority::Participate).await;
+    std::fs::create_dir(f.root.join("a")).unwrap();
+    std::fs::write(f.root.join("a/x.txt"), "x").unwrap();
+    std::os::unix::fs::symlink("..", f.root.join("a/up")).unwrap();
+    let listing = call(&f.rpc, &peer, "fs.list", json!({ "path": "a/up/a" })).await.unwrap();
+    assert_eq!(listing["path"], "a/up/a");
+    let paths: Vec<&str> = listing["entries"].as_array().unwrap().iter().map(|entry| entry["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["a/up/a/up", "a/up/a/x.txt"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_listing_is_the_first_names_within_a_frame() {
+    let f = fixture();
+    let (peer, _events) = peer(&f.rpc, "device-p", Authority::Participate).await;
+    for index in (0..MAX_LIST_ENTRIES + 20).rev() {
+        std::fs::write(f.root.join(format!("file-{index:05}-{}.txt", "n".repeat(40))), "").unwrap();
+    }
+    let listing = call(&f.rpc, &peer, "fs.list", json!({})).await.unwrap();
+    assert_eq!(listing["truncated"], true);
+    let entries = listing["entries"].as_array().unwrap();
+    assert!(entries[0]["name"].as_str().unwrap().starts_with("file-00000-"));
+    assert!(entries.windows(2).all(|pair| pair[0]["name"].as_str() < pair[1]["name"].as_str()));
+    assert!(listing.to_string().len() <= LIST_RESPONSE_BYTES + 1024);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_commit_frees_its_upload() {
+    let f = fixture();
+    let (manager, _events) = peer(&f.rpc, "device-a", Authority::Manage).await;
+    std::fs::write(f.root.join("big.bin"), "agent").unwrap();
+    for attempt in 0..MAX_UPLOADS_PER_DEVICE + 2 {
+        let upload = format!("upload-{attempt:04}");
+        let part = json!({ "uploadId": upload, "offset": 0, "dataB64": STANDARD.encode(b"mine"), "clientRequestId": format!("part-{attempt:06}") });
+        call(&f.rpc, &manager, "fs.writePart", part).await.unwrap();
+        let commit = json!({ "path": "big.bin", "uploadId": upload, "size": 4, "expectedEtag": "stale", "clientRequestId": format!("commit-{attempt:04}") });
+        assert_eq!(call(&f.rpc, &manager, "fs.write", commit).await.unwrap_err(), "conflict");
+    }
+    let files = f.rpc_files();
+    assert!(files.uploads.lock().unwrap().is_empty());
+    assert_eq!(std::fs::read_dir(&files.staging).map(|dir| dir.count()).unwrap_or(0), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stat_hashes_a_large_file_only_when_asked() {
+    let f = fixture();
+    let (peer, _events) = peer(&f.rpc, "device-p", Authority::Participate).await;
+    let content = pattern(STAT_ETAG_BYTES as usize + 10);
+    std::fs::write(f.root.join("large.bin"), &content).unwrap();
+    assert!(call(&f.rpc, &peer, "fs.stat", json!({ "path": "large.bin" })).await.unwrap().get("etag").is_none());
+    let asked = call(&f.rpc, &peer, "fs.stat", json!({ "path": "large.bin", "etag": true })).await.unwrap();
+    assert_eq!(asked["etag"], etag(&content));
 }

@@ -123,10 +123,23 @@ describe("workspace files", () => {
     expect(runtime.calls("fs.read").slice(3).every((params) => params.version === "v2")).toBe(true);
   });
 
-  it("refuses a file larger than asked before reading it", async () => {
-    const { runtime, client } = connect({ "fs.stat": () => ({ name: "a", kind: "file", size: 10_000, modifiedMs: 1 }) });
+  it("refuses a file larger than asked after its first part", async () => {
+    const file = partedFile(new Uint8Array(FS_PART_BYTES * 3));
+    const { runtime, client } = connect({ "fs.read": file.read });
     await expect(readRemoteFile(client, "a", { maxBytes: 100 })).rejects.toMatchObject({ code: "too_large" });
-    expect(runtime.calls("fs.read")).toEqual([]);
+    expect(runtime.calls("fs.read")).toHaveLength(1);
+    expect(runtime.calls("fs.stat")).toEqual([]);
+  });
+
+  it("keeps a byte order mark in a large file", async () => {
+    const body = new Uint8Array(FS_PART_BYTES + 10).fill(97);
+    body.set([0xef, 0xbb, 0xbf]);
+    const { client } = connect({ "fs.read": partedFile(body).read });
+    const read = await readRemoteFile(client, "bom.csv");
+    expect(read.text?.charCodeAt(0)).toBe(0xfeff);
+    const encoded = new TextEncoder().encode(read.text!);
+    expect(encoded.length).toBe(body.length);
+    expect(encoded.every((byte, index) => byte === body[index])).toBe(true);
   });
 
   it("does not decode non-UTF-8 content as text", async () => {
@@ -188,6 +201,7 @@ describe("workspace files", () => {
     runtime.setState(connected);
     await new Promise((resolve) => setTimeout(resolve, 0));
     runtime.deliver({ event: "fs.changed", params: { subscriptionId: "sub-2", paths: ["b.txt"] } });
-    expect(seen).toEqual([["a.txt"], null, ["b.txt"]]);
+    runtime.deliver({ event: "fs.changed", params: { subscriptionId: "sub-2", paths: [], overflow: true } });
+    expect(seen).toEqual([["a.txt"], null, ["b.txt"], null]);
   });
 });

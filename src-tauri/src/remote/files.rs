@@ -36,6 +36,12 @@ pub const PART_BYTES: usize = 384 * 1024;
 /// Largest file read or written remotely, in parts.
 pub const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_LIST_ENTRIES: usize = 5000;
+/// Serialized entries per `fs.list` answer; a frame must cross the relay.
+const LIST_RESPONSE_BYTES: usize = 384 * 1024;
+/// Changed paths per `fs.changed`; a larger burst is `overflow: true`,
+/// which tells the client to re-read what it shows.
+const MAX_CHANGED_PATHS: usize = 1000;
+const CHANGED_PATHS_BYTES: usize = 128 * 1024;
 /// Files up to this size carry an `etag` in `fs.stat` and `fs.list`-free
 /// reads; larger ones are hashed only when read from the start.
 const STAT_ETAG_BYTES: u64 = 4 * 1024 * 1024;
@@ -162,22 +168,25 @@ impl WorkspaceFiles {
 
     // ---- reads -----------------------------------------------------------
 
-    /// One level of a directory. A symlink is described by what it points
-    /// at when that is inside the workspace, and as an escaping link otherwise.
+    /// One level of a directory, by name, at most [`MAX_LIST_ENTRIES`] and
+    /// [`LIST_RESPONSE_BYTES`] (`truncated`). Entry paths extend the path
+    /// asked for, not where a symlinked directory resolves, so a link to an
+    /// ancestor is just another level. A symlink is described by what it
+    /// points at when that is inside the workspace, and as an escaping link
+    /// otherwise.
     pub fn list(&self, params: &Value) -> Result<Value, RpcError> {
-        let dir = self.existing_path(params.get("path").and_then(Value::as_str).unwrap_or(""))?;
+        let requested = params.get("path").and_then(Value::as_str).unwrap_or("");
+        let dir = self.existing_path(requested)?;
         if !dir.is_dir() {
             return Err(RpcError::invalid("not a directory"));
         }
-        let base = self.relative(&dir);
+        let base = self.relative(&self.lexical(requested)?);
+        let mut names: Vec<std::fs::DirEntry> = std::fs::read_dir(&dir).map_err(RpcError::internal)?.filter_map(Result::ok).collect();
+        names.sort_by_key(|entry| entry.file_name());
+        let mut truncated = names.len() > MAX_LIST_ENTRIES;
+        let mut budget = LIST_RESPONSE_BYTES;
         let mut entries = Vec::new();
-        let mut truncated = false;
-        for entry in std::fs::read_dir(&dir).map_err(RpcError::internal)? {
-            let Ok(entry) = entry else { continue };
-            if entries.len() >= MAX_LIST_ENTRIES {
-                truncated = true;
-                break;
-            }
+        for entry in names.into_iter().take(MAX_LIST_ENTRIES) {
             let name = entry.file_name().to_string_lossy().into_owned();
             let path = if base.is_empty() { name.clone() } else { format!("{base}/{name}") };
             let Ok(own) = entry.metadata() else { continue };
@@ -199,9 +208,15 @@ impl WorkspaceFiles {
             if described["kind"] == "file" {
                 described["mediaType"] = json!(media_mime(&entry.path()));
             }
+            // Its separator too.
+            let size = described.to_string().len() + 1;
+            if size > budget {
+                truncated = true;
+                break;
+            }
+            budget -= size;
             entries.push(described);
         }
-        entries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
         Ok(json!({ "path": base, "entries": entries, "truncated": truncated }))
     }
 
@@ -212,7 +227,8 @@ impl WorkspaceFiles {
         if meta.is_file() {
             stat["version"] = json!(version_of(&meta));
             stat["mediaType"] = json!(media_mime(&path));
-            if meta.len() <= STAT_ETAG_BYTES {
+            let asked = params.get("etag").and_then(Value::as_bool) == Some(true);
+            if meta.len() <= STAT_ETAG_BYTES || (asked && meta.len() <= MAX_FILE_BYTES) {
                 stat["etag"] = json!(hash_file(&path).map_err(RpcError::internal)?);
             }
         }
@@ -355,9 +371,27 @@ impl WorkspaceFiles {
         if inline.as_ref().is_some_and(|bytes| bytes.len() > PART_BYTES) {
             return Err(RpcError::new("too_large", format!("send files over {PART_BYTES} bytes in parts with fs.writePart")));
         }
+        // A staged upload is used up by this commit whatever its outcome, so
+        // a refused save never holds an upload slot or its disk space.
+        let staged = match inline {
+            Some(_) => None,
+            None => {
+                let upload_id = required_str(params, "uploadId")?;
+                let size = params.get("size").and_then(Value::as_u64).ok_or_else(|| RpcError::invalid("size is required with uploadId"))?;
+                let key = (device.to_string(), upload_id.to_string());
+                let upload = self.uploads.lock().unwrap().remove(&key).ok_or_else(|| RpcError::not_found("no such upload"))?;
+                let staged = Staged(upload.file.clone());
+                if upload.received != size {
+                    return Err(RpcError::invalid(format!("the upload has {} bytes, not {size}", upload.received)));
+                }
+                Some((staged, size))
+            }
+        };
         if let Some(expected) = params.get("expectedEtag") {
             let current = match std::fs::symlink_metadata(&path) {
                 Ok(meta) if meta.is_dir() => return Err(RpcError::invalid("the path is a directory")),
+                // Never read remotely, so no etag of it was ever handed out.
+                Ok(meta) if meta.len() > MAX_FILE_BYTES => Some(String::new()),
                 Ok(_) => Some(hash_file(&path).map_err(RpcError::internal)?),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) => return Err(RpcError::internal(error)),
@@ -380,14 +414,7 @@ impl WorkspaceFiles {
                 (etag(&bytes), bytes.len() as u64)
             }
             None => {
-                let upload_id = required_str(params, "uploadId")?;
-                let size = params.get("size").and_then(Value::as_u64).ok_or_else(|| RpcError::invalid("size is required with uploadId"))?;
-                let key = (device.to_string(), upload_id.to_string());
-                let upload = self.uploads.lock().unwrap().remove(&key).ok_or_else(|| RpcError::not_found("no such upload"))?;
-                let staged = Staged(upload.file.clone());
-                if upload.received != size {
-                    return Err(RpcError::invalid(format!("the upload has {} bytes, not {size}", upload.received)));
-                }
+                let (staged, size) = staged.expect("an upload when not inline");
                 std::fs::copy(&staged.0, &temporary).map_err(RpcError::internal)?;
                 (hash_file(&temporary).map_err(RpcError::internal)?, size)
             }
@@ -536,11 +563,12 @@ impl WorkspaceFiles {
     // ---- watch -----------------------------------------------------------
 
     /// A recursive watcher on `path` that reports changed workspace-relative
-    /// paths, `.git` and anything reached through an escaping link left out.
+    /// paths, `.git` and anything reached through an escaping link left out;
+    /// None for a burst too large to name (an install, a checkout).
     pub fn watcher(
         self: &Arc<Self>,
         relative: &str,
-        on_change: impl Fn(Vec<String>) + Send + 'static,
+        on_change: impl Fn(Option<Vec<String>>) + Send + 'static,
     ) -> Result<(Box<dyn Send>, String), RpcError> {
         use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
         let path = self.existing_path(relative)?;
@@ -557,9 +585,11 @@ impl WorkspaceFiles {
                 .collect();
             paths.sort();
             paths.dedup();
-            if !paths.is_empty() {
-                on_change(paths);
+            if paths.is_empty() {
+                return;
             }
+            let bytes: usize = paths.iter().map(|path| path.len() + 4).sum();
+            on_change(if paths.len() > MAX_CHANGED_PATHS || bytes > CHANGED_PATHS_BYTES { None } else { Some(paths) });
         })
         .map_err(RpcError::internal)?;
         debouncer.watcher().watch(&path, RecursiveMode::Recursive).map_err(RpcError::internal)?;

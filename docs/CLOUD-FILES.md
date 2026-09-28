@@ -10,14 +10,14 @@ the desktop never mounts, syncs or caches it on disk.
 
 | Method | Authority | What |
 | --- | --- | --- |
-| `fs.list` | participate | One directory level. Entries carry `path`, `kind`, `size`, `modifiedMs`, `mediaType`; a symlink carries `symlink: true`, and one that leaves the workspace (or dangles) `escapes: true` and `kind: "symlink"`. At most 5000 entries (`truncated`). |
-| `fs.stat` | participate | `version` (size, mtime, inode, ctime) always; `etag` (content hash) for files up to 4 MiB. |
+| `fs.list` | participate | One directory level. Entries carry `path`, `kind`, `size`, `modifiedMs`, `mediaType`; a symlink carries `symlink: true`, and one that leaves the workspace (or dangles) `escapes: true` and `kind: "symlink"`. Sorted by name; at most 5000 entries and a 384 KiB answer (`truncated`). Entry paths extend the path asked for, so a link to an ancestor is just another level. |
+| `fs.stat` | participate | `version` (size, mtime, inode, ctime) always; `etag` (content hash) for files up to 4 MiB, or up to 32 MiB with `etag: true`. |
 | `fs.read` | participate | One part: `offset`, `length` ≤ 384 KiB. The first part carries `etag` and `binary`; every part carries `version`, and a later part asked with the first part's `version` is `conflict` if the file changed in between. A small UTF-8 file comes back whole as `text`, anything else as `dataB64`. Files over 32 MiB are `too_large`. |
 | `fs.writePart` | manage | Stage a part of a large write (`uploadId`, `offset`, `dataB64`) in a 0700 directory outside the workspace. Offset 0 starts over; a gap is refused. At most 4 uploads per device, 10 minutes idle. |
-| `fs.write` | manage | Replace a file at once from `text`/`dataB64` (≤ one part) or a staged `uploadId` of exactly `size` bytes. `expectedEtag`: a string must match the current content, null means the file must not exist, absent writes unconditionally. The file's mode is kept. |
+| `fs.write` | manage | Replace a file at once from `text`/`dataB64` (≤ one part) or a staged `uploadId` of exactly `size` bytes. `expectedEtag`: a string must match the current content, null means the file must not exist, absent writes unconditionally. The file's mode is kept. A staged upload is used up by its commit, even a refused one. |
 | `fs.search` | participate | Grep under `path`: literal or `regex`, `caseSensitive`, `.gitignore`d/hidden/binary files skipped, symlinks never followed. `maxResults` ≤ 1000, answer ≤ 384 KiB, ≤ 32 matches per line (`capped`). |
 | `fs.cancel` | participate | Stop a search this connection started (`searchId`); the search answers with what it found and `cancelled: true`. A new search under the same id, or the connection closing, cancels too. |
-| `fs.watch` / `fs.unwatch` | participate | `fs.changed { subscriptionId, paths }`, debounced. `.git`, the writer's temporaries and anything under an escaping link are left out. At most 8 per connection. |
+| `fs.watch` / `fs.unwatch` | participate | `fs.changed { subscriptionId, paths }`, debounced. `.git`, the writer's temporaries and anything under an escaping link are left out. A burst of more than 1000 paths (or 128 KiB) is `paths: [], overflow: true`: re-read what is shown. At most 8 per connection. |
 | `fs.rename`, `fs.delete`, `fs.mkdir` | manage | Unchanged from PRO-13. |
 
 Why parts of 384 KiB and not zuse's 4 MB (#647): the relay Cell accepts frames

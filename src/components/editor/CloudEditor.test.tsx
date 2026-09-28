@@ -19,7 +19,7 @@ class FakeCloud implements FileSource {
   readonly kind = "cloud" as const;
   files = new Map<string, { text: string; version: number }>();
   listeners = new Set<(paths: string[] | null) => void>();
-  writes: { rel: string; text: string; base: string | undefined }[] = [];
+  writes: { rel: string; text: string; base: string | null | undefined }[] = [];
   constructor(readonly readOnly = false) {}
 
   private state(rel: string): FileState | null {
@@ -32,10 +32,10 @@ class FakeCloud implements FileSource {
     if (!file) throw Object.assign(new Error("not_found"), { code: "not_found" });
     return { content: file.text, size: file.text.length, binary: false, truncated: false, ...this.state(rel)! };
   };
-  writeText = async (rel: string, text: string, base: string | undefined) => {
+  writeText = async (rel: string, text: string, base: string | null | undefined) => {
     this.writes.push({ rel, text, base });
     const current = this.state(rel);
-    if (base !== undefined && current?.etag !== base) throw Object.assign(new Error("conflict"), { code: "conflict" });
+    if (base !== undefined && (current?.etag ?? null) !== base) throw Object.assign(new Error("conflict"), { code: "conflict" });
     this.files.set(rel, { text, version: (this.files.get(rel)?.version ?? 0) + 1 });
     return this.state(rel)!;
   };

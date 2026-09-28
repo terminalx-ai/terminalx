@@ -80,6 +80,20 @@ describe("the file tree on a cloud workspace", () => {
     act(() => source.emit(["NEW.md"]));
     await screen.findByText("NEW.md", {}, { timeout: 3000 });
   });
+
+  it("catches up on changes made while it was hidden", async () => {
+    let listing: SourceEntry[] = [{ name: "a.txt", path: "a.txt", isDir: false }];
+    const source = fakeSource({ listDir: async () => listing });
+    const view = (active: boolean) => <FileTreeView sessionId={KEY} root={ROOT} rootName="ws-1" active={active} source={source} />;
+    const { rerender } = render(view(true));
+    await screen.findByText("a.txt");
+    rerender(view(false));
+    listing = [...listing, { name: "b.txt", path: "b.txt", isDir: false }];
+    // Missed: the hidden tree does not listen.
+    act(() => source.emit(["b.txt"]));
+    rerender(view(true));
+    await screen.findByText("b.txt");
+  });
 });
 
 describe("search on a cloud workspace", () => {
