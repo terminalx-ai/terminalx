@@ -476,3 +476,79 @@ async fn attach_replays_the_ring_in_frames_and_reports_what_it_lost() {
     }
     assert!(first.len() + rest.len() >= PTY_RING_BYTES - 64 * 1024, "the whole ring was replayed");
 }
+
+struct NoAgents;
+
+impl crate::cloud_agents::AgentOps for NoAgents {
+    fn tabs(&self) -> Vec<crate::cloud_agents::AgentTabInfo> {
+        Vec::new()
+    }
+    fn busy(&self, _: &str, _: &str) -> bool {
+        false
+    }
+    fn send(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn stop(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn respond(&self, _: &str, _: &str, _: &str, _: &str) -> Result<(), crate::cloud_agents::DecisionError> {
+        Err(crate::cloud_agents::DecisionError::NotPending)
+    }
+    fn answer(&self, _: &str, _: &str, _: &str, _: HashMap<String, String>) -> Result<(), crate::cloud_agents::DecisionError> {
+        Err(crate::cloud_agents::DecisionError::NotPending)
+    }
+    fn configure(&self, _: &str, _: &str, _: &crate::cloud_agents::Settings) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn note(&self, _: &str, _: &str, _: &str) {}
+    fn events(&self, _: &str, _: &str) -> anyhow::Result<Vec<Value>> {
+        Ok(Vec::new())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_workspace_key_is_handed_out_over_keys_1_and_only_managers_rotate_it() {
+    let f = fixture();
+    let agents = crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), Arc::new(NoAgents), None, None, 7).unwrap();
+    f.rpc.set_agents(agents.clone());
+    let (manager, _events) = Peer::new("device-manage".into(), Authority::Manage);
+    call(&f.rpc, &manager, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["session/1"] })).await.unwrap();
+    assert_eq!(code(call(&f.rpc, &manager, "keys.get", json!({})).await), "capability_not_granted");
+    let (participant, _events) = Peer::new("device-phone".into(), Authority::Participate);
+    let hello = call(&f.rpc, &participant, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["session/1", "keys/1"] })).await.unwrap();
+    assert_eq!(hello["capabilities"], json!(["session/1", "keys/1"]));
+    assert_eq!(agents.attached(), 2, "each connection that said hello counts as attached");
+    let handout = call(&f.rpc, &participant, "keys.get", json!({})).await.unwrap();
+    let (current, key) = agents.keys.current().unwrap();
+    assert_eq!(handout["currentKeyId"], current);
+    assert_eq!(handout["keys"][0]["key"], crate::cloud_agents::crypto::b64(&key));
+    assert_eq!(code(call(&f.rpc, &participant, "keys.rotate", json!({ "clientRequestId": "request-0001" })).await), "forbidden");
+    // Nothing is shared with a participant, so it sees no agent tabs.
+    assert_eq!(call(&f.rpc, &participant, "session.tabs", json!({})).await.unwrap()["tabs"], json!([]));
+    assert_eq!(
+        code(call(&f.rpc, &participant, "session.configure", json!({ "sessionId": "s", "tabId": "t", "clientRequestId": "request-0002" })).await),
+        "forbidden"
+    );
+    f.rpc.disconnect(&participant);
+    f.rpc.disconnect(&participant);
+    assert_eq!(agents.attached(), 1, "a connection is counted once");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_rotates_the_key_and_nudges_the_mailbox() {
+    let f = fixture();
+    let agents = crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), Arc::new(NoAgents), None, None, 7).unwrap();
+    f.rpc.set_agents(agents.clone());
+    let (manager, _events) = Peer::new("device-manage".into(), Authority::Manage);
+    call(&f.rpc, &manager, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["session/1", "keys/1"] })).await.unwrap();
+    let before = agents.keys.current().unwrap().0;
+    let rotated = call(&f.rpc, &manager, "keys.rotate", json!({ "clientRequestId": "request-0001" })).await.unwrap();
+    assert_ne!(rotated["currentKeyId"], before);
+    let again = call(&f.rpc, &manager, "keys.rotate", json!({ "clientRequestId": "request-0001" })).await.unwrap();
+    assert_eq!(again, rotated, "a resent rotation is not a second rotation");
+    agents.poll.wait(Duration::ZERO);
+    call(&f.rpc, &manager, "session.nudge", json!({})).await.unwrap();
+    assert!(agents.poll.wait(Duration::ZERO));
+    assert_eq!(code(call(&f.rpc, &manager, "session.configure", json!({ "sessionId": "s", "tabId": "t", "clientRequestId": "request-0003" })).await), "not_found");
+}

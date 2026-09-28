@@ -805,7 +805,7 @@ fn read_identity(dir: &Path) -> Result<Option<StoredIdentity>> {
     }
 }
 
-fn ensure_private_dir(dir: &Path) -> Result<()> {
+pub(crate) fn ensure_private_dir(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     #[cfg(unix)]
     {
