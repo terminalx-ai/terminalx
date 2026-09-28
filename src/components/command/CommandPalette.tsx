@@ -319,7 +319,7 @@ export function CommandPalette({
     let live = true;
     setReposLoading(true);
     void Promise.all(
-      store.projects.map(async (project) => [project.path, await issues.githubRepo(project.path).catch(() => null)] as const),
+      store.projects.filter((project) => project.kind !== "folder").map(async (project) => [project.path, await issues.githubRepo(project.path).catch(() => null)] as const),
     ).then((entries) => {
       if (!live) return;
       setRepoByProject(Object.fromEntries(entries.filter((entry): entry is readonly [string, string] => !!entry[1])));
@@ -332,9 +332,9 @@ export function CommandPalette({
 
   const smartProject = useMemo(() => {
     if (smartInput?.kind !== "github") return null;
-    if (!smartInput.owner || !smartInput.repo) return activeProject;
+    if (!smartInput.owner || !smartInput.repo) return activeProject?.kind === "folder" ? null : activeProject;
     const wanted = `${smartInput.owner}/${smartInput.repo}`.toLowerCase();
-    return store.projects.find((project) => githubRepoKey(repoByProject[project.path] ?? "") === wanted) ?? null;
+    return store.projects.find((project) => project.kind !== "folder" && githubRepoKey(repoByProject[project.path] ?? "") === wanted) ?? null;
   }, [activeProject, repoByProject, smartInput, store.projects]);
 
   const lookupWorkItem = useCallback(

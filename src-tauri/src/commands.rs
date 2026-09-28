@@ -78,6 +78,220 @@ pub async fn account_sign_out(
 }
 
 #[tauri::command]
+pub async fn organization_create(
+    name: String,
+    idempotency_key: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::account::OrganizationSummary> {
+    let account = state.account.clone();
+    tauri::async_runtime::spawn_blocking(move || account.create_organization(&name, &idempotency_key))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn organization_select(
+    app: AppHandle,
+    organization_id: String,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::account::AccountStatus> {
+    let account = state.account.clone();
+    tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<crate::account::AccountStatus> {
+        account.select_organization_for_revision(&organization_id, &context_revision)?;
+        Ok(account.status(&app))
+    }).await.map_err(err)?.map_err(err)
+}
+
+// --------------------------------------------------------- cloud workspaces
+
+macro_rules! cloud_command {
+    ($state:expr, $risk:expr, $operation:expr) => {{
+        let service = $state.cloud_workspaces.clone();
+        tauri::async_runtime::spawn_blocking(move || $operation(service))
+            .await
+            .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::task_failed($risk))?
+    }};
+}
+
+#[tauri::command]
+pub async fn cloud_providers(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudProviderSummaryResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.providers())
+}
+
+#[tauri::command]
+pub async fn cloud_provider(
+    provider: crate::cloud_workspaces::CloudWorkspaceProviderId,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudProviderConnectionResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.provider(provider))
+}
+
+enum ProviderPromptError { Cancelled, Empty, Unavailable }
+
+impl ProviderPromptError {
+    fn client_error(self) -> crate::cloud_workspaces::CloudWorkspaceClientError {
+        let code = match self {
+            Self::Cancelled => "cloud_provider_entry_cancelled",
+            Self::Empty => "cloud_provider_credential_required",
+            Self::Unavailable => "cloud_provider_secure_input_unavailable",
+        };
+        crate::cloud_workspaces::CloudWorkspaceClientError::local(code, false)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn secure_provider_prompt(provider: crate::cloud_workspaces::CloudWorkspaceProviderId, organization_id: &str) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
+    use objc2::{MainThreadMarker, MainThreadOnly};
+    use objc2_app_kit::{NSAlert, NSSecureTextField, NSAlertFirstButtonReturn};
+    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+    let mtm = MainThreadMarker::new().ok_or(ProviderPromptError::Unavailable)?;
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str("Provider connection"));
+    alert.setInformativeText(&NSString::from_str(&format!("Enter the {} provider key for organization {}. The key is sent to the account service only for validation and secure storage.", provider.as_str(), organization_id)));
+    let field = NSSecureTextField::initWithFrame(NSSecureTextField::alloc(mtm), NSRect::new(NSPoint::new(0., 0.), NSSize::new(360., 24.)));
+    field.setPlaceholderString(Some(&NSString::from_str("Provider key")));
+    alert.setAccessoryView(Some(&field));
+    alert.addButtonWithTitle(&NSString::from_str("Validate"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    let response = alert.runModal();
+    if response != NSAlertFirstButtonReturn {
+        field.setStringValue(&NSString::from_str(""));
+        return Err(ProviderPromptError::Cancelled);
+    }
+    let value = zeroize::Zeroizing::new(field.stringValue().to_string());
+    field.setStringValue(&NSString::from_str(""));
+    if value.trim().is_empty() { return Err(ProviderPromptError::Empty); }
+    Ok(value)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn secure_provider_prompt(_provider: crate::cloud_workspaces::CloudWorkspaceProviderId, _organization_id: &str) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
+    Err(ProviderPromptError::Unavailable)
+}
+
+#[tauri::command]
+pub async fn cloud_provider_connect(
+    app: AppHandle,
+    provider: crate::cloud_workspaces::CloudWorkspaceProviderId,
+    input: crate::cloud_workspaces::CloudProviderConnectInput,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudProviderConnectionResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    crate::cloud_workspaces::validate_disclosure(&input)?;
+    static PROMPT_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _prompt_guard = PROMPT_GUARD.try_lock().map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_operation_in_progress", true))?;
+    let service = state.cloud_workspaces.clone();
+    let authorization = tauri::async_runtime::spawn_blocking(move || service.authorize_connect(provider))
+        .await
+        .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::task_failed(crate::cloud_workspaces::RequestRisk::Read))??;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let org_id = authorization.organization_id().to_owned();
+    app.run_on_main_thread(move || { let _ = sender.send(secure_provider_prompt(provider, &org_id)); })
+        .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?;
+    let prompt_result = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+        .await
+        .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?
+        .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?;
+    let credential = prompt_result.map_err(ProviderPromptError::client_error)?;
+    let service = state.cloud_workspaces.clone();
+    tauri::async_runtime::spawn_blocking(move || service.connect_authorized(authorization, input, credential))
+        .await
+        .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::task_failed(crate::cloud_workspaces::RequestRisk::Mutation))?
+}
+
+#[tauri::command]
+pub async fn cloud_provider_disconnect(
+    provider: crate::cloud_workspaces::CloudWorkspaceProviderId,
+    context_revision: String,
+    disposition: crate::cloud_workspaces::DisconnectDisposition,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudProviderConnectionResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.disconnect_provider(provider, context_revision, disposition))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_setup(
+    provider: crate::cloud_workspaces::CloudWorkspaceProviderId,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSetup, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.setup(provider))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_quote(
+    input: crate::cloud_workspaces::CloudWorkspaceQuoteInput,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceQuote, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.quote(input))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_create(
+    input: crate::cloud_workspaces::CloudWorkspaceCreateInput,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Create, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.create(input))
+}
+
+#[tauri::command]
+pub async fn cloud_workspaces(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceList, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.workspaces())
+}
+
+async fn cloud_workspace_lifecycle(
+    state: tauri::State<'_, crate::AppState>,
+    workspace_id: String,
+    action: crate::cloud_workspaces::OperationAction,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.lifecycle(&workspace_id, action))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_suspend(
+    workspace_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_workspace_lifecycle(state, workspace_id, crate::cloud_workspaces::OperationAction::Suspend).await
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_resume(
+    workspace_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_workspace_lifecycle(state, workspace_id, crate::cloud_workspaces::OperationAction::Resume).await
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_release(
+    workspace_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_workspace_lifecycle(state, workspace_id, crate::cloud_workspaces::OperationAction::Delete).await
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_operation(
+    operation_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.operation(&operation_id))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_operation_cancel(
+    operation_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.cancel_operation(&operation_id))
+}
+
+#[tauri::command]
 pub fn pairing_status(state: tauri::State<'_, crate::AppState>) -> crate::pairing::PairingStatus {
     state.pairing.status()
 }
@@ -128,9 +342,6 @@ pub fn list_projects() -> CmdResult<ProjectsResponse> {
 
 #[tauri::command]
 pub fn add_project(path: String) -> CmdResult<Project> {
-    if !git::is_repo(Path::new(&path)) {
-        return Err("That folder is not a git repository.".into());
-    }
     projects::add(&path).map_err(err)
 }
 
@@ -148,7 +359,7 @@ pub fn select_project(path: String) -> CmdResult<()> {
 
 #[tauri::command]
 pub fn list_sessions() -> CmdResult<Vec<SessionEntry>> {
-    index::load().map_err(err)
+    store::conversation_titles::backfill().map_err(err)
 }
 
 // ---------------------------------------------------------------- automations
@@ -218,6 +429,9 @@ pub fn automation_delete(app: AppHandle, id: String) -> CmdResult<()> {
 }
 
 fn validate_automation_target(input: &crate::automations::AutomationInput) -> CmdResult<()> {
+    if input.workspace == crate::automations::AutomationWorkspace::NewWorktree && !git::is_repo(Path::new(&input.project_path)) {
+        return Err("Folder automations must use an existing session; worktrees require a Git repository.".into());
+    }
     if input.workspace == crate::automations::AutomationWorkspace::Session {
         let target = index::get(input.session_id.as_deref().ok_or("Choose a session for this automation.")?).map_err(err)?;
         if projects::canonical(&target.project_path).map_err(err)? != input.project_path {
@@ -368,7 +582,7 @@ pub(crate) fn create_session_blocking(app: &AppHandle, req: NewSession) -> CmdRe
 
 fn create_session_entry(req: NewSession) -> CmdResult<SessionEntry> {
     validate_session_target(&req)?;
-    let project = projects::canonical(&req.project_path).map_err(err)?;
+    let project = projects::canonical_directory(&req.project_path).map_err(err)?;
     let project_path = Path::new(&project);
     let id = uuid::Uuid::now_v7().to_string();
     let now = index::now();
@@ -398,10 +612,10 @@ fn create_session_entry(req: NewSession) -> CmdResult<SessionEntry> {
     };
 
     if let Some(cwd) = req.cwd.as_deref().filter(|c| !c.is_empty()) {
-        let cwd = projects::canonical(cwd).map_err(err)?;
+        let cwd = projects::canonical_directory(cwd).map_err(err)?;
         entry.branch = git::current_branch(Path::new(&cwd));
         entry.cwd = cwd;
-    } else if has_agent && req.use_worktree {
+    } else if has_agent && req.use_worktree && git::is_repo(project_path) {
         let name = available_worktree_name(project_path, req.worktree_name.as_deref(), None)?;
         let wt = git::create_worktree(project_path, &name, req.base_ref.as_deref()).map_err(err)?;
         entry.cwd = wt.path;
@@ -1300,6 +1514,26 @@ pub fn file_mtime(path: String) -> Option<u64> {
 }
 
 #[tauri::command]
+pub async fn inspect_local_path(base: String, path: String) -> CmdResult<crate::files::LocalPathInfo> {
+    tauri::async_runtime::spawn_blocking(move || crate::files::inspect_local_path(Path::new(&base), Path::new(&path)))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+/// Local-main-window only (not ACP/paired RPC): open an existing filesystem
+/// object with the OS default application, with no caller-selected program.
+#[tauri::command]
+pub async fn open_local_path(app: AppHandle, path: String) -> CmdResult<()> {
+    let path = tauri::async_runtime::spawn_blocking(move || crate::files::existing_local_path(Path::new(&path)))
+        .await
+        .map_err(err)?
+        .map_err(err)?;
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_path(path.to_string_lossy(), None::<&str>).map_err(err)
+}
+
+#[tauri::command]
 pub async fn search_text(
     root: String,
     query: String,
@@ -1512,6 +1746,56 @@ mod command_tests {
             tab.permission_mode,
             crate::store::index::DEFAULT_PERMISSION_MODE
         );
+    }
+
+    #[test]
+    fn folder_sessions_and_workspaces_survive_reload_without_git() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = super::add_project(dir.path().to_string_lossy().into_owned()).unwrap();
+        assert_eq!(project.kind, crate::store::projects::ProjectKind::Folder);
+        let workspaces = crate::workspaces::list(dir.path()).unwrap();
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].path, project.path);
+        assert!(workspaces[0].is_main && !workspaces[0].managed);
+        assert!(workspaces[0].branch.is_none() && workspaces[0].head.is_none());
+        for agent in [false, true] {
+            let req: NewSession = serde_json::from_value(serde_json::json!({
+                "projectPath": project.path, "useWorktree": true,
+                "worktreeName": "saved-preference",
+                "tab": if agent { serde_json::json!({"harness": "codex", "model": ""}) } else { serde_json::Value::Null }
+            })).unwrap();
+            let session = create_session_entry(req).unwrap();
+            assert_eq!(session.cwd, project.path);
+            assert!(session.worktree_name.is_none() && session.branch.is_none() && session.base_ref.is_none());
+            assert_eq!(crate::store::index::get(&session.id).unwrap().cwd, project.path);
+        }
+        assert_eq!(super::list_projects().unwrap().projects, vec![project.clone()]);
+        assert_eq!(super::add_project(format!("{}/", project.path)).unwrap().path, project.path);
+        assert_eq!(super::list_projects().unwrap().projects.len(), 1);
+        assert!(!dir.path().join(".git").exists());
+        assert!(!dir.path().join(".raccoon").exists());
+        assert!(!crate::git::work_status(dir.path()).is_repo);
+    }
+
+    #[test]
+    fn session_and_workspace_targets_must_be_directories() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, "hello").unwrap();
+        for target in [&file, &dir.path().join("missing")] {
+            assert!(super::add_project(target.to_string_lossy().into_owned()).is_err());
+            assert!(crate::workspaces::list(target).is_err());
+            for override_cwd in [false, true] {
+                let req = serde_json::from_value(serde_json::json!({
+                    "projectPath": if override_cwd { dir.path() } else { target.as_path() },
+                    "cwd": if override_cwd { Some(target) } else { None }, "useWorktree": false
+                })).unwrap();
+                assert!(create_session_entry(req).is_err());
+            }
+        }
+        assert!(crate::store::index::load().unwrap().is_empty());
     }
 
     #[test]

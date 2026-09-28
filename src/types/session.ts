@@ -2,6 +2,10 @@ import type { AutomationRef } from "@/types/automations";
 
 export type TabStatus = "idle" | "in_progress" | "completed" | "waiting";
 
+export const TAB_STATUS_LABEL: Record<TabStatus, string> = {
+  idle: "Idle", in_progress: "Working", completed: "Completed", waiting: "Needs attention",
+};
+
 export interface TabEntry {
   id: string;
   harness: string;
@@ -52,6 +56,8 @@ export interface SessionEntry {
 }
 
 export interface Project {
+  /** Older project stores contain Git projects without an explicit kind. */
+  kind?: "git" | "folder";
   path: string;
   name: string;
   lastOpened?: string | null;

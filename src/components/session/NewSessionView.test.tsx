@@ -29,7 +29,7 @@ vi.mock("@/lib/models", () => ({
 }));
 vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
 vi.mock("@/lib/prefs", () => ({
-  usePrefs: () => ({ useWorktree: false, lastAgent: "claude", lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", lastProject: null }),
+  usePrefs: () => ({ useWorktree: true, lastAgent: "claude", lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", lastProject: null }),
   setPrefs: vi.fn(),
 }));
 
@@ -60,6 +60,7 @@ beforeEach(() => {
     throw new Error(`unexpected command ${cmd}`);
   });
   openDialog.mockReset();
+  project.kind = "git";
   vi.stubGlobal("crypto", { randomUUID: vi.fn(() => "attachment-1") });
   vi.stubGlobal("URL", { ...URL, createObjectURL: vi.fn(() => "blob:preview"), revokeObjectURL: vi.fn() });
 });
@@ -115,5 +116,43 @@ describe("new session attachments", () => {
     await onDrag({ payload: { type: "drop", paths: ["/tmp/shot.png"] } });
     expect(await screen.findByAltText("shot.png")).toBeTruthy();
     await waitFor(() => expect(screen.queryByText("Drop images to attach, other files to mention")).toBeNull());
+  });
+});
+
+
+describe("folder projects", () => {
+  it("starts in the folder despite a saved worktree preference", async () => {
+    project.kind = "folder";
+    render(<NewSessionView />);
+    expect(screen.getByText("Folder · no Git")).toBeTruthy();
+    expect(screen.queryByRole("switch")).toBeNull();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Inspect this folder" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("create_session", expect.objectContaining({ req: expect.objectContaining({
+      projectPath: project.path, useWorktree: false, worktreeName: null, cwd: null,
+    }) })));
+    expect(invoke.mock.calls.some(([cmd]) => cmd === "preview_workspace_name" || cmd === "work_status")).toBe(false);
+  });
+
+  it("opens a folder from the new-session project picker", async () => {
+    const sessions = await import("@/lib/sessions");
+    vi.mocked(sessions.addProject).mockResolvedValue({ path: "/tmp/empty-folder", name: "empty-folder", kind: "folder" });
+    openDialog.mockResolvedValue("/tmp/empty-folder");
+    renderView();
+    fireEvent.keyDown(screen.getByRole("button", { name: /raccoon/ }), { key: "ArrowDown" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Add a project/ }));
+    await waitFor(() => expect(sessions.addProject).toHaveBeenCalledWith("/tmp/empty-folder"));
+    expect(sessions.selectProjectInSidebar).toHaveBeenCalledWith("/tmp/empty-folder");
+  });
+
+  it("keeps the worktree switch and name preview for Git projects", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "preview_workspace_name") return "quiet-fox";
+      if (cmd === "work_status") return { isRepo: true, branch: "main", defaultBranch: "main" };
+    });
+    render(<NewSessionView />);
+    expect(screen.getByRole("switch").getAttribute("aria-checked")).toBe("true");
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_workspace_name", expect.anything()));
+    expect(screen.queryByText("Folder · no Git")).toBeNull();
   });
 });

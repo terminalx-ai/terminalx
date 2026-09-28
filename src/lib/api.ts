@@ -119,6 +119,36 @@ export const api = {
   accountStatus: () => invoke<AccountStatus>("account_status"),
   accountSignIn: () => invoke<AccountStatus>("account_sign_in"),
   accountSignOut: () => invoke<AccountStatus>("account_sign_out"),
+  organizationCreate: (name: string, idempotencyKey: string) =>
+    invoke<OrganizationSummary>("organization_create", { name, idempotencyKey }),
+  organizationSelect: (organizationId: string, contextRevision: string) =>
+    invoke<AccountStatus>("organization_select", { organizationId, contextRevision }),
+
+  // provider-aware Cloud Workspaces; authentication and Organization scope
+  // are resolved natively, so account tokens never cross this boundary.
+  cloudProviders: () => invoke<CloudProviderSummaryResponse>("cloud_providers"),
+  cloudProvider: (provider: CloudWorkspaceProviderId) => invoke<CloudProviderConnection>("cloud_provider", { provider }),
+  cloudProviderDisconnect: (provider: CloudWorkspaceProviderId, contextRevision: string, disposition: "retain" | "destroy") =>
+    invoke<CloudProviderConnection>("cloud_provider_disconnect", { provider, contextRevision, disposition }),
+  cloudProviderConnect: (provider: CloudWorkspaceProviderId, input: CloudProviderConnectInput) =>
+    invoke<CloudProviderConnection>("cloud_provider_connect", { provider, input }),
+  cloudWorkspaceSetup: (provider: CloudWorkspaceProviderId) =>
+    invoke<CloudWorkspaceSetup>("cloud_workspace_setup", { provider }),
+  cloudWorkspaceQuote: (input: CloudWorkspaceQuoteInput) =>
+    invoke<CloudWorkspaceQuote>("cloud_workspace_quote", { input }),
+  cloudWorkspaceCreate: (input: CloudWorkspaceCreateInput) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_create", { input }),
+  cloudWorkspaces: () => invoke<CloudWorkspaceList>("cloud_workspaces"),
+  cloudWorkspaceSuspend: (workspaceId: string) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_suspend", { workspaceId }),
+  cloudWorkspaceResume: (workspaceId: string) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_resume", { workspaceId }),
+  cloudWorkspaceRelease: (workspaceId: string) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_release", { workspaceId }),
+  cloudWorkspaceOperation: (operationId: string) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_operation", { operationId }),
+  cloudWorkspaceOperationCancel: (operationId: string) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_operation_cancel", { operationId }),
 
   // opt-in device pairing
   pairingStatus: () => invoke<PairingStatus>("pairing_status"),
@@ -196,6 +226,12 @@ export const api = {
     invoke<CommitInfo[]>("log_commits", { cwd, range: range ?? null, limit: limit ?? 100 }),
 };
 
+export interface OrganizationSummary {
+  id: string;
+  name: string;
+  role: string;
+}
+
 export interface AccountIdentity {
   name: string | null;
   email: string;
@@ -207,7 +243,241 @@ export interface AccountStatus {
   identity: AccountIdentity | null;
   expiresAt: number | null;
   lastError: string | null;
+  context?: { scope: string; revision: string } | null;
+  organizations?: OrganizationSummary[];
 }
+
+export type CloudWorkspaceProviderId = "machine0" | "box";
+export type CloudWorkspaceReleaseDisposition = "destroyed" | "archived" | "terminalx-only";
+export type CloudWorkspaceNetworkPolicy = "relay-only" | "provider-public-network";
+
+export interface CloudProviderCapabilities {
+  suspend: boolean;
+  resume: boolean;
+  releaseDisposition: CloudWorkspaceReleaseDisposition;
+  locationSelection: "required" | "automatic";
+  sourceSelection: "required" | "optional" | "none";
+  pricing: "provider-rate" | "estimate" | "unavailable";
+}
+
+export interface CloudProviderSummary {
+  id: CloudWorkspaceProviderId;
+  displayName: string;
+  availability: "available" | "not-connected" | "attention-required" | "disabled-for-create";
+  canManage: boolean;
+  connection: {
+    state: "connected" | "attention-required";
+    connectedAt: number;
+    lastValidatedAt: number | null;
+    credentialFingerprint: string | null;
+  } | null;
+  capabilities: CloudProviderCapabilities;
+}
+
+export interface CloudProviderSummaryResponse {
+  providers: CloudProviderSummary[];
+}
+
+export interface CloudProviderConnection {
+  provider: CloudWorkspaceProviderId;
+  state: "not-connected" | "connected" | "attention-required";
+  canManage: boolean;
+  credentialFingerprint: string | null;
+  connectedAt: number | null;
+  lastValidatedAt: number | null;
+  credentialVersion?: number | null;
+  providerAccount?: string | null;
+  operationsBlocked?: boolean | null;
+  disconnectDisposition?: "retain" | "destroy" | null;
+  resources?: CloudProviderResource[] | null;
+}
+
+export interface CloudProviderConnectInput {
+  contextRevision: string;
+  disclosure: {
+    version: string;
+    providerBillingAccepted: true;
+    organizationUseAccepted: true;
+  };
+}
+
+
+export interface CloudWorkspaceProviderSelection {
+  sourceId: string;
+  locationId: string;
+  machineClassId: string;
+  idleSuspendMinutes: number;
+  retentionDays: number;
+  networkPolicy: CloudWorkspaceNetworkPolicy;
+}
+
+export interface CloudWorkspaceSetup {
+  provider: CloudWorkspaceProviderId;
+  credentialFingerprint: string;
+  currency: "USD" | "EUR";
+  pricing: "provider-rate" | "estimate";
+  pricingObservedAt: number;
+  sources: { id: string; kind: "image" | "template" | "provider-default"; label: string; description: string | null }[];
+  locations: { id: string; label: string; placement: "selected" | "automatic" }[];
+  machineClasses: {
+    id: string;
+    label: string;
+    vcpu: number;
+    memoryMiB: number;
+    diskGiB: number;
+    activeHourlyMicros: number | null;
+  }[];
+  defaults: CloudWorkspaceProviderSelection;
+  allowedIdleSuspendMinutes: number[];
+  allowedRetentionDays: number[];
+}
+
+export interface CloudWorkspaceQuoteInput extends CloudWorkspaceProviderSelection {
+  provider: CloudWorkspaceProviderId;
+}
+
+export interface CloudWorkspaceQuote {
+  id: string;
+  provider: CloudWorkspaceProviderId;
+  expiresAt: number;
+  currency: "USD" | "EUR";
+  pricing: "provider-rate" | "estimate";
+  pricingObservedAt: number;
+  activeHourlyMicros: number;
+  alwaysOnThirtyDayMicros: number;
+  estimatedSuspendedMonthlyMicros: number | null;
+  configuration: CloudWorkspaceProviderSelection & {
+    sourceLabel: string;
+    locationLabel: string;
+    machineClassLabel: string;
+    vcpu: number;
+    memoryMiB: number;
+    diskGiB: number;
+    architecture: "x86_64" | "arm64";
+  };
+}
+
+export interface CloudWorkspace {
+  id: string;
+  orgId: string;
+  name: string;
+  provider: CloudWorkspaceProviderId;
+  state: "provisioning" | "ready" | "suspended" | "attention-required" | "destroyed";
+  accessMode: "private" | "organization";
+  createdAt: number;
+  updatedAt: number;
+  releaseDisposition: CloudWorkspaceReleaseDisposition | null;
+}
+
+export interface CloudWorkspaceOperation {
+  id: string;
+  workspaceId: string;
+  type: "create";
+  action: "suspend" | "resume" | "delete" | null;
+  state: "queued" | "running" | "cancel-requested" | "succeeded" | "failed" | "canceled";
+  stage: "queued" | "preflight" | "creating-machine" | "bootstrapping" | "connecting-relay" | "cleanup" | "ready";
+  cancelable: boolean;
+  createdAt: number;
+  updatedAt: number;
+  lastProviderContactAt: number | null;
+  nextAttemptAt: number | null;
+  retryReason: "rate-limited" | null;
+  errorCode: CloudWorkspaceOperationErrorCode | null;
+  progress: { phase: "allocating" | "starting" | "installing-runtime" | "connecting-relay" | "suspending" | "releasing"; retryAt: number | null } | null;
+  events: {
+    code: "operation-queued" | "provider-preflight-started" | "machine-allocation-started" | "runtime-installation-started" | "credentials-installing" | "credentials-ready" | "repository-cloning" | "repository-ready" | "repository-clone-failed" | "relay-connection-started" | "provider-cleanup-started" | "workspace-ready" | "operation-failed" | "operation-canceled";
+    occurredAt: number;
+  }[] | null;
+}
+
+export interface CloudWorkspaceSnapshot {
+  workspace: CloudWorkspace;
+  operation: CloudWorkspaceOperation;
+}
+
+export interface CloudWorkspaceList {
+  workspaces: { workspace: CloudWorkspace; latestOperation: CloudWorkspaceOperation | null }[];
+}
+
+/** Retain this exact key when reconciling an ambiguous create response. */
+export interface CloudWorkspaceCreateInput {
+  name: string;
+  quoteId: string;
+  accessMode: "private" | "organization";
+  confirmProviderSpend: true;
+  idempotencyKey: string;
+}
+
+export interface CloudWorkspaceClientError {
+  code: CloudWorkspaceSafeErrorCode;
+  status: number | null;
+  retryable: boolean;
+  retryAfterSeconds: number | null;
+  retryWithSameIdempotencyKey: boolean;
+  requiresOriginalAccountContext: boolean;
+}
+
+export type CloudWorkspaceSafeErrorCode =
+  | "invalid_access_token"
+  | "organization_admin_required"
+  | "active_organization_required"
+  | "cloud_workspace_not_found"
+  | "cloud_workspace_operation_not_found"
+  | "machine0_connection_required"
+  | "cloud_provider_not_found"
+  | "cloud_provider_connection_required"
+  | "cloud_provider_connection_attention_required"
+  | "cloud_provider_operation_in_progress"
+  | "cloud_provider_credential_invalid"
+  | "cloud_provider_rate_limited"
+  | "cloud_provider_invalid_response"
+  | "cloud_provider_billing_required"
+  | "cloud_provider_unavailable"
+  | "cloud_workspace_provider_unsupported"
+  | "cloud_workspace_credential_required"
+  | "cloud_workspace_credential_in_use"
+  | "cloud_workspace_credential_invalid"
+  | "cloud_workspace_credential_verification_unavailable"
+  | "cloud_workspace_repository_credential_required"
+  | "cloud_workspace_repository_not_accessible"
+  | "cloud_workspace_repository_ref_not_found"
+  | "cloud_workspace_repository_verification_unavailable"
+  | "cloud_workspace_agent_credential_required"
+  | "cloud_workspace_device_auth_unavailable"
+  | "cloud_workspace_operation_in_progress"
+  | "cloud_workspace_quota_exceeded"
+  | "idempotency_key_reused"
+  | "cloud_workspace_quote_expired"
+  | "cloud_workspace_request_invalid"
+  | "cloud_workspace_rate_limited"
+  | "machine0_invalid_response"
+  | "machine0_unavailable"
+  | "cloud_workspace_unknown_error"
+  | "cloud_workspace_invalid_response"
+  | "cloud_workspace_unavailable"
+  | "cloud_workspace_request_outcome_unknown"
+  | "cloud_workspace_create_outcome_unknown"
+  | "cloud_workspace_client_invalid"
+  | "cloud_workspace_client_unavailable"
+  | "account_signed_out"
+  | "account_organization_unavailable"
+  | "account_context_changed";
+
+export type CloudWorkspaceOperationErrorCode =
+  | CloudWorkspaceSafeErrorCode
+  | "provider_retry_exhausted"
+  | "provider_reconciliation_required"
+  | "provider_cleanup_pending"
+  | "machine0_provisioning_failed"
+  | "relay_attestation_pending"
+  | "attachment_revocation_pending"
+  | "cloud_provider_ambiguous_mutation"
+  | "cloud_provider_quota_exhausted"
+  | "cloud_provider_capacity_unavailable"
+  | "cloud_provider_state_conflict"
+  | "cloud_provider_idempotency_key_reused"
+  | "cloud_provider_idempotency_window_expired"
+  | "cloud_provider_unsupported";
 
 export interface CliToolStatus {
   installed: boolean;
@@ -613,6 +883,15 @@ export interface MediaFile {
   mtimeMs: number;
 }
 
+export interface LocalPathInfo {
+  path: string;
+  root: string;
+  rel: string;
+  kind: "file" | "directory";
+  /** A conservative content sniff; known media extensions are classified separately. */
+  text: boolean;
+}
+
 export const fs = {
   openMedia: (root: string, rel: string) => invoke<MediaFile>("open_media_file", { root, rel }),
   closeMedia: (token: string) => invoke<void>("close_media_file", { token }),
@@ -620,6 +899,9 @@ export const fs = {
   readText: (path: string) => invoke<TextFile>("read_text_file", { path }),
   writeText: (path: string, content: string) => invoke<number>("write_text_file", { path, content }),
   mtime: (path: string) => invoke<number | null>("file_mtime", { path }),
+  inspectPath: (base: string, path: string) => invoke<LocalPathInfo>("inspect_local_path", { base, path }),
+  /** Native default-app opening, restricted to existing local files/folders. */
+  openPath: (path: string) => invoke<void>("open_local_path", { path }),
   searchText: (root: string, query: string, regex: boolean, caseSensitive: boolean, limit = 500, replacement?: string) =>
     invoke<TextSearch>("search_text", { root, query, regex, caseSensitive, limit, replacement: replacement ?? null }),
   /**
@@ -725,3 +1007,16 @@ export const transcription = {
   setInput: (device: string | null) => invoke<void>("transcription_set_input", { device }),
   setMute: (mute: boolean) => invoke<void>("transcription_set_mute", { mute }),
 };
+
+export interface CloudProviderResource {
+  id: string;
+  name: string;
+  state: string;
+  releaseDisposition: string | null;
+  activeHourlyMicros: number | null;
+  suspendedMonthlyMicros: number | null;
+  currency: string;
+  operationState: string | null;
+  cleanupRequired: boolean;
+  kind: "workspace" | "runtime" | "build" | "legacy-operation";
+}

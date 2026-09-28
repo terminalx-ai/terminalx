@@ -322,7 +322,7 @@ export function setShowArchived(v: boolean) {
 export async function addProject(path: string) {
   const p = await api.addProject(path);
   const exists = state.projects.some((x) => x.path === p.path);
-  set({ projects: exists ? state.projects : [...state.projects, p], lastProject: p.path });
+  set({ projects: exists ? state.projects.map((existing) => existing.path === p.path ? p : existing) : [...state.projects, p], lastProject: p.path });
   return p;
 }
 

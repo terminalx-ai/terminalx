@@ -2,7 +2,7 @@ import "@testing-library/dom";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ setHostName: vi.fn(async () => {}) }));
+const mocks = vi.hoisted(() => ({ setHostName: vi.fn(async () => {}), organization: null as string | null }));
 
 vi.mock("@/lib/account", () => ({
   signIn: vi.fn(),
@@ -12,7 +12,7 @@ vi.mock("@/lib/account", () => ({
     busy: false,
     status: {
       state: "signed-in",
-      identity: { name: "Paresh", email: "owner@terminalx.ai", organization: null },
+      identity: { name: "Paresh", email: "owner@terminalx.ai", organization: mocks.organization },
       expiresAt: Date.now() + 60_000,
       lastError: null,
     },
@@ -61,4 +61,13 @@ describe("account binding disclosure", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save Mac display name" }));
     await waitFor(() => expect(mocks.setHostName).toHaveBeenCalledWith("Desk Mac"));
   });
+
+  it("keeps creation discoverable when an organization already exists", () => {
+    mocks.organization = "Existing organization";
+    render(<AccountTab />);
+    expect(screen.getByRole("button", { name: "Create or switch organization" })).toBeTruthy();
+    cleanup();
+    mocks.organization = null;
+  });
+
 });

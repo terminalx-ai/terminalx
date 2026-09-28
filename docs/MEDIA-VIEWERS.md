@@ -21,7 +21,7 @@ first needed. `open_media_file(root, rel)` canonicalizes and validates the selec
 file inside its workspace, then returns a random, per-viewer URL. The listener
 serves only those grants: it has no directory listing, arbitrary path route,
 CORS grant, or write endpoint. No workspace-wide asset scope is added. This works
-with worktrees and custom `RACCOON_HOME` locations, independently of attachments.
+with worktrees and custom `TERMINALX_HOME` locations, independently of attachments.
 
 Responses include the format's MIME type, length, and byte-range support. Both
 full and partial responses stream with backpressure in 64 KiB chunks. Large
@@ -44,7 +44,7 @@ fallback and the existing Reveal action.
 
 On September 5, 2026, an isolated **packaged debug `.app`**, using production-built
 frontend assets, was exercised on macOS 26.3.1 (Apple silicon, WKWebView), with
-`RACCOON_HOME` under `/tmp/terminalx-media-118/app-data`. A temporary frontend
+`TERMINALX_HOME` under `/tmp/terminalx-media-118/app-data`. A temporary frontend
 bootstrap drove the real tab store, DOM elements, Tauri commands, and local
 streaming endpoint. It is not included in the shipping frontend.
 
@@ -77,6 +77,6 @@ the runtime cannot decode them. Windows and Linux were not verified.
 To repeat the manual checks, create fixtures in a disposable Git repository with
 FFmpeg (PNG with alpha, JPEG/GIF, MP3, PCM WAV, H.264/AAC MP4), including a file
 larger than 4 MiB and filenames containing spaces and non-ASCII characters. Open
-that repository in a separately built app using a temporary `RACCOON_HOME`.
+that repository in a separately built app using a temporary `TERMINALX_HOME`.
 Exercise Explorer/Open/Quick Open; switch, collapse, and close playing tabs;
 modify/delete a fixture externally and retry; and compare file hashes afterward.

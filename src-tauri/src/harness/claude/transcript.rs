@@ -91,7 +91,14 @@ pub fn decode_line(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>) {
     }
     match v["type"].as_str().unwrap_or("") {
         "user" => decode_user(&v, out),
+        "assistant" if v["isApiErrorMessage"].as_bool() == Some(true) => {
+            out.push(Payload::Error { message: text_of(&v["message"]["content"]), fatal: false });
+        }
         "assistant" => decode_assistant(&v, out),
+        "system" if v["subtype"] == "api_error" => {
+            let message = v["error"]["message"].as_str().or_else(|| v["message"].as_str()).unwrap_or("Provider request failed");
+            out.push(Payload::Error { message: message.into(), fatal: false });
+        }
         "system" if v["subtype"] == "compact_boundary" => {
             let meta = &v["compactMetadata"];
             out.push(Payload::ContextCompacted {

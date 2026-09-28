@@ -1,3 +1,4 @@
+import { TAB_STATUS_LABEL } from "@/types/session";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Globe,
@@ -205,7 +206,7 @@ function WorkspaceNode({
   const removedSession = group.sessions.find((session) => session.removedWorkspace) ?? group.sessions[0];
   const name = group.removed && removedSession ? sessionWorkspaceName(removedSession) : (workspace?.name ?? group.path.split("/").pop() ?? group.path);
   const displayName = group.removed ? name : workspace?.managed ? name : (workspace?.branch ?? name);
-  const kind = group.removed ? "removed" : !workspace ? "missing" : workspace.isMain ? "main" : workspace.managed ? "worktree" : "external";
+  const kind = group.removed ? "removed" : !workspace ? "missing" : project.kind === "folder" ? "folder" : workspace.isMain ? "main" : workspace.managed ? "worktree" : "external";
   const openWorkspace = () => {
     if (workspace) startSessionIn(project.path, workspace.path);
     else if (group.sessions[0]) selectSession(group.sessions[0].id);
@@ -223,7 +224,7 @@ function WorkspaceNode({
         title={group.path}
       >
         <TreeToggle expanded={expanded} label={displayName} onToggle={onToggle} className="ml-0.5" />
-        <GitBranch className="size-3 shrink-0" />
+        {project.kind === "folder" ? <FolderOpen className="size-3 shrink-0" /> : <GitBranch className="size-3 shrink-0" />}
         {workspace ? (
           <WorkspaceNameEditor
             value={displayName}
@@ -460,7 +461,7 @@ function TabNode({
             "group/tab relative flex h-6 min-w-0 cursor-default items-center gap-1.5 rounded-md px-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
             active ? "bg-(--surface-thumb) text-foreground shadow-button" : "text-muted-foreground hover:bg-selected/40 hover:text-foreground",
           )}
-          title={label}
+          title={`${label} · ${TAB_STATUS_LABEL[tab.status]}`}
         >
           <span
             aria-hidden
@@ -471,6 +472,7 @@ function TabNode({
               tab.status === "in_progress" && "bg-info animate-pulse-soft",
             )}
           />
+          <span role="img" aria-label={TAB_STATUS_LABEL[tab.status]} className="sr-only" />
           <AgentMark id={tab.harness} className="size-3.5 shrink-0" decorative />
           <span className="min-w-0 flex-1 truncate text-[11px]">{label}</span>
           {mobileDriven ? <Lock className="size-3 shrink-0 text-warning" aria-label="Mobile is driving this terminal" /> : null}

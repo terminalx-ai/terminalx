@@ -64,11 +64,19 @@ fn unpushed(cwd: &Path, branch: Option<&str>) -> u32 {
 /// The project root plus every worktree, root first, Raccoon's own after,
 /// then the rest in git's order.
 pub fn list(project: &Path) -> Result<Vec<Workspace>> {
-    let root = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    let root = PathBuf::from(crate::store::projects::canonical_directory(&project.to_string_lossy())?);
+    if !git::is_repo(&root) {
+        return Ok(vec![Workspace {
+            name: crate::store::projects::project_name(&root.to_string_lossy()),
+            path: root.to_string_lossy().into_owned(),
+            branch: None, head: None, is_main: true, managed: false,
+            uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0,
+        }]);
+    }
     let managed_root = git::worktree_root(project);
     let managed_root = std::fs::canonicalize(&managed_root).unwrap_or(managed_root);
     let mut out = Vec::new();
-    let entries = if git::is_repo(project) { git::list_worktrees(project)? } else { vec![(root.to_string_lossy().into_owned(), None)] };
+    let entries = git::list_worktrees(project)?;
     for (path, branch) in entries {
         let p = PathBuf::from(&path);
         let p = std::fs::canonicalize(&p).unwrap_or(p);

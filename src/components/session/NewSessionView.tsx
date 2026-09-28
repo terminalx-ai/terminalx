@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, FolderGit2, GitBranch, Loader2 } from "lucide-react";
+import { ChevronDown, FolderOpen, FolderGit2, GitBranch, Loader2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
@@ -51,7 +51,6 @@ export function NewSessionView({
   const [workspaceName, setWorkspaceName] = useState<string | null>(null);
   const [localUseWorktree, setLocalUseWorktree] = useState(prefs.useWorktree);
   const ref = useRef<HTMLTextAreaElement>(null);
-  const useWorktree = controlledUseWorktree ?? localUseWorktree;
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
 
   const preset = store.newSessionPreset;
@@ -59,6 +58,8 @@ export function NewSessionView({
   // happened to start a session in some other day; a preset beats both.
   const wanted = preset?.projectPath ?? store.selectedProject ?? prefs.lastProject;
   const project = store.projects.find((p) => p.path === wanted) ?? store.projects[0] ?? null;
+  const isGit = project?.kind !== "folder";
+  const useWorktree = isGit && (controlledUseWorktree ?? localUseWorktree);
   const harness = store.harnesses.find((h) => h.id === prefs.lastAgent) ?? store.harnesses[0] ?? null;
   const available = harness?.available ?? false;
   const models = useModels(harness?.id);
@@ -72,12 +73,12 @@ export function NewSessionView({
   useEffect(() => {
     let cancelled = false;
     const at = preset?.cwd ?? project?.path;
-    if (!at) return setStatus(null);
+    if (!at || !isGit) return setStatus(null);
     api.workStatus(at).then((s) => !cancelled && setStatus(s)).catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [project, preset]);
+  }, [project, preset, isGit]);
 
   useEffect(() => {
     let cancelled = false;
@@ -180,7 +181,7 @@ export function NewSessionView({
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="secondary" size="sm" className={pill}>
-                  <FolderGit2 />
+                  {isGit ? <FolderGit2 /> : <FolderOpen />}
                   {project?.name ?? "Choose project"}
                   <ChevronDown className="text-faint" />
                 </Button>
@@ -197,7 +198,7 @@ export function NewSessionView({
                       void selectProject(p.path);
                     }}
                   >
-                    <FolderGit2 className={cn(p.path === project?.path && "text-foreground")} />
+                    {p.kind === "folder" ? <FolderOpen /> : <FolderGit2 className={cn(p.path === project?.path && "text-foreground")} />}
                     <span className="truncate">{p.name}</span>
                   </DropdownMenuItem>
                 ))}
@@ -292,7 +293,11 @@ export function NewSessionView({
               </DropdownMenuContent>
             </DropdownMenu>
 
-            {preset?.cwd ? (
+            {!isGit ? (
+              <span className="ml-1 flex items-center gap-1 text-xs text-muted-foreground" title="Agents, terminals, and files are available. Git features require a repository.">
+                <FolderOpen className="size-3.5" /> Folder · no Git
+              </span>
+            ) : preset?.cwd ? (
               <span className="ml-1 flex items-center gap-1 text-xs text-muted-foreground">
                 <GitBranch className="size-3.5" />
                 In workspace <span className="font-mono text-foreground">{workspace?.name ?? preset.cwd.split("/").pop()}</span>

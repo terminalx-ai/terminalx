@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { URL as FileURL } from "node:url";
 import type { SessionSummary } from "./host-api";
-import { agentConversations, matchesSession } from "./session-navigation";
+import { agentConversations } from "./session-navigation";
+import { conversationRows } from "./conversations";
 
 // Captured from the reported worktree's live desktop index, reduced to the
-// summary fields used for navigation. No transcript or credentials are included.
+// summary fields used for navigation, with identifiers and title anonymized.
 const session: SessionSummary = JSON.parse(readFileSync(new FileURL("./fixtures/multi-agent-worktree.json", import.meta.url), "utf8"));
 
 describe("worktree conversation navigation", () => {
@@ -14,8 +15,8 @@ describe("worktree conversation navigation", () => {
     expect(conversations.map(({ label }) => label)).toEqual(["Claude Code", "Codex"]);
     expect(conversations.map(({ status }) => status)).toEqual(["completed", "in_progress"]);
     expect(conversations.map(({ href }) => href.params.tabId)).toEqual([
-      "01a06e9d-7fee-7263-8539-eed1fd76b18d",
-      "01a06f07-f2d9-74c0-8bb4-124fa8a232de",
+      "agent-claude",
+      "agent-codex",
     ]);
     for (const { href } of conversations) {
       expect(href.pathname).toBe("/session/[sessionId]");
@@ -24,8 +25,8 @@ describe("worktree conversation navigation", () => {
   });
 
   it("finds a worktree by its non-first provider as well as its workspace", () => {
-    expect(matchesSession(session, "codex raccoon")).toBe(true);
-    expect(matchesSession(session, "claude code")).toBe(true);
-    expect(matchesSession(session, "opencode")).toBe(false);
+    expect(conversationRows([session], "codex example-project").map(({ tab }) => tab.id)).toEqual(["agent-codex"]);
+    expect(conversationRows([session], "claude code")).toHaveLength(1);
+    expect(conversationRows([session], "opencode")).toHaveLength(0);
   });
 });

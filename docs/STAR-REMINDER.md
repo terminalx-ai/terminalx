@@ -1,7 +1,7 @@
 # GitHub star reminder
 
 `src-tauri/src/star_nag.rs` owns eligibility, actions and the atomic local
-`$RACCOON_HOME/star-reminder.json` file. Its durable fields are the launch count,
+`$TERMINALX_HOME/star-reminder.json` file. Its durable fields are the launch count,
 baseline, next threshold, cooldown deadline, app version, permanent completion
 flag and version that consumed the successful-work trigger. No telemetry is added.
 

@@ -286,7 +286,7 @@ state rather than silently declaring remote credentials revoked.
 The phone stores only bounded local transcript/terminal cache needed for the UI
 and clears it with its paired host. The host, not the phone or cloud, writes
 owner-only multiplayer activity to
-`$RACCOON_HOME/sessions/<session-id>/activity.jsonl`, without prompt, note,
+`$TERMINALX_HOME/sessions/<session-id>/activity.jsonl`, without prompt, note,
 agent, or terminal content and with 30-day retention.
 
 ## Notifications and background behavior

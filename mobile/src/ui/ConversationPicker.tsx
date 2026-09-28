@@ -1,6 +1,8 @@
+import { useEffect, useRef } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { ChevronRight } from "lucide-react-native";
 import type { SessionSummary } from "@mobile/data/host-api";
+import { statusLabel } from "@mobile/data/conversations";
 import { agentConversations, type AgentConversation } from "@mobile/data/session-navigation";
 import { StatusDot } from "./primitives";
 import { useTheme } from "./theme";
@@ -13,14 +15,17 @@ export function ConversationPicker({ session, selectedTabId, onSelect, horizonta
 }) {
   const { palette } = useTheme();
   const conversations = agentConversations(session);
+  const scroll = useRef<ScrollView>(null);
+  const offsets = useRef<Record<string, number>>({});
+  useEffect(() => {
+    if (horizontal && selectedTabId) scroll.current?.scrollTo({ x: offsets.current[selectedTabId] ?? 0, animated: false });
+  }, [horizontal, selectedTabId]);
   const buttons = conversations.map((conversation) => {
     const selected = conversation.id === selectedTabId;
     const color = conversation.status === "waiting" ? palette.warning
       : conversation.status === "in_progress" ? palette.accent
       : conversation.status === "completed" ? palette.success : palette.faint;
-    const status = conversation.status === "waiting" ? "Needs you"
-      : conversation.status === "in_progress" ? "Working"
-      : conversation.status === "completed" ? "Done" : "Idle";
+    const status = statusLabel(conversation.status);
     return <Pressable
       key={conversation.id}
       accessibilityRole="button"
@@ -28,6 +33,10 @@ export function ConversationPicker({ session, selectedTabId, onSelect, horizonta
       accessibilityHint={`${status} · ${session.title}`}
       accessibilityState={{ selected }}
       onPress={() => onSelect(conversation)}
+      onLayout={({ nativeEvent }) => {
+        offsets.current[conversation.id] = nativeEvent.layout.x;
+        if (horizontal && selected) scroll.current?.scrollTo({ x: nativeEvent.layout.x, animated: false });
+      }}
       style={({ pressed }) => [styles.button, horizontal ? styles.chip : styles.row, {
         borderColor: palette.border,
         backgroundColor: selected ? palette.selected : pressed ? palette.raised : palette.card,
@@ -41,7 +50,7 @@ export function ConversationPicker({ session, selectedTabId, onSelect, horizonta
       {!horizontal ? <ChevronRight size={18} color={palette.faint} /> : null}
     </Pressable>;
   });
-  if (horizontal) return <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.scroll} contentContainerStyle={styles.chips}>{buttons}</ScrollView>;
+  if (horizontal) return <ScrollView ref={scroll} horizontal showsHorizontalScrollIndicator={false} style={styles.scroll} contentContainerStyle={styles.chips}>{buttons}</ScrollView>;
   return <View>{buttons.length ? buttons : <Text style={[styles.empty, { color: palette.muted }]}>No agent conversations</Text>}</View>;
 }
 

@@ -63,7 +63,7 @@ pub struct HookFrame {
 pub struct Origin {
     pub token: String,
     /// Claude: `~/.claude/projects/<encoded cwd>`. Codex: the managed
-    /// `$RACCOON_HOME/codex/sessions`.
+    /// `$TERMINALX_HOME/codex/sessions`.
     pub transcript_root: PathBuf,
 }
 
@@ -296,7 +296,7 @@ where
                 crate::control::ControlError::new(
                     "unauthorized",
                     "The control token is missing or does not match this app launch.",
-                    Some("Restart an app-launched tab, or let a human shell read RACCOON_HOME/run/control.token.".into()),
+                    Some("Restart an app-launched tab, or let a human shell read TERMINALX_HOME/run/control.token.".into()),
                 ),
             );
             return serde_json::to_value(response).unwrap_or_default();
@@ -550,7 +550,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_symlinked_root_still_holds_its_own_transcripts() {
-        // `$RACCOON_HOME` under /tmp is /private/tmp once resolved, so the
+        // `$TERMINALX_HOME` under /tmp is /private/tmp once resolved, so the
         // path Codex reports would fail a purely lexical check.
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("real/sessions");

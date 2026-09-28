@@ -6,6 +6,8 @@ import { useSyncExternalStore } from "react";
  * ~/.raccoon/settings.json instead (see store/settings.rs).
  */
 export interface Prefs {
+  linkBrowser: "terminalx" | "system";
+  linkActions: boolean;
   sidebarOpen: boolean;
   sidebarWidth: number;
   panelOpen: boolean;
@@ -29,6 +31,8 @@ export interface Prefs {
 }
 
 const DEFAULTS: Prefs = {
+  linkBrowser: "terminalx",
+  linkActions: true,
   sidebarOpen: true,
   sidebarWidth: 268,
   panelOpen: false,

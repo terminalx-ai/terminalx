@@ -4,6 +4,7 @@ mod binpath;
 pub mod browser;
 pub mod cli;
 mod commands;
+mod cloud_workspaces;
 pub mod computer;
 mod control;
 #[cfg(windows)]
@@ -24,6 +25,7 @@ mod names;
 mod pairing;
 mod pty;
 mod session;
+mod recovery;
 mod continuation;
 pub mod skills;
 mod store;
@@ -44,6 +46,7 @@ fn supports_deep_link_scheme(scheme: &str) -> bool {
 
 pub struct AppState {
     pub account: Arc<account::AccountManager>,
+    pub cloud_workspaces: Arc<cloud_workspaces::CloudWorkspaceService>,
     pub pairing: Arc<pairing::PairingManager>,
     pub host: Arc<harness::host::Host>,
     pub terminals: Arc<pty::Terminals>,
@@ -76,12 +79,14 @@ pub fn run() {
     let status_state = Arc::new(status::StatusState::default());
     let account = Arc::new(account::AccountManager::default());
     let pairing = Arc::new(pairing::PairingManager::new(account.clone()));
+    let cloud_workspaces = Arc::new(cloud_workspaces::CloudWorkspaceService::new(account.clone()));
     // The resource directory is only known once Tauri is up; the service
     // resolves the helper lazily, so it can be built before `setup`.
     let computer = Arc::new(computer::ComputerService::new(None));
-    let browser = Arc::new(browser::BrowserRuntime::open().expect("open the browser stores under RACCOON_HOME"));
+    let browser = Arc::new(browser::BrowserRuntime::open().expect("open the browser stores under TERMINALX_HOME"));
     let state = AppState {
         account: account.clone(),
+        cloud_workspaces,
         pairing: pairing.clone(),
         host: host.clone(),
         terminals: terminals.clone(),
@@ -161,8 +166,23 @@ pub fn run() {
             }
             std::thread::spawn(|| {
                 if let Err(error) = github::recover_workspace_prs() {
-                    log::warn!("recover workspace PR history: {error:#}");
-                    store::activity::report_error(format!("Workspace PR recovery is incomplete; discovery will retry on restart or workspace refresh: {error:#}"));
+                    let detail = format!("{error:#}").to_lowercase();
+                    let category = if detail.contains("auth") || detail.contains("login") || detail.contains("credential") {
+                        "credentials"
+                    } else if detail.contains("rate limit") {
+                        "rate_limit"
+                    } else {
+                        "connection"
+                    };
+                    log::warn!("recover workspace PR history failed (category={category}; workspace details omitted)");
+                    let message = if category == "credentials" {
+                        "GitHub credentials need attention before pull-request data can be refreshed."
+                    } else if category == "rate_limit" {
+                        "GitHub rate limits prevented pull-request data from refreshing. We’ll retry on restart or workspace refresh."
+                    } else {
+                        "Some pull-request data couldn’t be refreshed because GitHub is unreachable. We’ll retry on restart or workspace refresh."
+                    };
+                    store::activity::report_error(message.into());
                 }
             });
             let exited = manager.clone();
@@ -196,6 +216,21 @@ pub fn run() {
             commands::account_status,
             commands::account_sign_in,
             commands::account_sign_out,
+            commands::organization_create,
+            commands::organization_select,
+            commands::cloud_providers,
+            commands::cloud_provider,
+            commands::cloud_provider_connect,
+            commands::cloud_provider_disconnect,
+            commands::cloud_workspace_setup,
+            commands::cloud_workspace_quote,
+            commands::cloud_workspace_create,
+            commands::cloud_workspaces,
+            commands::cloud_workspace_suspend,
+            commands::cloud_workspace_resume,
+            commands::cloud_workspace_release,
+            commands::cloud_workspace_operation,
+            commands::cloud_workspace_operation_cancel,
             commands::pairing_status,
             commands::pairing_generate,
             commands::pairing_revoke,
@@ -286,6 +321,8 @@ pub fn run() {
             commands::read_text_file,
             commands::write_text_file,
             commands::file_mtime,
+            commands::inspect_local_path,
+            commands::open_local_path,
             commands::search_text,
             commands::replace_text,
             commands::settle_session,

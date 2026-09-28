@@ -107,11 +107,11 @@ async function canNotify(): Promise<boolean> {
   return permission;
 }
 
-function summarise(session: SessionEntry, tab: TabEntry, kind: NoticeKind): { title: string; body: string } {
-  const agent = tab.title ?? getSessions().harnesses.find((h) => h.id === tab.harness)?.name ?? tab.harness;
-  const status = kind === "waiting" ? `${agent} needs you` : kind === "failed" ? `${agent} hit a problem` : `${agent} finished`;
+function summarise(_session: SessionEntry, tab: TabEntry, kind: NoticeKind): { title: string; body: string } {
+  const agent = getSessions().harnesses.find((h) => h.id === tab.harness)?.name ?? "Agent";
+  const status = kind === "waiting" ? `${agent} needs attention` : kind === "failed" ? `${agent} hit a problem` : `${agent} finished`;
   const title = `TerminalX — ${status}`;
-  return { title, body: session.title };
+  return { title, body: kind === "waiting" ? "Open the session to review its recovery actions or pending request." : "Open the session to review the conversation." };
 }
 
 /** Called for every tab status change; decides what, if anything, to raise. */

@@ -132,6 +132,8 @@ function GeneralTab() {
   };
   return (
     <div className="flex flex-col">
+      <SettingRow label="Website links" description="Choose where HTTP(S) links open by default." control={<Segmented aria-label="Website links" value={prefs.linkBrowser} onChange={(v) => setPrefs({ linkBrowser: v })} options={[{ value: "terminalx", label: "TerminalX Browser" }, { value: "system", label: "System Browser" }]} />} />
+      <SettingRow label="Link actions" description="Show both browser destinations in the link action menu." control={<Switch checked={prefs.linkActions} onCheckedChange={(v) => setPrefs({ linkActions: v })} />} />
       <SettingRow
         label="Command line tool"
         description={

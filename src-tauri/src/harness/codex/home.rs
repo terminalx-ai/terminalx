@@ -5,7 +5,7 @@
 //! it. Installing that in the reader's own `~/.codex` would edit two files
 //! Raccoon does not own and would fire our hooks at every `codex` they run in
 //! their own terminal, so Raccoon keeps a home of its own at
-//! `$RACCOON_HOME/codex` and points `CODEX_HOME` at it.
+//! `$TERMINALX_HOME/codex` and points `CODEX_HOME` at it.
 //!
 //! A separate home must not become a separate Codex. It gets:
 //!

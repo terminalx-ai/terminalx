@@ -23,19 +23,23 @@ const MOUNT_STEP = 12;
  * anchoring scrollTop so the reader's view never moves.
  */
 export function Chat({
+  sessionId,
   transcript,
   stream,
   cwd,
   live,
+  progressing = live,
   onAnswerPermission,
   onAnswerQuestions,
   answering,
   footer,
 }: {
+  sessionId: string;
   transcript: Transcript;
   stream: StreamBlock[];
   cwd?: string;
   live: boolean;
+  progressing?: boolean;
   onAnswerPermission: (requestId: string, optionId: string) => void;
   onAnswerQuestions: (requestId: string, answers: Record<string, string>) => void;
   answering: boolean;
@@ -125,7 +129,7 @@ export function Chat({
     setAtBottom(true);
   }, [lastPromptSeq, pinToBottom]);
 
-  const working = live && !!transcript.workingSince && (transcript.modelRequestOpen || !stream.length);
+  const working = progressing && !!transcript.workingSince && (transcript.modelRequestOpen || !stream.length);
   const streamingTool = stream.find((s) => s.kind === "tool_use" && !s.done);
 
   return (
@@ -148,16 +152,17 @@ export function Chat({
                 key={t.key}
                 turn={t}
                 cwd={cwd}
+                sessionId={sessionId}
                 stream={isLast && live ? stream : []}
                 working={isLast && working && !transcript.pendingAsks.length && !transcript.compacting}
                 streamingTool={isLast && live ? streamingTool : undefined}
               />
             );
           })}
-          {transcript.compacting && (
+          {transcript.compacting && progressing && (
             <div className="mb-3 px-1.5 text-[13px] text-shimmer">Compacting context</div>
           )}
-          {transcript.retry && live && (
+          {transcript.retry && progressing && (
             <div className="mb-3 px-1.5 text-[13px] text-warning">
               Retrying ({transcript.retry.attempt}/{transcript.retry.maxRetries})
               {transcript.retry.reason ? ` · ${transcript.retry.reason}` : ""}
@@ -194,7 +199,7 @@ export function Chat({
         </Button>
       </div>
       <div className="relative shrink-0">
-        <RaccoonRunner active={live} obstacle={!atBottom} />
+        <RaccoonRunner active={progressing} obstacle={!atBottom} />
         {footer}
       </div>
     </div>

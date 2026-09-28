@@ -35,6 +35,13 @@ export const hostIdForPublicKey = (value: string): string | null => {
   return base64Url(sha256(decoded)).slice(0, 16);
 };
 
+export const DirectEndpointsSchema = z.array(z.string().max(2_048).refine((value) => {
+  try {
+    const url = new URL(value);
+    return ["ws:", "wss:"].includes(url.protocol) && !!url.hostname && !url.username && !url.password && !url.hash;
+  } catch { return false; }
+})).max(64);
+
 export function createPairingOfferSchema(now: () => number = Date.now) {
   const relay = z
     .object({
@@ -55,6 +62,7 @@ export function createPairingOfferSchema(now: () => number = Date.now) {
   return z
     .object({
       v: z.literal(PAIRING_OFFER_VERSION),
+      directEndpoints: DirectEndpointsSchema.optional(),
       endpoint: z.string().min(1).max(16 * 1_024),
       deviceToken: z.string().min(1).max(64 * 1_024),
       publicKeyB64: z.string().min(1).max(4 * 1_024),
@@ -103,6 +111,7 @@ export const RelayPhoneHelloSchema = z.union([
 export const PairingEndpointsResultSchema = z
   .object({
     v: z.literal(1),
+    directEndpoints: DirectEndpointsSchema.optional(),
     relay: z
       .object({
         v: z.literal(1),
@@ -147,6 +156,7 @@ export type DeviceResumeConfirmed = z.infer<typeof DeviceResumeConfirmedSchema>;
 export const PairingGetEndpointsResultSchema = z
   .object({
     v: z.literal(1),
+    directEndpoints: DirectEndpointsSchema.optional(),
     relay: PairingEndpointsResultSchema.shape.relay,
     installStatus: z
       .union([

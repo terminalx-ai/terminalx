@@ -194,9 +194,29 @@ fn wait_child(mut child: Child) -> Option<i32> {
 pub fn is_alive(pid: u32) -> bool {
     #[cfg(unix)]
     unsafe {
-        libc::kill(pid as i32, 0) == 0
+        libc::kill(pid as i32, 0) == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    unsafe {
+        use std::ffi::c_void;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+            fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
+            fn CloseHandle(handle: *mut c_void) -> i32;
+            fn GetLastError() -> u32;
+        }
+        // SYNCHRONIZE lets us observe exit without requesting control of the
+        // process. Access denied or an unexpected error remains unknown/alive.
+        let handle = OpenProcess(0x0010_0000, 0, pid);
+        if handle.is_null() {
+            return GetLastError() != 87; // ERROR_INVALID_PARAMETER: PID is gone
+        }
+        let running = WaitForSingleObject(handle, 0) != 0; // WAIT_OBJECT_0: exited
+        CloseHandle(handle);
+        running
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         true
@@ -259,6 +279,18 @@ mod tests {
         fn exited(&self, _pid: u32, code: Option<i32>) {
             let _ = self.0.lock().unwrap().send(format!("exit:{code:?}"));
         }
+    }
+
+    #[test]
+    fn process_probe_distinguishes_running_from_confirmed_exit() {
+        assert!(is_alive(std::process::id()));
+        #[cfg(windows)]
+        let mut child = Command::new("cmd").args(["/C", "exit", "0"]).spawn().unwrap();
+        #[cfg(not(windows))]
+        let mut child = Command::new("/bin/sh").args(["-c", "exit 0"]).spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert!(!is_alive(pid));
     }
 
     #[test]

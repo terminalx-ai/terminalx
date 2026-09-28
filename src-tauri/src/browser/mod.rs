@@ -99,7 +99,7 @@ pub struct BrowserRuntime {
 }
 
 impl BrowserRuntime {
-    /// Open the stores under `$RACCOON_HOME/browser`. Pages remembered from a
+    /// Open the stores under `$TERMINALX_HOME/browser`. Pages remembered from a
     /// previous run are dropped: their browser is gone (or about to be swept).
     pub fn open() -> anyhow::Result<Self> {
         let home = crate::store::root()?;

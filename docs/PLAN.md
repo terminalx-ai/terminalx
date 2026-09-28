@@ -38,7 +38,7 @@ src-tauri/src
   events.rs          normalized AgentEvent (+ TS twin in src/types/events.ts)
   session.rs         SessionManager: one runtime per tab, numbering and persisting events
   store/
-    mod.rs           the $RACCOON_HOME layout
+    mod.rs           the $TERMINALX_HOME layout
     index.rs         sessions/index.json — one entry per session, holding its tabs
     projects.rs      projects.json — repo roots the reader has attached
     settings.rs      settings.json — what Rust needs before the webview exists
@@ -207,8 +207,8 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 - **History sources.** Claude reads `~/.claude/projects/**/*.jsonl` and
   `~/.claude/transcripts/**/*.jsonl`. Codex reads system history from
   `~/.codex/sessions/**/*.jsonl`; the shared managed home at
-  `$RACCOON_HOME/codex/sessions/**/*.jsonl`; every managed account at
-  `$RACCOON_HOME/codex-accounts/*/home/sessions/**/*.jsonl`; and the equivalent
+  `$TERMINALX_HOME/codex/sessions/**/*.jsonl`; every managed account at
+  `$TERMINALX_HOME/codex-accounts/*/home/sessions/**/*.jsonl`; and the equivalent
   shared and per-account homes in the existing TerminalX user-data directory.
   Canonical file paths prevent physical aliases from being scanned twice.
   OpenCode is disabled, so no OpenCode home is scanned and it contributes zero.
@@ -302,7 +302,7 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
       PTY (bracketed paste, then the Enter a beat later).
 - [x] Status and permissions come from the CLI's hooks: `--settings` points every
       hook at the app's `raccoon` binary as `raccoon hook <Event>`, which forwards the
-      payload over a unix socket under `$RACCOON_HOME`. `PermissionRequest`
+      payload over a unix socket under `$TERMINALX_HOME`. `PermissionRequest`
       parks there until the chat's card is answered and replies with the
       decision the CLI expects.
 - [x] Chat ↔ terminal is a view flag with the pane still mounted underneath;
@@ -372,6 +372,6 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
       scheme. The handler also recognizes legacy `terminalx-next://` links.
 - [x] Development builds are `TerminalX Dev` /
       `com.terminalx.next.dev`, with the same source art carrying a "D" badge.
-- [x] The `raccoon` crate and binary, `RACCOON_HOME`, `~/.raccoon`, branch and
+- [x] The `raccoon` crate and binary, `TERMINALX_HOME`, `~/.raccoon`, branch and
       socket names, and repository identity remain unchanged during the
       transition.

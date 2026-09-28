@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { agent, errorMessage, type ImageInput } from "@/lib/api";
-import { applyEvent, loadTab, useTabLog } from "@/lib/agentEvents";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { agent, type ImageInput } from "@/lib/api";
+import { applyEvent, loadTab, setTabStatus, useTabLog } from "@/lib/agentEvents";
 import { buildTranscript, type Transcript } from "@/lib/transcript";
 import { getDraft, setDraft, useDraft } from "@/lib/drafts";
-import { patchTab } from "@/lib/sessions";
+import { patchTab, useSessionStore } from "@/lib/sessions";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { changeRange, useChanges } from "@/lib/changes";
 import { Chat } from "@/components/chat/Chat";
@@ -14,7 +14,11 @@ import { MessageSquare } from "lucide-react";
 import { useTerminals } from "@/lib/terminal";
 import { cn } from "@/lib/cn";
 import { clearTabViewError, isPtyFirst, leaveTerminalView, startTabAgent, terminalPaneId, useTabViews } from "@/lib/tabViews";
-import type { SessionEntry, TabEntry } from "@/types/session";
+import { classifyRecovery, RECOVERY_MESSAGES, RECOVERY_PROMPT, recoveryFromEvents } from "@/lib/recovery";
+import { RecoveryBanner } from "./RecoveryBanner";
+import { ContinuationDialog } from "./ContinuationDialog";
+import { useModels } from "@/lib/models";
+import { TAB_STATUS_LABEL, type SessionEntry, type TabEntry } from "@/types/session";
 
 /**
  * One tab: its event log, the transcript built from it, and the composer.
@@ -35,6 +39,7 @@ function handoffsFor(t: Transcript, changed: boolean): { label: string; prompt: 
 }
 
 export function TabView({ session, tab, active, continuationOpen = false }: { session: SessionEntry; tab: TabEntry; active: boolean; continuationOpen?: boolean }) {
+  const isGit = useSessionStore().projects.find((p) => p.path === session.projectPath)?.kind !== "folder";
   const log = useTabLog(session.id, tab.id);
   const draft = useDraft(tab.id);
   const [error, setError] = useState<string | null>(null);
@@ -46,9 +51,17 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
   const paneId = terminalPaneId(tab.id);
   const pane = terms.panes.find((p) => p.id === paneId);
   const [answering, setAnswering] = useState(false);
+  const [recovering, setRecovering] = useState(false);
+  const recoveryLock = useRef(false);
+  const [stopped, setStopped] = useState(false);
+  const [continueOpen, setContinueOpen] = useState(false);
+  const models = useModels(tab.harness);
+  const eventRecovery = useMemo(() => recoveryFromEvents(log.events), [log.events, log.version]);
+  const recovery = eventRecovery ?? (error || viewError ? classifyRecovery(error ?? viewError!) : null);
+  const safeError = (e: unknown) => RECOVERY_MESSAGES[classifyRecovery(String(e))];
 
   useEffect(() => {
-    void loadTab(session.id, tab.id);
+    void loadTab(session.id, tab.id).catch(e => setError(safeError(e)));
   }, [session.id, tab.id]);
 
   // A PTY-first tab is its CLI, so opening the tab starts it. Idempotent, and
@@ -70,17 +83,19 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
   // Whether the session's checkout differs from where the conversation
   // started, by tree diff, so a shell heredoc counts as much as an edit tool.
   const range = useMemo(() => changeRange(log.events, session.baseRef), [log.events, log.version, session.baseRef]);
-  const changes = useChanges(session.cwd, range, active && !live);
+  const changes = useChanges(session.cwd, range, isGit && active && !live);
 
   const send = useCallback(
     async (text: string, images: ImageInput[]) => {
       setError(null);
+      setStopped(false);
       try {
         const out = await agent.send(session.id, tab.id, text, images);
         for (const ev of out.events) applyEvent(ev);
         if (!out.queued) patchTab(session.id, tab.id, { status: "in_progress" });
       } catch (e) {
-        setError(errorMessage(e));
+        setError(safeError(e));
+        setTabStatus(session.id, tab.id, "waiting");
         setDraft(tab.id, getDraft(tab.id) || text);
         throw e;
       }
@@ -89,8 +104,41 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
   );
 
   const stop = useCallback(() => {
-    void agent.interrupt(session.id, tab.id).catch((e) => setError(errorMessage(e)));
+    if (recoveryLock.current) return;
+    recoveryLock.current = true;
+    setRecovering(true);
+    void agent.stop(session.id, tab.id).then(() => {
+      setTabStatus(session.id, tab.id, "idle");
+      setStopped(true);
+      setError(null);
+      clearTabViewError(tab.id);
+    }).catch((e) => setError(safeError(e))).finally(() => {
+      recoveryLock.current = false;
+      setRecovering(false);
+    });
   }, [session.id, tab.id]);
+
+  const retry = async (model?: string) => {
+    if (recoveryLock.current) return;
+    recoveryLock.current = true;
+    setRecovering(true);
+    try {
+      // Await confirmed local exit before starting a replacement. Remote
+      // outcomes remain unknown and the continuation asks to verify them.
+      await agent.stop(session.id, tab.id);
+      if (model) {
+        await agent.setModel(session.id, tab.id, model);
+        patchTab(session.id, tab.id, { model });
+      }
+      const out = await agent.send(session.id, tab.id, RECOVERY_PROMPT, []);
+      setStopped(false);
+      for (const ev of out.events) applyEvent(ev);
+      setError(null);
+      clearTabViewError(tab.id);
+      // Recovery never touches the unsent composer draft or attachments.
+    } catch (e) { setError(safeError(e)); }
+    finally { recoveryLock.current = false; setRecovering(false); }
+  };
 
   // Editors, dialogs and pickers own Escape before the agent-stop shortcut.
   useHotkey("escape", () => (live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane") ? (stop(), true) : false), { enabled: active && !continuationOpen });
@@ -101,7 +149,7 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
       try {
         await agent.respondPermission(session.id, tab.id, requestId, optionId);
       } catch (e) {
-        setError(errorMessage(e));
+        setError(safeError(e));
       } finally {
         setAnswering(false);
       }
@@ -115,7 +163,7 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
       try {
         await agent.answerQuestions(session.id, tab.id, requestId, answers);
       } catch (e) {
-        setError(errorMessage(e));
+        setError(safeError(e));
       } finally {
         setAnswering(false);
       }
@@ -125,10 +173,12 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
 
   const chat = (
     <Chat
-      transcript={transcript}
+      sessionId={session.id}
+      transcript={{ ...transcript, pendingAsks: [] }}
       stream={log.stream}
       cwd={session.cwd}
       live={live}
+      progressing={tab.status === "in_progress" && !recovery && !transcript.pendingAsks.length}
       answering={answering}
       onAnswerPermission={answerPermission}
       onAnswerQuestions={answerQuestions}
@@ -145,21 +195,21 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
           onSend={send}
           onStop={stop}
           onSetModel={(m) => {
-            patchTab(session.id, tab.id, { model: m });
-            void agent.setModel(session.id, tab.id, m).catch((e) => setError(errorMessage(e)));
+            if (recovery) { void retry(m); return; }
+            void agent.setModel(session.id, tab.id, m).then(() => patchTab(session.id, tab.id, { model: m })).catch((e) => setError(safeError(e)));
           }}
           onSetEffort={(e) => {
             patchTab(session.id, tab.id, { effort: e });
-            void agent.setEffort(session.id, tab.id, e).catch((err) => setError(errorMessage(err)));
+            void agent.setEffort(session.id, tab.id, e).catch((err) => setError(safeError(err)));
           }}
           onSetMode={(m) => {
             patchTab(session.id, tab.id, { permissionMode: m });
-            void agent.setPermissionMode(session.id, tab.id, m).catch((e) => setError(errorMessage(e)));
+            void agent.setPermissionMode(session.id, tab.id, m).catch((e) => setError(safeError(e)));
           }}
           contextUsed={transcript.contextUsed ?? tab.contextUsed ?? undefined}
           contextMax={transcript.contextMax ?? tab.contextMax ?? undefined}
-          handoffs={handoffsFor(transcript, changes.files.length > 0)}
-          disabledReason={error ?? viewError}
+          handoffs={handoffsFor(transcript, isGit && changes.files.length > 0)}
+          disabledReason={error ?? (viewError ? safeError(viewError) : null)}
           autoFocus={active}
         />
       }
@@ -169,13 +219,17 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
   const info = views.info[tab.id];
   const terminal = (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex h-8 shrink-0 items-center gap-2 border-b border-hairline px-3 text-xs text-muted-foreground">
-        <span className="shrink-0 text-foreground">Terminal view</span>
-        <span className="truncate font-mono text-[11px] text-faint" title={info?.command}>
+      <div className="flex min-h-8 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground">
+        <span className="shrink-0 text-foreground">Terminal view · {TAB_STATUS_LABEL[tab.status]}</span>
+        {live && !recovery && <Button size="xs" variant="outline" disabled={recovering} onClick={stop}>Stop session</Button>}
+        <span className="min-w-0 truncate font-mono text-[11px] text-faint" title={info?.command}>
           {info?.command}
         </span>
-        <span className="ml-auto shrink-0 text-faint">
+        <span className="ml-auto min-w-0 text-faint">
           {ptyFirst ? "The chat is the same conversation." : "The chat resumes when you switch back."}
+          {tab.harness === "claude" && (
+            <> Claude Code may show its own diff sidebar. Type <code>/diff</code> in the terminal to hide or show it.</>
+          )}
         </span>
       </div>
       {pane?.exited && (
@@ -192,12 +246,32 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
     </div>
   );
 
+  const wrap = (body: React.ReactNode) => <div className="flex h-full min-h-0 flex-col">
+    {stopped && <div role="status" className="flex items-center gap-2 border-b border-hairline p-3 text-xs">
+      Session closed. Untracked or remote commands may still be running; verify their outcome before continuing.
+      <Button size="sm" disabled={recovering} onClick={() => void retry()}>Resume safely</Button>
+    </div>}
+    <RecoveryBanner kind={recovery} waiting={tab.status === "waiting"} asks={transcript.pendingAsks} busy={recovering} answering={answering}
+      models={models.filter(m => m.id !== tab.model && !m.upgrade)} onPermission={answerPermission} onQuestions={answerQuestions}
+      onRetry={retry} onStop={stop} onContinue={() => {
+        if (recoveryLock.current) return;
+        recoveryLock.current = true;
+        setRecovering(true);
+        void agent.stop(session.id, tab.id).then(() => setContinueOpen(true)).catch(e => setError(safeError(e))).finally(() => {
+          recoveryLock.current = false;
+          setRecovering(false);
+        });
+      }} />
+    {continueOpen && <ContinuationDialog session={session} source={tab} onClose={() => setContinueOpen(false)} />}
+    <div className="min-h-0 flex-1">{body}</div>
+  </div>;
+
   // A PTY-first tab keeps its terminal mounted under the chat: the pane holds
   // the live CLI, so unmounting it to show the transcript would throw away the
   // scrollback and resize the agent's window on every toggle. `invisible`
   // rather than `hidden` because xterm needs a laid-out box to fit itself to.
   if (ptyFirst) {
-    return (
+    return wrap(
       <div className="relative flex h-full min-h-0 flex-col">
         <div className={cn("absolute inset-0 flex min-h-0 flex-col", !terminalMode && "invisible")} aria-hidden={!terminalMode}>
           {terminal}
@@ -207,6 +281,6 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
     );
   }
 
-  if (terminalMode) return terminal;
-  return chat;
+  if (terminalMode) return wrap(terminal);
+  return wrap(chat);
 }

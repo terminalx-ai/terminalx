@@ -1,3 +1,4 @@
+import { DirectEndpointsSchema } from "./contracts";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Crypto from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
@@ -22,6 +23,7 @@ const metadataSchema = z.object({
   preferredHostId: z.string().min(1).optional(),
   provenance: provenanceSchema,
   offer: z.object({
+    directEndpoints: DirectEndpointsSchema.optional(),
     endpoint: z.string().min(1).max(16 * 1_024),
     publicKeyB64: z.string().min(1).max(4 * 1_024),
     pairedDeviceId: z.string().min(1).max(128).optional(),
@@ -61,7 +63,7 @@ export async function createPairingJournal(args: { offer: PairingOffer & { relay
     label: args.label,
     ...(args.preferredHostId ? { preferredHostId: args.preferredHostId } : {}),
     provenance: args.provenance,
-    offer: { endpoint: args.offer.endpoint, publicKeyB64: args.offer.publicKeyB64, ...(args.offer.pairedDeviceId ? { pairedDeviceId: args.offer.pairedDeviceId } : {}), ...(args.offer.scope ? { scope: args.offer.scope } : {}), ...(args.offer.identityMode ? { identityMode: args.offer.identityMode } : {}), relay },
+    offer: { endpoint: args.offer.endpoint, directEndpoints: args.offer.directEndpoints, publicKeyB64: args.offer.publicKeyB64, ...(args.offer.pairedDeviceId ? { pairedDeviceId: args.offer.pairedDeviceId } : {}), ...(args.offer.scope ? { scope: args.offer.scope } : {}), ...(args.offer.identityMode ? { identityMode: args.offer.identityMode } : {}), relay },
   });
   const secrets = secretsSchema.parse({ v: 1, journalId, deviceToken: args.offer.deviceToken, inviteToken, pendingResumeToken: base64Url(await Crypto.getRandomBytesAsync(32)) });
   // Secrets land first: a crash can leave an unreferenced Keychain item, but never metadata that points at missing credential material.

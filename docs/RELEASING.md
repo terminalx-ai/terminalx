@@ -32,7 +32,7 @@ a merge patch over `tauri.conf.json` — it changes three things and nothing els
 | --- | --- | --- |
 | `productName` | `TerminalX Dev` | The Dock label, the app menu, ⌘-Tab |
 | `identifier` | `com.terminalx.next.dev` | macOS permission grants and per-app state |
-| `bundle.icon` | `icons-dev/*` | The Dock icon: the app icon with an amber "D" badge |
+| `bundle.icon` | `icons-dev/*` | The Dock icon: the app icon with an orange circular "D" badge |
 
 So a dev build and an installed release can sit in the Dock together and stay
 apart at a glance.
@@ -52,11 +52,11 @@ versa. Anything else macOS scopes per identifier (saved window state, launch
 services registration) is likewise separate.
 
 What the identifier does *not* move is TerminalX's own data. The store still
-lives in `~/.raccoon` for both builds, and `RACCOON_HOME` is still the only
+lives in `~/.raccoon` for both builds, and `TERMINALX_HOME` is still the only
 thing that points it elsewhere:
 
 ```sh
-RACCOON_HOME=~/.raccoon-dev pnpm tauri:dev
+TERMINALX_HOME=~/.raccoon-dev pnpm tauri:dev
 ```
 
 Two notes on the mechanics:
@@ -71,30 +71,92 @@ Two notes on the mechanics:
   the release build its own `CARGO_TARGET_DIR` (below) to avoid that.
 
 `pnpm tauri build` reads only `tauri.conf.json`, so the shipped bundle keeps
-the amber "N" badge, the `TerminalX` name, and the `com.terminalx.next`
+the unbadged Legacy icon, the `TerminalX` name, and the `com.terminalx.next`
 identifier.
 
-### Regenerating the badged icons
+### Regenerating the app icons
 
-`src-tauri/icons/` and `src-tauri/icons-dev/` are generated and committed, so
-a fresh clone can build without the predecessor installed. To regenerate both
-sets from the installed TerminalX icon:
+The source artwork and all generated assets are committed. A fresh clone needs
+neither an installed predecessor nor Xcode to regenerate desktop/Tauri assets.
+On macOS, with `iconutil`, Pillow (`python3 -m pip install Pillow==11.1.0`), and
+repo dependencies (`pnpm install`), run:
 
 ```sh
 python3 scripts/badge-dev-icon.py
-pnpm tauri icon src-tauri/icons/app-icon-next.png --output src-tauri/icons
-pnpm tauri icon src-tauri/icons-dev/app-icon-next-dev.png --output src-tauri/icons-dev
-rm -rf src-tauri/icons-dev/android src-tauri/icons-dev/ios \
-       src-tauri/icons-dev/Square*Logo.png src-tauri/icons-dev/StoreLogo.png
+APP_VARIANT=production pnpm --dir mobile exec expo prebuild --platform ios --no-install --no-clean
+python3 scripts/test_icons.py
 ```
 
-The script needs Pillow (`pip install pillow`). It extracts the largest
-PNG-encoded entry from
-`/Applications/TerminalX.app/Contents/Resources/icon.icns`, composites "N" and
-"D" badges in the app's own amber accent, removes the source artwork's stray
-vertical highlight, and writes the two 1024px masters; the same source, fonts,
-and Pillow version produce the same bytes. The final command drops mobile and
-Windows Store output from the dev set, which a macOS dev build never loads.
+`resources/icon-source/legacy.icns` is the unmodified compiled Legacy icon;
+its provenance and update procedure are in `resources/icon-source/README.md`.
+Release copies it byte-for-byte, preserving the trimmed 16/32/64px Finder
+slots and the safe-area inset in larger macOS slots. Dev badges each native
+slot with Legacy's orange disc and white "D", then trims the small slots.
+The script also saves the inset `app-icon.png` / `app-icon-dev.png` masters.
+Windows ICOs and Linux/Store PNGs are generated from trimmed desktop artwork.
+Do not run `tauri icon` directly into the committed directories: that would
+replace the macOS slot treatment and generate mobile icons from desktop art.
+
+`mobile/assets/icon.png` and `adaptive-icon.png` are the original Legacy
+mobile sources. The script makes their dev variants and regenerates **both**
+Tauri mobile sets from these mobile assets. iOS uses an opaque, full-bleed
+background; Android uses the transparent foreground with `#111111` behind it.
+The mobile badge stays inside the system mask's safe area.
+
+Expo reads these paths through `mobile/app.json`. `mobile/app.config.js` selects
+the D-badged assets when `APP_VARIANT=development`, as set by the EAS development
+profile and `pnpm --dir mobile ios`. Preview/default builds remain unbadged.
+This follows [Expo's app variant configuration](https://docs.expo.dev/build-reference/variants/).
+Refresh an existing native project with prebuild whenever changing variants;
+JavaScript reloads cannot update an installed home-screen icon.
+
+The release Xcode `AppIcon.appiconset` is committed; the rest of `mobile/ios`
+remains generated and ignored. After checking a dev prebuild, run the production
+prebuild command above to restore the release catalog before committing.
+Commit the sources, desktop sets, mobile assets, and release catalog together.
+The same source, macOS fonts, Pillow, and pinned Tauri CLI yield the same pixels.
+
+### Validate the delivered icons
+
+Install Pillow (`python3 -m pip install Pillow==11.1.0`). CI runs the source
+checks, packaged-metadata regression tests, and an isolated Expo prebuild →
+Apple `actool` check. The latter switches production → development → production
+to catch native catalog reuse; it requires Xcode with a compatible simulator
+runtime. Its compiled catalogs are test fixtures, not installable app builds.
+
+Before publishing, verify the **final extracted artifact**, not only the source
+tree or a neighboring build directory:
+
+```sh
+# macOS: extract the updater archive, or select the .app on the mounted DMG.
+python3 scripts/verify_packaged_icons.py macos /path/to/extracted/TerminalX.app
+
+# iOS: extract the IPA with Archive Utility/ditto and select Payload/TerminalX.app.
+python3 scripts/verify_packaged_icons.py ios /path/to/Payload/TerminalX.app
+# For a development artifact:
+python3 scripts/verify_packaged_icons.py ios /path/to/TerminalX.app --variant development
+```
+
+The verifier follows `Info.plist`'s selected icon filenames and checks bundle
+identity. iOS checks reject blank, transparent, padded, wrong-artwork, and
+wrong-badge PNGs, including Apple-optimized device PNGs. macOS requires the
+selected ICNS to match Legacy exactly (or the dev ICNS for development).
+An unsupported catalog-only layout fails instead of reporting success without
+checking pixels. `Assets.car` is required and hashed; its internal renditions
+and system rendering still need the visual check below.
+
+Save the JSON result with the artifact's SHA-256, source commit, dirty-tree
+status, resolved Expo config, variant, build command/profile, and installation
+method. Record the source commit **at build time**; the current checkout and
+file timestamps cannot establish an older artifact's source commit. Keep
+signing credentials and device/account identifiers out of shared reports.
+
+Complete the [fresh-install and upgrade matrix](testing/issue-166-icons.md)
+before claiming the installed icon is fixed. A passing asset check cannot
+prove which artifact is installed on a phone or what Dock/Finder currently
+displays. `pnpm --dir mobile ios:simulator` now fixes `APP_VARIANT=production`
+through prebuild/build and verifies packaged icons before installing; install
+Pillow before using it. The development `ios` command still uses its D badge.
 
 ## Build
 

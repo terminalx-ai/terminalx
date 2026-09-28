@@ -283,3 +283,22 @@ describe("complete navigation hierarchy", () => {
     expect(store.getSessionStore().newSessionPreset?.cwd).toBe("/alpha");
   });
 });
+
+
+it("opens an empty folder from the project rail and shows folder navigation", async () => {
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  vi.mocked(open).mockResolvedValue("/tmp/empty-folder");
+  const folder: Project = { path: "/tmp/empty-folder", name: "empty-folder", kind: "folder" };
+  const original = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation(async (cmd: string, args?: Record<string, string>) => {
+    if (cmd === "add_project") return folder;
+    if (cmd === "list_workspaces" && args?.projectPath === folder.path) return [{ ...workspace(folder.path), branch: null, head: null }];
+    return original(cmd, args);
+  });
+  mount();
+  fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+  await screen.findByText("folder", { selector: "span" });
+  expect(mocks.invoke).toHaveBeenCalledWith("add_project", { path: folder.path });
+  expect(store.getSessions().selectedProject).toBe(folder.path);
+  expect(store.getSessions().projects.find((p) => p.path === folder.path)?.kind).toBe("folder");
+});

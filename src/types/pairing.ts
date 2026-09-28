@@ -29,6 +29,7 @@ export interface PairingRelayV1 {
 export interface PairingOfferV2 {
   v: typeof PAIRING_OFFER_VERSION;
   endpoint: string;
+  directEndpoints?: string[];
   deviceToken: string;
   publicKeyB64: string;
   pairedDeviceId?: string;

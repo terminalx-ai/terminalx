@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Check, Loader2, Pencil } from "lucide-react";
+import { OrganizationOnboarding } from "./OrganizationOnboarding";
 import { AccountAvatar } from "@/components/account/AccountAvatar";
 import { Button } from "@/components/ui/button";
 import { signIn, signOut, useAccount } from "@/lib/account";
@@ -40,6 +41,7 @@ export function AccountTab() {
         <p className="text-xs leading-relaxed text-muted-foreground">
           Your TerminalX account is optional. The session refreshes automatically and its credentials are stored in macOS Keychain.
         </p>
+        <OrganizationOnboarding key={identity.email} organizationName={identity.organization} accountEmail={identity.email} contextRevision={status.context?.revision ?? ""} organizations={status.organizations ?? []} />
         {pairing.status.host && (
           <div className="rounded-lg border border-hairline px-3 py-3">
             <div className="text-xs font-medium">What this Mac shares</div>

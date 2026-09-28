@@ -29,6 +29,7 @@ const TABS: { id: PanelTab; label: string; chord: string }[] = [
  */
 export function RightPanel({
   cwd,
+  isGit = true,
   branch,
   baseRef,
   events = [],
@@ -44,6 +45,7 @@ export function RightPanel({
   workspace,
 }: {
   cwd: string;
+  isGit?: boolean;
   /** Undefined asks the panel to resolve the checkout branch itself. */
   branch?: string | null;
   baseRef?: string | null;
@@ -61,13 +63,14 @@ export function RightPanel({
   workspace?: { projectPath: string; name: string };
 }) {
   const prefs = usePrefs();
-  const [tab, setTab] = useState<PanelTab>("changes");
+  const [selectedTab, setTab] = useState<PanelTab>("changes");
   const [refreshTick, setRefreshTick] = useState(0);
   const [status, setStatus] = useState<WorkStatus | null>(null);
+  const tab = isGit ? selectedTab : "files";
   const dragging = useRef<{ x: number; w: number } | null>(null);
 
   useEffect(() => {
-    if (branch !== undefined && !labelMode) return;
+    if (!isGit || (branch !== undefined && !labelMode)) return;
     let cancelled = false;
     api
       .workStatus(cwd)
@@ -76,10 +79,10 @@ export function RightPanel({
     return () => {
       cancelled = true;
     };
-  }, [cwd, branch, labelMode, refreshTick]);
+  }, [cwd, branch, labelMode, refreshTick, isGit]);
 
   const resolvedBranch = branch === undefined ? (status?.branch ?? null) : branch;
-  const targetLabel = labelMode === "base" ? `base: ${status?.defaultBranch ?? "default"}` : labelMode === "branch" ? (resolvedBranch ?? "current branch") : null;
+  const targetLabel = !isGit ? "Folder" : labelMode === "base" ? `base: ${status?.defaultBranch ?? "default"}` : labelMode === "branch" ? (resolvedBranch ?? "current branch") : null;
 
   useHotkey(TABS[0].chord, () => setTab("changes"));
   useHotkey(TABS[1].chord, () => setTab("repo"));
@@ -121,7 +124,7 @@ export function RightPanel({
         className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-ring/30"
       />
       <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-0.5 px-2">
-        {TABS.map((t) => (
+        {TABS.filter((t) => isGit || t.id === "files").map((t) => (
           <WithTooltip key={t.id} label={t.label} keys={keycaps(t.chord)}>
             <button
               type="button"
@@ -147,44 +150,49 @@ export function RightPanel({
         </WithTooltip>
       </div>
       <div className="min-h-0 flex-1">
-        <div className={cn("h-full", tab !== "changes" && "hidden")}>
-          <ChangesPanel
-            key={refreshTick}
-            cwd={cwd}
-            events={events}
-            version={version}
-            baseRef={baseRef}
-            active={tab === "changes"}
-            live={live}
-            workingTree={workingTree}
-          />
-        </div>
-        <div className={cn("h-full", tab !== "repo" && "hidden")}>
-          <RepoPanel key={refreshTick} cwd={cwd} active={tab === "repo"} />
-        </div>
-        <div className={cn("h-full", tab !== "pr" && "hidden")}>
-          <PrPanel
-            key={refreshTick}
-            cwd={cwd}
-            branch={resolvedBranch}
-            active={tab === "pr"}
-            busy={live}
-            onSettle={settleSessionId ? () => openSettle(settleSessionId) : undefined}
-            workspace={
-              workspace
-                ? {
-                    projectPath: workspace.projectPath,
-                    onDelete: () => openWorkspaceDelete(workspace.projectPath, cwd, workspace.name),
-                  }
-                : undefined
-            }
-          />
-        </div>
+        {isGit && (
+          <>
+            <div className={cn("h-full", tab !== "changes" && "hidden")}>
+              <ChangesPanel
+                key={refreshTick}
+                cwd={cwd}
+                events={events}
+                version={version}
+                baseRef={baseRef}
+                active={tab === "changes"}
+                live={live}
+                workingTree={workingTree}
+              />
+            </div>
+            <div className={cn("h-full", tab !== "repo" && "hidden")}>
+              <RepoPanel key={refreshTick} cwd={cwd} active={tab === "repo"} />
+            </div>
+            <div className={cn("h-full", tab !== "pr" && "hidden")}>
+              <PrPanel
+                key={refreshTick}
+                cwd={cwd}
+                branch={resolvedBranch}
+                active={tab === "pr"}
+                busy={live}
+                onSettle={settleSessionId ? () => openSettle(settleSessionId) : undefined}
+                workspace={
+                  workspace
+                    ? {
+                        projectPath: workspace.projectPath,
+                        onDelete: () => openWorkspaceDelete(workspace.projectPath, cwd, workspace.name),
+                      }
+                    : undefined
+                }
+              />
+            </div>
+          </>
+        )}
         <div className={cn("h-full", tab !== "files" && "hidden")}>
           <FileTree
             key={refreshTick}
             sessionId={sessionId ?? `checkout:${cwd}`}
             root={cwd}
+            isGit={isGit}
             rootName={rootName}
             active={tab === "files"}
             mentionTabId={mentionTabId}

@@ -36,7 +36,7 @@ export async function rotateCredentialIfNeeded(args: { client: RelayClient; host
     current: { token: pending.token, hash: pending.hash, version: installed.currentVersion, expiresAt: installed.resumeExpiresAt },
     ...(installed.graceExpiresAt ? { grace: { ...current, expiresAt: installed.graceExpiresAt } } : {}),
   };
-  const nextHost: StoredHost = { ...args.host, relay: endpointResult.relay };
+  const nextHost: StoredHost = { ...args.host, directEndpoints: endpointResult.directEndpoints ?? args.host.directEndpoints, relay: endpointResult.relay };
   await writeHostCredential(args.host.id, nextCredential);
   await updateStoredHost(nextHost);
   return { host: nextHost, credential: nextCredential };

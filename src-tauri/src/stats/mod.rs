@@ -1,7 +1,7 @@
 //! Local app statistics and transcript-backed token analytics.
 //!
 //! The scanner never contacts a provider. It walks the histories the installed
-//! CLIs already own and keeps a compact projection under `RACCOON_HOME`, keyed
+//! CLIs already own and keeps a compact projection under `TERMINALX_HOME`, keyed
 //! by path, mtime and size so unchanged multi-gigabyte histories cost only a
 //! metadata read on later visits.
 

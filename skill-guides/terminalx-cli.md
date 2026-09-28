@@ -27,8 +27,8 @@ Confirm the connection first:
 terminalx status --json
 ```
 
-The app listens at `$RACCOON_HOME/run/hooks.sock` and writes its per-launch credential to
-`$RACCOON_HOME/run/control.token`, both owner-only. Tabs launched by the app receive
+The app listens at `$TERMINALX_HOME/run/hooks.sock` and writes its per-launch credential to
+`$TERMINALX_HOME/run/control.token`, both owner-only. Tabs launched by the app receive
 `TERMINALX_NEXT_SOCKET` and `TERMINALX_NEXT_TOKEN`; a normal shell reads the token file
 automatically. Never print, copy, or persist that token.
 
@@ -139,7 +139,7 @@ request an explicit complete guide; the embedded guide is complete either way.
 The built-in browser is TerminalX's own Chromium, opened as a headed window the reader can see
 and take over, with tabs scoped to TerminalX workspaces. It is not the reader's Chrome or
 Safari and not TerminalX's own app chrome; for those use a desktop-control tool, not these
-commands. Tabs and cookies persist in a browser profile under `$RACCOON_HOME/browser`, so a
+commands. Tabs and cookies persist in a browser profile under `$TERMINALX_HOME/browser`, so a
 login survives across commands and sessions.
 
 Use a snapshot → interact → re-snapshot loop:
@@ -251,7 +251,7 @@ JSON failures have this shape:
 {"ok":false,"error":{"code":"app_unavailable","message":"…","recovery":"…"}}
 ```
 
-- `app_unavailable`: open TerminalX with the same `RACCOON_HOME`, then retry `status` once.
+- `app_unavailable`: open TerminalX with the same `TERMINALX_HOME`, then retry `status` once.
 - `unauthorized`: do not retry with the same credential. A human shell should remove stale
   `TERMINALX_NEXT_TOKEN` and let the CLI read `control.token`; an app tab should be restarted so
   it receives the new launch environment.

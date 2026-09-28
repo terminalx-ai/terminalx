@@ -383,7 +383,7 @@ fn session_summaries() -> Result<Value> {
         .map(|summary| (summary.session_id.clone(), summary))
         .collect();
     let mut sessions = Vec::new();
-    for session in index::load()?.into_iter().filter(|session| !session.archived) {
+    for session in store::conversation_titles::backfill()?.into_iter().filter(|session| !session.archived) {
         let summary = snippets.get(&session.id);
         let project = file_name(&session.project_path);
         let worktree = session

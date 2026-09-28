@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import platform
 import plistlib
 import struct
@@ -11,13 +12,18 @@ from pathlib import Path
 
 
 MOBILE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(MOBILE.parent / "scripts"))
+
+from verify_packaged_icons import verify_app as verify_icons
 
 
 def run(*args, **kwargs):
-    return subprocess.run(args, check=True, cwd=MOBILE, **kwargs)
+    return subprocess.run(args, check=True, cwd=MOBILE,
+                          env={**os.environ, "APP_VARIANT": "production"}, **kwargs)
 
 
 def verify_app(app):
+    print(json.dumps(verify_icons(app, "ios", "production"), indent=2), flush=True)
     info = plistlib.loads((app / "Info.plist").read_bytes())
     if info.get("CFBundleSupportedPlatforms") != ["iPhoneSimulator"]:
         raise ValueError("Expected an iOS simulator app")
@@ -79,8 +85,12 @@ def main():
     run("xcrun", "simctl", "bootstatus", device["udid"], "-b")
 
     workspace = MOBILE / "ios/TerminalX.xcworkspace"
-    if not workspace.exists():
-        run("pnpm", "exec", "expo", "prebuild", "--platform", "ios")
+    # Refresh native icons even when a previous build already created the
+    # workspace (for example, after switching from the D-badged dev variant).
+    prebuild = ["pnpm", "exec", "expo", "prebuild", "--platform", "ios", "--no-clean"]
+    if workspace.exists():
+        prebuild.append("--no-install")
+    run(*prebuild)
     derived = args.derived_data.resolve()
     # Ad-hoc simulator signing needs no Apple certificate or paid team, but must
     # remain enabled so Xcode embeds the identity used by Simulator's Keychain.

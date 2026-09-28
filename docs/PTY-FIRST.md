@@ -112,7 +112,7 @@ prints `{}` rather than nothing on purpose: an empty stdout from a permission
 hook is read as a refusal.
 
 On the app side, `hooks.rs` listens on one unix socket per instance at
-`$RACCOON_HOME/run/hooks.sock` (stale file removed at start, mode 0600), one
+`$TERMINALX_HOME/run/hooks.sock` (stale file removed at start, mode 0600), one
 thread per frame so a parked permission cannot queue the next hook behind it.
 `SessionManager::on_hook` routes by event:
 
@@ -282,7 +282,7 @@ trusted_hash = "sha256:764f7e14…"
 
 Installing that in the reader's `~/.codex` would edit two files TerminalX
 does not own and would fire our hooks at every `codex` they run in their own
-terminal. So `home.rs` keeps a home at `$RACCOON_HOME/codex` and points
+terminal. So `home.rs` keeps a home at `$TERMINALX_HOME/codex` and points
 `CODEX_HOME` at it. A separate home must not become a separate Codex, so it
 gets the reader's account (`auth.json` **symlinked**, never copied, so a
 refreshed token is shared), their `skills`, `prompts`, `plugins` and
@@ -516,7 +516,7 @@ rule at click time rather than trusting the rendered row.
   through sessions leaves several running. The status bar names and measures
   them; they are killed together when the window closes, and individually when
   a tab or session is removed.
-- **The hook socket is a unix socket**, so `$RACCOON_HOME` has to sit inside
+- **The hook socket is a unix socket**, so `$TERMINALX_HOME` has to sit inside
   the platform's path limit (about 104 bytes on macOS). A path too long to bind
   is logged and the tab runs without status or permission cards.
 - **No streaming preview for Codex either.** The rollout is written per item,

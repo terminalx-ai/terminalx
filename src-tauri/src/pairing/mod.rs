@@ -5,6 +5,7 @@
 
 mod cloud;
 mod crypto;
+mod diagnostics;
 mod mobile;
 mod model;
 mod registry;
@@ -19,7 +20,7 @@ use base64::{engine::general_purpose, Engine};
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use tauri::{AppHandle, Emitter, Listener};
+use tauri::{AppHandle, Emitter, Listener, Manager};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
@@ -52,12 +53,13 @@ struct Inner {
     host: Option<HostMetadata>,
     active_pairing: Option<PairingCode>,
     pending_pairing_device: Option<String>,
-    direct_endpoint: Option<String>,
+    direct_listener_started: bool,
     last_error: Option<String>,
 }
 
 pub struct PairingManager {
     account: Arc<AccountManager>,
+    diagnostics: Mutex<diagnostics::DiagnosticLog>,
     secrets: PairingSecrets,
     registry: DeviceRegistry,
     app: OnceLock<AppHandle>,
@@ -85,6 +87,7 @@ impl PairingManager {
     pub fn new(account: Arc<AccountManager>) -> Self {
         Self {
             account,
+            diagnostics: Mutex::new(diagnostics::DiagnosticLog::default()),
             secrets: PairingSecrets::default(),
             registry: DeviceRegistry::default(),
             app: OnceLock::new(),
@@ -98,6 +101,14 @@ impl PairingManager {
     }
 
     pub fn configure(self: &Arc<Self>, app: &AppHandle, app_identifier: &str) -> Result<()> {
+        match app.path().app_log_dir() {
+            Ok(directory) => {
+                if self.diagnostics.lock().unwrap().configure(directory).is_err() {
+                    log::warn!("relay diagnostics unavailable (category=local-storage)");
+                }
+            }
+            Err(_) => log::warn!("relay diagnostics unavailable (category=local-storage)"),
+        }
         self.secrets.configure(app_identifier)?;
         for device_id in self.registry.remove_unclaimed()? {
             self.secrets.delete_device_token(&device_id)?;
@@ -143,7 +154,7 @@ impl PairingManager {
             })?),
             PairingConnectionMode::LocalOnly => None,
         };
-        let endpoint = self.ensure_direct_listener().await?;
+        self.ensure_direct_listener()?;
         let keypair = self.host_key(true)?;
         let device_id = Uuid::new_v4().simple().to_string();
         let token = random_token();
@@ -185,9 +196,11 @@ impl PairingManager {
             .map(|relay| relay.invite_expires_at)
             .unwrap_or_else(|| Utc::now().timestamp_millis() + OFFER_TTL_MS)
             .min(Utc::now().timestamp_millis() + OFFER_TTL_MS);
+        let direct_endpoints = advertised_endpoints();
         let offer = PairingOffer {
             v: 2,
-            endpoint,
+            endpoint: direct_endpoints[0].clone(),
+            direct_endpoints,
             device_token: token,
             public_key_b64: keypair.public_key_b64(),
             paired_device_id: device_id.clone(),
@@ -375,6 +388,31 @@ impl PairingManager {
             .ok_or_else(|| anyhow!("host identity is unavailable"))
     }
 
+    fn record_relay_diagnostic(
+        &self,
+        event: diagnostics::Event,
+        attempt: u32,
+        failure: Option<diagnostics::Failure>,
+    ) {
+        // Only typed allowlisted data reaches either sink. A disk error must not
+        // stop connection recovery or reveal the user's filesystem path.
+        if let Some(failure) = failure {
+            log::warn!(
+                "relay failure stage={:?} category={:?} http_status={:?} attempt={}",
+                failure.stage, failure.category, failure.http_status, attempt
+            );
+        }
+        if self
+            .diagnostics
+            .lock()
+            .unwrap()
+            .record(event, attempt, failure)
+            .is_err()
+        {
+            log::warn!("relay diagnostics write failed (category=local-storage)");
+        }
+    }
+
     pub(super) fn set_relay_off(&self) {
         let changed = {
             let mut inner = self.inner.lock().unwrap();
@@ -426,13 +464,10 @@ impl PairingManager {
 
     pub(super) async fn relay_ready(self: &Arc<Self>, context: AccountContext, relay: RelayLive) {
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
-        let endpoint = match self.ensure_direct_listener().await {
-            Ok(endpoint) => endpoint,
-            Err(error) => {
-                self.set_error(format!("Direct pairing listener failed: {error:#}"));
-                return;
-            }
-        };
+        if let Err(error) = self.ensure_direct_listener() {
+            self.set_error(format!("Direct pairing listener failed: {error:#}"));
+            return;
+        }
         let keypair = match self.host_key(true) {
             Ok(keypair) => keypair,
             Err(error) => {
@@ -504,9 +539,7 @@ impl PairingManager {
         self.emit();
         let manager = self.clone();
         tauri::async_runtime::spawn(async move {
-            manager
-                .host_poll(epoch, context, relay, endpoint, generation)
-                .await;
+            manager.host_poll(epoch, context, relay, generation).await;
         });
     }
 
@@ -515,7 +548,6 @@ impl PairingManager {
         epoch: u64,
         context: AccountContext,
         relay: RelayLive,
-        endpoint: String,
         generation: u64,
     ) {
         let host_id = relay.relay_host_id.clone();
@@ -547,7 +579,7 @@ impl PairingManager {
                         }
                     }
                     for grant in grants {
-                        self.fulfill_grant(epoch, &context, &relay, &endpoint, generation, grant)
+                        self.fulfill_grant(epoch, &context, &relay, generation, grant)
                             .await;
                     }
                     for revocation in revocations {
@@ -595,7 +627,6 @@ impl PairingManager {
         epoch: u64,
         context: &AccountContext,
         relay: &RelayLive,
-        endpoint: &str,
         generation: u64,
         grant: AccountPairingGrant,
     ) {
@@ -603,7 +634,7 @@ impl PairingManager {
             return;
         }
         let result = self
-            .build_automatic_offer(epoch, context, relay, endpoint, generation, &grant)
+            .build_automatic_offer(epoch, context, relay, generation, &grant)
             .await;
         match result {
             Ok((device_id, envelope)) if self.is_epoch(epoch) => {
@@ -641,7 +672,6 @@ impl PairingManager {
         epoch: u64,
         context: &AccountContext,
         relay: &RelayLive,
-        endpoint: &str,
         generation: u64,
         grant: &AccountPairingGrant,
     ) -> Result<(String, model::AccountPairingEnvelope)> {
@@ -677,9 +707,11 @@ impl PairingManager {
             if !self.is_epoch(epoch) {
                 bail!("pairing was fenced by sign-out");
             }
+            let direct_endpoints = advertised_endpoints();
             let offer = PairingOffer {
                 v: 2,
-                endpoint: endpoint.into(),
+                endpoint: direct_endpoints[0].clone(),
+                direct_endpoints,
                 device_token: token,
                 public_key_b64: keypair.public_key_b64(),
                 paired_device_id: device_id.clone(),
@@ -707,24 +739,17 @@ impl PairingManager {
         }
     }
 
-    async fn ensure_direct_listener(self: &Arc<Self>) -> Result<String> {
-        if let Some(endpoint) = self.inner.lock().unwrap().direct_endpoint.clone() {
-            return Ok(endpoint);
+    fn ensure_direct_listener(self: &Arc<Self>) -> Result<()> {
+        // Serialize binding; only listener lifetime is cached, never interface addresses.
+        let mut inner = self.inner.lock().unwrap();
+        if inner.direct_listener_started {
+            return Ok(());
         }
-        // The direct endpoint is part of the durable pairing contract. The
-        // stable deployed port keeps it valid across app restarts.
-        let listener =
-            tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, 6768)).await?;
-        let port = listener.local_addr()?.port();
-        let address = advertised_ipv4().unwrap_or(std::net::Ipv4Addr::LOCALHOST);
-        let endpoint = format!("ws://{address}:{port}");
-        {
-            let mut inner = self.inner.lock().unwrap();
-            if let Some(existing) = inner.direct_endpoint.as_ref() {
-                return Ok(existing.clone());
-            }
-            inner.direct_endpoint = Some(endpoint.clone());
-        }
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, 6768))?;
+        listener.set_nonblocking(true)?;
+        let listener = tokio::net::TcpListener::from_std(listener)?;
+        inner.direct_listener_started = true;
+        drop(inner);
         let manager = self.clone();
         tauri::async_runtime::spawn(async move {
             loop {
@@ -756,7 +781,7 @@ impl PairingManager {
                 });
             }
         });
-        Ok(endpoint)
+        Ok(())
     }
 
     pub(super) async fn handle_relay_connection(
@@ -1025,7 +1050,9 @@ impl PairingManager {
             validate_opaque_id(req_id)?;
         }
         let Some(relay) = self.current_relay() else {
-            return Ok(serde_json::json!({ "v": 1, "relay": null }));
+            return Ok(
+                serde_json::json!({ "v": 1, "directEndpoints": advertised_endpoints(), "relay": null }),
+            );
         };
         if let PairingConnectionContext::Relay { relay_host_id, .. } = connection {
             if relay_host_id != &relay.relay_host_id {
@@ -1034,6 +1061,7 @@ impl PairingManager {
         }
         let mut result = serde_json::json!({
             "v": 1,
+            "directEndpoints": advertised_endpoints(),
             "relay": {
                 "v": 1,
                 "directorUrl": cloud::RELAY_DIRECTOR_URL,
@@ -1237,19 +1265,61 @@ fn host_display_name() -> String {
         .unwrap_or_else(|| "This Mac".into())
 }
 
-fn advertised_ipv4() -> Option<std::net::Ipv4Addr> {
-    if_addrs::get_if_addrs()
-        .ok()?
+fn advertised_endpoints() -> Vec<String> {
+    let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
+    let addresses: Vec<_> = interfaces
         .into_iter()
         .filter_map(|interface| {
             let std::net::IpAddr::V4(address) = interface.ip() else {
                 return None;
             };
-            (!address.is_loopback() && !address.is_link_local() && !is_proxy_fake_ipv4(address))
-                .then_some((interface.name, address))
+            usable_ipv4(address).then_some((interface_rank(&interface.name, address), address))
         })
-        .min_by_key(|(name, address)| interface_rank(name, *address))
-        .map(|(_, address)| address)
+        .collect();
+    let mut endpoints = direct_ipv4_endpoints(addresses);
+    // macOS publishes LocalHostName via its built-in mDNS responder. Resolve it
+    // anew on each phone connection so LAN address changes need no new pairing.
+    #[cfg(target_os = "macos")]
+    if let Ok(output) = std::process::Command::new("/usr/sbin/scutil")
+        .args(["--get", "LocalHostName"])
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(name) = String::from_utf8(output.stdout) {
+                let name = name.trim();
+                if !name.is_empty()
+                    && name.len() <= 63
+                    && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                {
+                    endpoints.push(format!("ws://{name}.local:6768"));
+                }
+            }
+        }
+    }
+    if endpoints.is_empty() {
+        endpoints.push("ws://127.0.0.1:6768".into());
+    }
+    endpoints
+}
+
+fn direct_ipv4_endpoints(mut addresses: Vec<(u8, std::net::Ipv4Addr)>) -> Vec<String> {
+    addresses.sort_unstable();
+    let mut seen = std::collections::HashSet::new();
+    addresses.retain(|entry| seen.insert(entry.1));
+    addresses
+        .into_iter()
+        .take(63) // Leave room for Bonjour within the mobile contract limit.
+        .map(|(_, address)| format!("ws://{address}:6768"))
+        .collect()
+}
+
+fn usable_ipv4(address: std::net::Ipv4Addr) -> bool {
+    !address.is_loopback()
+        && !address.is_link_local()
+        && !address.is_unspecified()
+        && !address.is_multicast()
+        && !address.is_broadcast()
+        && !is_proxy_fake_ipv4(address)
 }
 
 fn is_proxy_fake_ipv4(address: std::net::Ipv4Addr) -> bool {
@@ -1459,6 +1529,7 @@ mod tests {
         let offer = PairingOffer {
             v: 2,
             endpoint: "ws://127.0.0.1:1".into(),
+            direct_endpoints: vec![],
             device_token: "token".into(),
             public_key_b64: key.public_key_b64(),
             paired_device_id: "device".into(),
@@ -1470,6 +1541,42 @@ mod tests {
         assert!(encode_pairing_offer(&offer)
             .unwrap()
             .starts_with("terminalx://pair?code="));
+    }
+
+    #[test]
+    fn advertising_keeps_every_path_and_recomputes_after_network_changes() {
+        let lan = "192.168.1.2".parse().unwrap();
+        let vpn = "100.93.49.78".parse().unwrap();
+        assert_eq!(
+            direct_ipv4_endpoints(vec![(1, lan)]),
+            vec!["ws://192.168.1.2:6768"]
+        );
+        assert_eq!(
+            direct_ipv4_endpoints(vec![(1, lan), (0, vpn), (3, lan)]),
+            vec!["ws://100.93.49.78:6768", "ws://192.168.1.2:6768"]
+        );
+        assert_eq!(
+            direct_ipv4_endpoints(vec![(0, vpn)]),
+            vec!["ws://100.93.49.78:6768"]
+        );
+    }
+
+    #[test]
+    fn direct_candidates_include_lan_and_vpn_but_not_unusable_addresses() {
+        for address in ["192.168.1.2", "172.20.10.2", "100.93.49.78"] {
+            assert!(usable_ipv4(address.parse().unwrap()));
+        }
+        for address in [
+            "127.0.0.1",
+            "0.0.0.0",
+            "169.254.1.2",
+            "224.0.0.1",
+            "255.255.255.255",
+            "198.18.2.3",
+            "198.19.1.2",
+        ] {
+            assert!(!usable_ipv4(address.parse().unwrap()));
+        }
     }
 
     #[test]

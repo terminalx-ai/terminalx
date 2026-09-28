@@ -39,7 +39,7 @@ export function AgentCard({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const harnesses = [...new Set(session.tabs.map((t) => t.harness))];
-  const running = session.tabs.filter((t) => t.status === "in_progress");
+  const stoppable = session.tabs.filter((t) => t.status === "in_progress" || t.status === "waiting");
 
   // The keyboard cursor lives in the dashboard; the card follows it into view.
   useEffect(() => {
@@ -48,8 +48,8 @@ export function AgentCard({
 
   const open = () => selectSession(session.id);
   const stop = () => {
-    for (const t of running) {
-      void agent.interrupt(session.id, t.id).catch((e) => console.error("stop failed", errorMessage(e)));
+    for (const t of stoppable) {
+      void agent.stop(session.id, t.id).catch((e) => console.error("stop failed", errorMessage(e)));
     }
   };
 
@@ -143,7 +143,7 @@ export function AgentCard({
         <DropdownMenuItem onSelect={open}>
           <PanelsTopLeft /> Open
         </DropdownMenuItem>
-        {running.length > 0 && (
+        {stoppable.length > 0 && (
           <DropdownMenuItem onSelect={stop}>
             <Square /> Stop
           </DropdownMenuItem>

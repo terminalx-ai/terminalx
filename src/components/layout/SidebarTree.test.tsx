@@ -13,7 +13,7 @@ vi.mock("@/lib/mobileDriver", () => ({ useMobileDrivenTabs: () => new Set<string
 vi.mock("@/lib/tabViews", () => ({ useTabViews: () => ({ views: {} }) }));
 
 const { ProjectNavigation, groupProjectWorkspaces } = await import("./SidebarTree");
-const { bootSessions, getSessionStore, selectSession } = await import("@/lib/sessions");
+const { bootSessions, getSessionStore, selectSession, upsertSession } = await import("@/lib/sessions");
 
 const projectPath = "/repos/raccoon";
 const workspacePath = "/repos/raccoon/.worktrees/feature";
@@ -112,6 +112,12 @@ describe("sidebar navigation tree", () => {
     expect(await screen.findByText("Codex")).toBeTruthy();
     const selectedTab = screen.getByText("Codex").closest('[role="treeitem"]');
     expect(selectedTab?.getAttribute("aria-selected")).toBe("true");
+
+    // The backend publishes session_updated after naming the first request.
+    act(() => upsertSession({ ...session, tabs: session.tabs.map((tab) =>
+      tab.id === "tab-1" ? { ...tab, title: "Fix login redirect" } : tab) }));
+    expect(screen.queryByText("Codex")).toBeNull();
+    expect(screen.getByText("Fix login redirect").closest('[role="treeitem"]')?.getAttribute("aria-selected")).toBe("true");
 
     fireEvent.click(screen.getByRole("button", { name: `Collapse ${session.title}` }));
     expect(getSessionStore().selectedSessionId).toBe(session.id);
