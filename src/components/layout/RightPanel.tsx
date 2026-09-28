@@ -6,7 +6,7 @@ import { cn } from "@/lib/cn";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { ChangesPanel } from "@/components/changes/ChangesPanel";
-import { RepoPanel } from "@/components/changes/RepoPanel";
+import { RepoPanel, type RepoView } from "@/components/changes/RepoPanel";
 import { PrPanel } from "@/components/changes/PrPanel";
 import { FileTree } from "@/components/files/FileTree";
 import { openSettle, openWorkspaceDelete } from "@/lib/dialogs";
@@ -64,6 +64,7 @@ export function RightPanel({
 }) {
   const prefs = usePrefs();
   const [selectedTab, setTab] = useState<PanelTab>("changes");
+  const [repoView, setRepoView] = useState<RepoView>("uncommitted");
   const [refreshTick, setRefreshTick] = useState(0);
   const [status, setStatus] = useState<WorkStatus | null>(null);
   const tab = isGit ? selectedTab : "files";
@@ -162,10 +163,14 @@ export function RightPanel({
                 active={tab === "changes"}
                 live={live}
                 workingTree={workingTree}
+                onViewUncommitted={() => {
+                  setRepoView("uncommitted");
+                  setTab("repo");
+                }}
               />
             </div>
             <div className={cn("h-full", tab !== "repo" && "hidden")}>
-              <RepoPanel key={refreshTick} cwd={cwd} active={tab === "repo"} />
+              <RepoPanel key={refreshTick} cwd={cwd} active={tab === "repo"} view={repoView} onViewChange={setRepoView} />
             </div>
             <div className={cn("h-full", tab !== "pr" && "hidden")}>
               <PrPanel
