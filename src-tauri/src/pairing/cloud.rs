@@ -1,11 +1,12 @@
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::json;
 
 use crate::account::AccountContext;
 
+use super::diagnostics::Category;
 use super::model::{
     AccountPairingEnvelope, AccountPairingGrant, AccountPairingRevocation, HostBindingPayload,
     CAPABILITY,
@@ -175,8 +176,22 @@ pub fn relay_authorization(
     relay_host_id: &str,
     host_public_key_b64: &str,
 ) -> Result<RelayAuthorization> {
-    request_json(
+    relay_authorization_at(
         ACCOUNT_BASE_URL,
+        context,
+        relay_host_id,
+        host_public_key_b64,
+    )
+}
+
+fn relay_authorization_at(
+    base: &str,
+    context: &AccountContext,
+    relay_host_id: &str,
+    host_public_key_b64: &str,
+) -> Result<RelayAuthorization> {
+    request_json(
+        base,
         "/v1/desktop/auth/relay-token",
         "POST",
         Some(json!({
@@ -192,12 +207,21 @@ pub fn relay_assignment(
     relay_host_id: &str,
     reconnect: bool,
 ) -> Result<RelayAssignment> {
+    relay_assignment_at(RELAY_DIRECTOR_URL, authorization, relay_host_id, reconnect)
+}
+
+fn relay_assignment_at(
+    base: &str,
+    authorization: &RelayAuthorization,
+    relay_host_id: &str,
+    reconnect: bool,
+) -> Result<RelayAssignment> {
     let mut body = json!({ "v": 1, "relayHostId": relay_host_id });
     if reconnect {
         body["reconnect"] = json!(true);
     }
     let assignment: RelayAssignment = request_json(
-        RELAY_DIRECTOR_URL,
+        base,
         "/v1/assign",
         "POST",
         Some(body),
@@ -207,7 +231,7 @@ pub fn relay_assignment(
         || assignment.lease.is_empty()
         || !allowed_https_origin(&assignment.cell_url)
     {
-        bail!("relay director returned an invalid assignment");
+        return Err(anyhow!(Category::Protocol));
     }
     Ok(assignment)
 }
@@ -230,9 +254,7 @@ fn request_json<T: DeserializeOwned>(
     token: &str,
 ) -> Result<T> {
     let response = send(base, path, method, body, token)?;
-    response
-        .into_json()
-        .context("decode cloud service response")
+    response.into_json().context(Category::Protocol)
 }
 
 fn send(
@@ -243,7 +265,7 @@ fn send(
     token: &str,
 ) -> Result<ureq::Response> {
     if token.is_empty() {
-        bail!("account authorization is unavailable");
+        return Err(anyhow!(Category::Authentication));
     }
     let agent = ureq::AgentBuilder::new()
         .timeout(REQUEST_TIMEOUT)
@@ -279,5 +301,117 @@ mod tests {
         assert!(allowed_https_origin("https://relay.example"));
         assert!(!allowed_https_origin("http://relay.example"));
         assert!(!allowed_https_origin("https://relay.example/path"));
+    }
+    #[test]
+    fn authenticated_assignment_outage_preserves_status_and_recovers_without_body_leaks() {
+        use super::super::diagnostics::{Failure, Stage};
+        use std::io::{BufRead, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for (path, token, status, body) in [
+                (
+                    "/v1/desktop/auth/relay-token",
+                    "synthetic-access-token",
+                    200,
+                    r#"{"relayToken":"synthetic-relay-token","expiresAt":4000000000000}"#,
+                ),
+                (
+                    "/v1/assign",
+                    "synthetic-relay-token",
+                    502,
+                    "private email=fixture@example.invalid token=secret upstream=private-host",
+                ),
+                (
+                    "/v1/desktop/auth/relay-token",
+                    "synthetic-access-token",
+                    200,
+                    r#"{"relayToken":"synthetic-relay-token","expiresAt":4000000000000}"#,
+                ),
+                (
+                    "/v1/assign",
+                    "synthetic-relay-token",
+                    200,
+                    r#"{"v":1,"cellUrl":"https://cell.example.invalid","assignmentEpoch":1,"lease":"synthetic-lease"}"#,
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = std::io::BufReader::new(&mut stream);
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                assert_eq!(request.trim(), format!("POST {path} HTTP/1.1"));
+                let mut headers = String::new();
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_lowercase().strip_prefix("content-length: ") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                    headers.push_str(&line.to_lowercase());
+                }
+                assert!(headers.contains(&format!("authorization: bearer {token}")));
+                let mut body_bytes = vec![0; length];
+                reader.read_exact(&mut body_bytes).unwrap();
+                let payload: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+                assert_eq!(payload["relayHostId"], "synthetic-host");
+                if path == "/v1/assign" {
+                    assert_eq!(payload["v"], 1);
+                    assert_eq!(
+                        payload.get("reconnect"),
+                        if status == 200 {
+                            Some(&json!(true))
+                        } else {
+                            None
+                        }
+                    );
+                }
+                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let context = AccountContext {
+            access_token: "synthetic-access-token".into(),
+            user_id: "synthetic-user".into(),
+            email: "fixture@example.invalid".into(),
+            display_name: "Fixture".into(),
+            profile_id: "synthetic-profile".into(),
+            organization_id: "synthetic-org".into(),
+            relay_entitled: true,
+            generation: 1,
+        };
+        let authorization =
+            relay_authorization_at(&base, &context, "synthetic-host", "synthetic-public-key")
+                .unwrap();
+        let error = relay_assignment_at(&base, &authorization, "synthetic-host", false)
+            .err()
+            .unwrap()
+            .context(Stage::Assignment);
+        assert_eq!(Failure::from_error(&error).http_status, Some(502));
+        assert_eq!(
+            Failure::from_error(&error).category,
+            Category::ServiceUnavailable
+        );
+        for sensitive in [
+            "secret",
+            "private-host",
+            "fixture@example.invalid",
+            "synthetic-relay-token",
+        ] {
+            assert!(!format!("{error:#}").contains(sensitive));
+        }
+        let authorization =
+            relay_authorization_at(&base, &context, "synthetic-host", "synthetic-public-key")
+                .unwrap();
+        let assignment =
+            relay_assignment_at(&base, &authorization, "synthetic-host", true).unwrap();
+        assert_eq!(assignment.assignment_epoch, 1);
+        assert_eq!(assignment.cell_url, "https://cell.example.invalid");
+        server.join().unwrap();
     }
 }

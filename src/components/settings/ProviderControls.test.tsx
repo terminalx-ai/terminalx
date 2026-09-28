@@ -242,7 +242,7 @@ describe("organization provider controls", () => {
     render(<ProviderControls contextRevision="org-revision" />);
     await screen.findByText("Compute setup incomplete — connect a provider");
     fireEvent.click(screen.getByRole("button", { name: "Connect provider" }));
-    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(await screen.findByRole("checkbox"));
     fireEvent.click(
       screen.getByRole("button", { name: "Validate and save key" }),
     );

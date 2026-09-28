@@ -48,10 +48,16 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   qr: vi.fn(async () => "data:image/png;base64,qr"),
   signIn: vi.fn(),
+  statusListener: null as null | ((event: { payload: PairingStatus }) => void),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (_name, listener) => {
+    mocks.statusListener = listener;
+    return () => {};
+  }),
+}));
 vi.mock("qrcode", () => ({ default: { toDataURL: mocks.qr } }));
 vi.mock("@/lib/account", () => ({
   signIn: mocks.signIn,
@@ -96,5 +102,30 @@ describe("paired devices settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Revoke Priya's iPhone" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("pairing_revoke", { deviceId: "phone-1" }));
     expect(await screen.findByText("No paired devices")).toBeTruthy();
+  });
+
+  it("shows a service outage and enables Relay pairing after automatic recovery", async () => {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "pairing_status") return empty;
+      if (command === "pairing_generate") return ready;
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    await act(async () => bootPairing());
+    const message = "TerminalX Relay service is temporarily unavailable. Retrying automatically. You can use LAN meanwhile.";
+    act(() => mocks.statusListener!({
+      payload: { ...empty, relay: { phase: "offline", message, attempt: 12 } },
+    }));
+    render(<DevicesTab />);
+    expect(screen.getByText(message)).toBeTruthy();
+    expect(screen.queryByText(/unavailable for this account or network/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Choose LAN to pair" }).matches(":disabled")).toBe(true);
+    act(() => mocks.statusListener!({ payload: { ...empty, relay: { phase: "connecting", message: null, attempt: 13 } } }));
+    expect(screen.getByRole("button", { name: "Choose LAN to pair" }).matches(":disabled")).toBe(true);
+    act(() => mocks.statusListener!({ payload: { ...empty, relay: ready.relay } }));
+    expect(screen.getByText("Relay is ready. Nearby phones may connect directly over LAN; other networks use Relay.")).toBeTruthy();
+    expect(screen.queryByText(message)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Create pairing code" }));
+    await screen.findByText("typed-fallback");
+    expect(mocks.invoke).toHaveBeenCalledWith("pairing_generate", { connectionMode: "automatic" });
   });
 });
