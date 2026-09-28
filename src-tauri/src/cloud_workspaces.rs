@@ -892,6 +892,36 @@ impl CloudWorkspaceService {
         })
     }
 
+    /// `POST .../cloud-workspaces/:id/open?attachTicket=1`: the attachment
+    /// for this installation, with its pairing code and an attach ticket once
+    /// the runtime answered it (PRO-13). Returns the organization it was
+    /// made for, so the caller can refuse a response from a switched account.
+    pub fn open_attachment(
+        &self,
+        workspace_id: &str,
+        client_installation_id: &str,
+        refresh_pairing: bool,
+    ) -> Result<(String, Value), CloudWorkspaceClientError> {
+        if !valid_resource_id(workspace_id) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        self.run(RequestRisk::Mutation, |client, context| {
+            let mut body = json!({ "clientInstallationId": client_installation_id });
+            if refresh_pairing {
+                body["refreshPairing"] = json!(true);
+            }
+            let result: Value = client.request(
+                context,
+                &["cloud-workspaces", workspace_id, "open"],
+                Some(("attachTicket", "1")),
+                Some(body),
+                None,
+                RequestRisk::Mutation,
+            )?;
+            Ok((context.organization_id.clone(), result))
+        })
+    }
+
     pub fn operation(
         &self,
         operation_id: &str,

@@ -1,4 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import {
+  WorkspaceRpcClient,
+  type Activation,
+  type WorkspaceConnectionState,
+  type WorkspaceTransport,
+} from "@terminalx/portable/workspace";
 import type {
   BranchInfo,
   IssueRef,
@@ -149,6 +156,15 @@ export const api = {
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_operation", { operationId }),
   cloudWorkspaceOperationCancel: (operationId: string) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_operation_cancel", { operationId }),
+  // Remote runtime connections (PRO-13); relay credentials and E2EE keys stay native.
+  cloudRemoteAttach: (target: CloudWorkspaceTarget, activation: Activation) =>
+    invoke<string>("cloud_remote_attach", { target, activation }),
+  cloudRemoteAttachDev: (pairingCode: string) => invoke<string>("cloud_remote_attach_dev", { pairingCode, ticket: null }),
+  cloudRemoteSend: (connectionId: string, frame: { id: string; method: string; params?: unknown }) =>
+    invoke<boolean>("cloud_remote_send", { connectionId, frame }),
+  cloudRemoteActivate: (connectionId: string, activation: Activation) =>
+    invoke<void>("cloud_remote_activate", { connectionId, activation }),
+  cloudRemoteDetach: (connectionId: string) => invoke<void>("cloud_remote_detach", { connectionId }),
 
   // opt-in device pairing
   pairingStatus: () => invoke<PairingStatus>("pairing_status"),
@@ -395,8 +411,13 @@ export interface CloudWorkspaceSnapshot {
   operation: CloudWorkspaceOperation;
 }
 
+export interface CloudWorkspaceListItem {
+  workspace: CloudWorkspace;
+  latestOperation: CloudWorkspaceOperation | null;
+}
+
 export interface CloudWorkspaceList {
-  workspaces: { workspace: CloudWorkspace; latestOperation: CloudWorkspaceOperation | null }[];
+  workspaces: CloudWorkspaceListItem[];
 }
 
 /** Retain this exact key when reconciling an ambiguous create response. */
@@ -1019,4 +1040,147 @@ export interface CloudProviderResource {
   operationState: string | null;
   cleanupRequired: boolean;
   kind: "workspace" | "runtime" | "build" | "legacy-operation";
+}
+
+/**
+ * Where a workspace's operations run. Local workspaces keep using the Tauri
+ * commands above unchanged; a cloud workspace is reached through its remote
+ * runtime over the relay (`terminalx-workspace-rpc/1`), never by forwarding
+ * desktop IPC.
+ */
+export type WorkspaceTarget = { kind: "local" } | CloudWorkspaceTarget;
+
+export interface CloudWorkspaceTarget {
+  kind: "cloud";
+  organizationId: string;
+  workspaceId: string;
+  /** The generation last seen, if any; the attach ticket decides which runtime is current. */
+  runtimeGeneration?: number;
+}
+
+export const LOCAL_WORKSPACE: WorkspaceTarget = { kind: "local" };
+
+export function workspaceTargetKey(target: WorkspaceTarget): string {
+  return target.kind === "local" ? "local" : `cloud:${target.organizationId}:${target.workspaceId}`;
+}
+
+type RemoteEvent =
+  | { kind: "state"; connectionId: string; state: WorkspaceConnectionState }
+  | { kind: "message"; connectionId: string; message: unknown }
+  | { kind: "identityChanged"; connectionIds: string[] };
+
+/** One supervised native connection, as the portable client's transport. */
+class NativeWorkspaceTransport implements WorkspaceTransport {
+  private readonly messages = new Set<(message: unknown) => void>();
+  private readonly states = new Set<(state: WorkspaceConnectionState) => void>();
+  private unlisten: (() => void) | null = null;
+  private closed = false;
+
+  constructor(private readonly connectionId: string) {}
+
+  async start(): Promise<void> {
+    const unlisten = await listen<RemoteEvent>("cloud_remote_event", ({ payload }) => {
+      if (payload.kind === "identityChanged") {
+        if (payload.connectionIds.includes(this.connectionId)) this.emitState({ state: "stopped" });
+        return;
+      }
+      if (payload.connectionId !== this.connectionId) return;
+      if (payload.kind === "state") this.emitState(payload.state);
+      else for (const listener of this.messages) listener(payload.message);
+    });
+    if (this.closed) unlisten();
+    else this.unlisten = unlisten;
+  }
+
+  send(frame: { id: string; method: string; params?: unknown }): boolean {
+    if (this.closed) return false;
+    // Delivery is confirmed by the response; a refused send surfaces as a
+    // timeout or drop, and the portable client resends with the same id.
+    void api.cloudRemoteSend(this.connectionId, frame).catch(() => undefined);
+    return true;
+  }
+
+  onMessage(listener: (message: unknown) => void) {
+    this.messages.add(listener);
+    return () => this.messages.delete(listener);
+  }
+
+  onState(listener: (state: WorkspaceConnectionState) => void) {
+    this.states.add(listener);
+    return () => this.states.delete(listener);
+  }
+
+  activate(activation: Activation): Promise<void> {
+    return api.cloudRemoteActivate(this.connectionId, activation);
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.unlisten?.();
+    void api.cloudRemoteDetach(this.connectionId).catch(() => undefined);
+  }
+
+  private emitState(state: WorkspaceConnectionState): void {
+    for (const listener of this.states) listener(state);
+  }
+}
+
+export interface CloudWorkspaceConnection {
+  target: WorkspaceTarget;
+  client: WorkspaceRpcClient;
+  /** Raise the activation; only `wake` (an interactive action) resumes suspended compute. */
+  activate(activation: Activation): Promise<void>;
+  close(): void;
+}
+
+const connections = new Map<string, CloudWorkspaceConnection>();
+
+/**
+ * The transport for a workspace target: null for a local workspace (use the
+ * Tauri commands), a supervised remote connection for a cloud one. One
+ * connection per target; `connect` never wakes suspended compute.
+ */
+export async function workspaceConnection(target: WorkspaceTarget, activation: Activation = "connect"): Promise<CloudWorkspaceConnection | null> {
+  if (target.kind === "local") return null;
+  const key = workspaceTargetKey(target);
+  const existing = connections.get(key);
+  if (existing) {
+    if (activation === "wake") await existing.activate("wake");
+    return existing;
+  }
+  const connectionId = await api.cloudRemoteAttach(target, activation);
+  return adopt(key, target, connectionId);
+}
+
+/** Debug builds: a cloud session from a local runtime's pairing code. */
+export async function devWorkspaceConnection(pairingCode: string): Promise<CloudWorkspaceConnection> {
+  const connectionId = await api.cloudRemoteAttachDev(pairingCode);
+  return adopt(`dev:${connectionId}`, { kind: "cloud", organizationId: "dev", workspaceId: connectionId }, connectionId);
+}
+
+async function adopt(key: string, target: WorkspaceTarget, connectionId: string): Promise<CloudWorkspaceConnection> {
+  const transport = new NativeWorkspaceTransport(connectionId);
+  await transport.start();
+  const client = new WorkspaceRpcClient(transport);
+  const connection: CloudWorkspaceConnection = {
+    target,
+    client,
+    activate: (next) => transport.activate(next),
+    close: () => {
+      connections.delete(key);
+      client.close();
+    },
+  };
+  connections.set(key, connection);
+  client.onState((state) => {
+    // Stopped for an identity change: drop it so nothing reuses the old one.
+    if (state.state === "stopped" && connections.get(key) === connection) connection.close();
+  });
+  return connection;
+}
+
+/** Drop every cloud connection and what it cached, e.g. on sign-out or an organization switch. */
+export function closeWorkspaceConnections(): void {
+  for (const connection of [...connections.values()]) connection.close();
 }

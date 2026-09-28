@@ -31,6 +31,7 @@ import {
   Sparkles,
   Sun,
   Terminal,
+  Cloud,
   type LucideIcon,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -244,11 +245,13 @@ export function CommandPalette({
   open,
   onOpenChange,
   onOpenSettings,
+  onOpenCloudSession,
   onCreated,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onOpenSettings: (tab?: SettingsTab) => void;
+  onOpenCloudSession?: () => void;
   onCreated: (sessionId: string, tabId: string, text: string) => void;
 }) {
   const store = useSessionStore();
@@ -461,9 +464,12 @@ export function CommandPalette({
       indexPaletteItem({ id: "command:mode:light", group: "commands" as const, primary: "Appearance: Light", secondary: theme.mode === "light" ? "Current appearance" : "Use the light appearance", recentAt: 4, icon: Sun, run: () => setMode("light") }),
       indexPaletteItem({ id: "command:mode:dark", group: "commands" as const, primary: "Appearance: Dark", secondary: theme.mode === "dark" ? "Current appearance" : "Use the dark appearance", recentAt: 3, icon: Moon, run: () => setMode("dark") }),
       indexPaletteItem({ id: "command:settings:appearance", group: "commands" as const, primary: "Open Appearance settings", secondary: "Themes, type and transcript layout", recentAt: 2, icon: Settings, run: () => onOpenSettings("appearance") }),
+      ...(onOpenCloudSession
+        ? [indexPaletteItem({ id: "command:cloud-session", group: "commands" as const, primary: "Open a cloud workspace session", secondary: "Terminal and agent tab in a cloud workspace", recentAt: 1, icon: Cloud, run: onOpenCloudSession })]
+        : []),
     ];
     return [...shortcutEntries, ...extras];
-  }, [onOpenSettings, runShortcut, status.settings.percent, status.settings.visible, theme.mode, theme.theme]);
+  }, [onOpenCloudSession, onOpenSettings, runShortcut, status.settings.percent, status.settings.visible, theme.mode, theme.theme]);
 
   const fileEntries = useMemo<FileEntry[]>(
     () => fileHits.map((hit, index) => indexPaletteItem({

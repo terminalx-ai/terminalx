@@ -18,6 +18,8 @@ pub mod cli;
 #[cfg(feature = "desktop")]
 mod commands;
 #[cfg(feature = "desktop")]
+mod cloud_remote;
+#[cfg(feature = "desktop")]
 mod cloud_workspaces;
 #[cfg(feature = "desktop")]
 mod organization_members;
@@ -118,6 +120,7 @@ pub fn run() {
     let pairing = Arc::new(pairing::PairingManager::new(account.clone()));
     let cloud_workspaces = Arc::new(cloud_workspaces::CloudWorkspaceService::new(account.clone()));
     let organization_members = Arc::new(organization_members::OrganizationMembersService::new(account.clone()));
+    let cloud_remote = cloud_remote::CloudRemote::new(account.clone(), cloud_workspaces.clone());
     // The resource directory is only known once Tauri is up; the service
     // resolves the helper lazily, so it can be built before `setup`.
     let computer = Arc::new(computer::ComputerService::new(None));
@@ -151,7 +154,9 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(state)
+        .manage(cloud_remote.clone())
         .setup(move |app| {
+            cloud_remote.watch_identity(app.handle().clone());
             account.configure(&app.config().identifier)?;
             pairing.configure(Arc::new(app.handle().clone()), app.path().app_log_dir().ok(), &app.config().identifier)?;
             #[cfg(desktop)]
@@ -262,6 +267,11 @@ pub fn run() {
             commands::cloud_workspace_release,
             commands::cloud_workspace_operation,
             commands::cloud_workspace_operation_cancel,
+            cloud_remote::cloud_remote_attach,
+            cloud_remote::cloud_remote_attach_dev,
+            cloud_remote::cloud_remote_send,
+            cloud_remote::cloud_remote_activate,
+            cloud_remote::cloud_remote_detach,
             commands::pairing_status,
             commands::pairing_generate,
             commands::pairing_revoke,

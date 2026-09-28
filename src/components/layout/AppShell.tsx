@@ -35,6 +35,7 @@ import { EditorSplit } from "@/components/editor/EditorSplit";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
+const CloudSessionPage = lazy(() => import("@/components/cloud/CloudSessionPage").then((module) => ({ default: module.CloudSessionPage })));
 const SettingsPage = lazy(() => import("@/components/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const statusBarFallback = <div aria-hidden className="h-[22px] shrink-0 border-t border-hairline bg-background/70" />;
 const viewFallback = <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-faint">Loading view…</div>;
@@ -53,6 +54,7 @@ export function AppShell() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [cloudSessionOpen, setCloudSessionOpen] = useState(false);
 
   useEffect(() => {
     void subscribeAgentEvents();
@@ -123,6 +125,10 @@ export function AppShell() {
           <Suspense fallback={viewFallback}>
             <SettingsPage initialTab={settingsTab} onBack={() => setSettingsOpen(false)} />
           </Suspense>
+        ) : cloudSessionOpen ? (
+          <Suspense fallback={viewFallback}>
+            <CloudSessionPage onBack={() => setCloudSessionOpen(false)} />
+          </Suspense>
         ) : (
           <>
             {sidebarOpen && (
@@ -166,7 +172,7 @@ export function AppShell() {
         </ErrorBoundary>
       ) : null}
 
-      {paletteOpen ? <CommandPalette open onOpenChange={setPaletteOpen} onOpenSettings={openSettings} onCreated={onCreated} /> : null}
+      {paletteOpen ? <CommandPalette open onOpenChange={setPaletteOpen} onOpenSettings={openSettings} onOpenCloudSession={() => setCloudSessionOpen(true)} onCreated={onCreated} /> : null}
     </div>
   );
 }
