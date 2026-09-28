@@ -115,16 +115,36 @@ Debug builds honour `TERMINALX_SERVE_TEST_CRASH_AT=<step>`, which SIGKILLs the p
 that step. `serve/tests/bootstrap_crash.rs` uses it against a fake server to check each
 step. Release builds compile it out.
 
+## Relay host and workspace RPC (PRO-13)
+
+A bootstrapped runtime with `--project-root` registers with the relay as a Host, outbound
+only, using the bootstrap's Relay Token and host key (`src/remote/host.rs`):
+
+- Director `/v1/assign`, then the Cell's `/v1/host/control` with the host proof bound to
+  the token's identity. The token's `runtimeGeneration` is the generation it serves; a
+  `4101` from the relay means a newer runtime replaced it, and it stays down (`fenced`).
+- Each pending attachment from `/refresh` gets a single-use relay invite and a pairing
+  code (offer v2), published with `/attachments/:id/complete`. Attached devices (token
+  hashes only) are kept in `run/remote-devices.json`.
+- A client connection runs the E2EE v2 handshake, proves the attachment's device token,
+  may install a resume credential (`pairing.provisionRelay`) and then speaks
+  `terminalx-workspace-rpc/1` (`src/remote/server.rs`): `rpc.hello` capability
+  negotiation and the versioned `pty.*`, `fs.*`, `git.*` and `session.*` methods, each
+  authorized against the attachment's authority, with idempotent mutations.
+- A rejected runtime credential disconnects every client and stops serving until the
+  API accepts one again.
+
+Registration states are printed as `{"type":"relay","status":{...}}` lines.
+`--relay-link <file>` reads the relay session from a JSON file instead of the bootstrap;
+`scripts/remote-runtime/e2e.sh` uses it to run `serve/tests/relay_e2e.rs` against the
+terminalx-saas relay code.
+
 ## Not yet
 
-- **Relay host registration and the portable RPC surface (PRO-13).** `BroadcastSink::subscribe`
-  is the event feed that will serve it.
 - **First-run setup** (organization credentials, repository clone). The runtime does not
   advertise `organization-setup-v*`, so the server does not send it.
 - **The `terminalx` agent CLI inside the runtime.** The CLI module links the desktop's
   computer-use and browser parsers, so it is still desktop-only.
-- **A rejected credential in steady state.** The 30-second refresh loop logs it; stopping
-  the relay host belongs with its registration (PRO-13).
 - **The published artifact.** terminalx-saas installs this binary behind
   `CLOUD_WORKSPACE_RUNTIME_KIND=terminalx-serve` (versioned directory, atomic `current`
   swap, health check, rollback). A signed, pinned linux-x64/arm64 build is not published

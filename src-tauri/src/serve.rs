@@ -202,7 +202,7 @@ fn run(options: Options) -> Result<()> {
             "projectRoot": runtime.project_root,
             "dataDir": data_dir,
             "socket": crate::hooks::socket_path().ok(),
-            "cloudWorkspace": cloud.as_ref().map(|cloud| {
+            "cloudWorkspace": cloud.as_ref().map(|(cloud, _)| {
                 let session = cloud.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 json!({
                     "workspaceId": session.workspace_id,
@@ -212,8 +212,16 @@ fn run(options: Options) -> Result<()> {
             }),
         })
     );
-    if let (Some(link), Some(root)) = (&options.relay_link, &runtime.project_root) {
-        tokio.block_on(start_relay_host(&runtime, link, root, &data_dir))?;
+    // The relay host: from the bootstrap in a cloud workspace, or from a
+    // link file in development and tests.
+    let link: Option<Arc<dyn crate::remote::host::RuntimeLink>> = match (&options.relay_link, &cloud) {
+        (Some(path), _) => Some(Arc::new(crate::remote::host::FileLink::open(path).context("open the relay link")?)),
+        (None, Some((cloud, origin))) => Some(Arc::new(crate::remote::bootstrap_link::BootstrapLink::new(cloud.clone(), origin))),
+        (None, None) => None,
+    };
+    // The self-test checks the local runtime only.
+    if let (Some(link), Some(root), false) = (link, &runtime.project_root, options.self_test) {
+        start_relay_host(&runtime, link, root, &data_dir);
     }
     let outcome = if options.self_test {
         self_test(&runtime, &tokio)
@@ -226,9 +234,9 @@ fn run(options: Options) -> Result<()> {
     outcome
 }
 
-/// Redeem or refresh, then keep the session fresh in the background.
-/// TODO(PRO-13): register with the relay as a host with this session.
-fn bootstrap_cloud_workspace(data_dir: &std::path::Path) -> Result<Option<Arc<crate::cloud_bootstrap::Bootstrapped>>> {
+/// Redeem or refresh, then keep the session fresh in the background. The
+/// relay host registers with this session once the runtime is up.
+fn bootstrap_cloud_workspace(data_dir: &std::path::Path) -> Result<Option<(Arc<crate::cloud_bootstrap::Bootstrapped>, String)>> {
     use crate::cloud_bootstrap::{establish, Config, HttpApi, Policy};
     let Some(config) = Config::from_env(data_dir)? else {
         log::warn!("no cloud workspace bootstrap configured; serving without a cloud identity");
@@ -241,7 +249,7 @@ fn bootstrap_cloud_workspace(data_dir: &std::path::Path) -> Result<Option<Arc<cr
         log::info!("cloud workspace {} bootstrapped as relay host {}", session.workspace_id, session.relay_host_id);
     }
     cloud.clone().spawn_refresh_loop(api);
-    Ok(Some(cloud))
+    Ok(Some((cloud, config.origin)))
 }
 
 /// The desktop's `setup`, less everything that needs a window.
@@ -286,22 +294,23 @@ fn start(options: &Options) -> Result<Runtime> {
     Ok(Runtime { sink, host, terminals, manager, project_root })
 }
 
-/// Serve the workspace through the relay with a file-backed link, and report
+/// Serve the workspace through the relay in the background, and report
 /// each registration state as a JSON line on stdout.
-async fn start_relay_host(runtime: &Runtime, link: &std::path::Path, root: &str, data_dir: &std::path::Path) -> Result<()> {
-    let link: Arc<dyn crate::remote::host::RuntimeLink> =
-        Arc::new(crate::remote::host::FileLink::open(link).context("open the relay link")?);
-    let host = crate::remote::host::serve_workspace(
-        link,
-        PathBuf::from(root),
-        runtime.sink.clone(),
-        runtime.terminals.clone(),
-        Some(runtime.manager.clone()),
-        Some(data_dir.join("run").join("remote-devices.json")),
-    )
-    .await?;
-    let mut status = host.status();
+fn start_relay_host(runtime: &Runtime, link: Arc<dyn crate::remote::host::RuntimeLink>, root: &str, data_dir: &std::path::Path) {
+    let sink = runtime.sink.clone();
+    let terminals = runtime.terminals.clone();
+    let manager = runtime.manager.clone();
+    let root = PathBuf::from(root);
+    let devices = data_dir.join("run").join("remote-devices.json");
     tokio::spawn(async move {
+        let host = match crate::remote::host::serve_workspace(link, root, sink, terminals, Some(manager), Some(devices)).await {
+            Ok(host) => host,
+            Err(error) => {
+                log::error!("relay host: {error:#}");
+                return;
+            }
+        };
+        let mut status = host.status();
         loop {
             let current = status.borrow_and_update().clone();
             println!("{}", json!({ "type": "relay", "status": current }));
@@ -310,7 +319,6 @@ async fn start_relay_host(runtime: &Runtime, link: &std::path::Path, root: &str,
             }
         }
     });
-    Ok(())
 }
 
 fn shutdown(runtime: &Runtime) {

@@ -229,6 +229,8 @@ enum ControlCommand {
     CreateInvite { device_id: String, respond: oneshot::Sender<Result<(String, i64)>> },
     Revoke { device_id: String },
     InstallCredential { payload: Value, req_id: String, respond: oneshot::Sender<Result<Value>> },
+    /// The runtime credential was revoked: stop serving.
+    Shutdown,
 }
 
 #[derive(Clone)]
@@ -248,6 +250,9 @@ pub enum HostStatus {
     /// The relay retired this runtime for a newer generation (4101). It
     /// stays down until the link reports a newer generation.
     Fenced { runtime_generation: u64 },
+    /// The API rejects the runtime credential; nothing is served until it
+    /// accepts one again.
+    Revoked,
     Retrying { attempt: u32 },
 }
 
@@ -314,6 +319,10 @@ impl RelayHost {
         loop {
             let session = match self.fetch_session().await {
                 Ok(session) => session,
+                Err(error) if error.downcast_ref::<Revoked>().is_some() => {
+                    self.revoked().await;
+                    continue;
+                }
                 Err(error) => {
                     log::warn!("relay host: runtime session unavailable: {error:#}");
                     attempt += 1;
@@ -338,6 +347,10 @@ impl RelayHost {
             self.status.send_replace(HostStatus::Connecting);
             match self.clone().connect_once(session, identity.clone()).await {
                 Ok(()) => attempt = 0,
+                Err(error) if error.downcast_ref::<Revoked>().is_some() => {
+                    self.revoked().await;
+                    continue;
+                }
                 Err(error) if error.downcast_ref::<Fenced>().is_some() => {
                     log::warn!("relay host: generation {} was retired by a newer runtime", identity.runtime_generation);
                     fenced = Some(identity.runtime_generation);
@@ -354,6 +367,13 @@ impl RelayHost {
             self.status.send_replace(HostStatus::Retrying { attempt });
             tokio::time::sleep(protocol::backoff(attempt, jitter())).await;
         }
+    }
+
+    async fn revoked(&self) {
+        log::warn!("relay host: the runtime credential was rejected; not serving");
+        self.status.send_replace(HostStatus::Revoked);
+        self.close_all_connections();
+        tokio::time::sleep(REFRESH_INTERVAL).await;
     }
 
     async fn fetch_session(&self) -> Result<RelaySession> {
@@ -473,6 +493,10 @@ impl RelayHost {
                             socket.send(Message::Text(json!({ "type": "invite-create", "reqId": req_id, "relayDeviceId": device_id }).to_string().into())).await?;
                             invites.insert(req_id, respond);
                         }
+                        ControlCommand::Shutdown => {
+                            let _ = socket.close(None).await;
+                            return Err(Revoked.into());
+                        }
                         ControlCommand::Revoke { device_id } => {
                             let req_id = uuid::Uuid::new_v4().simple().to_string();
                             socket.send(Message::Text(json!({ "type": "device-revoke", "reqId": req_id, "relayDeviceId": device_id }).to_string().into())).await?;
@@ -570,6 +594,10 @@ impl RelayHost {
                             log::warn!("relay host: could not answer an attachment: {error:#}");
                         }
                     }
+                }
+                Err(error) if error.downcast_ref::<Revoked>().is_some() => {
+                    let _ = live.commands.send(ControlCommand::Shutdown);
+                    return;
                 }
                 Err(error) => log::warn!("relay host: refresh failed: {error:#}"),
             }
@@ -816,6 +844,19 @@ pub async fn serve_workspace(
     tokio::spawn(host.clone().run());
     Ok(host)
 }
+
+/// A [`RuntimeLink`] returns this when the API rejects the runtime
+/// credential: the host disconnects every client and stops serving.
+#[derive(Debug)]
+pub struct Revoked;
+
+impl std::fmt::Display for Revoked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the runtime credential was rejected")
+    }
+}
+
+impl std::error::Error for Revoked {}
 
 #[derive(Debug)]
 struct Fenced;

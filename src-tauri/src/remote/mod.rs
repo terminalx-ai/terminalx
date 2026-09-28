@@ -7,6 +7,7 @@
 //! - [`host`]: the runtime's outbound relay registration.
 //! - [`client`]: the desktop's attach, E2EE and supervision.
 
+pub mod bootstrap_link;
 pub mod client;
 pub mod host;
 pub mod protocol;
