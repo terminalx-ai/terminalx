@@ -48,7 +48,7 @@ pub const TOKEN_PATH_ENV: &str = "TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_TOKEN_PATH
 /// left out until this runtime can apply it.
 pub const CAPABILITIES: &str = "organization-access-v1";
 const CAPABILITIES_HEADER: &str = "x-terminalx-cloud-workspace-runtime-capabilities";
-const VERSION_HEADER: &str = "x-terminalx-cloud-workspace-runtime-version";
+pub(crate) const VERSION_HEADER: &str = "x-terminalx-cloud-workspace-runtime-version";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -543,6 +543,12 @@ impl Bootstrapped {
         }
         *current = session;
         Ok(())
+    }
+
+    /// The runtime credential, for calls made outside this module
+    /// (`cloud_grants`).
+    pub(crate) fn runtime_credential(&self) -> Zeroizing<String> {
+        self.credential.clone()
     }
 
     /// Whether the server currently rejects the runtime credential.

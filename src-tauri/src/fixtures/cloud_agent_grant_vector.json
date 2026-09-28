@@ -1,0 +1,32 @@
+{
+    "description": "PRO-17 sealed agent grant test vector. Shared by terminalx-saas apps/api and terminalx src-tauri cloud_grants; both must seal to exactly `sealed` from these inputs and open it back to `plaintext`.",
+    "recipientPrivateKeyHex": "a8abababababababababababababababababababababababababababababab6b",
+    "recipientPublicKeyB64": "43EthRoOXXm4McXjSrIrQaGYFx3iCbi4+sojoRxiSFk=",
+    "ephemeralPrivateKeyHex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f60",
+    "contentKeyHex": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+    "wrapIvHex": "101112131415161718191a1b",
+    "ivHex": "202122232425262728292a2b",
+    "aad": "terminalx-cloud-agent-grant-v1\nworkspace_00000000-0000-4000-8000-000000000001\nclaude\ncredential_00000000-0000-4000-8000-000000000002\nvXOB6rCNLWJnXCfHnpmCFX5xYXoJWIZR2Ku6xQPTmSM\n3\n7\ngrant_00000000-0000-4000-8000-000000000003\n1790985600000\n1790986500000",
+    "plaintext": "{\"v\":1,\"provider\":\"claude\",\"mode\":\"oauth-access-token\",\"accessToken\":\"test-access-token-not-a-real-credential\",\"expiresAt\":1791000000000,\"version\":4}",
+    "sealed": {
+        "v": 1,
+        "alg": "X25519-HKDF-SHA256/A256GCM-KW/A256GCM",
+        "header": {
+            "workspaceId": "workspace_00000000-0000-4000-8000-000000000001",
+            "provider": "claude",
+            "credentialId": "credential_00000000-0000-4000-8000-000000000002",
+            "keyThumbprint": "vXOB6rCNLWJnXCfHnpmCFX5xYXoJWIZR2Ku6xQPTmSM",
+            "epoch": 3,
+            "runtimeGeneration": 7,
+            "grantId": "grant_00000000-0000-4000-8000-000000000003",
+            "issuedAt": 1790985600000,
+            "expiresAt": 1790986500000
+        },
+        "ephemeralPublicKey": "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw",
+        "wrapIv": "EBESExQVFhcYGRob",
+        "wrappedKey": "bcpsHmoLvzn8MBGapD4-8v2l7t2AbZQvBRLLpMSmuCvbsrZozIJlotQr2qNL_hGh",
+        "iv": "ICEiIyQlJicoKSor",
+        "ciphertext": "OhdlR6QgPJJSl3O1w1KMbtViO4uFrrciAu7_bkIQhzNK6UGnlrLjNSiw7wsqmV8PRKO183yh24kswMvsHSESAH4rzzRAqxfHxQYyafqrM2dXUlrM8BmVYj-Kl2F9r2l7LPhcUFOIwwRP1Dd46Hk9tdI_e2IRudPoH_CmAeMlpNm2VhGdxCfx8sjKC7GnoTV2yOEblg4",
+        "tag": "7Eq_Xy6V4ZFoRZ8Lb8h3bA"
+    }
+}

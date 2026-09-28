@@ -335,6 +335,9 @@ impl ControlService {
                 if let Some(kind) = &self.runtime_kind {
                     status["runtimeKind"] = json!(kind);
                 }
+                if let Some(grants) = crate::cloud_grants::status_json() {
+                    status["agentGrants"] = grants;
+                }
                 Ok(status)
             }
             "projects.list" => {
