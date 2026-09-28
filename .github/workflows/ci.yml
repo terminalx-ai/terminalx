@@ -84,6 +84,37 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
+  # The headless runtime a cloud workspace boots. The runner has no WebView,
+  # GTK or ALSA development packages, so a GUI dependency fails the build.
+  headless-serve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git/db
+            src-tauri/target
+          key: serve-cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: serve-cargo-${{ runner.os }}-
+      - name: Build terminalx-serve
+        working-directory: src-tauri/serve
+        run: cargo build --locked --bin terminalx-serve
+      - name: No GUI crates in its dependency tree
+        working-directory: src-tauri/serve
+        run: |
+          cargo tree --locked -e normal,build > "$RUNNER_TEMP/serve-tree.txt"
+          ! grep -E '(^|[^a-z])(tauri|wry|webkit2gtk|gtk|cpal|alsa-sys)[ -]' "$RUNNER_TEMP/serve-tree.txt"
+      - name: Clippy
+        working-directory: src-tauri/serve
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Self-test (start, shell PTY, clean exit)
+        working-directory: src-tauri/serve
+        run: ../target/debug/terminalx-serve --data-dir "$RUNNER_TEMP/serve" --project-root "$GITHUB_WORKSPACE" --runtime-kind cloud-workspace --self-test
+
   desktop-platforms:
     strategy:
       fail-fast: false

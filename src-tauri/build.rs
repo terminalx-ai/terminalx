@@ -6,14 +6,20 @@ fn main() {
     assert!(url.starts_with("https://github.com/"));
     println!("cargo:rustc-env=TERMINALX_REPO_URL={url}");
     embed_cli_skill();
-    ensure_helper_resource_dirs();
-    ensure_agent_browser_stand_in();
+    #[cfg(feature = "desktop")]
+    {
+        ensure_helper_resource_dirs();
+        ensure_agent_browser_stand_in();
+    }
     // ggml's Metal backend uses `@available` checks, which compile to a call
     // into clang's builtins runtime. Rust links with `-nodefaultlibs`, so that
     // archive has to be named explicitly or release links fail on
     // `___isPlatformVersionAtLeast`.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "desktop"))]
     link_clang_builtins();
+    // `terminalx-serve` builds without the desktop feature: no Tauri context,
+    // bundle resources or sidecars to check.
+    #[cfg(feature = "desktop")]
     tauri_build::build()
 }
 
@@ -23,6 +29,7 @@ fn main() {
 /// depend on, so an empty stand-in directory is created when it is missing;
 /// the runtime then reports the helper as not found instead of the build
 /// failing.
+#[cfg(feature = "desktop")]
 fn ensure_helper_resource_dirs() {
     for output in ["release", "release-dev"] {
         let dir = format!("../native/computer-use-macos/.build/{output}/TerminalX Computer Use.app");
@@ -49,6 +56,7 @@ fn embed_cli_skill() {
 /// must not depend on the 10 MB runtime, so a stand-in that explains itself
 /// is written when `scripts/ensure-agent-browser.mjs` has not run. The real
 /// copy replaces it before `tauri dev` and `tauri build`.
+#[cfg(feature = "desktop")]
 fn ensure_agent_browser_stand_in() {
     let triple = std::env::var("TARGET").unwrap_or_default();
     if triple.is_empty() {
@@ -71,7 +79,7 @@ fn ensure_agent_browser_stand_in() {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "desktop"))]
 fn link_clang_builtins() {
     use std::path::PathBuf;
     use std::process::Command;

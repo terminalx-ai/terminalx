@@ -9,11 +9,10 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::AppHandle;
-
-use crate::commands::{NewSession, NewTab};
 use crate::hooks::ControlEndpoint;
 use crate::session::{PendingPermission, SessionManager};
+use crate::session_ops::{NewSession, NewTab};
+use crate::sink::EventSink;
 use crate::store::index::{self, SessionEntry, TabEntry, TabStatus};
 use crate::store::projects::{self, Project};
 
@@ -236,27 +235,57 @@ fn client_token_path() -> PathBuf {
 
 #[derive(Clone)]
 pub struct ControlService {
-    app: AppHandle,
+    sink: Arc<dyn EventSink>,
     manager: SessionManager,
     endpoint: ControlEndpoint,
+    /// Set by the headless runtime (`cloud-workspace`, `local`); the desktop
+    /// app reports none.
+    runtime_kind: Option<String>,
+    /// Computer use and the built-in browser; the headless runtime has neither.
+    #[cfg(feature = "desktop")]
+    desktop: Option<DesktopControl>,
+}
+
+#[cfg(feature = "desktop")]
+#[derive(Clone)]
+struct DesktopControl {
     computer: Arc<crate::computer::ComputerService>,
     browser: std::sync::Arc<crate::browser::BrowserRuntime>,
 }
 
 impl ControlService {
+    #[cfg(feature = "desktop")]
     pub fn new(
-        app: AppHandle,
+        sink: Arc<dyn EventSink>,
         manager: SessionManager,
         endpoint: ControlEndpoint,
         computer: Arc<crate::computer::ComputerService>,
         browser: std::sync::Arc<crate::browser::BrowserRuntime>,
     ) -> Self {
         Self {
-            app,
+            sink,
             manager,
             endpoint,
-            computer,
-            browser,
+            runtime_kind: None,
+            desktop: Some(DesktopControl { computer, browser }),
+        }
+    }
+
+    /// The control service of `terminalx-serve`: sessions, tabs, permissions,
+    /// worktrees and issues, without the desktop's computer use and browser.
+    pub fn headless(
+        sink: Arc<dyn EventSink>,
+        manager: SessionManager,
+        endpoint: ControlEndpoint,
+        runtime_kind: String,
+    ) -> Self {
+        Self {
+            sink,
+            manager,
+            endpoint,
+            runtime_kind: Some(runtime_kind),
+            #[cfg(feature = "desktop")]
+            desktop: None,
         }
     }
 
@@ -269,25 +298,44 @@ impl ControlService {
     }
 
     fn execute(&self, command: &str, params: Value, request_id: &str) -> Result<Value, ControlError> {
-        if let Some(method) = command.strip_prefix("computer.") {
-            // Computer-use errors keep their own codes: the skill guide
-            // teaches recovery per code, so they must not collapse into
-            // `internal`.
-            return self
-                .computer
-                .call(method, params, request_id)
-                .map_err(computer_error);
+        #[cfg(feature = "desktop")]
+        if let Some(desktop) = &self.desktop {
+            if let Some(method) = command.strip_prefix("computer.") {
+                // Computer-use errors keep their own codes: the skill guide
+                // teaches recovery per code, so they must not collapse into
+                // `internal`.
+                return desktop
+                    .computer
+                    .call(method, params, request_id)
+                    .map_err(computer_error);
+            }
+            if command.starts_with("browser.") {
+                return crate::browser::control::handle(&desktop.browser, command, params);
+            }
+        }
+        #[cfg(not(feature = "desktop"))]
+        let _ = request_id;
+        if command.starts_with("computer.") || command.starts_with("browser.") {
+            return Err(ControlError::new(
+                "unsupported",
+                format!("{command} needs the TerminalX desktop app; terminalx-serve has no browser or computer use."),
+                None::<String>,
+            ));
         }
         match command {
             "status" => {
                 let (projects, _) = projects::list().map_err(ControlError::internal)?;
-                Ok(json!({
+                let mut status = json!({
                     "appVersion": env!("CARGO_PKG_VERSION"),
                     "pid": std::process::id(),
                     "socket": self.endpoint.socket,
                     "projects": projects,
                     "runningTabs": self.manager.running_tabs(),
-                }))
+                });
+                if let Some(kind) = &self.runtime_kind {
+                    status["runtimeKind"] = json!(kind);
+                }
+                Ok(status)
             }
             "projects.list" => {
                 let (projects, last_selected) = projects::list().map_err(ControlError::internal)?;
@@ -323,9 +371,6 @@ impl ControlService {
             "worktrees.list" => self.worktrees_list(params),
             "worktrees.delete" => self.worktree_delete(params),
             "issues.list" => self.issues_list(params),
-            browser if browser.starts_with("browser.") => {
-                crate::browser::control::handle(&self.browser, browser, params)
-            }
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -386,8 +431,8 @@ impl ControlService {
             }
         }
         let project = resolve_project(&p.project)?;
-        let entry = crate::commands::create_session_blocking(
-            &self.app,
+        let entry = crate::session_ops::create_session_blocking(
+            &*self.sink,
             NewSession {
                 project_path: project.path,
                 title: None,
@@ -550,21 +595,24 @@ impl ControlService {
                 "A project's main checkout cannot be deleted.",
             ));
         }
-        let affected = crate::commands::sessions_in_workspace(Path::new(&worktree.path))
+        let affected = crate::session_ops::sessions_in_workspace(Path::new(&worktree.path))
             .map_err(ControlError::internal)?;
         for session in &affected {
             for tab in &session.tabs {
                 let _ = self.manager.stop(&session.id, &tab.id);
             }
         }
-        self.browser.forget_workspace(&crate::browser::control::canonical(&worktree.path));
-        let entries = crate::commands::delete_workspace_entries(
+        #[cfg(feature = "desktop")]
+        if let Some(desktop) = &self.desktop {
+            desktop.browser.forget_workspace(&crate::browser::control::canonical(&worktree.path));
+        }
+        let entries = crate::session_ops::delete_workspace_entries(
             &project.path,
             &worktree.path,
             false,
         )
         .map_err(ControlError::internal)?;
-        crate::commands::notify_workspace_deleted(&self.app, &project.path, &entries);
+        crate::session_ops::notify_workspace_deleted(&*self.sink, &project.path, &entries);
         let removed: Vec<_> = entries.into_iter().map(|entry| entry.id).collect();
         Ok(json!({"deleted": worktree.path, "project": project.path, "removedSessions": removed}))
     }
@@ -612,6 +660,7 @@ struct Target {
     tab: TabEntry,
 }
 
+#[cfg(feature = "desktop")]
 fn computer_error(error: crate::computer::ComputerError) -> ControlError {
     let recovery = error.recovery();
     ControlError::new(&error.code, error.message, Some(recovery))
@@ -867,6 +916,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "desktop")]
     #[test]
     fn computer_errors_keep_their_code_and_gain_the_guide_recovery() {
         let error = computer_error(crate::computer::ComputerError::new(

@@ -13,7 +13,6 @@ use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, EventId, Listener, Manager};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -22,7 +21,9 @@ use super::{DeviceEntry, DeviceScope, PairingManager};
 use crate::events::{AgentEvent, Payload};
 use crate::pty::PtyData;
 use crate::store::index::{self, SessionEntry, TabEntry};
-use crate::{store, summaries, AppState};
+use crate::session::SessionManager;
+use crate::sink::{EventSink, ListenerId};
+use crate::{store, summaries};
 
 const NOTES_LIMIT: usize = 1_000;
 const NOTE_BYTES_LIMIT: usize = 16 * 1024;
@@ -54,7 +55,7 @@ struct DriverLease {
 }
 
 pub(super) struct MobileRuntime {
-    app: OnceLock<AppHandle>,
+    sink: OnceLock<Arc<dyn EventSink>>,
     clients: Mutex<HashMap<String, mpsc::UnboundedSender<Value>>>,
     drivers: Mutex<HashMap<String, DriverLease>>,
     notifications: Mutex<VecDeque<MobileNotification>>,
@@ -66,7 +67,7 @@ pub(super) struct MobileRuntime {
 impl MobileRuntime {
     pub(super) fn new() -> Self {
         Self {
-            app: OnceLock::new(),
+            sink: OnceLock::new(),
             clients: Mutex::new(HashMap::new()),
             drivers: Mutex::new(HashMap::new()),
             notifications: Mutex::new(VecDeque::new()),
@@ -76,9 +77,9 @@ impl MobileRuntime {
         }
     }
 
-    pub(super) fn configure(&self, app: &AppHandle) -> Result<()> {
-        self.app
-            .set(app.clone())
+    pub(super) fn configure(&self, sink: Arc<dyn EventSink>) -> Result<()> {
+        self.sink
+            .set(sink)
             .map_err(|_| anyhow!("mobile runtime was already configured"))
     }
 
@@ -130,8 +131,8 @@ impl MobileRuntime {
                 events.pop_front();
             }
         }
-        if let Some(app) = manager.app.get() {
-            let _ = app.emit("mobile_notification", &notification);
+        if let Some(sink) = manager.sink.get() {
+            sink.emit("mobile_notification", &notification);
         }
         self.broadcast(json!({ "method": "notifications.event", "params": notification }));
     }
@@ -198,10 +199,10 @@ impl MobileRuntime {
     }
 
     fn emit_driver(&self, lease: &DriverLease, active: bool) {
-        if let Some(app) = self.app.get() {
-            let _ = app.emit(
+        if let Some(sink) = self.sink.get() {
+            sink.emit(
                 "mobile_terminal_driver",
-                json!({
+                &json!({
                     "sessionId": lease.session_id,
                     "tabId": lease.tab_id,
                     "active": active,
@@ -236,7 +237,7 @@ pub(super) struct MobileConnection {
     id: String,
     runtime: Arc<MobileRuntime>,
     outbound: mpsc::UnboundedSender<Value>,
-    subscriptions: Mutex<HashMap<String, EventId>>,
+    subscriptions: Mutex<HashMap<String, ListenerId>>,
     closed: std::sync::atomic::AtomicBool,
 }
 
@@ -260,9 +261,9 @@ impl MobileConnection {
         {
             return;
         }
-        if let Some(app) = self.runtime.app.get() {
+        if let Some(sink) = self.runtime.sink.get() {
             for (_, listener) in self.subscriptions.lock().unwrap().drain() {
-                app.unlisten(listener);
+                sink.unlisten(listener);
             }
         }
         self.runtime.unregister_client(&self.id);
@@ -272,14 +273,14 @@ impl MobileConnection {
         let _ = self.outbound.send(success_response(request_id, result));
     }
 
-    fn insert_subscription(&self, subscription_id: String, event_id: EventId) {
+    fn insert_subscription(&self, subscription_id: String, event_id: ListenerId) {
         self.subscriptions.lock().unwrap().insert(subscription_id, event_id);
     }
 
     fn unsubscribe(&self, subscription_id: &str) -> bool {
         let listener = self.subscriptions.lock().unwrap().remove(subscription_id);
-        if let (Some(app), Some(listener)) = (self.runtime.app.get(), listener) {
-            app.unlisten(listener);
+        if let (Some(sink), Some(listener)) = (self.runtime.sink.get(), listener) {
+            sink.unlisten(listener);
             true
         } else {
             false
@@ -293,9 +294,9 @@ impl Drop for MobileConnection {
             .closed
             .swap(true, std::sync::atomic::Ordering::SeqCst)
         {
-            if let Some(app) = self.runtime.app.get() {
+            if let Some(sink) = self.runtime.sink.get() {
                 for (_, listener) in self.subscriptions.lock().unwrap().drain() {
-                    app.unlisten(listener);
+                    sink.unlisten(listener);
                 }
             }
             self.runtime.unregister_client(&self.id);
@@ -311,13 +312,14 @@ pub(super) async fn dispatch(
 ) -> Option<Result<Value>> {
     let method = request.get("method")?.as_str()?;
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-    let app = manager.app.get().cloned();
+    let sink = manager.sink.get().cloned();
     let result = match method {
         "sessions.summaries" => no_params(&params).and_then(|_| session_summaries()),
         "session.tail" => parse_params(params).and_then(|params| session_tail(manager, params)),
-        "session.subscribe" => app
+        "session.subscribe" => sink
+            .as_ref()
             .context("app is unavailable")
-            .and_then(|app| parse_params(params).and_then(|params| subscribe_session(&app, connection, request_id(request), params))),
+            .and_then(|sink| parse_params(params).and_then(|params| subscribe_session(&**sink, connection, request_id(request), params))),
         "session.unsubscribe" | "terminal.unsubscribe" | "notifications.unsubscribe" => {
             parse_params(params).map(|params: UnsubscribeParams| json!({ "removed": connection.unsubscribe(&params.subscription_id) }))
         }
@@ -333,17 +335,19 @@ pub(super) async fn dispatch(
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| promote_notes(manager, device, params)))
         }
         "terminal.read" => parse_params(params).and_then(|params| read_terminal(manager, params)),
-        "terminal.subscribe" => app
+        "terminal.subscribe" => sink
+            .as_ref()
             .context("app is unavailable")
-            .and_then(|app| parse_params(params).and_then(|params| subscribe_terminal(manager, &app, connection, request_id(request), params))),
+            .and_then(|sink| parse_params(params).and_then(|params| subscribe_terminal(manager, &**sink, connection, request_id(request), params))),
         "steerLease.queueInput" => {
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| queue_input(manager, connection, params)))
         }
         "steerLease.release" => parse_params(params).map(|params| release_input(connection, params)),
         "notifications.missedSince" => parse_params(params).map(|params| missed_notifications(manager, params)),
-        "notifications.subscribe" => app
+        "notifications.subscribe" => sink
+            .as_ref()
             .context("app is unavailable")
-            .and_then(|app| no_params(&params).and_then(|_| subscribe_notifications(&app, connection, request_id(request)))),
+            .and_then(|sink| no_params(&params).and_then(|_| subscribe_notifications(&**sink, connection, request_id(request)))),
         _ => return None,
     };
     Some(result)
@@ -441,7 +445,7 @@ fn session_tail(manager: &PairingManager, params: SessionTailParams) -> Result<V
     if !(1..=20).contains(&params.limit) {
         bail!("tail limit must be between 1 and 20 turns");
     }
-    let session_manager = app_state(manager)?.manager().context("session manager is unavailable")?;
+    let session_manager = sessions(manager)?;
     let path = store::log_path(&params.session_id, &params.tab_id)?;
     let (mut events, has_more) = read_event_tail(&path, params.before, params.limit)?;
     if params.before.is_none() {
@@ -513,7 +517,7 @@ struct SessionSubscribeParams {
 }
 
 fn subscribe_session(
-    app: &AppHandle,
+    sink: &dyn EventSink,
     connection: &Arc<MobileConnection>,
     request_id: &str,
     params: SessionSubscribeParams,
@@ -524,14 +528,17 @@ fn subscribe_session(
     let response_id = request_id.to_string();
     let session_id = session.id;
     let tab_id = params.tab_id;
-    let listener = app.listen("agent_event", move |event| {
-        let Ok(event) = serde_json::from_str::<AgentEvent>(event.payload()) else { return };
-        if event.session_id == session_id && event.tab_id == tab_id {
-            if let Some(stream) = stream.upgrade() {
-                stream.stream(&response_id, json!({ "event": event }));
+    let listener = sink.listen(
+        "agent_event",
+        Box::new(move |payload| {
+            let Ok(event) = serde_json::from_str::<AgentEvent>(payload) else { return };
+            if event.session_id == session_id && event.tab_id == tab_id {
+                if let Some(stream) = stream.upgrade() {
+                    stream.stream(&response_id, json!({ "event": event }));
+                }
             }
-        }
-    });
+        }),
+    );
     connection.insert_subscription(subscription_id.clone(), listener);
     Ok(json!({ "subscriptionId": subscription_id }))
 }
@@ -576,9 +583,7 @@ struct PermissionRespondParams {
 
 fn respond_permission(manager: &PairingManager, params: PermissionRespondParams) -> Result<Value> {
     validate_session_tab(&params.session_id, &params.tab_id)?;
-    app_state(manager)?
-        .manager()
-        .context("session manager is unavailable")?
+    sessions(manager)?
         .respond_permission(
             &params.session_id,
             &params.tab_id,
@@ -731,7 +736,7 @@ fn send_attributed(
         "authority": "host",
     });
     let attributed = format!("[TerminalX Effective User v1] {envelope}\n{prompt}");
-    let session_manager = app_state(manager)?.manager().context("session manager is unavailable")?;
+    let session_manager = sessions(manager)?;
     let outcome = session_manager.send_with_display_text(
         session_id,
         tab_id,
@@ -859,9 +864,8 @@ struct TerminalParams {
 
 fn read_terminal(manager: &PairingManager, params: TerminalParams) -> Result<Value> {
     let pane = resolve_live_pane(manager, &params.worktree_id, &params.tab_id)?;
-    let state = app_state(manager)?;
-    let bytes = state
-        .terminals
+    let bytes = sessions(manager)?
+        .terminals()
         .read_output(&pane)
         .context("terminal output is unavailable")?;
     Ok(json!({ "text": String::from_utf8_lossy(&bytes) }))
@@ -879,7 +883,7 @@ struct TerminalSubscribeParams {
 
 fn subscribe_terminal(
     manager: &PairingManager,
-    app: &AppHandle,
+    sink: &dyn EventSink,
     connection: &Arc<MobileConnection>,
     request_id: &str,
     params: TerminalSubscribeParams,
@@ -891,28 +895,30 @@ fn subscribe_terminal(
         bail!("terminal subscription capabilities are invalid");
     }
     let pane = resolve_live_pane(manager, &params.worktree_id, &params.tab_id)?;
-    let state = app_state(manager)?;
-    let initial = state
-        .terminals
+    let initial = sessions(manager)?
+        .terminals()
         .read_output(&pane)
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
     let subscription_id = Uuid::new_v4().to_string();
     let stream = Arc::downgrade(connection);
     let response_id = request_id.to_string();
-    let listener = app.listen("pty_data", move |event| {
-        let Ok(data) = serde_json::from_str::<PtyData>(event.payload()) else { return };
-        if data.id != pane {
-            return;
-        }
-        let Ok(bytes) = general_purpose::STANDARD.decode(data.data) else { return };
-        if let Some(stream) = stream.upgrade() {
-            stream.stream(
-                &response_id,
-                json!({ "type": "data", "chunk": String::from_utf8_lossy(&bytes) }),
-            );
-        }
-    });
+    let listener = sink.listen(
+        "pty_data",
+        Box::new(move |payload| {
+            let Ok(data) = serde_json::from_str::<PtyData>(payload) else { return };
+            if data.id != pane {
+                return;
+            }
+            let Ok(bytes) = general_purpose::STANDARD.decode(data.data) else { return };
+            if let Some(stream) = stream.upgrade() {
+                stream.stream(
+                    &response_id,
+                    json!({ "type": "data", "chunk": String::from_utf8_lossy(&bytes) }),
+                );
+            }
+        }),
+    );
     connection.insert_subscription(subscription_id.clone(), listener);
     Ok(json!({
         "subscriptionId": subscription_id,
@@ -953,8 +959,8 @@ fn queue_input(
             .release_driver(&connection.id, &params.worktree_id, &params.tab_id);
         bail!("agent instance was replaced");
     }
-    app_state(manager)?
-        .terminals
+    sessions(manager)?
+        .terminals()
         .write(&current, params.text.as_bytes())?;
     Ok(json!({ "accepted": true, "bytesWritten": params.text.len() }))
 }
@@ -991,29 +997,28 @@ fn missed_notifications(manager: &PairingManager, params: MissedNotificationsPar
 }
 
 fn subscribe_notifications(
-    app: &AppHandle,
+    sink: &dyn EventSink,
     connection: &Arc<MobileConnection>,
     request_id: &str,
 ) -> Result<Value> {
     let subscription_id = Uuid::new_v4().to_string();
     let stream = Arc::downgrade(connection);
     let response_id = request_id.to_string();
-    let listener = app.listen("mobile_notification", move |event| {
-        let Ok(event) = serde_json::from_str::<MobileNotification>(event.payload()) else { return };
-        if let Some(stream) = stream.upgrade() {
-            stream.stream(&response_id, json!({ "event": event }));
-        }
-    });
+    let listener = sink.listen(
+        "mobile_notification",
+        Box::new(move |payload| {
+            let Ok(event) = serde_json::from_str::<MobileNotification>(payload) else { return };
+            if let Some(stream) = stream.upgrade() {
+                stream.stream(&response_id, json!({ "event": event }));
+            }
+        }),
+    );
     connection.insert_subscription(subscription_id.clone(), listener);
     Ok(json!({ "subscriptionId": subscription_id }))
 }
 
-fn app_state(manager: &PairingManager) -> Result<tauri::State<'_, AppState>> {
-    manager
-        .app
-        .get()
-        .context("app is unavailable")
-        .map(Manager::state::<AppState>)
+fn sessions(manager: &PairingManager) -> Result<&SessionManager> {
+    manager.sessions.get().context("session manager is unavailable")
 }
 
 fn validate_session_tab(session_id: &str, tab_id: &str) -> Result<(SessionEntry, TabEntry)> {
@@ -1038,12 +1043,11 @@ fn find_tab(tab_id: &str) -> Result<(SessionEntry, TabEntry)> {
 
 fn resolve_live_pane(manager: &PairingManager, session_id: &str, tab_id: &str) -> Result<String> {
     validate_session_tab(session_id, tab_id)?;
-    let state = app_state(manager)?;
-    let session_manager = state.manager().context("session manager is unavailable")?;
+    let session_manager = sessions(manager)?;
     let pane = session_manager
         .pane_of(session_id, tab_id)
         .context("terminal is not running")?;
-    if !state.terminals.is_running(&pane.pane_id) {
+    if !session_manager.terminals().is_running(&pane.pane_id) {
         bail!("terminal is not running");
     }
     Ok(pane.pane_id)
