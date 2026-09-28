@@ -258,6 +258,8 @@ async fn wait_for_shutdown_signal() {
 
 const SELF_TEST_PANE: &str = "serve-self-test";
 const SELF_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+const SELF_TEST_MARKER: &[u8] = b"terminalx-serve-42-ok";
+const EXIT_DRAIN: Duration = Duration::from_secs(3);
 
 /// Run the reader's login shell in a PTY, type one command into it and wait
 /// for its answer and its exit: the same path an agent tab's CLI takes.
@@ -275,16 +277,32 @@ fn self_test(runtime: &Runtime) -> Result<()> {
     runtime.terminals.write(SELF_TEST_PANE, b"echo terminalx-serve-$((6*7))-ok; exit 0\n")?;
     let deadline = Instant::now() + SELF_TEST_TIMEOUT;
     let mut output = Vec::new();
-    let mut answered = false;
+    // The exit is reported by the waiter thread, the last output by the
+    // reader thread as it drains the PTY: after the exit, the output still
+    // gets a moment to arrive.
+    let mut exited: Option<(Option<i64>, Instant)> = None;
     loop {
+        let answered = contains(&output, SELF_TEST_MARKER)
+            || runtime.terminals.read_output(SELF_TEST_PANE).is_some_and(|scrollback| contains(&scrollback, SELF_TEST_MARKER));
+        match exited {
+            Some((code, _)) if answered => {
+                if code != Some(0) {
+                    bail!("the shell answered but exited with {code:?}");
+                }
+                println!("{}", json!({ "type": "self-test", "pty": "ok", "shell": crate::pty::shell() }));
+                return Ok(());
+            }
+            Some((code, at)) if at.elapsed() >= EXIT_DRAIN => {
+                bail!("the shell exited with {code:?} without answering; output: {}", String::from_utf8_lossy(&output));
+            }
+            _ => {}
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             bail!("the shell did not answer and exit within {}s; output: {}", SELF_TEST_TIMEOUT.as_secs(), String::from_utf8_lossy(&output));
         }
-        let event = match events.blocking_recv_timeout(remaining) {
-            Some(event) => event,
-            None => continue,
-        };
+        let wait = if exited.is_some() { remaining.min(Duration::from_millis(50)) } else { remaining };
+        let Some(event) = events.blocking_recv_timeout(wait) else { continue };
         let payload: serde_json::Value = serde_json::from_str(&event.payload)?;
         if payload["id"] != SELF_TEST_PANE {
             continue;
@@ -293,19 +311,11 @@ fn self_test(runtime: &Runtime) -> Result<()> {
             "pty_data" => {
                 let chunk = base64::engine::general_purpose::STANDARD.decode(payload["data"].as_str().unwrap_or_default())?;
                 output.extend_from_slice(&chunk);
-                answered = answered || contains(&output, b"terminalx-serve-42-ok");
             }
             "pty_exit" => {
                 let code = payload["code"].as_i64();
                 log::info!("self-test shell exited with {code:?}");
-                if !answered {
-                    bail!("the shell exited without answering; output: {}", String::from_utf8_lossy(&output));
-                }
-                if code != Some(0) {
-                    bail!("the shell exited with {code:?}");
-                }
-                println!("{}", json!({ "type": "self-test", "pty": "ok", "shell": crate::pty::shell() }));
-                return Ok(());
+                exited = Some((code, Instant::now()));
             }
             _ => {}
         }
