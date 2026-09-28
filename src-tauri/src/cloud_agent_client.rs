@@ -1,0 +1,979 @@
+//! The desktop half of the cloud agent command mailbox and transcript
+//! checkpoints (PRO-22, `docs/CLOUD-AGENT-TABS.md`; terminalx-saas contract
+//! §11-13).
+//!
+//! - **Keys.** Workspace content keys arrive over the relay E2EE channel
+//!   (`keys.get`, called by `cloud_remote` itself) and are kept in the OS
+//!   keychain. The web view never sees them. A non-secret index names the
+//!   known key ids and the current one.
+//! - **Outbox.** A command is encrypted once. Its envelope is written durably
+//!   before the first POST and resent byte for byte until the API has it, so
+//!   a lost response never becomes a second command.
+//! - **Checkpoints.** Fetched only when newer, verified (sha256, AES-GCM with
+//!   the bound metadata), inflated under a limit and handed to the UI.
+//! - **Cache.** The UI's per-tab cache (ordered events, cursor, unread), kept
+//!   in the store rather than in web storage.
+//!
+//! Everything lives under `<store root>/cloud-agent/<user>/<organization>/<workspace>/`
+//! and is dropped when the signed-in identity changes.
+
+use std::collections::{BTreeMap, HashMap};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+
+use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use url::Url;
+use zeroize::Zeroizing;
+
+use crate::cloud_agents::crypto;
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// A checkpoint is at most 1 MiB decoded, so about 1.4 MiB of base64url.
+const RESPONSE_LIMIT: u64 = 4 * 1024 * 1024;
+const CHECKPOINT_INFLATE_LIMIT: usize = 8 * 1024 * 1024;
+const CACHE_ENTRY_LIMIT: usize = 4 * 1024 * 1024;
+const CACHE_TOTAL_LIMIT: usize = 32 * 1024 * 1024;
+const SETTLED_KEPT_PER_TAB: usize = 20;
+const STATUS_BATCH: usize = 100;
+const KINDS: [&str; 4] = ["send", "steer", "stop", "permission-decision"];
+const TERMINAL_STATES: [&str; 4] = ["applied", "rejected", "cancelled", "outcome-unknown"];
+
+/// The account a call is made for.
+#[derive(Clone)]
+pub struct Ctx {
+    pub user_id: String,
+    pub organization_id: String,
+    pub access_token: Zeroizing<String>,
+}
+
+pub trait AccountSource: Send + Sync {
+    fn context(&self) -> Option<Ctx>;
+}
+
+impl AccountSource for crate::account::AccountManager {
+    fn context(&self) -> Option<Ctx> {
+        let context = crate::account::AccountManager::context(self)?;
+        Some(Ctx { user_id: context.user_id, organization_id: context.organization_id, access_token: Zeroizing::new(context.access_token) })
+    }
+}
+
+/// Workspace content keys, by `(organization, workspace, keyId)`.
+pub trait KeyStore: Send + Sync {
+    fn put(&self, organization_id: &str, workspace_id: &str, key_id: &str, key: &[u8; crypto::KEY_LEN]) -> Result<()>;
+    fn get(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<Option<[u8; crypto::KEY_LEN]>>;
+    fn delete(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<()>;
+}
+
+/// macOS keychain generic passwords under `<app identifier>.cloud-agent-keys`.
+#[derive(Default)]
+pub struct KeychainKeys {
+    service: OnceLock<String>,
+}
+
+impl KeychainKeys {
+    pub fn configure(&self, app_identifier: &str) {
+        let _ = self.service.set(format!("{app_identifier}.cloud-agent-keys"));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn service(&self) -> Result<&str> {
+        self.service.get().map(String::as_str).ok_or_else(|| anyhow!("the key store is not configured"))
+    }
+}
+
+fn key_account(organization_id: &str, workspace_id: &str, key_id: &str) -> String {
+    format!("{organization_id}/{workspace_id}/{key_id}")
+}
+
+#[cfg(target_os = "macos")]
+impl KeyStore for KeychainKeys {
+    fn put(&self, organization_id: &str, workspace_id: &str, key_id: &str, key: &[u8; crypto::KEY_LEN]) -> Result<()> {
+        security_framework::passwords::set_generic_password(self.service()?, &key_account(organization_id, workspace_id, key_id), key)
+            .context("save a workspace key to Keychain")
+    }
+
+    fn get(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<Option<[u8; crypto::KEY_LEN]>> {
+        match security_framework::passwords::get_generic_password(self.service()?, &key_account(organization_id, workspace_id, key_id)) {
+            Ok(bytes) => {
+                let bytes = Zeroizing::new(bytes);
+                Ok(Some(bytes.as_slice().try_into().map_err(|_| anyhow!("a stored workspace key is not 32 bytes"))?))
+            }
+            Err(error) if error.code() == -25300 => Ok(None), // errSecItemNotFound
+            Err(error) => Err(error).context("read a workspace key from Keychain"),
+        }
+    }
+
+    fn delete(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<()> {
+        match security_framework::passwords::delete_generic_password(self.service()?, &key_account(organization_id, workspace_id, key_id)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.code() == -25300 => Ok(()),
+            Err(error) => Err(error).context("delete a workspace key from Keychain"),
+        }
+    }
+}
+
+/// Elsewhere: a 0600 file per workspace next to the index.
+#[cfg(not(target_os = "macos"))]
+impl KeyStore for KeychainKeys {
+    fn put(&self, organization_id: &str, workspace_id: &str, key_id: &str, key: &[u8; crypto::KEY_LEN]) -> Result<()> {
+        let path = secret_file(organization_id, workspace_id)?;
+        let mut keys: BTreeMap<String, String> = read_json(&path)?.unwrap_or_default();
+        keys.insert(key_id.to_string(), crypto::b64(key));
+        write_atomic(&path, &serde_json::to_vec(&keys)?)
+    }
+
+    fn get(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<Option<[u8; crypto::KEY_LEN]>> {
+        let keys: BTreeMap<String, String> = read_json(&secret_file(organization_id, workspace_id)?)?.unwrap_or_default();
+        keys.get(key_id).map(|key| crypto::key_from_b64(key)).transpose()
+    }
+
+    fn delete(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<()> {
+        let path = secret_file(organization_id, workspace_id)?;
+        let mut keys: BTreeMap<String, String> = read_json(&path)?.unwrap_or_default();
+        if keys.remove(key_id).is_some() {
+            write_atomic(&path, &serde_json::to_vec(&keys)?)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn secret_file(organization_id: &str, workspace_id: &str) -> Result<PathBuf> {
+    let dir = crate::store::root()?.join("cloud-agent-keys");
+    ensure_private_dir(&dir)?;
+    Ok(dir.join(format!("{organization_id}--{workspace_id}.json")))
+}
+
+/// For tests.
+#[cfg(test)]
+#[derive(Default)]
+pub struct MemoryKeys(Mutex<HashMap<String, [u8; crypto::KEY_LEN]>>);
+
+#[cfg(test)]
+impl KeyStore for MemoryKeys {
+    fn put(&self, organization_id: &str, workspace_id: &str, key_id: &str, key: &[u8; crypto::KEY_LEN]) -> Result<()> {
+        self.0.lock().unwrap().insert(key_account(organization_id, workspace_id, key_id), *key);
+        Ok(())
+    }
+    fn get(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<Option<[u8; crypto::KEY_LEN]>> {
+        Ok(self.0.lock().unwrap().get(&key_account(organization_id, workspace_id, key_id)).copied())
+    }
+    fn delete(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<()> {
+        self.0.lock().unwrap().remove(&key_account(organization_id, workspace_id, key_id));
+        Ok(())
+    }
+}
+
+/// Which keys a workspace has and which one encrypts new commands. No secrets.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KeyIndex {
+    current_key_id: Option<String>,
+    keys: Vec<KeyMeta>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KeyMeta {
+    key_id: String,
+    #[serde(default)]
+    created_at: Option<Value>,
+    #[serde(default)]
+    retired_at: Option<Value>,
+}
+
+/// An outbox entry as stored: the exact envelope plus what is known of it.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Stored {
+    client_command_id: String,
+    tab_id: String,
+    kind: String,
+    key_id: String,
+    iv: String,
+    ciphertext: String,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
+    state: String,
+    #[serde(default)]
+    wake: Option<String>,
+    #[serde(default)]
+    outcome: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    receipt: Option<Value>,
+    #[serde(default)]
+    sequence: Option<u64>,
+    created_at: u64,
+    updated_at: u64,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+impl Stored {
+    fn envelope(&self) -> Value {
+        json!({
+            "v": 1,
+            "clientCommandId": self.client_command_id,
+            "tabId": self.tab_id,
+            "kind": self.kind,
+            "keyId": self.key_id,
+            "iv": self.iv,
+            "ciphertext": self.ciphertext,
+        })
+    }
+
+    fn pending(&self) -> bool {
+        !TERMINAL_STATES.contains(&self.state.as_str())
+    }
+
+    fn view(&self) -> OutboxEntry {
+        OutboxEntry {
+            client_command_id: self.client_command_id.clone(),
+            tab_id: self.tab_id.clone(),
+            kind: self.kind.clone(),
+            text: self.text.clone(),
+            request_id: self.request_id.clone(),
+            state: self.state.clone(),
+            wake: self.wake.clone(),
+            outcome: self.outcome.clone(),
+            category: self.category.clone(),
+            receipt: self.receipt.clone(),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            error: self.error.clone(),
+        }
+    }
+}
+
+/// What the UI sees of an outbox entry: never the envelope.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboxEntry {
+    pub client_command_id: String,
+    pub tab_id: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// `unsent`, or the server's `queued | leased | applied | rejected | cancelled | outcome-unknown`.
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wake: Option<String>,
+    /// The runtime's receipt outcome, once decrypted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<Value>,
+    pub created_at: u64,
+    pub updated_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Checkpoint {
+    pub epoch: u64,
+    pub version: u64,
+    pub schema_version: u64,
+    pub projection: Value,
+}
+
+/// The server's `command` object, as far as the outbox reads it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerCommand {
+    client_command_id: String,
+    state: String,
+    #[serde(default)]
+    sequence: Option<u64>,
+    #[serde(default)]
+    outcome_category: Option<String>,
+    #[serde(default)]
+    result_iv: Option<String>,
+    #[serde(default)]
+    result_ciphertext: Option<String>,
+}
+
+enum Reply {
+    Ok(Value),
+    /// An HTTP error with the API's `{ "error": code }`.
+    Refused(u16, String),
+    /// No answer: the request may or may not have arrived.
+    Unreachable,
+}
+
+fn valid_id(value: &str) -> bool {
+    (1..=128).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+pub struct CloudAgentClient {
+    accounts: Arc<dyn AccountSource>,
+    keys: Arc<dyn KeyStore>,
+    base: Url,
+    root: PathBuf,
+    /// Serializes every read-modify-write of the stored files.
+    lock: Mutex<()>,
+    /// The identity last observed, so a change drops the old one's data.
+    observed: Mutex<Option<(String, String)>>,
+}
+
+impl CloudAgentClient {
+    pub fn new(accounts: Arc<dyn AccountSource>, keys: Arc<dyn KeyStore>) -> Result<Self> {
+        let base = Url::parse(&crate::account::api_base_url()).context("account service URL")?;
+        Ok(Self::with(accounts, keys, base, crate::store::root()?.join("cloud-agent")))
+    }
+
+    pub fn with(accounts: Arc<dyn AccountSource>, keys: Arc<dyn KeyStore>, base: Url, root: PathBuf) -> Self {
+        Self { accounts, keys, base, root, lock: Mutex::new(()), observed: Mutex::new(None) }
+    }
+
+    /// The current account, which must be in `organization_id`.
+    fn ctx(&self, organization_id: &str) -> Result<Ctx, String> {
+        let ctx = self.accounts.context().ok_or("account_signed_out")?;
+        if ctx.organization_id.is_empty() || ctx.organization_id != organization_id {
+            return Err("cloud_remote_organization_mismatch".into());
+        }
+        Ok(ctx)
+    }
+
+    fn dir(&self, ctx: &Ctx, workspace_id: &str) -> Result<PathBuf, String> {
+        if !valid_id(workspace_id) || !valid_id(&ctx.user_id) || !valid_id(&ctx.organization_id) {
+            return Err("cloud_agent_request_invalid".into());
+        }
+        Ok(self.root.join(&ctx.user_id).join(&ctx.organization_id).join(workspace_id))
+    }
+
+    // ------------------------------------------------------------ keys
+
+    /// Store what `keys.get` answered for a workspace. Called by
+    /// `cloud_remote` for the identity the connection was made for.
+    pub fn store_keys(&self, user_id: &str, organization_id: &str, workspace_id: &str, result: &Value) -> Result<()> {
+        let current = self.accounts.context().ok_or_else(|| anyhow!("signed out"))?;
+        if current.user_id != user_id || current.organization_id != organization_id {
+            return Err(anyhow!("the identity changed before the keys arrived"));
+        }
+        let dir = self.dir(&current, workspace_id).map_err(anyhow::Error::msg)?;
+        let current_key_id = result.get("currentKeyId").and_then(Value::as_str).filter(|id| valid_id(id)).map(str::to_string);
+        let mut metas = Vec::new();
+        for key in result.get("keys").and_then(Value::as_array).into_iter().flatten() {
+            let key_id = key.get("keyId").and_then(Value::as_str).filter(|id| valid_id(id)).ok_or_else(|| anyhow!("a key has no valid keyId"))?;
+            let bytes = Zeroizing::new(crypto::key_from_b64(key.get("key").and_then(Value::as_str).unwrap_or_default())?);
+            self.keys.put(organization_id, workspace_id, key_id, &bytes)?;
+            metas.push(KeyMeta { key_id: key_id.to_string(), created_at: key.get("createdAt").cloned(), retired_at: key.get("retiredAt").cloned() });
+        }
+        if current_key_id.as_ref().is_some_and(|id| !metas.iter().any(|meta| &meta.key_id == id)) {
+            return Err(anyhow!("currentKeyId is not among the keys"));
+        }
+        let _guard = self.lock.lock().unwrap();
+        let path = dir.join("keys.json");
+        let mut index: KeyIndex = read_json(&path)?.unwrap_or_default();
+        // Keys the runtime no longer lists are forgotten, secret included.
+        for old in &index.keys {
+            if !metas.iter().any(|meta| meta.key_id == old.key_id) {
+                let _ = self.keys.delete(organization_id, workspace_id, &old.key_id);
+            }
+        }
+        index.keys = metas;
+        index.current_key_id = current_key_id;
+        write_atomic(&path, &serde_json::to_vec(&index)?)
+    }
+
+    fn index(&self, dir: &Path) -> Result<KeyIndex, String> {
+        read_json(&dir.join("keys.json")).map_err(|_| "cloud_agent_store_unreadable".to_string()).map(Option::unwrap_or_default)
+    }
+
+    fn key(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<[u8; crypto::KEY_LEN], String> {
+        match self.keys.get(organization_id, workspace_id, key_id) {
+            Ok(Some(key)) => Ok(key),
+            Ok(None) => Err("cloud_agent_key_missing".into()),
+            Err(error) => {
+                log::warn!("read workspace key: {error:#}");
+                Err("cloud_agent_key_store_unavailable".into())
+            }
+        }
+    }
+
+    pub fn has_key(&self, organization_id: &str, workspace_id: &str) -> Result<bool, String> {
+        let ctx = self.ctx(organization_id)?;
+        let dir = self.dir(&ctx, workspace_id)?;
+        let Some(current) = self.index(&dir)?.current_key_id else { return Ok(false) };
+        Ok(self.keys.get(organization_id, workspace_id, &current).ok().flatten().is_some())
+    }
+
+    // ------------------------------------------------------------ outbox
+
+    fn load_outbox(&self, dir: &Path) -> Result<Vec<Stored>, String> {
+        read_json(&dir.join("outbox.json")).map_err(|_| "cloud_agent_store_unreadable".to_string()).map(Option::unwrap_or_default)
+    }
+
+    fn save_outbox(&self, dir: &Path, entries: &[Stored]) -> Result<(), String> {
+        let bytes = serde_json::to_vec(entries).map_err(|_| "cloud_agent_store_unwritable".to_string())?;
+        write_atomic(&dir.join("outbox.json"), &bytes).map_err(|error| {
+            log::warn!("write the cloud agent outbox: {error:#}");
+            "cloud_agent_store_unwritable".to_string()
+        })
+    }
+
+    /// Update stored entries under the lock.
+    fn edit_outbox<R>(&self, dir: &Path, edit: impl FnOnce(&mut Vec<Stored>) -> R) -> Result<R, String> {
+        let _guard = self.lock.lock().unwrap();
+        let mut entries = self.load_outbox(dir)?;
+        let result = edit(&mut entries);
+        prune(&mut entries);
+        self.save_outbox(dir, &entries)?;
+        Ok(result)
+    }
+
+    /// Encrypt a command, store its envelope, then hand it to the API. A
+    /// command the API could not be asked about stays `unsent` and is resent
+    /// by `outbox_sync`; it is never re-encrypted.
+    pub fn enqueue(&self, organization_id: &str, workspace_id: &str, tab_id: &str, kind: &str, payload: Value) -> Result<OutboxEntry, String> {
+        let ctx = self.ctx(organization_id)?;
+        let dir = self.dir(&ctx, workspace_id)?;
+        if !valid_id(tab_id) || !KINDS.contains(&kind) {
+            return Err("cloud_agent_request_invalid".into());
+        }
+        let Value::Object(mut plaintext) = payload else { return Err("cloud_agent_request_invalid".into()) };
+        let text = plaintext.get("text").and_then(Value::as_str).map(str::to_string);
+        let request_id = plaintext.get("requestId").and_then(Value::as_str).map(str::to_string);
+        let valid = match kind {
+            "send" | "steer" => text.as_deref().is_some_and(|text| !text.trim().is_empty()),
+            "permission-decision" => {
+                request_id.as_deref().is_some_and(|id| !id.is_empty())
+                    && (plaintext.get("optionId").is_some_and(Value::is_string) || plaintext.get("answers").is_some_and(Value::is_object))
+            }
+            _ => true,
+        };
+        if !valid {
+            return Err("cloud_agent_request_invalid".into());
+        }
+        plaintext.insert("v".into(), json!(1));
+        let key_id = self.index(&dir)?.current_key_id.ok_or("cloud_agent_key_missing")?;
+        let key = Zeroizing::new(self.key(organization_id, workspace_id, &key_id)?);
+        let client_command_id = uuid::Uuid::new_v4().to_string();
+        let aad = crypto::command_aad(organization_id, workspace_id, tab_id, &client_command_id, kind, &key_id);
+        let bytes = Zeroizing::new(serde_json::to_vec(&Value::Object(plaintext)).map_err(|_| "cloud_agent_request_invalid".to_string())?);
+        let (iv, ciphertext) = crypto::seal(&key, &bytes, &aad).map_err(|_| "cloud_agent_encrypt_failed".to_string())?;
+        if ciphertext.len() > crypto::MAX_COMMAND_CIPHERTEXT {
+            return Err("cloud_agent_command_too_large".into());
+        }
+        let now = now_ms();
+        let stored = Stored {
+            client_command_id: client_command_id.clone(),
+            tab_id: tab_id.to_string(),
+            kind: kind.to_string(),
+            key_id,
+            iv,
+            ciphertext,
+            text,
+            request_id,
+            state: "unsent".into(),
+            wake: None,
+            outcome: None,
+            category: None,
+            receipt: None,
+            sequence: None,
+            created_at: now,
+            updated_at: now,
+            error: None,
+        };
+        // Durable before the network: a crash after the POST still resends it.
+        self.edit_outbox(&dir, |entries| entries.push(stored.clone()))?;
+        self.post_envelope(&ctx, workspace_id, &dir, &stored)
+    }
+
+    fn post_envelope(&self, ctx: &Ctx, workspace_id: &str, dir: &Path, stored: &Stored) -> Result<OutboxEntry, String> {
+        let reply = self.call(ctx, "POST", workspace_id, &["agent-commands"], &[], Some(&stored.envelope()));
+        let id = stored.client_command_id.clone();
+        self.edit_outbox(dir, |entries| {
+            let entry = entries.iter_mut().find(|entry| entry.client_command_id == id)?;
+            entry.updated_at = now_ms();
+            match reply {
+                Reply::Ok(body) => {
+                    entry.error = None;
+                    entry.wake = body.get("wake").and_then(Value::as_str).map(str::to_string);
+                    if let Some(command) = body.get("command").cloned().and_then(|c| serde_json::from_value::<ServerCommand>(c).ok()) {
+                        self.apply_server(&ctx.organization_id, workspace_id, dir, entry, command);
+                    } else {
+                        entry.state = "queued".into();
+                    }
+                }
+                // Kept unsent: nothing proves the API has or lacks it.
+                Reply::Unreachable => entry.error = Some("cloud_agent_command_pending_retry".into()),
+                Reply::Refused(status, code) if status == 401 || status >= 500 => entry.error = Some(code),
+                // The API refused it for good and stored nothing (or stored
+                // another payload under this id): it will never run.
+                Reply::Refused(_, code) => {
+                    entry.state = "rejected".into();
+                    entry.category = Some(code.clone());
+                    entry.error = Some(code);
+                }
+            }
+            Some(entry.view())
+        })?
+        .ok_or_else(|| "cloud_agent_command_unknown".into())
+    }
+
+    fn apply_server(&self, organization_id: &str, workspace_id: &str, dir: &Path, entry: &mut Stored, command: ServerCommand) {
+        if command.client_command_id != entry.client_command_id {
+            return;
+        }
+        entry.state = command.state;
+        entry.sequence = command.sequence.or(entry.sequence);
+        if command.outcome_category.is_some() {
+            entry.category = command.outcome_category;
+        }
+        if let (Some(iv), Some(ciphertext)) = (command.result_iv.filter(|v| !v.is_empty()), command.result_ciphertext.filter(|v| !v.is_empty())) {
+            if entry.receipt.is_none() {
+                entry.receipt = self.open_receipt(organization_id, workspace_id, dir, entry, &iv, &ciphertext);
+                entry.outcome = entry.receipt.as_ref().and_then(|r| r.get("outcome")).and_then(Value::as_str).map(str::to_string);
+            }
+        }
+    }
+
+    /// The receipt names its outcome and key only inside its AAD, so each
+    /// outcome and known key (the command's own first) is tried.
+    fn open_receipt(&self, organization_id: &str, workspace_id: &str, dir: &Path, entry: &Stored, iv: &str, ciphertext: &str) -> Option<Value> {
+        let mut key_ids = vec![entry.key_id.clone()];
+        for meta in read_json::<KeyIndex>(&dir.join("keys.json")).ok().flatten().unwrap_or_default().keys {
+            if !key_ids.contains(&meta.key_id) {
+                key_ids.push(meta.key_id);
+            }
+        }
+        for key_id in key_ids {
+            let Ok(Some(key)) = self.keys.get(organization_id, workspace_id, &key_id) else { continue };
+            let key = Zeroizing::new(key);
+            for outcome in ["applied", "rejected", "outcome-unknown"] {
+                let aad = crypto::receipt_aad(organization_id, workspace_id, &entry.client_command_id, outcome, &key_id);
+                if let Ok(bytes) = crypto::open(&key, iv, ciphertext, &aad) {
+                    let mut receipt = crypto::parse_v1(&bytes).ok()?;
+                    receipt["outcome"] = json!(outcome);
+                    return Some(receipt);
+                }
+            }
+        }
+        None
+    }
+
+    /// Resend what the API has not confirmed, then refresh every pending
+    /// entry's state.
+    pub fn outbox_sync(&self, organization_id: &str, workspace_id: &str) -> Result<Vec<OutboxEntry>, String> {
+        let ctx = self.ctx(organization_id)?;
+        let dir = self.dir(&ctx, workspace_id)?;
+        let unsent: Vec<Stored> = {
+            let _guard = self.lock.lock().unwrap();
+            self.load_outbox(&dir)?.into_iter().filter(|entry| entry.state == "unsent").collect()
+        };
+        for entry in &unsent {
+            self.post_envelope(&ctx, workspace_id, &dir, entry)?;
+        }
+        let pending: Vec<String> = {
+            let _guard = self.lock.lock().unwrap();
+            self.load_outbox(&dir)?.into_iter().filter(|entry| entry.pending() && entry.state != "unsent").map(|entry| entry.client_command_id).collect()
+        };
+        for batch in pending.chunks(STATUS_BATCH) {
+            let body = json!({ "v": 1, "clientCommandIds": batch });
+            match self.call(&ctx, "POST", workspace_id, &["agent-commands", "status"], &[], Some(&body)) {
+                Reply::Ok(body) => {
+                    let commands: Vec<ServerCommand> =
+                        body.get("commands").cloned().and_then(|c| serde_json::from_value(c).ok()).unwrap_or_default();
+                    self.edit_outbox(&dir, |entries| {
+                        for command in commands {
+                            if let Some(entry) = entries.iter_mut().find(|entry| entry.client_command_id == command.client_command_id) {
+                                entry.updated_at = now_ms();
+                                entry.error = None;
+                                self.apply_server(organization_id, workspace_id, &dir, entry, command);
+                            }
+                        }
+                    })?;
+                }
+                Reply::Unreachable => return Err("cloud_workspace_unavailable".into()),
+                Reply::Refused(_, code) => return Err(code),
+            }
+        }
+        self.outbox(organization_id, workspace_id, None)
+    }
+
+    /// Pending entries first (oldest first), then settled ones, newest first.
+    pub fn outbox(&self, organization_id: &str, workspace_id: &str, tab_id: Option<&str>) -> Result<Vec<OutboxEntry>, String> {
+        let ctx = self.ctx(organization_id)?;
+        let dir = self.dir(&ctx, workspace_id)?;
+        let _guard = self.lock.lock().unwrap();
+        let mut entries: Vec<Stored> = self.load_outbox(&dir)?.into_iter().filter(|entry| tab_id.is_none_or(|tab| entry.tab_id == tab)).collect();
+        entries.sort_by_key(|entry| (!entry.pending(), if entry.pending() { entry.created_at as i64 } else { -(entry.updated_at as i64) }));
+        Ok(entries.iter().map(Stored::view).collect())
+    }
+
+    pub fn cancel(&self, organization_id: &str, workspace_id: &str, client_command_id: &str) -> Result<OutboxEntry, String> {
+        let ctx = self.ctx(organization_id)?;
+        let dir = self.dir(&ctx, workspace_id)?;
+        if !valid_id(client_command_id) {
+            return Err("cloud_agent_request_invalid".into());
+        }
+        let known = self.outbox(organization_id, workspace_id, None)?.into_iter().find(|entry| entry.client_command_id == client_command_id);
+        let known = known.ok_or("cloud_agent_command_unknown")?;
+        if !TERMINAL_STATES.contains(&known.state.as_str()) {
+            let reply = self.call(&ctx, "POST", workspace_id, &["agent-commands", client_command_id, "cancel"], &[], Some(&json!({})));
+            let id = client_command_id.to_string();
+            let outcome = self.edit_outbox(&dir, |entries| {
+                let entry = entries.iter_mut().find(|entry| entry.client_command_id == id)?;
+                entry.updated_at = now_ms();
+                Some(match reply {
+                    Reply::Ok(body) => {
+                        if let Some(command) = body.get("command").cloned().and_then(|c| serde_json::from_value::<ServerCommand>(c).ok()) {
+                            self.apply_server(organization_id, workspace_id, &dir, entry, command);
+                        }
+                        Ok(())
+                    }
+                    // Never reached the API: nothing to cancel there.
+                    Reply::Refused(404, _) if entry.state == "unsent" => {
+                        entry.state = "cancelled".into();
+                        entry.category = Some("cancelled-by-user".into());
+                        Ok(())
+                    }
+                    Reply::Refused(_, code) => Err(code),
+                    Reply::Unreachable => Err("cloud_workspace_unavailable".into()),
+                })
+            })?;
+            match outcome {
+                Some(Err(code)) => return Err(code),
+                None => return Err("cloud_agent_command_unknown".into()),
+                Some(Ok(())) => {}
+            }
+        }
+        self.outbox(organization_id, workspace_id, None)?
+            .into_iter()
+            .find(|entry| entry.client_command_id == client_command_id)
+            .ok_or_else(|| "cloud_agent_command_unknown".into())
+    }
+
+    // ------------------------------------------------------------ checkpoints
+
+    pub fn checkpoints(&self, organization_id: &str, workspace_id: &str) -> Result<Vec<Value>, String> {
+        let ctx = self.ctx(organization_id)?;
+        self.dir(&ctx, workspace_id)?;
+        match self.call(&ctx, "GET", workspace_id, &["transcript-checkpoints"], &[], None) {
+            Reply::Ok(body) => Ok(body.get("checkpoints").and_then(Value::as_array).cloned().unwrap_or_default()),
+            Reply::Refused(_, code) => Err(code),
+            Reply::Unreachable => Err("cloud_workspace_unavailable".into()),
+        }
+    }
+
+    /// The tab's checkpoint when it is newer than `(after_epoch, after_version)`.
+    pub fn checkpoint(&self, organization_id: &str, workspace_id: &str, tab_id: &str, after: Option<(u64, u64)>) -> Result<Option<Checkpoint>, String> {
+        let ctx = self.ctx(organization_id)?;
+        self.dir(&ctx, workspace_id)?;
+        if !valid_id(tab_id) {
+            return Err("cloud_agent_request_invalid".into());
+        }
+        let query: Vec<(&str, String)> = after.map(|(epoch, version)| vec![("afterEpoch", epoch.to_string()), ("afterVersion", version.to_string())]).unwrap_or_default();
+        let body = match self.call(&ctx, "GET", workspace_id, &["transcript-checkpoints", tab_id], &query, None) {
+            Reply::Ok(body) => body,
+            Reply::Refused(404, code) if code == "cloud_workspace_transcript_checkpoint_not_found" => return Ok(None),
+            Reply::Refused(_, code) => return Err(code),
+            Reply::Unreachable => return Err("cloud_workspace_unavailable".into()),
+        };
+        let Some(checkpoint) = body.get("checkpoint").filter(|value| !value.is_null()) else { return Ok(None) };
+        self.open_checkpoint(organization_id, workspace_id, tab_id, checkpoint, after)
+    }
+
+    fn open_checkpoint(&self, organization_id: &str, workspace_id: &str, tab_id: &str, checkpoint: &Value, after: Option<(u64, u64)>) -> Result<Option<Checkpoint>, String> {
+        let invalid = || "cloud_agent_checkpoint_invalid".to_string();
+        let number = |name: &str| checkpoint.get(name).and_then(Value::as_u64).ok_or_else(invalid);
+        let text = |name: &str| checkpoint.get(name).and_then(Value::as_str).ok_or_else(invalid);
+        let (epoch, version, schema_version) = (number("epoch")?, number("version")?, number("schemaVersion")?);
+        if checkpoint.get("tabId").and_then(Value::as_str).is_some_and(|id| id != tab_id) {
+            return Err(invalid());
+        }
+        // A live projection or the cache is always stronger than an older checkpoint.
+        if after.is_some_and(|after| (epoch, version) <= after) {
+            return Ok(None);
+        }
+        if schema_version != crypto::CHECKPOINT_SCHEMA {
+            return Err("cloud_agent_checkpoint_schema_unsupported".into());
+        }
+        let key_id = text("keyId")?;
+        let iv = crypto::unb64(text("iv")?).map_err(|_| invalid())?;
+        let ciphertext = crypto::unb64(text("ciphertext")?).map_err(|_| invalid())?;
+        if iv.len() != crypto::IV_LEN || ciphertext.len() > crypto::MAX_CHECKPOINT_CIPHERTEXT {
+            return Err(invalid());
+        }
+        if !crypto::sha256_hex(&ciphertext).eq_ignore_ascii_case(text("sha256")?) {
+            return Err("cloud_agent_checkpoint_hash_mismatch".into());
+        }
+        let key = Zeroizing::new(self.key(organization_id, workspace_id, key_id)?);
+        let aad = crypto::checkpoint_aad(organization_id, workspace_id, tab_id, epoch, version, schema_version, key_id);
+        let packed = crypto::open_raw(&key, &iv, &ciphertext, &aad).map_err(|_| "cloud_agent_checkpoint_decrypt_failed".to_string())?;
+        let json = crypto::gunzip(&packed, CHECKPOINT_INFLATE_LIMIT).map_err(|_| invalid())?;
+        let projection = crypto::parse_v1(&json).map_err(|_| invalid())?;
+        Ok(Some(Checkpoint { epoch, version, schema_version, projection }))
+    }
+
+    // ------------------------------------------------------------ cache
+
+    pub fn cache_load(&self, organization_id: &str, workspace_id: &str) -> Result<Value, String> {
+        let ctx = self.ctx(organization_id)?;
+        let dir = self.dir(&ctx, workspace_id)?;
+        let _guard = self.lock.lock().unwrap();
+        let tabs: BTreeMap<String, Value> = read_json(&dir.join("cache.json")).ok().flatten().unwrap_or_default();
+        Ok(json!({ "tabs": tabs }))
+    }
+
+    pub fn cache_save(&self, organization_id: &str, workspace_id: &str, tab_id: &str, entry: Option<Value>) -> Result<(), String> {
+        let ctx = self.ctx(organization_id)?;
+        let dir = self.dir(&ctx, workspace_id)?;
+        if !valid_id(tab_id) {
+            return Err("cloud_agent_request_invalid".into());
+        }
+        if entry.as_ref().is_some_and(|entry| serde_json::to_vec(entry).map(|bytes| bytes.len()).unwrap_or(usize::MAX) > CACHE_ENTRY_LIMIT) {
+            return Err("cloud_agent_cache_too_large".into());
+        }
+        let _guard = self.lock.lock().unwrap();
+        let path = dir.join("cache.json");
+        let mut tabs: BTreeMap<String, Value> = read_json(&path).ok().flatten().unwrap_or_default();
+        match entry {
+            Some(entry) => tabs.insert(tab_id.to_string(), entry),
+            None => tabs.remove(tab_id),
+        };
+        let bytes = serde_json::to_vec(&tabs).map_err(|_| "cloud_agent_store_unwritable".to_string())?;
+        if bytes.len() > CACHE_TOTAL_LIMIT {
+            return Err("cloud_agent_cache_too_large".into());
+        }
+        write_atomic(&path, &bytes).map_err(|_| "cloud_agent_store_unwritable".to_string())
+    }
+
+    // ------------------------------------------------------------ identity
+
+    /// Called with the signed-in `(user, organization)` whenever it is read.
+    /// Everything stored for another identity is dropped, keys included.
+    pub fn observe_identity(&self, current: Option<(String, String)>) {
+        let changed = {
+            let mut observed = self.observed.lock().unwrap();
+            let changed = *observed != current;
+            let had = observed.is_some();
+            *observed = current.clone();
+            // Before the account loads the identity reads as none; only a
+            // real change (or the first real identity) prunes.
+            changed && (had || current.is_some())
+        };
+        if changed {
+            self.retain_only(current.as_ref());
+        }
+    }
+
+    fn retain_only(&self, keep: Option<&(String, String)>) {
+        let _guard = self.lock.lock().unwrap();
+        let Ok(users) = std::fs::read_dir(&self.root) else { return };
+        for user in users.flatten() {
+            let user_id = user.file_name().to_string_lossy().into_owned();
+            let Ok(orgs) = std::fs::read_dir(user.path()) else { continue };
+            for org in orgs.flatten() {
+                let organization_id = org.file_name().to_string_lossy().into_owned();
+                if keep.is_some_and(|(u, o)| *u == user_id && *o == organization_id) {
+                    continue;
+                }
+                for workspace in std::fs::read_dir(org.path()).into_iter().flatten().flatten() {
+                    let workspace_id = workspace.file_name().to_string_lossy().into_owned();
+                    let index: KeyIndex = read_json(&workspace.path().join("keys.json")).ok().flatten().unwrap_or_default();
+                    for meta in index.keys {
+                        if let Err(error) = self.keys.delete(&organization_id, &workspace_id, &meta.key_id) {
+                            log::warn!("drop a workspace key: {error:#}");
+                        }
+                    }
+                }
+                if let Err(error) = std::fs::remove_dir_all(org.path()) {
+                    log::warn!("drop cloud agent data for a previous identity: {error}");
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ HTTP
+
+    fn call(&self, ctx: &Ctx, method: &str, workspace_id: &str, tail: &[&str], query: &[(&str, String)], body: Option<&Value>) -> Reply {
+        let mut url = self.base.clone();
+        {
+            let Ok(mut segments) = url.path_segments_mut() else { return Reply::Unreachable };
+            segments.pop_if_empty();
+            segments.extend(["v1", "desktop", "orgs", ctx.organization_id.as_str(), "cloud-workspaces", workspace_id]);
+            segments.extend(tail.iter().copied());
+        }
+        for (name, value) in query {
+            url.query_pairs_mut().append_pair(name, value);
+        }
+        let agent = ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).redirects(0).build();
+        let request = agent
+            .request(method, url.as_str())
+            .set("authorization", &format!("Bearer {}", ctx.access_token.as_str()))
+            .set("content-type", "application/json");
+        let response = match body {
+            Some(body) => request.send_bytes(&serde_json::to_vec(body).unwrap_or_default()),
+            None => request.call(),
+        };
+        let read = |response: ureq::Response| -> Option<Value> {
+            let mut bytes = Vec::new();
+            response.into_reader().take(RESPONSE_LIMIT + 1).read_to_end(&mut bytes).ok()?;
+            (bytes.len() as u64 <= RESPONSE_LIMIT).then(|| serde_json::from_slice(&bytes).ok()).flatten()
+        };
+        match response {
+            Ok(response) => read(response).map(Reply::Ok).unwrap_or(Reply::Unreachable),
+            Err(ureq::Error::Status(status, response)) => {
+                let code = read(response)
+                    .and_then(|body| body.get("error").and_then(Value::as_str).map(str::to_string))
+                    .filter(|code| code.len() <= 96 && code.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'))
+                    .unwrap_or_else(|| "cloud_workspace_unavailable".into());
+                Reply::Refused(status, code)
+            }
+            Err(ureq::Error::Transport(_)) => Reply::Unreachable,
+        }
+    }
+}
+
+/// Keep every pending entry and the newest settled ones per tab.
+fn prune(entries: &mut Vec<Stored>) {
+    let mut settled: HashMap<String, Vec<(u64, String)>> = HashMap::new();
+    for entry in entries.iter().filter(|entry| !entry.pending()) {
+        settled.entry(entry.tab_id.clone()).or_default().push((entry.updated_at, entry.client_command_id.clone()));
+    }
+    let mut dropped = std::collections::HashSet::new();
+    for (_, mut list) in settled {
+        list.sort_by(|a, b| b.cmp(a));
+        dropped.extend(list.into_iter().skip(SETTLED_KEPT_PER_TAB).map(|(_, id)| id));
+    }
+    entries.retain(|entry| !dropped.contains(&entry.client_command_id));
+}
+
+fn ensure_private_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+/// Temp file, fsync, rename, fsync the directory: the file is either the
+/// old or the new contents after a crash.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let dir = path.parent().ok_or_else(|| anyhow!("no parent directory"))?;
+    ensure_private_dir(dir)?;
+    let tmp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4().simple()));
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error).with_context(|| format!("rename into {}", path.display()));
+    }
+    #[cfg(unix)]
+    std::fs::File::open(dir).and_then(|dir| dir.sync_all()).with_context(|| format!("sync {}", dir.display()))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------- Tauri
+
+type Client<'a> = tauri::State<'a, Arc<CloudAgentClient>>;
+
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work).await.map_err(|_| "cloud_agent_task_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn cloud_agent_enqueue(client: Client<'_>, organization_id: String, workspace_id: String, tab_id: String, kind: String, payload: Value) -> Result<OutboxEntry, String> {
+    let client = client.inner().clone();
+    blocking(move || client.enqueue(&organization_id, &workspace_id, &tab_id, &kind, payload)).await
+}
+
+#[tauri::command]
+pub async fn cloud_agent_outbox(client: Client<'_>, organization_id: String, workspace_id: String, tab_id: Option<String>) -> Result<Vec<OutboxEntry>, String> {
+    let client = client.inner().clone();
+    blocking(move || client.outbox(&organization_id, &workspace_id, tab_id.as_deref())).await
+}
+
+#[tauri::command]
+pub async fn cloud_agent_outbox_sync(client: Client<'_>, organization_id: String, workspace_id: String) -> Result<Vec<OutboxEntry>, String> {
+    let client = client.inner().clone();
+    blocking(move || client.outbox_sync(&organization_id, &workspace_id)).await
+}
+
+#[tauri::command]
+pub async fn cloud_agent_cancel(client: Client<'_>, organization_id: String, workspace_id: String, client_command_id: String) -> Result<OutboxEntry, String> {
+    let client = client.inner().clone();
+    blocking(move || client.cancel(&organization_id, &workspace_id, &client_command_id)).await
+}
+
+#[tauri::command]
+pub async fn cloud_agent_checkpoints(client: Client<'_>, organization_id: String, workspace_id: String) -> Result<Vec<Value>, String> {
+    let client = client.inner().clone();
+    blocking(move || client.checkpoints(&organization_id, &workspace_id)).await
+}
+
+#[tauri::command]
+pub async fn cloud_agent_checkpoint(
+    client: Client<'_>,
+    organization_id: String,
+    workspace_id: String,
+    tab_id: String,
+    after_epoch: Option<u64>,
+    after_version: Option<u64>,
+) -> Result<Option<Checkpoint>, String> {
+    let client = client.inner().clone();
+    let after = after_epoch.zip(after_version);
+    blocking(move || client.checkpoint(&organization_id, &workspace_id, &tab_id, after)).await
+}
+
+#[tauri::command]
+pub async fn cloud_agent_has_key(client: Client<'_>, organization_id: String, workspace_id: String) -> Result<bool, String> {
+    let client = client.inner().clone();
+    blocking(move || client.has_key(&organization_id, &workspace_id)).await
+}
+
+#[tauri::command]
+pub async fn cloud_agent_cache_load(client: Client<'_>, organization_id: String, workspace_id: String) -> Result<Value, String> {
+    let client = client.inner().clone();
+    blocking(move || client.cache_load(&organization_id, &workspace_id)).await
+}
+
+#[tauri::command]
+pub async fn cloud_agent_cache_save(client: Client<'_>, organization_id: String, workspace_id: String, tab_id: String, entry: Option<Value>) -> Result<(), String> {
+    let client = client.inner().clone();
+    blocking(move || client.cache_save(&organization_id, &workspace_id, &tab_id, entry)).await
+}
+
+#[cfg(test)]
+#[path = "cloud_agent_client_tests.rs"]
+mod tests;
