@@ -11,15 +11,19 @@ import type { CommitInfo, WorkStatus } from "@/types/session";
 import { DiffPane } from "./DiffPane";
 import { FileList } from "./FileList";
 
-type Sub = "uncommitted" | "history";
+export type RepoView = "uncommitted" | "history";
 
 /**
  * The whole repository: uncommitted changes with a commit box, and history
  * opening commits in place. Reads live; commit, push and pull are the only
  * writes, and each refetches.
  */
-export function RepoPanel({ cwd, active }: { cwd: string; active: boolean }) {
-  const [sub, setSub] = useState<Sub>("uncommitted");
+export function RepoPanel({ cwd, active, view: sub, onViewChange: setSub }: {
+  cwd: string;
+  active: boolean;
+  view: RepoView;
+  onViewChange: (view: RepoView) => void;
+}) {
   const [tick, setTick] = useState(0);
   const refresh = () => setTick((t) => t + 1);
   const { head, files, loading } = useWorkingChanges(cwd, active && sub === "uncommitted", tick);
@@ -73,7 +77,7 @@ export function RepoPanel({ cwd, active }: { cwd: string; active: boolean }) {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center gap-2 px-3 py-2">
-        <Segmented<Sub>
+        <Segmented<RepoView>
           aria-label="Repository view"
           value={sub}
           onChange={setSub}

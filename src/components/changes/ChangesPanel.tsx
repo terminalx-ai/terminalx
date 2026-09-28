@@ -23,6 +23,7 @@ export function ChangesPanel({
   active,
   live,
   workingTree = false,
+  onViewUncommitted,
 }: {
   cwd: string;
   events: AgentEvent[];
@@ -33,9 +34,10 @@ export function ChangesPanel({
   live: boolean;
   /** Show the checkout's uncommitted diff outside an agent turn. */
   workingTree?: boolean;
+  onViewUncommitted: () => void;
 }) {
   if (workingTree) return <WorkingTreeChanges cwd={cwd} active={active} />;
-  return <TurnChanges cwd={cwd} events={events} version={version} baseRef={baseRef} active={active} live={live} />;
+  return <TurnChanges cwd={cwd} events={events} version={version} baseRef={baseRef} active={active} live={live} onViewUncommitted={onViewUncommitted} />;
 }
 
 function TurnChanges({
@@ -45,6 +47,7 @@ function TurnChanges({
   baseRef,
   active,
   live,
+  onViewUncommitted,
 }: {
   cwd: string;
   events: AgentEvent[];
@@ -52,6 +55,7 @@ function TurnChanges({
   baseRef?: string | null;
   active: boolean;
   live: boolean;
+  onViewUncommitted: () => void;
 }) {
   const range = useMemo(() => changeRange(events, baseRef), [events, version, baseRef]);
   const [tick, setTick] = useState(0);
@@ -62,17 +66,32 @@ function TurnChanges({
   }, [live, active]);
   const { files, loading, error } = useChanges(cwd, range, active, tick);
   return (
-    <ChangesBody
-      cwd={cwd}
-      files={files}
-      loading={loading}
-      error={error}
-      range={range}
-      label={live ? "This turn, so far" : "Last turn"}
-      empty="No files changed."
-      noRange="Send a prompt to see what a turn changes."
-      refreshKey={tick}
-    />
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="min-h-0 flex-1">
+        <ChangesBody
+          cwd={cwd}
+          files={files}
+          loading={loading}
+          error={error}
+          range={range}
+          label={live ? "This turn, so far" : "Last turn"}
+          empty={
+            loading ? "Loading turn changes…"
+              : error ? "Could not load turn changes."
+                : live ? "No files changed during this turn yet."
+                  : "No files changed during the last turn."
+          }
+          noRange="Send a prompt to see what a turn changes."
+          refreshKey={tick}
+        />
+      </div>
+      <div className="shrink-0 space-y-2 border-t border-hairline px-3 py-3">
+        <p className="text-xs text-muted-foreground">Repo shows all uncommitted workspace changes, including untracked files.</p>
+        <Button variant="secondary" size="sm" onClick={onViewUncommitted}>
+          View all uncommitted changes
+        </Button>
+      </div>
+    </div>
   );
 }
 
