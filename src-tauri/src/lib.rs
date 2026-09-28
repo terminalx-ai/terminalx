@@ -10,6 +10,7 @@ mod account;
 #[cfg(feature = "desktop")]
 mod automations;
 mod binpath;
+mod cloud_activity;
 mod cloud_bootstrap;
 #[cfg(feature = "desktop")]
 pub mod browser;
@@ -44,6 +45,7 @@ pub mod hooks;
 mod issues;
 #[cfg(feature = "desktop")]
 mod installation;
+mod memory_baseline;
 mod models;
 mod names;
 #[cfg(feature = "desktop")]

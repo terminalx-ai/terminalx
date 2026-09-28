@@ -5,6 +5,9 @@
 //!
 //! A cloud workspace runtime redeems its bootstrap token (or refreshes the
 //! stored credential) before anything else starts; see `cloud_bootstrap`.
+//! It then records its memory baseline (`memory_baseline`) and reports its
+//! activity to the API so an unused workspace can be suspended
+//! (`cloud_activity`).
 //!
 //! Not here yet:
 //! - TODO(PRO-13): register with the relay as a host (outbound only) and serve
@@ -193,6 +196,9 @@ fn run(options: Options) -> Result<()> {
     let tokio = tokio::runtime::Builder::new_multi_thread().enable_all().build().context("start the async runtime")?;
     let _entered = tokio.enter();
     let runtime = start(&options)?;
+    if let (Some((cloud, origin)), false) = (&cloud, options.self_test) {
+        report_activity(&runtime, cloud.clone(), origin);
+    }
     println!(
         "{}",
         json!({
@@ -248,8 +254,55 @@ fn bootstrap_cloud_workspace(data_dir: &std::path::Path) -> Result<Option<(Arc<c
         let session = cloud.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         log::info!("cloud workspace {} bootstrapped as relay host {}", session.workspace_id, session.relay_host_id);
     }
+    cloud.record_memory_baseline();
     cloud.clone().spawn_refresh_loop(api);
     Ok(Some((cloud, config.origin)))
+}
+
+/// Tell the API about agent turns, terminal input and attached clients, so
+/// it suspends the workspace only when nobody uses it (`cloud_activity`).
+fn report_activity(runtime: &Runtime, cloud: Arc<crate::cloud_bootstrap::Bootstrapped>, origin: &str) {
+    use crate::cloud_activity::{note, spawn_reporter, Counts, Kind};
+    // A turn that starts or produces output publishes one of these. A
+    // recovery marker is the runtime's own bookkeeping, not use.
+    runtime.sink.listen("agent_work_started", Box::new(|_| note(Kind::AgentTurn)));
+    runtime.sink.listen(
+        "agent_event",
+        Box::new(|payload| {
+            #[derive(serde::Deserialize)]
+            struct Event {
+                payload: Tagged,
+            }
+            #[derive(serde::Deserialize)]
+            struct Tagged {
+                #[serde(rename = "type")]
+                kind: String,
+            }
+            if serde_json::from_str::<Event>(payload).is_ok_and(|event| event.payload.kind != "recovery") {
+                note(Kind::AgentTurn);
+            }
+        }),
+    );
+    let manager = runtime.manager.clone();
+    let counts = move || {
+        let (active_turns, pending_approvals) = manager.turn_counts();
+        Counts { active_turns, pending_approvals }
+    };
+    let api = crate::cloud_bootstrap::HttpApi::new(origin);
+    spawn_reporter(counts, move |report| {
+        // The refresh loop notices a revoked credential; until it is
+        // accepted again a report could only be refused.
+        if cloud.is_rejected() {
+            return false;
+        }
+        match cloud.report_activity(&api, report) {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("report activity: {}", crate::cloud_bootstrap::describe(&error));
+                false
+            }
+        }
+    });
 }
 
 /// The desktop's `setup`, less everything that needs a window.
@@ -313,6 +366,9 @@ fn start_relay_host(runtime: &Runtime, link: Arc<dyn crate::remote::host::Runtim
         let mut status = host.status();
         loop {
             let current = status.borrow_and_update().clone();
+            if matches!(current, crate::remote::host::HostStatus::Registered { .. }) {
+                crate::cloud_activity::registered();
+            }
             println!("{}", json!({ "type": "relay", "status": current }));
             if status.changed().await.is_err() {
                 return;

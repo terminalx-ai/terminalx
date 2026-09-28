@@ -669,6 +669,18 @@ impl SessionManager {
             .collect()
     }
 
+    /// Turns in progress and permission prompts waiting, counted without
+    /// copying either (the cloud activity report polls this every second).
+    pub fn turn_counts(&self) -> (usize, usize) {
+        let runtimes: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
+        runtimes.into_iter().fold((0, 0), |(active, pending), runtime| {
+            let runtime = runtime.lock().unwrap();
+            let running = runtime.child.is_some()
+                || matches!(&runtime.engine, Engine::Cli(cli) if self.terminals.is_running(&cli.pane_id));
+            (active + usize::from(running && runtime.status == TabStatus::InProgress), pending + runtime.pending.len())
+        })
+    }
+
     pub fn usage_snapshot(&self) -> crate::status::usage::UsageSnapshot {
         self.status.usage.snapshot(&self.running_agents())
     }
