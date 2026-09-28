@@ -24,7 +24,9 @@ const TERM_GRACE: Duration = Duration::from_millis(400);
 
 struct Pane {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    /// Locked on its own, so a write the program is slow to read blocks
+    /// only this pane, not every other pane's resize or kill.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pid: Option<u32>,
     alive: Arc<Mutex<bool>>,
     /// When this pane last wrote something. A caller that has to type into a
@@ -219,17 +221,22 @@ impl Terminals {
                 sink.emit("pty_exit", &PtyExit { id, code });
             })?;
         }
+        let writer = Arc::new(Mutex::new(writer));
         self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, writer, pid, alive, last_output, scrollback, cwd: cwd.to_string() });
         self.changed();
         Ok(())
     }
 
     pub fn write(&self, id: &str, data: &[u8]) -> Result<()> {
-        let mut panes = self.panes.lock().unwrap();
-        let pane = panes.get_mut(id).context("no such terminal")?;
-        pane.writer.write_all(data)?;
-        pane.writer.flush()?;
+        let writer = self.panes.lock().unwrap().get(id).context("no such terminal")?.writer.clone();
+        let mut writer = writer.lock().unwrap();
+        writer.write_all(data)?;
+        writer.flush()?;
         Ok(())
+    }
+
+    pub fn pid(&self, id: &str) -> Option<u32> {
+        self.panes.lock().unwrap().get(id)?.pid
     }
 
     pub fn read_output(&self, id: &str) -> Option<Vec<u8>> {

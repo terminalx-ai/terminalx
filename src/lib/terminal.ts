@@ -99,7 +99,8 @@ export function getInstance(id: string, create: () => TerminalInstance): Termina
   return inst;
 }
 
-function disposeInstance(id: string) {
+/** Drop a live instance and its element; its process is the caller's to end. */
+export function disposeInstance(id: string) {
   const inst = instances.get(id);
   if (inst) {
     inst.term.dispose();

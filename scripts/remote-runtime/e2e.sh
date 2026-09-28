@@ -16,4 +16,4 @@ for _ in $(seq 1 50); do
 done
 export RELAY_TEST_REDIS_URL="redis://127.0.0.1:${port}"
 cd "$here/src-tauri/serve"
-cargo test --test relay_e2e -- --ignored --nocapture "$@"
+cargo test --test relay_e2e -- --ignored --nocapture --test-threads=1 "$@"

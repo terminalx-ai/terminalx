@@ -1,18 +1,30 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, workspaceConnection } from "@/lib/api";
+import { resetCloudTerminals } from "@/lib/cloudTerminals";
 import { CloudSessionPage } from "./CloudSessionPage";
 
+/** Input handlers of every xterm made, so a test can type into one. */
+const typed: ((data: string) => void)[] = [];
 vi.mock("@xterm/xterm", () => ({
   Terminal: class {
     cols = 80;
     rows = 24;
+    options = {};
     loadAddon() {}
     open() {}
     write() {}
     focus() {}
     dispose() {}
-    onData() {
+    resize(cols: number, rows: number) {
+      this.cols = cols;
+      this.rows = rows;
+    }
+    onData(handler: (data: string) => void) {
+      typed.push(handler);
+      return { dispose() {} };
+    }
+    onBinary() {
       return { dispose() {} };
     }
     onResize() {
@@ -20,12 +32,17 @@ vi.mock("@xterm/xterm", () => ({
     }
   },
 }));
-vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
+vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} proposeDimensions() { return { cols: 132, rows: 40 }; } } }));
+vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class { onContextLoss() {} dispose() {} } }));
+vi.mock("@/lib/theme", () => ({ useTheme: () => ({ resolvedMode: "dark" }) }));
 vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
 vi.mock("@/lib/api", () => ({
   api: { cloudWorkspaces: vi.fn() },
+  pty: {},
   workspaceConnection: vi.fn(),
   devWorkspaceConnection: vi.fn(),
+  workspaceTargetKey: (target: { kind: string; organizationId?: string; workspaceId?: string }) =>
+    target.kind === "local" ? "local" : `cloud:${target.organizationId}:${target.workspaceId}`,
 }));
 
 const workspace = (id: string, state: string) => ({
@@ -33,48 +50,95 @@ const workspace = (id: string, state: string) => ({
   latestOperation: null,
 });
 
-beforeEach(() => {
-  vi.clearAllMocks();
-  vi.mocked(api.cloudWorkspaces).mockResolvedValue({
-    workspaces: [workspace("ws-ready", "ready"), workspace("ws-asleep", "suspended"), workspace("ws-new", "provisioning")],
-  } as never);
-  vi.mocked(workspaceConnection).mockResolvedValue(fakeConnection() as never);
+const info = (fields: Record<string, unknown> = {}) => ({
+  ptyId: "remote-pty-1",
+  number: 1,
+  epoch: "e1",
+  pid: 4242,
+  cwd: "",
+  cols: 100,
+  rows: 30,
+  createdAt: 1,
+  offset: 0,
+  exited: false,
+  exitCode: null,
+  control: "you",
+  ...fields,
 });
 
 const stateListeners = new Set<(state: unknown) => void>();
-const mutate = vi.fn(async () => ({ ptyId: "remote-pty-1" }));
+let listed: ReturnType<typeof info>[] = [];
+let epoch = "e1";
+const client = {
+  onState: (listener: (state: unknown) => void) => {
+    stateListeners.add(listener);
+    listener({ state: "connecting", attempt: 0 });
+    return () => stateListeners.delete(listener);
+  },
+  listPtys: vi.fn(async () => ({ epoch, terminals: listed })),
+  createPty: vi.fn(async () => {
+    const created = info();
+    listed = [created];
+    return created;
+  }),
+  attachPty: vi.fn(async (_ptyId: string, _handlers: Record<string, unknown>) => ({ cursor: () => undefined, detach: vi.fn() })),
+  write: vi.fn(async (_ptyId: string, _data: string) => undefined),
+  resizePty: vi.fn(async () => ({})),
+  controlPty: vi.fn(async () => info({ control: "you", cols: 132, rows: 40 })),
+  killPty: vi.fn(async () => undefined),
+  call: vi.fn(async () => ({})),
+  mutate: vi.fn(async () => ({})),
+  subscribeSession: vi.fn(async () => () => undefined),
+};
 const fakeConnection = () => ({
   target: { kind: "cloud", organizationId: "org-1", workspaceId: "ws-ready" },
-  client: {
-    onState: (listener: (state: unknown) => void) => {
-      stateListeners.add(listener);
-      listener({ state: "connecting", attempt: 0 });
-      return () => stateListeners.delete(listener);
-    },
-    mutate,
-    attachPty: vi.fn(async () => () => undefined),
-    call: vi.fn(async () => ({})),
-    write: vi.fn(async () => true),
-    subscribeSession: vi.fn(async () => () => undefined),
-  },
+  client,
   activate: vi.fn(),
   close: vi.fn(),
 });
 const emit = (state: unknown) => {
   for (const listener of [...stateListeners]) listener(state);
 };
-const connectedState = { state: "connected", runtimeGeneration: 7, runtimeVersion: "0.2.2", capabilities: ["pty/1"], authority: "manage" };
+const connectedState = (fields: Record<string, unknown> = {}) => ({
+  state: "connected",
+  runtimeGeneration: 7,
+  runtimeEpoch: epoch,
+  runtimeVersion: "0.2.2",
+  capabilities: ["pty/1"],
+  authority: "manage",
+  ...fields,
+});
 
-afterEach(cleanup);
+beforeEach(() => {
+  vi.clearAllMocks();
+  stateListeners.clear();
+  typed.length = 0;
+  listed = [];
+  epoch = "e1";
+  vi.mocked(api.cloudWorkspaces).mockResolvedValue({
+    workspaces: [workspace("ws-ready", "ready"), workspace("ws-asleep", "suspended"), workspace("ws-new", "provisioning")],
+  } as never);
+  vi.mocked(workspaceConnection).mockResolvedValue(fakeConnection() as never);
+});
+
+afterEach(() => {
+  cleanup();
+  resetCloudTerminals();
+});
+
+async function openReady() {
+  render(<CloudSessionPage onBack={() => undefined} />);
+  const [open] = await screen.findAllByRole("button", { name: "Open session" });
+  fireEvent.click(open!);
+  await waitFor(() => expect(workspaceConnection).toHaveBeenCalled());
+  // The page listens for connection states once the workspace view is up.
+  await screen.findByTestId("cloud-execution-location");
+}
 
 describe("cloud workspace session page", () => {
   it("connects a ready workspace without waking compute", async () => {
-    render(<CloudSessionPage onBack={() => undefined} />);
-    const [openReady] = await screen.findAllByRole("button", { name: "Open session" });
-    fireEvent.click(openReady!);
-    await waitFor(() =>
-      expect(workspaceConnection).toHaveBeenCalledWith({ kind: "cloud", organizationId: "org-1", workspaceId: "ws-ready" }, "connect"),
-    );
+    await openReady();
+    expect(workspaceConnection).toHaveBeenCalledWith({ kind: "cloud", organizationId: "org-1", workspaceId: "ws-ready" }, "connect");
     await waitFor(() => expect(screen.getByTestId("cloud-connection-state").textContent).toBe("Connecting…"));
   });
 
@@ -86,22 +150,103 @@ describe("cloud workspace session page", () => {
     );
   });
 
-  it("creates the remote terminal once connected and keeps it across a reconnect", async () => {
-    stateListeners.clear();
-    mutate.mockClear();
-    render(<CloudSessionPage onBack={() => undefined} />);
-    const [openReady] = await screen.findAllByRole("button", { name: "Open session" });
-    fireEvent.click(openReady!);
+  it("labels the workspace, its provider and that commands run in the cloud", async () => {
+    await openReady();
+    const location = await screen.findByTestId("cloud-execution-location");
+    expect(location.textContent).toContain("Cloud · Boat");
+    expect(location.getAttribute("title")).toContain("not on this computer");
+    act(() => emit(connectedState()));
+    const tab = await screen.findByTestId("cloud-terminal-tab");
+    expect(tab.textContent).toContain("Terminal 1");
+    expect(tab.querySelector("button")!.getAttribute("title")).toBe("Terminal 1 runs in the cloud workspace Workspace ws-ready");
+  });
+
+  it("opens the first shell once, then keeps the same terminal across reconnects and view switches", async () => {
+    await openReady();
+    expect(client.createPty).not.toHaveBeenCalled();
+    act(() => emit(connectedState()));
+    await waitFor(() => expect(client.createPty).toHaveBeenCalledWith({ cols: 100, rows: 30 }));
     await screen.findByTestId("cloud-terminal");
-    expect(mutate).not.toHaveBeenCalled();
-    emit(connectedState);
-    await waitFor(() => expect(mutate).toHaveBeenCalledWith("pty.create", { cols: 80, rows: 24 }));
-    emit({ state: "reconnecting", attempt: 1, reason: "1006", retryInMs: 250 });
-    emit(connectedState);
-    fireEvent.click(screen.getByRole("button", { name: /Agent/ }));
-    fireEvent.click(screen.getByRole("button", { name: /Terminal/ }));
+    act(() => emit({ state: "reconnecting", attempt: 1, reason: "1006", retryInMs: 250 }));
+    act(() => emit(connectedState()));
+    await waitFor(() => expect(client.listPtys).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("tab", { name: /Agent/ }));
+    fireEvent.click(screen.getByRole("tab", { name: /Terminal 1/ }));
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(client.createPty).toHaveBeenCalledTimes(1);
+    // The client resumes its own stream after a reconnect; the page never re-attaches it.
+    expect(client.attachPty).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByTestId("cloud-terminal-tab")).toHaveLength(1);
+  });
+
+  it("resumes terminals already running in the workspace instead of creating one", async () => {
+    listed = [info(), info({ ptyId: "remote-pty-2", number: 2 })];
+    await openReady();
+    act(() => emit(connectedState()));
+    await waitFor(() => expect(screen.getAllByTestId("cloud-terminal-tab")).toHaveLength(2));
+    expect(client.createPty).not.toHaveBeenCalled();
+    expect(client.attachPty.mock.calls.map(([ptyId]) => ptyId)).toEqual(["remote-pty-1", "remote-pty-2"]);
+  });
+
+  it("watches a terminal another device controls, and takes control only when asked", async () => {
+    listed = [info({ control: "other" })];
+    await openReady();
+    act(() => emit(connectedState()));
+    const viewer = await screen.findByTestId("cloud-terminal-viewer");
+    expect(viewer.textContent).toContain("Another device controls");
+    expect(client.resizePty).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Take control" }));
+    await waitFor(() => expect(client.controlPty).toHaveBeenCalledWith("remote-pty-1", 132, 40));
+    await waitFor(() => expect(screen.queryByTestId("cloud-terminal-viewer")).toBeNull());
+  });
+
+  it("gives a participating attachment a view-only terminal", async () => {
+    listed = [info({ control: "other" })];
+    await openReady();
+    act(() => emit(connectedState({ authority: "participate" })));
+    const viewer = await screen.findByTestId("cloud-terminal-viewer");
+    expect(viewer.textContent).toContain("View only");
+    expect(screen.queryByRole("button", { name: "Take control" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "New cloud terminal" })).toBeNull();
+  });
+
+  it("shows refused input instead of dropping it", async () => {
+    listed = [info()];
+    client.write.mockRejectedValueOnce(Object.assign(new Error("refused"), { code: "not_controller" }));
+    await openReady();
+    act(() => emit(connectedState()));
+    await screen.findByTestId("cloud-terminal");
+    await waitFor(() => expect(typed.length).toBeGreaterThan(0));
+    act(() => typed.at(-1)!("ls\r"));
+    expect(client.write).toHaveBeenCalledWith("remote-pty-1", "ls\r");
+    const notice = await screen.findByTestId("cloud-terminal-notice");
+    expect(notice.textContent).toContain("another device controls this terminal");
+  });
+
+  it("marks a terminal of a restarted runtime as ended rather than recreating or retargeting it", async () => {
+    listed = [info()];
+    await openReady();
+    act(() => emit(connectedState()));
+    await screen.findByTestId("cloud-terminal");
+    listed = [];
+    epoch = "e2";
+    act(() => emit({ state: "reconnecting", attempt: 1, reason: "1006", retryInMs: 250 }));
+    act(() => emit(connectedState()));
+    const notice = await screen.findByTestId("cloud-terminal-notice");
+    expect(notice.textContent).toContain("workspace runtime restarted");
+    expect(screen.getByTestId("cloud-terminal-tab").textContent).toContain("(ended)");
+    expect(client.createPty).not.toHaveBeenCalled();
+    act(() => typed.at(-1)!("rm -rf /\r"));
+    expect(client.write).not.toHaveBeenCalled();
+  });
+
+  it("closes a terminal on the runtime from its tab", async () => {
+    listed = [info()];
+    await openReady();
+    act(() => emit(connectedState()));
+    fireEvent.click(await screen.findByRole("button", { name: "Close Terminal 1" }));
+    await waitFor(() => expect(client.killPty).toHaveBeenCalledWith("remote-pty-1"));
+    await waitFor(() => expect(screen.queryByTestId("cloud-terminal-tab")).toBeNull());
   });
 
   it("does not offer a session for a workspace that is still provisioning", async () => {

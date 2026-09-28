@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { pty } from "@/lib/api";
-import { getInstance } from "@/lib/terminal";
+import { getInstance, type TerminalInstance } from "@/lib/terminal";
 import { useTheme } from "@/lib/theme";
 
 function cssVar(name: string): string {
@@ -31,7 +31,7 @@ function toHex(css: string, fallback: string): string {
 }
 
 /** The terminal's palette follows the app's mode; ANSI colours are tuned per mode. */
-function themeFor(mode: "dark" | "light") {
+export function themeFor(mode: "dark" | "light") {
   const fg = toHex(cssVar("--foreground"), mode === "dark" ? "#e6e6e6" : "#222222");
   // The page surface, opaque: programs that query the background (OSC 11)
   // then learn the real mode instead of a transparent black.
@@ -85,7 +85,8 @@ function themeFor(mode: "dark" | "light") {
       };
 }
 
-function createInstance(id: string, mode: "dark" | "light") {
+/** An xterm in its own element, styled like every TerminalX terminal, not yet wired to a process. */
+export function createTerminal(mode: "dark" | "light"): TerminalInstance {
   const el = document.createElement("div");
   el.className = "h-full w-full";
   const term = new Terminal({
@@ -108,6 +109,11 @@ function createInstance(id: string, mode: "dark" | "light") {
   } catch {
     /* canvas renderer stays */
   }
+  return { el, term, fit };
+}
+
+function createInstance(id: string, mode: "dark" | "light"): TerminalInstance {
+  const { el, term, fit } = createTerminal(mode);
   term.onData((d) => void pty.write(id, d).catch(() => {}));
   term.onBinary((d) => void pty.write(id, d).catch(() => {}));
   term.onResize(({ cols, rows }) => void pty.resize(id, cols, rows).catch(() => {}));
@@ -118,18 +124,35 @@ function createInstance(id: string, mode: "dark" | "light") {
  * A view onto one long-lived terminal instance. Mounting re-parents the
  * instance's element here; unmounting detaches it, leaving the buffer and
  * the shell untouched. Size follows the box through a ResizeObserver.
+ *
+ * `create` makes the instance when there is none yet (a cloud terminal
+ * wires its own input); `fit: false` keeps the size someone else set, for
+ * a view that watches a terminal another device controls.
  */
-export function TerminalView({ id, visible }: { id: string; visible: boolean }) {
+export function TerminalView({
+  id,
+  visible,
+  create,
+  fit = true,
+}: {
+  id: string;
+  visible: boolean;
+  create?: (mode: "dark" | "light") => TerminalInstance;
+  fit?: boolean;
+}) {
   const host = useRef<HTMLDivElement>(null);
   const { resolvedMode } = useTheme();
+  const make = () => (create ? create(resolvedMode) : createInstance(id, resolvedMode));
+  const fitting = useRef(fit);
+  fitting.current = fit;
 
   useEffect(() => {
     const el = host.current;
     if (!el) return;
-    const inst = getInstance(id, () => createInstance(id, resolvedMode));
+    const inst = getInstance(id, make);
     el.appendChild(inst.el);
     const refit = () => {
-      if (el.clientWidth > 0 && el.clientHeight > 0) {
+      if (fitting.current && el.clientWidth > 0 && el.clientHeight > 0) {
         try {
           inst.fit.fit();
         } catch {
@@ -150,22 +173,22 @@ export function TerminalView({ id, visible }: { id: string; visible: boolean }) 
   }, [id]);
 
   useEffect(() => {
-    const inst = getInstance(id, () => createInstance(id, resolvedMode));
+    const inst = getInstance(id, make);
     inst.term.options.theme = themeFor(resolvedMode);
   }, [id, resolvedMode]);
 
   useEffect(() => {
     if (!visible) return;
     requestAnimationFrame(() => {
-      const inst = getInstance(id, () => createInstance(id, resolvedMode));
+      const inst = getInstance(id, make);
       try {
-        inst.fit.fit();
+        if (fitting.current) inst.fit.fit();
         inst.term.focus();
       } catch {
         /* ignore */
       }
     });
-  }, [id, visible]);
+  }, [id, visible, fit]);
 
   return <div ref={host} className="terminal-host h-full w-full px-2 pt-1" />;
 }

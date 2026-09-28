@@ -6,8 +6,11 @@
 // - mutations carry a `clientRequestId` that is kept across resends, so the
 //   runtime answers a resend from its idempotency cache instead of writing
 //   or prompting twice;
-// - terminal writes carry a per-terminal `seq`, and the runtime drops one it
-//   already applied;
+// - terminal input is queued per terminal and sent one numbered write at a
+//   time (`writerId` + `seq`), so it arrives once and in order across drops,
+//   and a refusal is reported rather than dropped;
+// - terminals belong to one runtime process (`epoch`): after a restart or
+//   replacement nothing is sent to them and their views are told they ended;
 // - subscriptions resume from their last offset or cursor after a
 //   reconnect, and resync from a snapshot when the runtime generation moved.
 import { PortableRpcClient, type RpcCallResult, type RpcErrorData, type RpcResponse, type RpcWireRequest } from "./rpc";
@@ -40,7 +43,66 @@ export type WorkspaceConnectionState =
   | { state: "idle" | "opening" | "waitingForRuntime" | "suspended" | "updateRequired" | "stopped" }
   | { state: "connecting"; attempt: number }
   | { state: "reconnecting"; attempt: number; reason: string; retryInMs: number }
-  | { state: "connected"; runtimeGeneration: number; runtimeVersion: string; capabilities: string[]; authority: "manage" | "participate" };
+  | {
+      state: "connected";
+      runtimeGeneration: number;
+      /** The runtime process; absent from a runtime older than PRO-26. */
+      runtimeEpoch?: string;
+      runtimeVersion: string;
+      capabilities: string[];
+      authority: "manage" | "participate";
+    };
+
+/** Who drives a terminal's input and size: this client, another device, or nobody. */
+export type PtyControl = "you" | "other" | "none";
+
+/** A terminal as `pty.create`, `pty.list` and `pty.attach` describe it. */
+export interface PtyInfo {
+  ptyId: string;
+  number: number;
+  /** The runtime process the terminal runs in. */
+  epoch: string;
+  pid: number | null;
+  cwd: string;
+  cols: number;
+  rows: number;
+  createdAt: number;
+  /** Bytes the terminal has written so far. */
+  offset: number;
+  exited: boolean;
+  exitCode: number | null;
+  control: PtyControl;
+}
+
+/** Where a terminal view left off, to resume without replaying what it shows. */
+export interface PtyCursor {
+  offset: number;
+  epoch: string;
+}
+
+export interface PtyHandlers {
+  onData(bytes: Uint8Array, offset: number): void;
+  onExit?(code: number | null): void;
+  onControl?(control: PtyControl): void;
+  /** The controller resized the terminal; a viewer should match it. */
+  onResize?(cols: number, rows: number): void;
+  /** Output older than the runtime's ring was lost while away. */
+  onTruncated?(): void;
+  /** The terminal is gone: closed, or its runtime restarted or was replaced. */
+  onGone?(reason: "closed" | "runtime-restarted"): void;
+  /** Resume after this point instead of replaying the whole ring. */
+  since?: PtyCursor;
+}
+
+export interface PtyAttachment {
+  /** Where the view is now; keep it to resume on a later connection. */
+  cursor(): PtyCursor | undefined;
+  detach(): void;
+}
+
+/** UTF-16 units per `pty.write`; at most 4 UTF-8 bytes each keeps it under the runtime's 64 KiB. */
+const WRITE_CHUNK = 16 * 1024;
+const BACKPRESSURE_RETRY_MS = 200;
 
 /** Frames in and out of one supervised connection (the desktop's Rust supervisor). */
 export interface WorkspaceTransport {
@@ -70,6 +132,19 @@ type Subscription = {
   serverId?: string;
 };
 
+class PtyInput {
+  writerId = randomRequestId();
+  /** Last seq the runtime accepted from this writer. */
+  seq = 0;
+  running = false;
+  pending: { data: string; resolve: () => void; reject: (error: unknown) => void }[] = [];
+
+  reset(): void {
+    this.writerId = randomRequestId();
+    this.seq = 0;
+  }
+}
+
 const RESEND_WAIT_MS = 15_000;
 
 export class WorkspaceRpcClient {
@@ -78,7 +153,13 @@ export class WorkspaceRpcClient {
   private readonly stateListeners = new Set<(state: WorkspaceConnectionState) => void>();
   private readonly detach: (() => void)[] = [];
   private readonly subscriptions = new Map<string, Subscription>();
-  private readonly writeSeq = new Map<string, number>();
+  private readonly inputs = new Map<string, PtyInput>();
+  /** Notifications for a subscription whose id is not known yet (its answer is still being handled). */
+  private unrouted: WorkspaceNotification[] = [];
+  /** Subscribe requests awaiting their answer. */
+  private resuming = 0;
+  /** The runtime process each known terminal belongs to. */
+  private readonly ptyEpochs = new Map<string, string>();
   private state: WorkspaceConnectionState = { state: "idle" };
   private nextLocal = 0;
   private closed = false;
@@ -133,14 +214,110 @@ export class WorkspaceRpcClient {
     return this.resending(() => this.untilDropped(this.rpc.request<T>(method, request)).then((result) => unwrap(method, result)));
   }
 
-  /** Terminal input, numbered per terminal so a resend is not typed twice. */
-  async write(ptyId: string, data: string): Promise<boolean> {
-    const seq = (this.writeSeq.get(ptyId) ?? 0) + 1;
-    this.writeSeq.set(ptyId, seq);
-    const result = await this.resending(() =>
-      this.untilDropped(this.rpc.request<{ applied: boolean }>("pty.write", { ptyId, data, seq })).then((value) => unwrap("pty.write", value)),
-    );
-    return result.applied;
+  /**
+   * Terminal input. Queued per terminal and sent one numbered write at a
+   * time, so it is typed once and in order even across reconnects. Resolves
+   * once the runtime accepted it; rejects (never silently drops) when the
+   * runtime refuses it, e.g. `not_controller`, an exited terminal, or one
+   * whose runtime restarted.
+   */
+  write(ptyId: string, data: string): Promise<void> {
+    let input = this.inputs.get(ptyId);
+    if (!input) this.inputs.set(ptyId, (input = new PtyInput()));
+    return new Promise<void>((resolve, reject) => {
+      input.pending.push({ data, resolve, reject });
+      if (!input.running) void this.pumpInput(ptyId, input);
+    });
+  }
+
+  private async pumpInput(ptyId: string, input: PtyInput): Promise<void> {
+    input.running = true;
+    try {
+      while (input.pending.length && !this.closed) {
+        const batch = input.pending.splice(0);
+        try {
+          const text = batch.map((entry) => entry.data).join("");
+          for (let start = 0; start < text.length; ) {
+            let end = Math.min(text.length, start + WRITE_CHUNK);
+            // Never split a surrogate pair across two writes.
+            if (end < text.length && /[\uDC00-\uDFFF]/.test(text[end]!)) end--;
+            await this.sendInput(ptyId, input, text.slice(start, end));
+            start = end;
+          }
+          for (const entry of batch) entry.resolve();
+        } catch (error) {
+          // Input typed after a refusal was meant for the same state; report it too.
+          for (const entry of [...batch, ...input.pending.splice(0)]) entry.reject(error);
+        }
+      }
+    } finally {
+      input.running = false;
+    }
+  }
+
+  private async sendInput(ptyId: string, input: PtyInput, data: string): Promise<void> {
+    const seq = input.seq + 1;
+    for (;;) {
+      const epoch = this.ptyEpochs.get(ptyId);
+      if (epoch && this.state.state === "connected" && this.state.runtimeEpoch && this.state.runtimeEpoch !== epoch) {
+        throw new WorkspaceRpcError("not_found", "the terminal's runtime restarted", "pty.write");
+      }
+      try {
+        const params = { ptyId, data, seq, writerId: input.writerId, ...(epoch ? { epoch } : {}) };
+        await this.resending(() => this.untilDropped(this.rpc.request("pty.write", params)).then((value) => unwrap("pty.write", value)));
+        input.seq = seq;
+        return;
+      } catch (error) {
+        if (error instanceof WorkspaceRpcError && error.code === "backpressure" && !this.closed) {
+          // The program is not reading yet: the runtime kept nothing, try the same seq again.
+          await new Promise((resolve) => setTimeout(resolve, BACKPRESSURE_RETRY_MS));
+          continue;
+        }
+        if (!(error instanceof WorkspaceRpcError)) {
+          // Unknown whether it landed; a fresh writer keeps later input from
+          // being held behind (or merged with) it.
+          input.reset();
+        }
+        throw error;
+      }
+    }
+  }
+
+  async createPty(params: { cols: number; rows: number; cwd?: string }): Promise<PtyInfo> {
+    const info = await this.mutate<PtyInfo>("pty.create", params);
+    this.ptyEpochs.set(info.ptyId, info.epoch);
+    return info;
+  }
+
+  async listPtys(): Promise<{ epoch: string; terminals: PtyInfo[] }> {
+    const listed = await this.call<{ epoch: string; terminals: PtyInfo[] }>("pty.list");
+    for (const info of listed.terminals) this.ptyEpochs.set(info.ptyId, info.epoch);
+    return listed;
+  }
+
+  /** Only the controller's size is applied; a viewer gets `not_controller`. */
+  resizePty(ptyId: string, cols: number, rows: number): Promise<{ cols: number; rows: number }> {
+    return this.call("pty.resize", this.withEpoch(ptyId, { ptyId, cols, rows }));
+  }
+
+  /** Take over a terminal's input and size explicitly, at this view's size. */
+  controlPty(ptyId: string, cols?: number, rows?: number): Promise<PtyInfo> {
+    return this.call<PtyInfo>("pty.control", this.withEpoch(ptyId, { ptyId, ...(cols && rows ? { cols, rows } : {}) }));
+  }
+
+  async killPty(ptyId: string): Promise<void> {
+    await this.call("pty.kill", this.withEpoch(ptyId, { ptyId }));
+    this.forgetPty(ptyId);
+  }
+
+  private withEpoch(ptyId: string, params: Record<string, unknown>): Record<string, unknown> {
+    const epoch = this.ptyEpochs.get(ptyId);
+    return epoch ? { ...params, epoch } : params;
+  }
+
+  private forgetPty(ptyId: string): void {
+    this.ptyEpochs.delete(ptyId);
+    this.inputs.delete(ptyId);
   }
 
   /**
@@ -168,40 +345,93 @@ export class WorkspaceRpcClient {
     });
   }
 
-  /** Stream a terminal from `sinceOffset`, resuming from the last byte seen after a reconnect. */
-  attachPty(
-    ptyId: string,
-    onData: (bytes: Uint8Array, offset: number) => void,
-    onExit?: (code: number | null) => void,
-  ): Promise<() => void> {
-    let nextOffset: number | undefined;
-    // Offsets count bytes of one runtime generation's terminal.
-    let offsetGeneration: number | null = null;
+  /**
+   * Stream a terminal: replay from the runtime's ring (after `since`, when
+   * given), then live output, resuming from the last byte seen after every
+   * reconnect or `pty.lagged`. A terminal whose runtime process is no longer
+   * the connected one is reported gone, never re-attached by id elsewhere.
+   */
+  async attachPty(ptyId: string, handlers: PtyHandlers): Promise<PtyAttachment> {
+    let cursor: PtyCursor | undefined = handlers.since;
+    if (cursor && !this.ptyEpochs.has(ptyId)) this.ptyEpochs.set(ptyId, cursor.epoch);
+    let gone = false;
+    const markGone = (reason: "closed" | "runtime-restarted") => {
+      if (gone) return;
+      gone = true;
+      this.forgetPty(ptyId);
+      handlers.onGone?.(reason);
+    };
     const emit = (dataB64: string, offset: number) => {
-      offsetGeneration = this.generation;
       const bytes = decodeBase64(dataB64);
       // Replay and live output can overlap by a chunk around a reconnect.
-      const skip = nextOffset === undefined ? 0 : Math.max(0, nextOffset - offset);
-      if (skip < bytes.length) onData(bytes.subarray(skip), offset + skip);
-      nextOffset = Math.max(nextOffset ?? 0, offset + bytes.length);
+      const skip = cursor === undefined ? 0 : Math.max(0, cursor.offset - offset);
+      if (skip < bytes.length) handlers.onData(bytes.subarray(skip), offset + skip);
+      cursor = { offset: Math.max(cursor?.offset ?? 0, offset + bytes.length), epoch: this.ptyEpochs.get(ptyId) ?? cursor?.epoch ?? "" };
     };
-    return this.subscribe({
+    const stop = await this.subscribe({
       method: "pty.attach",
       params: { ptyId },
-      resumeParams: () => (nextOffset === undefined || offsetGeneration === null ? {} : { sinceOffset: nextOffset, runtimeGeneration: offsetGeneration }),
+      resumeParams: () => {
+        const epoch = this.ptyEpochs.get(ptyId);
+        return cursor === undefined || !epoch || this.generation === null
+          ? {}
+          : { sinceOffset: cursor.offset, runtimeGeneration: this.generation, epoch };
+      },
+      beforeResume: () => {
+        if (gone) return false;
+        const epoch = this.ptyEpochs.get(ptyId);
+        const runtimeEpoch = this.state.state === "connected" ? this.state.runtimeEpoch : undefined;
+        if (epoch && runtimeEpoch && epoch !== runtimeEpoch) {
+          markGone("runtime-restarted");
+          return false;
+        }
+        return true;
+      },
+      onRefused: (error) => {
+        if (error.code !== "not_found") return false;
+        markGone("closed");
+        return true;
+      },
       onCursorExpired: () => {
-        nextOffset = undefined;
+        cursor = undefined;
       },
       onReplay: (result) => {
-        if (result.truncated === true) nextOffset = undefined;
-        emit(String(result.data ?? ""), Number(result.offset ?? 0));
-        if (result.exited === true) onExit?.((result.exitCode as number | null | undefined) ?? null);
+        const info = result as Partial<PtyInfo> & { data?: string; truncated?: boolean };
+        if (typeof info.epoch === "string") this.ptyEpochs.set(ptyId, info.epoch);
+        if (info.truncated === true) handlers.onTruncated?.();
+        emit(String(info.data ?? ""), Number(info.offset ?? 0));
+        if (info.control) handlers.onControl?.(info.control);
+        if (info.cols && info.rows) handlers.onResize?.(info.cols, info.rows);
+        if (info.exited === true) handlers.onExit?.(info.exitCode ?? null);
       },
-      listener: (notification) => {
-        if (notification.event === "pty.output") emit(String(notification.params.data), Number(notification.params.offset));
-        else if (notification.event === "pty.exit") onExit?.((notification.params.code as number | null | undefined) ?? null);
+      listener: (notification, resubscribe) => {
+        const params = notification.params;
+        switch (notification.event) {
+          case "pty.output":
+            emit(String(params.data), Number(params.offset));
+            break;
+          case "pty.exit":
+            handlers.onExit?.((params.code as number | null | undefined) ?? null);
+            break;
+          case "pty.control":
+            handlers.onControl?.(params.control as PtyControl);
+            break;
+          case "pty.resized":
+            handlers.onResize?.(Number(params.cols), Number(params.rows));
+            break;
+          case "pty.closed":
+            // Closed by another client, or dropped from the exited-terminal limit.
+            markGone("closed");
+            break;
+          case "pty.lagged":
+            // The runtime ended this stream because the link fell behind;
+            // pick it up again from the last byte shown.
+            resubscribe();
+            break;
+        }
       },
     });
+    return { cursor: () => cursor, detach: stop };
   }
 
   /** An agent tab's events, replayed after the last cursor seen. */
@@ -231,7 +461,8 @@ export class WorkspaceRpcClient {
     for (const stop of this.detach) stop();
     this.rpc.close("Workspace connection closed");
     this.subscriptions.clear();
-    this.writeSeq.clear();
+    for (const input of this.inputs.values()) for (const entry of input.pending.splice(0)) entry.reject(new Error("Workspace connection closed"));
+    this.inputs.clear();
     this.transport.close();
   }
 
@@ -239,27 +470,66 @@ export class WorkspaceRpcClient {
     method: Subscription["method"];
     params: Record<string, unknown>;
     resumeParams: () => Record<string, unknown>;
-    listener: Subscription["listener"];
+    /** The runtime ended the stream; call this to resume it. */
+    listener: (notification: WorkspaceNotification, resubscribe: () => void) => void;
     onReplay: (result: Record<string, unknown>) => void;
     onCursorExpired?: () => void;
+    /** False: the subscription is over and is dropped instead of resumed. */
+    beforeResume?: () => boolean;
+    /** True: the refusal was handled and ends the subscription quietly. */
+    onRefused?: (error: WorkspaceRpcError) => boolean;
   }): Promise<() => void> {
     const localId = `local-${++this.nextLocal}`;
     const subscription: Subscription & { resume: () => Promise<void> } = {
       method: spec.method,
       params: spec.params,
-      listener: spec.listener,
+      listener: (notification) =>
+        spec.listener(notification, () => {
+          if (this.subscriptions.get(localId) !== subscription) return;
+          subscription.serverId = undefined;
+          // Keep trying while the link is up; a reconnect resumes it anyway.
+          const retry = (attempt: number) => {
+            if (this.closed || this.state.state !== "connected" || this.subscriptions.get(localId) !== subscription || subscription.serverId) return;
+            subscription.resume().catch(() => setTimeout(() => retry(attempt + 1), Math.min(10_000, 250 * 2 ** attempt)));
+          };
+          retry(0);
+        }),
       onReplay: spec.onReplay,
       resume: async () => {
+        if (spec.beforeResume && !spec.beforeResume()) {
+          this.subscriptions.delete(localId);
+          return;
+        }
         let result: RpcCallResult<Record<string, unknown>>;
-        result = await this.rpc.request(spec.method, { ...spec.params, ...spec.resumeParams() });
+        this.resuming++;
+        try {
+          result = await this.rpc.request(spec.method, { ...spec.params, ...spec.resumeParams() });
+        } finally {
+          this.resuming--;
+        }
         if (!result.ok && result.refusal.code === "cursor_expired") {
           // Another runtime generation: resync from a full snapshot.
           spec.onCursorExpired?.();
-          result = await this.rpc.request(spec.method, spec.params);
+          this.resuming++;
+          try {
+            result = await this.rpc.request(spec.method, spec.params);
+          } finally {
+            this.resuming--;
+          }
+        }
+        if (!result.ok && spec.onRefused?.(new WorkspaceRpcError(result.refusal.code, result.refusal.message, spec.method))) {
+          this.subscriptions.delete(localId);
+          return;
         }
         const value = unwrap(spec.method, result);
         subscription.serverId = String(value.subscriptionId);
         spec.onReplay(value);
+        const early = this.unrouted.filter((notification) => notification.params.subscriptionId === subscription.serverId);
+        if (early.length) {
+          this.unrouted = this.unrouted.filter((notification) => notification.params.subscriptionId !== subscription.serverId);
+          for (const notification of early) subscription.listener(notification);
+        }
+        if (this.resuming === 0) this.unrouted = [];
       },
     };
     this.assertGranted(spec.method);
@@ -294,8 +564,18 @@ export class WorkspaceRpcClient {
     if (typeof record.event === "string" && record.params && typeof record.params === "object") {
       const notification = record as unknown as WorkspaceNotification;
       const target = notification.params.subscriptionId;
+      let routed = false;
       for (const subscription of this.subscriptions.values()) {
-        if (subscription.serverId === target) subscription.listener(notification);
+        if (subscription.serverId === target) {
+          subscription.listener(notification);
+          routed = true;
+        }
+      }
+      // Only a subscription whose answer is still on its way can own it;
+      // anything else is for a stream this client already ended.
+      if (!routed && target && this.resuming > 0) {
+        this.unrouted.push(notification);
+        if (this.unrouted.length > 256) this.unrouted.shift();
       }
     }
   }
@@ -304,6 +584,7 @@ export class WorkspaceRpcClient {
     const wasConnected = this.state.state === "connected";
     this.state = state;
     if (wasConnected && state.state !== "connected") {
+      this.unrouted = [];
       for (const dropped of [...this.dropWaiters]) dropped();
       this.dropWaiters.clear();
     }
@@ -319,6 +600,10 @@ export class WorkspaceRpcClient {
 
   private connected(withinMs: number): Promise<void> {
     if (this.state.state === "connected") return new Promise((resolve) => setTimeout(resolve, 50));
+    // Nothing reconnects from these on its own; do not hold input for them.
+    if (["suspended", "stopped", "updateRequired"].includes(this.state.state)) {
+      return Promise.reject(new Error(`Workspace runtime is ${this.state.state}`));
+    }
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         stop();

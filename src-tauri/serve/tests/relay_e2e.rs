@@ -405,3 +405,255 @@ async fn desktop_drives_a_remote_runtime_through_the_relay() {
     runtime.wait_for_relay("fenced");
     let _ = std::fs::remove_dir_all(&data);
 }
+
+impl Client {
+    /// The next notification matching `want`, keeping the rest for later.
+    async fn notification(&mut self, want: impl Fn(&Value) -> bool) -> Value {
+        if let Some(index) = self.notifications.iter().position(&want) {
+            return self.notifications.remove(index);
+        }
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            match tokio::time::timeout_at(deadline, self.events.recv()).await.expect("notification").unwrap() {
+                ClientEvent::Message(message) if want(&message) => return message,
+                ClientEvent::Message(message) => self.notifications.push(message),
+                ClientEvent::State(state) => self.states.push(state),
+            }
+        }
+    }
+
+    /// Follow one terminal's output from `offset` until `marker`, checking
+    /// every byte arrives once and in order; a `pty.lagged` stream is picked
+    /// up again from the last byte, as the desktop client does.
+    async fn follow(&mut self, pty_id: &str, epoch: &str, mut offset: u64, marker: &str) -> (String, u64, u32) {
+        let mut output = Vec::new();
+        let mut lagged = 0;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        // What arrived while a call was awaited comes first, in order.
+        let (buffered, rest): (Vec<Value>, Vec<Value>) = std::mem::take(&mut self.notifications).into_iter().partition(|n| n["params"]["ptyId"] == pty_id);
+        let mut buffered = std::collections::VecDeque::from(buffered);
+        self.notifications = rest;
+        while !String::from_utf8_lossy(&output).contains(marker) {
+            let event = match buffered.pop_front() {
+                Some(event) => event,
+                None => match tokio::time::timeout_at(deadline, self.events.recv()).await.unwrap_or_else(|_| {
+                    let tail = String::from_utf8_lossy(&output);
+                    panic!("no {marker} after offset {offset}; got {:?}; states {:?}", &tail[tail.len().saturating_sub(400)..], self.states)
+                }).unwrap() {
+                    ClientEvent::Message(message) => message,
+                    ClientEvent::State(state @ ClientState::Connected { .. }) => {
+                        // A new connection has no subscriptions: resume from
+                        // the last byte, as the desktop client does.
+                        eprintln!("follow: reconnected at offset {offset}; resuming");
+                        self.states.push(state);
+                        let resumed = self
+                            .ok("pty.attach", json!({ "ptyId": pty_id, "sinceOffset": offset, "runtimeGeneration": 7, "epoch": epoch }))
+                            .await;
+                        output.extend(STANDARD.decode(resumed["data"].as_str().unwrap()).unwrap());
+                        offset = resumed["end"].as_u64().unwrap();
+                        continue;
+                    }
+                    ClientEvent::State(state) => {
+                        self.states.push(state);
+                        continue;
+                    }
+                },
+            };
+            if event["params"]["ptyId"] != pty_id {
+                self.notifications.push(event);
+                continue;
+            }
+            match event["event"].as_str() {
+                Some("pty.output") => {
+                    let at = event["params"]["offset"].as_u64().unwrap();
+                    let chunk = STANDARD.decode(event["params"]["data"].as_str().unwrap()).unwrap();
+                    if at + chunk.len() as u64 <= offset {
+                        continue;
+                    }
+                    assert!(at <= offset, "a gap in terminal output: expected {offset}, got {at}");
+                    output.extend(&chunk[(offset - at) as usize..]);
+                    offset = at + chunk.len() as u64;
+                }
+                Some("pty.lagged") => {
+                    lagged += 1;
+                    assert_eq!(event["params"]["offset"].as_u64(), Some(offset), "lagged names the first byte not sent");
+                    let resumed = self
+                        .ok("pty.attach", json!({ "ptyId": pty_id, "sinceOffset": offset, "runtimeGeneration": 7, "epoch": epoch }))
+                        .await;
+                    assert_eq!(resumed["truncated"], false, "the ring still held what was not sent");
+                    output.extend(STANDARD.decode(resumed["data"].as_str().unwrap()).unwrap());
+                    offset = resumed["end"].as_u64().unwrap();
+                }
+                _ => {}
+            }
+        }
+        (String::from_utf8_lossy(&output).into_owned(), offset, lagged)
+    }
+}
+
+fn source(harness: &Harness, pairing_dir: &Path, attachment: &str, device: &str, relay_host_id: &str) -> Arc<TestSource> {
+    Arc::new(TestSource {
+        harness_control: harness.control.clone(),
+        pairing: pairing_dir.join(format!("{attachment}.pairing")),
+        attachment_id: attachment.into(),
+        device_id: device.into(),
+        relay_host_id: relay_host_id.into(),
+        generation: Mutex::new(7),
+    })
+}
+
+/// PRO-26: interactive shells of a cloud workspace, over the relay.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs terminalx-saas, bun and Redis: scripts/remote-runtime/e2e.sh"]
+async fn cloud_terminals_keep_identity_order_and_ownership_through_the_relay() {
+    let harness = Harness::start();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("ws");
+    let data = PathBuf::from(format!("/tmp/tx-e2e-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut secret = [0u8; 32];
+    secret[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    secret[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    let relay_host_id = relay_host_id_for_secret(secret);
+    let relay_token = harness.post("/runtime-token", json!({ "relayHostId": relay_host_id, "runtimeGeneration": 7 }))["relayToken"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let link = dir.path().join("link.json");
+    let tokens: Vec<String> = (0..3).map(|_| uuid::Uuid::new_v4().simple().to_string()).collect();
+    write_link(
+        &link,
+        &secret,
+        &relay_token,
+        &harness.director,
+        json!([
+            attachment("att-desk", "desktop-desk", &tokens[0], "runtime"),
+            attachment("att-laptop", "desktop-laptop", &tokens[1], "runtime"),
+            attachment("att-phone", "mobile-phone", &tokens[2], "session")
+        ]),
+    );
+    let mut runtime = Runtime::start(&root, &data, &link);
+    runtime.wait_for_relay("registered");
+    let pairing_dir = dir.path().join("link.json.attachments");
+
+    let mut desk = Client::start(source(&harness, &pairing_dir, "att-desk", "desktop-desk", &relay_host_id));
+    let ClientState::Connected { runtime_epoch: epoch, .. } = desk.connected().await else { unreachable!() };
+    assert!(epoch.starts_with("epoch-"), "{epoch}");
+
+    // A workspace-bound shell, identified by id, epoch and process.
+    let created = desk.ok("pty.create", json!({ "cols": 100, "rows": 30, "clientRequestId": "e2e-term-create-1" })).await;
+    let pty_id = created["ptyId"].as_str().unwrap().to_string();
+    assert_eq!((created["epoch"].as_str(), created["number"].as_u64(), created["control"].as_str()), (Some(epoch.as_str()), Some(1), Some("you")));
+    let pid = created["pid"].as_u64().expect("the shell's pid");
+    desk.ok("pty.attach", json!({ "ptyId": pty_id })).await;
+    // The desk's writer: one seq per accepted write; a refusal gives it back.
+    let seq = std::cell::Cell::new(0u64);
+    let write = |data: &str| {
+        seq.set(seq.get() + 1);
+        json!({ "ptyId": pty_id, "data": data, "seq": seq.get(), "writerId": "desk-1", "epoch": epoch })
+    };
+
+    // An interactive program: it prompts, waits for input and answers.
+    // (The prompt is assembled by printf so the command's own echo never matches it.)
+    desk.ok("pty.write", write("printf 'na%s? ' me; read who; echo hello-$who-$((40+2))\n")).await;
+    let (_, offset, _) = desk.follow(&pty_id, &epoch, 0, "name? ").await;
+    desk.ok("pty.write", write("relay\n")).await;
+    let (_, offset, _) = desk.follow(&pty_id, &epoch, offset, "hello-relay-42").await;
+
+    // Sustained output: ~1.9 MB crosses the relay once, in order, gap-free.
+    desk.ok("pty.write", write("seq 1 300000; echo flood-$((1+1))-done\n")).await;
+    let (flood, offset, lagged) = desk.follow(&pty_id, &epoch, offset, "flood-2-done").await;
+    assert!(flood.contains("\r\n299999\r\n300000\r\n"), "the tail of the flood arrived");
+    assert!(flood.contains("\r\n150000\r\n150001\r\n"), "the middle of the flood arrived");
+    eprintln!("sustained output: {} bytes, {lagged} lagged resumes", flood.len());
+
+    // A second desktop watches; input and size stay with the controller.
+    let mut laptop = Client::start(source(&harness, &pairing_dir, "att-laptop", "desktop-laptop", &relay_host_id));
+    laptop.connected().await;
+    let watching = laptop.ok("pty.attach", json!({ "ptyId": pty_id, "sinceOffset": offset, "runtimeGeneration": 7, "epoch": epoch })).await;
+    assert_eq!(watching["control"], "other");
+    assert_eq!(laptop.refused("pty.resize", json!({ "ptyId": pty_id, "cols": 50, "rows": 10 })).await, "not_controller");
+    assert_eq!(
+        laptop.refused("pty.write", json!({ "ptyId": pty_id, "data": "ls\n", "seq": 1, "writerId": "laptop-1" })).await,
+        "not_controller"
+    );
+    desk.ok("pty.resize", json!({ "ptyId": pty_id, "cols": 120, "rows": 40 })).await;
+    let resized = laptop.notification(|n| n["event"] == "pty.resized").await;
+    assert_eq!((resized["params"]["cols"].as_u64(), resized["params"]["rows"].as_u64()), (Some(120), Some(40)));
+    // Taking over is explicit and announced.
+    let taken = laptop.ok("pty.control", json!({ "ptyId": pty_id, "cols": 90, "rows": 25, "epoch": epoch })).await;
+    assert_eq!(taken["control"], "you");
+    assert_eq!(desk.notification(|n| n["event"] == "pty.control").await["params"]["control"], "other");
+    assert_eq!(desk.refused("pty.write", write("echo desk\n")).await, "not_controller");
+    seq.set(seq.get() - 1); // refused: the seq was not spent
+    laptop.ok("pty.write", json!({ "ptyId": pty_id, "data": "stty size\n", "seq": 1, "writerId": "laptop-1" })).await;
+    laptop.follow(&pty_id, &epoch, offset, "25 90").await;
+
+    // The phone's scope watches only: no input, size or control.
+    let mut phone = Client::start(source(&harness, &pairing_dir, "att-phone", "mobile-phone", &relay_host_id));
+    let ClientState::Connected { authority, .. } = phone.connected().await else { unreachable!() };
+    assert_eq!(authority, "participate");
+    assert_eq!(phone.ok("pty.list", json!({})).await["terminals"][0]["ptyId"], pty_id.as_str());
+    phone.ok("pty.attach", json!({ "ptyId": pty_id })).await;
+    for method in ["pty.resize", "pty.control", "pty.write", "pty.kill"] {
+        let refused = phone.refused(method, json!({ "ptyId": pty_id, "cols": 10, "rows": 10, "data": "x", "seq": 1 })).await;
+        assert_eq!(refused, "forbidden", "{method}");
+    }
+    phone.supervisor.stop();
+
+    // Stale and forged terminal ids reach nothing.
+    assert_eq!(desk.refused("pty.write", json!({ "ptyId": "remote-pty-forged", "data": "x", "seq": 1 })).await, "not_found");
+    assert_eq!(
+        desk.refused("pty.write", json!({ "ptyId": pty_id, "data": "x", "seq": 1, "writerId": "old", "epoch": "epoch-stale" })).await,
+        "not_found"
+    );
+    assert_eq!(
+        desk.refused("pty.attach", json!({ "ptyId": pty_id, "sinceOffset": 0, "runtimeGeneration": 7, "epoch": "epoch-stale" })).await,
+        "cursor_expired"
+    );
+
+    // The Cell restarts: both reconnect to the same process and terminal.
+    harness.post("/restart-cell", json!({}));
+    desk.state(|state| matches!(state, ClientState::Reconnecting { .. })).await;
+    let ClientState::Connected { runtime_epoch: after, .. } = desk.connected().await else { unreachable!() };
+    assert_eq!(after, epoch, "same runtime process");
+    let listed = desk.ok("pty.list", json!({})).await;
+    assert_eq!((listed["terminals"][0]["ptyId"].as_str(), listed["terminals"][0]["pid"].as_u64()), (Some(pty_id.as_str()), Some(pid)));
+    let resumed = desk.ok("pty.attach", json!({ "ptyId": pty_id, "sinceOffset": offset, "runtimeGeneration": 7, "epoch": epoch })).await;
+    assert_eq!(resumed["offset"].as_u64(), Some(offset));
+    desk.ok("pty.control", json!({ "ptyId": pty_id })).await;
+    // A resend of an applied write is not typed again after the reconnect.
+    assert_eq!(desk.ok("pty.write", json!({ "ptyId": pty_id, "data": "x", "seq": seq.get(), "writerId": "desk-1", "epoch": epoch })).await["applied"], false);
+    desk.ok("pty.write", write("echo same-shell-$$\n")).await;
+    desk.follow(&pty_id, &epoch, resumed["end"].as_u64().unwrap(), &format!("same-shell-{pid}")).await;
+    laptop.supervisor.stop();
+
+    // The shell exits: reported, and input to it is refused, not dropped.
+    desk.ok("pty.write", write("exit 7\n")).await;
+    let exit = desk.notification(|n| n["event"] == "pty.exit").await;
+    assert_eq!(exit["params"]["code"], 7);
+    assert_eq!(desk.refused("pty.write", write("echo late\n")).await, "unavailable");
+    desk.ok("pty.kill", json!({ "ptyId": pty_id })).await;
+    assert_eq!(desk.ok("pty.list", json!({})).await["terminals"], json!([]));
+
+    // The runtime stops and a new process starts in the same generation (a
+    // resume): the client reconnects to a new epoch, and nothing addressed
+    // to the old process's terminals reaches the new one.
+    let second = desk.ok("pty.create", json!({ "clientRequestId": "e2e-term-create-2" })).await;
+    let second_id = second["ptyId"].as_str().unwrap().to_string();
+    drop(runtime);
+    desk.state(|state| matches!(state, ClientState::Reconnecting { .. } | ClientState::WaitingForRuntime)).await;
+    runtime = Runtime::start(&root, &data, &link);
+    runtime.wait_for_relay("registered");
+    let ClientState::Connected { runtime_epoch: restarted, .. } = desk.connected().await else { unreachable!() };
+    assert_ne!(restarted, epoch, "a new runtime process");
+    assert_eq!(desk.ok("pty.list", json!({})).await["terminals"], json!([]));
+    assert_eq!(
+        desk.refused("pty.write", json!({ "ptyId": second_id, "data": "x", "seq": 1, "writerId": "desk-2", "epoch": epoch })).await,
+        "not_found"
+    );
+    assert_eq!(desk.refused("pty.attach", json!({ "ptyId": second_id })).await, "not_found");
+    desk.supervisor.stop();
+    drop(runtime);
+    let _ = std::fs::remove_dir_all(&data);
+}

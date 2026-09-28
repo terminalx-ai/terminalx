@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { RpcWireRequest } from "./rpc";
 import { WorkspaceRpcClient, WorkspaceRpcError, type WorkspaceConnectionState, type WorkspaceTransport } from "./workspace";
 
-const connected = (generation = 7, capabilities = ["pty/1", "fs/1", "git/1", "session/1"]): WorkspaceConnectionState => ({
+const connected = (generation = 7, capabilities = ["pty/1", "fs/1", "git/1", "session/1"], epoch = "e1"): WorkspaceConnectionState => ({
   state: "connected",
   runtimeGeneration: generation,
+  runtimeEpoch: epoch,
   runtimeVersion: "0.2.2",
   capabilities,
   authority: "manage",
@@ -14,6 +15,9 @@ const connected = (generation = 7, capabilities = ["pty/1", "fs/1", "git/1", "se
 class FakeRuntime implements WorkspaceTransport {
   up = false;
   generation = 7;
+  epoch = "e1";
+  /** Answer the next pty.write with this error code instead. */
+  refuseWrite: string | null = null;
   sent: RpcWireRequest[] = [];
   /** Requests are received but the answer is lost with the connection. */
   loseAnswers = false;
@@ -21,7 +25,7 @@ class FakeRuntime implements WorkspaceTransport {
   writes: string[] = [];
   created = 0;
   private cache = new Map<string, unknown>();
-  private applied = 0;
+  private applied = new Map<string, number>();
   private subscription = 0;
   private messages = new Set<(message: unknown) => void>();
   private states = new Set<(state: WorkspaceConnectionState) => void>();
@@ -46,7 +50,7 @@ class FakeRuntime implements WorkspaceTransport {
   connect(capabilities?: string[]) {
     this.up = true;
     this.loseAnswers = false;
-    for (const listener of this.states) listener(connected(this.generation, capabilities));
+    for (const listener of this.states) listener(connected(this.generation, capabilities, this.epoch));
   }
   drop() {
     this.up = false;
@@ -69,24 +73,43 @@ class FakeRuntime implements WorkspaceTransport {
     switch (frame.method) {
       case "pty.create": {
         this.created++;
-        const result = { ptyId: "p1" };
+        const result = { ptyId: "p1", epoch: this.epoch };
         this.cache.set(key!, result);
         return ok(result);
       }
       case "pty.write": {
         const seq = Number(params.seq);
-        if (seq <= this.applied) return ok({ applied: false, seq: this.applied });
-        this.applied = seq;
+        const writer = String(params.writerId);
+        const applied = this.applied.get(writer) ?? 0;
+        if (params.epoch !== undefined && params.epoch !== this.epoch) return { id: frame.id, ok: false, error: { code: "not_found", message: "old epoch" } };
+        if (seq <= applied) return ok({ applied: false, seq: applied });
+        if (seq !== applied + 1) return { id: frame.id, ok: false, error: { code: "conflict", message: `expected ${applied + 1}` } };
+        if (this.refuseWrite) {
+          const code = this.refuseWrite;
+          this.refuseWrite = null;
+          return { id: frame.id, ok: false, error: { code, message: code } };
+        }
+        this.applied.set(writer, seq);
         this.writes.push(String(params.data));
         return ok({ applied: true, seq });
       }
       case "pty.attach": {
-        if (params.sinceOffset !== undefined && params.runtimeGeneration !== this.generation) {
+        if (params.sinceOffset !== undefined && (params.runtimeGeneration !== this.generation || params.epoch !== this.epoch)) {
           return { id: frame.id, ok: false, error: { code: "cursor_expired", message: "other generation" } };
         }
         const from = Number(params.sinceOffset ?? 0);
         this.subscription++;
-        return ok({ subscriptionId: `sub-${this.subscription}`, offset: from, data: btoa(this.output.slice(from)), truncated: false, exited: false });
+        return ok({
+          subscriptionId: `sub-${this.subscription}`,
+          epoch: this.epoch,
+          offset: from,
+          data: btoa(this.output.slice(from)),
+          truncated: false,
+          exited: false,
+          control: "you",
+          cols: 80,
+          rows: 24,
+        });
       }
       default:
         return { id: frame.id, ok: false, error: { code: "method_not_found", message: frame.method } };
@@ -108,7 +131,7 @@ describe("workspace RPC client", () => {
     await settle();
     runtime.drop();
     runtime.connect();
-    await expect(created).resolves.toEqual({ ptyId: "p1" });
+    await expect(created).resolves.toEqual({ ptyId: "p1", epoch: "e1" });
     const creates = runtime.sent.filter((frame) => frame.method === "pty.create");
     expect(creates).toHaveLength(2);
     expect(new Set(creates.map((frame) => (frame.params as { clientRequestId: string }).clientRequestId)).size).toBe(1);
@@ -125,21 +148,49 @@ describe("workspace RPC client", () => {
     await settle();
     runtime.drop();
     runtime.connect();
-    await expect(write).resolves.toBe(false);
+    await expect(write).resolves.toBeUndefined();
     expect(runtime.writes).toEqual(["ls\n"]);
-    await expect(client.write("p1", "pwd\n")).resolves.toBe(true);
+    await client.write("p1", "pwd\n");
     expect(runtime.writes).toEqual(["ls\n", "pwd\n"]);
     client.close();
   });
 
-  it("resumes a terminal from the last byte after a reconnect and resyncs after a new generation", async () => {
+  it("sends input one write at a time, in order, batching what was typed meanwhile", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    await Promise.all(["e", "c", "h", "o"].map((key) => client.write("p1", key)));
+    expect(runtime.writes).toEqual(["e", "cho"]);
+    const seqs = runtime.sent.filter((frame) => frame.method === "pty.write").map((frame) => (frame.params as { seq: number }).seq);
+    expect(seqs).toEqual([1, 2]);
+    client.close();
+  });
+
+  it("reports refused input instead of dropping it, and retries backpressure with the same seq", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    runtime.refuseWrite = "not_controller";
+    await expect(client.write("p1", "rm -rf build\n")).rejects.toMatchObject({ code: "not_controller" });
+    expect(runtime.writes).toEqual([]);
+    runtime.refuseWrite = "backpressure";
+    await client.write("p1", "q");
+    expect(runtime.writes).toEqual(["q"]);
+    const seqs = runtime.sent.filter((frame) => frame.method === "pty.write").map((frame) => (frame.params as { seq: number }).seq);
+    expect(seqs).toEqual([1, 1, 1], "a refusal does not spend the seq");
+    client.close();
+  });
+
+  it("resumes a terminal from the last byte after a reconnect, also across a new generation of the same runtime", async () => {
     const runtime = new FakeRuntime();
     const client = new WorkspaceRpcClient(runtime, ids);
     runtime.connect();
     runtime.output = "hello ";
     let seen = "";
-    await client.attachPty("p1", (bytes) => {
-      seen += new TextDecoder().decode(bytes);
+    await client.attachPty("p1", {
+      onData: (bytes) => {
+        seen += new TextDecoder().decode(bytes);
+      },
     });
     runtime.typeOutput("world");
     runtime.drop();
@@ -148,17 +199,125 @@ describe("workspace RPC client", () => {
     await settle();
     await settle();
     const attaches = runtime.sent.filter((frame) => frame.method === "pty.attach");
-    expect(attaches[1]!.params).toEqual({ ptyId: "p1", sinceOffset: 11, runtimeGeneration: 7 });
+    expect(attaches[1]!.params).toEqual({ ptyId: "p1", sinceOffset: 11, runtimeGeneration: 7, epoch: "e1" });
     expect(seen).toBe("hello world!");
 
+    // The relay re-registered at a newer generation; the process (and its
+    // terminals) are the same, so output resumes without a replay.
     runtime.drop();
     runtime.generation = 8;
     runtime.connect();
     await settle();
     await settle();
-    const [stale, resync] = runtime.sent.filter((frame) => frame.method === "pty.attach").slice(-2);
-    expect(stale!.params).toEqual({ ptyId: "p1", sinceOffset: 12, runtimeGeneration: 7 });
-    expect(resync!.params).toEqual({ ptyId: "p1" });
+    expect(runtime.sent.filter((frame) => frame.method === "pty.attach").at(-1)!.params).toEqual({
+      ptyId: "p1",
+      sinceOffset: 12,
+      runtimeGeneration: 8,
+      epoch: "e1",
+    });
+    expect(seen).toBe("hello world!");
+    client.close();
+  });
+
+  it("resumes from a kept cursor, and again from the last byte when the runtime says the link lagged", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    runtime.output = "old output|";
+    let seen = "";
+    const attachment = await client.attachPty("p1", {
+      since: { offset: 11, epoch: "e1" },
+      onData: (bytes) => {
+        seen += new TextDecoder().decode(bytes);
+      },
+    });
+    expect(runtime.sent.at(-1)!.params).toEqual({ ptyId: "p1", sinceOffset: 11, runtimeGeneration: 7, epoch: "e1" });
+    runtime.output += "missed";
+    runtime.deliver({ event: "pty.lagged", params: { subscriptionId: "sub-1", ptyId: "p1", offset: 11 } });
+    await settle();
+    await settle();
+    expect(runtime.sent.at(-1)!.params).toEqual({ ptyId: "p1", sinceOffset: 11, runtimeGeneration: 7, epoch: "e1" });
+    expect(seen).toBe("missed");
+    expect(attachment.cursor()).toEqual({ offset: 17, epoch: "e1" });
+    client.close();
+  });
+
+  it("keeps output that arrives before its subscription's answer has been handled", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    runtime.output = "first|";
+    let seen = "";
+    const originalSend = runtime.send.bind(runtime);
+    runtime.send = (frame) => {
+      const sent = originalSend(frame);
+      // The rest of a long replay, queued right behind the answer.
+      if (frame.method === "pty.attach") runtime.deliver({ event: "pty.output", params: { subscriptionId: "sub-1", ptyId: "p1", offset: 6, data: btoa("rest") } });
+      return sent;
+    };
+    await client.attachPty("p1", { onData: (bytes) => (seen += new TextDecoder().decode(bytes)) });
+    await settle();
+    expect(seen).toBe("first|rest");
+    client.close();
+  });
+
+  it("reports a terminal closed elsewhere and does not resume it", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    const gone: string[] = [];
+    await client.attachPty("p1", { onData: () => undefined, onGone: (reason) => gone.push(reason) });
+    runtime.deliver({ event: "pty.closed", params: { subscriptionId: "sub-1", ptyId: "p1" } });
+    expect(gone).toEqual(["closed"]);
+    runtime.drop();
+    runtime.connect();
+    await settle();
+    expect(runtime.sent.filter((frame) => frame.method === "pty.attach")).toHaveLength(1);
+    client.close();
+  });
+
+  it("keeps trying to resume a lagged stream while the link is up", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids, 20);
+    runtime.connect();
+    let seen = "";
+    await client.attachPty("p1", { onData: (bytes) => (seen += new TextDecoder().decode(bytes)) });
+    runtime.loseAnswers = true;
+    runtime.deliver({ event: "pty.lagged", params: { subscriptionId: "sub-1", ptyId: "p1", offset: 0 } });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    runtime.loseAnswers = false;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(runtime.sent.filter((frame) => frame.method === "pty.attach").length).toBeGreaterThanOrEqual(3);
+    runtime.typeOutput("back");
+    expect(seen).toBe("back");
+    client.close();
+  });
+
+  it("never re-attaches or types into a terminal whose runtime restarted", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    const gone: string[] = [];
+    await client.attachPty("p1", { onData: () => undefined, onGone: (reason) => gone.push(reason) });
+    runtime.drop();
+    const typed = client.write("p1", "make deploy\n");
+    runtime.epoch = "e2";
+    runtime.connect();
+    await settle();
+    await expect(typed).rejects.toMatchObject({ code: "not_found" });
+    expect(gone).toEqual(["runtime-restarted"]);
+    expect(runtime.sent.filter((frame) => frame.method === "pty.attach")).toHaveLength(1);
+    expect(runtime.writes).toEqual([]);
+    client.close();
+  });
+
+  it("fails input at once while the workspace is suspended rather than holding it", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    runtime.up = false;
+    for (const listener of (runtime as unknown as { states: Set<(state: WorkspaceConnectionState) => void> }).states) listener({ state: "suspended" });
+    await expect(client.write("p1", "x")).rejects.toThrow(/suspended/);
     client.close();
   });
 
@@ -174,12 +333,12 @@ describe("workspace RPC client", () => {
   it("keeps a subscription made while disconnected and starts it on connect", async () => {
     const runtime = new FakeRuntime();
     const client = new WorkspaceRpcClient(runtime, ids);
-    const stop = await client.attachPty("p1", () => undefined);
+    const attachment = await client.attachPty("p1", { onData: () => undefined });
     expect(runtime.sent).toHaveLength(0);
     runtime.connect();
     await settle();
     expect(runtime.sent.map((frame) => frame.method)).toEqual(["pty.attach"]);
-    stop();
+    attachment.detach();
     client.close();
   });
 });
