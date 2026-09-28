@@ -143,6 +143,53 @@ pub async fn organization_member_remove(
     members_call(state, move |service| service.remove(&user_id, &context_revision)).await
 }
 
+// ------------------------------------------------------ organization compute
+
+type ComputeResult = Result<serde_json::Value, crate::organization_compute::OrganizationComputeError>;
+
+async fn compute_call(
+    state: tauri::State<'_, crate::AppState>,
+    operation: impl FnOnce(&crate::organization_compute::OrganizationComputeService) -> ComputeResult + Send + 'static,
+) -> ComputeResult {
+    let service = state.organization_compute.clone();
+    tauri::async_runtime::spawn_blocking(move || operation(&service))
+        .await
+        .map_err(|_| crate::organization_compute::OrganizationComputeError::local("organization_compute_unavailable"))?
+}
+
+#[tauri::command]
+pub async fn organization_compute_policy(state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    compute_call(state, |service| service.policy()).await
+}
+
+#[tauri::command]
+pub async fn organization_compute_usage(state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    compute_call(state, |service| service.usage()).await
+}
+
+#[tauri::command]
+pub async fn organization_compute_policy_update(
+    policy: serde_json::Value,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> ComputeResult {
+    compute_call(state, move |service| service.update_policy(&policy, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_compute_provisioning_pause(
+    expected_version: u64,
+    paused: bool,
+    reason: Option<String>,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> ComputeResult {
+    compute_call(state, move |service| {
+        service.set_provisioning_paused(expected_version, paused, reason.as_deref(), &context_revision)
+    })
+    .await
+}
+
 // --------------------------------------------------------- cloud workspaces
 
 macro_rules! cloud_command {
