@@ -243,9 +243,18 @@ fn boot_installs_the_helper_and_git_and_gh_get_brokered_tokens() {
     assert!(walk(&vm.path("d")).iter().all(|file| !std::fs::read(file).unwrap_or_default().windows(4).any(|window| window == b"ghs_")));
 
     // gh: the default token, in GH_TOKEN, over whatever the user set.
-    let output = Command::new(vm.shim_dir().join("gh")).args(["repo", "view"]).env("GH_TOKEN", "user_token").output().unwrap();
+    // Outside a clone it asks for the workspace default.
+    let output = Command::new(vm.shim_dir().join("gh")).args(["repo", "view"]).current_dir(vm.path("p")).env("GH_TOKEN", "user_token").output().unwrap();
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "GH_TOKEN=ghs_2 args=repo view");
     assert_eq!(state.lock().unwrap().minted[1].1, json!({ "v": 1 }));
+
+    // In a clone, for the repository its origin points at.
+    let clone = vm.path("clone");
+    assert!(Command::new("git").arg("init").arg("-q").arg(&clone).status().unwrap().success());
+    assert!(Command::new("git").args(["remote", "add", "origin", "https://github.com/other-org/web.git"]).current_dir(&clone).status().unwrap().success());
+    let output = Command::new(vm.shim_dir().join("gh")).args(["pr", "list"]).current_dir(&clone).env("GIT_CONFIG_GLOBAL", vm.gitconfig()).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "GH_TOKEN=ghs_3 args=pr list");
+    assert_eq!(state.lock().unwrap().minted[2].1, json!({ "v": 1, "repository": "other-org/web" }));
 
     // A refusal fails Git's credential request with the reason.
     state.lock().unwrap().refusals.insert("acme/gone".into(), (409, "github_installation_revoked"));
@@ -257,7 +266,7 @@ fn boot_installs_the_helper_and_git_and_gh_get_brokered_tokens() {
     // Another host is not ours to answer.
     let output = vm.credential_fill("https://gitlab.com/acme/api.git");
     assert!(!String::from_utf8_lossy(&output.stdout).contains("password="));
-    assert_eq!(state.lock().unwrap().minted.len(), 3);
+    assert_eq!(state.lock().unwrap().minted.len(), 4);
 
     // The next boot installs again, idempotently, and starts from an empty
     // cache.
@@ -265,7 +274,7 @@ fn boot_installs_the_helper_and_git_and_gh_get_brokered_tokens() {
     let child = vm.boot();
     assert_eq!(vm.git_get_all("credential.https://github.com.helper"), vec![String::new(), helper]);
     let output = vm.credential_fill("https://github.com/acme/api.git");
-    assert!(String::from_utf8_lossy(&output.stdout).contains("password=ghs_4\n"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("password=ghs_5\n"));
     stop(child);
 }
 

@@ -182,7 +182,8 @@ it("saves the checked repositories and keeps other installations' choices", asyn
     }),
   );
   api.repositories.mockResolvedValue(live());
-  api.saveRepositories.mockResolvedValue(undefined);
+  // Tauri resolves a command returning `()` to null.
+  api.saveRepositories.mockResolvedValue(null as never);
   await renderPanel();
   fireEvent.click(screen.getByRole("button", { name: "Choose repositories for acme" }));
   await screen.findByRole("list", { name: "Available repositories" });
@@ -200,6 +201,27 @@ it("saves the checked repositories and keeps other installations' choices", asyn
     "rev-1",
   );
   expect(screen.queryByRole("group", { name: "Choose repositories" })).toBeNull();
+});
+
+it("keeps a stored selection that a truncated live list does not show", async () => {
+  api.summary.mockResolvedValue(
+    summary({
+      repositories: [
+        ...summary().repositories,
+        { id: "ghrepo_9", installationId: "ghinst_1", githubRepositoryId: 1500, fullName: "acme/zzz-service", private: true, state: "accessible", reason: null },
+      ],
+    }),
+  );
+  api.repositories.mockResolvedValue(live({ truncated: true }));
+  api.saveRepositories.mockResolvedValue(null as never);
+  await renderPanel();
+  fireEvent.click(screen.getByRole("button", { name: "Choose repositories for acme" }));
+  const available = await screen.findByRole("list", { name: "Available repositories" });
+  fireEvent.click(within(available).getByRole("checkbox", { name: "acme/web" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save selection" }));
+  await screen.findByText("Repository selection saved.");
+  const saved = api.saveRepositories.mock.calls[0][0].map((choice) => choice.githubRepositoryId).sort((a, b) => a - b);
+  expect(saved).toEqual([7, 8, 1500]);
 });
 
 it("surfaces a refused save and re-reads the live list", async () => {
@@ -240,7 +262,7 @@ it("explains missing and revoked repositories with a link to fix them on GitHub"
 });
 
 it("disconnects only after confirmation", async () => {
-  api.disconnect.mockResolvedValue(undefined);
+  api.disconnect.mockResolvedValue(null as never);
   await renderPanel();
   fireEvent.click(screen.getByRole("button", { name: "Disconnect acme" }));
   expect(api.disconnect).not.toHaveBeenCalled();
@@ -248,6 +270,7 @@ it("disconnects only after confirmation", async () => {
   api.summary.mockResolvedValue(summary({ installations: [], repositories: [] }));
   fireEvent.click(screen.getByRole("button", { name: "Confirm disconnect" }));
   await screen.findByText("No GitHub installation is connected yet.");
+  expect(screen.getByText(/Disconnected acme/)).toBeTruthy();
   expect(api.disconnect).toHaveBeenCalledWith("ghinst_1", "rev-1");
 });
 

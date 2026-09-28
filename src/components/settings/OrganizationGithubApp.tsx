@@ -45,6 +45,13 @@ export function OrganizationGithubApp({
   pollIntervalMs?: number;
 }) {
   const [summary, setSummary] = useState<GithubAppSummary | null>(null);
+  // For callbacks that must see the latest summary without re-creating.
+  const summaryRef = useRef<GithubAppSummary | null>(null);
+  summaryRef.current = summary;
+  const storedSelection = (installationId: string) =>
+    (summaryRef.current?.repositories ?? [])
+      .filter((repository) => repository.installationId === installationId && repository.state === "accessible")
+      .map((repository) => repository.githubRepositoryId);
   const [notConfigured, setNotConfigured] = useState(false);
   const [canManage, setCanManage] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -150,16 +157,18 @@ export function OrganizationGithubApp({
     };
   }, [attempt, load, pollIntervalMs]);
 
-  const act = async <T,>(key: string, run: (revision: string) => Promise<T>): Promise<T | null> => {
+  // `{ value }` on success: a command that returns nothing resolves to null,
+  // which must not read as a failure.
+  const act = async <T,>(key: string, run: (revision: string) => Promise<T>): Promise<{ value: T } | null> => {
     if (!summary || busy) return null;
     const current = contextEpoch.current;
     setBusy(key);
     setError(null);
     setNotice(null);
     try {
-      const result = await run(summary.contextRevision);
+      const value = await run(summary.contextRevision);
       if (current !== contextEpoch.current) return null;
-      return result;
+      return { value };
     } catch (failure) {
       if (current !== contextEpoch.current) return null;
       setError(githubAppErrorMessage(failure));
@@ -175,14 +184,15 @@ export function OrganizationGithubApp({
     const started = await act("connect", (revision) => organizationGithubApp.connect(revision));
     if (started) {
       attemptSeq.current += 1;
-      setAttempt(started);
+      setAttempt(started.value);
     }
   };
 
   const cancelAttempt = async () => {
     if (!attempt) return;
     attemptSeq.current += 1;
-    const ended = await act("cancel", (revision) => organizationGithubApp.cancelAttempt(attempt.attemptId, revision));
+    const canceled = await act("cancel", (revision) => organizationGithubApp.cancelAttempt(attempt.attemptId, revision));
+    const ended = canceled?.value;
     if (!ended) {
       // Not canceled: keep polling the attempt.
       setAttempt((shown) => (shown ? { ...shown } : shown));
@@ -215,7 +225,15 @@ export function OrganizationGithubApp({
               live,
               loading: false,
               // The first list seeds the draft; later searches keep the admin's edits.
-              draft: shown.draft ?? new Set(live.repositories.filter((repository) => repository.selected).map((repository) => repository.githubRepositoryId)),
+              // Seeded from the live flags and the stored selection, so a
+              // repository past a truncated or filtered list is not dropped
+              // on save.
+              draft:
+                shown.draft ??
+                new Set([
+                  ...live.repositories.filter((repository) => repository.selected).map((repository) => repository.githubRepositoryId),
+                  ...storedSelection(installationId),
+                ]),
             }
           : shown,
       );

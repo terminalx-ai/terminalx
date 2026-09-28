@@ -181,6 +181,7 @@ fn known_error_code(code: &str) -> bool {
             | "forbidden"
             | "not_found"
             | "invalid_request"
+            | "cloud_workspace_request_invalid"
             | "organization_admin_required"
             | "github_app_not_configured"
             | "github_app_unavailable"

@@ -135,6 +135,7 @@ export function githubAppErrorMessage(error: unknown): string {
     case "forbidden":
       return "Only organization owners and admins can manage GitHub access.";
     case "invalid_request":
+    case "cloud_workspace_request_invalid":
       return "That request was not valid. Check the details and try again.";
     case "not_found":
       return "That installation or connection attempt is no longer available. The list has been refreshed.";

@@ -20,7 +20,8 @@
 //!
 //! - `terminalx-github-auth`, the credential helper Git runs;
 //! - `gh`, which puts `GH_TOKEN` in its environment and `exec`s the real
-//!   `gh`. `<dir>/bin` goes first on the `PATH` of everything the runtime
+//!   `gh`. It asks for the repository the current directory's `origin`
+//!   points at, falling back to the workspace default. `<dir>/bin` goes first on the `PATH` of everything the runtime
 //!   spawns ([`crate::binpath::set_priority_dir`]).
 //!
 //! Git is configured for `https://github.com` only (an empty helper first
@@ -37,8 +38,10 @@
 //! repository the token is minted for; `gh` passes none and gets the
 //! workspace default.
 //!
-//! Tokens are cached per repository key in a 0700 directory: tmpfs when there
-//! is one (the same base `cloud_grants` uses), else `<dir>/cache`. A cached
+//! Tokens are cached per repository key in a 0700 tmpfs directory (the same
+//! base `cloud_grants` uses); without tmpfs nothing is cached and every
+//! request mints, so a token never reaches the disk. Git's `erase` (GitHub
+//! rejected the token) drops the cached entry. A cached
 //! token is reused until less than five minutes remain; a refresh takes a
 //! per-key `flock` and checks the cache again once it holds it, so parallel
 //! Git processes mint once. When the API cannot be reached (a transport error,
@@ -64,7 +67,6 @@ const TOKEN_PATH: &str = "/v1/cloud-workspace-bootstrap/github-token";
 const DIR_NAME: &str = "github-auth";
 const CONFIG_FILE: &str = "broker.json";
 const BIN_DIR: &str = "bin";
-const CACHE_DIR: &str = "cache";
 const TMPFS_CACHE_DIR: &str = "github";
 const HELPER_SCRIPT: &str = "terminalx-github-auth";
 const GH_SCRIPT: &str = "gh";
@@ -84,7 +86,8 @@ struct BrokerConfig {
     origin: String,
     /// The bootstrap's state directory, holding the runtime credential.
     state_dir: PathBuf,
-    cache_dir: PathBuf,
+    /// `None` without tmpfs: tokens are then never written anywhere.
+    cache_dir: Option<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -299,6 +302,32 @@ impl KeyLock {
     }
 }
 
+fn usable(minted: Minted, now_ms: u64) -> Result<Minted, MintError> {
+    if minted.v != 1 || !valid_token(&minted.token) || minted.expires_at <= now_ms {
+        return Err(MintError { status: Some(200), code: None, detail: "the TerminalX server returned an unusable GitHub token".into() });
+    }
+    Ok(minted)
+}
+
+/// [`resolve_token`] through the cache when there is one; without one (no
+/// tmpfs) every request mints, so no token is ever written to disk.
+pub fn resolve(cache_dir: Option<&Path>, repository: Option<&str>, api: &dyn TokenApi, now_ms: &dyn Fn() -> u64) -> Result<Zeroizing<String>, MintError> {
+    match cache_dir {
+        Some(cache_dir) => resolve_token(cache_dir, repository, api, now_ms),
+        None => api.mint(repository).and_then(|minted| usable(minted, now_ms())).map(|minted| Zeroizing::new(minted.token.clone())),
+    }
+}
+
+/// Forget the cached token for `repository`, when Git reports that GitHub
+/// rejected it (`erase`).
+fn forget(cache_dir: &Path, repository: Option<&str>) {
+    let key = cache_key(repository);
+    let path = cache_dir.join(format!("{key}.json"));
+    if let Ok(_lock) = KeyLock::acquire(&cache_dir.join(format!("{key}.lock"))) {
+        let _ = fs::remove_file(path);
+    }
+}
+
 /// A token for `repository` (or the workspace default): the cached one while
 /// more than five minutes of it remain, else a fresh one, minted once however
 /// many processes ask at the same time.
@@ -316,13 +345,7 @@ pub fn resolve_token(cache_dir: &Path, repository: Option<&str>, api: &dyn Token
     if let Some(cached) = cached.as_ref().filter(|cached| fresh(cached)) {
         return Ok(Zeroizing::new(cached.token.clone()));
     }
-    let minted = api.mint(repository).and_then(|minted| {
-        if minted.v != 1 || !valid_token(&minted.token) || minted.expires_at <= now_ms() {
-            return Err(MintError { status: Some(200), code: None, detail: "the TerminalX server returned an unusable GitHub token".into() });
-        }
-        Ok(minted)
-    });
-    match minted {
+    match api.mint(repository).and_then(|minted| usable(minted, now_ms())) {
         Ok(minted) => {
             let entry = CachedToken { v: 1, token: minted.token.clone(), expires_at: minted.expires_at };
             let bytes = Zeroizing::new(serde_json::to_vec(&entry).unwrap_or_default());
@@ -361,9 +384,9 @@ pub fn repository_from_path(path: &str) -> Option<String> {
 
 /// One Git credential request (`get`, `store` or `erase`). Returns the exit
 /// code.
-pub fn credential(operation: &str, input: &mut dyn BufRead, out: &mut dyn Write, err: &mut dyn Write, cache_dir: &Path, api: &dyn TokenApi, now_ms: &dyn Fn() -> u64) -> i32 {
-    // Git never persists the token: storing and erasing are ours to ignore.
-    if operation != "get" {
+pub fn credential(operation: &str, input: &mut dyn BufRead, out: &mut dyn Write, err: &mut dyn Write, cache_dir: Option<&Path>, api: &dyn TokenApi, now_ms: &dyn Fn() -> u64) -> i32 {
+    // Git never persists the token: storing is ours to ignore.
+    if operation != "get" && operation != "erase" {
         return 0;
     }
     let (mut protocol, mut host, mut path) = (None, None, None);
@@ -393,7 +416,15 @@ pub fn credential(operation: &str, input: &mut dyn BufRead, out: &mut dyn Write,
         return 0;
     }
     let repository = path.as_deref().and_then(repository_from_path);
-    match resolve_token(cache_dir, repository.as_deref(), api, now_ms) {
+    if operation == "erase" {
+        // GitHub rejected the token (revoked or uninstalled): the next `get`
+        // asks the server again, which then says why.
+        if let Some(cache_dir) = cache_dir {
+            forget(cache_dir, repository.as_deref());
+        }
+        return 0;
+    }
+    match resolve(cache_dir, repository.as_deref(), api, now_ms) {
         Ok(token) => {
             let answer = Zeroizing::new(format!("username={USERNAME}\npassword={}\n", token.as_str()));
             if out.write_all(answer.as_bytes()).and_then(|()| out.flush()).is_err() {
@@ -406,6 +437,30 @@ pub fn credential(operation: &str, input: &mut dyn BufRead, out: &mut dyn Write,
             1
         }
     }
+}
+
+/// `owner/name` of a github.com remote URL: `https://github.com/o/n.git`,
+/// `ssh://git@github.com/o/n.git` or `git@github.com:o/n.git`.
+pub fn repository_from_remote(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    if let Ok(url) = url::Url::parse(remote) {
+        return (url.host_str().is_some_and(|host| host.eq_ignore_ascii_case(GITHUB_HOST)) && matches!(url.scheme(), "https" | "ssh" | "git"))
+            .then(|| repository_from_path(url.path()))
+            .flatten();
+    }
+    let (user_host, path) = remote.split_once(':')?;
+    let host = user_host.rsplit_once('@').map_or(user_host, |(_, host)| host);
+    host.eq_ignore_ascii_case(GITHUB_HOST).then(|| repository_from_path(path)).flatten()
+}
+
+/// The repository the current directory's `origin` points at, if it is on
+/// github.com.
+fn origin_repository() -> Option<String> {
+    let output = std::process::Command::new("git").args(["remote", "get-url", "origin"]).stderr(std::process::Stdio::null()).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    repository_from_remote(&String::from_utf8_lossy(&output.stdout))
 }
 
 fn load_config(dir: &Path) -> Result<BrokerConfig> {
@@ -447,7 +502,7 @@ pub fn run_cli(args: &[String]) -> i32 {
             let mut input = stdin.lock();
             let stdout = std::io::stdout();
             let mut out = stdout.lock();
-            credential(operation, &mut input, &mut out, &mut std::io::stderr(), &config.cache_dir, &api, &now)
+            credential(operation, &mut input, &mut out, &mut std::io::stderr(), config.cache_dir.as_deref(), &api, &now)
         }
         ["token"] | ["token", "--repository", _] => {
             let repository = match rest.get(2) {
@@ -458,9 +513,18 @@ pub fn run_cli(args: &[String]) -> i32 {
                         return 64;
                     }
                 },
-                None => None,
+                // gh passes no repository: take the one this directory's
+                // origin points at, so a workspace spanning installations
+                // gets the right one.
+                None => origin_repository(),
             };
-            match resolve_token(&config.cache_dir, repository.as_deref(), &api, &now) {
+            let mut resolved = resolve(config.cache_dir.as_deref(), repository.as_deref(), &api, &now);
+            // A clone that is not one of the workspace's repositories: gh
+            // still gets the workspace default.
+            if rest.len() == 1 && repository.is_some() && resolved.as_ref().is_err_and(|error| error.code.as_deref() == Some("github_repository_not_authorized")) {
+                resolved = resolve(config.cache_dir.as_deref(), None, &api, &now);
+            }
+            match resolved {
                 Ok(token) => {
                     let mut out = std::io::stdout().lock();
                     if writeln!(out, "{}", token.as_str()).and_then(|()| out.flush()).is_err() {
@@ -488,7 +552,8 @@ pub fn run_cli(args: &[String]) -> i32 {
 pub struct Installed {
     pub dir: PathBuf,
     pub bin_dir: PathBuf,
-    pub cache_dir: PathBuf,
+    /// `None` without tmpfs: no token is cached.
+    pub cache_dir: Option<PathBuf>,
     /// The real `gh` the shim runs, if there is one.
     pub gh: Option<PathBuf>,
     /// The value of `credential.https://github.com.helper`.
@@ -573,20 +638,21 @@ pub fn configure_git(target: &GitTarget, helper: &str) -> Result<()> {
 
 /// Install the helper, the `gh` shim and the Git configuration. `state_dir`
 /// is the bootstrap's (it holds the runtime credential); the helper's own
-/// files go in `<state_dir>/github-auth`, tokens in `cache_dir` (tmpfs when
-/// there is one).
+/// files go in `<state_dir>/github-auth`, tokens in `cache_dir` (tmpfs; with
+/// none, tokens are not cached at all, so none reaches the disk).
 pub fn install(state_dir: &Path, origin: &str, cache_dir: Option<PathBuf>, exe: &Path, gh_search: Vec<PathBuf>, git: &GitTarget) -> Result<Installed> {
     let dir = state_dir.join(DIR_NAME);
     let bin_dir = dir.join(BIN_DIR);
-    let cache_dir = cache_dir.unwrap_or_else(|| dir.join(CACHE_DIR));
-    for private in [&dir, &bin_dir, &cache_dir] {
+    for private in [Some(&dir), Some(&bin_dir), cache_dir.as_ref()].into_iter().flatten() {
         crate::cloud_grants::prepare_private_dir(private)?;
     }
     // Tokens from before this boot were minted for an older runtime
     // generation and repository selection.
-    for entry in fs::read_dir(&cache_dir).with_context(|| format!("read {}", cache_dir.display()))?.flatten() {
-        if entry.path().extension().is_some_and(|extension| extension == "json") {
-            let _ = fs::remove_file(entry.path());
+    if let Some(cache_dir) = &cache_dir {
+        for entry in fs::read_dir(cache_dir).with_context(|| format!("read {}", cache_dir.display()))?.flatten() {
+            if entry.path().extension().is_some_and(|extension| extension == "json") {
+                let _ = fs::remove_file(entry.path());
+            }
         }
     }
     let config = BrokerConfig { v: 1, origin: origin.to_string(), state_dir: state_dir.to_path_buf(), cache_dir: cache_dir.clone() };
@@ -604,15 +670,41 @@ pub fn install(state_dir: &Path, origin: &str, cache_dir: Option<PathBuf>, exe: 
         ),
     )?;
     let gh = find_real_gh(gh_search, &bin_dir);
-    let gh_body = match &gh {
-        Some(real) => format!(
-            "#!/bin/sh\n# Written by terminalx-serve on every boot: runs the real gh with a\n# GitHub token for this cloud workspace. `gh auth login` is not needed.\nGH_TOKEN=$({} {SUBCOMMAND} --dir {} token) || exit 1\nexport GH_TOKEN\nexec {} \"$@\"\n",
-            shell_quote(exe),
-            shell_quote(dir_str),
-            shell_quote(&real.to_string_lossy())
-        ),
-        None => "#!/bin/sh\necho 'gh: the GitHub CLI is not installed in this cloud workspace' >&2\nexit 127\n".to_string(),
-    };
+    let bin_str = bin_dir.to_str().ok_or_else(|| anyhow!("{} is not UTF-8", bin_dir.display()))?;
+    // The gh found at boot, else whichever is on PATH now (one installed
+    // after boot), never this shim.
+    let gh_body = format!(
+        r#"#!/bin/sh
+# Written by terminalx-serve on every boot: runs the real gh with a GitHub
+# token for this cloud workspace. `gh auth login` is not needed.
+shim={shim}
+real={real}
+if [ ! -x "$real" ]; then
+    real=
+    set -f
+    IFS=:
+    for dir in $PATH; do
+        if [ -n "$dir" ] && [ -x "$dir/gh" ] && [ ! "$dir/gh" -ef "$shim" ]; then
+            real="$dir/gh"
+            break
+        fi
+    done
+    unset IFS
+    set +f
+fi
+if [ -z "$real" ]; then
+    echo 'gh: the GitHub CLI is not installed in this cloud workspace' >&2
+    exit 127
+fi
+GH_TOKEN=$({exe} {SUBCOMMAND} --dir {dir} token) || exit 1
+export GH_TOKEN
+exec "$real" "$@"
+"#,
+        shim = shell_quote(&format!("{bin_str}/{GH_SCRIPT}")),
+        real = shell_quote(&gh.as_ref().map(|real| real.to_string_lossy().into_owned()).unwrap_or_default()),
+        exe = shell_quote(exe),
+        dir = shell_quote(dir_str),
+    );
     write_script(&bin_dir.join(GH_SCRIPT), &gh_body)?;
 
     let helper_str = helper_path.to_str().ok_or_else(|| anyhow!("{} is not UTF-8", helper_path.display()))?;
@@ -646,17 +738,17 @@ pub fn install_at_boot(state_dir: &Path, origin: &str, workspace_id: &str) {
             }
             match &installed.gh {
                 Some(gh) => log::info!(
-                    "GitHub access: Git helper `{}` and gh shim installed in {} (real gh at {}, tokens cached in {})",
+                    "GitHub access: Git helper `{}` and gh shim installed in {} (real gh at {}, token cache {:?})",
                     installed.helper,
                     installed.dir.display(),
                     gh.display(),
-                    installed.cache_dir.display()
+                    installed.cache_dir
                 ),
                 None => log::warn!(
-                    "GitHub access: Git helper `{}` installed in {} (tokens cached in {}); no gh CLI found to shim",
+                    "GitHub access: Git helper `{}` installed in {} (token cache {:?}); no gh CLI found yet",
                     installed.helper,
                     installed.dir.display(),
-                    installed.cache_dir.display()
+                    installed.cache_dir
                 ),
             }
         }
@@ -728,7 +820,7 @@ mod tests {
 
     fn get(cache: &Path, api: &dyn TokenApi, request: &str) -> (i32, String, String) {
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = credential("get", &mut request.as_bytes(), &mut out, &mut err, cache, api, &now);
+        let code = credential("get", &mut request.as_bytes(), &mut out, &mut err, Some(cache), api, &now);
         (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
     }
 
@@ -845,17 +937,48 @@ mod tests {
     }
 
     #[test]
-    fn store_and_erase_do_nothing() {
+    fn store_does_nothing_and_erase_only_forgets_the_cached_token() {
         let dir = tempfile::tempdir().unwrap();
         let api = FakeApi::minting("ghs_x", NOW + 60 * MINUTE);
-        for operation in ["store", "erase"] {
-            let (mut out, mut err) = (Vec::new(), Vec::new());
-            let input = "protocol=https\nhost=github.com\nusername=x-access-token\npassword=ghs_x\n";
-            assert_eq!(credential(operation, &mut input.as_bytes(), &mut out, &mut err, dir.path(), &api, &now), 0);
-            assert!(out.is_empty() && err.is_empty());
-        }
-        assert_eq!(api.calls(), 0);
+        let input = "protocol=https\nhost=github.com\npath=acme/api.git\nusername=x-access-token\npassword=ghs_x\n";
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(credential("store", &mut input.as_bytes(), &mut out, &mut err, Some(dir.path()), &api, &now), 0);
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        // GitHub rejected a cached token: `erase` drops it, so the next
+        // `get` asks the server instead of replaying it for an hour.
+        seed(dir.path(), Some("acme/api"), "ghs_revoked", NOW + 50 * MINUTE);
+        seed(dir.path(), Some("acme/web"), "ghs_other", NOW + 50 * MINUTE);
+        assert_eq!(credential("erase", &mut input.as_bytes(), &mut out, &mut err, Some(dir.path()), &api, &now), 0);
+        assert!(out.is_empty() && err.is_empty());
+        assert_eq!(api.calls(), 0);
+        let (_, answer, _) = get(dir.path(), &api, "protocol=https\nhost=github.com\npath=acme/api.git\n");
+        assert!(answer.contains("password=ghs_x"), "{answer}");
+        assert_eq!(resolve_token(dir.path(), Some("acme/web"), &api, &now).unwrap().as_str(), "ghs_other");
+        assert_eq!(api.calls(), 1);
+    }
+
+    #[test]
+    fn without_a_cache_directory_nothing_is_written_and_every_request_mints() {
+        let api = FakeApi::minting("ghs_uncached", NOW + 60 * MINUTE);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        for _ in 0..2 {
+            out.clear();
+            let code = credential("get", &mut "protocol=https\nhost=github.com\n".as_bytes(), &mut out, &mut err, None, &api, &now);
+            assert_eq!((code, String::from_utf8_lossy(&out).contains("password=ghs_uncached")), (0, true));
+        }
+        assert_eq!(api.calls(), 2);
+    }
+
+    #[test]
+    fn remote_urls() {
+        assert_eq!(repository_from_remote("https://github.com/acme/api.git\n").as_deref(), Some("acme/api"));
+        assert_eq!(repository_from_remote("https://GitHub.com/acme/api").as_deref(), Some("acme/api"));
+        assert_eq!(repository_from_remote("git@github.com:acme/api.git").as_deref(), Some("acme/api"));
+        assert_eq!(repository_from_remote("ssh://git@github.com/acme/api.git").as_deref(), Some("acme/api"));
+        assert_eq!(repository_from_remote("https://gitlab.com/acme/api.git"), None);
+        assert_eq!(repository_from_remote("http://github.com/acme/api.git"), None);
+        assert_eq!(repository_from_remote("/srv/git/api.git"), None);
     }
 
     #[test]
@@ -1010,7 +1133,8 @@ mod tests {
         let text = fs::read_to_string(&config).unwrap();
         assert!(!text.contains("ghs_") && !text.contains("store"));
         use std::os::unix::fs::PermissionsExt;
-        for path in [&first.dir, &first.bin_dir, &first.cache_dir] {
+        assert!(first.cache_dir.is_none());
+        for path in [&first.dir, &first.bin_dir] {
             assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o700, "{}", path.display());
         }
         let broker: BrokerConfig = serde_json::from_slice(&fs::read(first.dir.join(CONFIG_FILE)).unwrap()).unwrap();
@@ -1064,13 +1188,22 @@ mod tests {
     }
 
     #[test]
-    fn without_a_real_gh_the_shim_says_so() {
+    fn without_a_real_gh_the_shim_says_so_until_one_is_installed() {
         let home = tempfile::tempdir().unwrap();
         let git = GitTarget { program: None, global_config: Some(home.path().join("gitconfig")) };
-        let installed = install(&home.path().join("state"), "http://127.0.0.1:1", None, Path::new("/x"), vec![], &git).unwrap();
+        let exe = home.path().join("fake-serve");
+        write_script(&exe, "#!/bin/sh\necho ghs_late\n").unwrap();
+        let installed = install(&home.path().join("state"), "http://127.0.0.1:1", None, &exe, vec![], &git).unwrap();
         assert!(installed.gh.is_none());
-        let output = std::process::Command::new(installed.bin_dir.join("gh")).output().unwrap();
+        let late = home.path().join("late-bin");
+        fs::create_dir_all(&late).unwrap();
+        let path = |extra: &Path| format!("{}:{}:/usr/bin:/bin", installed.bin_dir.display(), extra.display());
+        let output = std::process::Command::new(installed.bin_dir.join("gh")).env("PATH", path(&home.path().join("nothing"))).output().unwrap();
         assert_eq!(output.status.code(), Some(127));
+        // Installed after boot: found on PATH, past the shim itself.
+        write_script(&late.join("gh"), "#!/bin/sh\necho \"late token=$GH_TOKEN\"\n").unwrap();
+        let output = std::process::Command::new(installed.bin_dir.join("gh")).env("PATH", path(&late)).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "late token=ghs_late");
     }
 
     /// Git runs the installed helper for github.com with the repository path
