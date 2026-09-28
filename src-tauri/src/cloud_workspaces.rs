@@ -14,7 +14,9 @@ use url::Url;
 use crate::account::{AccountContext, AccountManager};
 
 const CONTRACT: &str = "providers-v1";
-const SUPPORTED_PROVIDERS: &str = "machine0,box";
+/// The local Docker provider (terminalx-saas `cloud:e2e:local --serve`) is
+/// offered only by debug builds.
+const SUPPORTED_PROVIDERS: &str = if cfg!(debug_assertions) { "machine0,box,local-docker" } else { "machine0,box" };
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const RESPONSE_LIMIT_BYTES: u64 = 512 * 1024;
 const MAX_RETRY_AFTER_SECONDS: u64 = 60 * 60;
@@ -24,6 +26,8 @@ const MAX_RETRY_AFTER_SECONDS: u64 = 60 * 60;
 pub enum CloudWorkspaceProviderId {
     Machine0,
     Box,
+    #[serde(rename = "local-docker")]
+    LocalDocker,
 }
 
 impl CloudWorkspaceProviderId {
@@ -31,6 +35,7 @@ impl CloudWorkspaceProviderId {
         match self {
             Self::Machine0 => "machine0",
             Self::Box => "box",
+            Self::LocalDocker => "local-docker",
         }
     }
 }
@@ -367,6 +372,49 @@ pub struct CloudWorkspace {
     pub created_at: i64,
     pub updated_at: i64,
     pub release_disposition: Option<ReleaseDisposition>,
+    /// The launch intent the workspace was created with (PRO-21, contract §19).
+    #[serde(default)]
+    pub launch: Option<WorkspaceLaunch>,
+}
+
+/// Contract §19.2. `phase` and `state` stay strings so a newer server's
+/// values reach the page instead of failing the whole response.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceLaunch {
+    pub launch_id: String,
+    pub phase: String,
+    pub state: String,
+    pub work_branch: String,
+    pub agent: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub has_prompt: bool,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub tab_id: Option<String>,
+    #[serde(default)]
+    pub timings: LaunchTimings,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchTimings {
+    pub requested_at: Option<i64>,
+    pub booting_at: Option<i64>,
+    pub authenticating_at: Option<i64>,
+    pub syncing_at: Option<i64>,
+    pub starting_agent_at: Option<i64>,
+    pub running_at: Option<i64>,
+    pub failed_at: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -504,6 +552,172 @@ pub struct CloudWorkspaceCreateInput {
     pub access_mode: WorkspaceAccessMode,
     pub confirm_provider_spend: bool,
     pub idempotency_key: String,
+    /// The primary repository first, then additional ones (at most five).
+    #[serde(default)]
+    pub repositories: Vec<CreateRepository>,
+    /// The agent and first prompt (PRO-21, contract §19.1).
+    #[serde(default)]
+    pub launch: Option<CreateLaunch>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateRepository {
+    pub clone_url: String,
+    /// The base revision (a branch); the default branch when absent.
+    #[serde(default, rename = "ref")]
+    pub base_ref: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateLaunch {
+    pub agent: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
+pub const MAX_REPOSITORIES: usize = 5;
+pub const MAX_PROMPT_BYTES: usize = 32 * 1024;
+const NAME_MAX_CHARS: usize = 80;
+
+/// The create's own checks (contract §19.1), made before anything is quoted
+/// or sent: an invalid name, repository, ref or launch never costs a quote.
+pub fn validate_create(
+    name: &str,
+    repositories: &[CreateRepository],
+    launch: Option<&CreateLaunch>,
+) -> Result<(), CloudWorkspaceClientError> {
+    let invalid = |code: &str| Err(CloudWorkspaceClientError::local(code, false));
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > NAME_MAX_CHARS || name.chars().any(char::is_control) {
+        return invalid("cloud_workspace_name_invalid");
+    }
+    if repositories.len() > MAX_REPOSITORIES {
+        return invalid("cloud_workspace_repositories_too_many");
+    }
+    let mut seen = std::collections::HashSet::new();
+    for repository in repositories {
+        if !valid_clone_url(&repository.clone_url) {
+            return invalid("cloud_workspace_repository_invalid");
+        }
+        if !seen.insert(repository.clone_url.to_ascii_lowercase().trim_end_matches(".git").to_string()) {
+            return invalid("cloud_workspace_repository_duplicate");
+        }
+        if repository.base_ref.as_deref().is_some_and(|base| !crate::cloud_agents::launch::valid_branch(base)) {
+            return invalid("cloud_workspace_repository_ref_invalid");
+        }
+    }
+    if let Some(launch) = launch {
+        let agent_ok = (1..=32).contains(&launch.agent.len())
+            && launch.agent.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+        let model_ok = launch.model.as_deref().is_none_or(|model| (1..=100).contains(&model.len()) && model.bytes().all(|byte| (0x20..=0x7e).contains(&byte)));
+        let effort_ok = launch.effort.as_deref().is_none_or(|effort| (1..=16).contains(&effort.len()) && effort.bytes().all(|byte| byte.is_ascii_lowercase()));
+        let mode_ok = launch.mode.as_deref().is_none_or(|mode| matches!(mode, "plan" | "manual" | "auto" | "acceptEdits" | "bypassPermissions"));
+        if !agent_ok || !model_ok || !effort_ok || !mode_ok {
+            return invalid("cloud_workspace_launch_invalid");
+        }
+        if launch.prompt.as_deref().is_some_and(|prompt| prompt.len() > MAX_PROMPT_BYTES || prompt.contains('\0')) {
+            return invalid("cloud_workspace_prompt_too_long");
+        }
+    }
+    Ok(())
+}
+
+fn valid_clone_url(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("https://github.com/") else { return false };
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
+    let mut parts = rest.split('/');
+    let segment = |part: Option<&str>| {
+        part.is_some_and(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')))
+    };
+    segment(parts.next()) && segment(parts.next()) && parts.next().is_none()
+}
+
+fn setup_body(repositories: &[CreateRepository]) -> Value {
+    json!({
+        "version": 1,
+        "credentialIds": [],
+        "repositories": repositories
+            .iter()
+            .map(|repository| {
+                let mut entry = json!({ "sourceProvider": "github", "cloneUrl": repository.clone_url });
+                if let Some(base) = &repository.base_ref {
+                    entry["ref"] = json!(base);
+                }
+                entry
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn launch_body(launch: &CreateLaunch) -> Value {
+    let mut body = json!({ "v": 1, "agent": launch.agent });
+    for (name, value) in [("model", &launch.model), ("effort", &launch.effort), ("mode", &launch.mode)] {
+        if let Some(value) = value.as_deref().filter(|value| !value.is_empty()) {
+            body[name] = json!(value);
+        }
+    }
+    if let Some(prompt) = launch.prompt.as_deref().filter(|prompt| !prompt.trim().is_empty()) {
+        body["prompt"] = json!(prompt);
+    }
+    body
+}
+
+/// `POST …/cloud-workspaces/preflight`: can these repositories and refs be
+/// used, checked against GitHub before anything is quoted.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWorkspacePreflight {
+    pub ready: bool,
+    #[serde(default)]
+    pub checks: Vec<PreflightCheck>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreflightCheck {
+    pub kind: String,
+    #[serde(default)]
+    pub clone_url: Option<String>,
+    pub status: String,
+    #[serde(default, deserialize_with = "safe_optional_error_code")]
+    pub error_code: Option<String>,
+    #[serde(default)]
+    pub retryable: bool,
+}
+
+/// A repository the organization chose for cloud workspaces (PRO-14), as
+/// the create form lists it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectedRepository {
+    pub full_name: String,
+    #[serde(default)]
+    pub clone_url: Option<String>,
+    #[serde(default)]
+    pub default_branch: Option<String>,
+    #[serde(default)]
+    pub private: bool,
+    /// `accessible`, `missing`, `installation-suspended` or `installation-revoked`.
+    pub state: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectedRepositories {
+    #[serde(default)]
+    pub configured: bool,
+    #[serde(default)]
+    pub repositories: Vec<SelectedRepository>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -824,14 +1038,21 @@ impl CloudWorkspaceService {
                 false,
             ));
         }
+        validate_create(&input.name, &input.repositories, input.launch.as_ref())?;
         self.run(RequestRisk::Create, |client, context| {
             let idempotency_key = input.idempotency_key.clone();
-            let body = json!({
-                "name": input.name,
+            let mut body = json!({
+                "name": input.name.trim(),
                 "quoteId": input.quote_id,
                 "accessMode": input.access_mode,
                 "confirmProviderSpend": true
             });
+            if !input.repositories.is_empty() {
+                body["setup"] = setup_body(&input.repositories);
+            }
+            if let Some(launch) = &input.launch {
+                body["launch"] = launch_body(launch);
+            }
             let result = client.request(
                 context,
                 &["cloud-workspaces"],
@@ -855,6 +1076,32 @@ impl CloudWorkspaceService {
                 RequestRisk::Read,
             )?;
             ensure_list(result, &context.organization_id, RequestRisk::Read)
+        })
+    }
+
+    /// Check the repositories and refs before quoting (contract §16).
+    pub fn preflight(&self, repositories: Vec<CreateRepository>) -> Result<CloudWorkspacePreflight, CloudWorkspaceClientError> {
+        if repositories.is_empty() {
+            return Ok(CloudWorkspacePreflight { ready: true, checks: Vec::new() });
+        }
+        validate_create("preflight", &repositories, None)?;
+        self.run(RequestRisk::Mutation, |client, context| {
+            client.request(
+                context,
+                &["cloud-workspaces", "preflight"],
+                None,
+                Some(json!({ "setup": setup_body(&repositories) })),
+                None,
+                RequestRisk::Mutation,
+            )
+        })
+    }
+
+    /// The organization's selected GitHub repositories (PRO-14), the ones a
+    /// workspace can be created from.
+    pub fn selected_repositories(&self) -> Result<SelectedRepositories, CloudWorkspaceClientError> {
+        self.run(RequestRisk::Read, |client, context| {
+            client.request(context, &["github-app"], None, None, None, RequestRisk::Read)
         })
     }
 
@@ -1082,6 +1329,22 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_rate_limited"
             | "machine0_invalid_response"
             | "machine0_unavailable"
+            | "cloud_workspace_policy_denied"
+            | "cloud_provisioning_paused"
+            | "cloud_compute_policy_conflict"
+            | "cloud_environment_changed"
+            | "cloud_environment_repository_not_in_image"
+            | "cloud_environment_version_missing"
+            | "cloud_workspace_repository_invalid"
+            | "cloud_workspace_github_installation_unavailable"
+            | "github_app_not_configured"
+            | "github_app_unavailable"
+            | "github_repository_not_accessible"
+            | "github_repository_not_authorized"
+            | "github_repository_not_granted"
+            | "github_repository_unavailable"
+            | "github_installation_suspended"
+            | "github_installation_revoked"
     )
 }
 
@@ -1527,6 +1790,8 @@ mod tests {
                 access_mode: WorkspaceAccessMode::Private,
                 confirm_provider_spend: true,
                 idempotency_key: "stable create key".into(),
+                repositories: Vec::new(),
+                launch: None,
             })
             .unwrap();
         let captured = request.join().unwrap();
@@ -1818,6 +2083,8 @@ mod tests {
                     access_mode: WorkspaceAccessMode::Private,
                     confirm_provider_spend: true,
                     idempotency_key: "original-key".into(),
+                    repositories: Vec::new(),
+                    launch: None,
                 })
                 .unwrap_err();
             let captured = request.join().unwrap();
@@ -1858,6 +2125,7 @@ mod tests {
                     created_at: 1,
                     updated_at: 1,
                     release_disposition: None,
+                    launch: None,
                 },
                 latest_operation: None,
             }],
@@ -1899,6 +2167,8 @@ mod tests {
                         access_mode: WorkspaceAccessMode::Private,
                         confirm_provider_spend: true,
                         idempotency_key: "original-key".into(),
+                        repositories: Vec::new(),
+                        launch: None,
                     })
                     .map(|_| ()),
                 RequestRisk::Mutation => unreachable!(),
@@ -1952,5 +2222,117 @@ mod tests {
         };
         let encoded = serde_json::to_value(input).unwrap();
         assert!(encoded.get("credential").is_none());
+    }
+
+    fn launch_input(repositories: Vec<CreateRepository>, launch: Option<CreateLaunch>) -> CloudWorkspaceCreateInput {
+        CloudWorkspaceCreateInput {
+            name: "  Fix login  ".into(),
+            quote_id: "quote-1".into(),
+            access_mode: WorkspaceAccessMode::Organization,
+            confirm_provider_spend: true,
+            idempotency_key: "launch key".into(),
+            repositories,
+            launch,
+        }
+    }
+
+    fn repo(name: &str, base_ref: Option<&str>) -> CreateRepository {
+        CreateRepository { clone_url: format!("https://github.com/acme/{name}.git"), base_ref: base_ref.map(String::from) }
+    }
+
+    #[test]
+    fn create_sends_repositories_refs_and_the_launch_intent() {
+        let mut body: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
+        body["workspace"]["launch"] = json!({
+            "launchId": "launch_1", "phase": "allocating", "state": "pending",
+            "workBranch": "terminalx/fix-login-3f9a2c1b7d4e", "agent": "claude", "model": "sonnet",
+            "hasPrompt": true, "timings": { "requestedAt": 5 }, "somethingNewer": 1
+        });
+        let (base, _, request) = serve_once(response("202 Accepted", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let launch = CreateLaunch {
+            agent: "claude".into(),
+            model: Some("sonnet".into()),
+            effort: Some("high".into()),
+            mode: None,
+            prompt: Some("Fix the login".into()),
+        };
+        let result = service.create(launch_input(vec![repo("app", Some("main")), repo("lib", None)], Some(launch))).unwrap();
+        let captured = request.join().unwrap();
+        let sent: Value = serde_json::from_str(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(
+            sent,
+            json!({
+                "name": "Fix login", "quoteId": "quote-1", "accessMode": "organization", "confirmProviderSpend": true,
+                "setup": { "version": 1, "credentialIds": [], "repositories": [
+                    { "sourceProvider": "github", "cloneUrl": "https://github.com/acme/app.git", "ref": "main" },
+                    { "sourceProvider": "github", "cloneUrl": "https://github.com/acme/lib.git" }
+                ] },
+                "launch": { "v": 1, "agent": "claude", "model": "sonnet", "effort": "high", "prompt": "Fix the login" }
+            })
+        );
+        let launch = result.workspace.launch.expect("the launch view");
+        assert_eq!((launch.phase.as_str(), launch.work_branch.as_str()), ("allocating", "terminalx/fix-login-3f9a2c1b7d4e"));
+        assert_eq!(launch.timings.requested_at, Some(5));
+    }
+
+    #[test]
+    fn invalid_names_repositories_refs_and_launches_never_reach_the_server() {
+        let (_, service) = test_service("http://127.0.0.1:9");
+        let launch = |agent: &str, prompt: Option<String>| Some(CreateLaunch { agent: agent.into(), model: None, effort: None, mode: None, prompt });
+        let cases = [
+            (launch_input(vec![repo("app", Some("feature..x"))], None), "cloud_workspace_repository_ref_invalid"),
+            (launch_input(vec![repo("app", Some("-evil"))], None), "cloud_workspace_repository_ref_invalid"),
+            (launch_input(vec![repo("app", Some("a b"))], None), "cloud_workspace_repository_ref_invalid"),
+            (launch_input(vec![repo("app", None), repo("app", Some("main"))], None), "cloud_workspace_repository_duplicate"),
+            (launch_input((0..6).map(|i| repo(&format!("r{i}"), None)).collect(), None), "cloud_workspace_repositories_too_many"),
+            (
+                launch_input(vec![CreateRepository { clone_url: "https://gitlab.com/acme/app".into(), base_ref: None }], None),
+                "cloud_workspace_repository_invalid",
+            ),
+            (launch_input(Vec::new(), launch("Claude", None)), "cloud_workspace_launch_invalid"),
+            (launch_input(Vec::new(), launch("claude", Some("x".repeat(MAX_PROMPT_BYTES + 1)))), "cloud_workspace_prompt_too_long"),
+        ];
+        for (input, code) in cases {
+            assert_eq!(service.create(input).unwrap_err().code, code);
+        }
+        let mut unnamed = launch_input(Vec::new(), None);
+        unnamed.name = "   ".into();
+        assert_eq!(service.create(unnamed).unwrap_err().code, "cloud_workspace_name_invalid");
+    }
+
+    #[test]
+    fn policy_and_quota_refusals_are_definite_not_outcome_unknown() {
+        for code in ["cloud_workspace_policy_denied", "cloud_workspace_quota_exceeded", "cloud_provisioning_paused", "cloud_environment_repository_not_in_image"] {
+            let body = format!(r#"{{"error":"{code}"}}"#);
+            let (base, _, request) = serve_once(response("409 Conflict", &body, ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            let error = service.create(launch_input(vec![repo("app", None)], None)).unwrap_err();
+            request.join().unwrap();
+            assert_eq!(error.code, code);
+            assert!(!error.retry_with_same_idempotency_key, "{code} is a definite answer");
+        }
+    }
+
+    #[test]
+    fn preflight_checks_the_repositories_and_lists_selected_ones() {
+        let body = r#"{"version":1,"ready":false,"checks":[{"kind":"repository","cloneUrl":"https://github.com/acme/app.git","status":"failed","errorCode":"cloud_workspace_repository_ref_not_found","retryable":false}]}"#;
+        let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let result = service.preflight(vec![repo("app", Some("nope"))]).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/preflight "));
+        assert!(captured.text.contains(r#""ref":"nope""#));
+        assert!(!result.ready);
+        assert_eq!(result.checks[0].error_code.as_deref(), Some("cloud_workspace_repository_ref_not_found"));
+
+        let body = r#"{"configured":true,"canManage":false,"installations":[],"repositories":[{"id":"r1","installationId":"i1","githubRepositoryId":7,"fullName":"acme/app","cloneUrl":"https://github.com/acme/app.git","defaultBranch":"main","private":true,"state":"accessible","reason":null,"lastVerifiedAt":1}]}"#;
+        let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let selected = service.selected_repositories().unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/github-app "));
+        assert_eq!(selected.repositories[0].full_name, "acme/app");
+        assert_eq!(selected.repositories[0].default_branch.as_deref(), Some("main"));
     }
 }

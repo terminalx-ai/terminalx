@@ -312,6 +312,8 @@ pub fn run() {
             commands::cloud_workspace_setup,
             commands::cloud_workspace_quote,
             commands::cloud_workspace_create,
+            commands::cloud_workspace_preflight,
+            commands::cloud_workspace_repositories,
             commands::cloud_workspaces,
             commands::cloud_workspace_suspend,
             commands::cloud_workspace_resume,

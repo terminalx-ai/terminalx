@@ -44,6 +44,10 @@ vi.mock("./CloudAgents", () => ({
     return <div data-testid="cloud-agents-stub" />;
   },
 }));
+// The create form has its own tests (CloudCreateWorkspace.test.tsx).
+vi.mock("./CloudCreateWorkspace", () => ({
+  CloudCreateWorkspace: () => <div data-testid="cloud-create-stub" />,
+}));
 vi.mock("@/lib/api", () => ({
   api: { cloudWorkspaces: vi.fn() },
   pty: {},
@@ -144,6 +148,25 @@ async function openReady() {
 }
 
 describe("cloud workspace session page", () => {
+  it("shows a starting workspace's phase and work branch, and opens the create form", async () => {
+    const starting = workspace("ws-new", "provisioning");
+    vi.mocked(api.cloudWorkspaces).mockResolvedValue({
+      workspaces: [
+        {
+          ...starting,
+          workspace: {
+            ...starting.workspace,
+            launch: { launchId: "l1", phase: "syncing-repository", state: "claimed", workBranch: "terminalx/app-3f9a2c1b7d4e", agent: "claude", hasPrompt: true, timings: {} },
+          },
+        },
+      ],
+    } as never);
+    render(<CloudSessionPage onBack={() => undefined} />);
+    await waitFor(() => expect(screen.getByTestId("cloud-workspace-state").textContent).toBe("Syncing repository · terminalx/app-3f9a2c1b7d4e"));
+    fireEvent.click(screen.getByRole("button", { name: /New workspace/ }));
+    expect(screen.getByTestId("cloud-create-stub")).toBeTruthy();
+  });
+
   it("connects a ready workspace without waking compute", async () => {
     await openReady();
     expect(workspaceConnection).toHaveBeenCalledWith({ kind: "cloud", organizationId: "org-1", workspaceId: "ws-ready" }, "connect");
