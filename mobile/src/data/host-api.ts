@@ -13,7 +13,7 @@ export interface SessionSummary {
   lastPrompt?: string;
   lastReply?: string;
   issueRef?: string;
-  tabs: { id: string; title?: string; harness: string; status: SessionStatus }[];
+  tabs: { id: string; title?: string | null; harness: string; status: SessionStatus }[];
 }
 
 export interface ChatNote { id: string; body: string; createdAt: number; author: { userId: string; displayName?: string } }

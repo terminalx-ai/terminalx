@@ -1,0 +1,21 @@
+{
+  "id": "01a06e9d-7fee-7263-8539-eec4d6df7353",
+  "title": "Create a new issue, where, the UX, gets, cluttered, like mix",
+  "modified": "2026-09-05T12:04:25.504Z",
+  "project": "raccoon",
+  "worktree": "main",
+  "tabs": [
+    {
+      "id": "01a06e9d-7fee-7263-8539-eed1fd76b18d",
+      "title": null,
+      "harness": "claude",
+      "status": "completed"
+    },
+    {
+      "id": "01a06f07-f2d9-74c0-8bb4-124fa8a232de",
+      "title": null,
+      "harness": "codex",
+      "status": "in_progress"
+    }
+  ]
+}
