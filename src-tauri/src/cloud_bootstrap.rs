@@ -14,7 +14,10 @@
 //!    durably on disk (temp file, fsync, rename, fsync of the directory).
 //!    Only then is the token deleted.
 //! 3. A restart with a stored credential refreshes instead of redeeming, and
-//!    finishes deleting a token a previous run left behind.
+//!    finishes deleting a token a previous run left behind. A token that is
+//!    not the one already spent was delivered by a fenced restart
+//!    (terminalx-saas PRO-33) and is redeemed first, replacing the stored
+//!    credential the server revoked.
 //! 4. A restart between the server committing the redeem and the credential
 //!    reaching the disk redeems again with the same token and the same host
 //!    key; the server replays the redeem for that identity (terminalx-saas
@@ -53,6 +56,9 @@ pub const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const STATE_DIR: &str = "cloud-workspace";
 const HOST_KEY_FILE: &str = "host-key.json";
 const STATE_FILE: &str = "runtime.json";
+/// Next to the bootstrap token, in the runtime's state root
+/// (`/var/lib/terminalx`), where the worker's memory probe reads it.
+const BASELINE_FILE: &str = "memory-baseline.json";
 const MAX_LIST: usize = 256;
 
 /// The server refused the token or the credential. Retrying cannot help:
@@ -95,6 +101,11 @@ impl Config {
             }
             _ => bail!("set both {ORIGIN_ENV} and {TOKEN_PATH_ENV}, or neither"),
         }
+    }
+
+    /// Where the memory baseline goes (`memory_baseline`).
+    pub fn baseline_path(&self) -> PathBuf {
+        self.token_path.with_file_name(BASELINE_FILE)
     }
 }
 
@@ -307,6 +318,7 @@ pub struct Bootstrapped {
     /// Set while the server rejects the runtime credential (the workspace
     /// was revoked or rotated); the relay host stops serving meanwhile.
     rejected: std::sync::atomic::AtomicBool,
+    baseline_path: PathBuf,
     // Held for the life of the process: one runtime per state directory.
     _lock: StateLock,
 }
@@ -370,7 +382,16 @@ pub fn establish(config: &Config, api: &dyn Api, policy: &Policy) -> Result<Boot
     let started = Instant::now();
     loop {
         let (error, rejected) = match attempt(config, api, &key) {
-            Ok((session, credential)) => return Ok(Bootstrapped { key, session: Mutex::new(session), credential, rejected: std::sync::atomic::AtomicBool::new(false), _lock: lock }),
+            Ok((session, credential)) => {
+                return Ok(Bootstrapped {
+                    key,
+                    session: Mutex::new(session),
+                    credential,
+                    rejected: std::sync::atomic::AtomicBool::new(false),
+                    baseline_path: config.baseline_path(),
+                    _lock: lock,
+                })
+            }
             Err(Failure::Fatal(error)) => return Err(error),
             Err(Failure::Retry { error, rejected }) => (error, rejected),
         };
@@ -394,34 +415,50 @@ pub fn establish(config: &Config, api: &dyn Api, policy: &Policy) -> Result<Boot
 
 fn attempt(config: &Config, api: &dyn Api, key: &HostKey) -> Result<(Session, Zeroizing<String>), Failure> {
     let relay_host_id = key.relay_host_id();
-    if let Some(stored) = read_identity(&config.state_dir).map_err(Failure::Fatal)? {
-        if stored.relay_host_id != relay_host_id {
-            // Only a hand-edited state dir gets here; guessing which half is
-            // right could register a second identity.
-            return Err(Failure::Fatal(anyhow!("the stored runtime identity belongs to a different host key")));
-        }
-        match api.refresh(&stored.runtime_credential) {
-            Ok(refreshed) => {
-                let session = session_from_refresh(refreshed, &relay_host_id).map_err(Failure::Fatal)?;
-                if session.workspace_id != stored.workspace_id || session.organization_id != stored.organization_id {
-                    return Err(Failure::Fatal(anyhow!("the server answered for a different workspace")));
-                }
-                // A previous run stored the credential but was stopped before
-                // it could delete the token it spent. A different token is a
-                // newly provisioned one and stays.
-                remove_spent_token(&config.token_path, &stored.token_sha256).map_err(Failure::Fatal)?;
-                return Ok((session, Zeroizing::new(stored.runtime_credential.clone())));
+    let Some(stored) = read_identity(&config.state_dir).map_err(Failure::Fatal)? else {
+        return redeem(config, api, key, None);
+    };
+    if stored.relay_host_id != relay_host_id {
+        // Only a hand-edited state dir gets here; guessing which half is
+        // right could register a second identity.
+        return Err(Failure::Fatal(anyhow!("the stored runtime identity belongs to a different host key")));
+    }
+    // A fenced restart (terminalx-saas PRO-33) delivers a new token and
+    // revokes the stored credential, so a delivered token goes first. A
+    // token the server refuses may be a stale one, so the stored
+    // credential is still tried.
+    if token_is_new(&config.token_path, &stored.token_sha256) {
+        match redeem(config, api, key, Some((&stored.workspace_id, &stored.organization_id))) {
+            Err(Failure::Retry { rejected: Some(_), error }) => {
+                log::warn!("{error:#}; refreshing with the stored runtime credential instead");
             }
-            // A newly provisioned token, if one is there, is the way back in.
-            Err(CallError::Rejected) if token_is_new(&config.token_path, &stored.token_sha256) => {
-                log::warn!("the stored runtime credential was rejected; redeeming the new bootstrap token");
-            }
-            Err(CallError::Rejected) => {
-                return Err(Failure::Retry { error: anyhow!("the stored runtime credential was rejected"), rejected: Some("cloud_workspace_runtime_credential_rejected") });
-            }
-            Err(CallError::Transient(error)) => return Err(Failure::Retry { error: error.context("refresh the runtime session"), rejected: None }),
+            other => return other,
         }
     }
+    match api.refresh(&stored.runtime_credential) {
+        Ok(refreshed) => {
+            let session = session_from_refresh(refreshed, &relay_host_id).map_err(Failure::Fatal)?;
+            if session.workspace_id != stored.workspace_id || session.organization_id != stored.organization_id {
+                return Err(Failure::Fatal(anyhow!("the server answered for a different workspace")));
+            }
+            // A previous run stored the credential but was stopped before
+            // it could delete the token it spent. A different token is a
+            // newly provisioned one and stays.
+            remove_spent_token(&config.token_path, &stored.token_sha256).map_err(Failure::Fatal)?;
+            Ok((session, Zeroizing::new(stored.runtime_credential.clone())))
+        }
+        Err(CallError::Rejected) => {
+            Err(Failure::Retry { error: anyhow!("the stored runtime credential was rejected"), rejected: Some("cloud_workspace_runtime_credential_rejected") })
+        }
+        Err(CallError::Transient(error)) => Err(Failure::Retry { error: error.context("refresh the runtime session"), rejected: None }),
+    }
+}
+
+/// Trade the token on disk for a credential, store it durably (replacing any
+/// stored identity, which must be for the same workspace), and only then
+/// delete the token.
+fn redeem(config: &Config, api: &dyn Api, key: &HostKey, stored: Option<(&str, &str)>) -> Result<(Session, Zeroizing<String>), Failure> {
+    let relay_host_id = key.relay_host_id();
     let token = read_token(&config.token_path).map_err(Failure::Fatal)?;
     crash_point("before-redeem");
     let mut redeemed = match api.redeem(&token, key) {
@@ -434,6 +471,9 @@ fn attempt(config: &Config, api: &dyn Api, key: &HostKey) -> Result<(Session, Ze
     };
     crash_point("after-redeem-response");
     validate_redeemed(&redeemed).map_err(Failure::Fatal)?;
+    if stored.is_some_and(|(workspace, organization)| redeemed.workspace_id != workspace || redeemed.organization_id != organization) {
+        return Err(Failure::Fatal(anyhow!("the delivered bootstrap token is for a different workspace")));
+    }
     let stored = StoredIdentity {
         v: 1,
         workspace_id: redeemed.workspace_id.clone(),
@@ -510,13 +550,32 @@ impl Bootstrapped {
         Ok(())
     }
 
+    /// Tell the API what the runtime has been doing
+    /// (`POST /v1/cloud-workspace-bootstrap/activity`, see `cloud_activity`).
+    pub fn report_activity(&self, api: &HttpApi, report: &serde_json::Value) -> Result<(), CallError> {
+        let _: serde_json::Value = api.post("/v1/cloud-workspace-bootstrap/activity", &self.credential, report.clone(), None)?;
+        Ok(())
+    }
+
+    /// Record the memory baseline for the current session's runtime
+    /// generation, once per boot and generation (`memory_baseline`).
+    pub fn record_memory_baseline(&self) {
+        let token = self.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).relay_token.clone();
+        let generation = relay_token_generation(&token);
+        if let Err(error) = crate::memory_baseline::record(&self.baseline_path, generation) {
+            log::warn!("record the memory baseline at {}: {error:#}", self.baseline_path.display());
+        }
+    }
+
     /// Keep the relay token fresh in the background until the process ends.
     pub fn spawn_refresh_loop(self: Arc<Self>, api: Arc<dyn Api + Send + Sync>) {
         let spawned = std::thread::Builder::new().name("cloud-refresh".into()).spawn(move || loop {
             std::thread::sleep(REFRESH_INTERVAL);
-            if let Err(error) = self.refresh(api.as_ref()) {
+            match self.refresh(api.as_ref()) {
+                // A rotated session may carry a new runtime generation.
+                Ok(()) => self.record_memory_baseline(),
                 // A rejection also sets `rejected`, which stops the relay host.
-                log::warn!("refresh the cloud workspace session: {}", describe(&error));
+                Err(error) => log::warn!("refresh the cloud workspace session: {}", describe(&error)),
             }
         });
         if let Err(error) = spawned {
@@ -525,7 +584,19 @@ impl Bootstrapped {
     }
 }
 
-fn describe(error: &CallError) -> String {
+/// The `runtimeGeneration` claim of a Relay Token; absent (a pre-PRO-11
+/// grant) or unreadable is generation 0, as the relay reads it.
+fn relay_token_generation(token: &str) -> u64 {
+    token
+        .split('.')
+        .nth(1)
+        .and_then(|payload| general_purpose::URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|claims| claims["runtimeGeneration"].as_u64())
+        .unwrap_or(0)
+}
+
+pub fn describe(error: &CallError) -> String {
     match error {
         CallError::Rejected => "rejected".into(),
         CallError::Transient(error) => format!("{error:#}"),
@@ -974,6 +1045,77 @@ mod tests {
         drop(establish(&config, &server, &quick()).unwrap());
         assert_eq!(fs::read_to_string(&config.token_path).unwrap(), fresh, "only the spent token is deleted");
         assert_eq!(server.redeems.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_delivered_token_takes_precedence_over_a_live_credential() {
+        let token = random_credential();
+        let server = FakeServer::with_token(&token);
+        let (_dir, config) = setup(&token);
+        let first_host = establish(&config, &server, &quick()).unwrap().key.relay_host_id();
+        let old_credential = server.credential.borrow().clone().unwrap();
+        // A fenced restart delivered a token; the stored credential would
+        // still refresh, but the delivered token wins.
+        let fresh = random_credential();
+        server.tokens.borrow_mut().insert(fresh.clone(), None);
+        fs::write(&config.token_path, &fresh).unwrap();
+        let second = establish(&config, &server, &quick()).unwrap();
+        assert_eq!(server.redeems.borrow().len(), 2);
+        assert_eq!(first_host, second.key.relay_host_id(), "same host identity after the fenced restart");
+        assert!(!config.token_path.exists(), "the delivered token is spent");
+        let stored = read_identity(&config.state_dir).unwrap().unwrap();
+        assert_ne!(stored.runtime_credential, old_credential, "the stored credential is replaced");
+        assert_eq!(Some(&stored.runtime_credential), server.credential.borrow().as_ref());
+        assert_eq!(stored.token_sha256, token_sha256(&fresh));
+        drop(second);
+        // The next restart refreshes with the new credential.
+        establish(&config, &server, &quick()).unwrap();
+        assert_eq!(server.redeems.borrow().len(), 2);
+    }
+
+    #[test]
+    fn a_delivered_token_for_another_workspace_is_refused() {
+        struct Elsewhere(FakeServer, RefCell<bool>);
+        impl Api for Elsewhere {
+            fn redeem(&self, token: &str, key: &HostKey) -> Result<Redeemed, CallError> {
+                let mut redeemed = self.0.redeem(token, key)?;
+                if *self.1.borrow() {
+                    redeemed.workspace_id = "ws_other".into();
+                }
+                Ok(redeemed)
+            }
+            fn refresh(&self, credential: &str) -> Result<Refreshed, CallError> {
+                self.0.refresh(credential)
+            }
+        }
+        let token = random_credential();
+        let server = Elsewhere(FakeServer::with_token(&token), RefCell::new(false));
+        let (_dir, config) = setup(&token);
+        drop(establish(&config, &server, &quick()).unwrap());
+        let before = read_identity(&config.state_dir).unwrap().unwrap().runtime_credential.clone();
+        let fresh = random_credential();
+        server.0.tokens.borrow_mut().insert(fresh.clone(), None);
+        fs::write(&config.token_path, &fresh).unwrap();
+        *server.1.borrow_mut() = true;
+        let error = establish(&config, &server, &quick()).err().unwrap();
+        assert!(format!("{error:#}").contains("different workspace"), "{error:#}");
+        assert_eq!(read_identity(&config.state_dir).unwrap().unwrap().runtime_credential, before, "the stored identity is untouched");
+        assert!(config.token_path.exists());
+    }
+
+    #[test]
+    fn reads_the_runtime_generation_from_the_relay_token() {
+        let claims = general_purpose::URL_SAFE_NO_PAD.encode(br#"{"sub":"cloud-runtime:ws_1","runtimeGeneration":7}"#);
+        assert_eq!(relay_token_generation(&format!("h.{claims}.s")), 7);
+        let legacy = general_purpose::URL_SAFE_NO_PAD.encode(br#"{"sub":"cloud-runtime:ws_1"}"#);
+        assert_eq!(relay_token_generation(&format!("h.{legacy}.s")), 0);
+        assert_eq!(relay_token_generation("relay.token.jwt"), 0);
+    }
+
+    #[test]
+    fn the_baseline_sits_next_to_the_token() {
+        let (_dir, config) = setup("x");
+        assert_eq!(config.baseline_path(), config.token_path.parent().unwrap().join("memory-baseline.json"));
     }
 
     #[test]

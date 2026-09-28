@@ -23,6 +23,8 @@ use serde_json::{json, Value};
 const RUN_TIMEOUT: Duration = Duration::from_secs(60);
 
 const TOKEN: &str = "tokentokentokentokentokentokentokentokentok";
+/// The token a fenced restart delivers (terminalx-saas PRO-33).
+const FENCED_TOKEN: &str = "fencedfencedfencedfencedfencedfencedfencedf";
 
 #[derive(Default)]
 struct State {
@@ -308,6 +310,49 @@ fn kill_9_at_every_step_in_one_life() {
     let before = server.state.lock().unwrap().redeem_hosts.len();
     assert_healthy(&vm, &server, &vm.run(&server.origin, None));
     assert_eq!(server.state.lock().unwrap().redeem_hosts.len(), before);
+}
+
+/// A fenced restart revokes the stored credential and delivers a new token
+/// next to it. The token wins over the stored identity, and a `kill -9` at
+/// any step of that second redeem still ends with one identity, the live
+/// credential and the token spent.
+#[test]
+fn kill_9_during_a_fenced_restart_redeem() {
+    // The host key exists by now, so the identity is the first durable write.
+    const FENCED_STEPS: &[&str] = &["before-redeem", "after-redeem-response", "1:temp-written", "identity-persisted", "token-removed"];
+    for step in FENCED_STEPS {
+        let server = FakeServer::start(false);
+        let vm = Vm::new();
+        assert_healthy(&vm, &server, &vm.run(&server.origin, None));
+        let fenced_credential = {
+            let mut state = server.state.lock().unwrap();
+            state.tokens.insert(FENCED_TOKEN.into(), None);
+            state.credential.take()
+        };
+        std::fs::write(&vm.token_path, FENCED_TOKEN).unwrap();
+        assert_killed(&vm.run(&server.origin, Some(step)), step);
+        assert!(vm.token_path.exists() || *step == "token-removed", "{step}: the token survives until the identity is stored");
+        assert_healthy(&vm, &server, &vm.run(&server.origin, None));
+        let stored = vm.stored().unwrap();
+        assert_ne!(stored["runtimeCredential"].as_str(), fenced_credential.as_deref(), "{step}: the fenced-out credential is replaced");
+        let redeems = server.state.lock().unwrap().redeem_hosts.len();
+        let expected = if matches!(*step, "after-redeem-response" | "1:temp-written") { 3 } else { 2 };
+        assert_eq!(redeems, expected, "{step}: redeem count");
+    }
+}
+
+/// While the stored credential still works (a generation-only rotation
+/// never revokes it), a delivered token the server refuses is not fatal.
+#[test]
+fn a_refused_delivered_token_falls_back_to_the_stored_credential() {
+    let server = FakeServer::start(false);
+    let vm = Vm::new();
+    assert_healthy(&vm, &server, &vm.run(&server.origin, None));
+    std::fs::write(&vm.token_path, FENCED_TOKEN).unwrap();
+    let output = vm.run(&server.origin, None);
+    assert!(output.status.success(), "{}", describe(&output));
+    assert_eq!(std::fs::read_to_string(&vm.token_path).unwrap(), FENCED_TOKEN, "a token that was never spent is kept");
+    assert_eq!(server.state.lock().unwrap().redeem_hosts.len(), 1);
 }
 
 /// Against a server without redeem replay, the lost-answer window cannot be

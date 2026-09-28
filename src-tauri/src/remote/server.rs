@@ -433,6 +433,7 @@ impl WorkspaceRpc {
             *applied = p.seq;
         }
         self.terminals.write(&p.pty_id, p.data.as_bytes()).map_err(RpcError::internal)?;
+        crate::cloud_activity::note(crate::cloud_activity::Kind::TerminalInput);
         Ok(json!({ "applied": true, "seq": p.seq }))
     }
 

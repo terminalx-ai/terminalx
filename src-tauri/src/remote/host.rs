@@ -730,6 +730,8 @@ impl RelayHost {
         // refuses this connection or finds it and closes it.
         let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
         let device = self.admit(&connection.relay_device_id, token, cancel_tx)?;
+        // Counts as use of the workspace for as long as it stays open.
+        let _attached = crate::cloud_activity::attached();
         let authenticated = json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
         send_sealed(&mut socket, &mut session, &authenticated).await?;
 
