@@ -107,10 +107,14 @@ pub struct HostKey {
 
 impl HostKey {
     fn generate() -> Self {
-        Self::from_secret(StaticSecret::random_from_rng(OsRng).to_bytes())
+        let mut secret = StaticSecret::random_from_rng(OsRng).to_bytes();
+        let key = Self::from_secret(secret);
+        secret.zeroize();
+        key
     }
 
     fn from_secret(secret: [u8; 32]) -> Self {
+        // StaticSecret wipes itself on drop.
         let public = PublicKey::from(&StaticSecret::from(secret)).to_bytes();
         Self { secret, public }
     }
@@ -219,6 +223,19 @@ pub struct Refreshed {
     setup: Option<serde_json::Value>,
     #[serde(default)]
     access_mode: Option<AccessMode>,
+}
+
+impl Drop for Redeemed {
+    fn drop(&mut self) {
+        self.runtime_credential.zeroize();
+        self.relay_token.zeroize();
+    }
+}
+
+impl Drop for Refreshed {
+    fn drop(&mut self) {
+        self.relay_token.zeroize();
+    }
 }
 
 /// Why a call failed: the server said no, or it could not be asked.
@@ -399,7 +416,7 @@ fn attempt(config: &Config, api: &dyn Api, key: &HostKey) -> Result<(Session, Ze
     }
     let token = read_token(&config.token_path).map_err(Failure::Fatal)?;
     crash_point("before-redeem");
-    let redeemed = match api.redeem(&token, key) {
+    let mut redeemed = match api.redeem(&token, key) {
         Ok(redeemed) => redeemed,
         // Kept on disk either way: the token is the only way in.
         Err(CallError::Rejected) => {
@@ -429,12 +446,12 @@ fn attempt(config: &Config, api: &dyn Api, key: &HostKey) -> Result<(Session, Ze
         Err(error) => {
             log::warn!("first refresh after redeem failed: {}", describe(&error));
             Session {
-                workspace_id: redeemed.workspace_id,
-                organization_id: redeemed.organization_id,
+                workspace_id: std::mem::take(&mut redeemed.workspace_id),
+                organization_id: std::mem::take(&mut redeemed.organization_id),
                 relay_host_id,
-                relay_token: redeemed.relay_token,
+                relay_token: std::mem::take(&mut redeemed.relay_token),
                 relay_token_expires_at: redeemed.relay_token_expires_at,
-                director_url: redeemed.director_url,
+                director_url: std::mem::take(&mut redeemed.director_url),
                 access_mode: AccessMode::Private,
                 attachments: Vec::new(),
                 revocations: Vec::new(),
@@ -481,7 +498,7 @@ fn describe(error: &CallError) -> String {
     }
 }
 
-fn session_from_refresh(refreshed: Refreshed, relay_host_id: &str) -> Result<Session> {
+fn session_from_refresh(mut refreshed: Refreshed, relay_host_id: &str) -> Result<Session> {
     if refreshed.v != 1 {
         bail!("unsupported refresh version {}", refreshed.v);
     }
@@ -493,15 +510,15 @@ fn session_from_refresh(refreshed: Refreshed, relay_host_id: &str) -> Result<Ses
         log::warn!("the server sent first-run setup, which this runtime does not apply yet");
     }
     Ok(Session {
-        workspace_id: refreshed.workspace_id,
-        organization_id: refreshed.organization_id,
+        workspace_id: std::mem::take(&mut refreshed.workspace_id),
+        organization_id: std::mem::take(&mut refreshed.organization_id),
         relay_host_id: relay_host_id.to_string(),
-        relay_token: refreshed.relay_token,
+        relay_token: std::mem::take(&mut refreshed.relay_token),
         relay_token_expires_at: refreshed.relay_token_expires_at,
-        director_url: refreshed.director_url,
+        director_url: std::mem::take(&mut refreshed.director_url),
         access_mode: refreshed.access_mode.unwrap_or(AccessMode::Private),
-        attachments: refreshed.attachments,
-        revocations: refreshed.revocations,
+        attachments: std::mem::take(&mut refreshed.attachments),
+        revocations: std::mem::take(&mut refreshed.revocations),
     })
 }
 
@@ -544,7 +561,7 @@ fn canonical_origin(value: &str) -> bool {
     scheme_ok && url.origin().ascii_serialization() == value
 }
 
-fn read_token(path: &Path) -> Result<String> {
+fn read_token(path: &Path) -> Result<Zeroizing<String>> {
     let raw = match fs::read_to_string(path) {
         Ok(raw) => Zeroizing::new(raw),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -556,7 +573,7 @@ fn read_token(path: &Path) -> Result<String> {
     if !is_base64url_32(token) {
         return Err(Rejected("cloud_workspace_bootstrap_token_invalid").into());
     }
-    Ok(token.to_string())
+    Ok(Zeroizing::new(token.to_string()))
 }
 
 fn token_sha256(token: &str) -> String {
@@ -629,7 +646,11 @@ fn load_or_create_host_key(dir: &Path) -> Result<HostKey> {
             let decoded = general_purpose::URL_SAFE_NO_PAD.decode(&file.secret).ok().map(Zeroizing::new);
             let secret = decoded.as_deref().and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok());
             match (file.v, secret) {
-                (1, Some(secret)) => Ok(HostKey::from_secret(secret)),
+                (1, Some(mut secret)) => {
+                    let key = HostKey::from_secret(secret);
+                    secret.zeroize();
+                    Ok(key)
+                }
                 _ => bail!("the relay host key file is malformed"),
             }
         }
@@ -646,6 +667,7 @@ fn load_or_create_host_key(dir: &Path) -> Result<HostKey> {
 fn read_identity(dir: &Path) -> Result<Option<StoredIdentity>> {
     match fs::read(dir.join(STATE_FILE)) {
         Ok(bytes) => {
+            let bytes = Zeroizing::new(bytes);
             let stored: StoredIdentity = serde_json::from_slice(&bytes).context("parse the stored runtime identity")?;
             if stored.v != 1 || !is_base64url_32(&stored.runtime_credential) {
                 bail!("the stored runtime identity is malformed");
@@ -950,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn a_relative_token_path_can_be_deleted() {
+    fn a_bare_token_file_name_syncs_the_working_directory() {
         let dir = tempfile::tempdir().unwrap();
         let token = random_credential();
         let path = dir.path().join("bootstrap-token");
