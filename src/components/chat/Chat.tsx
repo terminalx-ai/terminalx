@@ -15,12 +15,16 @@ const MOUNT_STEP = 12;
 /**
  * The transcript scroller.
  *
- * Follow pin: a ref written on scroll, resize and turn change; only an upward
- * wheel gesture unpins, so a resize clamp or a delta re-pin can't fight it.
+ * Follow pin: a ref the reader's own input decides. An upward wheel (or an
+ * upward scrollbar drag) unpins; a scroll re-pins only when it moved down into
+ * the bottom zone, so a small upward step inside that zone can't re-pin and be
+ * undone by the next render. Scrolls without input never unpin, so a resize
+ * clamp or layout nudge can't fight the pin, and programmatic writes record the
+ * position they set, so they never read as the reader moving.
  * A ResizeObserver on both the scroller and its content re-takes the bottom
  * after async growth (highlighting, images) with no React commit involved.
  * Long logs mount the newest turns first and backfill above in idle steps,
- * anchoring scrollTop so the reader's view never moves.
+ * shifting scrollTop by exactly the inserted height so the reader's view never moves.
  */
 export function Chat({
   sessionId,
@@ -48,61 +52,93 @@ export function Chat({
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+  /** The scrollTop last seen or set; a scroll event's change from it is the reader's own movement. */
+  const lastTop = useRef(0);
   const [atBottom, setAtBottom] = useState(true);
   const turns = transcript.turns;
   const [oldestMounted, setOldestMounted] = useState(() => Math.max(0, turns.length - FIRST_MOUNT));
+  const backfillAnchor = useRef<{ node: HTMLElement; offset: number } | null>(null);
+
+  const follow = useCallback((on: boolean) => {
+    pinned.current = on;
+    setAtBottom(on);
+  }, []);
 
   const pinToBottom = useCallback((smooth = false) => {
     const el = scroller.current;
     if (!el) return;
-    if (smooth) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-    else el.scrollTop = el.scrollHeight;
+    if (smooth) {
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    } else {
+      el.scrollTop = el.scrollHeight;
+      lastTop.current = el.scrollTop;
+    }
   }, []);
 
-  // Backfill older turns above, one step per macrotask, keeping the view anchored.
+  /** A node's offset within the content, which the reader's scrolling doesn't change. */
+  const offsetInContent = useCallback((node: HTMLElement) => {
+    return node.getBoundingClientRect().top - (content.current?.getBoundingClientRect().top ?? 0);
+  }, []);
+
+  // Backfill older turns above, one step per macrotask. The step notes where the
+  // top turn sits in the content; the commit below moves scrollTop by what landed
+  // above it, so scrolling done while the step renders is kept, not undone.
   useEffect(() => {
     if (oldestMounted <= 0) return;
     const id = window.setTimeout(() => {
-      const el = scroller.current;
-      const anchor = content.current?.querySelector<HTMLElement>("[data-turn]");
-      const before = anchor?.getBoundingClientRect().top ?? 0;
+      const node = content.current?.querySelector<HTMLElement>("[data-turn]");
+      backfillAnchor.current = node ? { node, offset: offsetInContent(node) } : null;
       setOldestMounted((o) => Math.max(0, o - MOUNT_STEP));
-      requestAnimationFrame(() => {
-        if (!el) return;
-        if (pinned.current) {
-          pinToBottom();
-        } else if (anchor) {
-          const after = anchor.getBoundingClientRect().top;
-          el.scrollTop += after - before;
-        }
-      });
     }, 0);
     return () => window.clearTimeout(id);
-  }, [oldestMounted, pinToBottom]);
+  }, [oldestMounted, offsetInContent]);
 
-  // Wheel up unpins immediately; scroll position re-confirms the pin.
+  // After a backfill commit, before paint. Pinned views are re-pinned below.
+  useLayoutEffect(() => {
+    const anchor = backfillAnchor.current;
+    backfillAnchor.current = null;
+    const el = scroller.current;
+    if (!anchor || !el || pinned.current) return;
+    el.scrollTop += offsetInContent(anchor.node) - anchor.offset;
+    lastTop.current = el.scrollTop;
+  }, [oldestMounted, offsetInContent]);
+
+  // Wheel up unpins before the scroll lands. A scroll only unpins while the
+  // reader holds the scrollbar: layout can nudge scrollTop up on its own.
   useEffect(() => {
     const el = scroller.current;
     if (!el) return;
+    let dragging = false;
     const onWheel = (e: WheelEvent) => {
-      if (e.deltaY < 0) {
-        pinned.current = false;
-        setAtBottom(false);
-      }
+      if (e.deltaY < 0 && el.scrollTop > 0) follow(false);
+    };
+    const onPointerDown = () => {
+      dragging = true;
+    };
+    const onPointerUp = () => {
+      dragging = false;
     };
     const onScroll = () => {
-      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-      const near = dist < NEAR_BOTTOM_PX;
-      if (near) pinned.current = true;
-      setAtBottom(near);
+      const top = el.scrollTop;
+      const moved = top - lastTop.current;
+      lastTop.current = top;
+      const dist = el.scrollHeight - top - el.clientHeight;
+      if (moved < 0 && dragging && dist >= 1) follow(false);
+      else if (moved > 0 && dist < NEAR_BOTTOM_PX) follow(true);
     };
     el.addEventListener("wheel", onWheel, { passive: true });
+    el.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => {
       el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
       el.removeEventListener("scroll", onScroll);
     };
-  }, []);
+  }, [follow]);
 
   // Heights change without a commit: re-pin after layout, before paint.
   useLayoutEffect(() => {
@@ -124,10 +160,9 @@ export function Chat({
 
   const lastPromptSeq = turns[turns.length - 1]?.prompt?.seq;
   useLayoutEffect(() => {
-    pinned.current = true;
+    follow(true);
     pinToBottom();
-    setAtBottom(true);
-  }, [lastPromptSeq, pinToBottom]);
+  }, [lastPromptSeq, follow, pinToBottom]);
 
   const working = progressing && !!transcript.workingSince && (transcript.modelRequestOpen || !stream.length);
   const streamingTool = stream.find((s) => s.kind === "tool_use" && !s.done);
@@ -190,9 +225,8 @@ export function Chat({
           variant="secondary"
           className="pointer-events-auto gap-1 rounded-full shadow-surface"
           onClick={() => {
-            pinned.current = true;
+            follow(true);
             pinToBottom(!live);
-            setAtBottom(true);
           }}
         >
           <ArrowDown /> Latest
