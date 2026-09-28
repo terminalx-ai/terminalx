@@ -436,6 +436,20 @@ impl Client {
         }
     }
 
+    /// Follow a subscription from its `pty.attach` answer: the bytes the
+    /// answer replayed count as output, and live output continues after them.
+    /// (Following from the offset asked for instead would see the first live
+    /// event start past it whenever the replay was not empty: a gap that is
+    /// only the harness ignoring the answer.)
+    async fn follow_attached(&mut self, pty_id: &str, epoch: &str, attached: &Value, marker: &str) -> (String, u64, u32) {
+        let replayed = String::from_utf8_lossy(&STANDARD.decode(attached["data"].as_str().unwrap()).unwrap()).into_owned();
+        if replayed.contains(marker) {
+            return (replayed, attached["end"].as_u64().unwrap(), 0);
+        }
+        let (rest, end, lagged) = self.follow(pty_id, epoch, attached["end"].as_u64().unwrap(), marker).await;
+        (replayed + &rest, end, lagged)
+    }
+
     /// Follow one terminal's output from `offset` until `marker`, checking
     /// every byte arrives once and in order; a `pty.lagged` stream is picked
     /// up again from the last byte, as the desktop client does.
@@ -559,7 +573,7 @@ async fn cloud_terminals_keep_identity_order_and_ownership_through_the_relay() {
     let pty_id = created["ptyId"].as_str().unwrap().to_string();
     assert_eq!((created["epoch"].as_str(), created["number"].as_u64(), created["control"].as_str()), (Some(epoch.as_str()), Some(1), Some("you")));
     let pid = created["pid"].as_u64().expect("the shell's pid");
-    desk.ok("pty.attach", json!({ "ptyId": pty_id })).await;
+    let attached = desk.ok("pty.attach", json!({ "ptyId": pty_id })).await;
     // The desk's writer: one seq per accepted write; a refusal gives it back.
     let seq = std::cell::Cell::new(0u64);
     let write = |data: &str| {
@@ -570,7 +584,7 @@ async fn cloud_terminals_keep_identity_order_and_ownership_through_the_relay() {
     // An interactive program: it prompts, waits for input and answers.
     // (The prompt is assembled by printf so the command's own echo never matches it.)
     desk.ok("pty.write", write("printf 'na%s? ' me; read who; echo hello-$who-$((40+2))\n")).await;
-    let (_, offset, _) = desk.follow(&pty_id, &epoch, 0, "name? ").await;
+    let (_, offset, _) = desk.follow_attached(&pty_id, &epoch, &attached, "name? ").await;
     desk.ok("pty.write", write("relay\n")).await;
     let (_, offset, _) = desk.follow(&pty_id, &epoch, offset, "hello-relay-42").await;
 
@@ -580,11 +594,19 @@ async fn cloud_terminals_keep_identity_order_and_ownership_through_the_relay() {
     assert!(flood.contains("\r\n299999\r\n300000\r\n"), "the tail of the flood arrived");
     assert!(flood.contains("\r\n150000\r\n150001\r\n"), "the middle of the flood arrived");
     eprintln!("sustained output: {} bytes, {lagged} lagged resumes", flood.len());
+    // Output that exists before the second desktop attaches.
+    desk.ok("pty.write", write("echo before-$((3*3))-watching\n")).await;
+    let before = offset;
+    let (_, offset, _) = desk.follow(&pty_id, &epoch, offset, "before-9-watching").await;
 
     // A second desktop watches; input and size stay with the controller.
     let mut laptop = Client::start(source(&harness, &pairing_dir, "att-laptop", "desktop-laptop", &relay_host_id));
     laptop.connected().await;
-    let watching = laptop.ok("pty.attach", json!({ "ptyId": pty_id, "sinceOffset": offset, "runtimeGeneration": 7, "epoch": epoch })).await;
+    // It attaches from before that output, so its answer always replays
+    // bytes and its live output starts after them.
+    let watching = laptop.ok("pty.attach", json!({ "ptyId": pty_id, "sinceOffset": before, "runtimeGeneration": 7, "epoch": epoch })).await;
+    assert_eq!(watching["offset"].as_u64(), Some(before));
+    assert!(watching["end"].as_u64().unwrap() >= offset, "the answer replays up to what the desk has seen");
     assert_eq!(watching["control"], "other");
     assert_eq!(laptop.refused("pty.resize", json!({ "ptyId": pty_id, "cols": 50, "rows": 10 })).await, "not_controller");
     assert_eq!(
@@ -601,7 +623,8 @@ async fn cloud_terminals_keep_identity_order_and_ownership_through_the_relay() {
     assert_eq!(desk.refused("pty.write", write("echo desk\n")).await, "not_controller");
     seq.set(seq.get() - 1); // refused: the seq was not spent
     laptop.ok("pty.write", json!({ "ptyId": pty_id, "data": "stty size\n", "seq": 1, "writerId": "laptop-1" })).await;
-    laptop.follow(&pty_id, &epoch, offset, "25 90").await;
+    let (watched, _, _) = laptop.follow_attached(&pty_id, &epoch, &watching, "25 90").await;
+    assert_eq!(watched.matches("before-9-watching").count(), 1, "replayed once, then live without a gap: {watched}");
 
     // The phone's scope watches only: no input, size or control.
     let mut phone = Client::start(source(&harness, &pairing_dir, "att-phone", "mobile-phone", &relay_host_id));
@@ -639,7 +662,7 @@ async fn cloud_terminals_keep_identity_order_and_ownership_through_the_relay() {
     // A resend of an applied write is not typed again after the reconnect.
     assert_eq!(desk.ok("pty.write", json!({ "ptyId": pty_id, "data": "x", "seq": seq.get(), "writerId": "desk-1", "epoch": epoch })).await["applied"], false);
     desk.ok("pty.write", write("echo same-shell-$$\n")).await;
-    desk.follow(&pty_id, &epoch, resumed["end"].as_u64().unwrap(), &format!("same-shell-{pid}")).await;
+    desk.follow_attached(&pty_id, &epoch, &resumed, &format!("same-shell-{pid}")).await;
     laptop.supervisor.stop();
 
     // The shell exits: reported, and input to it is refused, not dropped.
