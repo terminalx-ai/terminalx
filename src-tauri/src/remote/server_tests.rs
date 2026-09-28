@@ -36,7 +36,7 @@ async fn call(rpc: &Arc<WorkspaceRpc>, peer: &Arc<Peer>, method: &str, params: V
     }
 }
 
-async fn manager_peer(rpc: &Arc<WorkspaceRpc>) -> (Arc<Peer>, mpsc::UnboundedReceiver<Value>) {
+async fn manager_peer(rpc: &Arc<WorkspaceRpc>) -> (Arc<Peer>, Notifications) {
     let (peer, events) = Peer::new("device-manage".into(), Authority::Manage);
     call(rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["pty/1", "fs/1", "git/1", "session/1"] }))
         .await
@@ -140,7 +140,7 @@ async fn writes_are_optimistic_and_a_resend_does_not_write_twice() {
     );
 }
 
-async fn output_until(events: &mut mpsc::UnboundedReceiver<Value>, marker: &str) -> (String, u64) {
+async fn output_until(events: &mut Notifications, marker: &str) -> (String, u64) {
     let mut output = Vec::new();
     let mut end = 0;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
@@ -229,4 +229,218 @@ async fn hello_and_cursors_follow_a_newer_registered_generation() {
         code(call(&f.rpc, &peer, "pty.attach", json!({ "ptyId": created["ptyId"], "sinceOffset": 0, "runtimeGeneration": 7 })).await),
         "cursor_expired"
     );
+}
+
+async fn peer_for(rpc: &Arc<WorkspaceRpc>, device: &str, authority: Authority) -> (Arc<Peer>, Notifications) {
+    let (peer, events) = Peer::new(device.into(), authority);
+    call(rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["pty/1"] })).await.unwrap();
+    (peer, events)
+}
+
+/// The next notification named `event`, skipping others.
+async fn next_event(events: &mut Notifications, event: &str) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let next = tokio::time::timeout_at(deadline, events.recv()).await.unwrap_or_else(|_| panic!("no {event}")).unwrap();
+        if next["event"] == event {
+            return next["params"].clone();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn terminals_are_listed_with_their_identity_and_survive_a_new_connection() {
+    let f = fixture();
+    let (peer, mut events) = manager_peer(&f.rpc).await;
+    let hello = call(&f.rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["pty/1"] })).await.unwrap();
+    let epoch = hello["runtime"]["epoch"].as_str().unwrap().to_string();
+    let first = call(&f.rpc, &peer, "pty.create", json!({ "cols": 90, "rows": 20, "clientRequestId": "request-list-1" })).await.unwrap();
+    let second = call(&f.rpc, &peer, "pty.create", json!({ "clientRequestId": "request-list-2" })).await.unwrap();
+    assert_eq!(first["epoch"], epoch.as_str());
+    assert_eq!((first["number"].as_u64(), second["number"].as_u64()), (Some(1), Some(2)));
+    assert_eq!(first["control"], "you");
+    assert!(first["pid"].as_u64().is_some());
+    let pty_id = first["ptyId"].as_str().unwrap().to_string();
+    call(&f.rpc, &peer, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    call(&f.rpc, &peer, "pty.write", json!({ "ptyId": pty_id, "data": "echo shell-$$-pid\n", "seq": 1, "writerId": "w1", "epoch": epoch }))
+        .await
+        .unwrap();
+    // The shell itself prints its pid: the listed process is the one running.
+    let (_, end) = output_until(&mut events, &format!("shell-{}-pid", first["pid"])).await;
+
+    // The connection goes away (view switch, reconnect, app restart); the
+    // same device comes back, finds the terminal and resumes where it was.
+    f.rpc.disconnect(&peer);
+    let (again, _events) = manager_peer(&f.rpc).await;
+    let listed = call(&f.rpc, &again, "pty.list", json!({})).await.unwrap();
+    assert_eq!(listed["epoch"], epoch.as_str());
+    let terminals = listed["terminals"].as_array().unwrap();
+    assert_eq!(terminals.len(), 2);
+    assert_eq!(terminals[0]["ptyId"], pty_id.as_str());
+    assert_eq!(terminals[0]["pid"], first["pid"]);
+    assert_eq!((terminals[0]["cols"].as_u64(), terminals[0]["rows"].as_u64()), (Some(90), Some(20)));
+    let resumed = call(&f.rpc, &again, "pty.attach", json!({ "ptyId": pty_id, "sinceOffset": end, "runtimeGeneration": 7, "epoch": epoch })).await.unwrap();
+    assert_eq!(resumed["offset"].as_u64(), Some(end));
+    assert_eq!(resumed["control"], "you");
+    // The writer's seq continues; nothing it sent is typed twice.
+    assert_eq!(
+        call(&f.rpc, &again, "pty.write", json!({ "ptyId": pty_id, "data": "echo shell-$$-pid\n", "seq": 1, "writerId": "w1" })).await.unwrap()["applied"],
+        false
+    );
+    // An offset or a handle from another runtime process is refused.
+    assert_eq!(
+        code(call(&f.rpc, &again, "pty.attach", json!({ "ptyId": pty_id, "sinceOffset": 0, "runtimeGeneration": 7, "epoch": "epoch-old" })).await),
+        "cursor_expired"
+    );
+    assert_eq!(
+        code(call(&f.rpc, &again, "pty.write", json!({ "ptyId": pty_id, "data": "x", "seq": 2, "writerId": "w1", "epoch": "epoch-old" })).await),
+        "not_found"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn input_is_applied_once_in_order_and_backpressure_keeps_it() {
+    let f = fixture();
+    let (peer, _events) = manager_peer(&f.rpc).await;
+    let pty_id = call(&f.rpc, &peer, "pty.create", json!({ "clientRequestId": "request-order-1" })).await.unwrap()["ptyId"].as_str().unwrap().to_string();
+    let write = |seq: u64, writer: &str| json!({ "ptyId": pty_id, "data": "true\n", "seq": seq, "writerId": writer });
+    assert_eq!(code(call(&f.rpc, &peer, "pty.write", write(2, "w1")).await), "conflict", "a gap is refused, not skipped");
+    assert_eq!(call(&f.rpc, &peer, "pty.write", write(1, "w1")).await.unwrap()["applied"], true);
+    assert_eq!(call(&f.rpc, &peer, "pty.write", write(1, "w1")).await.unwrap()["applied"], false);
+    // A new client instance of the same device numbers from 1 again.
+    assert_eq!(call(&f.rpc, &peer, "pty.write", write(1, "w2")).await.unwrap()["applied"], true);
+    assert_eq!(code(call(&f.rpc, &peer, "pty.write", write(0, "w2")).await), "invalid_params");
+    let big = "x".repeat(MAX_WRITE_BYTES + 1);
+    assert_eq!(code(call(&f.rpc, &peer, "pty.write", json!({ "ptyId": pty_id, "data": big, "seq": 2, "writerId": "w1" })).await), "too_large");
+
+    // The program is not reading: the write is refused, its seq is not
+    // spent, and the same write goes through once there is room.
+    let pending = f.rpc.ptys.lock().unwrap()[&pty_id].input_pending.clone();
+    pending.fetch_add(MAX_PENDING_INPUT, Ordering::SeqCst);
+    assert_eq!(code(call(&f.rpc, &peer, "pty.write", write(2, "w1")).await), "backpressure");
+    pending.fetch_sub(MAX_PENDING_INPUT, Ordering::SeqCst);
+    assert_eq!(call(&f.rpc, &peer, "pty.write", write(2, "w1")).await.unwrap()["applied"], true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_controller_owns_input_and_size_and_viewers_follow() {
+    let f = fixture();
+    let (desk, mut desk_events) = peer_for(&f.rpc, "device-desk", Authority::Manage).await;
+    let (laptop, mut laptop_events) = peer_for(&f.rpc, "device-laptop", Authority::Manage).await;
+    let (phone, _phone_events) = peer_for(&f.rpc, "device-phone", Authority::Participate).await;
+    let created = call(&f.rpc, &desk, "pty.create", json!({ "cols": 120, "rows": 40, "clientRequestId": "request-own-1" })).await.unwrap();
+    let pty_id = created["ptyId"].as_str().unwrap().to_string();
+    call(&f.rpc, &desk, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    let watching = call(&f.rpc, &laptop, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    assert_eq!(watching["control"], "other");
+    assert_eq!(call(&f.rpc, &phone, "pty.list", json!({})).await.unwrap()["terminals"][0]["control"], "other");
+
+    // A second window's size never reshapes the controller's program.
+    assert_eq!(code(call(&f.rpc, &laptop, "pty.resize", json!({ "ptyId": pty_id, "cols": 60, "rows": 10 })).await), "not_controller");
+    assert_eq!(
+        code(call(&f.rpc, &laptop, "pty.write", json!({ "ptyId": pty_id, "data": "ls\n", "seq": 1, "writerId": "l" })).await),
+        "not_controller"
+    );
+    // Participants (the paired phone's scope) never gain input, size or control.
+    for (method, params) in [
+        ("pty.resize", json!({ "ptyId": pty_id, "cols": 60, "rows": 10 })),
+        ("pty.control", json!({ "ptyId": pty_id })),
+        ("pty.write", json!({ "ptyId": pty_id, "data": "x", "seq": 1 })),
+    ] {
+        assert_eq!(code(call(&f.rpc, &phone, method, params).await), "forbidden", "{method}");
+    }
+
+    // Taking control is explicit, applies the new controller's size and is
+    // announced to every viewer.
+    let taken = call(&f.rpc, &laptop, "pty.control", json!({ "ptyId": pty_id, "cols": 100, "rows": 30 })).await.unwrap();
+    assert_eq!((taken["control"].as_str(), taken["cols"].as_u64(), taken["rows"].as_u64()), (Some("you"), Some(100), Some(30)));
+    assert_eq!(next_event(&mut desk_events, "pty.resized").await["cols"], 100);
+    assert_eq!(next_event(&mut desk_events, "pty.control").await["control"], "other");
+    assert_eq!(next_event(&mut laptop_events, "pty.control").await["control"], "you");
+    assert_eq!(code(call(&f.rpc, &desk, "pty.resize", json!({ "ptyId": pty_id, "cols": 80, "rows": 24 })).await), "not_controller");
+    call(&f.rpc, &laptop, "pty.write", json!({ "ptyId": pty_id, "data": "stty size\n", "seq": 1, "writerId": "l" })).await.unwrap();
+    output_until(&mut laptop_events, "30 100").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_and_close_are_reported_and_nothing_targets_a_closed_terminal() {
+    let f = fixture();
+    let (peer, mut events) = manager_peer(&f.rpc).await;
+    let pty_id = call(&f.rpc, &peer, "pty.create", json!({ "clientRequestId": "request-exit-1" })).await.unwrap()["ptyId"].as_str().unwrap().to_string();
+    call(&f.rpc, &peer, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    call(&f.rpc, &peer, "pty.write", json!({ "ptyId": pty_id, "data": "exit 3\n", "seq": 1, "writerId": "w" })).await.unwrap();
+    let exit = next_event(&mut events, "pty.exit").await;
+    assert_eq!(exit["ptyId"], pty_id.as_str());
+    assert_eq!(code(call(&f.rpc, &peer, "pty.write", json!({ "ptyId": pty_id, "data": "x", "seq": 2, "writerId": "w" })).await), "unavailable");
+    // Still listed, with its output, until it is closed.
+    let listed = call(&f.rpc, &peer, "pty.list", json!({})).await.unwrap();
+    assert_eq!(listed["terminals"][0]["exited"], true);
+    call(&f.rpc, &peer, "pty.kill", json!({ "ptyId": pty_id })).await.unwrap();
+    assert_eq!(call(&f.rpc, &peer, "pty.list", json!({})).await.unwrap()["terminals"], json!([]));
+    assert_eq!(code(call(&f.rpc, &peer, "pty.attach", json!({ "ptyId": pty_id })).await), "not_found");
+
+    // Closing a running terminal ends its process and then its entry.
+    let running = call(&f.rpc, &peer, "pty.create", json!({ "clientRequestId": "request-exit-2" })).await.unwrap();
+    let running_id = running["ptyId"].as_str().unwrap().to_string();
+    call(&f.rpc, &peer, "pty.attach", json!({ "ptyId": running_id })).await.unwrap();
+    call(&f.rpc, &peer, "pty.kill", json!({ "ptyId": running_id })).await.unwrap();
+    assert_eq!(next_event(&mut events, "pty.exit").await["ptyId"], running_id.as_str());
+    assert_eq!(code(call(&f.rpc, &peer, "pty.write", json!({ "ptyId": running_id, "data": "x", "seq": 1 })).await), "not_found");
+    assert!(!f.terminals.is_live(&running_id));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_that_cannot_keep_up_is_told_to_resume_from_its_offset() {
+    let f = fixture();
+    let (peer, mut events) = manager_peer(&f.rpc).await;
+    let pty_id = call(&f.rpc, &peer, "pty.create", json!({ "clientRequestId": "request-lag-1" })).await.unwrap()["ptyId"].as_str().unwrap().to_string();
+    call(&f.rpc, &peer, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    // Nobody drains this connection while the terminal floods it.
+    call(&f.rpc, &peer, "pty.write", json!({ "ptyId": pty_id, "data": "head -c 6000000 /dev/zero | tr '\\0' 'a'; echo; echo flood-done\n", "seq": 1 }))
+        .await
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !f.rpc.ptys.lock().unwrap()[&pty_id].subscribers.is_empty() {
+        assert!(Instant::now() < deadline, "the lagging stream was never ended");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(peer.queued.load(Ordering::SeqCst) <= MAX_QUEUED_OUTPUT + MAX_FRAME_BYTES, "queued output stays bounded");
+    // What it did get is contiguous, and ends with where to resume.
+    let mut end = 0u64;
+    let lagged_at = loop {
+        let event = events.recv().await.unwrap();
+        match event["event"].as_str() {
+            Some("pty.output") => {
+                assert_eq!(event["params"]["offset"].as_u64(), Some(end));
+                end += STANDARD.decode(event["params"]["data"].as_str().unwrap()).unwrap().len() as u64;
+            }
+            Some("pty.lagged") => break event["params"]["offset"].as_u64().unwrap(),
+            _ => {}
+        }
+    };
+    assert_eq!(lagged_at, end);
+    // Resuming replays from the ring; bytes older than it are reported, not faked.
+    let (resumed_peer, mut resumed) = manager_peer(&f.rpc).await;
+    let replay = call(&f.rpc, &resumed_peer, "pty.attach", json!({ "ptyId": pty_id, "sinceOffset": end, "runtimeGeneration": 7 })).await.unwrap();
+    assert!(replay["offset"].as_u64().unwrap() >= end);
+    assert!(STANDARD.decode(replay["data"].as_str().unwrap()).unwrap().len() <= REPLAY_CHUNK, "a replay never outgrows one frame");
+    assert_eq!(replay["truncated"], json!(replay["offset"].as_u64().unwrap() > end));
+    let tail = String::from_utf8_lossy(&STANDARD.decode(replay["data"].as_str().unwrap()).unwrap()).into_owned();
+    if !tail.contains("flood-done") {
+        output_until_from(&mut resumed, "flood-done", replay["end"].as_u64().unwrap()).await;
+    }
+}
+
+async fn output_until_from(events: &mut Notifications, marker: &str, mut end: u64) {
+    let mut output = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !String::from_utf8_lossy(&output).contains(marker) {
+        let event = tokio::time::timeout_at(deadline, events.recv()).await.expect("terminal answered").unwrap();
+        if event["event"] == "pty.output" {
+            assert_eq!(event["params"]["offset"].as_u64(), Some(end));
+            let chunk = STANDARD.decode(event["params"]["data"].as_str().unwrap()).unwrap();
+            end += chunk.len() as u64;
+            output.extend(chunk);
+        }
+    }
 }

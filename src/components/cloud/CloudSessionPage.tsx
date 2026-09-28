@@ -1,32 +1,59 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Cloud, Loader2, Plug, TerminalSquare, Bot } from "lucide-react";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
-import "@xterm/xterm/css/xterm.css";
+import { ArrowLeft, Bot, Cloud, Loader2, Plug, Plus, TerminalSquare, X } from "lucide-react";
 import { mergeAgentEvents, type AgentEvent } from "@terminalx/portable/events";
 import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { TerminalView, createTerminal } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
 import {
   api,
   devWorkspaceConnection,
   workspaceConnection,
+  workspaceTargetKey,
   type CloudWorkspaceConnection,
   type CloudWorkspaceListItem,
 } from "@/lib/api";
+import {
+  closeCloudTerminal,
+  cloudTerminalFactory,
+  createCloudTerminal,
+  detachCloudTerminals,
+  selectCloudTerminal,
+  syncCloudTerminals,
+  takeControl,
+  useCloudTerminals,
+  type CloudTerminal,
+} from "@/lib/cloudTerminals";
+import { getInstance } from "@/lib/terminal";
+import { useTheme } from "@/lib/theme";
+
+/** Where an open session's commands run, as the page labels it. */
+interface OpenedWorkspace {
+  connection: CloudWorkspaceConnection;
+  name: string;
+  provider: string | null;
+}
+
+const PROVIDER_NAMES: Record<string, string> = { box: "Boat", machine0: "Machine0", "local-docker": "Local Docker" };
+
+export function providerName(provider: string | null): string {
+  if (!provider) return "Development runtime";
+  return PROVIDER_NAMES[provider] ?? provider;
+}
 
 /**
  * A session in a cloud workspace: the desktop attaches to the workspace's
- * remote runtime (PRO-13) and drives a terminal and an agent tab in it over
- * the relay. Deliberately minimal; the full cloud tab experience is PRO-26/PRO-22.
+ * remote runtime (PRO-13) and drives its shell tabs (PRO-26) and an agent
+ * tab over the relay. Every shell here runs in the cloud workspace, and the
+ * page says so; the full agent tab experience is PRO-22.
  */
 export function CloudSessionPage({ onBack }: { onBack: () => void }) {
   const [workspaces, setWorkspaces] = useState<CloudWorkspaceListItem[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
-  const [connection, setConnection] = useState<CloudWorkspaceConnection | null>(null);
+  const [opened, setOpened] = useState<OpenedWorkspace | null>(null);
+  const connection = opened?.connection ?? null;
   const [state, setState] = useState<WorkspaceConnectionState>({ state: "idle" });
   const [error, setError] = useState<string | null>(null);
   const [pairingCode, setPairingCode] = useState("");
-  const [view, setView] = useState<"terminal" | "agent">("terminal");
 
   useEffect(() => {
     api
@@ -40,7 +67,16 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
     return connection.client.onState(setState);
   }, [connection]);
 
-  useEffect(() => () => connection?.close(), [connection]);
+  useEffect(() => {
+    if (!connection) return;
+    const key = workspaceTargetKey(connection.target);
+    return () => {
+      // The shells keep running in the workspace; their views and offsets
+      // stay here for the next time this workspace is opened.
+      detachCloudTerminals(key);
+      connection.close();
+    };
+  }, [connection]);
 
   const open = useCallback(async (item: CloudWorkspaceListItem) => {
     setError(null);
@@ -50,7 +86,7 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
         { kind: "cloud", organizationId: item.workspace.orgId, workspaceId: item.workspace.id },
         item.workspace.state === "suspended" ? "wake" : "connect",
       );
-      setConnection(next);
+      if (next) setOpened({ connection: next, name: item.workspace.name, provider: item.workspace.provider });
     } catch (e) {
       setError(errorCode(e));
     }
@@ -59,13 +95,11 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
   const openDev = useCallback(async () => {
     setError(null);
     try {
-      setConnection(await devWorkspaceConnection(pairingCode.trim()));
+      setOpened({ connection: await devWorkspaceConnection(pairingCode.trim()), name: "Development runtime", provider: null });
     } catch (e) {
       setError(errorCode(e));
     }
   }, [pairingCode]);
-
-  const connected = state.state === "connected";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-background" data-testid="cloud-session-page">
@@ -74,7 +108,8 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
           <ArrowLeft className="size-4" />
         </Button>
         <Cloud className="size-4 text-muted-foreground" />
-        <span className="text-sm font-medium">Cloud workspace session</span>
+        <span className="text-sm font-medium">{opened ? opened.name : "Cloud workspace session"}</span>
+        {opened && <ExecutionLocation provider={opened.provider} name={opened.name} />}
         <span className="ml-auto text-xs text-muted-foreground" data-testid="cloud-connection-state">
           {describe(state)}
         </span>
@@ -125,95 +160,238 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
           {error && <p className="text-xs text-red-500">Could not open: {error}</p>}
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="flex shrink-0 gap-1 border-b border-hairline px-3 py-1">
-            <Button size="sm" variant={view === "terminal" ? "secondary" : "ghost"} onClick={() => setView("terminal")}>
-              <TerminalSquare className="size-3.5" /> Terminal
-            </Button>
-            <Button size="sm" variant={view === "agent" ? "secondary" : "ghost"} onClick={() => setView("agent")}>
-              <Bot className="size-3.5" /> Agent
-            </Button>
-          </div>
-          {!connected && <div className="px-4 py-1 text-xs text-muted-foreground">{describe(state)}</div>}
-          {/* Both stay mounted across reconnects and view switches: the
-              terminal and the agent tab live on the runtime, and the client
-              resumes their streams from the last offset or cursor. */}
-          <div className={view === "terminal" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
-            <RemoteTerminal client={connection.client} />
-          </div>
-          <div className={view === "agent" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
-            <RemoteAgent client={connection.client} />
-          </div>
-        </div>
+        <WorkspaceView opened={opened!} state={state} />
       )}
     </div>
   );
 }
 
-function RemoteTerminal({ client }: { client: WorkspaceRpcClient }) {
-  const host = useRef<HTMLDivElement>(null);
-  const [error, setError] = useState<string | null>(null);
+/** Says, wherever a cloud shell is shown, that it runs in the cloud workspace and not on this Mac. */
+function ExecutionLocation({ provider, name }: { provider: string | null; name: string }) {
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-full border border-hairline px-2 py-0.5 text-[11px] text-muted-foreground"
+      data-testid="cloud-execution-location"
+      title={`Commands run in the cloud workspace ${name} (${providerName(provider)}), not on this computer.`}
+    >
+      <Cloud className="size-3" /> Cloud · {providerName(provider)}
+    </span>
+  );
+}
 
+type View = { kind: "terminal" } | { kind: "agent" };
+
+function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: WorkspaceConnectionState }) {
+  const { connection } = opened;
+  const client = connection.client;
+  const key = workspaceTargetKey(connection.target);
+  const { terminals, selected } = useCloudTerminals(key);
+  const [view, setView] = useState<View>({ kind: "terminal" });
+  const [error, setError] = useState<string | null>(null);
+  const { resolvedMode } = useTheme();
+  const mode = useRef(resolvedMode);
+  mode.current = resolvedMode;
+  const autoCreated = useRef(false);
+  const connected = state.state === "connected";
+  const manage = connected && state.authority === "manage";
+  const base = useCallback(() => createTerminal(mode.current), []);
+
+  const generation = connected ? `${state.runtimeGeneration}:${state.runtimeEpoch ?? ""}` : null;
   useEffect(() => {
-    const element = host.current;
-    if (!element) return;
-    const term = new Terminal({ cursorBlink: true, fontSize: 12.5, scrollback: 10_000, convertEol: false });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-    term.open(element);
-    fit.fit();
-    let ptyId: string | null = null;
-    let detach: (() => void) | null = null;
-    let disposed = false;
-    const decoder = new TextDecoder();
+    if (!generation) return;
+    let cancelled = false;
     void (async () => {
       try {
-        await firstConnect(client);
-        if (disposed) return;
-        const created = await client.mutate<{ ptyId: string }>("pty.create", { cols: term.cols, rows: term.rows });
-        if (disposed) return;
-        ptyId = created.ptyId;
-        detach = await client.attachPty(
-          created.ptyId,
-          (bytes) => term.write(decoder.decode(bytes, { stream: true })),
-          (code) => term.write(`\r\n[process exited${code === null ? "" : ` with ${code}`}]\r\n`),
-        );
-        term.focus();
+        const live = await syncCloudTerminals(key, client, base);
+        // A workspace with no shell gets one on the first connect only; after
+        // that tabs are the user's, and a restarted runtime's ended tabs are
+        // never quietly replaced by new shells.
+        const first = !autoCreated.current;
+        autoCreated.current = true;
+        if (!cancelled && first && live.length === 0 && manage) {
+          await createCloudTerminal(key, client, { cols: 100, rows: 30 }, base);
+        }
       } catch (e) {
-        setError(errorCode(e));
+        if (!cancelled) setError(errorCode(e));
       }
     })();
-    const input = term.onData((data) => {
-      if (ptyId) void client.write(ptyId, data).catch((e: unknown) => setError(errorCode(e)));
-    });
-    const resize = term.onResize(({ cols, rows }) => {
-      if (ptyId) void client.call("pty.resize", { ptyId, cols, rows }).catch(() => undefined);
-    });
-    const observer = new ResizeObserver(() => {
-      try {
-        fit.fit();
-      } catch {
-        /* not laid out */
-      }
-    });
-    observer.observe(element);
     return () => {
-      disposed = true;
-      observer.disconnect();
-      input.dispose();
-      resize.dispose();
-      detach?.();
-      if (ptyId) void client.call("pty.kill", { ptyId }).catch(() => undefined);
-      term.dispose();
+      cancelled = true;
     };
-  }, [client]);
+  }, [generation, key, client, base, manage]);
+
+  const newTerminal = async () => {
+    setError(null);
+    try {
+      await createCloudTerminal(key, client, { cols: 100, rows: 30 }, base);
+      setView({ kind: "terminal" });
+    } catch (e) {
+      setError(errorCode(e));
+    }
+  };
+
+  const close = async (terminal: CloudTerminal) => {
+    setError(null);
+    try {
+      await closeCloudTerminal(key, connected ? client : null, terminal.id);
+    } catch (e) {
+      setError(errorCode(e));
+    }
+  };
+
+  const active = terminals.find((terminal) => terminal.id === selected) ?? null;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {error && <p className="px-3 py-1 text-xs text-red-500">Terminal: {error}</p>}
-      <div ref={host} className="min-h-0 flex-1 px-2 pt-1" data-testid="cloud-terminal" />
+      <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-hairline px-3 py-1" role="tablist">
+        {terminals.map((terminal) => (
+          <div key={terminal.id} className="flex items-center" data-testid="cloud-terminal-tab">
+            <Button
+              size="sm"
+              role="tab"
+              aria-selected={view.kind === "terminal" && terminal.id === selected}
+              variant={view.kind === "terminal" && terminal.id === selected ? "secondary" : "ghost"}
+              title={`${terminal.title} runs in the cloud workspace ${opened.name}`}
+              onClick={() => {
+                selectCloudTerminal(key, terminal.id);
+                setView({ kind: "terminal" });
+              }}
+            >
+              <Cloud className="size-3.5" /> {terminal.title}
+              {terminal.gone ? " (ended)" : terminal.exited ? " (exited)" : ""}
+            </Button>
+            {(manage || terminal.gone) && (
+              <Button size="icon" variant="ghost" className="size-6" aria-label={`Close ${terminal.title}`} onClick={() => void close(terminal)}>
+                <X className="size-3" />
+              </Button>
+            )}
+          </div>
+        ))}
+        {manage && (
+          <Button size="icon" variant="ghost" className="size-7" aria-label="New cloud terminal" onClick={() => void newTerminal()}>
+            <Plus className="size-3.5" />
+          </Button>
+        )}
+        <Button
+          size="sm"
+          role="tab"
+          aria-selected={view.kind === "agent"}
+          variant={view.kind === "agent" ? "secondary" : "ghost"}
+          onClick={() => setView({ kind: "agent" })}
+        >
+          <Bot className="size-3.5" /> Agent
+        </Button>
+      </div>
+      {!connected && <div className="px-4 py-1 text-xs text-muted-foreground">{describe(state)}</div>}
+      {error && <p className="px-4 py-1 text-xs text-red-500">Terminal: {error}</p>}
+      {/* Terminal views and the agent tab stay mounted across reconnects and
+          view switches: they live on the runtime, and their streams resume
+          from the last byte or cursor. */}
+      <div className={view.kind === "terminal" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+        {active ? (
+          <CloudTerminalPane
+            key={active.id}
+            workspace={key}
+            terminal={active}
+            client={client}
+            connected={connected}
+            manage={manage}
+            base={base}
+          />
+        ) : (
+          <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
+            <TerminalSquare className="mr-2 size-4" />
+            {connected ? "No terminals in this workspace." : "Terminals appear once the workspace is connected."}
+          </div>
+        )}
+      </div>
+      <div className={view.kind === "agent" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+        <RemoteAgent client={client} />
+      </div>
     </div>
   );
+}
+
+function CloudTerminalPane({
+  workspace,
+  terminal,
+  client,
+  connected,
+  manage,
+  base,
+}: {
+  workspace: string;
+  terminal: CloudTerminal;
+  client: WorkspaceRpcClient;
+  connected: boolean;
+  manage: boolean;
+  base: () => ReturnType<typeof createTerminal>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const create = useCallback(() => cloudTerminalFactory(workspace, terminal, base)(), [workspace, terminal.id]);
+  const controlling = terminal.control === "you";
+
+  const control = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const instance = getInstance(terminal.id, create);
+      const size = instance.fit.proposeDimensions();
+      await takeControl(workspace, client, terminal.id, size && size.cols > 0 && size.rows > 0 ? { cols: size.cols, rows: size.rows } : null);
+    } catch (e) {
+      setError(errorCode(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  let notice: string | null = null;
+  if (terminal.gone === "runtime-restarted") notice = "This terminal ended when the workspace runtime restarted. Input is not sent anywhere.";
+  else if (terminal.gone === "closed") notice = "This terminal was closed.";
+  else if (terminal.exited) notice = `The shell exited${terminal.exitCode === null ? "" : ` with code ${terminal.exitCode}`}.`;
+  else if (terminal.inputError) notice = `Input was not delivered: ${inputErrorText(terminal.inputError)}`;
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="cloud-terminal">
+      {!terminal.gone && !terminal.exited && !controlling && (
+        <div className="flex items-center gap-2 border-b border-hairline px-3 py-1 text-xs text-muted-foreground" data-testid="cloud-terminal-viewer">
+          <span>
+            {manage ? "Another device controls this terminal's input and size; you are watching." : "View only: this attachment cannot type into or resize terminals."}
+          </span>
+          {manage && (
+            <Button size="sm" variant="outline" disabled={busy || !connected} onClick={() => void control()}>
+              Take control
+            </Button>
+          )}
+        </div>
+      )}
+      {notice && (
+        <p className="border-b border-hairline px-3 py-1 text-xs text-muted-foreground" data-testid="cloud-terminal-notice">
+          {notice}
+        </p>
+      )}
+      {error && <p className="px-3 py-1 text-xs text-red-500">{error}</p>}
+      <div className="min-h-0 flex-1">
+        <TerminalView id={terminal.id} visible create={create} fit={controlling && !terminal.gone} />
+      </div>
+    </div>
+  );
+}
+
+function inputErrorText(code: string): string {
+  switch (code) {
+    case "not_controller":
+      return "another device controls this terminal. Take control to type.";
+    case "unavailable":
+      return "the shell has exited.";
+    case "not_found":
+      return "the terminal no longer exists.";
+    case "not connected":
+      return "not connected to the workspace.";
+    default:
+      return code;
+  }
 }
 
 function RemoteAgent({ client }: { client: WorkspaceRpcClient }) {
@@ -297,18 +475,6 @@ function RemoteAgent({ client }: { client: WorkspaceRpcClient }) {
       </div>
     </div>
   );
-}
-
-/** Resolves on the first `connected` state; the page mounts before that. */
-function firstConnect(client: WorkspaceRpcClient): Promise<void> {
-  return new Promise((resolve) => {
-    let stop: (() => void) | undefined;
-    stop = client.onState((state) => {
-      if (state.state !== "connected") return;
-      queueMicrotask(() => stop?.());
-      resolve();
-    });
-  });
 }
 
 function eventText(event: AgentEvent): string | null {

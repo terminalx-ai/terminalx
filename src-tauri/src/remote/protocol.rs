@@ -61,8 +61,12 @@ pub const METHODS: &[Method] = &[
     method("session.subscribe", "session/1", Participate, false),
     method("session.unsubscribe", "session/1", Participate, false),
     method("pty.create", "pty/1", Manage, true),
+    method("pty.list", "pty/1", Participate, false),
+    // Input and size belong to the terminal's controller; `pty.control`
+    // takes them over explicitly. Participants only ever watch.
     method("pty.write", "pty/1", Manage, false),
     method("pty.resize", "pty/1", Manage, false),
+    method("pty.control", "pty/1", Manage, false),
     method("pty.kill", "pty/1", Manage, false),
     method("pty.attach", "pty/1", Participate, false),
     method("pty.detach", "pty/1", Participate, false),
@@ -211,6 +215,8 @@ fn leak_code(code: &str) -> &'static str {
         "hello_required",
         "too_large",
         "git_failed",
+        "not_controller",
+        "backpressure",
     ];
     CODES.iter().find(|known| **known == code).copied().unwrap_or("internal")
 }

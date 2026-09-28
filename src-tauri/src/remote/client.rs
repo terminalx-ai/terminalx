@@ -120,6 +120,8 @@ pub enum ClientState {
     Connecting { attempt: u32 },
     Connected {
         runtime_generation: u64,
+        /// The runtime process; terminals and their offsets belong to it.
+        runtime_epoch: String,
         runtime_version: String,
         capabilities: Vec<String>,
         authority: String,
@@ -504,6 +506,7 @@ async fn establish(connection: &mut Connection, attached: &Attached, was_invite:
     Ok((
         ClientState::Connected {
             runtime_generation: generation,
+            runtime_epoch: hello["runtime"]["epoch"].as_str().unwrap_or_default().to_string(),
             runtime_version: hello["runtime"]["version"].as_str().unwrap_or_default().to_string(),
             capabilities: serde_json::from_value(hello["capabilities"].clone()).unwrap_or_default(),
             authority: hello["authority"].as_str().unwrap_or_default().to_string(),

@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -39,6 +39,18 @@ const MAX_READ_BYTES: u64 = 768 * 1024;
 const MAX_DIFF_BYTES: usize = 768 * 1024;
 const MAX_LIST_ENTRIES: usize = 5000;
 const PTY_PREFIX: &str = "remote-pty-";
+/// Largest single `pty.write`; a paste is split by the client.
+pub const MAX_WRITE_BYTES: usize = 64 * 1024;
+/// Input accepted but not yet read by the program. Past it a write is
+/// refused with `backpressure` and the client retries the same seq.
+const MAX_PENDING_INPUT: usize = 256 * 1024;
+/// Terminal output (base64) queued for one connection before its streams
+/// are ended with `pty.lagged` and resumed from the ring by offset.
+pub const MAX_QUEUED_OUTPUT: usize = 4 * 1024 * 1024;
+/// Replay bytes per frame (base64 grows it by a third; well under the frame limit).
+const REPLAY_CHUNK: usize = 256 * 1024;
+/// Distinct writers remembered per terminal for resend detection.
+const MAX_WRITERS: usize = 64;
 
 /// One attached client connection.
 pub struct Peer {
@@ -47,44 +59,99 @@ pub struct Peer {
     /// reconnect of the same attachment replays, another attachment cannot.
     pub device_id: String,
     pub authority: Authority,
-    outbound: mpsc::UnboundedSender<Value>,
+    outbound: mpsc::UnboundedSender<(Value, usize)>,
+    /// Terminal output bytes queued for this connection that its transport
+    /// has not taken yet. Past [`MAX_QUEUED_OUTPUT`] a terminal stream is
+    /// ended with `pty.lagged` instead of growing without bound.
+    queued: Arc<AtomicUsize>,
     granted: Mutex<Option<HashSet<String>>>,
 }
 
 static NEXT_PEER: AtomicU64 = AtomicU64::new(1);
 
+/// A connection's notifications, in order, as its transport sends them.
+pub struct Notifications {
+    receiver: mpsc::UnboundedReceiver<(Value, usize)>,
+    queued: Arc<AtomicUsize>,
+}
+
+impl Notifications {
+    pub async fn recv(&mut self) -> Option<Value> {
+        let (value, size) = self.receiver.recv().await?;
+        self.queued.fetch_sub(size, Ordering::SeqCst);
+        Some(value)
+    }
+}
+
 impl Peer {
-    pub fn new(device_id: String, authority: Authority) -> (Arc<Self>, mpsc::UnboundedReceiver<Value>) {
+    pub fn new(device_id: String, authority: Authority) -> (Arc<Self>, Notifications) {
         let (outbound, receiver) = mpsc::unbounded_channel();
+        let queued = Arc::new(AtomicUsize::new(0));
         let peer = Arc::new(Self {
             id: NEXT_PEER.fetch_add(1, Ordering::Relaxed),
             device_id,
             authority,
             outbound,
+            queued: queued.clone(),
             granted: Mutex::new(None),
         });
-        (peer, receiver)
+        (peer, Notifications { receiver, queued })
     }
 
     fn notify(&self, event: &str, params: Value) {
-        let _ = self.outbound.send(json!({ "event": event, "params": params }));
+        self.notify_sized(event, params, 0);
+    }
+
+    fn notify_sized(&self, event: &str, params: Value, size: usize) {
+        self.queued.fetch_add(size, Ordering::SeqCst);
+        if self.outbound.send((json!({ "event": event, "params": params }), size)).is_err() {
+            self.queued.fetch_sub(size, Ordering::SeqCst);
+        }
     }
 }
 
+/// One remote terminal. Its bytes live only in `ring`: nothing here writes
+/// terminal output into a session transcript.
 struct PtyState {
+    /// Issued in creation order; clients name tabs "Terminal <number>".
+    number: u64,
+    cwd: String,
+    created_at_ms: u64,
+    pid: Option<u32>,
+    cols: u16,
+    rows: u16,
+    /// The device whose input and size the terminal follows. Only it may
+    /// write or resize; another manage attachment takes over with
+    /// `pty.control`. Participants never hold it.
+    controller: Option<String>,
     ring: VecDeque<u8>,
     /// Byte offset one past the last byte ever written by the terminal.
     end: u64,
     exit: Option<Option<i32>>,
     exited_at: Option<Instant>,
-    /// Last applied `pty.write` seq per device, so a resend is dropped.
-    applied_seq: HashMap<String, u64>,
+    /// `pty.kill` was called; the entry goes once the exit is reported.
+    closed: bool,
+    /// Last applied `pty.write` seq per (device, writer): a resend is
+    /// dropped and a gap is refused, so input is applied once and in order.
+    applied_seq: HashMap<(String, String), (u64, Instant)>,
+    /// Accepted input, written by the terminal's own writer thread so a
+    /// program that stops reading never stalls the connection.
+    input: std::sync::mpsc::Sender<Vec<u8>>,
+    input_pending: Arc<AtomicUsize>,
     subscribers: HashMap<String, Arc<Peer>>,
 }
 
 impl PtyState {
     fn start(&self) -> u64 {
         self.end - self.ring.len() as u64
+    }
+
+    fn control_for(&self, peer: &Peer) -> &'static str {
+        match &self.controller {
+            Some(device) if *device == peer.device_id => "you",
+            Some(_) => "other",
+            None => "none",
+        }
     }
 }
 
@@ -118,6 +185,11 @@ pub struct WorkspaceRpc {
     /// The generation the relay host registered with; offsets and cursors
     /// are bound to it.
     generation: AtomicU64,
+    /// This runtime process. Terminals, offsets and write seqs belong to
+    /// it: a restarted runtime (same generation, e.g. after a resume) has
+    /// none of them, and says so with a new epoch.
+    epoch: String,
+    next_pty_number: AtomicU64,
     version: String,
     sink: Arc<dyn EventSink>,
     terminals: Arc<Terminals>,
@@ -148,6 +220,8 @@ impl WorkspaceRpc {
         let rpc = Arc::new(Self {
             root,
             generation: AtomicU64::new(generation),
+            epoch: format!("epoch-{}", uuid::Uuid::new_v4().simple()),
+            next_pty_number: AtomicU64::new(1),
             version: env!("CARGO_PKG_VERSION").into(),
             sink: sink.clone(),
             terminals,
@@ -218,10 +292,10 @@ impl WorkspaceRpc {
             *peer.granted.lock().unwrap() = Some(granted.iter().cloned().collect());
             return Ok(json!({
                 "protocol": PROTOCOL,
-                "runtime": { "version": self.version, "runtimeGeneration": self.generation() },
+                "runtime": { "version": self.version, "runtimeGeneration": self.generation(), "epoch": self.epoch },
                 "capabilities": granted,
                 "authority": peer.authority,
-                "limits": { "maxFrameBytes": MAX_FRAME_BYTES, "maxPtys": MAX_PTYS },
+                "limits": { "maxFrameBytes": MAX_FRAME_BYTES, "maxPtys": MAX_PTYS, "maxWriteBytes": MAX_WRITE_BYTES },
             }));
         }
         let Some(spec) = protocol::find_method(method) else {
@@ -279,9 +353,11 @@ impl WorkspaceRpc {
 
     fn execute_blocking(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
         match method {
-            "pty.create" => self.pty_create(params),
+            "pty.create" => self.pty_create(peer, params),
+            "pty.list" => self.pty_list(peer),
             "pty.write" => self.pty_write(peer, params),
-            "pty.resize" => self.pty_resize(params),
+            "pty.resize" => self.pty_resize(peer, params),
+            "pty.control" => self.pty_control(peer, params),
             "pty.kill" => self.pty_kill(params),
             "pty.attach" => self.pty_attach(peer, params),
             "pty.detach" | "session.unsubscribe" | "fs.unwatch" => self.unsubscribe(peer, params),
@@ -360,7 +436,25 @@ impl WorkspaceRpc {
 
     // ---- terminals -------------------------------------------------------
 
-    fn pty_create(&self, params: Value) -> Result<Value, RpcError> {
+    /// What a client needs to show and resume one terminal.
+    fn describe_pty(&self, pty_id: &str, pty: &PtyState, peer: &Peer) -> Value {
+        json!({
+            "ptyId": pty_id,
+            "number": pty.number,
+            "epoch": self.epoch,
+            "pid": pty.pid,
+            "cwd": pty.cwd,
+            "cols": pty.cols,
+            "rows": pty.rows,
+            "createdAt": pty.created_at_ms,
+            "offset": pty.end,
+            "exited": pty.exit.is_some(),
+            "exitCode": pty.exit.flatten(),
+            "control": pty.control_for(peer),
+        })
+    }
+
+    fn pty_create(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Params {
@@ -385,19 +479,34 @@ impl WorkspaceRpc {
             return Err(RpcError::invalid("cwd is not a directory"));
         }
         let pty_id = format!("{PTY_PREFIX}{}", uuid::Uuid::new_v4().simple());
+        let (input, queue) = std::sync::mpsc::channel::<Vec<u8>>();
+        let input_pending = Arc::new(AtomicUsize::new(0));
         {
             let mut ptys = self.ptys.lock().unwrap();
-            if ptys.values().filter(|pty| pty.exit.is_none()).count() >= MAX_PTYS {
+            if ptys.values().filter(|pty| pty.exit.is_none() && !pty.closed).count() >= MAX_PTYS {
                 return Err(RpcError::new("unavailable", format!("at most {MAX_PTYS} terminals may run at once")));
             }
             ptys.insert(
                 pty_id.clone(),
                 PtyState {
+                    number: self.next_pty_number.fetch_add(1, Ordering::SeqCst),
+                    cwd: self.relative(&cwd),
+                    created_at_ms: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|elapsed| elapsed.as_millis() as u64)
+                        .unwrap_or(0),
+                    pid: None,
+                    cols: p.cols,
+                    rows: p.rows,
+                    controller: Some(peer.device_id.clone()),
                     ring: VecDeque::new(),
                     end: 0,
                     exit: None,
                     exited_at: None,
+                    closed: false,
                     applied_seq: HashMap::new(),
+                    input,
+                    input_pending: input_pending.clone(),
                     subscribers: HashMap::new(),
                 },
             );
@@ -408,84 +517,221 @@ impl WorkspaceRpc {
             self.ptys.lock().unwrap().remove(&pty_id);
             return Err(RpcError::internal(error));
         }
-        Ok(json!({ "ptyId": pty_id }))
+        let terminals = self.terminals.clone();
+        let writer_id = pty_id.clone();
+        let spawned = std::thread::Builder::new().name(format!("pty-input-{pty_id}")).spawn(move || {
+            // Ends when the terminal's entry (the sender) is dropped, or the
+            // program is gone; its exit is reported through `pty.exit`.
+            for data in queue {
+                let written = terminals.write(&writer_id, &data);
+                input_pending.fetch_sub(data.len(), Ordering::SeqCst);
+                if written.is_err() {
+                    break;
+                }
+            }
+        });
+        if let Err(error) = spawned {
+            self.ptys.lock().unwrap().remove(&pty_id);
+            self.terminals.kill(&pty_id);
+            return Err(RpcError::internal(error));
+        }
+        let mut ptys = self.ptys.lock().unwrap();
+        let pty = ptys.get_mut(&pty_id).ok_or_else(|| RpcError::internal("the terminal exited while starting"))?;
+        pty.pid = self.terminals.pid(&pty_id);
+        Ok(self.describe_pty(&pty_id, pty, peer))
+    }
+
+    /// Terminals of this runtime, oldest first; closed ones are gone.
+    fn pty_list(&self, peer: &Peer) -> Result<Value, RpcError> {
+        let ptys = self.ptys.lock().unwrap();
+        let mut listed: Vec<(u64, Value)> =
+            ptys.iter().filter(|(_, pty)| !pty.closed).map(|(id, pty)| (pty.number, self.describe_pty(id, pty, peer))).collect();
+        listed.sort_by_key(|(number, _)| *number);
+        Ok(json!({
+            "epoch": self.epoch,
+            "runtimeGeneration": self.generation(),
+            "terminals": listed.into_iter().map(|(_, pty)| pty).collect::<Vec<_>>(),
+        }))
+    }
+
+    /// A terminal addressed by exact id in this runtime process. A client
+    /// that names the epoch it created or attached in never reaches a
+    /// terminal of a restarted runtime.
+    fn live_pty<'a>(&self, ptys: &'a mut HashMap<String, PtyState>, params: &Value) -> Result<(String, &'a mut PtyState), RpcError> {
+        let pty_id = required_str(params, "ptyId")?;
+        if let Some(epoch) = params.get("epoch").and_then(Value::as_str) {
+            if epoch != self.epoch {
+                return Err(RpcError::not_found("the terminal belonged to an earlier runtime"));
+            }
+        }
+        match ptys.get_mut(pty_id) {
+            Some(pty) if !pty.closed => Ok((pty_id.to_string(), pty)),
+            _ => Err(RpcError::not_found("no such terminal")),
+        }
     }
 
     fn pty_write(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Params {
-            pty_id: String,
-            data: String,
-            seq: u64,
+        let seq = params.get("seq").and_then(Value::as_u64).filter(|seq| *seq > 0).ok_or_else(|| RpcError::invalid("seq must be a positive integer"))?;
+        let data = required_str(&params, "data")?;
+        if data.len() > MAX_WRITE_BYTES {
+            return Err(RpcError::new("too_large", format!("write at most {MAX_WRITE_BYTES} bytes at a time")));
         }
-        let p: Params = parse(params)?;
-        {
-            let mut ptys = self.ptys.lock().unwrap();
-            let pty = ptys.get_mut(&p.pty_id).ok_or_else(|| RpcError::not_found("no such terminal"))?;
-            if pty.exit.is_some() {
-                return Err(RpcError::new("unavailable", "the terminal has exited"));
-            }
-            let applied = pty.applied_seq.entry(peer.device_id.clone()).or_insert(0);
-            if p.seq <= *applied {
-                return Ok(json!({ "applied": false, "seq": *applied }));
-            }
-            *applied = p.seq;
+        let writer = params.get("writerId").and_then(Value::as_str).unwrap_or("");
+        if writer.len() > 128 {
+            return Err(RpcError::invalid("writerId is too long"));
         }
-        self.terminals.write(&p.pty_id, p.data.as_bytes()).map_err(RpcError::internal)?;
+        let mut ptys = self.ptys.lock().unwrap();
+        let (_, pty) = self.live_pty(&mut ptys, &params)?;
+        let key = (peer.device_id.clone(), writer.to_string());
+        let applied = pty.applied_seq.get(&key).map(|(seq, _)| *seq).unwrap_or(0);
+        // A resend of what was applied is answered, never typed again, even
+        // after control moved or the program exited.
+        if seq <= applied {
+            return Ok(json!({ "applied": false, "seq": applied }));
+        }
+        if seq != applied + 1 {
+            return Err(RpcError::new("conflict", format!("expected seq {}", applied + 1)));
+        }
+        if pty.exit.is_some() {
+            return Err(RpcError::new("unavailable", "the terminal has exited"));
+        }
+        if pty.controller.as_deref() != Some(peer.device_id.as_str()) {
+            return Err(RpcError::new("not_controller", "another device controls this terminal's input"));
+        }
+        if pty.input_pending.load(Ordering::SeqCst) + data.len() > MAX_PENDING_INPUT {
+            return Err(RpcError::new("backpressure", "the program is not reading its input yet; retry"));
+        }
+        pty.input_pending.fetch_add(data.len(), Ordering::SeqCst);
+        if pty.input.send(data.as_bytes().to_vec()).is_err() {
+            pty.input_pending.fetch_sub(data.len(), Ordering::SeqCst);
+            return Err(RpcError::new("unavailable", "the terminal has exited"));
+        }
+        pty.applied_seq.insert(key, (seq, Instant::now()));
+        if pty.applied_seq.len() > MAX_WRITERS {
+            if let Some(oldest) = pty.applied_seq.iter().min_by_key(|(_, (_, at))| *at).map(|(key, _)| key.clone()) {
+                pty.applied_seq.remove(&oldest);
+            }
+        }
+        // Accepted input is use of the workspace (a resend or refusal is not).
         crate::cloud_activity::note(crate::cloud_activity::Kind::TerminalInput);
-        Ok(json!({ "applied": true, "seq": p.seq }))
+        Ok(json!({ "applied": true, "seq": seq }))
     }
 
-    fn pty_resize(&self, params: Value) -> Result<Value, RpcError> {
-        let pty_id = self.known_pty(&params)?;
-        let cols = params.get("cols").and_then(Value::as_u64).filter(|v| (1..=1000).contains(v));
-        let rows = params.get("rows").and_then(Value::as_u64).filter(|v| (1..=1000).contains(v));
-        let (Some(cols), Some(rows)) = (cols, rows) else {
-            return Err(RpcError::invalid("cols and rows must be between 1 and 1000"));
-        };
-        self.terminals.resize(&pty_id, cols as u16, rows as u16).map_err(RpcError::internal)?;
-        Ok(json!({}))
+    fn size_params(params: &Value) -> Result<Option<(u16, u16)>, RpcError> {
+        match (params.get("cols"), params.get("rows")) {
+            (None, None) => Ok(None),
+            (cols, rows) => {
+                let valid = |value: Option<&Value>| value.and_then(Value::as_u64).filter(|v| (1..=1000).contains(v));
+                match (valid(cols), valid(rows)) {
+                    (Some(cols), Some(rows)) => Ok(Some((cols as u16, rows as u16))),
+                    _ => Err(RpcError::invalid("cols and rows must be between 1 and 1000")),
+                }
+            }
+        }
+    }
+
+    /// Apply a size and tell every other viewer, so their view matches the
+    /// program's. Called with the terminal's entry locked.
+    fn apply_size(&self, pty_id: &str, pty: &mut PtyState, cols: u16, rows: u16) -> Result<(), RpcError> {
+        if (pty.cols, pty.rows) == (cols, rows) {
+            return Ok(());
+        }
+        self.terminals.resize(pty_id, cols, rows).map_err(RpcError::internal)?;
+        pty.cols = cols;
+        pty.rows = rows;
+        for (subscription_id, subscriber) in &pty.subscribers {
+            subscriber.notify("pty.resized", json!({ "subscriptionId": subscription_id, "ptyId": pty_id, "cols": cols, "rows": rows }));
+        }
+        Ok(())
+    }
+
+    fn pty_resize(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let (cols, rows) = Self::size_params(&params)?.ok_or_else(|| RpcError::invalid("cols and rows must be between 1 and 1000"))?;
+        let mut ptys = self.ptys.lock().unwrap();
+        let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
+        // A viewer's window size never reshapes the controller's program.
+        if pty.controller.as_deref() != Some(peer.device_id.as_str()) {
+            return Err(RpcError::new("not_controller", "another device controls this terminal's size"));
+        }
+        if pty.exit.is_none() {
+            self.apply_size(&pty_id, pty, cols, rows)?;
+        }
+        Ok(json!({ "cols": pty.cols, "rows": pty.rows }))
+    }
+
+    /// Take over a terminal's input and size, optionally at this client's size.
+    fn pty_control(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let size = Self::size_params(&params)?;
+        let mut ptys = self.ptys.lock().unwrap();
+        let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
+        let changed = pty.controller.as_deref() != Some(peer.device_id.as_str());
+        pty.controller = Some(peer.device_id.clone());
+        if let (Some((cols, rows)), None) = (size, pty.exit) {
+            self.apply_size(&pty_id, pty, cols, rows)?;
+        }
+        if changed {
+            for (subscription_id, subscriber) in &pty.subscribers {
+                subscriber.notify(
+                    "pty.control",
+                    json!({ "subscriptionId": subscription_id, "ptyId": pty_id, "control": pty.control_for(subscriber) }),
+                );
+            }
+        }
+        Ok(self.describe_pty(&pty_id, pty, peer))
     }
 
     fn pty_kill(&self, params: Value) -> Result<Value, RpcError> {
-        let pty_id = self.known_pty(&params)?;
+        let (pty_id, exited) = {
+            let mut ptys = self.ptys.lock().unwrap();
+            let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
+            pty.closed = true;
+            (pty_id, pty.exit.is_some())
+        };
+        // SIGTERM, then SIGKILL after a grace period, to the whole group.
         self.terminals.kill(&pty_id);
-        Ok(json!({}))
-    }
-
-    fn known_pty(&self, params: &Value) -> Result<String, RpcError> {
-        let pty_id = required_str(params, "ptyId")?;
-        if !self.ptys.lock().unwrap().contains_key(pty_id) {
-            return Err(RpcError::not_found("no such terminal"));
+        if exited {
+            self.ptys.lock().unwrap().remove(&pty_id);
         }
-        Ok(pty_id.to_string())
+        Ok(json!({ "ptyId": pty_id }))
     }
 
     fn pty_attach(&self, peer: &Arc<Peer>, params: Value) -> Result<Value, RpcError> {
-        let pty_id = required_str(&params, "ptyId")?.to_string();
         let since = params.get("sinceOffset").and_then(Value::as_u64);
-        if since.is_some() && params.get("runtimeGeneration").and_then(Value::as_u64) != Some(self.generation()) {
-            return Err(RpcError::new("cursor_expired", "the offset belongs to another runtime generation"));
+        if since.is_some() {
+            let generation = params.get("runtimeGeneration").and_then(Value::as_u64);
+            let epoch = params.get("epoch").and_then(Value::as_str);
+            if generation != Some(self.generation()) || epoch.is_some_and(|epoch| epoch != self.epoch) {
+                return Err(RpcError::new("cursor_expired", "the offset belongs to another runtime generation or process"));
+            }
         }
         let subscription_id = Self::subscription_id();
         let mut ptys = self.ptys.lock().unwrap();
-        let pty = ptys.get_mut(&pty_id).ok_or_else(|| RpcError::not_found("no such terminal"))?;
+        let pty_id = required_str(&params, "ptyId")?.to_string();
+        let pty = ptys.get_mut(&pty_id).filter(|pty| !pty.closed).ok_or_else(|| RpcError::not_found("no such terminal"))?;
         let start = pty.start();
         let from = since.unwrap_or(start).clamp(start, pty.end);
         let skip = (from - start) as usize;
         let replay: Vec<u8> = pty.ring.iter().skip(skip).copied().collect();
+        // The answer carries the first slice of the replay; the rest follows
+        // as ordinary output ahead of anything live, so no frame outgrows the
+        // limit. The transport sends an answer before notifications queued
+        // while it was made.
+        let (first, rest) = replay.split_at(replay.len().min(REPLAY_CHUNK));
+        let mut at = from + first.len() as u64;
+        for chunk in rest.chunks(REPLAY_CHUNK) {
+            let data = STANDARD.encode(chunk);
+            let size = data.len();
+            peer.notify_sized("pty.output", json!({ "subscriptionId": subscription_id, "ptyId": pty_id, "offset": at, "data": data }), size);
+            at += chunk.len() as u64;
+        }
         pty.subscribers.insert(subscription_id.clone(), peer.clone());
-        let result = json!({
-            "subscriptionId": subscription_id,
-            "ptyId": pty_id,
-            "offset": from,
-            "data": STANDARD.encode(&replay),
-            "truncated": since.is_some_and(|since| since < start),
-            "exited": pty.exit.is_some(),
-            "exitCode": pty.exit.flatten(),
-            "runtimeGeneration": self.generation(),
-        });
+        let mut result = self.describe_pty(&pty_id, pty, peer);
+        result["subscriptionId"] = json!(subscription_id);
+        result["offset"] = json!(from);
+        result["end"] = json!(from + first.len() as u64);
+        result["data"] = json!(STANDARD.encode(first));
+        result["truncated"] = json!(since.is_some_and(|since| since < start));
+        result["runtimeGeneration"] = json!(self.generation());
         drop(ptys);
         self.subscriptions.lock().unwrap().insert(subscription_id, Subscription::Pty { peer: peer.id, pty_id });
         Ok(result)
@@ -496,41 +742,74 @@ impl WorkspaceRpc {
             return;
         }
         let Ok(bytes) = STANDARD.decode(&data.data) else { return };
-        let mut ptys = self.ptys.lock().unwrap();
-        let Some(pty) = ptys.get_mut(&data.id) else { return };
-        let offset = pty.end;
-        pty.end += bytes.len() as u64;
-        pty.ring.extend(bytes.iter().copied());
-        let excess = pty.ring.len().saturating_sub(PTY_RING_BYTES);
-        pty.ring.drain(..excess);
-        for (subscription_id, peer) in &pty.subscribers {
-            peer.notify(
-                "pty.output",
-                json!({ "subscriptionId": subscription_id, "ptyId": data.id, "offset": offset, "data": data.data }),
-            );
+        let mut lagged = Vec::new();
+        {
+            let mut ptys = self.ptys.lock().unwrap();
+            let Some(pty) = ptys.get_mut(&data.id) else { return };
+            let offset = pty.end;
+            pty.end += bytes.len() as u64;
+            pty.ring.extend(bytes.iter().copied());
+            let excess = pty.ring.len().saturating_sub(PTY_RING_BYTES);
+            pty.ring.drain(..excess);
+            for (subscription_id, peer) in &pty.subscribers {
+                // A connection that cannot keep up is not fed without bound:
+                // its stream ends here and it resumes from this offset,
+                // replayed from the ring (or marked truncated past it).
+                if peer.queued.load(Ordering::SeqCst) > MAX_QUEUED_OUTPUT {
+                    peer.notify("pty.lagged", json!({ "subscriptionId": subscription_id, "ptyId": data.id, "offset": offset }));
+                    lagged.push(subscription_id.clone());
+                    continue;
+                }
+                peer.notify_sized(
+                    "pty.output",
+                    json!({ "subscriptionId": subscription_id, "ptyId": data.id, "offset": offset, "data": data.data }),
+                    data.data.len(),
+                );
+            }
+            for subscription_id in &lagged {
+                pty.subscribers.remove(subscription_id);
+            }
+        }
+        if !lagged.is_empty() {
+            let mut subscriptions = self.subscriptions.lock().unwrap();
+            for subscription_id in lagged {
+                subscriptions.remove(&subscription_id);
+            }
         }
     }
 
     fn on_pty_exit(&self, exit: PtyExit) {
-        let mut ptys = self.ptys.lock().unwrap();
-        let Some(pty) = ptys.get_mut(&exit.id) else { return };
-        pty.exit = Some(exit.code);
-        pty.exited_at = Some(Instant::now());
-        for (subscription_id, peer) in &pty.subscribers {
-            peer.notify(
-                "pty.exit",
-                json!({ "subscriptionId": subscription_id, "ptyId": exit.id, "code": exit.code, "offset": pty.end }),
-            );
-        }
-        // Exited terminals keep their output for a late reader, up to a
-        // bound: the oldest are dropped first.
-        let mut exited: Vec<(Instant, String)> =
-            ptys.iter().filter_map(|(id, pty)| pty.exited_at.map(|at| (at, id.clone()))).collect();
-        if exited.len() > MAX_EXITED_PTYS {
-            exited.sort();
-            for (_, id) in exited.drain(..exited.len() - MAX_EXITED_PTYS) {
-                ptys.remove(&id);
+        let evicted = {
+            let mut ptys = self.ptys.lock().unwrap();
+            let Some(pty) = ptys.get_mut(&exit.id) else { return };
+            pty.exit = Some(exit.code);
+            pty.exited_at = Some(Instant::now());
+            for (subscription_id, peer) in &pty.subscribers {
+                peer.notify(
+                    "pty.exit",
+                    json!({ "subscriptionId": subscription_id, "ptyId": exit.id, "code": exit.code, "offset": pty.end }),
+                );
             }
+            if pty.closed {
+                ptys.remove(&exit.id);
+            }
+            // Exited terminals keep their output for a late reader, up to a
+            // bound: the oldest are dropped first.
+            let mut exited: Vec<(Instant, String)> =
+                ptys.iter().filter_map(|(id, pty)| pty.exited_at.map(|at| (at, id.clone()))).collect();
+            let mut evicted = Vec::new();
+            if exited.len() > MAX_EXITED_PTYS {
+                exited.sort();
+                for (_, id) in exited.drain(..exited.len() - MAX_EXITED_PTYS) {
+                    ptys.remove(&id);
+                    evicted.push(id);
+                }
+            }
+            evicted
+        };
+        // Release the evicted terminals' PTYs too, not only their output.
+        for id in evicted {
+            self.terminals.kill(&id);
         }
     }
 
