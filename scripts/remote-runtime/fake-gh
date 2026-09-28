@@ -17,6 +17,8 @@ Faults, by file in the state directory:
   drop-after-create  the next create lands, then reports a dropped connection
   mergeable          its text is the mergeable state of new pull requests
   checks.json        statusCheckRollup of every pull request
+  pr-<n>.json        a pull request; a test may write one (e.g. a fork's,
+                     "isCrossRepository": true)
   calls.log          every call is appended here (one line of JSON each)
 
 A create refuses a head branch the remote does not have, and a second open
@@ -103,7 +105,7 @@ def main(args):
             fail("fake-gh: --head and --base are required", 2)
         if not remote_has(head):
             fail("pull request create failed: GraphQL: Head sha can't be blank, Head ref must be a branch (createPullRequest)")
-        if any(pr["headRefName"] == head and pr["state"] == "OPEN" for pr in prs):
+        if any(pr["headRefName"] == head and pr["state"] == "OPEN" and not pr.get("isCrossRepository") for pr in prs):
             fail('a pull request for branch "%s" into branch "%s" already exists' % (head, base))
         number = len(prs) + 1
         mergeable = open(path("mergeable")).read().strip() if flag("mergeable") else "MERGEABLE"
@@ -123,6 +125,7 @@ def main(args):
             "reviewDecision": "",
             "statusCheckRollup": checks,
             "author": {"login": "octocat"},
+            "isCrossRepository": False,
         }
         save(pr)
         if flag("drop-after-create"):

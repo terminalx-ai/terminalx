@@ -27,11 +27,13 @@
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::files::WorkspaceFiles;
 use super::protocol::RpcError;
 
 /// At most this many repositories are listed (the disposition contract's bound).
@@ -52,6 +54,7 @@ const SKIPPED_DIRS: &[&str] = &["node_modules", "target", "vendor", "dist", "bui
 
 pub struct WorkspaceGit {
     root: PathBuf,
+    files: Arc<WorkspaceFiles>,
     gh: Option<PathBuf>,
 }
 
@@ -106,6 +109,9 @@ fn classify(text: &str, timed_out: bool) -> Failure {
         "http 401",
         "error: 401",
         "returned error: 403",
+        // GitHub answers 404 for a repository the token may not see.
+        "returned error: 404",
+        "repository not found",
         "permission to",
         "no longer accepts this workspace's runtime credential",
         "github app installation",
@@ -121,7 +127,9 @@ fn classify(text: &str, timed_out: bool) -> Failure {
         "remote contains work that you do",
         "not possible to fast-forward",
         "diverging branches",
-        "conflict",
+        "conflict (",
+        "merge conflict",
+        "fix conflicts",
         "not mergeable",
         "would be overwritten",
     ]) {
@@ -168,17 +176,24 @@ fn run_bounded(mut command: Command, timeout: Duration) -> std::io::Result<Ran> 
     }
     let mut child = command.spawn()?;
     let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut buffer = Vec::new();
             if let Some(mut pipe) = pipe {
                 let _ = pipe.read_to_end(&mut buffer);
             }
-            String::from_utf8_lossy(&buffer).into_owned()
-        })
+            let _ = sender.send(String::from_utf8_lossy(&buffer).into_owned());
+        });
+        receiver
     };
     let stdout = drain(child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
     let stderr = drain(child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
     let deadline = Instant::now() + timeout;
+    // A grandchild (an SSH master, a helper's daemon) can keep the pipes open
+    // after the child exits: its output is waited for only until the deadline.
+    let collect = |receiver: std::sync::mpsc::Receiver<String>| {
+        receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(50))).unwrap_or_default()
+    };
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break Some(status);
@@ -197,8 +212,8 @@ fn run_bounded(mut command: Command, timeout: Duration) -> std::io::Result<Ran> 
     match status {
         Some(status) => Ok(Ran {
             ok: status.success(),
-            stdout: stdout.join().unwrap_or_default(),
-            stderr: stderr.join().unwrap_or_default(),
+            stdout: collect(stdout),
+            stderr: collect(stderr),
             timed_out: false,
         }),
         // A grandchild may still hold the pipes; the readers finish on their own.
@@ -230,16 +245,23 @@ fn display_remote(url: &str) -> String {
     }
 }
 
+/// A branch name as `git check-ref-format --branch` accepts it (so `fix#1`,
+/// `user+topic` and non-ASCII names pass), and never an option.
 pub fn valid_ref_name(name: &str) -> bool {
     !name.is_empty()
-        && name.len() <= 200
+        && name.len() <= 255
         && !name.starts_with('-')
         && !name.starts_with('/')
+        && !name.starts_with('.')
         && !name.ends_with('/')
+        && !name.ends_with('.')
         && !name.ends_with(".lock")
         && !name.contains("..")
         && !name.contains("//")
-        && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.'))
+        && !name.contains("/.")
+        && !name.contains("@{")
+        && name != "@"
+        && !name.chars().any(|c| c.is_control() || c.is_whitespace() || matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\'))
 }
 
 fn valid_object_id(value: &str) -> bool {
@@ -293,8 +315,9 @@ fn truncate_text(text: &mut String, max: usize) -> bool {
 }
 
 impl WorkspaceGit {
-    pub fn new(root: PathBuf) -> Self {
-        Self { root, gh: std::env::var_os("TERMINALX_SERVE_GH").map(PathBuf::from) }
+    /// `files` resolves working-tree paths with the same containment rules as `fs/1`.
+    pub fn new(root: PathBuf, files: Arc<WorkspaceFiles>) -> Self {
+        Self { root, files, gh: std::env::var_os("TERMINALX_SERVE_GH").map(PathBuf::from) }
     }
 
     #[cfg(test)]
@@ -334,7 +357,9 @@ impl WorkspaceGit {
     /// Workspace-relative repository directories, sorted; the root alone when
     /// it is one. Symlinks, hidden and build directories are not searched.
     pub fn repositories(&self) -> (Vec<String>, bool) {
-        if self.root.join(".git").exists() {
+        // The root itself, or a directory inside a checkout (a package of a
+        // monorepo as the target directory, development runtimes).
+        if self.root.join(".git").exists() || crate::git::is_repo(&self.root) {
             return (vec![".".into()], false);
         }
         let mut found = Vec::new();
@@ -594,10 +619,12 @@ impl WorkspaceGit {
 
     /// A working-tree file, never through a link that leaves the workspace.
     fn working_file(&self, repo: &Repo, path: &str) -> Result<Option<String>, RpcError> {
-        let Ok(resolved) = std::fs::canonicalize(repo.dir.join(path)) else { return Ok(None) };
-        if !resolved.starts_with(&self.root) {
-            return Err(RpcError::new("path_forbidden", "the path resolves outside the workspace"));
-        }
+        let relative = if repo.name == "." { path.to_string() } else { format!("{}/{path}", repo.name) };
+        let resolved = match self.files.existing_path(&relative) {
+            Ok(resolved) => resolved,
+            Err(error) if error.code == "not_found" => return Ok(None),
+            Err(error) => return Err(error),
+        };
         let Ok(meta) = std::fs::metadata(&resolved) else { return Ok(None) };
         if !meta.is_file() {
             return Ok(None);
@@ -665,12 +692,12 @@ impl WorkspaceGit {
 
     fn unstage(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
+        let paths = Self::path_list(params)?;
         // Before the first commit there is no HEAD to restore from.
-        if crate::git::head_commit(&repo.dir).is_some() {
-            self.paths(params, &["restore", "--staged", "--"])
-        } else {
-            self.paths(params, &["rm", "--cached", "-r", "-q", "--"])
-        }
+        let mut args = if crate::git::head_commit(&repo.dir).is_some() { vec!["restore", "--staged", "--"] } else { vec!["rm", "--cached", "-r", "-q", "--"] };
+        args.extend(paths.iter().map(String::as_str));
+        self.git(&repo, &args)?;
+        Ok(json!({ "repo": repo.name, "paths": paths }))
     }
 
     fn commit(&self, params: &Value) -> Result<Value, RpcError> {
@@ -838,9 +865,10 @@ impl WorkspaceGit {
     }
 
     fn list_prs(&self, repo: &Repo, branch: &str, state: &str, timeout: Duration) -> Result<Vec<crate::github::PullRequest>, RpcError> {
-        let out = self.gh(repo, &["pr", "list", "--head", branch, "--state", state, "--json", crate::github::FIELDS, "--limit", "100"], timeout)?;
+        let fields = format!("{},isCrossRepository", crate::github::FIELDS);
+        let out = self.gh(repo, &["pr", "list", "--head", branch, "--state", state, "--json", &fields, "--limit", "100"], timeout)?;
         let value: Value = serde_json::from_str(&out).map_err(|error| RpcError::new("git_failed", format!("gh pr list: {error}")))?;
-        let mut prs: Vec<_> = value.as_array().map(|prs| prs.iter().map(crate::github::parse_pr).collect()).unwrap_or_default();
+        let mut prs: Vec<_> = value.as_array().map(|prs| own_prs(prs).map(crate::github::parse_pr).collect()).unwrap_or_default();
         prs.sort_by(|a, b| (b.state == "OPEN").cmp(&(a.state == "OPEN")).then(b.number.cmp(&a.number)));
         Ok(prs)
     }
@@ -955,7 +983,11 @@ impl WorkspaceGit {
     /// `openPullRequests: null`, never an error.
     pub fn disposition_repositories(&self) -> Vec<Value> {
         let (names, _) = self.repositories();
-        names.iter().map(|name| self.repository_facts(name)).collect()
+        // Side by side, so the whole answer takes about one repository's budget.
+        std::thread::scope(|scope| {
+            let running: Vec<_> = names.iter().map(|name| scope.spawn(move || self.repository_facts(name))).collect();
+            running.into_iter().zip(&names).map(|(handle, name)| handle.join().unwrap_or_else(|_| json!({ "path": name }))).collect()
+        })
     }
 
     fn repository_facts(&self, name: &str) -> Value {
@@ -987,18 +1019,16 @@ impl WorkspaceGit {
         let count = |out: Option<String>| out.and_then(|out| out.trim().parse::<u32>().ok());
         let unpushed = if has_upstream { count(git(&["rev-list", "--count", "@{upstream}..HEAD"])) } else { None };
         // Commits no remote-tracking ref has, whatever the upstream: what a delete would lose.
-        let local_only = if crate::git::head_commit(&repo.dir).is_some() {
+        let local_only = if git(&["rev-parse", "--verify", "--quiet", "HEAD"]).is_some() {
             count(git(&["rev-list", "--count", "HEAD", "--not", "--remotes"]))
         } else {
             Some(0)
         };
         let open_prs = branch.as_ref().and_then(|branch| {
-            let out = self.gh(&repo, &["pr", "list", "--head", branch, "--state", "open", "--json", "number,url,state", "--limit", "20"], left()).ok()?;
+            let out = self.gh(&repo, &["pr", "list", "--head", branch, "--state", "open", "--json", "number,url,state,isCrossRepository", "--limit", "20"], left()).ok()?;
             let value: Value = serde_json::from_str(&out).ok()?;
             Some(
-                value
-                    .as_array()?
-                    .iter()
+                own_prs(value.as_array()?)
                     .map(|pr| json!({ "number": pr["number"], "url": pr["url"], "state": pr["state"].as_str().unwrap_or("OPEN").to_ascii_lowercase() }))
                     .collect::<Vec<_>>(),
             )
@@ -1014,6 +1044,12 @@ impl WorkspaceGit {
             "openPullRequests": open_prs,
         })
     }
+}
+
+/// `gh pr list --head` matches the branch name only: a fork's pull request
+/// from a branch of the same name is someone else's.
+fn own_prs(prs: &[Value]) -> impl Iterator<Item = &Value> {
+    prs.iter().filter(|pr| pr["isCrossRepository"].as_bool() != Some(true))
 }
 
 fn git_error(error: anyhow::Error) -> RpcError {

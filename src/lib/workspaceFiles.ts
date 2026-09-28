@@ -198,7 +198,8 @@ export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnl
       return () => listeners.delete(listener);
     },
     changes: async () => {
-      type Status = { repository: boolean; files?: { path: string; index: string; worktree: string }[] };
+      type Status = { repository: boolean; repo?: string; files?: { path: string; index: string; worktree: string }[] };
+      const under = (repo: string | undefined) => (repo && repo !== "." ? `${repo}/` : "");
       const badges = (status: Status, prefix: string) =>
         (status.files ?? []).flatMap((file) => {
           const code = file.index === "?" ? "?" : file.worktree !== " " ? file.worktree : file.index;
@@ -207,7 +208,8 @@ export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnl
         });
       try {
         const status = await live(client.call<Status>("git.status"));
-        return status.repository ? badges(status, "") : [];
+        // Paths are the repository's; a lone clone below the root is prefixed too.
+        return status.repository ? badges(status, under(status.repo)) : [];
       } catch (error) {
         if (!(error instanceof WorkspaceRpcError) || error.code !== "ambiguous_repository") throw error;
       }
@@ -216,7 +218,7 @@ export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnl
       const each = await Promise.all(
         repositories.map((repository) =>
           live(client.call<Status>("git.status", { repo: repository.repo }))
-            .then((status) => badges(status, repository.repo === "." ? "" : `${repository.repo}/`))
+            .then((status) => badges(status, under(repository.repo)))
             .catch(() => []),
         ),
       );

@@ -223,9 +223,10 @@ impl WorkspaceRpc {
         sessions: Option<SessionManager>,
     ) -> anyhow::Result<Arc<Self>> {
         let root = std::fs::canonicalize(root)?;
+        let files = Arc::new(WorkspaceFiles::new(root.clone()));
         let rpc = Arc::new(Self {
-            files: Arc::new(WorkspaceFiles::new(root.clone())),
-            git: WorkspaceGit::new(root.clone()),
+            git: WorkspaceGit::new(root.clone(), files.clone()),
+            files,
             root,
             generation: AtomicU64::new(generation),
             epoch: format!("epoch-{}", uuid::Uuid::new_v4().simple()),

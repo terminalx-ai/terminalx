@@ -9,8 +9,8 @@ runtime.
 ## Principles
 
 - **Every call names its repository.** A workspace is one repository (its
-  root) or several clones below it (the setup's `targetDirectory`, up to two
-  levels deep; hidden, `node_modules`, `target`, `vendor`, `dist` and
+  root, or a directory inside a checkout) or several clones below it (the
+  setup's `targetDirectory`, up to two levels deep; hidden, `node_modules`, `target`, `vendor`, `dist` and
   `build` directories are not searched, at most 20 are listed). Calls take
   `repo` (workspace-relative, as `git.repositories` lists it). Without `repo`
   a workspace with exactly one repository uses it; with several the call is
@@ -39,7 +39,7 @@ runtime.
 | `git.fileContents` | participate | One file at tree `base` and at tree `head` or in the working tree; each side ≤ 384 KiB. A working-tree read never follows a link out of the workspace. |
 | `git.log` | participate | Commits (`from` a commit id), bodies ≤ 4 KiB. |
 | `git.branches` | participate | Local and remote branches, `current`, `defaultBranch`. |
-| `git.prs` | participate | Pull requests whose head is `branch` (default: current), with checks and `mergeable`. |
+| `git.prs` | participate | Pull requests whose head is `branch` (default: current), with checks and `mergeable`. A fork's pull request from a branch of the same name is left out (`isCrossRepository`). |
 | `git.checkout` | manage | Switch, or `create` (optionally `from` a ref). |
 | `git.stage` / `git.unstage` | manage | Paths are repository-relative; `GIT_LITERAL_PATHSPECS` makes `:(top)`-style magic plain names. |
 | `git.commit` | manage | `message`, `author` (required); everything by default, `paths`, or `staged: true` for the index only. Nothing to commit is `invalid_params`. |
@@ -49,8 +49,11 @@ runtime.
 | `git.prReady` / `git.prMerge` | manage | Answered by what GitHub reports afterwards (a merge that went through before an error is a success). |
 | `lifecycle.dispositionFacts` | participate | saas contract 10.2; see below. |
 
-Network calls are bounded (120 s; the process group is killed on timeout)
-and run off the connection's ordered loop (`host.rs` `SLOW_METHODS`).
+Network calls are bounded (120 s; the process group is killed on timeout,
+and output a lingering grandchild keeps open is not waited for past it).
+Git calls run off the connection's ordered loop (`host.rs` `SLOW_METHODS`).
+Branch names follow Git's own rules (`fix#1`, `user+topic` and non-ASCII
+names are fine); a name starting with `-` is refused.
 
 ### Errors
 
@@ -87,7 +90,7 @@ no remote-tracking branch, what a delete would lose even without an
 upstream) and `tabId` on active tasks. Per repository: `path`, `branch`,
 `dirtyFiles`, `untrackedFiles`, `unpushedCommits` (null without upstream),
 `hasUpstream`, `openPullRequests` (null when GitHub could not be asked within
-the 2 s per-repository budget). `activeTasks` are agent tabs in progress or
+the 2 s per-repository budget; repositories are checked side by side). `activeTasks` are agent tabs in progress or
 waiting on a permission; `runningProcesses` are terminals whose shell has not
 exited.
 
@@ -135,5 +138,9 @@ exited.
   `scripts/remote-runtime/fake-gh`.
 - The archive/delete dialog itself (PRO-34 desktop UI) is not built; the
   facts are shown in the Git view and are ready for it.
+- The author is the global `user.name`/`user.email`; an identity set only
+  under `includeIf "gitdir:…"` on the desktop is not used (the cloud
+  checkout has no local path to match). A per-organization identity is a
+  follow-up.
 - The running app has not been checked by hand (computer use is blocked on
   this machine); the views are covered by component tests.

@@ -89,7 +89,7 @@ fn fixture() -> Fixture {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let mut workspace = WorkspaceGit::new(root.clone());
+    let mut workspace = WorkspaceGit::new(root.clone(), Arc::new(WorkspaceFiles::new(root.clone())));
     workspace.set_gh(shim);
     Fixture { _dir: dir, base, root, state, git: workspace }
 }
@@ -442,9 +442,48 @@ fn failures_are_classified_for_the_client() {
     assert_eq!(classify("fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com", false), Failure::Network);
     assert_eq!(classify("", true), Failure::Network);
     assert_eq!(classify("fatal: something else", false), Failure::Other);
-    assert!(valid_ref_name("feature/x-1.2"));
-    for bad in ["-x", "a..b", "a b", "a/", "/a", "a.lock", "a//b", ""] {
+    // GitHub's 404 for a repository the token cannot see is certain, not a network fault.
+    assert_eq!(classify("fatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 404", false), Failure::Auth);
+    assert_eq!(classify("error: pathspec 'src/conflict.rs' did not match any file(s) known to git", false), Failure::Other);
+    assert_eq!(classify("CONFLICT (content): Merge conflict in a.txt", false), Failure::Conflict);
+    for good in ["feature/x-1.2", "fix#123", "user+topic", "ümlaut/zweig"] {
+        assert!(valid_ref_name(good), "{good}");
+    }
+    for bad in ["-x", "a..b", "a b", "a/", "/a", "a.lock", "a//b", "", "a~1", "a:b", "a^", "x@{1}", ".hidden", "a/.b", "tab\tname"] {
         assert!(!valid_ref_name(bad), "{bad}");
     }
     assert_eq!(display_remote("https://x-access-token:secret@github.com/o/r.git"), "https://github.com/o/r.git");
+}
+
+#[test]
+fn a_root_inside_a_checkout_is_that_repository() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    let repo = f.clone(&remote, "mono");
+    std::fs::create_dir_all(repo.join("packages/web")).unwrap();
+    let inner = WorkspaceGit::new(repo.join("packages/web"), Arc::new(WorkspaceFiles::new(repo.join("packages/web"))));
+    assert_eq!(inner.repositories().0, ["."]);
+    assert_eq!(inner.handle("git.status", &json!({})).unwrap().unwrap()["branch"], "main");
+}
+
+#[test]
+fn a_forks_pull_request_from_a_branch_of_the_same_name_is_not_this_branchs() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    let repo = f.clone(&remote, "app");
+    f.call("git.checkout", json!({ "repo": "app", "branch": "fix-typo", "create": true })).unwrap();
+    std::fs::write(repo.join("t.txt"), "t").unwrap();
+    f.call("git.commit", json!({ "repo": "app", "message": "t", "author": me() })).unwrap();
+    f.call("git.push", json!({ "repo": "app" })).unwrap();
+    let fork = json!({
+        "number": 1, "title": "Someone else's", "body": "", "url": "https://github.test/octo/repo/pull/1", "state": "OPEN",
+        "isDraft": false, "baseRefName": "main", "headRefName": "fix-typo", "additions": 1, "deletions": 0,
+        "mergeable": "MERGEABLE", "reviewDecision": "", "statusCheckRollup": [], "author": { "login": "stranger" },
+        "isCrossRepository": true,
+    });
+    std::fs::write(f.state.join("pr-1.json"), fork.to_string()).unwrap();
+    assert_eq!(f.call("git.prs", json!({ "repo": "app" })).unwrap()["prs"], json!([]));
+    assert_eq!(f.git.disposition_repositories()[0]["openPullRequests"], json!([]));
+    let created = f.call("git.prCreate", json!({ "repo": "app", "title": "Mine" })).unwrap();
+    assert_eq!((created["created"].clone(), created["pr"]["number"].clone()), (json!(true), json!(2)));
 }
