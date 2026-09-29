@@ -7,6 +7,14 @@ edition = "2021"
 license = "MIT"
 publish = false
 
+# The cloud runtime protocol this build speaks, published in each release's
+# terminalx-serve.json. A TerminalX cloud server installs only runtimes whose
+# protocol is within the range it implements. Bump it when a change needs a
+# matching server (bootstrap, launch intents, runtime API).
+# 1 = launch intents and the serve bootstrap (PRO-21).
+[package.metadata.terminalx]
+runtime-protocol = 1
+
 [[bin]]
 name = "terminalx-serve"
 path = "src/main.rs"

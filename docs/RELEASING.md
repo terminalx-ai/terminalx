@@ -232,6 +232,101 @@ channel.
 The check only ever happens when the reader presses "Check for updates" in
 Settings → About. Nothing runs on launch or on a timer.
 
+## The cloud runtime (`terminalx-serve`)
+
+Cloud workspaces run the headless `terminalx-serve` binary, not the desktop
+app. The TerminalX cloud server downloads it from this repository's
+**runtime-only prereleases**, which `.github/workflows/release-serve.yml`
+publishes from `main`. They need no updater signing key, and desktop releases
+do not carry the runtime at all.
+
+### Runtime prereleases
+
+After the CI workflow succeeds on a push to `main` (or when the workflow is
+run by hand from `main`), the `plan` job publishes only if **all** of these
+hold, and otherwise skips:
+
+- the commit is on `main`: the current tip or an ancestor of it;
+- it is a **strict descendant** of the newest runtime prerelease's commit (or
+  there is none yet), so re-running an old CI or release run, or a CI run
+  that finishes out of order, can never publish older code.
+
+There is no path filter: the serve build also compiles files outside
+`src-tauri/` (`src/lib/mediaTypes.json`, `src/lib/repo.ts`), and the
+descendant rule already prevents duplicate publishes, so every newer `main`
+commit that passes CI gets a runtime prerelease.
+
+It then:
+
+1. builds `src-tauri/serve` in release mode on Ubuntu 22.04 for x86-64 and
+   arm64 (glibc floor 2.35 or lower: Ubuntu 22.04 and 24.04, Debian 12; the
+   job log prints the highest `GLIBC_` symbol the binary needs);
+2. runs each binary's `--self-test` (start, shell PTY, clean exit);
+3. checks again, now serialized with every other publish, that the commit is
+   `ahead` of the newest runtime prerelease (GitHub compare API), and creates
+   a **prerelease** tagged
+   `runtime-v<serve crate version>-<commit's UTC committer time yyyymmddHHMMSS>-<7-char commit>`,
+   e.g. `runtime-v0.2.2-20260929121810-3001736`, with
+   `terminalx-serve-linux-x64`, `terminalx-serve-linux-arm64`,
+   `terminalx-serve.json` and `SHA256SUMS`;
+4. deletes runtime prereleases (and their tags) beyond the newest 10.
+
+The timestamp is the commit's, not the run's, so a tag says when its code was
+committed. Runtime prereleases are created with `--prerelease
+--latest=false`, so they are never the release that
+`/releases/latest/download/latest.json` resolves to and cannot affect the
+desktop auto-updater. Pruning only ever touches prereleases whose tag matches
+`^runtime-v[0-9]+\.[0-9]+\.[0-9]+-[0-9]{14}-[0-9a-f]{7}$`.
+
+The build job runs every dependency's build script and the built binary, so
+it gets a read-only token and no `GH_TOKEN`; only the publish job can write,
+checkouts never persist credentials, and actions are pinned by commit SHA.
+
+To publish by hand (for example when CI on `main` is red for an unrelated
+reason), run the workflow from `main`; it applies the same rules:
+
+```sh
+gh workflow run release-serve.yml --ref main
+```
+
+### `terminalx-serve.json` and the runtime protocol
+
+```json
+{ "version": "0.2.2", "protocol": 1, "commit": "<40-char sha>", "builtAt": "2026-09-29T12:18:10Z" }
+```
+
+`protocol` comes from `[package.metadata.terminalx] runtime-protocol` in
+`src-tauri/serve/Cargo.toml`. A cloud server installs only runtimes whose
+protocol lies between its `MIN_RUNTIME_PROTOCOL` and `MAX_RUNTIME_PROTOCOL`
+(the protocol it implements). **Bump it whenever a runtime change needs a
+matching server** (bootstrap, launch intents, the runtime API). Servers that
+do not implement the new protocol yet keep their last compatible runtime until
+they are upgraded to one whose `MAX_RUNTIME_PROTOCOL` includes it. Protocol 1 is the
+first runtime with launch intents and the serve bootstrap.
+
+The server only considers runtime prereleases. It picks the newest (by tag
+timestamp) whose protocol is within the range it implements, and never
+replaces its active runtime with a commit that is not a descendant of the
+active one, unless an operator pins that exact release.
+
+### Building it locally
+
+To build it for x86-64 from an Apple Silicon Mac, cross-compile in Docker
+rather than emulating amd64 (the linker segfaults under QEMU):
+
+```sh
+docker run --rm -v "$PWD":/src -w /src/src-tauri/serve rust:1-bookworm bash -c '
+  dpkg --add-architecture amd64 && apt-get update &&
+  apt-get install -y gcc-x86-64-linux-gnu libssl-dev:amd64 &&
+  rustup target add x86_64-unknown-linux-gnu &&
+  PKG_CONFIG_ALLOW_CROSS=1 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
+    cargo build --locked --release --bin terminalx-serve --target x86_64-unknown-linux-gnu'
+```
+
+Check its glibc floor before running it on an older host
+(`x86_64-linux-gnu-objdump -T … | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1`;
+2.34 as of 0.2.2). The release workflow's build is the one to ship.
+
 ## Notes
 
 - The build script links clang's builtins archive (`libclang_rt.osx.a` from

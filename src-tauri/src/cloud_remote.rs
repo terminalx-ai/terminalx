@@ -25,8 +25,11 @@ use crate::remote::protocol::Activation;
 
 pub const EVENT: &str = "cloud_remote_event";
 
+/// The web view's `NativeWorkspaceTransport` reads `kind`, `connectionId`,
+/// `state`, `message` and `connectionIds`: `rename_all` only renames the
+/// variant tags, so the fields need `rename_all_fields` too.
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 enum RemoteEvent {
     State { connection_id: String, state: ClientState },
     Message { connection_id: String, message: Value },
@@ -399,5 +402,22 @@ mod intercept_tests {
         assert!(!may_hold_keys("participate", None));
         assert!(!may_hold_keys("participate", Some(&json!({ "role": "none" }))));
         assert!(may_hold_keys("participate", Some(&json!({ "role": "viewer" }))));
+    }
+
+    /// The exact shape `NativeWorkspaceTransport.route` (src/lib/api.ts) reads;
+    /// with snake_case fields it dropped every state and message, so an
+    /// opened cloud session stayed "Not connected".
+    #[test]
+    fn events_reach_the_web_view_in_its_field_names() {
+        let state = serde_json::to_value(RemoteEvent::State {
+            connection_id: "cloud-1".into(),
+            state: ClientState::Connecting { attempt: 2 },
+        })
+        .unwrap();
+        assert_eq!(state, json!({ "kind": "state", "connectionId": "cloud-1", "state": { "state": "connecting", "attempt": 2 } }));
+        let message = serde_json::to_value(RemoteEvent::Message { connection_id: "cloud-1".into(), message: json!({ "id": "r1" }) }).unwrap();
+        assert_eq!(message, json!({ "kind": "message", "connectionId": "cloud-1", "message": { "id": "r1" } }));
+        let changed = serde_json::to_value(RemoteEvent::IdentityChanged { connection_ids: vec!["cloud-1".into()] }).unwrap();
+        assert_eq!(changed, json!({ "kind": "identityChanged", "connectionIds": ["cloud-1"] }));
     }
 }
