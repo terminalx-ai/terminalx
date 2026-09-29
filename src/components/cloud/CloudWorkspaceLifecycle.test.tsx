@@ -276,6 +276,22 @@ describe("DeletionProgress", () => {
     await waitFor(() => expect(screen.getByTestId("cloud-deletion-progress").dataset.state).toBe("running"));
   });
 
+  it("adds the provider's own safe error code to a stopped delete when the server reports one", async () => {
+    const failed = operation({ state: "failed", errorCode: "cloud_provider_credential_invalid", providerErrorCode: "forbidden" });
+    mocked.cloudWorkspaceOperation.mockResolvedValue({ workspace: item("attention-required").workspace, operation: failed } as never);
+    render(<DeletionProgress item={item("attention-required", {}, failed)} onChanged={() => undefined} onForceNeeded={() => undefined} />);
+    expect(screen.getByTestId("cloud-deletion-progress").textContent).toContain(
+      "The delete stopped: The provider credential is no longer valid. An admin can repair it, then retry. (Provider code: forbidden)",
+    );
+  });
+
+  it("explains an action the provider refused while its credential stays valid", async () => {
+    const failed = operation({ state: "failed", errorCode: "cloud_provider_permission_denied", providerErrorCode: "permission_denied" });
+    mocked.cloudWorkspaceOperation.mockResolvedValue({ workspace: item("ready").workspace, operation: failed } as never);
+    render(<DeletionProgress item={item("ready", {}, failed)} onChanged={() => undefined} onForceNeeded={() => undefined} />);
+    expect(screen.getByTestId("cloud-deletion-progress").textContent).toMatch(/refused this action, though its credential is still valid.*\(Provider code: permission_denied\)/);
+  });
+
   it("a retry refused for running agent work goes to the confirmation dialog", async () => {
     const failed = operation({ state: "failed", errorCode: "cloud_provider_unavailable" });
     mocked.cloudWorkspaceOperation.mockResolvedValue({ workspace: item("attention-required").workspace, operation: failed } as never);

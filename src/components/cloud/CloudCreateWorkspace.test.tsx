@@ -192,6 +192,45 @@ describe("CloudCreateWorkspace", () => {
     expect(mocked.cloudWorkspaceResume).toHaveBeenCalledWith("ws-1");
     expect(mocked.cloudWorkspaceCreate).toHaveBeenCalledTimes(1);
   });
+
+  it("says when a Ready workspace's runtime never picks up the first task, and still opens the session", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(100_000);
+    const onOpen = vi.fn();
+    const onProgress = vi.fn();
+    const stuck = snapshot("authenticating-runtime", {
+      workspace: { state: "ready" },
+      operation: { state: "succeeded", stage: "ready", cancelable: false, updatedAt: 100_000 },
+    });
+    mocked.cloudWorkspaceCreate.mockResolvedValue(stuck);
+    mocked.cloudWorkspaceOperation.mockResolvedValue(stuck);
+    render(<CloudCreateWorkspace organizationId="org-1" onOpen={onOpen} onProgress={onProgress} />);
+    await screen.findByRole("option", { name: "acme/app" });
+    fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "https://github.com/acme/app.git" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create workspace/ }));
+    const progress = await screen.findByTestId("cloud-create-progress");
+    expect(progress.dataset.phase).toBe("authenticating-runtime");
+    expect(onProgress).toHaveBeenCalledWith(stuck);
+    expect(screen.queryByTestId("cloud-create-not-picked-up")).toBeNull();
+    // Ready, so the session can be opened before the agent runs.
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ workspace: expect.objectContaining({ id: "ws-1", state: "ready" }) }));
+    await act(async () => void (await vi.advanceTimersByTimeAsync(2 * 60 * 1000 + 2100)));
+    expect((await screen.findByTestId("cloud-create-not-picked-up")).textContent).toMatch(/has not picked up the first task/);
+    expect(screen.getByRole("button", { name: "Open session" })).toBeTruthy();
+    // Each poll reaches the list too.
+    expect(onProgress.mock.calls.length).toBeGreaterThan(2);
+  });
+
+  it("names a runtime that cannot start agents from a first prompt", async () => {
+    mocked.cloudWorkspaceCreate.mockResolvedValue(
+      snapshot("failed", { workspace: { state: "ready" }, operation: { state: "succeeded", stage: "ready", cancelable: false }, launch: { state: "failed", category: "runtime-unsupported" } }),
+    );
+    await fill();
+    fireEvent.click(screen.getByRole("button", { name: /Create workspace/ }));
+    expect(await screen.findByText(/runtime cannot start agents from a first prompt/)).toBeTruthy();
+    expect(screen.queryByText(/runtime-unsupported/)).toBeNull();
+  });
 });
 
 describe("CloudCreateWorkspace repository list", () => {

@@ -9,13 +9,14 @@ import { CloudGitView } from "./CloudGit";
 import { CloudCreateWorkspace } from "./CloudCreateWorkspace";
 import { actionsFor, archiveLine, CloudWorkspaceLifecycleDialog, DeletionProgress, type LifecycleAction } from "./CloudWorkspaceLifecycle";
 import { useAccount } from "@/lib/account";
-import { PHASES, phaseOf, settled } from "@/lib/cloudCreate";
+import { failureMessage, PHASES, phaseOf, runtimeNotPickedUp, settled } from "@/lib/cloudCreate";
 import {
   archiving,
   checkpointText,
   deletion,
   isArchived,
   lifecycleErrorMessage,
+  operationFailureText,
   purgeNoticeText,
   purgeTombstones,
   type PurgeNotice,
@@ -27,6 +28,7 @@ import {
   workspaceTargetKey,
   type CloudWorkspaceConnection,
   type CloudWorkspaceListItem,
+  type CloudWorkspaceSnapshot,
 } from "@/lib/api";
 import {
   closeCloudTerminal,
@@ -97,6 +99,24 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
   }, []);
 
   useEffect(() => reload(), [reload]);
+
+  // The create form polls the workspace it tracks; its snapshots keep that
+  // row current while the list itself does not poll.
+  const progress = useCallback((snapshot: CloudWorkspaceSnapshot) => {
+    setWorkspaces((current) =>
+      current?.map((item) => (item.workspace.id === snapshot.workspace.id ? { workspace: snapshot.workspace, latestOperation: snapshot.operation } : item)) ??
+      current,
+    );
+  }, []);
+
+  // Back from an opened session returns to the list; from the list, it leaves.
+  const back = useCallback(() => {
+    if (opened) {
+      setOpened(null);
+      setState({ state: "idle" });
+      reload();
+    } else onBack();
+  }, [opened, onBack, reload]);
 
   // While any workspace is still starting (provisioning, or ready with its
   // agent not yet running) or archiving, keep it current. The create form
@@ -172,7 +192,7 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-background" data-testid="cloud-session-page">
       <div className="flex h-(--titlebar-h) shrink-0 items-center gap-2 border-b border-hairline pl-[78px] pr-3" data-tauri-drag-region>
-        <Button variant="ghost" size="sm" onClick={onBack} aria-label="Back">
+        <Button variant="ghost" size="sm" onClick={back} aria-label={opened ? "Back to workspaces" : "Back"}>
           <ArrowLeft className="size-4" />
         </Button>
         <Cloud className="size-4 text-muted-foreground" />
@@ -212,6 +232,7 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
                 key={scope}
                 organizationId={scope}
                 onChanged={reload}
+                onProgress={progress}
                 onOpen={(item) => void open(item, false)}
               />
             )}
@@ -293,7 +314,7 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
                           {archiving(item)
                             ? archivingText(item)
                             : failed
-                              ? `The archive did not finish: ${lifecycleErrorMessage(item.latestOperation?.errorCode ?? "cloud_workspace_unknown_error")}`
+                              ? `The archive did not finish: ${item.latestOperation ? operationFailureText(item.latestOperation) : lifecycleErrorMessage("cloud_workspace_unknown_error")}`
                               : archiveLine(item)}
                         </span>
                         {saved && !archiving(item) && <span className="text-xs text-muted-foreground">{saved}</span>}
@@ -404,13 +425,47 @@ function archivingText(item: CloudWorkspaceListItem): string {
     : "Archiving…";
 }
 
-/** The list's one line of state: the startup phase while a workspace starts. */
-function describeWorkspace(item: CloudWorkspaceListItem): string {
+const STATE_TEXT: Record<string, string> = {
+  provisioning: "Starting",
+  ready: "Ready",
+  suspended: "Stopped",
+  archived: "Archived",
+  "attention-required": "Needs attention",
+  destroyed: "Deleted",
+};
+
+/**
+ * The list's one line of state. What is happening to the workspace itself
+ * (deleting, archiving, stopped, needing attention) comes first; the startup
+ * phase of its first task only while it is otherwise ready or starting.
+ */
+export function describeWorkspace(item: CloudWorkspaceListItem, now = Date.now()): string {
+  const { state, launch } = item.workspace;
+  // A delete that stopped says why on its own line below; the row keeps its state.
+  if (deletion(item) === "running") return "Deleting…";
   if (archiving(item)) return archivingText(item);
-  const branch = item.workspace.launch?.workBranch;
+  const branch = launch?.workBranch;
   const phase = phaseOf(item);
-  const starting = item.workspace.state === "provisioning" || (Boolean(item.workspace.launch) && !settled(phase));
-  const text = starting ? (PHASES.find((p) => p.id === phase)?.label ?? phase) : item.workspace.state;
+  let text: string;
+  if (state === "attention-required") {
+    const code = item.latestOperation?.state === "failed" ? item.latestOperation.errorCode : null;
+    text =
+      phase === "failed" && launch
+        ? `Needs attention: ${failureMessage(item)}`
+        : code
+          ? `Needs attention: ${operationFailureText(item.latestOperation!)}`
+          : "Needs attention";
+  } else if (state === "suspended" || state === "archived" || state === "destroyed") {
+    text = STATE_TEXT[state];
+  } else if (phase === "failed" && launch) {
+    text = `The agent did not start: ${failureMessage(item)}`;
+  } else if (runtimeNotPickedUp(item, now) !== null) {
+    text = "Ready · the runtime has not picked up the first task";
+  } else if (state === "provisioning" || (launch && !settled(phase))) {
+    text = PHASES.find((p) => p.id === phase)?.label ?? phase;
+  } else {
+    text = STATE_TEXT[state] ?? state;
+  }
   return branch ? `${text} · ${branch}` : text;
 }
 
