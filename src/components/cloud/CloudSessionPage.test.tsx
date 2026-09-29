@@ -574,6 +574,21 @@ describe("shared cloud workspaces (PRO-30)", () => {
     expect(client.call.mock.calls.map(([method]) => method)).not.toContain("collab.state");
   });
 
+  it("lists the terminals once the workspace is shared with this person, without reconnecting", async () => {
+    listed = [info()];
+    await openReady();
+    act(() => emit(shared({ userId: "u-me", role: "none", canApprove: false }, { authority: "participate" })));
+    await screen.findByTestId("cloud-not-shared");
+    // Nothing is asked for while there is no access (it would only be refused).
+    expect(client.listPtys).not.toHaveBeenCalled();
+    // The runtime now answers as it would after the share.
+    collabState = { ...collabState, you: { userId: "u-me", role: "driver", canApprove: false } };
+    act(() => notify("collab.you", { you: { userId: "u-me", role: "driver", canApprove: false } }));
+    await screen.findByTestId("cloud-terminal");
+    expect(client.listPtys).toHaveBeenCalled();
+    expect(screen.queryByText(/Terminal: /)).toBeNull();
+  });
+
   it("names the person typing in a terminal and lets a driver take control", async () => {
     listed = [info({ control: "other", controllerId: "u-alice" })];
     await openReady();

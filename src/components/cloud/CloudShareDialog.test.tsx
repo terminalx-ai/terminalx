@@ -98,10 +98,14 @@ describe("share dialog", () => {
     mocks.put.mockRejectedValueOnce({ code: "cloud_workspace_share_redundant", status: 409 });
     dialog();
     await screen.findByTestId("cloud-share-row");
-    await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Carol/)).toBeTruthy());
-    fireEvent.change(screen.getByLabelText("Add person"), { target: { value: "u-admin" } });
+    await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Bob/)).toBeTruthy());
+    // Owners and admins always have access, so they are not offered.
+    expect(within(screen.getByLabelText("Add person")).queryByText(/Carol/)).toBeNull();
+    expect(within(screen.getByLabelText("Add person")).queryByText(/^Me/)).toBeNull();
+    // The server still refuses someone with access, such as a member who created the workspace.
+    fireEvent.change(screen.getByLabelText("Add person"), { target: { value: "u-bob" } });
     fireEvent.click(screen.getByRole("button", { name: /Share/ }));
-    expect((await screen.findByTestId("cloud-share-error")).textContent).toBe("Carol already has access as owner/admin/creator.");
+    expect((await screen.findByTestId("cloud-share-error")).textContent).toBe("Bob already has access as owner/admin/creator.");
 
     mocks.put.mockRejectedValueOnce({ code: "cloud_workspace_share_requires_organization_access", status: 409 });
     fireEvent.click(screen.getByRole("button", { name: /Share/ }));

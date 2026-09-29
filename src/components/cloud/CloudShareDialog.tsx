@@ -71,7 +71,8 @@ export function CloudShareDialog({ workspaceId, name, onClose }: { workspaceId: 
 
   const manage = listed?.you.canManageShares ?? false;
   const shared = useMemo(() => new Set(listed?.shares.map((share) => share.userId) ?? []), [listed]);
-  const candidates = members.filter((member) => !shared.has(member.userId));
+  // Owners and admins always have access; offering them would only be refused.
+  const candidates = members.filter((member) => !shared.has(member.userId) && member.role !== "owner" && member.role !== "admin");
   const nameOf = (userId: string) => {
     const member = members.find((m) => m.userId === userId);
     return member?.displayName || member?.email || listed?.shares.find((s) => s.userId === userId)?.name || "This person";

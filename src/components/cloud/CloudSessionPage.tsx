@@ -542,12 +542,17 @@ function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: Work
       cancelled = true;
     };
   }, [cloudTarget?.workspaceId]);
+  // Terminals are listed again when this person's access changes: a
+  // participant shared with mid-connection sees them without reconnecting.
+  const hidden = notShared(state, you);
+  const role = shared?.role ?? null;
   useEffect(() => {
-    if (!generation) return;
+    if (!generation || hidden) return;
     let cancelled = false;
     void (async () => {
       try {
         const live = await syncCloudTerminals(key, client, base);
+        if (!cancelled) setError(null);
         // A workspace with no shell gets one on the first connect only; after
         // that tabs are the user's, and a restarted runtime's ended tabs are
         // never quietly replaced by new shells.
@@ -564,7 +569,7 @@ function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: Work
     return () => {
       cancelled = true;
     };
-  }, [generation, key, client, base, manage]);
+  }, [generation, key, client, base, manage, hidden, role]);
 
   const newTerminal = async () => {
     setError(null);
@@ -603,7 +608,7 @@ function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: Work
     [terminals, agentScope.organizationId, agentScope.workspaceId],
   );
 
-  if (notShared(state, you)) {
+  if (hidden) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         {cloudTarget && (
