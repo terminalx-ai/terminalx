@@ -8,6 +8,7 @@ vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
 vi.mock("@/lib/api", () => ({
   api: { cloudAgentPurgeWorkspace: mocks.purge },
   closeWorkspaceConnection: mocks.close,
+  hasWorkspaceConnection: vi.fn(() => false),
   workspaceConnection: vi.fn(),
   workspaceTargetKey: (target: { kind: string; organizationId?: string; workspaceId?: string }) =>
     target.kind === "local" ? "local" : `cloud:${target.organizationId}:${target.workspaceId}`,
@@ -92,12 +93,28 @@ describe("purgeTombstones", () => {
     expect(await purgeTombstones([tombstone], new Map())).toEqual([]);
   });
 
-  it("a native purge that fails is tried again on the next list", async () => {
+  it("a native purge that fails keeps everything for the next list, which says what went", async () => {
+    const dirty = openFile(KEY, "cloud://x", "README.md", undefined, "cloud://x", KEY);
+    setEditorDirty(dirty, true);
     mocks.purge.mockRejectedValueOnce("cloud_agent_store_unwritable").mockResolvedValueOnce({ removed: true, unsentCommands: 0, cachedTabs: 1 });
     expect(await purgeTombstones([tombstone], new Map())).toEqual([]);
+    expect(getEditors().editors.map((entry) => entry.id)).toEqual([dirty]);
     const notices = await purgeTombstones([tombstone], new Map());
     expect(notices).toHaveLength(1);
-    expect(purgeNoticeText(notices[0])).toBe("A cloud workspace was permanently deleted. TerminalX removed what this Mac kept of it.");
+    expect(purgeNoticeText(notices[0])).toBe(
+      "A cloud workspace was permanently deleted. TerminalX removed what this Mac kept of it, including unsaved edits in 1 file.",
+    );
+  });
+
+  it("overlapping list reloads purge a tombstone once", async () => {
+    let resolve: (value: unknown) => void = () => undefined;
+    mocks.purge.mockReturnValue(new Promise((done) => (resolve = done)));
+    const first = purgeTombstones([tombstone], new Map([["ws-gone", "Docs site"]]));
+    const second = purgeTombstones([tombstone], new Map([["ws-gone", "Docs site"]]));
+    resolve({ removed: true, unsentCommands: 0, cachedTabs: 0 });
+    const notices = [...(await first), ...(await second)];
+    expect(notices).toHaveLength(1);
+    expect(mocks.purge).toHaveBeenCalledTimes(1);
   });
 });
 

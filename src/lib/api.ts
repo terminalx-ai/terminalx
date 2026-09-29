@@ -1390,6 +1390,11 @@ async function adopt(
   return connection;
 }
 
+/** Whether something already holds a connection to this target. */
+export function hasWorkspaceConnection(target: WorkspaceTarget): boolean {
+  return connections.has(workspaceTargetKey(target));
+}
+
 /** Drop one workspace's connection, if any: it was deleted or archived. */
 export function closeWorkspaceConnection(target: WorkspaceTarget): void {
   const key = workspaceTargetKey(target);

@@ -9,8 +9,11 @@ import {
   cleanupKindText,
   cleanupStateText,
   dateText,
+  DAY_MS,
   deadlineText,
+  isOpen,
   lifecycleErrorMessage,
+  remaining,
   repositoryRiskLines,
   risksOf,
   type RuntimeCheck,
@@ -20,7 +23,6 @@ import { errorCode } from "@/lib/cloudTerminals";
 export type LifecycleAction = "stop" | "archive" | "delete";
 
 const POLL_MS = 3000;
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** The actions a workspace in this state offers. */
 export function actionsFor(item: CloudWorkspaceListItem): LifecycleAction[] {
@@ -297,7 +299,7 @@ export function DeletionProgress({
   const [error, setError] = useState<string | null>(null);
   const changed = useRef(onChanged);
   changed.current = onChanged;
-  const running = ["queued", "running", "cancel-requested"].includes(operation.state);
+  const running = isOpen(operation);
 
   // A list reload carries no cleanup report: keep the newer one polled here.
   useEffect(
@@ -313,7 +315,7 @@ export function DeletionProgress({
         .then((snapshot) => {
           if (!live) return;
           setOperation(snapshot.operation);
-          if (!["queued", "running", "cancel-requested"].includes(snapshot.operation.state)) changed.current();
+          if (!isOpen(snapshot.operation)) changed.current();
         })
         .catch((e: unknown) => {
           // Gone from view: the tombstone in the list says the rest.
@@ -345,7 +347,7 @@ export function DeletionProgress({
   };
 
   const items = operation.cleanup?.items ?? [];
-  const left = items.filter((entry) => entry.state !== "removed");
+  const left = operation.cleanup ? remaining(operation.cleanup) : [];
   return (
     <div className="flex flex-col gap-1 text-xs" data-testid="cloud-deletion-progress" data-state={operation.state}>
       <span className={running ? "text-muted-foreground" : "text-destructive"}>

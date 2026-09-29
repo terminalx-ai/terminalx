@@ -220,8 +220,10 @@ pub struct Session {
     pub quiesce: Option<QuiesceRequest>,
 }
 
+/// Read leniently: a field the server adds later must not fail the whole
+/// refresh (and with it the relay token).
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct QuiesceRequest {
     pub operation_id: String,
     pub reason: String,
@@ -261,8 +263,10 @@ pub struct Refreshed {
     #[serde(default)]
     access_mode: Option<AccessMode>,
     // Sent (possibly null) because this runtime advertises `quiesce-v1`.
+    // Kept raw and parsed on its own, so a malformed request is dropped
+    // instead of failing the refresh.
     #[serde(default)]
-    quiesce: Option<QuiesceRequest>,
+    quiesce: Option<serde_json::Value>,
 }
 
 impl Drop for Redeemed {
@@ -677,12 +681,14 @@ fn session_from_refresh(mut refreshed: Refreshed, relay_host_id: &str) -> Result
         access_mode: refreshed.access_mode.unwrap_or(AccessMode::Private),
         attachments: std::mem::take(&mut refreshed.attachments),
         revocations: std::mem::take(&mut refreshed.revocations),
-        quiesce: refreshed.quiesce.take().filter(|request| {
-            let valid = opaque_id(&request.operation_id);
-            if !valid {
-                log::warn!("ignoring a quiesce request with a malformed operation id");
+        quiesce: refreshed.quiesce.take().filter(|value| !value.is_null()).and_then(|value| {
+            match serde_json::from_value::<QuiesceRequest>(value) {
+                Ok(request) if opaque_id(&request.operation_id) => Some(request),
+                _ => {
+                    log::warn!("ignoring a malformed quiesce request");
+                    None
+                }
             }
-            valid
         }),
     })
 }
@@ -1329,6 +1335,10 @@ mod tests {
         let request = with(r#"{"operationId":"operation_1","reason":"archive","requestedAt":10,"deadline":60010}"#).quiesce.unwrap();
         assert_eq!(request, QuiesceRequest { operation_id: "operation_1".into(), reason: "archive".into(), requested_at: 10, deadline: 60010 });
         assert_eq!(with(r#"{"operationId":"../x y","reason":"archive","requestedAt":10,"deadline":60010}"#).quiesce, None);
+        // A newer server's extra field is tolerated; a mistyped one only drops the request.
+        assert!(with(r#"{"operationId":"op_2","reason":"archive","requestedAt":10,"deadline":60010,"later":true}"#).quiesce.is_some());
+        let mistyped = with(r#"{"operationId":"op_3","reason":"archive","requestedAt":10,"deadline":"soon"}"#);
+        assert_eq!((mistyped.quiesce, mistyped.workspace_id.as_str()), (None, "w"));
         assert!(CAPABILITIES.split(',').any(|capability| capability == "quiesce-v1"));
     }
 

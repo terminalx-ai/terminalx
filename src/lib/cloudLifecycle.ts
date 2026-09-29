@@ -3,6 +3,7 @@ import { dispositionFacts, hasUnpublishedWork, type DispositionFacts, type Repos
 import {
   api,
   closeWorkspaceConnection,
+  hasWorkspaceConnection,
   workspaceConnection,
   workspaceTargetKey,
   type CloudWorkspace,
@@ -23,14 +24,15 @@ import { dropEditors, getEditors } from "@/lib/editors";
  * kept of a workspace once its tombstone arrives.
  */
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+export const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** In the archive: archived, or an archive that failed and stays listed there to retry. */
 export function isArchived(workspace: CloudWorkspace): boolean {
   return workspace.state === "archived" || typeof workspace.archivedAt === "number";
 }
 
-function open(operation: CloudWorkspaceOperation | null | undefined): boolean {
+/** Queued, running or being canceled. */
+export function isOpen(operation: CloudWorkspaceOperation | null | undefined): boolean {
   return !!operation && ["queued", "running", "cancel-requested"].includes(operation.state);
 }
 
@@ -38,14 +40,14 @@ function open(operation: CloudWorkspaceOperation | null | undefined): boolean {
 export function deletion(item: CloudWorkspaceListItem): "running" | "failed" | null {
   const operation = item.latestOperation;
   if (operation?.action !== "delete") return null;
-  if (open(operation)) return "running";
+  if (isOpen(operation)) return "running";
   if (operation.state === "failed") return "failed";
   return null;
 }
 
 /** An archive still quiescing, checkpointing or suspending. */
 export function archiving(item: CloudWorkspaceListItem): boolean {
-  return item.latestOperation?.action === "archive" && open(item.latestOperation);
+  return item.latestOperation?.action === "archive" && isOpen(item.latestOperation);
 }
 
 /** "in 29 days", "in 5 hours", "within the hour", or "overdue". */
@@ -210,6 +212,8 @@ export async function checkRuntime(workspace: CloudWorkspace, server: CloudWorks
   if (server && !server.runtimeFacts.available) return { kind: "unsupported" };
   if (workspace.state !== "ready") return { kind: "offline" };
   const target = { kind: "cloud" as const, organizationId: workspace.orgId, workspaceId: workspace.id };
+  // Only a connection made for this check is closed after it.
+  const owned = !hasWorkspaceConnection(target);
   try {
     const connection = await workspaceConnection(target, "connect");
     if (!connection || !(await waitConnected(connection.client, withinMs))) return { kind: "offline" };
@@ -218,9 +222,7 @@ export async function checkRuntime(workspace: CloudWorkspace, server: CloudWorks
   } catch (error) {
     return { kind: "error", message: error instanceof Error ? error.message : String(error) };
   } finally {
-    // Asked from the workspace list, where nothing else holds a connection;
-    // an archive or delete revokes it anyway.
-    closeWorkspaceConnection(target);
+    if (owned) closeWorkspaceConnection(target);
   }
 }
 
@@ -249,6 +251,16 @@ export async function purgeTombstones(tombstones: CloudWorkspaceTombstone[], nam
   for (const tombstone of tombstones) {
     const id = `${tombstone.orgId}:${tombstone.id}`;
     if (purged.has(id)) continue;
+    // Claimed now, so an overlapping list reload skips it.
+    purged.add(id);
+    let native;
+    try {
+      native = await api.cloudAgentPurgeWorkspace(tombstone.orgId, tombstone.id);
+    } catch {
+      // Nothing here is dropped yet; the next list tries it all again.
+      purged.delete(id);
+      continue;
+    }
     const scope = { organizationId: tombstone.orgId, workspaceId: tombstone.id };
     const target = { kind: "cloud" as const, ...scope };
     const key = workspaceTargetKey(target);
@@ -258,13 +270,6 @@ export async function purgeTombstones(tombstones: CloudWorkspaceTombstone[], nam
     if (editors.length) dropEditors((entry) => entry.sessionId === key);
     dropCloudTerminals(key);
     const tabs = dropCloudAgents(scope);
-    let native;
-    try {
-      native = await api.cloudAgentPurgeWorkspace(tombstone.orgId, tombstone.id);
-    } catch {
-      continue;
-    }
-    purged.add(id);
     const name = names.get(tombstone.id) ?? null;
     if (native.removed || unsavedFiles > 0 || editors.length > 0 || tabs > 0 || name) {
       notices.push({ workspaceId: tombstone.id, name, unsentCommands: native.unsentCommands, unsavedFiles });

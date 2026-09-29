@@ -6,8 +6,9 @@
 //! server waits at most 60 s and never lets a missing answer block the
 //! archive, so this stays inside the request's deadline.
 //!
-//! If the request disappears and compute is still running long after (the
-//! archive failed, or was undone before compute stopped), work resumes.
+//! If the request is gone and a device attaches again, or compute is still
+//! running ten minutes later (the archive failed, or was undone before
+//! compute stopped), work resumes.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -52,6 +53,14 @@ impl Quiescer {
         now_ms: u64,
     ) {
         let Some(request) = request else {
+            // A device attached again: the archive revoked every attachment,
+            // so the workspace is in use (the archive failed or was undone).
+            if let Some(agents) = agents.filter(|agents| agents.quiesced() && agents.attached() > 0) {
+                log::info!("a device attached after the archive; taking work again");
+                agents.resume_work();
+                self.idle_since = None;
+                return;
+            }
             if agents.is_some_and(CloudAgents::quiesced) {
                 let since = *self.idle_since.get_or_insert(now);
                 if now.duration_since(since) >= HOLD {

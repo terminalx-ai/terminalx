@@ -99,15 +99,14 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
   useEffect(() => reload(), [reload]);
 
   // While any workspace is still starting (provisioning, or ready with its
-  // agent not yet running), archiving or being deleted, keep it current. The
-  // create form polls the workspace it tracks itself, so the list waits
-  // while it is open.
+  // agent not yet running) or archiving, keep it current. The create form
+  // polls the workspace it tracks itself, so the list waits while it is
+  // open; a delete's progress polls its own operation and reloads when done.
   const starting =
     workspaces?.some(
       (item) =>
         ((item.workspace.state === "provisioning" || item.workspace.launch) && !settled(phaseOf(item))) ||
-        archiving(item) ||
-        deletion(item) === "running",
+        archiving(item),
     ) ?? false;
   useEffect(() => {
     if (!starting || connection || creating) return;

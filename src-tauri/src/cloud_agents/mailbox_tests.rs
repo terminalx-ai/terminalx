@@ -427,3 +427,19 @@ fn work_resumes_when_the_archive_never_stopped_this_runtime() {
     quiescer.tick(None, Some(&h.agents), &mut report, start + std::time::Duration::from_secs(11 * 60), now_ms());
     assert!(!h.agents.quiesced());
 }
+
+#[test]
+fn work_resumes_at_once_when_a_device_attaches_after_the_archive() {
+    use crate::cloud_bootstrap::QuiesceRequest;
+    let h = harness();
+    let mut quiescer = crate::cloud_quiesce::Quiescer::default();
+    let mut report = |_: &str, _: bool| Ok(());
+    let request = QuiesceRequest { operation_id: "op_1".into(), reason: "archive".into(), requested_at: 0, deadline: now_ms() + 60_000 };
+    let start = std::time::Instant::now();
+    quiescer.tick(Some(&request), Some(&h.agents), &mut report, start, now_ms());
+    quiescer.tick(None, Some(&h.agents), &mut report, start + std::time::Duration::from_secs(10), now_ms());
+    assert!(h.agents.quiesced(), "no device yet: still paused");
+    h.agents.client_attached();
+    quiescer.tick(None, Some(&h.agents), &mut report, start + std::time::Duration::from_secs(20), now_ms());
+    assert!(!h.agents.quiesced());
+}

@@ -225,16 +225,19 @@ pub fn final_checkpoint(agents: &CloudAgents, deadline: Instant) -> bool {
     agents.quiesce();
     let mut pending: Vec<String> = agents.tabs().into_iter().map(|tab| tab.tab_id).collect();
     loop {
-        pending.retain(|tab_id| match upload(agents, tab_id) {
-            Ok(()) => {
-                let now = Instant::now();
-                agents.checkpoints.last_upload.lock().unwrap().insert(tab_id.clone(), now);
-                agents.checkpoints.dirty.lock().unwrap().remove(tab_id);
-                false
-            }
-            Err(error) => {
-                log::warn!("final checkpoint of {tab_id}: {error}");
-                true
+        pending.retain(|tab_id| {
+            // Taken before the upload, as `due` does: an event marked while
+            // it is on its way stays dirty for the regular flush.
+            agents.checkpoints.dirty.lock().unwrap().remove(tab_id);
+            match upload(agents, tab_id) {
+                Ok(()) => {
+                    agents.checkpoints.last_upload.lock().unwrap().insert(tab_id.clone(), Instant::now());
+                    false
+                }
+                Err(error) => {
+                    log::warn!("final checkpoint of {tab_id}: {error}");
+                    true
+                }
             }
         });
         let now = Instant::now();
@@ -242,6 +245,10 @@ pub fn final_checkpoint(agents: &CloudAgents, deadline: Instant) -> bool {
             return true;
         }
         if now + FINAL_RETRY >= deadline {
+            // Left for the regular flush, should the runtime keep running.
+            for tab_id in pending {
+                agents.checkpoints.mark(&tab_id, false);
+            }
             return false;
         }
         std::thread::sleep(FINAL_RETRY);

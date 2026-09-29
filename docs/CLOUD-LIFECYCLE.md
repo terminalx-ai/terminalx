@@ -62,10 +62,17 @@ refresh answer carries `quiesce { operationId, deadline }`, and
    `{"v":1,"operationId","result":"committed"|"failed"}`. A 401 (no longer
    wanted) is not retried.
 
-If the request is gone and the runtime is still running ten minutes later
-(the archive failed, or was undone before compute stopped), it takes work
-again. The refresh runs every 30 s, so the request is seen within 30 s of the
-archive asking; the server waits 60 s.
+If the request is gone and a device attaches again (an archive revokes every
+attachment), or the runtime is still running ten minutes later (the archive
+failed, or was undone before compute stopped), it takes work again. The
+request is read leniently: a malformed one is dropped without failing the
+refresh.
+
+The request is only seen on the relay-token refresh, every 30 s, so up to
+half of the server's 60 s window can pass before the checkpoint starts; with
+many tabs, or clock skew against the request's `deadline`, the upload may not
+finish and the archive records `failed` or `timed-out` (the disk is kept
+either way). Refreshing sooner while an archive is pending is a follow-up.
 
 ## Tests
 
@@ -89,6 +96,8 @@ archive asking; the server waits 60 s.
 
 ## Open
 
+- The final checkpoint's latency (above): the runtime learns of the request
+  on its 30 s refresh.
 - Organization teardown and the provider disconnect `archive` disposition
   have no desktop UI yet.
 - Preview routes do not exist; scoped runtime secrets are revoked by the
