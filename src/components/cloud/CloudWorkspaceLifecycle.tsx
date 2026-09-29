@@ -10,7 +10,6 @@ import {
   cleanupStateText,
   dateText,
   deadlineText,
-  isArchived,
   lifecycleErrorMessage,
   repositoryRiskLines,
   risksOf,
@@ -28,7 +27,8 @@ export function actionsFor(item: CloudWorkspaceListItem): LifecycleAction[] {
   const { state } = item.workspace;
   const actions: LifecycleAction[] = [];
   if (state === "ready") actions.push("stop");
-  if (!isArchived(item.workspace) && ["ready", "suspended", "attention-required"].includes(state)) actions.push("archive");
+  // A failed archive stays in the archive list and is retried by archiving again.
+  if (["ready", "suspended", "attention-required"].includes(state)) actions.push("archive");
   if (state !== "destroyed") actions.push("delete");
   return actions;
 }
@@ -104,7 +104,8 @@ export function CloudWorkspaceLifecycleDialog({
   const unverified = destructive && runtime !== null && runtime.kind !== "checked";
   const ready =
     !busy &&
-    (!destructive || server !== undefined) &&
+    // Wait for both answers (the runtime's is bounded) so nothing at risk is missed.
+    (!destructive || (server !== undefined && runtime !== null)) &&
     (!needsForce || force) &&
     (action !== "delete" || (acknowledged && permanentDelete));
 
@@ -298,7 +299,11 @@ export function DeletionProgress({
   changed.current = onChanged;
   const running = ["queued", "running", "cancel-requested"].includes(operation.state);
 
-  useEffect(() => setOperation(initial), [initial]);
+  // A list reload carries no cleanup report: keep the newer one polled here.
+  useEffect(
+    () => setOperation((current) => (current.id === initial.id && current.updatedAt >= initial.updatedAt ? current : initial)),
+    [initial],
+  );
 
   useEffect(() => {
     let live = true;

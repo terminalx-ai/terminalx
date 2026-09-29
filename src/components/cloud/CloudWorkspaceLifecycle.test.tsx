@@ -181,6 +181,25 @@ describe("CloudWorkspaceLifecycleDialog", () => {
     expect(button(/Delete permanently/).disabled).toBe(true);
   });
 
+  it("a failed archive is archived again from the dialog", async () => {
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition({ state: "attention-required" }));
+    mocked.cloudWorkspaceArchive.mockResolvedValue(snapshot("archive") as never);
+    renderDialog(item("attention-required", { archivedAt: 1, deleteAfter: Date.now() + 86_400_000 }), "archive", { kind: "offline" });
+    await screen.findByText(/cannot be checked/);
+    expect(screen.getByTestId("cloud-lifecycle-summary").dataset.action).toBe("archive");
+    fireEvent.click(button(/Archive workspace/));
+    await waitFor(() => expect(mocked.cloudWorkspaceArchive).toHaveBeenCalledWith("ws-1", false));
+  });
+
+  it("waits for the runtime's answer before an archive can be confirmed", async () => {
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition());
+    const check = vi.fn(() => new Promise<RuntimeCheck>(() => undefined));
+    render(<CloudWorkspaceLifecycleDialog item={item("ready")} initial="archive" onClose={() => undefined} onDone={() => undefined} onExport={() => undefined} check={check} />);
+    await waitFor(() => expect(check).toHaveBeenCalled());
+    expect(screen.getByText(/Checking for running and unpublished work/)).toBeTruthy();
+    expect(button(/Archive workspace/).disabled).toBe(true);
+  });
+
   it("an archived workspace offers only delete", async () => {
     mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition({ state: "archived" }));
     renderDialog(item("archived", { archivedAt: 1, deleteAfter: Date.now() + 5 * 86_400_000 }), "archive", { kind: "offline" });
