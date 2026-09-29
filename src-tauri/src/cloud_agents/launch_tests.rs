@@ -354,3 +354,22 @@ fn a_prompt_that_failed_to_send_after_the_tab_exists_is_outcome_unknown_with_the
     assert_eq!(completed.category.as_deref(), Some("prompt-send-failed"));
     assert_eq!(completed.tab_id.as_deref(), Some("tab-1"));
 }
+
+/// `launch.json` keeps its snake_case `launch_id` (see `Record`): a file an
+/// earlier runtime wrote must still be found, or the prompt could go twice.
+#[test]
+fn launch_json_keeps_its_on_disk_shape() {
+    let applying = serde_json::to_value(Record::Applying { launch_id: "launch_1".into() }).unwrap();
+    assert_eq!(applying, serde_json::json!({ "stage": "applying", "launch_id": "launch_1" }));
+    let done = Record::Done {
+        launch_id: "launch_1".into(),
+        outcome: Outcome { outcome: "started".into(), category: None, session_id: Some("s1".into()), tab_id: Some("t1".into()), branches: vec![] },
+    };
+    assert_eq!(
+        serde_json::to_value(&done).unwrap(),
+        serde_json::json!({ "stage": "done", "launch_id": "launch_1", "outcome": { "outcome": "started", "sessionId": "s1", "tabId": "t1", "branches": [] } })
+    );
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(FILE), r#"{"stage":"done","launch_id":"launch_1","outcome":{"outcome":"started","sessionId":"s1","tabId":"t1","branches":[]}}"#).unwrap();
+    assert_eq!(Store::open(dir.path()).get("launch_1"), Some(done));
+}

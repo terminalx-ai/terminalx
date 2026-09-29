@@ -185,8 +185,14 @@ pub trait Checkout: Send + Sync {
     fn prepare(&self, repository: &Repository, work_branch: &str) -> Result<Branch>;
 }
 
+/// `launch.json` on the workspace machine. Its fields stay snake_case on
+/// purpose (`{"stage":"applying","launch_id":…}`): runtimes in the field
+/// have already written this file, and it is the exactly-once guard for the
+/// first prompt. Renaming `launch_id` would make an upgraded runtime fail to
+/// read its own record, treat the launch as new and could send the prompt a
+/// second time. Only this module reads the file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "stage", rename_all = "camelCase")]
+#[serde(tag = "stage", rename_all = "camelCase", rename_all_fields = "snake_case")]
 enum Record {
     Applying { launch_id: String },
     Done { launch_id: String, outcome: Outcome },
