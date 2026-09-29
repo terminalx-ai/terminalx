@@ -1,0 +1,8 @@
+Otto (outsider) GET /orgs/<Olivia's org>/cloud-workspaces -> 403 {"error":"active_organization_required"}
+Otto (outsider) GET /orgs/<Olivia's org>/cloud-workspaces/workspace_f6dfb25d-080c-4efb-b8b2-a4b85a9f80d8/shares -> 403 {"error":"active_organization_required"}
+Otto (outsider) POST /orgs/<Olivia's org>/cloud-workspaces/workspace_f6dfb25d-080c-4efb-b8b2-a4b85a9f80d8/open?attachTicket=1 -> 403 {"error":"active_organization_required"}
+Otto (outsider) PUT /orgs/<Olivia's org>/cloud-workspaces/workspace_f6dfb25d-080c-4efb-b8b2-a4b85a9f80d8/shares/p30-otto -> 403 {"error":"active_organization_required"}
+-- with Otto's active organization forced to Olivia's (he is not a member):
+Otto (outsider) GET /orgs/<Olivia's org>/cloud-workspaces/workspace_f6dfb25d-080c-4efb-b8b2-a4b85a9f80d8/shares -> 404 {"error":"cloud_workspace_not_found"}
+Otto (outsider) POST /orgs/<Olivia's org>/cloud-workspaces/workspace_f6dfb25d-080c-4efb-b8b2-a4b85a9f80d8/open?attachTicket=1 -> 404 {"error":"cloud_workspace_not_found"}
+Otto (outsider) PUT /orgs/<Olivia's org>/cloud-workspaces/workspace_f6dfb25d-080c-4efb-b8b2-a4b85a9f80d8/shares/p30-otto -> 404 {"error":"cloud_workspace_not_found"}
