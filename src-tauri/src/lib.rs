@@ -12,6 +12,7 @@ mod automations;
 mod binpath;
 mod cloud_activity;
 mod cloud_bootstrap;
+mod cloud_quiesce;
 pub mod cloud_agents;
 mod cloud_github;
 mod cloud_config;
@@ -318,6 +319,10 @@ pub fn run() {
             commands::cloud_workspace_suspend,
             commands::cloud_workspace_resume,
             commands::cloud_workspace_release,
+            commands::cloud_workspace_archive,
+            commands::cloud_workspace_delete,
+            commands::cloud_workspace_unarchive,
+            commands::cloud_workspace_disposition,
             commands::cloud_workspace_operation,
             commands::cloud_workspace_operation_cancel,
             cloud_remote::cloud_remote_attach,
@@ -334,6 +339,7 @@ pub fn run() {
             cloud_agent_client::cloud_agent_has_key,
             cloud_agent_client::cloud_agent_cache_load,
             cloud_agent_client::cloud_agent_cache_save,
+            cloud_agent_client::cloud_agent_purge_workspace,
             commands::pairing_status,
             commands::pairing_generate,
             commands::pairing_revoke,

@@ -420,3 +420,25 @@ fn settled_entries_are_pruned_to_the_newest_per_tab() {
     assert!(entries.iter().any(|entry| entry.state == "queued"), "pending entries always stay");
     assert!(entries.iter().any(|entry| entry.client_command_id == "c29") && !entries.iter().any(|entry| entry.client_command_id == "c9" && entry.state == "applied"));
 }
+
+#[test]
+fn a_deleted_workspace_loses_its_outbox_cache_and_keys_and_only_its_own() {
+    let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
+    give_key(&fixture);
+    // Unsent: the API never answers.
+    fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "not delivered" })).unwrap();
+    fixture.client.cache_save(ORG, WS, "tab-1", Some(json!({ "events": [] }))).unwrap();
+    fixture.client.cache_save(ORG, "ws_2", "tab-1", Some(json!({ "events": [] }))).unwrap();
+
+    let purged = fixture.client.purge_workspace(ORG, WS).unwrap();
+    assert_eq!(purged, Purged { removed: true, unsent_commands: 1, cached_tabs: 1 });
+    assert!(fixture.keys.get(ORG, WS, KEY_ID).unwrap().is_none());
+    assert!(fixture.client.outbox(ORG, WS, None).unwrap().is_empty());
+    assert!(fixture.client.cache_load(ORG, WS).unwrap()["tabs"].as_object().unwrap().is_empty());
+    assert!(!fixture.client.has_key(ORG, WS).unwrap());
+    // Another workspace keeps its cache, and purging again is a no-op.
+    assert!(fixture.client.cache_load(ORG, "ws_2").unwrap()["tabs"].get("tab-1").is_some());
+    assert_eq!(fixture.client.purge_workspace(ORG, WS).unwrap(), Purged::default());
+    // Only the signed-in organization's workspaces can be purged.
+    assert_eq!(fixture.client.purge_workspace("org_2", WS).unwrap_err(), "cloud_remote_organization_mismatch");
+}

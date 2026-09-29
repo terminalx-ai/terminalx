@@ -286,6 +286,22 @@ export function detachCloudTerminals(workspace: string) {
   }
 }
 
+/** Forget one workspace's terminals and views: it was deleted. */
+export function dropCloudTerminals(workspace: string) {
+  const prefix = `cloud:${workspace}:`;
+  for (const [id, binding] of bindings) {
+    if (!id.startsWith(prefix)) continue;
+    binding.attachment?.detach();
+    bindings.delete(id);
+  }
+  for (const id of [...cursors.keys()]) if (id.startsWith(prefix)) cursors.delete(id);
+  for (const terminal of state[workspace]?.terminals ?? []) disposeInstance(terminal.id);
+  if (!(workspace in state)) return;
+  const next = { ...state };
+  delete next[workspace];
+  publish(next);
+}
+
 /** Forget every workspace's terminals and views (sign-out, organization switch). */
 export function resetCloudTerminals() {
   for (const binding of bindings.values()) binding.attachment?.detach();

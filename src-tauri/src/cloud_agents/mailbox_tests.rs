@@ -82,6 +82,7 @@ struct FakeApi {
     stale_generation_once: Mutex<bool>,
     checkpoints: Mutex<Vec<(String, Checkpoint)>>,
     stale_puts: Mutex<u32>,
+    failing_puts: Mutex<u32>,
 }
 
 impl MailboxApi for FakeApi {
@@ -101,6 +102,13 @@ impl MailboxApi for FakeApi {
         Ok(AckOutcome::Settled)
     }
     fn put_checkpoint(&self, tab_id: &str, checkpoint: &Checkpoint) -> Result<PutOutcome, CallError> {
+        {
+            let mut failing = self.failing_puts.lock().unwrap();
+            if *failing > 0 {
+                *failing -= 1;
+                return Err(CallError::Transient(anyhow::anyhow!("network")));
+            }
+        }
         let mut stale = self.stale_puts.lock().unwrap();
         if *stale > 0 {
             *stale -= 1;
@@ -350,4 +358,72 @@ fn a_removed_tab_never_uploads_again_and_its_delete_is_retried() {
     let now = std::time::Instant::now();
     checkpoints::flush(&h.agents, now);
     assert!(h.api.checkpoints.lock().unwrap().is_empty(), "late events of a removed tab upload nothing");
+}
+
+#[test]
+fn a_final_checkpoint_quiesces_then_uploads_every_tab() {
+    let h = harness();
+    // A follow-up waiting for the turn to end, and a command in the mailbox.
+    *h.ops.busy.lock().unwrap() = true;
+    let mut unacked = Vec::new();
+    h.api.queue.lock().unwrap().push(lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "queued" })));
+    poll_once(&h.agents, &mut unacked).unwrap();
+    assert_eq!(h.agents.follow_ups.list("tab-1").len(), 1);
+
+    // One transient failure is retried within the deadline.
+    *h.api.failing_puts.lock().unwrap() = 1;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    assert!(checkpoints::final_checkpoint(&h.agents, deadline));
+    let stored = h.api.checkpoints.lock().unwrap().clone();
+    assert_eq!(stored.iter().map(|(tab, _)| tab.as_str()).collect::<Vec<_>>(), ["tab-1"]);
+    assert!(h.agents.quiesced());
+
+    // Quiesced: nothing more is leased, and the turn ending types nothing.
+    h.api.queue.lock().unwrap().push(lease(&h.agents, "c2", "send", json!({ "v": 1, "text": "later" })));
+    assert!(!poll_once(&h.agents, &mut unacked).unwrap());
+    assert_eq!(h.api.queue.lock().unwrap().len(), 1, "the command stays in the mailbox");
+    *h.ops.busy.lock().unwrap() = false;
+    h.agents.nudge_follow_ups("tab-1");
+    assert_eq!(h.agents.dispatch_follow_ups(), 0);
+    assert!(h.ops.sent.lock().unwrap().is_empty(), "the queued follow-up waits");
+
+    // The archive did not stop the runtime after all: work resumes.
+    h.agents.resume_work();
+    assert!(poll_once(&h.agents, &mut unacked).unwrap());
+    h.agents.nudge_follow_ups("tab-1");
+    assert!(h.agents.dispatch_follow_ups() >= 1);
+}
+
+#[test]
+fn a_final_checkpoint_that_cannot_upload_reports_failure_by_its_deadline() {
+    let h = harness();
+    *h.api.failing_puts.lock().unwrap() = u32::MAX;
+    let started = std::time::Instant::now();
+    assert!(!checkpoints::final_checkpoint(&h.agents, started + std::time::Duration::from_millis(1500)));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10), "bounded by the deadline");
+}
+
+#[test]
+fn work_resumes_when_the_archive_never_stopped_this_runtime() {
+    use crate::cloud_bootstrap::QuiesceRequest;
+    let h = harness();
+    let mut quiescer = crate::cloud_quiesce::Quiescer::default();
+    let reports = std::cell::RefCell::new(Vec::new());
+    let mut report = |id: &str, committed: bool| {
+        reports.borrow_mut().push((id.to_string(), committed));
+        Ok(())
+    };
+    let request = QuiesceRequest { operation_id: "op_1".into(), reason: "archive".into(), requested_at: 0, deadline: now_ms() + 60_000 };
+    let start = std::time::Instant::now();
+    quiescer.tick(Some(&request), Some(&h.agents), &mut report, start, now_ms());
+    assert_eq!(*reports.borrow(), [("op_1".to_string(), true)]);
+    assert_eq!(h.api.checkpoints.lock().unwrap().len(), 1, "every tab uploaded before the report");
+    assert!(h.agents.quiesced());
+    // The request is gone (answered) while compute stops: still paused.
+    quiescer.tick(None, Some(&h.agents), &mut report, start + std::time::Duration::from_secs(60), now_ms());
+    quiescer.tick(None, Some(&h.agents), &mut report, start + std::time::Duration::from_secs(5 * 60), now_ms());
+    assert!(h.agents.quiesced());
+    // Still running ten minutes later: the archive failed or was undone.
+    quiescer.tick(None, Some(&h.agents), &mut report, start + std::time::Duration::from_secs(11 * 60), now_ms());
+    assert!(!h.agents.quiesced());
 }

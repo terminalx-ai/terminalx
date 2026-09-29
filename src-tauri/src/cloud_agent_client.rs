@@ -253,6 +253,16 @@ impl Stored {
     }
 }
 
+/// What `purge_workspace` removed.
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Purged {
+    pub removed: bool,
+    /// Commands that never reached the runtime.
+    pub unsent_commands: usize,
+    pub cached_tabs: usize,
+}
+
 /// What the UI sees of an outbox entry: never the envelope.
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -787,6 +797,35 @@ impl CloudAgentClient {
         write_atomic(&path, &bytes).map_err(|_| "cloud_agent_store_unwritable".to_string())
     }
 
+    // ------------------------------------------------------------ tombstones
+
+    /// The workspace was deleted (a tombstone, contract §10.5): drop its
+    /// outbox, transcript cache and content keys. Says what was there, so the
+    /// page can tell the person what went with it; purging again is a no-op.
+    pub fn purge_workspace(&self, organization_id: &str, workspace_id: &str) -> Result<Purged, String> {
+        let ctx = self.ctx(organization_id)?;
+        let dir = self.dir(&ctx, workspace_id)?;
+        // No send or cancel of this workspace runs while its files go.
+        let send = self.send_lock(&dir);
+        let _send = send.lock().unwrap();
+        let _guard = self.lock.lock().unwrap();
+        if !dir.exists() {
+            return Ok(Purged::default());
+        }
+        let unsent_commands = self.load_outbox(&dir).unwrap_or_default().iter().filter(|entry| entry.pending()).count();
+        let cached_tabs = read_json::<BTreeMap<String, Value>>(&dir.join("cache.json")).ok().flatten().map_or(0, |tabs| tabs.len());
+        for meta in self.index(&dir).unwrap_or_default().keys {
+            if let Err(error) = self.keys.delete(organization_id, workspace_id, &meta.key_id) {
+                log::warn!("drop a deleted workspace's key: {error:#}");
+            }
+        }
+        std::fs::remove_dir_all(&dir).map_err(|error| {
+            log::warn!("drop a deleted workspace's agent data: {error}");
+            "cloud_agent_store_unwritable".to_string()
+        })?;
+        Ok(Purged { removed: true, unsent_commands, cached_tabs })
+    }
+
     // ------------------------------------------------------------ identity
 
     /// Called with the signed-in `(user, organization)` whenever it is read.
@@ -971,6 +1010,12 @@ pub async fn cloud_agent_cache_load(client: Client<'_>, organization_id: String,
 pub async fn cloud_agent_cache_save(client: Client<'_>, organization_id: String, workspace_id: String, tab_id: String, entry: Option<Value>) -> Result<(), String> {
     let client = client.inner().clone();
     blocking(move || client.cache_save(&organization_id, &workspace_id, &tab_id, entry)).await
+}
+
+#[tauri::command]
+pub async fn cloud_agent_purge_workspace(client: Client<'_>, organization_id: String, workspace_id: String) -> Result<Purged, String> {
+    let client = client.inner().clone();
+    blocking(move || client.purge_workspace(&organization_id, &workspace_id)).await
 }
 
 #[cfg(test)]

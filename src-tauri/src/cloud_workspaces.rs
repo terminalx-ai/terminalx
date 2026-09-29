@@ -14,6 +14,9 @@ use url::Url;
 use crate::account::{AccountContext, AccountManager};
 
 const CONTRACT: &str = "providers-v1";
+/// Archive, tombstones and cleanup reports (terminalx-saas contract §10.6).
+/// Without it an archived workspace reads as suspended.
+const LIFECYCLE: &str = "archive-v1";
 /// The local Docker provider (terminalx-saas `cloud:e2e:local --serve`) is
 /// offered only by debug builds.
 const SUPPORTED_PROVIDERS: &str = if cfg!(debug_assertions) { "machine0,box,local-docker" } else { "machine0,box" };
@@ -349,6 +352,8 @@ pub enum WorkspaceState {
     Provisioning,
     Ready,
     Suspended,
+    /// In the 30-day trash (§10.1): stopped, kept until `delete_after`.
+    Archived,
     AttentionRequired,
     Destroyed,
 }
@@ -375,6 +380,14 @@ pub struct CloudWorkspace {
     /// The launch intent the workspace was created with (PRO-21, contract §19).
     #[serde(default)]
     pub launch: Option<WorkspaceLaunch>,
+    /// Set while archived, including a failed archive (§10.1).
+    #[serde(default)]
+    pub archived_at: Option<i64>,
+    /// When an archived workspace is deleted for good.
+    #[serde(default)]
+    pub delete_after: Option<i64>,
+    #[serde(default)]
+    pub deleted_at: Option<i64>,
 }
 
 /// Contract §19.2. `phase` and `state` stay strings so a newer server's
@@ -445,6 +458,7 @@ pub enum OperationStage {
 pub enum OperationAction {
     Suspend,
     Resume,
+    Archive,
     Delete,
 }
 
@@ -486,6 +500,33 @@ pub struct CloudWorkspaceOperation {
     pub error_code: Option<String>,
     pub progress: Option<OperationProgress>,
     pub events: Option<Vec<OperationEvent>>,
+    /// An archive's final checkpoint: committed, failed, timed-out or skipped
+    /// (§10.3). A string so a newer server's value still reaches the page.
+    #[serde(default)]
+    pub checkpoint: Option<String>,
+    /// A delete's cleanup report until the provider confirms (§10.4).
+    #[serde(default)]
+    pub cleanup: Option<CleanupReport>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupReport {
+    pub complete: bool,
+    pub items: Vec<CleanupItem>,
+}
+
+/// `kind` and `state` stay strings: the page names the known ones and shows
+/// any other as it comes.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupItem {
+    pub kind: String,
+    pub state: String,
+    #[serde(default)]
+    pub provider_stage: Option<String>,
+    #[serde(default)]
+    pub expected_by: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -542,6 +583,78 @@ pub struct CloudWorkspaceListItem {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CloudWorkspaceList {
     pub workspaces: Vec<CloudWorkspaceListItem>,
+    /// Workspaces deleted in the last 30 days, content-free (§10.5): what
+    /// this desktop kept of them is purged.
+    #[serde(default)]
+    pub tombstones: Vec<CloudWorkspaceTombstone>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWorkspaceTombstone {
+    pub id: String,
+    pub org_id: String,
+    pub deleted_at: i64,
+    pub expires_at: i64,
+}
+
+/// `GET …/cloud-workspaces/:id/disposition` (§10.2): what the server knows
+/// before an archive or delete. Enumerations stay strings so a newer server's
+/// values reach the page.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWorkspaceDisposition {
+    pub workspace_id: String,
+    pub state: String,
+    pub provider: String,
+    #[serde(default)]
+    pub archived_at: Option<i64>,
+    #[serde(default)]
+    pub delete_after: Option<i64>,
+    #[serde(default)]
+    pub active_operation: Option<DispositionOperation>,
+    pub runtime: DispositionRuntime,
+    #[serde(default)]
+    pub attached_clients: u32,
+    pub provider_capabilities: DispositionCapabilities,
+    pub archive_retention_days: u32,
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    #[serde(default)]
+    pub removed_on_delete: Vec<String>,
+    pub runtime_facts: DispositionRuntimeFacts,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DispositionOperation {
+    pub id: String,
+    pub action: String,
+    pub state: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DispositionRuntime {
+    pub reporting: bool,
+    #[serde(default)]
+    pub reported_at: Option<i64>,
+    pub stale: bool,
+    pub active_turns: u32,
+    pub pending_approvals: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DispositionCapabilities {
+    pub permanent_delete: bool,
+    pub release_disposition: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DispositionRuntimeFacts {
+    pub available: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -818,7 +931,8 @@ impl Client {
             .set("content-type", "application/json")
             .set("X-TerminalX-Cloud-Workspace-Contract", CONTRACT)
             .set("X-TerminalX-Cloud-Workspace-Providers", SUPPORTED_PROVIDERS)
-            .set("X-TerminalX-Cloud-Workspace-Idle-Options", "never-v1");
+            .set("X-TerminalX-Cloud-Workspace-Idle-Options", "never-v1")
+            .set("X-TerminalX-Cloud-Workspace-Lifecycle", LIFECYCLE);
         if let Some(key) = idempotency_key {
             request = request.set("Idempotency-Key", key);
         }
@@ -1120,6 +1234,18 @@ impl CloudWorkspaceService {
         workspace_id: &str,
         action: OperationAction,
     ) -> Result<CloudWorkspaceSnapshot, CloudWorkspaceClientError> {
+        self.lifecycle_with(workspace_id, action, false)
+    }
+
+    /// Archive and delete refuse while agent work runs
+    /// (`cloud_workspace_active_work`, §10.2) unless `force` is sent, which
+    /// the page does only after the person confirmed it.
+    pub fn lifecycle_with(
+        &self,
+        workspace_id: &str,
+        action: OperationAction,
+        force: bool,
+    ) -> Result<CloudWorkspaceSnapshot, CloudWorkspaceClientError> {
         if !valid_resource_id(workspace_id) {
             return Err(CloudWorkspaceClientError::local(
                 "cloud_workspace_request_invalid",
@@ -1129,14 +1255,20 @@ impl CloudWorkspaceService {
         let action_path = match action {
             OperationAction::Suspend => "suspend",
             OperationAction::Resume => "resume",
+            OperationAction::Archive => "archive",
             OperationAction::Delete => "delete",
+        };
+        let body = if force && matches!(action, OperationAction::Archive | OperationAction::Delete) {
+            json!({ "force": true })
+        } else {
+            json!({})
         };
         self.run(RequestRisk::Mutation, |client, context| {
             let result = client.request(
                 context,
                 &["cloud-workspaces", workspace_id, action_path],
                 None,
-                Some(json!({})),
+                Some(body),
                 None,
                 RequestRisk::Mutation,
             )?;
@@ -1146,6 +1278,46 @@ impl CloudWorkspaceService {
                 Some(workspace_id),
                 RequestRisk::Mutation,
             )
+        })
+    }
+
+    /// Take a workspace out of the archive (§10.1). It stays suspended: the
+    /// first interactive action resumes it.
+    pub fn unarchive(&self, workspace_id: &str) -> Result<CloudWorkspaceSnapshot, CloudWorkspaceClientError> {
+        if !valid_resource_id(workspace_id) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        self.run(RequestRisk::Mutation, |client, context| {
+            let result = client.request(
+                context,
+                &["cloud-workspaces", workspace_id, "unarchive"],
+                None,
+                Some(json!({})),
+                None,
+                RequestRisk::Mutation,
+            )?;
+            ensure_snapshot(result, &context.organization_id, Some(workspace_id), RequestRisk::Mutation)
+        })
+    }
+
+    /// What the server knows before an archive or delete (§10.2).
+    pub fn disposition(&self, workspace_id: &str) -> Result<CloudWorkspaceDisposition, CloudWorkspaceClientError> {
+        if !valid_resource_id(workspace_id) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        self.run(RequestRisk::Read, |client, context| {
+            let result: CloudWorkspaceDisposition = client.request(
+                context,
+                &["cloud-workspaces", workspace_id, "disposition"],
+                None,
+                None,
+                None,
+                RequestRisk::Read,
+            )?;
+            if result.workspace_id != workspace_id {
+                return Err(invalid_response());
+            }
+            Ok(result)
         })
     }
 
@@ -1332,6 +1504,9 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_agent_credential_required"
             | "cloud_workspace_device_auth_unavailable"
             | "cloud_workspace_operation_in_progress"
+            | "cloud_workspace_active_work"
+            | "cloud_workspace_archived"
+            | "cloud_teardown_in_progress"
             | "cloud_workspace_quota_exceeded"
             | "idempotency_key_reused"
             | "cloud_workspace_quote_expired"
@@ -1455,6 +1630,8 @@ fn known_operation_error_code(code: &str) -> bool {
                 | "cloud_provider_idempotency_key_reused"
                 | "cloud_provider_idempotency_window_expired"
                 | "cloud_provider_unsupported"
+                | "provider_permanent_delete_unavailable"
+                | "runtime_checkpoint_pending"
         )
 }
 
@@ -1540,7 +1717,11 @@ fn ensure_list(
                         !known_operation_error_code(code) && code != "cloud_workspace_unknown_error"
                     })
             })
-    }) {
+    }) || value
+        .tombstones
+        .iter()
+        .any(|tombstone| tombstone.org_id != org_id || !valid_resource_id(&tombstone.id))
+    {
         return Err(post_send_error(risk));
     }
     Ok(value)
@@ -2136,9 +2317,13 @@ mod tests {
                     updated_at: 1,
                     release_disposition: None,
                     launch: None,
+                    archived_at: None,
+                    delete_after: None,
+                    deleted_at: None,
                 },
                 latest_operation: None,
             }],
+            tombstones: Vec::new(),
         };
         assert_eq!(
             ensure_list(list, "org-one", RequestRisk::Read)
@@ -2353,5 +2538,115 @@ mod tests {
         let error = service.preflight(vec![repo("app", None)]).unwrap_err();
         request.join().unwrap();
         assert_eq!((error.code.as_str(), error.retryable), ("cloud_workspace_unavailable", true));
+    }
+
+    #[test]
+    fn archive_and_delete_send_force_only_when_asked_and_read_the_archive_vocabulary() {
+        let mut archived: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
+        archived["workspace"]["state"] = json!("archived");
+        archived["workspace"]["archivedAt"] = json!(10);
+        archived["workspace"]["deleteAfter"] = json!(20);
+        archived["operation"]["action"] = json!("archive");
+        archived["operation"]["state"] = json!("succeeded");
+        archived["operation"]["checkpoint"] = json!("committed");
+        let (base, _, request) = serve_once(response("202 Accepted", &archived.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let snapshot = service.lifecycle_with("workspace-1", OperationAction::Archive, true).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/archive HTTP/1.1"));
+        assert!(captured.text.contains("X-TerminalX-Cloud-Workspace-Lifecycle: archive-v1"), "{}", captured.text);
+        assert!(captured.text.ends_with(r#"{"force":true}"#));
+        assert_eq!(snapshot.workspace.state, WorkspaceState::Archived);
+        assert_eq!((snapshot.workspace.archived_at, snapshot.workspace.delete_after), (Some(10), Some(20)));
+        assert!(matches!(snapshot.operation.action, Some(OperationAction::Archive)));
+        assert_eq!(snapshot.operation.checkpoint.as_deref(), Some("committed"));
+
+        let mut deleting: Value = serde_json::from_str(&snapshot_body(Some("provider_cleanup_pending"))).unwrap();
+        deleting["operation"]["action"] = json!("delete");
+        deleting["operation"]["state"] = json!("running");
+        deleting["operation"]["stage"] = json!("cleanup");
+        deleting["operation"]["cleanup"] = json!({ "complete": false, "items": [
+            { "kind": "provider-compute", "state": "removed" },
+            { "kind": "provider-storage", "state": "pending", "providerStage": "waiting_for_uploads", "expectedBy": 99 },
+            { "kind": "future-thing", "state": "someday" }
+        ] });
+        let (base, _, request) = serve_once(response("202 Accepted", &deleting.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let snapshot = service.lifecycle_with("workspace-1", OperationAction::Delete, false).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/delete HTTP/1.1"));
+        assert!(captured.text.ends_with("{}"), "no force unless the person confirmed it");
+        let cleanup = snapshot.operation.cleanup.unwrap();
+        assert!(!cleanup.complete);
+        assert_eq!(cleanup.items[1].provider_stage.as_deref(), Some("waiting_for_uploads"));
+        assert_eq!(cleanup.items[2].state, "someday", "unknown kinds and states reach the page");
+
+        // Force is never sent for suspend.
+        let (base, _, request) = serve_once(response("202 Accepted", &snapshot_body(None), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        service.lifecycle_with("workspace-1", OperationAction::Suspend, true).unwrap();
+        assert!(request.join().unwrap().text.ends_with("{}"));
+    }
+
+    #[test]
+    fn active_work_and_archived_refusals_keep_their_codes() {
+        for code in ["cloud_workspace_active_work", "cloud_workspace_archived", "cloud_teardown_in_progress"] {
+            let (base, _, request) = serve_once(response("409 Conflict", &json!({ "error": code }).to_string(), ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            let error = service.lifecycle_with("workspace-1", OperationAction::Archive, false).unwrap_err();
+            request.join().unwrap();
+            assert_eq!((error.code.as_str(), error.status), (code, Some(409)));
+        }
+    }
+
+    #[test]
+    fn unarchive_and_the_list_tombstones() {
+        let (base, _, request) = serve_once(response("200 OK", &snapshot_body(None), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        service.unarchive("workspace-1").unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/unarchive HTTP/1.1"));
+
+        let list = json!({ "workspaces": [], "tombstones": [{ "id": "workspace-9", "orgId": "org-1", "deletedAt": 5, "expiresAt": 6 }] });
+        let (base, _, request) = serve_once(response("200 OK", &list.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let listed = service.workspaces().unwrap();
+        request.join().unwrap();
+        assert_eq!(listed.tombstones.len(), 1);
+        assert_eq!(listed.tombstones[0].id, "workspace-9");
+
+        // A tombstone for another organization means the answer is not ours.
+        let list = json!({ "workspaces": [], "tombstones": [{ "id": "workspace-9", "orgId": "org-2", "deletedAt": 5, "expiresAt": 6 }] });
+        let (base, _, request) = serve_once(response("200 OK", &list.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert!(service.workspaces().is_err());
+        request.join().unwrap();
+    }
+
+    #[test]
+    fn disposition_reads_the_server_facts_for_that_workspace_only() {
+        let facts = json!({
+            "workspaceId": "workspace-1", "state": "ready", "provider": "box",
+            "activeOperation": { "id": "operation-1", "action": "resume", "state": "running" },
+            "runtime": { "reporting": true, "reportedAt": 1, "stale": false, "activeTurns": 1, "pendingApprovals": 2 },
+            "attachedClients": 1,
+            "providerCapabilities": { "permanentDelete": true, "releaseDisposition": "destroyed" },
+            "archiveRetentionDays": 30,
+            "blockers": ["active-turns", "pending-approvals"],
+            "removedOnDelete": ["runtime-credentials", "provider-storage"],
+            "runtimeFacts": { "namespace": "lifecycle/1", "method": "lifecycle.dispositionFacts", "available": true }
+        });
+        let (base, _, request) = serve_once(response("200 OK", &facts.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let disposition = service.disposition("workspace-1").unwrap();
+        assert!(request.join().unwrap().text.starts_with("GET /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/disposition HTTP/1.1"));
+        assert_eq!(disposition.runtime.active_turns, 1);
+        assert_eq!(disposition.blockers, ["active-turns", "pending-approvals"]);
+        assert!(disposition.runtime_facts.available);
+
+        let (base, _, request) = serve_once(response("200 OK", &facts.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.disposition("workspace-2").unwrap_err().code, "cloud_workspace_invalid_response");
+        request.join().unwrap();
     }
 }

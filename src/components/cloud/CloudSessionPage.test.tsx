@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, workspaceConnection } from "@/lib/api";
+import { resetPurged } from "@/lib/cloudLifecycle";
 import { resetCloudTerminals } from "@/lib/cloudTerminals";
 import { CloudSessionPage } from "./CloudSessionPage";
 
@@ -49,8 +50,15 @@ vi.mock("./CloudCreateWorkspace", () => ({
   CloudCreateWorkspace: () => <div data-testid="cloud-create-stub" />,
 }));
 vi.mock("@/lib/api", () => ({
-  api: { cloudWorkspaces: vi.fn() },
+  api: {
+    cloudWorkspaces: vi.fn(),
+    cloudWorkspaceUnarchive: vi.fn(),
+    cloudWorkspaceDisposition: vi.fn(),
+    cloudWorkspaceOperation: vi.fn(),
+    cloudAgentPurgeWorkspace: vi.fn(),
+  },
   pty: {},
+  closeWorkspaceConnection: vi.fn(),
   workspaceConnection: vi.fn(),
   devWorkspaceConnection: vi.fn(),
   workspaceTargetKey: (target: { kind: string; organizationId?: string; workspaceId?: string }) =>
@@ -136,6 +144,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   resetCloudTerminals();
+  resetPurged();
 });
 
 async function openReady() {
@@ -305,6 +314,79 @@ describe("cloud workspace session page", () => {
     );
     await screen.findByTestId("cloud-agents-stub");
     expect(agentViews.at(-1)).toMatchObject({ scope: { organizationId: "org-1", workspaceId: "ws-asleep" }, workspaceState: "suspended" });
+  });
+
+  it("lists archived workspaces apart, with their deadline and what the final save did, and unarchives without starting compute", async () => {
+    const archived = workspace("ws-old", "archived");
+    const deleteAfter = Date.now() + 12.5 * 86_400_000;
+    vi.mocked(api.cloudWorkspaces).mockResolvedValue({
+      workspaces: [
+        workspace("ws-ready", "ready"),
+        {
+          workspace: { ...archived.workspace, archivedAt: 1, deleteAfter },
+          latestOperation: { id: "op-a", workspaceId: "ws-old", action: "archive", state: "succeeded", checkpoint: "timed-out" },
+        },
+      ],
+      tombstones: [],
+    } as never);
+    vi.mocked(api.cloudWorkspaceUnarchive).mockResolvedValue({} as never);
+    render(<CloudSessionPage onBack={() => undefined} />);
+    const row = await screen.findByTestId("cloud-archived-row");
+    expect(screen.getAllByTestId("cloud-workspace-row")).toHaveLength(1);
+    expect(screen.getByTestId("cloud-archive-deadline").textContent).toMatch(/^Deleted automatically on .* \(in 12 days\)\.$/);
+    expect(row.textContent).toMatch(/did not finish saving within a minute/);
+    // Reading an archived workspace never starts it.
+    expect(row.textContent).not.toMatch(/Resume/);
+    fireEvent.click(screen.getByRole("button", { name: /Unarchive/ }));
+    await waitFor(() => expect(api.cloudWorkspaceUnarchive).toHaveBeenCalledWith("ws-old"));
+    await waitFor(() => expect(api.cloudWorkspaces).toHaveBeenCalledTimes(2));
+    expect(workspaceConnection).not.toHaveBeenCalled();
+  });
+
+  it("a failed archive stays in the archive list to retry", async () => {
+    const failed = workspace("ws-stuck", "attention-required");
+    vi.mocked(api.cloudWorkspaces).mockResolvedValue({
+      workspaces: [
+        {
+          workspace: { ...failed.workspace, archivedAt: 1, deleteAfter: Date.now() + 86_400_000 * 30 },
+          latestOperation: { id: "op-a", workspaceId: "ws-stuck", action: "archive", state: "failed", errorCode: "cloud_provider_unavailable" },
+        },
+      ],
+      tombstones: [],
+    } as never);
+    render(<CloudSessionPage onBack={() => undefined} />);
+    await screen.findByText(/The archive did not finish: The provider did not answer/);
+    expect(screen.getByRole("button", { name: /Retry archive/ })).toBeTruthy();
+  });
+
+  it("purges a deleted workspace from the tombstone list and says what went with it", async () => {
+    vi.mocked(api.cloudWorkspaces)
+      .mockResolvedValueOnce({ workspaces: [workspace("ws-ready", "ready"), workspace("ws-gone", "suspended")], tombstones: [] } as never)
+      .mockResolvedValue({
+        workspaces: [workspace("ws-ready", "ready")],
+        tombstones: [{ id: "ws-gone", orgId: "org-1", deletedAt: 5, expiresAt: 6 }],
+      } as never);
+    vi.mocked(api.cloudAgentPurgeWorkspace).mockResolvedValue({ removed: true, unsentCommands: 1, cachedTabs: 1 });
+    vi.mocked(api.cloudWorkspaceUnarchive).mockResolvedValue({} as never);
+    render(<CloudSessionPage onBack={() => undefined} />);
+    await screen.findByText("Workspace ws-gone");
+    // Any reload (here the create form closing) reads the list again.
+    fireEvent.click(screen.getByRole("button", { name: /New workspace/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Close the new workspace form" }));
+    const notice = await screen.findByTestId("cloud-tombstone-notice");
+    expect(notice.textContent).toMatch(/“Workspace ws-gone” was permanently deleted\. .*1 agent message that never reached it/);
+    expect(screen.queryByText("Workspace ws-gone")).toBeNull();
+    expect(api.cloudAgentPurgeWorkspace).toHaveBeenCalledWith("org-1", "ws-gone");
+  });
+
+  it("offers stop, archive and delete on a running workspace", async () => {
+    vi.mocked(api.cloudWorkspaceDisposition).mockReturnValue(new Promise(() => undefined));
+    render(<CloudSessionPage onBack={() => undefined} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Archive Workspace ws-ready" }));
+    expect(await screen.findByTestId("cloud-lifecycle-dialog")).toBeTruthy();
+    expect(screen.getByTestId("cloud-lifecycle-summary").dataset.action).toBe("archive");
+    // A suspended workspace cannot be stopped again.
+    expect(screen.queryByRole("button", { name: "Stop Workspace ws-asleep" })).toBeNull();
   });
 
   it("does not offer a session for a workspace that is still provisioning", async () => {

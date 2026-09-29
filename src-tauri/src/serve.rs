@@ -247,15 +247,20 @@ fn run(options: Options) -> Result<()> {
         (None, None) => None,
     };
     // The self-test checks the local runtime only.
+    let mut agents = None;
     if let (Some(link), Some(root), false) = (link, &runtime.project_root, options.self_test) {
-        let agents = match start_cloud_agents(&runtime, root, &data_dir, cloud.as_ref(), options.relay_link.as_deref()) {
+        agents = match start_cloud_agents(&runtime, root, &data_dir, cloud.as_ref(), options.relay_link.as_deref()) {
             Ok(agents) => Some(agents),
             Err(error) => {
                 log::error!("cloud agent tabs: {error:#}");
                 None
             }
         };
-        start_relay_host(&runtime, link, root, &data_dir, agents);
+        start_relay_host(&runtime, link, root, &data_dir, agents.clone());
+    }
+    // An archive asks for a final checkpoint before compute stops.
+    if let (Some((cloud, origin)), false) = (&cloud, options.self_test) {
+        crate::cloud_quiesce::spawn(cloud.clone(), origin, agents);
     }
     let outcome = if options.self_test {
         self_test(&runtime, &tokio)
