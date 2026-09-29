@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use super::api::{Ack, AckOutcome, CallError, Lease};
 use super::receipts::{FollowUp, Known, Receipt};
 use super::{crypto, now_ms, CloudAgents, DecisionError, Settings};
+use crate::remote::collab::{LeaseRefusal, Role};
 
 const LEASE_LIMIT: u32 = 16;
 const ATTACHED_POLL: Duration = Duration::from_secs(3);
@@ -128,10 +129,32 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
     let Some(tab) = agents.tab(&lease.tab_id) else {
         return finish(agents, lease, "rejected", Some("tab-unknown"), json!({}));
     };
-    // Participants may act only in tabs shared with them; none are yet
-    // (the same rule as live RPC, which shares nothing with `participate`).
-    if lease.actor.authority != "manage" {
+    // The actor's role now: stamped by the API at lease time and narrowed
+    // by the runtime's latest member list (contract §20.4-20.5).
+    let access = agents.actor_access(&lease.actor);
+    let allowed = match lease.kind.as_str() {
+        "permission-decision" => access.can_approve,
+        _ => access.can_drive(),
+    };
+    if !allowed {
         return finish(agents, lease, "rejected", Some("forbidden"), json!({}));
+    }
+    // Competing input is serialized by the tab's driver lease: a send or
+    // steer claims it, and nobody else sends or stops while it is held.
+    if let (Some(collab), "send" | "steer" | "stop") = (agents.collab(), lease.kind.as_str()) {
+        let busy = agents.ops.busy(&tab.session_id, &lease.tab_id);
+        let now = now_ms();
+        let held = if lease.kind == "stop" {
+            collab.lease(&lease.tab_id, now, busy).filter(|held| held.holder_id != lease.actor.user_id && access.role != Role::Manager)
+        } else {
+            collab.claim(&lease.tab_id, &lease.actor.user_id, now, busy, false).err().and_then(|refusal| match refusal {
+                LeaseRefusal::Held(held) => Some(held),
+                LeaseRefusal::Forbidden => None,
+            })
+        };
+        if let Some(held) = held {
+            return finish(agents, lease, "rejected", Some("lease-held"), json!({ "holderId": held.holder_id }));
+        }
     }
     if let Err(error) = agents.receipts.applying(id) {
         // Without the durable mark the outcome could not be proven later,
@@ -187,7 +210,12 @@ fn apply(agents: &CloudAgents, lease: &Lease, session_id: &str, plaintext: &Valu
             }
             let queue = lease.kind == "send" && (ops.busy(session_id, tab_id) || !agents.follow_ups.list(tab_id).is_empty());
             if queue {
-                let follow_up = FollowUp { client_command_id: lease.client_command_id.clone(), session_id: session_id.to_string(), text };
+                let follow_up = FollowUp {
+                    client_command_id: lease.client_command_id.clone(),
+                    session_id: session_id.to_string(),
+                    text,
+                    actor_id: lease.actor.user_id.clone(),
+                };
                 if let Err(error) = agents.follow_ups.push(tab_id, follow_up) {
                     return failed(error);
                 }

@@ -125,6 +125,9 @@ pub enum ClientState {
         runtime_version: String,
         capabilities: Vec<String>,
         authority: String,
+        /// The person's collaboration role when `collab/1` was granted
+        /// (`{ userId, role, canApprove }`, saas contract §20.5).
+        you: Option<Value>,
     },
     Reconnecting { attempt: u32, reason: String, retry_in_ms: u64 },
     UpdateRequired,
@@ -510,6 +513,7 @@ async fn establish(connection: &mut Connection, attached: &Attached, was_invite:
             runtime_version: hello["runtime"]["version"].as_str().unwrap_or_default().to_string(),
             capabilities: serde_json::from_value(hello["capabilities"].clone()).unwrap_or_default(),
             authority: hello["authority"].as_str().unwrap_or_default().to_string(),
+            you: hello.get("you").filter(|you| you.is_object()).cloned(),
         },
         installed,
     ))

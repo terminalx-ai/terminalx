@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 
 use super::files::WorkspaceFiles;
 use super::git::WorkspaceGit;
+use super::collab::{self, Access, Change, Collaboration, LeaseRefusal, Role};
 use super::protocol::{self, Authority, IdempotencyCache, RpcError, PROTOCOL};
 use crate::cloud_agents::CloudAgents;
 use crate::events::AgentEvent;
@@ -50,6 +51,9 @@ pub const MAX_QUEUED_OUTPUT: usize = 4 * 1024 * 1024;
 const REPLAY_CHUNK: usize = 256 * 1024;
 /// Distinct writers remembered per terminal for resend detection.
 const MAX_WRITERS: usize = 64;
+/// Methods a `participate` attachment could not call before PRO-30. With no
+/// member list from the API (an older API) they stay closed to it.
+const SHARED_ONLY: &[&str] = &["keys.get", "pty.write", "pty.resize", "pty.control"];
 
 /// One attached client connection.
 pub struct Peer {
@@ -58,12 +62,26 @@ pub struct Peer {
     /// reconnect of the same attachment replays, another attachment cannot.
     pub device_id: String,
     pub authority: Authority,
+    /// The person the attachment belongs to (the API's `userId`); absent
+    /// from an older API or a development link without it.
+    pub user_id: Option<String>,
     outbound: mpsc::UnboundedSender<(Value, usize)>,
     /// Terminal output bytes queued for this connection that its transport
     /// has not taken yet. Past [`MAX_QUEUED_OUTPUT`] a terminal stream is
     /// ended with `pty.lagged` instead of growing without bound.
     queued: Arc<AtomicUsize>,
     granted: Mutex<Option<HashSet<String>>>,
+    /// What this connection is looking at (`presence.update`).
+    presence: Mutex<Presence>,
+    /// Raised when the runtime closes the connection (access revoked).
+    closed: tokio::sync::Notify,
+}
+
+#[derive(Clone)]
+struct Presence {
+    tab_id: Option<String>,
+    activity: &'static str,
+    since: u64,
 }
 
 static NEXT_PEER: AtomicU64 = AtomicU64::new(1);
@@ -84,17 +102,34 @@ impl Notifications {
 
 impl Peer {
     pub fn new(device_id: String, authority: Authority) -> (Arc<Self>, Notifications) {
+        Self::for_user(device_id, authority, None)
+    }
+
+    pub fn for_user(device_id: String, authority: Authority, user_id: Option<String>) -> (Arc<Self>, Notifications) {
         let (outbound, receiver) = mpsc::unbounded_channel();
         let queued = Arc::new(AtomicUsize::new(0));
         let peer = Arc::new(Self {
             id: NEXT_PEER.fetch_add(1, Ordering::Relaxed),
             device_id,
             authority,
+            user_id: user_id.filter(|user| !user.is_empty()),
             outbound,
             queued: queued.clone(),
             granted: Mutex::new(None),
+            presence: Mutex::new(Presence { tab_id: None, activity: "viewing", since: crate::cloud_agents::now_ms() }),
+            closed: tokio::sync::Notify::new(),
         });
         (peer, Notifications { receiver, queued })
+    }
+
+    /// Resolves once the runtime has closed this connection; the transport
+    /// then hangs up.
+    pub async fn closed(&self) {
+        self.closed.notified().await
+    }
+
+    fn granted(&self, capability: &str) -> bool {
+        self.granted.lock().unwrap().as_ref().is_some_and(|granted| granted.contains(capability))
     }
 
     fn notify(&self, event: &str, params: Value) {
@@ -120,9 +155,12 @@ struct PtyState {
     cols: u16,
     rows: u16,
     /// The device whose input and size the terminal follows. Only it may
-    /// write or resize; another manage attachment takes over with
-    /// `pty.control`. Participants never hold it.
+    /// write or resize; another manage attachment, or a participant the
+    /// workspace is shared with as a driver, takes over with `pty.control`.
     controller: Option<String>,
+    /// The controlling person and their attachment's authority, shown to
+    /// everyone watching and re-checked when roles change.
+    controller_user: Option<(Option<String>, Authority)>,
     ring: VecDeque<u8>,
     /// Byte offset one past the last byte ever written by the terminal.
     end: u64,
@@ -203,9 +241,9 @@ pub struct WorkspaceRpc {
     /// racing its original waits for the cached result instead of running
     /// twice, while unrelated mutations proceed.
     in_flight: Mutex<HashMap<(String, String), Gate>>,
-    /// Sessions a `participate` attachment may see. Nothing shares a session
-    /// yet, so participants see none (fail closed).
-    shared_sessions: Mutex<HashSet<String>>,
+    /// Roles, tab leases and notes (PRO-30). A `participate` attachment sees
+    /// sessions only while the workspace is shared with its person.
+    pub collab: Arc<Collaboration>,
     /// Agent tabs, keys and the mailbox (PRO-22); absent in tests without them.
     agents: OnceLock<Arc<CloudAgents>>,
     /// Connections that said hello, for workspace-wide notifications.
@@ -240,7 +278,7 @@ impl WorkspaceRpc {
             subscriptions: Mutex::new(HashMap::new()),
             idempotency: Mutex::new(IdempotencyCache::default()),
             in_flight: Mutex::new(HashMap::new()),
-            shared_sessions: Mutex::new(HashSet::new()),
+            collab: Arc::new(Collaboration::new()),
             agents: OnceLock::new(),
             peers: Mutex::new(HashMap::new()),
             tabs_changed: Arc::new(tokio::sync::Notify::new()),
@@ -277,6 +315,12 @@ impl WorkspaceRpc {
         let notify = rpc.tabs_changed.clone();
         sink.listen(crate::cloud_agents::TABS_CHANGED, Box::new(move |_| notify.notify_one()));
         let weak = Arc::downgrade(&rpc);
+        rpc.collab.listen(Box::new(move |change| {
+            if let Some(rpc) = weak.upgrade() {
+                rpc.on_collab_change(change);
+            }
+        }));
+        let weak = Arc::downgrade(&rpc);
         sink.listen(
             crate::cloud_agents::KEYS_CHANGED,
             Box::new(move |_| {
@@ -304,6 +348,7 @@ impl WorkspaceRpc {
     /// Serve agent tabs and keys from `agents`, and tell connections when
     /// the tab list changes. Call inside a Tokio runtime.
     pub fn set_agents(self: &Arc<Self>, agents: Arc<CloudAgents>) {
+        agents.share_collaboration(self.collab.clone());
         if self.agents.set(agents).is_err() {
             return;
         }
@@ -342,15 +387,142 @@ impl WorkspaceRpc {
     }
 
     fn broadcast_tabs(&self, tabs: &[crate::cloud_agents::AgentTabInfo]) {
-        let peers = self.live_peers();
-        let shared = self.shared_sessions.lock().unwrap().clone();
-        for peer in peers {
-            if !peer.granted.lock().unwrap().as_ref().is_some_and(|granted| granted.contains("session/1")) {
+        for peer in self.live_peers() {
+            if !peer.granted("session/1") {
                 continue;
             }
-            let visible: Vec<_> =
-                tabs.iter().filter(|tab| peer.authority == Authority::Manage || shared.contains(&tab.session_id)).collect();
+            let visible: Vec<_> = if self.access(&peer).can_view() { tabs.iter().collect() } else { Vec::new() };
             peer.notify("session.tabs", json!({ "tabs": visible }));
+        }
+    }
+
+    /// A connection's access: its attachment's authority and, for a
+    /// participant, the role the workspace is shared with them in.
+    pub fn access(&self, peer: &Peer) -> Access {
+        self.collab.access_for(peer.authority, peer.user_id.as_deref())
+    }
+
+    fn you(&self, peer: &Peer) -> Value {
+        let access = self.access(peer);
+        json!({ "userId": peer.user_id, "role": access.role, "canApprove": access.can_approve })
+    }
+
+    /// Apply the API's latest member list (`collaboration` on `/refresh`):
+    /// close connections of people who lost access, take terminal control
+    /// and tab leases from people who may no longer drive, drop their queued
+    /// follow-ups, and rotate the content key when anyone lost access.
+    /// `None` (the API did not say) changes nothing.
+    pub fn set_collaboration(&self, members: Option<collab::Members>) {
+        let Some(members) = members else { return };
+        // A version this runtime cannot read fails closed.
+        let map = members.into_map().unwrap_or_else(|| {
+            log::warn!("a collaboration list of an unknown version gives participants no access");
+            Default::default()
+        });
+        let first = !self.collab.known();
+        let diff = self.collab.set_members(map);
+        if diff.changed.is_empty() && !first {
+            return;
+        }
+        for peer in &self.live_peers() {
+            let Some(user) = peer.user_id.as_deref() else { continue };
+            if peer.authority == Authority::Participate && diff.lost.iter().any(|lost| lost == user) {
+                log::info!("closing a connection whose person no longer has access to the workspace");
+                peer.closed.notify_one();
+            } else if peer.granted("collab/1") && diff.changed.iter().any(|changed| changed == user) {
+                peer.notify("collab.you", json!({ "you": self.you(peer) }));
+            }
+        }
+        self.revalidate_terminal_control();
+        if let Some(agents) = self.agents.get() {
+            agents.revalidate_follow_ups();
+            if !diff.lost.is_empty() {
+                match agents.rotate_key() {
+                    Ok(key_id) => log::info!("rotated the workspace content key to {key_id} after access was revoked"),
+                    Err(error) => log::error!("rotate the workspace content key: {error:#}"),
+                }
+            }
+        }
+        self.broadcast_presence();
+        self.tabs_changed.notify_one();
+    }
+
+    /// A participant who may no longer drive loses the terminals they
+    /// control; everyone watching is told.
+    fn revalidate_terminal_control(&self) {
+        let mut ptys = self.ptys.lock().unwrap();
+        for (pty_id, pty) in ptys.iter_mut() {
+            let Some((user, authority)) = pty.controller_user.clone() else { continue };
+            if self.collab.access_for(authority, user.as_deref()).can_drive() {
+                continue;
+            }
+            pty.controller = None;
+            pty.controller_user = None;
+            for (subscription_id, subscriber) in &pty.subscribers {
+                subscriber.notify(
+                    "pty.control",
+                    json!({ "subscriptionId": subscription_id, "ptyId": pty_id, "control": "none", "controllerId": Value::Null }),
+                );
+            }
+        }
+    }
+
+    fn on_collab_change(&self, change: Change) {
+        let (event, params) = match change {
+            Change::Lease { tab_id, lease } => {
+                self.tabs_changed.notify_one();
+                ("collab.lease", json!({ "tabId": tab_id, "lease": lease }))
+            }
+            Change::Note(note) => ("notes.posted", json!({ "note": note })),
+        };
+        for peer in self.live_peers() {
+            if peer.granted("collab/1") && self.access(&peer).can_view() {
+                peer.notify(event, params.clone());
+            }
+        }
+    }
+
+    /// One row per person with access, over all their connections.
+    fn participants(&self) -> Vec<Value> {
+        let mut people: std::collections::BTreeMap<String, (Access, usize, Presence)> = std::collections::BTreeMap::new();
+        for peer in self.live_peers() {
+            let Some(user) = peer.user_id.clone() else { continue };
+            let access = self.access(&peer);
+            if !peer.granted("collab/1") || !access.can_view() {
+                continue;
+            }
+            let presence = peer.presence.lock().unwrap().clone();
+            let entry = people.entry(user).or_insert((access, 0, presence.clone()));
+            entry.1 += 1;
+            if access.role > entry.0.role {
+                entry.0 = access;
+            }
+            if presence.since > entry.2.since {
+                entry.2 = presence;
+            }
+        }
+        people
+            .into_iter()
+            .map(|(user, (access, surfaces, presence))| {
+                json!({
+                    "userId": user,
+                    "role": access.role,
+                    "canApprove": access.can_approve,
+                    "surfaces": surfaces,
+                    "tabId": presence.tab_id,
+                    "activity": presence.activity,
+                    "since": presence.since,
+                })
+            })
+            .collect()
+    }
+
+    fn broadcast_presence(&self) {
+        let participants = self.participants();
+        for peer in self.live_peers() {
+            if peer.granted("collab/1") && self.access(&peer).can_view() {
+                peer.notify("collab.presence", json!({ "participants": participants }));
+            }
         }
     }
 
@@ -380,7 +552,11 @@ impl WorkspaceRpc {
                     agents.client_attached();
                 }
             }
-            return Ok(json!({
+            let collab = granted.iter().any(|capability| capability == "collab/1");
+            if collab {
+                self.broadcast_presence();
+            }
+            let mut hello = json!({
                 "protocol": PROTOCOL,
                 "runtime": { "version": self.version, "runtimeGeneration": self.generation(), "epoch": self.epoch },
                 "capabilities": granted,
@@ -392,7 +568,11 @@ impl WorkspaceRpc {
                     "fsPartBytes": super::files::PART_BYTES,
                     "fsMaxFileBytes": super::files::MAX_FILE_BYTES,
                 },
-            }));
+            });
+            if collab {
+                hello["you"] = self.you(peer);
+            }
+            return Ok(hello);
         }
         let Some(spec) = protocol::find_method(method) else {
             return Err(RpcError::new("method_not_found", format!("{method} is not a workspace method")));
@@ -406,6 +586,9 @@ impl WorkspaceRpc {
         }
         if peer.authority < spec.authority {
             return Err(RpcError::forbidden(format!("{method} needs manage authority")));
+        }
+        if peer.authority == Authority::Participate {
+            self.authorize_participant(peer, spec)?;
         }
         if !spec.idempotent {
             return self.execute(peer, method, params).await;
@@ -435,6 +618,31 @@ impl WorkspaceRpc {
             in_flight.remove(&key);
         }
         result
+    }
+
+    /// What a participant's role allows (contract §20.1). Before the API
+    /// has listed members, participants keep exactly what they had before
+    /// sharing existed.
+    fn authorize_participant(&self, peer: &Peer, spec: &protocol::Method) -> Result<(), RpcError> {
+        let method = spec.name;
+        if !self.collab.known() && spec.capability != "collab/1" && !SHARED_ONLY.contains(&method) {
+            return Ok(());
+        }
+        let needed = match method {
+            "pty.write" | "pty.resize" | "pty.control" | "lease.acquire" | "lease.release" => Role::Driver,
+            "lease.takeOver" => Role::Manager,
+            _ => Role::Viewer,
+        };
+        let access = self.access(peer);
+        if access.role >= needed {
+            return Ok(());
+        }
+        let what = match needed {
+            Role::Manager => "a workspace manager",
+            Role::Driver => "driver access to the workspace",
+            _ => "the workspace to be shared with you",
+        };
+        Err(RpcError::forbidden(format!("{method} needs {what}")).with_data(json!({ "role": access.role })))
     }
 
     async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
@@ -487,6 +695,13 @@ impl WorkspaceRpc {
                 Ok(json!({}))
             }
             "keys.get" => Ok(self.agents()?.keys.handout(crate::cloud_agents::now_ms())),
+            "collab.state" => self.collab_state(peer),
+            "presence.update" => self.presence_update(peer, params),
+            "notes.list" => self.notes_list(params),
+            "notes.post" => self.notes_post(peer, params),
+            "lease.acquire" => self.lease_acquire(peer, params, false),
+            "lease.takeOver" => self.lease_acquire(peer, params, true),
+            "lease.release" => self.lease_release(peer, params),
             "keys.rotate" => {
                 let key_id = self.agents()?.rotate_key().map_err(RpcError::internal)?;
                 Ok(json!({ "currentKeyId": key_id }))
@@ -501,6 +716,9 @@ impl WorkspaceRpc {
         if self.peers.lock().unwrap().remove(&peer.id).is_some() {
             if let Some(agents) = self.agents.get() {
                 agents.client_detached();
+            }
+            if peer.granted("collab/1") {
+                self.broadcast_presence();
             }
         }
         let doomed: Vec<(String, Subscription)> = {
@@ -546,6 +764,93 @@ impl WorkspaceRpc {
         format!("sub-{}", uuid::Uuid::new_v4().simple())
     }
 
+    // ---- collaboration (collab/1, PRO-30) -----------------------------------
+
+    /// Whether the tab's turn is running, which keeps its lease alive.
+    fn tab_busy(&self, tab_id: &str) -> bool {
+        self.agents
+            .get()
+            .and_then(|agents| agents.tab(tab_id))
+            .is_some_and(|tab| agents_busy(&self.agents, &tab.session_id, tab_id))
+    }
+
+    /// An agent tab of this runtime, named by exact id.
+    fn known_tab(&self, params: &Value) -> Result<String, RpcError> {
+        let tab_id = required_str(params, "tabId")?;
+        self.agents()?.tab(tab_id).map(|tab| tab.tab_id).ok_or_else(|| RpcError::not_found("no such tab"))
+    }
+
+    fn collab_state(&self, peer: &Peer) -> Result<Value, RpcError> {
+        let now = crate::cloud_agents::now_ms();
+        let leases = self.collab.leases(now, &|tab_id| self.tab_busy(tab_id));
+        Ok(json!({ "you": self.you(peer), "participants": self.participants(), "leases": leases }))
+    }
+
+    fn presence_update(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let tab_id = match params.get("tabId") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(tab)) if (1..=128).contains(&tab.len()) => Some(tab.clone()),
+            Some(_) => return Err(RpcError::invalid("tabId must be a tab id or null")),
+        };
+        let activity = match params.get("activity").and_then(Value::as_str) {
+            None | Some("viewing") => "viewing",
+            Some("typing") => "typing",
+            Some(_) => return Err(RpcError::invalid("activity must be viewing or typing")),
+        };
+        let changed = {
+            let mut presence = peer.presence.lock().unwrap();
+            let changed = presence.tab_id != tab_id || presence.activity != activity;
+            *presence = Presence { tab_id, activity, since: crate::cloud_agents::now_ms() };
+            changed
+        };
+        if changed {
+            self.broadcast_presence();
+        }
+        Ok(json!({}))
+    }
+
+    fn notes_list(&self, params: Value) -> Result<Value, RpcError> {
+        let tab_id = self.known_tab(&params)?;
+        let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(100).clamp(1, 200) as usize;
+        let (notes, more) = self.collab.notes(&tab_id, params.get("beforeId").and_then(Value::as_str), limit);
+        Ok(json!({ "notes": notes, "more": more }))
+    }
+
+    /// A note for the people in the workspace. It never reaches the agent:
+    /// it is not typed, queued or checkpointed.
+    fn notes_post(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let tab_id = self.known_tab(&params)?;
+        let author = peer.user_id.as_deref().ok_or_else(|| RpcError::forbidden("notes need a signed-in person"))?;
+        let text = required_str(&params, "text")?;
+        if text.trim().is_empty() || text.chars().count() > collab::MAX_NOTE_CHARS {
+            return Err(RpcError::invalid(format!("a note is 1 to {} characters", collab::MAX_NOTE_CHARS)));
+        }
+        let note = self.collab.post_note(&tab_id, author, text, crate::cloud_agents::now_ms()).map_err(RpcError::internal)?;
+        Ok(json!({ "note": note }))
+    }
+
+    fn lease_acquire(&self, peer: &Peer, params: Value, take_over: bool) -> Result<Value, RpcError> {
+        let tab_id = self.known_tab(&params)?;
+        let user = peer.user_id.as_deref().ok_or_else(|| RpcError::forbidden("driving needs a signed-in person"))?;
+        let access = self.access(peer);
+        if !access.can_drive() || take_over && access.role != Role::Manager {
+            return Err(lease_refusal(LeaseRefusal::Forbidden));
+        }
+        let busy = self.tab_busy(&tab_id);
+        let lease = self.collab.claim(&tab_id, user, crate::cloud_agents::now_ms(), busy, take_over).map_err(lease_refusal)?;
+        Ok(json!({ "lease": lease }))
+    }
+
+    fn lease_release(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let tab_id = self.known_tab(&params)?;
+        let user = peer.user_id.as_deref().unwrap_or("");
+        let force = self.access(peer).role == Role::Manager;
+        if !self.collab.release(&tab_id, user, force) && self.collab.lease(&tab_id, crate::cloud_agents::now_ms(), true).is_some() {
+            return Err(RpcError::forbidden("only the driver or a manager releases the lease"));
+        }
+        Ok(json!({}))
+    }
+
     // ---- terminals -------------------------------------------------------
 
     /// What a client needs to show and resume one terminal.
@@ -563,6 +868,7 @@ impl WorkspaceRpc {
             "exited": pty.exit.is_some(),
             "exitCode": pty.exit.flatten(),
             "control": pty.control_for(peer),
+            "controllerId": pty.controller_user.as_ref().and_then(|(user, _)| user.clone()),
         })
     }
 
@@ -611,6 +917,7 @@ impl WorkspaceRpc {
                     cols: p.cols,
                     rows: p.rows,
                     controller: Some(peer.device_id.clone()),
+                    controller_user: Some((peer.user_id.clone(), peer.authority)),
                     ring: VecDeque::new(),
                     end: 0,
                     exit: None,
@@ -778,13 +1085,19 @@ impl WorkspaceRpc {
         let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
         let changed = pty.controller.as_deref() != Some(peer.device_id.as_str());
         pty.controller = Some(peer.device_id.clone());
+        pty.controller_user = Some((peer.user_id.clone(), peer.authority));
         // Control first, so a device that just lost it takes the new size as
         // a viewer instead of ignoring it as its own.
         if changed {
             for (subscription_id, subscriber) in &pty.subscribers {
                 subscriber.notify(
                     "pty.control",
-                    json!({ "subscriptionId": subscription_id, "ptyId": pty_id, "control": pty.control_for(subscriber) }),
+                    json!({
+                        "subscriptionId": subscription_id,
+                        "ptyId": pty_id,
+                        "control": pty.control_for(subscriber),
+                        "controllerId": peer.user_id,
+                    }),
                 );
             }
         }
@@ -1024,13 +1337,12 @@ impl WorkspaceRpc {
 
     fn visible_sessions(&self, peer: &Peer) -> Result<Vec<SessionEntry>, RpcError> {
         let root = self.root.to_string_lossy();
-        let shared = self.shared_sessions.lock().unwrap().clone();
-        Ok(index::load()
-            .map_err(RpcError::internal)?
-            .into_iter()
-            .filter(|session| session.project_path == root)
-            .filter(|session| peer.authority == Authority::Manage || shared.contains(&session.id))
-            .collect())
+        // Sharing is workspace-wide: a person it is shared with sees every
+        // session, anyone else none.
+        if !self.access(peer).can_view() {
+            return Ok(Vec::new());
+        }
+        Ok(index::load().map_err(RpcError::internal)?.into_iter().filter(|session| session.project_path == root).collect())
     }
 
     fn visible_session(&self, peer: &Peer, session_id: &str) -> Result<SessionEntry, RpcError> {
@@ -1159,6 +1471,16 @@ impl WorkspaceRpc {
         if text.trim().is_empty() {
             return Err(RpcError::invalid("text is empty"));
         }
+        if peer.authority == Authority::Participate {
+            // The same rule as a mailbox send (contract §20.5).
+            let user = peer
+                .user_id
+                .as_deref()
+                .filter(|_| self.access(peer).can_drive())
+                .ok_or_else(|| RpcError::forbidden("sending needs driver access to the workspace"))?;
+            let busy = self.manager()?.is_running(&session.id, &tab.id);
+            self.collab.claim(&tab.id, user, crate::cloud_agents::now_ms(), busy, false).map_err(lease_refusal)?;
+        }
         let outcome = self.manager()?.send(&session.id, &tab.id, text.to_string(), Vec::new()).map_err(RpcError::internal)?;
         Ok(json!({ "sessionId": session.id, "tabId": tab.id, "outcome": outcome }))
     }
@@ -1230,8 +1552,7 @@ impl WorkspaceRpc {
     }
 
     fn session_tabs(&self, peer: &Peer) -> Result<Value, RpcError> {
-        let visible: HashSet<String> = self.visible_sessions(peer)?.into_iter().map(|session| session.id).collect();
-        let tabs: Vec<_> = self.agents()?.tabs().into_iter().filter(|tab| visible.contains(&tab.session_id)).collect();
+        let tabs = if self.access(peer).can_view() { self.agents()?.tabs() } else { Vec::new() };
         Ok(json!({ "tabs": tabs }))
     }
 
@@ -1263,6 +1584,9 @@ impl WorkspaceRpc {
     /// Runs on the emitting thread under the tab's lock: only notify.
     fn on_tab_status(&self, status: Value) {
         let (Some(session_id), Some(tab_id)) = (status["sessionId"].as_str(), status["tabId"].as_str()) else { return };
+        if !matches!(status["status"].as_str(), Some("in_progress" | "waiting")) {
+            self.collab.turn_settled(tab_id, crate::cloud_agents::now_ms());
+        }
         let subs = self.session_subs.lock().unwrap();
         for (subscription_id, sub) in subs.iter() {
             if sub.session_id == session_id && sub.tab_id == tab_id {
@@ -1310,6 +1634,19 @@ impl WorkspaceRpc {
             return Err(expired());
         }
         seq.parse().map_err(|_| expired())
+    }
+}
+
+fn agents_busy(agents: &OnceLock<Arc<CloudAgents>>, session_id: &str, tab_id: &str) -> bool {
+    agents.get().is_some_and(|agents| agents.ops.busy(session_id, tab_id))
+}
+
+fn lease_refusal(refusal: LeaseRefusal) -> RpcError {
+    match refusal {
+        LeaseRefusal::Held(lease) => {
+            RpcError::new("lease_held", "someone else is driving this tab").with_data(json!({ "lease": lease }))
+        }
+        LeaseRefusal::Forbidden => RpcError::forbidden("driving needs driver access to the workspace"),
     }
 }
 

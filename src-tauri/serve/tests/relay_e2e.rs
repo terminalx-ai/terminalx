@@ -32,6 +32,14 @@
 //! a turn finishing while nobody is attached (and its checkpoint), and a
 //! runtime restart (receipts, keys and the dead turn reported honestly).
 //!
+//! PRO-30 (`a_shared_workspace_…`): two members the workspace is shared
+//! with (a driver and an approving viewer), a member it is not shared with,
+//! and the admin: roles from the API's list, presence, attributed notes that
+//! never reach the agent, the driver lease serializing competing sends,
+//! permission decisions by approval right, and a mid-turn revocation that
+//! closes the connection, drops the queued input and rotates the key, then a
+//! reconnect under the new role.
+//!
 //! PRO-24 (`cloud_files_…`): files in bounded parts, change notifications,
 //! a save refused after an agent's edit and made after a reconnect, a staged
 //! large write, bounded search, symlink escapes and a participant's limits.
@@ -1058,6 +1066,211 @@ async fn cloud_agent_tabs_run_through_the_mailbox_and_survive_disconnects_and_re
     desk.until_tab(&mut feeds, &a_tab, "the resumed reply", |f| has(f, "after the restart")).await;
     desk.supervisor.stop();
     drop(runtime);
+}
+
+// ---------------------------------------------------------------- PRO-30
+
+fn you(state: &ClientState) -> Value {
+    match state {
+        ClientState::Connected { you, .. } => you.clone().unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
+}
+
+/// PRO-30: a workspace shared with two members, seen and driven by several
+/// people at once through the relay.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs terminalx-saas, bun and Redis: scripts/remote-runtime/e2e.sh"]
+async fn a_shared_workspace_serializes_input_and_stops_access_when_revoked() {
+    use common::agent::{AgentWorld, Serve};
+    use common::mailbox::FakeMailbox;
+
+    assert!(std::process::Command::new("python3").arg("--version").output().is_ok(), "the fake agent needs python3");
+    let harness = Harness::start();
+    let world = AgentWorld::new();
+    let mailbox = FakeMailbox::start(7);
+    let mut secret = [0u8; 32];
+    secret[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    secret[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    let relay_host_id = relay_host_id_for_secret(secret);
+    let relay_token = harness.post("/runtime-token", json!({ "relayHostId": relay_host_id, "runtimeGeneration": 7 }))["relayToken"].as_str().unwrap().to_string();
+    let link_dir = tempfile::tempdir().unwrap();
+    let link = link_dir.path().join("link.json");
+    let pairing_dir = link_dir.path().join("link.json.attachments");
+    // The API's side, played by the test: attachments with their person, and
+    // who the workspace is shared with (`collaboration`, contract §20.3).
+    let attachments = Mutex::new(Vec::<Value>::new());
+    let members = Mutex::new(json!([
+        { "userId": "admin", "role": "manager", "canApprove": true },
+        { "userId": "alice", "role": "driver", "canApprove": false },
+        { "userId": "bob", "role": "viewer", "canApprove": true },
+    ]));
+    let write = || {
+        let temporary = link.with_extension("new");
+        let contents = json!({
+            "v": 1, "hostSecretB64": STANDARD.encode(secret), "relayToken": relay_token, "directorUrl": harness.director,
+            "attachments": *attachments.lock().unwrap(), "mailbox": mailbox.link_section(),
+            "collaboration": { "v": 1, "members": *members.lock().unwrap() },
+        });
+        std::fs::write(&temporary, contents.to_string()).unwrap();
+        std::fs::rename(temporary, &link).unwrap();
+    };
+    write();
+    let mut command = world.command();
+    command.args(["--runtime-kind", "cloud-workspace", "--relay-link"]).arg(&link);
+    let serve = Serve::start(command, &world.data);
+    common::agent::wait_until("relay registration", || {
+        serve.lines.lock().unwrap().iter().rev().find(|l| l["type"] == "relay" && l["status"]["state"] == "registered").cloned()
+    });
+    let open = |user: &str, scope: &str| {
+        let mut list = attachments.lock().unwrap();
+        let id = format!("att-share-{}", list.len() + 1);
+        let device = format!("device-{user}-{}", list.len() + 1);
+        let mut entry = attachment(&id, &device, &uuid::Uuid::new_v4().simple().to_string(), scope);
+        entry["userId"] = json!(user);
+        list.push(entry);
+        drop(list);
+        write();
+        source(&harness, &pairing_dir, &id, &device, &relay_host_id)
+    };
+
+    let mut admin = Client::start(open("admin", "runtime"));
+    assert_eq!(you(&admin.connected().await)["role"], "manager");
+    let mut alice = Client::start(open("alice", "session"));
+    let state = alice.connected().await;
+    assert_eq!(you(&state), json!({ "userId": "alice", "role": "driver", "canApprove": false }));
+    let mut bob = Client::start(open("bob", "session"));
+    assert_eq!(you(&bob.connected().await)["role"], "viewer");
+    // Carol is a member of the organization the workspace is not shared
+    // with. (An outsider never gets this far: the API answers `open` with 404.)
+    let mut carol = Client::start(open("carol", "session"));
+    assert_eq!(you(&carol.connected().await)["role"], "none");
+    for method in ["keys.get", "session.tabs", "collab.state", "pty.list", "fs.list"] {
+        assert_eq!(carol.refused(method, json!({})).await, "forbidden", "{method}");
+    }
+
+    let (key_id, keys) = workspace_keys(&mut admin).await;
+    let key = keys[&key_id];
+    let (bob_key, _) = workspace_keys(&mut bob).await;
+    assert_eq!(bob_key, key_id, "the key is handed out through sharing");
+    let send_as = |user: &str, role: &str, can_approve: bool, tab: &str, kind: &str, plaintext: Value| {
+        let authority = if role == "manager" { "manage" } else { "participate" };
+        let actor = json!({ "userId": user, "authority": authority, "role": role, "canApprove": can_approve });
+        mailbox.enqueue_as(&key_id, &key, tab, kind, plaintext, authority, Some(actor))
+    };
+    let created = admin.ok("session.create", json!({ "agent": "claude", "mode": "manual", "clientRequestId": "e2e-share-create" })).await;
+    let (session, tab) = (created["sessionId"].as_str().unwrap().to_string(), created["tabId"].as_str().unwrap().to_string());
+    let mut feeds = Feeds::new();
+    bob.subscribe_tab(&mut feeds, &session, &tab).await;
+
+    // Presence: one row per person, what they look at and whether they type.
+    alice.ok("presence.update", json!({ "tabId": tab, "activity": "typing" })).await;
+    let seen = bob
+        .notification(|n| {
+            n["event"] == "collab.presence"
+                && n["params"]["participants"].as_array().unwrap().iter().any(|p| p["userId"] == "alice" && p["activity"] == "typing")
+        })
+        .await;
+    let people: Vec<&str> = seen["params"]["participants"].as_array().unwrap().iter().map(|p| p["userId"].as_str().unwrap()).collect();
+    assert_eq!(people, ["admin", "alice", "bob"], "carol has no access, so no presence");
+
+    // Notes are for people: attributed, pushed to everyone, never sent to the agent.
+    let note = bob.ok("notes.post", json!({ "tabId": tab, "text": "please keep the old API", "clientRequestId": "e2e-note-0001" })).await;
+    assert_eq!(note["note"]["authorId"], "bob");
+    let pushed = alice.notification(|n| n["event"] == "notes.posted").await;
+    assert_eq!(pushed["params"]["note"]["text"], "please keep the old API");
+
+    // Alice drives: her turn runs and she holds the tab's lease.
+    let first = send_as("alice", "driver", false, &tab, "send", json!({ "v": 1, "text": "slow:6:300" }));
+    alice.ok("session.nudge", json!({})).await;
+    bob.until_tab(&mut feeds, &tab, "alice's turn", |f| has(f, "chunk 1 of 6")).await;
+    assert_eq!(settled(&mailbox, &first).state, "applied");
+    let tabs = bob.ok("session.tabs", json!({})).await;
+    assert_eq!(tabs["tabs"][0]["lease"]["holderId"], "alice", "{tabs}");
+    // Competing input: the admin's send while Alice drives is refused and
+    // says who drives; Bob, a viewer, may not send at all.
+    let competing = send_as("admin", "manager", true, &tab, "send", json!({ "v": 1, "text": "echo:admin was here" }));
+    let viewer = send_as("bob", "viewer", true, &tab, "send", json!({ "v": 1, "text": "echo:bob was here" }));
+    admin.ok("session.nudge", json!({})).await;
+    let refused = settled(&mailbox, &competing);
+    assert_eq!((refused.state.as_str(), refused.category.as_deref()), ("rejected", Some("lease-held")));
+    assert_eq!(mailbox.receipt(&competing, &keys).unwrap()["holderId"], "alice");
+    assert_eq!(settled(&mailbox, &viewer).category.as_deref(), Some("forbidden"));
+    bob.until_tab(&mut feeds, &tab, "alice's turn to end", |f| f.count("turn_completed") >= 1).await;
+
+    // Permission decisions follow the approval right, not driving.
+    let ask = send_as("alice", "driver", false, &tab, "send", json!({ "v": 1, "text": "ask:touch shared.txt" }));
+    alice.ok("session.nudge", json!({})).await;
+    bob.until_tab(&mut feeds, &tab, "the permission card", |f| f.count("permission_requested") >= 1).await;
+    settled(&mailbox, &ask);
+    let request = feeds[&tab].events.iter().find(|e| e["payload"]["type"] == "permission_requested").unwrap()["payload"]["requestId"].as_str().unwrap().to_string();
+    let by_alice = send_as("alice", "driver", false, &tab, "permission-decision", json!({ "v": 1, "requestId": request, "optionId": "allow" }));
+    alice.ok("session.nudge", json!({})).await;
+    assert_eq!(settled(&mailbox, &by_alice).category.as_deref(), Some("forbidden"));
+    let by_bob = send_as("bob", "viewer", true, &tab, "permission-decision", json!({ "v": 1, "requestId": request, "optionId": "allow" }));
+    bob.ok("session.nudge", json!({})).await;
+    assert_eq!(settled(&mailbox, &by_bob).state, "applied");
+    bob.until_tab(&mut feeds, &tab, "the approved tool", |f| has(f, "allowed: touch shared.txt")).await;
+
+    // Mid-turn revocation: Alice's turn runs with a follow-up of hers queued
+    // behind it; the admin unshares her.
+    let long = send_as("alice", "driver", false, &tab, "send", json!({ "v": 1, "text": "slow:12:400" }));
+    alice.ok("session.nudge", json!({})).await;
+    bob.until_tab(&mut feeds, &tab, "the long turn", |f| has(f, "chunk 1 of 12")).await;
+    let queued = send_as("alice", "driver", false, &tab, "send", json!({ "v": 1, "text": "echo:alice's queued follow-up" }));
+    alice.ok("session.nudge", json!({})).await;
+    assert_eq!(settled(&mailbox, &queued).state, "applied");
+    assert_eq!(mailbox.receipt(&queued, &keys).unwrap()["queued"], true, "queued behind her running turn");
+    let revoked_at = Instant::now();
+    *members.lock().unwrap() = json!([
+        { "userId": "admin", "role": "manager", "canApprove": true },
+        { "userId": "bob", "role": "viewer", "canApprove": true },
+    ]);
+    write();
+    alice.state(|state| !matches!(state, ClientState::Connected { .. })).await;
+    let took = revoked_at.elapsed();
+    assert!(took < Duration::from_secs(20), "access stopped within the refresh interval, took {took:?}");
+    admin.notification(|n| n["event"] == "keys.changed").await;
+    let (key_after, _) = workspace_keys(&mut admin).await;
+    assert_ne!(key_after, key_id, "the content key rotates when someone loses access");
+    bob.until_tab(&mut feeds, &tab, "the long turn to end", |f| has(f, "chunk 12 of 12")).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    bob.route_session_events(&mut feeds);
+    assert!(
+        !feeds[&tab].texts("user_message").iter().any(|t| t.contains("alice's queued follow-up")),
+        "the revoked person's queued input never reached the agent"
+    );
+    assert!(!has(&feeds[&tab], "alice's queued follow-up"));
+    let leased = bob.ok("session.tabs", json!({})).await;
+    assert!(leased["tabs"][0]["lease"].is_null() || leased["tabs"][0]["lease"]["holderId"] != "alice", "{leased}");
+    assert!(!feeds[&tab].texts("user_message").iter().any(|t| t.contains("please keep the old API")), "notes never reach the agent");
+    assert_eq!(settled(&mailbox, &long).state, "applied");
+
+    // Reconnect: Alice opens again (the API would now hand her a
+    // participate attachment of a member with no share) and has nothing,
+    // until she is shared with again as a viewer.
+    alice.supervisor.stop();
+    let mut alice = Client::start(open("alice", "session"));
+    assert_eq!(you(&alice.connected().await)["role"], "none");
+    assert_eq!(alice.refused("session.tabs", json!({})).await, "forbidden");
+    assert_eq!(alice.refused("keys.get", json!({})).await, "forbidden");
+    *members.lock().unwrap() = json!([
+        { "userId": "admin", "role": "manager", "canApprove": true },
+        { "userId": "alice", "role": "viewer", "canApprove": false },
+        { "userId": "bob", "role": "viewer", "canApprove": true },
+    ]);
+    write();
+    let changed = alice.notification(|n| n["event"] == "collab.you").await;
+    assert_eq!(changed["params"]["you"]["role"], "viewer");
+    assert_eq!(alice.ok("session.tabs", json!({})).await["tabs"][0]["tabId"], tab.as_str());
+    let (alice_key, _) = workspace_keys(&mut alice).await;
+    assert_eq!(alice_key, key_after, "shared again, she gets the current key");
+    assert_eq!(alice.refused("lease.acquire", json!({ "tabId": tab })).await, "forbidden", "a viewer does not drive");
+
+    for client in [admin, alice, bob, carol] {
+        client.supervisor.stop();
+    }
+    drop(serve);
 }
 
 // ---------------------------------------------------------------- PRO-24

@@ -19,7 +19,7 @@ pub mod receipts;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -27,6 +27,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::events::Payload;
+use crate::remote::collab::{self, Access, Collaboration};
 use crate::session::SessionManager;
 use crate::sink::EventSink;
 use crate::store::index::{self, TabStatus};
@@ -73,6 +74,8 @@ pub struct AgentTabInfo {
     pub process: &'static str,
     pub pending_permissions: Vec<PendingRequest>,
     pub follow_ups: Vec<FollowUpView>,
+    /// Who is driving the tab (contract §20.5), if anyone.
+    pub lease: Option<crate::remote::collab::TabLease>,
     pub last_seq: u64,
     pub created: String,
     pub modified: String,
@@ -83,6 +86,8 @@ pub struct AgentTabInfo {
 pub struct FollowUpView {
     pub client_command_id: String,
     pub text: String,
+    /// Who sent it; empty for one queued before sharing existed.
+    pub actor_id: String,
 }
 
 /// Why a permission decision could not be delivered.
@@ -187,6 +192,7 @@ impl AgentOps for ManagerOps {
                         })
                         .collect(),
                     follow_ups: Vec::new(),
+                    lease: None,
                     last_seq,
                     created: tab.created.clone(),
                     modified: tab.modified.clone(),
@@ -304,6 +310,10 @@ pub struct CloudAgents {
     /// Set while an archive waits for the final checkpoint (contract §10.3):
     /// no command is leased and no follow-up typed until it is lifted.
     quiesced: AtomicBool,
+    /// Roles and tab leases, shared with the workspace RPC (PRO-30). Absent
+    /// in tests without one: actors then have the role the API stamped.
+    collab: OnceLock<Arc<Collaboration>>,
+    dir: PathBuf,
 }
 
 impl CloudAgents {
@@ -338,7 +348,54 @@ impl CloudAgents {
             dispatch_signal: Signal::default(),
             generation: AtomicU64::new(generation),
             quiesced: AtomicBool::new(false),
+            collab: OnceLock::new(),
+            dir: dir.to_path_buf(),
         }))
+    }
+
+    /// Use the workspace RPC's roles and leases, and keep notes next to the
+    /// rest of the agent state.
+    pub fn share_collaboration(&self, collab: Arc<Collaboration>) {
+        collab.store_notes_in(&self.dir.join("notes"));
+        let _ = self.collab.set(collab);
+    }
+
+    pub fn collab(&self) -> Option<&Arc<Collaboration>> {
+        self.collab.get()
+    }
+
+    /// What a mailbox actor may do now (contract §20.4-20.5).
+    pub fn actor_access(&self, actor: &api::Actor) -> Access {
+        let stamped = collab::stamped_access(actor.role.as_deref(), actor.can_approve);
+        match self.collab.get() {
+            Some(collab) => collab.actor_access(&actor.authority, &actor.user_id, stamped),
+            None => stamped.unwrap_or(if actor.authority == "manage" { Access::MANAGER } else { Access::NONE }),
+        }
+    }
+
+    /// Whether a queued follow-up's sender may still drive. One queued
+    /// before sharing existed, or before the API listed anyone, is kept.
+    fn follow_up_allowed(&self, follow_up: &FollowUp) -> bool {
+        match self.collab.get() {
+            Some(collab) if collab.known() && !follow_up.actor_id.is_empty() => collab.access_of(Some(&follow_up.actor_id)).can_drive(),
+            _ => true,
+        }
+    }
+
+    /// Drop queued follow-ups whose sender lost driver access, saying so in
+    /// their transcripts (contract §20.5).
+    pub fn revalidate_follow_ups(&self) {
+        let dropped = match self.follow_ups.retain(|follow_up| self.follow_up_allowed(follow_up)) {
+            Ok(dropped) => dropped,
+            Err(error) => {
+                log::warn!("revalidate queued follow-ups: {error:#}");
+                return;
+            }
+        };
+        for (tab_id, follow_up) in dropped {
+            self.ops.note(&follow_up.session_id, &tab_id, "Dropped a queued message from a person who no longer has driver access.");
+            self.changed(Some(&tab_id), true);
+        }
     }
 
     pub fn state_dir(data_dir: &Path) -> PathBuf {
@@ -393,8 +450,12 @@ impl CloudAgents {
                 .follow_ups
                 .list(&tab.tab_id)
                 .into_iter()
-                .map(|follow_up| FollowUpView { client_command_id: follow_up.client_command_id, text: follow_up.text })
+                .map(|follow_up| FollowUpView { client_command_id: follow_up.client_command_id, text: follow_up.text, actor_id: follow_up.actor_id })
                 .collect();
+            if let Some(collab) = self.collab.get() {
+                let busy = matches!(tab.status, TabStatus::InProgress | TabStatus::Waiting) && tab.process == "running";
+                tab.lease = collab.lease(&tab.tab_id, now_ms(), busy);
+            }
         }
         tabs
     }
@@ -447,6 +508,13 @@ impl CloudAgents {
         for tab_id in tabs {
             let Some(next) = self.follow_ups.list(&tab_id).into_iter().next() else { continue };
             if self.ops.busy(&next.session_id, &tab_id) {
+                continue;
+            }
+            // Checked again right before it is typed: the sender's access
+            // may have changed while it waited.
+            if !self.follow_up_allowed(&next) {
+                self.revalidate_follow_ups();
+                self.nudge_follow_ups(&tab_id);
                 continue;
             }
             // Taken durably before it is typed: a crash in between loses

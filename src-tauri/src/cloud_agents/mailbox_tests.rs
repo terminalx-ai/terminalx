@@ -33,6 +33,7 @@ impl AgentOps for FakeOps {
             process: "running",
             pending_permissions: Vec::new(),
             follow_ups: Vec::new(),
+            lease: None,
             last_seq: 0,
             created: String::new(),
             modified: String::new(),
@@ -164,7 +165,7 @@ fn lease_for(agents: &CloudAgents, id: &str, tab_id: &str, kind: &str, body: Val
         key_id,
         iv,
         ciphertext,
-        actor: Actor { user_id: "u1".into(), authority: "manage".into() },
+        actor: Actor { user_id: "u1".into(), authority: "manage".into(), role: None, can_approve: None },
         created_at: now_ms(),
         redelivery: false,
         lease_token: format!("token-{id}"),
@@ -277,7 +278,7 @@ fn unreadable_misrouted_unauthorized_or_unknown_commands_are_rejected_untouched(
     let mut moved = lease_for(&h.agents, "c2", "tab-2", "send", json!({ "v": 1, "text": "x" }));
     moved.tab_id = "tab-1".into();
     assert_eq!(handle(&h.agents, &moved).category.as_deref(), Some("decrypt-failed"));
-    let participant = Lease { actor: Actor { user_id: "u2".into(), authority: "participate".into() }, ..lease(&h.agents, "c3", "send", json!({ "v": 1, "text": "x" })) };
+    let participant = Lease { actor: Actor { user_id: "u2".into(), authority: "participate".into(), role: None, can_approve: None }, ..lease(&h.agents, "c3", "send", json!({ "v": 1, "text": "x" })) };
     assert_eq!(handle(&h.agents, &participant).category.as_deref(), Some("forbidden"));
     assert_eq!(handle(&h.agents, &lease_for(&h.agents, "c4", "tab-9", "send", json!({ "v": 1, "text": "x" }))).category.as_deref(), Some("tab-unknown"));
     assert_eq!(handle(&h.agents, &lease(&h.agents, "c5", "send", json!({ "v": 1, "text": " " }))).category.as_deref(), Some("payload-invalid"));
@@ -442,4 +443,98 @@ fn work_resumes_at_once_when_a_device_attaches_after_the_archive() {
     h.agents.client_attached();
     quiescer.tick(None, Some(&h.agents), &mut report, start + std::time::Duration::from_secs(20), now_ms());
     assert!(!h.agents.quiesced());
+}
+
+// ---- sharing (PRO-30, saas contract §20.4-20.5) ------------------------------
+
+fn as_actor(lease: Lease, user: &str, role: &str, can_approve: bool) -> Lease {
+    Lease {
+        actor: Actor { user_id: user.into(), authority: "participate".into(), role: Some(role.into()), can_approve: Some(can_approve) },
+        ..lease
+    }
+}
+
+fn shared(h: &Harness, members: serde_json::Value) -> Arc<crate::remote::collab::Collaboration> {
+    let collab = Arc::new(crate::remote::collab::Collaboration::new());
+    let members: crate::remote::collab::Members = serde_json::from_value(json!({ "v": 1, "members": members })).unwrap();
+    collab.set_members(members.into_map().unwrap());
+    h.agents.share_collaboration(collab.clone());
+    collab
+}
+
+#[test]
+fn a_viewer_cannot_send_but_an_approving_viewer_decides_permissions() {
+    let h = harness();
+    shared(&h, json!([{ "userId": "bob", "role": "viewer", "canApprove": true }, { "userId": "cat", "role": "viewer" }]));
+    let send = as_actor(lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "hi" })), "bob", "viewer", true);
+    assert_eq!(handle(&h.agents, &send).category.as_deref(), Some("forbidden"));
+    h.ops.pending.lock().unwrap().push("req-1".into());
+    let decision = json!({ "v": 1, "requestId": "req-1", "optionId": "allow" });
+    let refused = as_actor(lease(&h.agents, "c2", "permission-decision", decision.clone()), "cat", "viewer", false);
+    assert_eq!(handle(&h.agents, &refused).category.as_deref(), Some("forbidden"));
+    let approved = as_actor(lease(&h.agents, "c3", "permission-decision", decision), "bob", "viewer", true);
+    assert_eq!(handle(&h.agents, &approved).outcome, "applied");
+    assert_eq!(*h.ops.decisions.lock().unwrap(), vec![("req-1".to_string(), "allow".to_string())]);
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn the_runtime_list_narrows_a_role_stamped_at_lease_time() {
+    let h = harness();
+    // Leased while Alice drove; the refresh since says she only views.
+    shared(&h, json!([{ "userId": "alice", "role": "viewer" }]));
+    let send = as_actor(lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "hi" })), "alice", "driver", false);
+    assert_eq!(handle(&h.agents, &send).category.as_deref(), Some("forbidden"));
+    // Removed altogether: nothing, not even a decision.
+    let gone = as_actor(lease(&h.agents, "c2", "stop", json!({ "v": 1 })), "dan", "driver", true);
+    assert_eq!(handle(&h.agents, &gone).category.as_deref(), Some("forbidden"));
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+    assert_eq!(*h.ops.stops.lock().unwrap(), 0);
+}
+
+#[test]
+fn one_driver_at_a_time_and_the_other_is_told_who_drives() {
+    let h = harness();
+    let collab = shared(&h, json!([{ "userId": "alice", "role": "driver" }, { "userId": "bob", "role": "driver" }, { "userId": "boss", "role": "manager" }]));
+    let alice = as_actor(lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "alice's task" })), "alice", "driver", false);
+    assert_eq!(handle(&h.agents, &alice).outcome, "applied");
+    assert_eq!(collab.lease("tab-1", now_ms(), true).unwrap().holder_id, "alice");
+    let bob = as_actor(lease(&h.agents, "c2", "send", json!({ "v": 1, "text": "bob's task" })), "bob", "driver", false);
+    let refused = handle(&h.agents, &bob);
+    assert_eq!((refused.outcome.as_str(), refused.category.as_deref()), ("rejected", Some("lease-held")));
+    assert_eq!(open_receipt(&h.agents, &bob, &refused)["holderId"], "alice");
+    let bob_stop = as_actor(lease(&h.agents, "c3", "stop", json!({ "v": 1 })), "bob", "driver", false);
+    assert_eq!(handle(&h.agents, &bob_stop).category.as_deref(), Some("lease-held"));
+    // A manager may stop anyone's turn; sending still needs the lease.
+    let boss_stop = Lease {
+        actor: Actor { user_id: "boss".into(), authority: "manage".into(), role: Some("manager".into()), can_approve: Some(true) },
+        ..lease(&h.agents, "c4", "stop", json!({ "v": 1 }))
+    };
+    assert_eq!(handle(&h.agents, &boss_stop).outcome, "applied");
+    // Alice's own follow-up while her turn runs is queued with her name.
+    *h.ops.busy.lock().unwrap() = true;
+    let follow = as_actor(lease(&h.agents, "c5", "send", json!({ "v": 1, "text": "and then" })), "alice", "driver", false);
+    assert_eq!(handle(&h.agents, &follow).outcome, "applied");
+    assert_eq!(h.agents.tabs()[0].follow_ups[0].actor_id, "alice");
+    assert_eq!(h.agents.tabs()[0].lease.as_ref().unwrap().holder_id, "alice");
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["alice's task"]);
+}
+
+#[test]
+fn a_queued_follow_up_is_dropped_when_its_sender_loses_driver_access() {
+    let h = harness();
+    let collab = shared(&h, json!([{ "userId": "alice", "role": "driver" }]));
+    *h.ops.busy.lock().unwrap() = true;
+    let follow = as_actor(lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "later" })), "alice", "driver", false);
+    assert_eq!(handle(&h.agents, &follow).outcome, "applied");
+    assert_eq!(h.agents.follow_ups.list("tab-1").len(), 1);
+    // Revoked mid-turn: the queued input is re-checked before it is typed.
+    collab.set_members(Default::default());
+    *h.ops.busy.lock().unwrap() = false;
+    h.agents.nudge_follow_ups("tab-1");
+    h.agents.dispatch_follow_ups();
+    assert!(h.ops.sent.lock().unwrap().is_empty(), "never typed");
+    assert!(h.agents.follow_ups.list("tab-1").is_empty());
+    assert!(h.ops.notes.lock().unwrap().iter().any(|note| note.contains("no longer has driver access")));
+    assert!(collab.lease("tab-1", now_ms(), true).is_none(), "the lease went with the role");
 }

@@ -28,6 +28,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, protocol::WebSocketConfig, Message};
 
+use super::collab::Members;
 use super::protocol::{self, Authority};
 use super::server::{Peer, WorkspaceRpc, MAX_FRAME_BYTES};
 use crate::relay_e2ee::{answer_relay_challenge, begin_e2ee_session, E2eeHello, E2eeSession, HostKeypair, PayloadKind, RelayProofContext};
@@ -35,6 +36,9 @@ use crate::relay_e2ee::{answer_relay_challenge, begin_e2ee_session, E2eeHello, E
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const SILENCE_TIMEOUT: Duration = Duration::from_secs(90);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
+/// While anyone is connected, access changes (revocations, shares) must
+/// apply promptly (contract §20.5).
+const ATTACHED_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// Answered from their own task (see `serve_connection`).
 const SLOW_METHODS: &[&str] = &[
     "git.push",
@@ -90,6 +94,9 @@ pub struct RelaySession {
     pub director_url: String,
     pub attachments: Vec<Attachment>,
     pub revocations: Vec<Revocation>,
+    /// Who the workspace is shared with and how (contract §20.3); absent
+    /// from an API before PRO-30.
+    pub collaboration: Option<Members>,
 }
 
 /// The runtime's identity and API session. Calls may block; the host runs
@@ -124,6 +131,8 @@ struct FileLinkContents {
     attachments: Vec<Attachment>,
     #[serde(default)]
     revocations: Vec<Revocation>,
+    #[serde(default)]
+    collaboration: Option<Members>,
 }
 
 impl FileLink {
@@ -166,6 +175,7 @@ impl RuntimeLink for FileLink {
             director_url: contents.director_url,
             attachments: contents.attachments,
             revocations: contents.revocations,
+            collaboration: contents.collaboration,
         })
     }
 
@@ -220,6 +230,9 @@ struct Device {
     token_hash: [u8; 32],
     authority: Authority,
     attachment_id: String,
+    /// The attachment's person, for roles, presence and attribution.
+    #[serde(default)]
+    user_id: Option<String>,
 }
 
 mod hash_b64 {
@@ -622,6 +635,7 @@ impl RelayHost {
                         let _ = live.commands.send(ControlCommand::Reregister);
                         return;
                     }
+                    self.rpc.set_collaboration(session.collaboration.clone());
                     self.apply_revocations(&live, &session.revocations);
                     for attachment in session.attachments {
                         if let Err(error) = self.answer_attachment(&live, &director_url, attachment).await {
@@ -635,7 +649,8 @@ impl RelayHost {
                 }
                 Err(error) => log::warn!("relay host: refresh failed: {error:#}"),
             }
-            tokio::time::sleep(REFRESH_INTERVAL).await;
+            let attached = self.state.lock().unwrap().connections.values().any(|senders| senders.iter().any(|sender| !sender.is_closed()));
+            tokio::time::sleep(if attached { ATTACHED_REFRESH_INTERVAL } else { REFRESH_INTERVAL }).await;
         }
     }
 
@@ -695,7 +710,12 @@ impl RelayHost {
             let mut state = self.state.lock().unwrap();
             state.devices.insert(
                 attachment.device_id.clone(),
-                Device { token_hash: Sha256::digest(attachment.device_token.as_bytes()).into(), authority, attachment_id: attachment.id.clone() },
+                Device {
+                    token_hash: Sha256::digest(attachment.device_token.as_bytes()).into(),
+                    authority,
+                    attachment_id: attachment.id.clone(),
+                    user_id: attachment.user_id.clone(),
+                },
             );
             self.save_devices(&state.devices);
         }
@@ -757,7 +777,7 @@ impl RelayHost {
         let authenticated = json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
         send_sealed(&mut socket, &mut session, &authenticated).await?;
 
-        let (peer, mut notifications) = Peer::new(connection.relay_device_id.clone(), device.authority);
+        let (peer, mut notifications) = Peer::for_user(connection.relay_device_id.clone(), device.authority, device.user_id.clone());
         // Slow mutations (Git network calls, agent prompts) answer from their
         // own task, so this connection keeps reading, streaming and honouring
         // a revocation meanwhile. Everything else is answered in order, which
@@ -768,6 +788,11 @@ impl RelayHost {
             loop {
                 tokio::select! {
                     _ = cancel.recv() => {
+                        let _ = socket.close(None).await;
+                        return Ok(());
+                    }
+                    // The person lost access to the workspace (contract §20.5).
+                    _ = peer.closed() => {
                         let _ = socket.close(None).await;
                         return Ok(());
                     }

@@ -2,6 +2,10 @@
 
 Status: Approved client-only plan
 
+> Cloud workspaces do not use this plan. Their sharing, presence, notes and
+> driver leases are served by the cloud runtime from the API's share records
+> and negotiated as `collab/1`: see `docs/CLOUD-SHARING.md` (PRO-30).
+
 Date: 2026-09-03
 
 Issue: [#5](https://github.com/terminalx-ai/raccoon/issues/5)
