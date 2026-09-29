@@ -497,6 +497,8 @@ export interface CloudWorkspaceOperation {
   nextAttemptAt: number | null;
   retryReason: "rate-limited" | null;
   errorCode: CloudWorkspaceOperationErrorCode | null;
+  /** The provider's own normalized error code for a failed operation, when the server reports one; never a message or body. */
+  providerErrorCode?: string | null;
   progress: { phase: "allocating" | "starting" | "installing-runtime" | "connecting-relay" | "suspending" | "releasing"; retryAt: number | null } | null;
   events: {
     code: "operation-queued" | "provider-preflight-started" | "machine-allocation-started" | "runtime-installation-started" | "credentials-installing" | "credentials-ready" | "repository-cloning" | "repository-ready" | "repository-clone-failed" | "relay-connection-started" | "provider-cleanup-started" | "workspace-ready" | "operation-failed" | "operation-canceled";
@@ -594,6 +596,7 @@ export type CloudWorkspaceSafeErrorCode =
   | "cloud_provider_connection_attention_required"
   | "cloud_provider_operation_in_progress"
   | "cloud_provider_credential_invalid"
+  | "cloud_provider_permission_denied"
   | "cloud_provider_rate_limited"
   | "cloud_provider_invalid_response"
   | "cloud_provider_billing_required"
@@ -669,7 +672,9 @@ export type CloudWorkspaceOperationErrorCode =
   | "cloud_provider_idempotency_window_expired"
   | "cloud_provider_unsupported"
   | "provider_permanent_delete_unavailable"
-  | "runtime_checkpoint_pending";
+  | "runtime_checkpoint_pending"
+  | "cloud_workspace_runtime_bootstrap_failed"
+  | "cloud_provider_permission_denied";
 
 export interface CliToolStatus {
   installed: boolean;

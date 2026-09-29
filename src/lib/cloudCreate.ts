@@ -258,6 +258,35 @@ export function settled(phase: PhaseId): boolean {
   return phase === "running" || phase === "failed" || phase === "canceled";
 }
 
+/**
+ * How long a Ready workspace may leave its launch intent unclaimed before the
+ * page says so. A runtime claims it within seconds of connecting; one that
+ * cannot run launch intents never does, and the server would otherwise keep
+ * the intent pending until it expires a day later.
+ */
+export const RUNTIME_PICKUP_MS = 2 * 60 * 1000;
+
+/**
+ * When a Ready workspace's runtime has not picked up its launch intent after
+ * `RUNTIME_PICKUP_MS`, the time it has been waiting since; otherwise null.
+ * Measured from when the launch reached the runtime phase, else from when
+ * the create operation succeeded.
+ */
+export function runtimeNotPickedUp(item: CloudWorkspaceListItem | CloudWorkspaceSnapshot, now: number): number | null {
+  const launch = item.workspace.launch;
+  if (!launch || item.workspace.state !== "ready" || launch.state !== "pending") return null;
+  if (phaseOf(item) !== "authenticating-runtime") return null;
+  const operation = "operation" in item ? item.operation : item.latestOperation;
+  const since =
+    launch.timings?.authenticatingAt ?? (operation?.state === "succeeded" ? operation.updatedAt : null) ?? launch.timings?.requestedAt ?? null;
+  if (since === null) return null;
+  const waited = now - since;
+  return waited >= RUNTIME_PICKUP_MS ? waited : null;
+}
+
+export const RUNTIME_NOT_PICKED_UP =
+  "The workspace is ready, but its runtime has not picked up the first task. It may not support starting agents from a first prompt. Open the session to start the agent yourself.";
+
 /** Milliseconds from the request to running, when both are known. */
 export function launchLatency(item: CloudWorkspaceListItem | CloudWorkspaceSnapshot): number | null {
   const timings = item.workspace.launch?.timings;
@@ -275,6 +304,7 @@ const MESSAGES: Record<string, string> = {
   cloud_provider_connection_required: "Connect a compute provider in Settings first.",
   cloud_provider_connection_attention_required: "The compute provider connection needs attention in Settings.",
   cloud_provider_billing_required: "The compute provider account needs billing set up.",
+  cloud_provider_permission_denied: "The provider key is valid but lacks a permission TerminalX needs. An admin can check its scope in the provider console.",
   cloud_workspace_repository_not_accessible: "The GitHub App cannot read that repository. Choose it in Settings → GitHub.",
   cloud_workspace_repository_ref_not_found: "That branch does not exist in the repository.",
   cloud_workspace_repository_credential_required: "Connect GitHub in Settings to use private repositories.",
@@ -312,6 +342,7 @@ const FAILURES: Record<string, string> = {
   "runtime-storage-replaced": "The workspace lost its state while starting the agent. The prompt may not have been sent.",
   "payload-invalid": "The launch settings were not accepted by the workspace.",
   "launch-intent-unavailable": "The first prompt could not be read back on the server, so it was not sent.",
+  "runtime-unsupported": "This workspace's runtime cannot start agents from a first prompt, so it was not sent. Open the session to start the agent yourself.",
 };
 
 /** Why a launch failed, from the operation or the launch category. */

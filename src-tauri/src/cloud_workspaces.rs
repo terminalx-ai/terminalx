@@ -498,6 +498,10 @@ pub struct CloudWorkspaceOperation {
     pub retry_reason: Option<RetryReason>,
     #[serde(default, deserialize_with = "safe_optional_error_code")]
     pub error_code: Option<String>,
+    /// The provider's own normalized error code for a failed operation.
+    /// Only a short token passes; anything else (a message, a body) is dropped.
+    #[serde(default, deserialize_with = "safe_provider_error_code")]
+    pub provider_error_code: Option<String>,
     pub progress: Option<OperationProgress>,
     pub events: Option<Vec<OperationEvent>>,
     /// An archive's final checkpoint: committed, failed, timed-out or skipped
@@ -1488,6 +1492,7 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_provider_account_mismatch"
             | "cloud_provider_disposition_required"
             | "cloud_provider_credential_invalid"
+            | "cloud_provider_permission_denied"
             | "cloud_provider_rate_limited"
             | "cloud_provider_invalid_response"
             | "cloud_provider_billing_required"
@@ -1607,6 +1612,27 @@ where
     }))
 }
 
+fn safe_provider_error_code<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::String(code)) if safe_provider_code(&code) => Some(code),
+        _ => None,
+    })
+}
+
+/// A provider error code as the server normalizes it: lowercase letters,
+/// digits and `_ . : -`, at most 64 bytes.
+fn safe_provider_code(code: &str) -> bool {
+    (1..=64).contains(&code.len())
+        && code.as_bytes()[0].is_ascii_alphanumeric()
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.' | b':' | b'-'))
+}
+
 fn known_operation_error_code(code: &str) -> bool {
     known_error_code(code)
         || matches!(
@@ -1632,6 +1658,7 @@ fn known_operation_error_code(code: &str) -> bool {
                 | "cloud_provider_unsupported"
                 | "provider_permanent_delete_unavailable"
                 | "runtime_checkpoint_pending"
+                | "cloud_workspace_runtime_bootstrap_failed"
         )
 }
 
@@ -1863,6 +1890,31 @@ mod tests {
             value["operation"]["errorCode"] = Value::String(error_code.into());
         }
         value.to_string()
+    }
+
+    #[test]
+    fn provider_error_code_passes_only_as_a_safe_token() {
+        let parse = |code: Value| {
+            let mut value: Value = serde_json::from_str(&snapshot_body(Some("cloud_provider_credential_invalid"))).unwrap();
+            value["operation"]["providerErrorCode"] = code;
+            serde_json::from_value::<CloudWorkspaceSnapshot>(value).unwrap().operation.provider_error_code
+        };
+        assert_eq!(parse(json!("permission_denied")).as_deref(), Some("permission_denied"));
+        assert_eq!(parse(json!("box.forbidden:403")).as_deref(), Some("box.forbidden:403"));
+        assert_eq!(parse(json!("Key sk-live-123 was rejected")), None);
+        assert_eq!(parse(json!("-leading")), None);
+        assert_eq!(parse(json!("a".repeat(65))), None);
+        assert_eq!(parse(json!({ "raw": "body" })), None);
+        assert_eq!(parse(Value::Null), None);
+        for code in ["cloud_workspace_runtime_bootstrap_failed", "cloud_provider_permission_denied"] {
+            let snapshot: CloudWorkspaceSnapshot = serde_json::from_str(&snapshot_body(Some(code))).unwrap();
+            assert_eq!(snapshot.operation.error_code.as_deref(), Some(code));
+        }
+        let projected = serde_json::to_value(
+            serde_json::from_str::<CloudWorkspaceSnapshot>(&snapshot_body(None)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(projected["operation"]["providerErrorCode"], Value::Null);
     }
 
     #[test]
@@ -2149,6 +2201,16 @@ mod tests {
         request.join().unwrap();
         assert_eq!(error.code, "cloud_workspace_unavailable");
         assert!(!serde_json::to_string(&error).unwrap().contains("canary"));
+    }
+
+    #[test]
+    fn a_valid_key_without_a_permission_is_reported_as_such() {
+        let body = r#"{"error":"cloud_provider_permission_denied"}"#;
+        let (base, _, request) = serve_once(response("422 Unprocessable Entity", body, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.providers().unwrap_err();
+        request.join().unwrap();
+        assert_eq!(error.code, "cloud_provider_permission_denied");
     }
 
     #[test]

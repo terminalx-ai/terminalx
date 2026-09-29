@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, workspaceConnection } from "@/lib/api";
 import { resetPurged } from "@/lib/cloudLifecycle";
 import { resetCloudTerminals } from "@/lib/cloudTerminals";
-import { CloudSessionPage } from "./CloudSessionPage";
+import { CloudSessionPage, describeWorkspace } from "./CloudSessionPage";
 
 /** Input handlers of every xterm made, so a test can type into one. */
 const typed: ((data: string) => void)[] = [];
@@ -46,8 +46,12 @@ vi.mock("./CloudAgents", () => ({
   },
 }));
 // The create form has its own tests (CloudCreateWorkspace.test.tsx).
+const createProps = vi.hoisted(() => [] as { onProgress?: (snapshot: unknown) => void }[]);
 vi.mock("./CloudCreateWorkspace", () => ({
-  CloudCreateWorkspace: () => <div data-testid="cloud-create-stub" />,
+  CloudCreateWorkspace: (props: { onProgress?: (snapshot: unknown) => void }) => {
+    createProps.push(props);
+    return <div data-testid="cloud-create-stub" />;
+  },
 }));
 vi.mock("@/lib/api", () => ({
   api: {
@@ -171,7 +175,8 @@ describe("cloud workspace session page", () => {
       ],
     } as never);
     render(<CloudSessionPage onBack={() => undefined} />);
-    await waitFor(() => expect(screen.getByTestId("cloud-workspace-state").textContent).toBe("Syncing repository · terminalx/app-3f9a2c1b7d4e"));
+    await waitFor(() => expect(screen.getByTestId("cloud-workspace-state").textContent).toBe("Syncing repository"));
+    expect(screen.getByTestId("cloud-workspace-branch").textContent).toBe("terminalx/app-3f9a2c1b7d4e");
     fireEvent.click(screen.getByRole("button", { name: /New workspace/ }));
     expect(screen.getByTestId("cloud-create-stub")).toBeTruthy();
   });
@@ -186,9 +191,9 @@ describe("cloud workspace session page", () => {
       .mockResolvedValueOnce({ workspaces: [item("starting-agent")] } as never)
       .mockResolvedValue({ workspaces: [item("running")] } as never);
     render(<CloudSessionPage onBack={() => undefined} />);
-    await waitFor(() => expect(screen.getByTestId("cloud-workspace-state").textContent).toBe("Starting agent · terminalx/b-000000000001"));
+    await waitFor(() => expect(screen.getByTestId("cloud-workspace-state").textContent).toBe("Starting agent"));
     await act(async () => void (await vi.advanceTimersByTimeAsync(3100)));
-    await waitFor(() => expect(screen.getByTestId("cloud-workspace-state").textContent).toBe("ready · terminalx/b-000000000001"));
+    await waitFor(() => expect(screen.getByTestId("cloud-workspace-state").textContent).toBe("Ready"));
     vi.useRealTimers();
   });
 
@@ -393,5 +398,95 @@ describe("cloud workspace session page", () => {
     render(<CloudSessionPage onBack={() => undefined} />);
     const buttons = await screen.findAllByRole("button", { name: "Open session" });
     expect((buttons.at(-1) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("goes back from an opened session to the list, and only then leaves the page", async () => {
+    const onBack = vi.fn();
+    render(<CloudSessionPage onBack={onBack} />);
+    fireEvent.click((await screen.findAllByRole("button", { name: "Open session" }))[0]!);
+    await screen.findByTestId("cloud-execution-location");
+    fireEvent.click(screen.getByRole("button", { name: "Back to workspaces" }));
+    expect(onBack).not.toHaveBeenCalled();
+    expect(await screen.findByText("Workspaces in this organization")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-execution-location")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(onBack).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes the create form when coming back from a session opened from it", async () => {
+    render(<CloudSessionPage onBack={() => undefined} />);
+    fireEvent.click(await screen.findByRole("button", { name: /New workspace/ }));
+    expect(screen.getByTestId("cloud-create-stub")).toBeTruthy();
+    fireEvent.click(screen.getAllByRole("button", { name: "Open session" })[0]!);
+    await screen.findByTestId("cloud-execution-location");
+    fireEvent.click(screen.getByRole("button", { name: "Back to workspaces" }));
+    expect(await screen.findByRole("button", { name: /New workspace/ })).toBeTruthy();
+    expect(screen.queryByTestId("cloud-create-stub")).toBeNull();
+  });
+
+  it("updates the list row from the create form's own snapshots while the form is open", async () => {
+    const starting = workspace("ws-new", "provisioning");
+    const launch = { launchId: "l1", phase: "allocating", state: "pending", workBranch: "terminalx/app-3f9a2c1b7d4e", agent: "claude", hasPrompt: true, timings: {} };
+    vi.mocked(api.cloudWorkspaces).mockResolvedValue({ workspaces: [{ ...starting, workspace: { ...starting.workspace, launch } }] } as never);
+    render(<CloudSessionPage onBack={() => undefined} />);
+    await waitFor(() => expect(screen.getByTestId("cloud-workspace-state").textContent).toBe("Allocating"));
+    fireEvent.click(screen.getByRole("button", { name: /New workspace/ }));
+    act(() =>
+      createProps.at(-1)!.onProgress!({
+        workspace: { ...starting.workspace, state: "ready", launch: { ...launch, phase: "authenticating-runtime" } },
+        operation: { id: "op-1", workspaceId: "ws-new", state: "succeeded", stage: "ready", updatedAt: Date.now() },
+      }),
+    );
+    expect(screen.getByTestId("cloud-workspace-state").textContent).toBe("Authenticating runtime");
+    expect((screen.getAllByRole("button", { name: "Open session" }).at(-1) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("keeps polling the list while the create form is open, so other rows stay current", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const other = workspace("ws-other", "ready");
+    const launch = { launchId: "l2", phase: "authenticating-runtime", state: "pending", workBranch: "terminalx/o-1", agent: "claude", hasPrompt: true, timings: {} };
+    const stopping = { ...other, workspace: { ...other.workspace, state: "provisioning", launch }, latestOperation: { id: "op-s", workspaceId: "ws-other", action: "suspend", state: "running" } };
+    const stopped = { ...stopping, workspace: { ...stopping.workspace, state: "suspended" }, latestOperation: { ...stopping.latestOperation, state: "succeeded" } };
+    vi.mocked(api.cloudWorkspaces).mockResolvedValueOnce({ workspaces: [stopping] } as never).mockResolvedValue({ workspaces: [stopped] } as never);
+    render(<CloudSessionPage onBack={() => undefined} />);
+    await waitFor(() => expect(screen.getByTestId("cloud-workspace-state").textContent).toBe("Stopping…"));
+    fireEvent.click(screen.getByRole("button", { name: /New workspace/ }));
+    await act(async () => void (await vi.advanceTimersByTimeAsync(3100)));
+    await waitFor(() => expect(screen.getByTestId("cloud-workspace-state").textContent).toBe("Stopped"));
+    vi.useRealTimers();
+  });
+});
+
+describe("the list's state line", () => {
+  const base = { id: "ws-1", orgId: "org-1", name: "W", provider: "box", accessMode: "private", createdAt: 1, updatedAt: 1, releaseDisposition: null };
+  const launch = (phase: string, extra: object = {}) => ({ launchId: "l1", phase, state: "pending", workBranch: "terminalx/w-1", agent: "claude", hasPrompt: true, category: null, timings: {}, ...extra });
+  const row = (state: string, workspaceExtra: object = {}, latestOperation: object | null = null) =>
+    ({ workspace: { ...base, state, ...workspaceExtra }, latestOperation }) as never;
+
+  it("puts what is happening to the workspace ahead of the launch phase, in words", () => {
+    expect(describeWorkspace(row("suspended", { launch: launch("authenticating-runtime") }))).toBe("Stopped");
+    expect(describeWorkspace(row("attention-required", { launch: launch("authenticating-runtime") }))).toBe("Needs attention");
+    expect(describeWorkspace(row("attention-required"))).toBe("Needs attention");
+    expect(describeWorkspace(row("attention-required", {}, { id: "op", action: "resume", state: "failed", errorCode: "cloud_provider_unavailable" }))).toBe(
+      "Needs attention: The provider did not answer. Retry resumes where it stopped.",
+    );
+    expect(describeWorkspace(row("ready", { launch: launch("authenticating-runtime") }, { id: "op", action: "archive", state: "running" }))).toBe("Archiving…");
+    expect(describeWorkspace(row("ready", { launch: launch("authenticating-runtime") }, { id: "op", action: "delete", state: "running" }))).toBe("Deleting…");
+    expect(describeWorkspace(row("provisioning", { launch: launch("authenticating-runtime") }, { id: "op", action: "suspend", state: "running" }))).toBe("Stopping…");
+    expect(describeWorkspace(row("provisioning", { launch: launch("authenticating-runtime") }, { id: "op", action: "resume", state: "queued" }))).toBe("Resuming…");
+    expect(describeWorkspace(row("ready"))).toBe("Ready");
+    expect(describeWorkspace(row("provisioning"))).toBe("Allocating");
+  });
+
+  it("says why a first task did not start instead of a raw state or category", () => {
+    const failed = row("ready", { launch: launch("failed", { state: "failed", category: "runtime-unsupported" }) });
+    expect(describeWorkspace(failed)).toMatch(/^The agent did not start: This workspace's runtime cannot start agents/);
+    expect(describeWorkspace(failed)).not.toMatch(/runtime-unsupported|attention-required/);
+  });
+
+  it("says when a Ready workspace's runtime has not picked up its first task", () => {
+    const stuck = row("ready", { launch: launch("authenticating-runtime", { timings: { authenticatingAt: 1000 } }) });
+    expect(describeWorkspace(stuck, 1000 + 60_000)).toBe("Authenticating runtime");
+    expect(describeWorkspace(stuck, 1000 + 10 * 60_000)).toBe("Ready · the runtime has not picked up the first task");
   });
 });
