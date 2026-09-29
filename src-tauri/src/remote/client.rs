@@ -126,7 +126,15 @@ pub enum ClientState {
         capabilities: Vec<String>,
         authority: String,
     },
-    Reconnecting { attempt: u32, reason: String, retry_in_ms: u64 },
+    Reconnecting {
+        attempt: u32,
+        reason: String,
+        retry_in_ms: u64,
+        /// The relay close code that ended the connection, for the desktop's
+        /// own diagnostics; the web view reads it from `reason`.
+        #[serde(skip_serializing)]
+        close_code: Option<u16>,
+    },
     UpdateRequired,
     Stopped,
 }
@@ -388,7 +396,7 @@ async fn run(shared: Arc<Shared>, source: Arc<dyn AttachSource>, events: mpsc::U
                 Err(error) => {
                     attempt += 1;
                     let delay = protocol::backoff(attempt, jitter());
-                    emit(ClientState::Reconnecting { attempt, reason: protocol::redact(&format!("{error:#}")), retry_in_ms: delay.as_millis() as u64 });
+                    emit(ClientState::Reconnecting { attempt, reason: protocol::redact(&format!("{error:#}")), retry_in_ms: delay.as_millis() as u64, close_code: None });
                     if sleep_or_stop(&mut stopped, delay).await {
                         break;
                     }
@@ -464,7 +472,7 @@ async fn run(shared: Arc<Shared>, source: Arc<dyn AttachSource>, events: mpsc::U
             Some(code) => format!("{code} {}", closed.reason),
             None => closed.reason,
         };
-        emit(ClientState::Reconnecting { attempt, reason, retry_in_ms: delay.as_millis() as u64 });
+        emit(ClientState::Reconnecting { attempt, reason, retry_in_ms: delay.as_millis() as u64, close_code: closed.code });
         if sleep_or_stop(&mut stopped, delay).await {
             break;
         }

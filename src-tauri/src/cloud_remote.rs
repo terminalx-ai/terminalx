@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 
 use crate::account::AccountManager;
 use crate::cloud_agent_client::CloudAgentClient;
+use crate::cloud_diagnostics::ConnectionCloseLog;
 use crate::cloud_workspaces::{CloudWorkspaceService, WorkspaceState};
 use crate::remote::client::{open_outcome, AttachSource, ClientEvent, ClientState, OpenOutcome, Supervisor};
 use crate::remote::protocol::Activation;
@@ -51,6 +52,8 @@ pub struct CloudRemote {
     service: Arc<CloudWorkspaceService>,
     agents: Arc<CloudAgentClient>,
     connections: Mutex<HashMap<String, Attached>>,
+    /// Typed relay closes (4100-4104) met by any connection; memory only.
+    closes: Arc<ConnectionCloseLog>,
 }
 
 /// Request ids the desktop itself sends; their answers never reach the web view.
@@ -58,7 +61,11 @@ const KEYS_REQUEST_PREFIX: &str = "keys-";
 
 impl CloudRemote {
     pub fn new(account: Arc<AccountManager>, service: Arc<CloudWorkspaceService>, agents: Arc<CloudAgentClient>) -> Arc<Self> {
-        Arc::new(Self { account, service, agents, connections: Mutex::new(HashMap::new()) })
+        Arc::new(Self { account, service, agents, connections: Mutex::new(HashMap::new()), closes: ConnectionCloseLog::new() })
+    }
+
+    pub fn close_log(&self) -> Arc<ConnectionCloseLog> {
+        self.closes.clone()
     }
 
     /// Cheap: no Keychain load or token refresh, so it can run per frame.
@@ -112,6 +119,7 @@ impl CloudRemote {
         let app = app.clone();
         let id = connection_id.clone();
         let agents = self.agents.clone();
+        let closes = self.closes.clone();
         tauri::async_runtime::spawn(async move {
             let mut keys_request: Option<String> = None;
             // Whether this connection was granted `keys/1` (fetch keys on it).
@@ -125,6 +133,9 @@ impl CloudRemote {
             while let Some(event) = receiver.recv().await {
                 let payload = match event {
                     ClientEvent::State(state) => {
+                        if let Some(code) = close_code(&state) {
+                            closes.record(workspace_id.as_deref(), code, chrono::Utc::now().timestamp_millis());
+                        }
                         keys_granted = matches!(&state, ClientState::Connected { capabilities, .. } if capabilities.iter().any(|capability| capability == "keys/1"))
                             && identity.is_some()
                             && workspace_id.is_some();
@@ -330,6 +341,16 @@ fn store_keys(agents: &Arc<CloudAgentClient>, identity: Option<&Identity>, works
     });
 }
 
+/// The relay close code a state change reports, if any. `UpdateRequired`
+/// only follows a 4103 close.
+fn close_code(state: &ClientState) -> Option<u16> {
+    match state {
+        ClientState::Reconnecting { close_code, .. } => *close_code,
+        ClientState::UpdateRequired => Some(4103),
+        _ => None,
+    }
+}
+
 /// What the desktop does with a frame from the runtime before the web view
 /// sees it: key traffic stays in Rust.
 #[derive(Debug, PartialEq, Eq)]
@@ -355,6 +376,17 @@ fn intercept(message: &Value) -> Intercept {
 mod intercept_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn typed_relay_closes_reach_the_diagnostics_log() {
+        let reconnecting = |close_code| ClientState::Reconnecting { attempt: 1, reason: "4101 stale".into(), retry_in_ms: 250, close_code };
+        assert_eq!(close_code(&reconnecting(Some(4101))), Some(4101));
+        assert_eq!(close_code(&reconnecting(None)), None);
+        assert_eq!(close_code(&ClientState::UpdateRequired), Some(4103));
+        assert_eq!(close_code(&ClientState::Opening), None);
+        // The web view's state is unchanged: the code is not serialized.
+        assert!(serde_json::to_value(reconnecting(Some(4101))).unwrap().get("closeCode").is_none());
+    }
 
     #[test]
     fn key_answers_and_rotations_never_reach_the_web_view() {
