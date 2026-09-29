@@ -193,6 +193,11 @@ impl RuntimeLink for FileLink {
     }
 }
 
+/// An answered attachment: its id and the device it was minted for.
+fn completion_key(attachment_id: &str, device_id: &str) -> String {
+    format!("{attachment_id}\u{0}{device_id}")
+}
+
 /// The relay host id the API derives from a host key (`deriveRelayHostId`).
 pub fn relay_host_id_for_secret(secret: [u8; 32]) -> String {
     HostKeypair::from_secret(secret).host_id()
@@ -257,6 +262,9 @@ mod hash_b64 {
 struct HostState {
     devices: HashMap<String, Device>,
     /// Attachments already answered with a pairing code in this process.
+    /// Keyed by attachment id and device: the API re-mints an attachment
+    /// (a refreshed pairing, a reopened session) under the same id with a new
+    /// device, and that one must be answered too.
     completed: HashSet<String>,
     /// Open client connections per device, closed on revocation.
     connections: HashMap<String, Vec<mpsc::UnboundedSender<()>>>,
@@ -665,7 +673,7 @@ impl RelayHost {
             for cancel in state.connections.remove(&revocation.device_id).unwrap_or_default() {
                 let _ = cancel.send(());
             }
-            state.completed.insert(revocation.id.clone());
+            state.completed.insert(completion_key(&revocation.id, &revocation.device_id));
         }
         if changed {
             self.save_devices(&state.devices);
@@ -673,7 +681,8 @@ impl RelayHost {
     }
 
     async fn answer_attachment(&self, live: &Live, director_url: &str, attachment: Attachment) -> Result<()> {
-        if self.state.lock().unwrap().completed.contains(&attachment.id) || attachment.expires_at <= now_ms() {
+        let key = completion_key(&attachment.id, &attachment.device_id);
+        if self.state.lock().unwrap().completed.contains(&key) || attachment.expires_at <= now_ms() {
             return Ok(());
         }
         let authority = Authority::from_scope(&attachment.scope).ok_or_else(|| anyhow!("unknown attachment scope"))?;
@@ -722,7 +731,7 @@ impl RelayHost {
         let link = self.link.clone();
         let attachment_id = attachment.id.clone();
         tokio::task::spawn_blocking(move || link.complete_attachment(&attachment_id, &pairing_code)).await??;
-        self.state.lock().unwrap().completed.insert(attachment.id);
+        self.state.lock().unwrap().completed.insert(key);
         Ok(())
     }
 

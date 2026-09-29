@@ -1133,6 +1133,19 @@ async fn a_shared_workspace_serializes_input_and_stops_access_when_revoked() {
         write();
         source(&harness, &pairing_dir, &id, &device, &relay_host_id)
     };
+    // The API re-mints an existing attachment (a reopened session) under the
+    // same id with a new device and token; the runtime answers it again.
+    let remint = |id: &str, user: &str, scope: &str| {
+        let mut list = attachments.lock().unwrap();
+        let device = format!("device-{user}-{}", list.len() + 1);
+        let entry = list.iter_mut().find(|entry| entry["id"] == id).expect("an attachment to re-mint");
+        *entry = attachment(id, &device, &uuid::Uuid::new_v4().simple().to_string(), scope);
+        entry["userId"] = json!(user);
+        drop(list);
+        let _ = std::fs::remove_file(pairing_dir.join(format!("{id}.pairing")));
+        write();
+        source(&harness, &pairing_dir, id, &device, &relay_host_id)
+    };
 
     let mut admin = Client::start(open("admin", "runtime"));
     assert_eq!(you(&admin.connected().await)["role"], "manager");
@@ -1246,11 +1259,11 @@ async fn a_shared_workspace_serializes_input_and_stops_access_when_revoked() {
     assert!(!feeds[&tab].texts("user_message").iter().any(|t| t.contains("please keep the old API")), "notes never reach the agent");
     assert_eq!(settled(&mailbox, &long).state, "applied");
 
-    // Reconnect: Alice opens again (the API would now hand her a
-    // participate attachment of a member with no share) and has nothing,
+    // Reconnect: Alice opens again, and the API re-mints her attachment
+    // (same id, new device) as that of a member with no share: she has nothing,
     // until she is shared with again as a viewer.
     alice.supervisor.stop();
-    let mut alice = Client::start(open("alice", "session"));
+    let mut alice = Client::start(remint("att-share-2", "alice", "session"));
     assert_eq!(you(&alice.connected().await)["role"], "none");
     assert_eq!(alice.refused("session.tabs", json!({})).await, "forbidden");
     assert_eq!(alice.refused("keys.get", json!({})).await, "forbidden");
