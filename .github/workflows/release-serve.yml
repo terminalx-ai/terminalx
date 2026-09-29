@@ -6,8 +6,8 @@ name: Release terminalx-serve
 # `protocol` in `terminalx-serve.json`.
 #
 # After CI succeeds on a push to main (or by hand from main), and only if the
-# commit is a strict descendant of the newest runtime prerelease's commit, is
-# still on main, and changed src-tauri/, this builds and publishes
+# commit is a strict descendant of the newest runtime prerelease's commit and
+# is still on main, this builds and publishes
 # `runtime-v<serve version>-<commit UTC yyyymmddHHMMSS>-<sha7>`. Anything
 # else, including a re-run of an old CI or release run, is a skip, so a
 # publish can never roll the fleet back. Prereleases are never marked latest
@@ -90,10 +90,15 @@ jobs:
           previous=$(runtime_releases | head -1 | cut -f2)
           base=
           if [ -n "$previous" ]; then
-            base=$(git rev-list -n 1 "refs/tags/$previous" 2>/dev/null) || skip "cannot resolve $previous"
+            # Resolved through the API, not local refs: the tag may have been
+            # created after this job's checkout. Failing to resolve it is an
+            # error, never a silent skip.
+            base=$(gh api "repos/$GH_REPO/commits/$previous" --jq .sha) \
+              || { echo "::error::cannot resolve $previous"; exit 1; }
             [ "$base" != "$sha" ] || skip "$previous already covers $sha"
+            git fetch --quiet --no-tags origin "$base" \
+              || { echo "::error::cannot fetch $base for $previous"; exit 1; }
             git merge-base --is-ancestor "$base" "$sha" || skip "$sha is not newer than $previous"
-            git diff --quiet "$base" "$sha" -- src-tauri && skip "src-tauri unchanged since $previous"
           fi
           version=$(git show "$sha:src-tauri/serve/Cargo.toml" | sed -n 's/^version = "\([0-9.]*\)"$/\1/p' | head -1)
           [ -n "$version" ] || { echo "::error::no serve version at $sha"; exit 1; }

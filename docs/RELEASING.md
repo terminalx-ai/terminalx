@@ -249,8 +249,12 @@ hold, and otherwise skips:
 - the commit is on `main`: the current tip or an ancestor of it;
 - it is a **strict descendant** of the newest runtime prerelease's commit (or
   there is none yet), so re-running an old CI or release run, or a CI run
-  that finishes out of order, can never publish older code;
-- something under `src-tauri/` changed since that prerelease.
+  that finishes out of order, can never publish older code.
+
+There is no path filter: the serve build also compiles files outside
+`src-tauri/` (`src/lib/mediaTypes.json`, `src/lib/repo.ts`), and the
+descendant rule already prevents duplicate publishes, so every newer `main`
+commit that passes CI gets a runtime prerelease.
 
 It then:
 
