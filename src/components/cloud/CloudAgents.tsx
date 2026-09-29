@@ -257,6 +257,8 @@ export function provisioningLabel(workspaceState: string | null, wake: WakeResul
   switch (workspaceState) {
     case "suspended":
       return "Asleep";
+    case "archived":
+      return "Archived (unarchive it to resume)";
     case "provisioning":
       return "Provisioning";
     case "ready":

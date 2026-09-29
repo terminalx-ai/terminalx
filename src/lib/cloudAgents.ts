@@ -157,6 +157,23 @@ export function resetCloudAgents() {
   stores.clear();
 }
 
+/**
+ * Forget one workspace's tabs, queued saves and polling: it was deleted
+ * (a tombstone). Returns how many tabs were known.
+ */
+export function dropCloudAgents(scope: CloudAgentScope): number {
+  const k = cloudAgentsKey(scope);
+  const s = stores.get(k);
+  if (!s) return 0;
+  if (s.poll) clearTimeout(s.poll);
+  for (const timer of s.saves.values()) clearTimeout(timer);
+  s.saves.clear();
+  for (const tab of s.tabs.values()) if (tab.info.sessionId) dropTabLog(tab.info.sessionId, tab.tabId);
+  const count = s.tabs.size;
+  stores.delete(k);
+  return count;
+}
+
 export function errorText(error: unknown): string {
   if (error && typeof error === "object" && "code" in error && typeof (error as { code: unknown }).code === "string") return (error as { code: string }).code;
   if (error instanceof Error) return error.message;

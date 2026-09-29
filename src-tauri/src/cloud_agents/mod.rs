@@ -18,7 +18,7 @@ pub mod receipts;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -301,6 +301,9 @@ pub struct CloudAgents {
     dispatch: Mutex<Vec<String>>,
     dispatch_signal: Signal,
     generation: AtomicU64,
+    /// Set while an archive waits for the final checkpoint (contract §10.3):
+    /// no command is leased and no follow-up typed until it is lifted.
+    quiesced: AtomicBool,
 }
 
 impl CloudAgents {
@@ -334,11 +337,31 @@ impl CloudAgents {
             dispatch: Mutex::new(Vec::new()),
             dispatch_signal: Signal::default(),
             generation: AtomicU64::new(generation),
+            quiesced: AtomicBool::new(false),
         }))
     }
 
     pub fn state_dir(data_dir: &Path) -> PathBuf {
         data_dir.join("cloud-agent")
+    }
+
+    /// Stop taking new work: leave commands in the mailbox and follow-ups
+    /// queued. The running turn is not interrupted.
+    pub fn quiesce(&self) {
+        self.quiesced.store(true, Ordering::SeqCst);
+    }
+
+    /// The archive did not stop this runtime after all (it failed or was
+    /// undone): take work again.
+    pub fn resume_work(&self) {
+        if self.quiesced.swap(false, Ordering::SeqCst) {
+            self.poll.raise();
+            self.dispatch_signal.raise();
+        }
+    }
+
+    pub fn quiesced(&self) -> bool {
+        self.quiesced.load(Ordering::SeqCst)
     }
 
     pub fn set_generation(&self, generation: u64) {
@@ -416,6 +439,9 @@ impl CloudAgents {
     /// Send the next follow-up of each nudged tab whose turn has ended.
     /// Returns how many were sent.
     pub fn dispatch_follow_ups(&self) -> usize {
+        if self.quiesced() {
+            return 0;
+        }
         let tabs: Vec<String> = std::mem::take(&mut *self.dispatch.lock().unwrap());
         let mut sent = 0;
         for tab_id in tabs {

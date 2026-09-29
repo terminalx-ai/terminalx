@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Bot, Cloud, FolderTree, GitBranch, Loader2, Plug, Plus, TerminalSquare, X } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowLeft, Bot, Cloud, FolderTree, GitBranch, Loader2, Pause, Plug, Plus, TerminalSquare, Trash2, X } from "lucide-react";
 import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { TerminalView, createTerminal } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
@@ -7,8 +7,19 @@ import { CloudAgentsView } from "./CloudAgents";
 import { CloudFilesView } from "./CloudFiles";
 import { CloudGitView } from "./CloudGit";
 import { CloudCreateWorkspace } from "./CloudCreateWorkspace";
+import { actionsFor, archiveLine, CloudWorkspaceLifecycleDialog, DeletionProgress, type LifecycleAction } from "./CloudWorkspaceLifecycle";
 import { useAccount } from "@/lib/account";
 import { PHASES, phaseOf, settled } from "@/lib/cloudCreate";
+import {
+  archiving,
+  checkpointText,
+  deletion,
+  isArchived,
+  lifecycleErrorMessage,
+  purgeNoticeText,
+  purgeTombstones,
+  type PurgeNotice,
+} from "@/lib/cloudLifecycle";
 import {
   api,
   devWorkspaceConnection,
@@ -63,15 +74,24 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [pairingCode, setPairingCode] = useState("");
   const [creating, setCreating] = useState(false);
+  const [lifecycle, setLifecycle] = useState<{ item: CloudWorkspaceListItem; action: LifecycleAction } | null>(null);
+  const [notices, setNotices] = useState<PurgeNotice[]>([]);
+  const [rowError, setRowError] = useState<{ id: string; message: string } | null>(null);
+  const names = useRef(new Map<string, string>());
   const { status } = useAccount();
   const scope = status.state === "signed-in" ? (status.context?.scope ?? "signed-in") : "signed-out";
 
   const reload = useCallback(() => {
     api
       .cloudWorkspaces()
-      .then((list) => {
-        setWorkspaces(list.workspaces);
+      .then(async (list) => {
+        const deleted = new Set((list.tombstones ?? []).map((tombstone) => tombstone.id));
+        // A tombstoned workspace is gone, whatever else still lists it.
+        setWorkspaces(list.workspaces.filter((item) => !deleted.has(item.workspace.id)));
         setListError(null);
+        for (const item of list.workspaces) names.current.set(item.workspace.id, item.workspace.name);
+        const purged = await purgeTombstones(list.tombstones ?? [], names.current);
+        if (purged.length) setNotices((current) => [...current, ...purged]);
       })
       .catch((e: unknown) => setListError(errorCode(e)));
   }, []);
@@ -79,10 +99,15 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
   useEffect(() => reload(), [reload]);
 
   // While any workspace is still starting (provisioning, or ready with its
-  // agent not yet running), keep its phase current. The create form polls
-  // the workspace it tracks itself, so the list waits while it is open.
+  // agent not yet running) or archiving, keep it current. The create form
+  // polls the workspace it tracks itself, so the list waits while it is
+  // open; a delete's progress polls its own operation and reloads when done.
   const starting =
-    workspaces?.some((item) => (item.workspace.state === "provisioning" || item.workspace.launch) && !settled(phaseOf(item))) ?? false;
+    workspaces?.some(
+      (item) =>
+        ((item.workspace.state === "provisioning" || item.workspace.launch) && !settled(phaseOf(item))) ||
+        archiving(item),
+    ) ?? false;
   useEffect(() => {
     if (!starting || connection || creating) return;
     const timer = window.setInterval(reload, 3000);
@@ -118,6 +143,22 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
       setError(errorCode(e));
     }
   }, []);
+
+  const unarchive = useCallback(
+    async (item: CloudWorkspaceListItem) => {
+      setRowError(null);
+      try {
+        await api.cloudWorkspaceUnarchive(item.workspace.id);
+        reload();
+      } catch (e) {
+        setRowError({ id: item.workspace.id, message: lifecycleErrorMessage(errorCode(e)) });
+      }
+    },
+    [reload],
+  );
+
+  const active = workspaces?.filter((item) => !isArchived(item.workspace)) ?? null;
+  const archived = workspaces?.filter((item) => isArchived(item.workspace)) ?? [];
 
   const openDev = useCallback(async () => {
     setError(null);
@@ -179,30 +220,130 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
             <h2 className="text-sm font-medium">Workspaces in this organization</h2>
             {listError && <p className="text-xs text-muted-foreground">Cloud workspaces are unavailable ({listError}).</p>}
             {!workspaces && !listError && <Loader2 className="size-4 animate-spin" />}
-            {workspaces?.length === 0 && <p className="text-xs text-muted-foreground">No cloud workspaces yet.</p>}
-            {workspaces?.map((item) => (
-              <div key={item.workspace.id} className="flex items-center gap-3 rounded-md border border-hairline px-3 py-2">
-                <div className="flex min-w-0 flex-1 flex-col">
-                  <span className="truncate text-sm">{item.workspace.name}</span>
-                  <span className="text-xs text-muted-foreground" data-testid="cloud-workspace-state">
-                    {describeWorkspace(item)}
-                  </span>
-                </div>
-                {item.workspace.state === "suspended" && (
-                  <Button size="sm" variant="ghost" title="Read saved agent conversations without waking the workspace" onClick={() => void open(item, false)}>
-                    Open without waking
-                  </Button>
-                )}
+            {active?.length === 0 && (
+              <p className="text-xs text-muted-foreground">{archived.length ? "No active cloud workspaces." : "No cloud workspaces yet."}</p>
+            )}
+            {notices.map((notice) => (
+              <div key={notice.workspaceId} className="flex items-start gap-2 rounded-md bg-well px-3 py-2 text-xs" role="status" data-testid="cloud-tombstone-notice">
+                <Trash2 className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+                <span className="flex-1">{purgeNoticeText(notice)}</span>
                 <Button
-                  size="sm"
-                  disabled={!["ready", "suspended"].includes(item.workspace.state)}
-                  onClick={() => void open(item, item.workspace.state === "suspended")}
+                  size="icon-xs"
+                  variant="ghost"
+                  aria-label="Dismiss"
+                  onClick={() => setNotices((current) => current.filter((other) => other !== notice))}
                 >
-                  {item.workspace.state === "suspended" ? "Resume and open" : "Open session"}
+                  <X />
                 </Button>
               </div>
             ))}
+            {active?.map((item) => {
+              const deleting = deletion(item);
+              return (
+                <div key={item.workspace.id} className="flex flex-col gap-1.5 rounded-md border border-hairline px-3 py-2" data-testid="cloud-workspace-row">
+                  <div className="flex items-center gap-3">
+                    <div className="flex min-w-0 flex-1 flex-col">
+                      <span className="truncate text-sm">{item.workspace.name}</span>
+                      <span className="text-xs text-muted-foreground" data-testid="cloud-workspace-state">
+                        {describeWorkspace(item)}
+                      </span>
+                    </div>
+                    {!deleting && item.workspace.state === "suspended" && (
+                      <Button size="sm" variant="ghost" title="Read saved agent conversations without waking the workspace" onClick={() => void open(item, false)}>
+                        Open without waking
+                      </Button>
+                    )}
+                    {!deleting && (
+                      <Button
+                        size="sm"
+                        disabled={!["ready", "suspended"].includes(item.workspace.state) || archiving(item)}
+                        onClick={() => void open(item, item.workspace.state === "suspended")}
+                      >
+                        {item.workspace.state === "suspended" ? "Resume and open" : "Open session"}
+                      </Button>
+                    )}
+                    {deleting !== "running" && !archiving(item) && (
+                      <LifecycleButtons item={item} onChoose={(action) => setLifecycle({ item, action })} />
+                    )}
+                  </div>
+                  {deleting && (
+                    <DeletionProgress item={item} onChanged={reload} onForceNeeded={() => setLifecycle({ item, action: "delete" })} />
+                  )}
+                  {rowError?.id === item.workspace.id && <p className="text-xs text-destructive">{rowError.message}</p>}
+                </div>
+              );
+            })}
           </section>
+          {archived.length > 0 && (
+            <section className="flex flex-col gap-2" data-testid="cloud-archived-section">
+              <h2 className="text-sm font-medium">Archived</h2>
+              <p className="text-xs text-muted-foreground">
+                Stopped and kept until their deadline, then deleted automatically. Storage keeps billing at the provider until then.
+              </p>
+              {archived.map((item) => {
+                const deleting = deletion(item);
+                const failed = item.workspace.state !== "archived" && !archiving(item) && !deleting;
+                const saved = item.latestOperation?.action === "archive" ? checkpointText(item.latestOperation.checkpoint) : null;
+                return (
+                  <div key={item.workspace.id} className="flex flex-col gap-1.5 rounded-md border border-hairline px-3 py-2" data-testid="cloud-archived-row">
+                    <div className="flex items-center gap-3">
+                      <div className="flex min-w-0 flex-1 flex-col">
+                        <span className="truncate text-sm">{item.workspace.name}</span>
+                        <span className="text-xs text-muted-foreground" data-testid="cloud-archive-deadline">
+                          {archiving(item)
+                            ? archivingText(item)
+                            : failed
+                              ? `The archive did not finish: ${lifecycleErrorMessage(item.latestOperation?.errorCode ?? "cloud_workspace_unknown_error")}`
+                              : archiveLine(item)}
+                        </span>
+                        {saved && !archiving(item) && <span className="text-xs text-muted-foreground">{saved}</span>}
+                      </div>
+                      {!deleting && !archiving(item) && (
+                        <>
+                          {item.workspace.state === "archived" && (
+                            <Button size="sm" variant="ghost" title="Read saved agent conversations; nothing is started" onClick={() => void open(item, false)}>
+                              Read conversations
+                            </Button>
+                          )}
+                          {failed && (
+                            <Button size="sm" variant="outline" onClick={() => setLifecycle({ item, action: "archive" })}>
+                              <Archive className="size-3.5" /> Retry archive
+                            </Button>
+                          )}
+                          <Button size="sm" variant="outline" onClick={() => void unarchive(item)} title="Keep it: it stays stopped until you open it">
+                            <ArchiveRestore className="size-3.5" /> Unarchive
+                          </Button>
+                          <Button size="sm" variant="ghost" aria-label={`Delete ${item.workspace.name} now`} onClick={() => setLifecycle({ item, action: "delete" })}>
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        </>
+                      )}
+                    </div>
+                    {deleting && (
+                      <DeletionProgress item={item} onChanged={reload} onForceNeeded={() => setLifecycle({ item, action: "delete" })} />
+                    )}
+                    {rowError?.id === item.workspace.id && <p className="text-xs text-destructive">{rowError.message}</p>}
+                  </div>
+                );
+              })}
+            </section>
+          )}
+          {lifecycle && (
+            <CloudWorkspaceLifecycleDialog
+              item={lifecycle.item}
+              initial={lifecycle.action}
+              onClose={() => setLifecycle(null)}
+              onDone={() => {
+                setLifecycle(null);
+                reload();
+              }}
+              onExport={() => {
+                const { item } = lifecycle;
+                setLifecycle(null);
+                void open(item, item.workspace.state === "suspended");
+              }}
+            />
+          )}
           {import.meta.env.DEV && (
             <section className="flex flex-col gap-2">
               <h2 className="text-sm font-medium">Development: attach by pairing code</h2>
@@ -232,8 +373,40 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
   );
 }
 
+/** Stop, archive and delete; each opens the dialog that tells them apart. */
+function LifecycleButtons({ item, onChoose }: { item: CloudWorkspaceListItem; onChoose: (action: LifecycleAction) => void }) {
+  const actions = actionsFor(item);
+  const name = item.workspace.name;
+  return (
+    <div className="flex items-center">
+      {actions.includes("stop") && (
+        <Button size="icon-sm" variant="ghost" aria-label={`Stop ${name}`} title="Stop: keeps everything, resume any time" onClick={() => onChoose("stop")}>
+          <Pause />
+        </Button>
+      )}
+      {actions.includes("archive") && (
+        <Button size="icon-sm" variant="ghost" aria-label={`Archive ${name}`} title="Archive: stopped and kept for 30 days" onClick={() => onChoose("archive")}>
+          <Archive />
+        </Button>
+      )}
+      {actions.includes("delete") && (
+        <Button size="icon-sm" variant="ghost" aria-label={`Delete ${name}`} title="Delete permanently" onClick={() => onChoose("delete")}>
+          <Trash2 />
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function archivingText(item: CloudWorkspaceListItem): string {
+  return item.latestOperation?.errorCode === "runtime_checkpoint_pending"
+    ? "Archiving: waiting for the runtime to save its conversations (up to a minute)…"
+    : "Archiving…";
+}
+
 /** The list's one line of state: the startup phase while a workspace starts. */
 function describeWorkspace(item: CloudWorkspaceListItem): string {
+  if (archiving(item)) return archivingText(item);
   const branch = item.workspace.launch?.workBranch;
   const phase = phaseOf(item);
   const starting = item.workspace.state === "provisioning" || (Boolean(item.workspace.launch) && !settled(phase));

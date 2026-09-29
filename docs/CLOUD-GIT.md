@@ -136,8 +136,8 @@ exited.
 
 - No real GitHub: everything ran against a local bare remote and
   `scripts/remote-runtime/fake-gh`.
-- The archive/delete dialog itself (PRO-34 desktop UI) is not built; the
-  facts are shown in the Git view and are ready for it.
+- The archive/delete dialog (PRO-34) shows the same facts before an
+  archive or delete; see [CLOUD-LIFECYCLE.md](CLOUD-LIFECYCLE.md).
 - The author is the global `user.name`/`user.email`; an identity set only
   under `includeIf "gitdir:…"` on the desktop is not used (the cloud
   checkout has no local path to match). A per-organization identity is a
