@@ -111,10 +111,13 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
   }, []);
 
   // Back from an opened session returns to the list; from the list, it leaves.
+  // Opening a session unmounted the create form, so it is closed rather than
+  // shown again empty; the list row carries the workspace's state.
   const back = useCallback(() => {
     if (opened) {
       setOpened(null);
       setState({ state: "idle" });
+      setCreating(false);
       reload();
     } else onBack();
   }, [opened, onBack, reload]);

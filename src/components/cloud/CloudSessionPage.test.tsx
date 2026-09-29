@@ -413,6 +413,17 @@ describe("cloud workspace session page", () => {
     expect(onBack).toHaveBeenCalledTimes(1);
   });
 
+  it("closes the create form when coming back from a session opened from it", async () => {
+    render(<CloudSessionPage onBack={() => undefined} />);
+    fireEvent.click(await screen.findByRole("button", { name: /New workspace/ }));
+    expect(screen.getByTestId("cloud-create-stub")).toBeTruthy();
+    fireEvent.click(screen.getAllByRole("button", { name: "Open session" })[0]!);
+    await screen.findByTestId("cloud-execution-location");
+    fireEvent.click(screen.getByRole("button", { name: "Back to workspaces" }));
+    expect(await screen.findByRole("button", { name: /New workspace/ })).toBeTruthy();
+    expect(screen.queryByTestId("cloud-create-stub")).toBeNull();
+  });
+
   it("updates the list row from the create form's own snapshots while the form is open", async () => {
     const starting = workspace("ws-new", "provisioning");
     const launch = { launchId: "l1", phase: "allocating", state: "pending", workBranch: "terminalx/app-3f9a2c1b7d4e", agent: "claude", hasPrompt: true, timings: {} };
