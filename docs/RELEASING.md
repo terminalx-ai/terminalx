@@ -235,39 +235,77 @@ Settings → About. Nothing runs on launch or on a timer.
 ## The cloud runtime (`terminalx-serve`)
 
 Cloud workspaces run the headless `terminalx-serve` binary, not the desktop
-app. `.github/workflows/release-serve.yml` attaches it to every release, so
-there is no manual step:
+app. The TerminalX cloud server downloads it from this repository's GitHub
+Releases by itself. `.github/workflows/release-serve.yml` publishes it on two
+paths, and neither needs the updater signing key.
 
-1. Publishing a GitHub Release triggers the workflow for that release's tag.
-2. It builds `src-tauri/serve` in release mode on Ubuntu 22.04, for x86-64
-   and arm64. Building on 22.04 keeps the glibc floor at 2.35, so the binary
-   runs on Ubuntu 22.04 and 24.04 and Debian 12; the job log prints the
-   highest `GLIBC_` symbol it needs.
-3. Each binary runs `--self-test` (start, shell PTY, clean exit) before it is
-   uploaded.
-4. It uploads `terminalx-serve-linux-x64` and `terminalx-serve-linux-arm64`
-   to the release and adds their lines to the release's `SHA256SUMS`. The
-   existing lines stay; only lines for these two files are replaced, so a
-   re-run neither duplicates nor drops anything.
+### Runtime prereleases (the normal path)
 
-The TerminalX cloud server polls this repository's releases and installs the
-newest stable release that carries `terminalx-serve-linux-x64` and is at
-least its minimum compatible version. It checks the file against
-`SHA256SUMS`, so a release must keep both. A release without the binary (for
-example while the workflow is still running) is skipped, and the server keeps
-the version it had.
+After the CI workflow succeeds on a push to `main`, the workflow checks
+whether anything under `src-tauri/` changed since the newest runtime
+prerelease. If so (or when there is none yet), it:
 
-To attach the binary to a release that already exists, run the workflow by
-hand (Actions → Release terminalx-serve → Run workflow) with the tag, or:
+1. builds `src-tauri/serve` in release mode on Ubuntu 22.04 for x86-64 and
+   arm64 (glibc floor 2.35 or lower: Ubuntu 22.04 and 24.04, Debian 12; the
+   job log prints the highest `GLIBC_` symbol the binary needs);
+2. runs each binary's `--self-test` (start, shell PTY, clean exit);
+3. creates a **prerelease** tagged
+   `runtime-v<serve crate version>-<UTC yyyymmddHHMMSS>-<7-char commit>`,
+   e.g. `runtime-v0.2.2-20260929121810-3001736`, with
+   `terminalx-serve-linux-x64`, `terminalx-serve-linux-arm64`,
+   `terminalx-serve.json` and `SHA256SUMS`;
+4. deletes runtime prereleases (and their tags) beyond the newest 10.
+
+The UTC timestamp makes the tags monotonic: newer builds sort later, whatever
+the crate version says. Runtime prereleases are created with `--prerelease
+--latest=false`, so they are never the release that
+`/releases/latest/download/latest.json` resolves to and cannot affect the
+desktop auto-updater. Pruning only ever touches prereleases whose tag matches
+`^runtime-v[0-9]+\.[0-9]+\.[0-9]+-[0-9]{14}-[0-9a-f]{7}$`.
+
+To publish one by hand (for example when CI on `main` is red for an
+unrelated reason), run the workflow from `main` with no tag:
 
 ```sh
-gh workflow run release-serve.yml -f tag=v0.2.5
+gh workflow run release-serve.yml --ref main
 ```
 
-The tag must contain `src-tauri/serve`; releases before 0.2.5 do not.
+### Desktop releases
 
-To build it locally for x86-64 from an Apple Silicon Mac, cross-compile in
-Docker rather than emulating amd64 (the linker segfaults under QEMU):
+Publishing a desktop release (the steps above) also triggers the workflow,
+which attaches the same three files to that release and adds their lines to
+its `SHA256SUMS`: existing lines stay, only lines for these files are
+replaced, so a re-run neither duplicates nor drops anything. It never touches
+`latest.json`. To attach to a release that already exists:
+
+```sh
+gh workflow run release-serve.yml --ref main -f tag=v0.2.5
+```
+
+The tag must contain `src-tauri/serve` with a `runtime-protocol`; releases up
+to 0.2.4 do not, and the workflow refuses them.
+
+### `terminalx-serve.json` and the runtime protocol
+
+```json
+{ "version": "0.2.2", "protocol": 1, "commit": "<40-char sha>", "builtAt": "2026-09-29T12:18:10Z" }
+```
+
+`protocol` comes from `[package.metadata.terminalx] runtime-protocol` in
+`src-tauri/serve/Cargo.toml`. The cloud server refuses a runtime whose
+protocol is below its minimum, so **bump it whenever a runtime change needs a
+matching server** (bootstrap, launch intents, the runtime API), and raise the
+server's minimum when the server starts depending on it. Protocol 1 is the
+first runtime with launch intents and the serve bootstrap.
+
+The server takes stable releases and runtime prereleases alike and picks the
+newest compatible one: runtime prereleases are ordered by the timestamp in
+their tag, stable releases by their publish time.
+
+### Building it locally
+
+To build it for x86-64 from an Apple Silicon Mac, cross-compile in Docker
+rather than emulating amd64 (the linker segfaults under QEMU):
 
 ```sh
 docker run --rm -v "$PWD":/src -w /src/src-tauri/serve rust:1-bookworm bash -c '
