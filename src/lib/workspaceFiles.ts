@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
-import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { WorkspaceRpcError, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { listRepositories } from "@terminalx/portable/workspaceGit";
 import {
   FS_MAX_FILE_BYTES,
   listRemoteDir,
@@ -197,13 +198,31 @@ export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnl
       return () => listeners.delete(listener);
     },
     changes: async () => {
-      const status = await live(client.call<{ repository: boolean; files?: { path: string; index: string; worktree: string }[] }>("git.status"));
-      if (!status.repository) return [];
-      return (status.files ?? []).flatMap((file) => {
-        const code = file.index === "?" ? "?" : file.worktree !== " " ? file.worktree : file.index;
-        const change = PORCELAIN[code];
-        return change ? [{ path: file.path, status: change }] : [];
-      });
+      type Status = { repository: boolean; repo?: string; files?: { path: string; index: string; worktree: string }[] };
+      const under = (repo: string | undefined) => (repo && repo !== "." ? `${repo}/` : "");
+      const badges = (status: Status, prefix: string) =>
+        (status.files ?? []).flatMap((file) => {
+          const code = file.index === "?" ? "?" : file.worktree !== " " ? file.worktree : file.index;
+          const change = PORCELAIN[code];
+          return change ? [{ path: prefix + file.path, status: change }] : [];
+        });
+      try {
+        const status = await live(client.call<Status>("git.status"));
+        // Paths are the repository's; a lone clone below the root is prefixed too.
+        return status.repository ? badges(status, under(status.repo)) : [];
+      } catch (error) {
+        if (!(error instanceof WorkspaceRpcError) || error.code !== "ambiguous_repository") throw error;
+      }
+      // Several repositories (PRO-27): each one's badges, under its directory.
+      const repositories = await live(listRepositories(client));
+      const each = await Promise.all(
+        repositories.map((repository) =>
+          live(client.call<Status>("git.status", { repo: repository.repo }))
+            .then((status) => badges(status, under(repository.repo)))
+            .catch(() => []),
+        ),
+      );
+      return each.flat();
     },
     search: async (query, signal) => {
       const controller = new AbortController();

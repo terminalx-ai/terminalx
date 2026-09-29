@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 
 /// Namespace versions this build speaks, in preference order.
-pub const CAPABILITIES: [&str; 5] = ["pty/1", "fs/1", "git/1", "session/1", "keys/1"];
+pub const CAPABILITIES: [&str; 6] = ["pty/1", "fs/1", "git/1", "session/1", "keys/1", "lifecycle/1"];
 
 /// Authority an attachment grants, from the API's `authority` (`manage` →
 /// runtime scope, `participate` → session scope).
@@ -94,16 +94,30 @@ pub const METHODS: &[Method] = &[
     method("fs.mkdir", "fs/1", Manage, true),
     method("fs.watch", "fs/1", Participate, false),
     method("fs.unwatch", "fs/1", Participate, false),
+    // PRO-27: every git call names its repository (`repo`) unless the
+    // workspace has exactly one (`remote/git.rs`).
+    method("git.repositories", "git/1", Participate, false),
     method("git.status", "git/1", Participate, false),
     method("git.diff", "git/1", Participate, false),
+    method("git.workingChanges", "git/1", Participate, false),
+    method("git.changesBetween", "git/1", Participate, false),
+    method("git.fileContents", "git/1", Participate, false),
     method("git.log", "git/1", Participate, false),
     method("git.branches", "git/1", Participate, false),
+    method("git.prs", "git/1", Participate, false),
     method("git.checkout", "git/1", Manage, true),
+    // The author comes from the client; credentials never do.
     method("git.commit", "git/1", Manage, true),
     method("git.stage", "git/1", Manage, true),
     method("git.unstage", "git/1", Manage, true),
+    method("git.fetch", "git/1", Manage, true),
     method("git.push", "git/1", Manage, true),
     method("git.pull", "git/1", Manage, true),
+    method("git.prCreate", "git/1", Manage, true),
+    method("git.prReady", "git/1", Manage, true),
+    method("git.prMerge", "git/1", Manage, true),
+    // PRO-34 facts before archive or delete (saas contract 10.2): read-only.
+    method("lifecycle.dispositionFacts", "lifecycle/1", Participate, false),
 ];
 
 pub fn find_method(name: &str) -> Option<&'static Method> {
@@ -232,6 +246,10 @@ fn leak_code(code: &str) -> &'static str {
         "git_failed",
         "not_controller",
         "backpressure",
+        "ambiguous_repository",
+        "auth_failed",
+        "outcome_unknown",
+        "unpushed",
     ];
     CODES.iter().find(|known| **known == code).copied().unwrap_or("internal")
 }

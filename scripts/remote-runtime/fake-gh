@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""A stand-in for the GitHub CLI (PRO-27 tests): pull requests against a fake GitHub.
+
+The runtime's `git.pr*` methods and `lifecycle.dispositionFacts` run `gh` in a
+repository; this answers the calls they make, from JSON files in
+`$FAKE_GH_STATE` (one fake repository per directory):
+
+  gh pr list --head <branch> --state all|open --json <fields> --limit <n>
+  gh pr create --title <t> --body <b> --base <base> --head <branch> [--draft]
+  gh pr view <number> --json <fields>
+  gh pr ready <number>
+  gh pr merge <number> --merge|--squash|--rebase
+
+Faults, by file in the state directory:
+  auth-expired       every call fails as GitHub does for a revoked token
+  offline            every call fails to connect
+  drop-after-create  the next create lands, then reports a dropped connection
+  mergeable          its text is the mergeable state of new pull requests
+  checks.json        statusCheckRollup of every pull request
+  pr-<n>.json        a pull request; a test may write one (e.g. a fork's,
+                     "isCrossRepository": true)
+  calls.log          every call is appended here (one line of JSON each)
+
+A create refuses a head branch the remote does not have, and a second open
+pull request for the same head, as GitHub does.
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+STATE = os.environ.get("FAKE_GH_STATE") or sys.exit("fake-gh: FAKE_GH_STATE is not set")
+
+
+def path(name):
+    return os.path.join(STATE, name)
+
+
+def flag(name):
+    return os.path.exists(path(name))
+
+
+def load_all():
+    prs = []
+    for name in os.listdir(STATE):
+        if name.startswith("pr-") and name.endswith(".json"):
+            with open(path(name)) as f:
+                prs.append(json.load(f))
+    return sorted(prs, key=lambda pr: pr["number"])
+
+
+def save(pr):
+    with open(path("pr-%d.json" % pr["number"]), "w") as f:
+        json.dump(pr, f)
+
+
+def option(args, name, default=None):
+    if name in args:
+        index = args.index(name)
+        if index + 1 < len(args):
+            return args[index + 1]
+    return default
+
+
+def fields(pr, wanted):
+    if not wanted:
+        return pr
+    return {key: pr.get(key) for key in wanted.split(",")}
+
+
+def fail(message, code=1):
+    sys.stderr.write(message + "\n")
+    sys.exit(code)
+
+
+def remote_has(branch):
+    """Whether origin (as the checkout's remote knows it) has `branch`."""
+    out = subprocess.run(["git", "ls-remote", "origin", "refs/heads/" + branch], capture_output=True, text=True)
+    return out.returncode == 0 and out.stdout.strip() != ""
+
+
+def main(args):
+    with open(path("calls.log"), "a") as log:
+        log.write(json.dumps(args) + "\n")
+    if flag("auth-expired"):
+        fail("HTTP 401: Bad credentials (https://api.github.com/graphql)\nTry authenticating with:  gh auth login")
+    if flag("offline"):
+        fail("error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com")
+    if args[:1] != ["pr"] or len(args) < 2:
+        fail("fake-gh: unsupported call: %s" % " ".join(args), 2)
+    command, rest = args[1], args[2:]
+    prs = load_all()
+    if command == "list":
+        head = option(rest, "--head")
+        state = option(rest, "--state", "open").upper()
+        found = [pr for pr in prs if (head is None or pr["headRefName"] == head) and (state == "ALL" or pr["state"] == state)]
+        found.reverse()
+        limit = int(option(rest, "--limit", "30"))
+        print(json.dumps([fields(pr, option(rest, "--json")) for pr in found[:limit]]))
+        return
+    if command == "create":
+        head, base = option(rest, "--head"), option(rest, "--base")
+        if not head or not base:
+            fail("fake-gh: --head and --base are required", 2)
+        if not remote_has(head):
+            fail("pull request create failed: GraphQL: Head sha can't be blank, Head ref must be a branch (createPullRequest)")
+        if any(pr["headRefName"] == head and pr["state"] == "OPEN" and not pr.get("isCrossRepository") for pr in prs):
+            fail('a pull request for branch "%s" into branch "%s" already exists' % (head, base))
+        number = len(prs) + 1
+        mergeable = open(path("mergeable")).read().strip() if flag("mergeable") else "MERGEABLE"
+        checks = json.load(open(path("checks.json"))) if flag("checks.json") else []
+        pr = {
+            "number": number,
+            "title": option(rest, "--title", ""),
+            "body": option(rest, "--body", ""),
+            "url": "https://github.test/octo/repo/pull/%d" % number,
+            "state": "OPEN",
+            "isDraft": "--draft" in rest,
+            "baseRefName": base,
+            "headRefName": head,
+            "additions": 1,
+            "deletions": 0,
+            "mergeable": mergeable,
+            "reviewDecision": "",
+            "statusCheckRollup": checks,
+            "author": {"login": "octocat"},
+            "isCrossRepository": False,
+        }
+        save(pr)
+        if flag("drop-after-create"):
+            os.remove(path("drop-after-create"))
+            fail("Post \"https://api.github.com/graphql\": read tcp 10.0.0.2:51234->140.82.112.6:443: read: connection reset by peer")
+        print(pr["url"])
+        return
+    number = int(rest[0]) if rest and rest[0].isdigit() else None
+    pr = next((pr for pr in prs if pr["number"] == number), None)
+    if pr is None:
+        fail("GraphQL: Could not resolve to a PullRequest with the number of %s." % (rest[0] if rest else ""))
+    if command == "view":
+        print(json.dumps(fields(pr, option(rest, "--json"))))
+    elif command == "ready":
+        pr["isDraft"] = False
+        save(pr)
+    elif command == "merge":
+        if pr["mergeable"] == "CONFLICTING":
+            fail("Pull request #%d is not mergeable: the merge commit cannot be cleanly created." % number)
+        pr["state"] = "MERGED"
+        save(pr)
+    else:
+        fail("fake-gh: unsupported call: %s" % " ".join(args), 2)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

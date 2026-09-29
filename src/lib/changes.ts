@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, git } from "@/lib/api";
+import { api } from "@/lib/api";
+import { localGitSource, type GitSource } from "@/lib/gitSource";
 import type { AgentEvent } from "@/types/events";
 import type { ChangedFile } from "@/types/session";
 
@@ -66,20 +67,32 @@ export function useChanges(cwd: string | undefined, range: ChangeRange | null, a
 }
 
 export function useWorkingChanges(cwd: string | undefined, active: boolean, tick = 0) {
-  const [state, setState] = useState<{ head: string | null; files: ChangedFile[] }>({ head: null, files: [] });
+  return useGitWorkingChanges(cwd ? localGitSource(cwd) : undefined, active, tick);
+}
+
+/** Uncommitted changes of a local checkout or a cloud repository. */
+export function useGitWorkingChanges(source: GitSource | undefined, active: boolean, tick = 0) {
+  const [state, setState] = useState<{ key: string | null; head: string | null; files: ChangedFile[] }>({ key: null, head: null, files: [] });
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<unknown>(null);
   useEffect(() => {
-    if (!cwd || !active) return;
+    if (!source || !active) return;
     let cancelled = false;
     setLoading(true);
-    git
-      .workingChanges(cwd)
-      .then(([head, files]) => !cancelled && setState({ head, files }))
-      .catch(() => {})
+    source
+      .workingChanges()
+      .then(({ head, files }) => {
+        if (cancelled) return;
+        setState({ key: source.key, head, files });
+        setError(null);
+      })
+      .catch((e) => !cancelled && setError(e))
       .finally(() => !cancelled && setLoading(false));
     return () => {
       cancelled = true;
     };
-  }, [cwd, active, tick]);
-  return { ...state, loading };
+  }, [source, active, tick]);
+  // Never show one repository's changes under another.
+  const current = state.key === (source?.key ?? null);
+  return { head: current ? state.head : null, files: current ? state.files : [], loading, error };
 }

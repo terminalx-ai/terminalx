@@ -97,6 +97,7 @@ async fn paths_cannot_leave_the_workspace() {
         call(&f.rpc, &peer, "fs.delete", json!({ "path": "escape", "clientRequestId": "request-0003" })).await.unwrap();
         assert!(f.root.parent().unwrap().join("secret.txt").exists());
     }
+    crate::git::run(&f.root, &["init", "-q"]).unwrap();
     assert_eq!(
         code(call(&f.rpc, &peer, "git.stage", json!({ "paths": ["../secret.txt"], "clientRequestId": "request-0004" })).await),
         "path_forbidden"
@@ -217,8 +218,9 @@ async fn git_reads_status_and_commits_once() {
     assert_eq!(status["files"][0]["path"], "a.txt");
     assert_eq!(status["files"][0]["worktree"], "?");
     call(&f.rpc, &peer, "git.stage", json!({ "paths": ["a.txt"], "clientRequestId": "request-git-1" })).await.unwrap();
-    let commit = call(&f.rpc, &peer, "git.commit", json!({ "message": "first", "clientRequestId": "request-git-2" })).await.unwrap();
-    let replay = call(&f.rpc, &peer, "git.commit", json!({ "message": "first", "clientRequestId": "request-git-2" })).await.unwrap();
+    let author = json!({ "name": "Ada", "email": "ada@example.com" });
+    let commit = call(&f.rpc, &peer, "git.commit", json!({ "message": "first", "author": author, "clientRequestId": "request-git-2" })).await.unwrap();
+    let replay = call(&f.rpc, &peer, "git.commit", json!({ "message": "first", "author": author, "clientRequestId": "request-git-2" })).await.unwrap();
     assert_eq!(commit, replay);
     let log = call(&f.rpc, &peer, "git.log", json!({ "limit": 5 })).await.unwrap();
     assert_eq!(log["commits"].as_array().unwrap().len(), 1);
@@ -595,4 +597,37 @@ fn session_cursors_expire_with_the_runtime_process() {
     let restarted = fixture();
     assert_eq!(restarted.rpc.parse_cursor(&cursor).unwrap_err().code, "cursor_expired");
     assert_eq!(f.rpc.parse_cursor("7:30").unwrap_err().code, "cursor_expired", "the pre-PRO-22 form");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn participants_read_git_and_disposition_facts_but_never_publish() {
+    let f = fixture();
+    crate::git::run(&f.root, &["init", "-q", "-b", "main"]).unwrap();
+    std::fs::write(f.root.join("a.txt"), "a").unwrap();
+    let (participant, _events) = Peer::new("device-participate".into(), Authority::Participate);
+    call(&f.rpc, &participant, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["git/1"] })).await.unwrap();
+    assert_eq!(code(call(&f.rpc, &participant, "lifecycle.dispositionFacts", json!({})).await), "capability_not_granted");
+    call(&f.rpc, &participant, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["git/1", "lifecycle/1"] })).await.unwrap();
+    assert_eq!(call(&f.rpc, &participant, "git.status", json!({})).await.unwrap()["files"][0]["path"], "a.txt");
+    assert_eq!(call(&f.rpc, &participant, "git.repositories", json!({})).await.unwrap()["repositories"][0]["repo"], ".");
+    let author = json!({ "name": "Ada", "email": "ada@example.com" });
+    for (method, params) in [
+        ("git.stage", json!({ "paths": ["a.txt"] })),
+        ("git.commit", json!({ "message": "m", "author": author })),
+        ("git.fetch", json!({})),
+        ("git.push", json!({})),
+        ("git.prCreate", json!({ "title": "t" })),
+        ("git.prMerge", json!({ "number": 1 })),
+    ] {
+        let mut params = params;
+        params["clientRequestId"] = json!("request-participant-1");
+        assert_eq!(code(call(&f.rpc, &participant, method, params).await), "forbidden", "{method}");
+    }
+    let facts = call(&f.rpc, &participant, "lifecycle.dispositionFacts", json!({})).await.unwrap();
+    assert_eq!(facts["v"], 1);
+    assert_eq!(facts["repositories"][0]["path"], ".");
+    assert_eq!(facts["repositories"][0]["dirtyFiles"], 1);
+    assert_eq!(facts["repositories"][0]["untrackedFiles"], 1);
+    assert_eq!(facts["runningProcesses"], 0);
+    assert_eq!(facts["activeTasks"], json!([]));
 }

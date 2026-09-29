@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use super::files::WorkspaceFiles;
+use super::git::WorkspaceGit;
 use super::protocol::{self, Authority, IdempotencyCache, RpcError, PROTOCOL};
 use crate::cloud_agents::CloudAgents;
 use crate::events::AgentEvent;
@@ -36,7 +37,6 @@ pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_PTYS: usize = 16;
 const MAX_EXITED_PTYS: usize = 8;
 const PTY_RING_BYTES: usize = 1024 * 1024;
-const MAX_DIFF_BYTES: usize = 768 * 1024;
 const PTY_PREFIX: &str = "remote-pty-";
 /// Largest single `pty.write`; a paste is split by the client.
 pub const MAX_WRITE_BYTES: usize = 64 * 1024;
@@ -182,6 +182,7 @@ type Gate = Arc<tokio::sync::Mutex<()>>;
 pub struct WorkspaceRpc {
     root: PathBuf,
     files: Arc<WorkspaceFiles>,
+    git: WorkspaceGit,
     /// The generation the relay host registered with; offsets and cursors
     /// are bound to it.
     generation: AtomicU64,
@@ -222,8 +223,10 @@ impl WorkspaceRpc {
         sessions: Option<SessionManager>,
     ) -> anyhow::Result<Arc<Self>> {
         let root = std::fs::canonicalize(root)?;
+        let files = Arc::new(WorkspaceFiles::new(root.clone()));
         let rpc = Arc::new(Self {
-            files: Arc::new(WorkspaceFiles::new(root.clone())),
+            git: WorkspaceGit::new(root.clone(), files.clone()),
+            files,
             root,
             generation: AtomicU64::new(generation),
             epoch: format!("epoch-{}", uuid::Uuid::new_v4().simple()),
@@ -465,16 +468,11 @@ impl WorkspaceRpc {
             "fs.search" => self.files.search(peer.id, &params),
             "fs.cancel" => self.files.cancel(peer.id, &params),
             "fs.watch" => self.fs_watch(peer, params),
-            "git.status" => self.git_status(params),
-            "git.diff" => self.git_diff(params),
-            "git.log" => self.git_log(params),
-            "git.branches" => self.git_branches(),
-            "git.checkout" => self.git_checkout(params),
-            "git.commit" => self.git_commit(params),
-            "git.stage" => self.git_paths(params, &["add", "--"]),
-            "git.unstage" => self.git_paths(params, &["restore", "--staged", "--"]),
-            "git.push" => crate::git::push(&self.root).map(|output| json!({ "output": output })).map_err(git_error),
-            "git.pull" => crate::git::pull(&self.root).map(|output| json!({ "output": output })).map_err(git_error),
+            "lifecycle.dispositionFacts" => self.disposition_facts(),
+            git if git.starts_with("git.") => self
+                .git
+                .handle(git, &params)
+                .unwrap_or_else(|| Err(RpcError::new("method_not_found", format!("{git} is not a workspace method")))),
             "session.list" => self.session_list(peer),
             "session.get" => self.session_get(peer, params),
             "session.create" => self.session_create(params),
@@ -964,10 +962,6 @@ impl WorkspaceRpc {
         self.files.clone()
     }
 
-    fn lexical(&self, relative: &str) -> Result<PathBuf, RpcError> {
-        self.files.lexical(relative)
-    }
-
     fn relative(&self, path: &Path) -> String {
         self.files.relative(path)
     }
@@ -997,123 +991,29 @@ impl WorkspaceRpc {
         Ok(json!({ "subscriptionId": subscription_id, "path": path }))
     }
 
-    // ---- git -------------------------------------------------------------
+    // ---- lifecycle ---------------------------------------------------------
 
-    fn git_status(&self, _params: Value) -> Result<Value, RpcError> {
-        if !crate::git::is_repo(&self.root) {
-            return Ok(json!({ "repository": false }));
-        }
-        let porcelain = crate::git::run(&self.root, &["status", "--porcelain=v1", "-z", "--untracked-files=all"])
-            .map_err(git_error)?;
-        let mut files = Vec::new();
-        let mut parts = porcelain.split('\0').filter(|part| !part.is_empty());
-        while let Some(entry) = parts.next() {
-            if entry.len() < 4 {
-                continue;
-            }
-            let (index, worktree, path) = (&entry[0..1], &entry[1..2], &entry[3..]);
-            let mut file = json!({ "path": path, "index": index, "worktree": worktree });
-            if index == "R" || index == "C" {
-                file["from"] = json!(parts.next());
-            }
-            files.push(file);
-        }
-        let (ahead, behind) = crate::git::upstream_counts(&self.root);
+    /// What an archive or delete would lose (saas contract 10.2): unpublished
+    /// work per repository, running agent turns and live terminals.
+    fn disposition_facts(&self) -> Result<Value, RpcError> {
+        let repositories = self.git.disposition_repositories();
+        let active_tasks: Vec<Value> = self
+            .agents
+            .get()
+            .map(|agents| agents.tabs())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|tab| matches!(tab.status, crate::store::index::TabStatus::InProgress | crate::store::index::TabStatus::Waiting))
+            .map(|tab| json!({ "sessionId": tab.session_id, "tabId": tab.tab_id, "kind": "agent-turn", "startedAt": tab.modified }))
+            .collect();
+        let running_processes = self.ptys.lock().unwrap().values().filter(|pty| pty.exit.is_none() && !pty.closed).count();
         Ok(json!({
-            "repository": true,
-            "branch": crate::git::current_branch(&self.root),
-            "head": crate::git::head_commit(&self.root),
-            "ahead": ahead,
-            "behind": behind,
-            "files": files,
+            "v": 1,
+            "repositories": repositories,
+            "activeTasks": active_tasks,
+            "runningProcesses": running_processes,
+            "observedAt": crate::cloud_agents::now_ms(),
         }))
-    }
-
-    fn git_diff(&self, params: Value) -> Result<Value, RpcError> {
-        let mut args = vec!["diff", "--no-color", "--no-ext-diff"];
-        if params.get("staged").and_then(Value::as_bool) == Some(true) {
-            args.push("--cached");
-        }
-        args.push("--");
-        let path = match params.get("path").and_then(Value::as_str) {
-            Some(path) => Some(self.git_path(path)?),
-            None => None,
-        };
-        if let Some(path) = &path {
-            args.push(path);
-        }
-        let mut diff = crate::git::run(&self.root, &args).map_err(git_error)?;
-        let truncated = diff.len() > MAX_DIFF_BYTES;
-        if truncated {
-            let mut cut = MAX_DIFF_BYTES;
-            while !diff.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            diff.truncate(cut);
-        }
-        Ok(json!({ "diff": diff, "truncated": truncated }))
-    }
-
-    fn git_log(&self, params: Value) -> Result<Value, RpcError> {
-        let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1, 500) as u32;
-        let commits = crate::git::log_commits(&self.root, None, limit).map_err(git_error)?;
-        Ok(json!({ "commits": commits }))
-    }
-
-    fn git_branches(&self) -> Result<Value, RpcError> {
-        let branches = crate::git::list_branches(&self.root).map_err(git_error)?;
-        Ok(json!({ "branches": branches, "current": crate::git::current_branch(&self.root) }))
-    }
-
-    fn git_checkout(&self, params: Value) -> Result<Value, RpcError> {
-        let branch = required_str(&params, "branch")?;
-        if !valid_ref_name(branch) {
-            return Err(RpcError::invalid("invalid branch name"));
-        }
-        let create = params.get("create").and_then(Value::as_bool).unwrap_or(false);
-        crate::git::checkout_branch(&self.root, branch, create).map_err(git_error)?;
-        Ok(json!({ "branch": branch }))
-    }
-
-    fn git_commit(&self, params: Value) -> Result<Value, RpcError> {
-        let message = required_str(&params, "message")?;
-        if message.trim().is_empty() || message.len() > 64 * 1024 {
-            return Err(RpcError::invalid("a commit message is required"));
-        }
-        let paths = match params.get("paths").and_then(Value::as_array) {
-            Some(paths) => Some(
-                paths
-                    .iter()
-                    .map(|path| path.as_str().ok_or_else(|| RpcError::invalid("paths must be strings")).and_then(|p| self.git_path(p)))
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-            None => None,
-        };
-        let commit = crate::git::commit_all(&self.root, message, paths.as_deref()).map_err(git_error)?;
-        Ok(json!({ "commit": commit }))
-    }
-
-    fn git_paths(&self, params: Value, prefix: &[&str]) -> Result<Value, RpcError> {
-        let paths = params
-            .get("paths")
-            .and_then(Value::as_array)
-            .filter(|paths| !paths.is_empty() && paths.len() <= 1000)
-            .ok_or_else(|| RpcError::invalid("paths must list 1 to 1000 paths"))?
-            .iter()
-            .map(|path| path.as_str().ok_or_else(|| RpcError::invalid("paths must be strings")).and_then(|p| self.git_path(p)))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut args: Vec<&str> = prefix.to_vec();
-        args.extend(paths.iter().map(String::as_str));
-        crate::git::run(&self.root, &args).map_err(git_error)?;
-        Ok(json!({ "paths": paths }))
-    }
-
-    /// A path for Git: workspace-relative and lexically inside it. Git
-    /// itself refuses paths outside the repository.
-    fn git_path(&self, relative: &str) -> Result<String, RpcError> {
-        let path = self.lexical(relative)?;
-        let relative = self.relative(&path);
-        Ok(if relative.is_empty() { ".".into() } else { relative })
     }
 
     // ---- sessions --------------------------------------------------------
@@ -1427,18 +1327,6 @@ fn parse<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, RpcError> {
 
 fn required_str<'a>(params: &'a Value, name: &str) -> Result<&'a str, RpcError> {
     params.get(name).and_then(Value::as_str).ok_or_else(|| RpcError::invalid(format!("{name} is required")))
-}
-
-fn valid_ref_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 200
-        && !name.starts_with('-')
-        && !name.contains("..")
-        && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.'))
-}
-
-fn git_error(error: anyhow::Error) -> RpcError {
-    RpcError::new("git_failed", format!("{error:#}"))
 }
 
 #[cfg(test)]

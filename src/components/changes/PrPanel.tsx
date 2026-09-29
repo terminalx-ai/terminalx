@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Check, CircleAlert, CircleDot, ExternalLink, GitMerge, GitPullRequestDraft, Loader2, X } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { api, errorMessage, gh, type PullRequest } from "@/lib/api";
+import { api, type PullRequest } from "@/lib/api";
+import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import {
@@ -45,13 +46,16 @@ export function mergeReadiness(pr: PullRequest): { ok: boolean; label: string } 
 
 export function PrPanel({
   cwd,
+  source: given,
   branch,
   active,
   busy,
   onSettle,
   workspace,
 }: {
-  cwd: string;
+  cwd?: string;
+  /** A cloud repository (PRO-27); without it, the local checkout at `cwd`. */
+  source?: GitSource;
   branch: string | null;
   active: boolean;
   busy: boolean;
@@ -60,6 +64,7 @@ export function PrPanel({
   /** A managed workspace that can use the guarded workspace cleanup flow. */
   workspace?: WorkspaceCleanup;
 }) {
+  const source = useMemo(() => given ?? localGitSource(cwd ?? ""), [given, cwd]);
   const [available, setAvailable] = useState<boolean | null>(null);
   const [prs, setPrs] = useState<PullRequest[]>([]);
   const [status, setStatus] = useState<WorkStatus | null>(null);
@@ -70,13 +75,16 @@ export function PrPanel({
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [draft, setDraft] = useState(false);
+  const [base, setBase] = useState<string | null>(null);
+  const [bases, setBases] = useState<string[]>([]);
+  const [notice, setNotice] = useState<string | null>(null);
   const [working, setWorking] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
   const workspaceKey = workspace ? `${workspace.projectPath}\0${cwd}\0${branch ?? ""}` : null;
 
   useEffect(() => {
-    gh.available().then(setAvailable).catch(() => setAvailable(false));
-  }, []);
+    source.ghAvailable().then(setAvailable).catch(() => setAvailable(false));
+  }, [source]);
 
   useEffect(() => {
     if (!active || !branch || !available) return;
@@ -84,9 +92,9 @@ export function PrPanel({
     setLoading(true);
     setCheckedWorkspace(null);
     const dispositionRequest = workspace && workspaceKey
-      ? api.workspaceDisposition(workspace.projectPath, cwd).then((disposition) => ({ key: workspaceKey, disposition }))
+      ? api.workspaceDisposition(workspace.projectPath, cwd ?? "").then((disposition) => ({ key: workspaceKey, disposition }))
       : Promise.resolve(null);
-    Promise.all([gh.list(cwd, branch), api.workStatus(cwd), dispositionRequest])
+    Promise.all([source.prs(branch), source.workStatus(), dispositionRequest])
       .then(([pullRequests, workStatus, workspaceCheck]) => {
         if (cancelled) return;
         setPrs(pullRequests);
@@ -97,13 +105,33 @@ export function PrPanel({
       .catch((e) => {
         if (cancelled) return;
         setCheckedWorkspace(null);
-        setError(errorMessage(e));
+        setError(source.errorMessage(e));
       })
       .finally(() => !cancelled && setLoading(false));
     return () => {
       cancelled = true;
     };
-  }, [cwd, branch, active, available, tick, busy, workspaceKey]);
+  }, [source, branch, active, available, tick, busy, workspaceKey]);
+
+  // Base branches to choose from when creating: the remote's, then local ones.
+  useEffect(() => {
+    if (!creating) return;
+    let cancelled = false;
+    source
+      .branches()
+      .then((all) => {
+        if (cancelled || !Array.isArray(all)) return;
+        const names = new Set<string>();
+        for (const b of all) if (b.remote && b.name.startsWith("origin/")) names.add(b.name.slice("origin/".length));
+        for (const b of all) if (!b.remote) names.add(b.name);
+        if (branch) names.delete(branch);
+        setBases([...names].sort());
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [source, creating, branch]);
 
   // Poll while something is in flight.
   useEffect(() => {
@@ -112,14 +140,20 @@ export function PrPanel({
     return () => window.clearInterval(id);
   }, [active, prs]);
 
-  const act = async (label: string, fn: () => Promise<unknown>) => {
+  const act = async (label: string, fn: () => Promise<string | null | void>) => {
     setWorking(label);
     setError(null);
+    setNotice(null);
     try {
-      await fn();
+      const said = await fn();
+      if (said) setNotice(said);
       setTick((t) => t + 1);
+      return true;
     } catch (e) {
-      setError(errorMessage(e));
+      setError(source.errorMessage(e));
+      // A refusal may still have changed something (a lost answer): read GitHub again.
+      setTick((t) => t + 1);
+      return false;
     } finally {
       setWorking(null);
     }
@@ -141,7 +175,8 @@ export function PrPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-y-auto scrollbar-thin">
-      {error && <div className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
+      {error && <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
+      {notice && <div role="status" className="mx-3 mt-2 rounded-md bg-well px-2 py-1 text-xs text-muted-foreground">{notice}</div>}
       {(workspace || onSettle) && merged && (
         <div className="mx-3 mt-2 flex items-center gap-2 rounded-md bg-merged/10 px-2 py-1.5 text-xs">
           <GitMerge className="size-3.5 shrink-0 text-merged" />
@@ -203,23 +238,23 @@ export function PrPanel({
               <div className="mt-3 flex items-center gap-2">
                 <span className={cn("text-xs", ready.ok ? "text-add" : "text-muted-foreground")}>{ready.label}</span>
                 <div className="ml-auto flex items-center gap-1">
-                  {pr.isDraft && (
-                    <Button size="sm" variant="secondary" disabled={!!working} onClick={() => void act("ready", () => gh.ready(cwd, pr.number))}>
+                  {pr.isDraft && source.canWrite && (
+                    <Button size="sm" variant="secondary" disabled={!!working} onClick={() => void act("ready", () => source.readyPr(pr.number))}>
                       Mark ready
                     </Button>
                   )}
-                  <DropdownMenu>
+                  {source.canWrite && <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button size="sm" className={cn("bg-merge text-merge-foreground hover:opacity-90", !ready.ok && "opacity-60")} disabled={!!working}>
                         {working === "merge" ? <Loader2 className="animate-spin" /> : <GitMerge />} Merge
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
-                      <DropdownMenuItem onSelect={() => void act("merge", () => gh.merge(cwd, pr.number, "merge"))}>Merge commit</DropdownMenuItem>
-                      <DropdownMenuItem onSelect={() => void act("merge", () => gh.merge(cwd, pr.number, "squash"))}>Squash and merge</DropdownMenuItem>
-                      <DropdownMenuItem onSelect={() => void act("merge", () => gh.merge(cwd, pr.number, "rebase"))}>Rebase and merge</DropdownMenuItem>
+                      <DropdownMenuItem onSelect={() => void act("merge", () => source.mergePr(pr.number, "merge"))}>Merge commit</DropdownMenuItem>
+                      <DropdownMenuItem onSelect={() => void act("merge", () => source.mergePr(pr.number, "squash"))}>Squash and merge</DropdownMenuItem>
+                      <DropdownMenuItem onSelect={() => void act("merge", () => source.mergePr(pr.number, "rebase"))}>Rebase and merge</DropdownMenuItem>
                     </DropdownMenuContent>
-                  </DropdownMenu>
+                  </DropdownMenu>}
                 </div>
               </div>
             )}
@@ -227,13 +262,21 @@ export function PrPanel({
         );
       })}
 
-      {canCreate && !creating && (
+      {canCreate && !creating && source.canWrite && (
         <div className="px-3 py-3">
           <div className="mb-2 text-xs text-muted-foreground">
             No pull request for <span className="font-mono">{branch}</span>.
             {status?.aheadOfBase != null && ` ${status.aheadOfBase} commit${status.aheadOfBase === 1 ? "" : "s"} ahead of ${status.defaultBranch}.`}
           </div>
-          <Button size="sm" variant="secondary" onClick={() => setCreating(true)} disabled={!status?.aheadOfBase}>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => {
+              setBase(status?.defaultBranch ?? null);
+              setCreating(true);
+            }}
+            disabled={!status?.aheadOfBase}
+          >
             Create pull request
           </Button>
         </div>
@@ -243,7 +286,8 @@ export function PrPanel({
           className="flex flex-col gap-2 px-3 py-3"
           onSubmit={(e) => {
             e.preventDefault();
-            void act("create", () => gh.create(cwd, title.trim(), body, status?.defaultBranch ?? null, draft)).then(() => {
+            void act("create", () => source.createPr({ title: title.trim(), body, base: base ?? status?.defaultBranch ?? null, draft })).then((ok) => {
+              if (!ok) return;
               setCreating(false);
               setTitle("");
               setBody("");
@@ -264,6 +308,21 @@ export function PrPanel({
             placeholder="Description (markdown)"
             className="rounded-md border border-hairline bg-transparent px-2 py-1.5 text-[13px] outline-none focus:border-ring"
           />
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            Into
+            <select
+              aria-label="Base branch"
+              value={base ?? ""}
+              onChange={(e) => setBase(e.target.value || null)}
+              className="h-7 min-w-0 flex-1 rounded-md border border-hairline bg-transparent px-1 font-mono text-xs outline-none focus:border-ring"
+            >
+              {[...new Set([base ?? status?.defaultBranch ?? "", ...bases])].filter(Boolean).map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
           <label className="flex items-center gap-2 text-xs text-muted-foreground">
             <input type="checkbox" checked={draft} onChange={(e) => setDraft(e.target.checked)} /> Draft
           </label>
