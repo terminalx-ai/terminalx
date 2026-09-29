@@ -538,3 +538,19 @@ fn a_queued_follow_up_is_dropped_when_its_sender_loses_driver_access() {
     assert!(h.ops.notes.lock().unwrap().iter().any(|note| note.contains("no longer has driver access")));
     assert!(collab.lease("tab-1", now_ms(), true).is_none(), "the lease went with the role");
 }
+
+#[test]
+fn an_idle_lease_that_expired_does_not_block_the_next_driver() {
+    let h = harness();
+    let collab = shared(&h, json!([{ "userId": "alice", "role": "driver" }, { "userId": "bob", "role": "driver" }]));
+    // Alice drove long ago; her lease expired and nothing removed it.
+    collab.claim("tab-1", "alice", 1, false, false).unwrap();
+    let bob = as_actor(lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "bob's turn" })), "bob", "driver", false);
+    assert_eq!(handle(&h.agents, &bob).outcome, "applied");
+    // Bob's turn runs now, and he holds the lease; Alice's expired one did not come back.
+    assert_eq!(collab.lease("tab-1", now_ms(), true).unwrap().holder_id, "bob");
+    let steer = as_actor(lease(&h.agents, "c2", "steer", json!({ "v": 1, "text": "faster" })), "bob", "driver", false);
+    assert_eq!(handle(&h.agents, &steer).outcome, "applied");
+    let alice_stop = as_actor(lease(&h.agents, "c3", "stop", json!({ "v": 1 })), "alice", "driver", false);
+    assert_eq!(handle(&h.agents, &alice_stop).category.as_deref(), Some("lease-held"));
+}

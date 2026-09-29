@@ -30,7 +30,7 @@ vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonRunner: () => null, Racc
 
 import { CloudAgentsView } from "./CloudAgents";
 import { resetCloudAgents } from "@/lib/cloudAgents";
-import { resetCollab, startCollab, TYPING_IDLE_MS } from "@/lib/cloudCollab";
+import { rememberYou, resetCollab, startCollab, TYPING_IDLE_MS } from "@/lib/cloudCollab";
 import { rememberPeople, resetPeople } from "@/lib/cloudPeople";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
@@ -377,6 +377,27 @@ describe("shared cloud workspace agent tabs (PRO-30)", () => {
     return state;
   }
   const notify = (event: string, params: Record<string, unknown>) => act(() => notificationListeners.forEach((listener) => listener({ event, params })));
+
+  it("keeps a viewer's controls disabled while the workspace sleeps or reconnects", async () => {
+    cache["t-1"] = { tab: tabInfo(), events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    liveTabs = [tabInfo()];
+    const state = share(me("viewer"));
+    const { rerender } = render(view(state));
+    await waitFor(() => expect(screen.getByTestId("composer-reason").textContent).toBe("You can view this workspace; ask an admin for driver access"));
+    // The connection drops and the workspace goes to sleep: still a viewer.
+    rerender(view({ state: "suspended" }, "suspended"));
+    await waitFor(() => expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).disabled).toBe(true));
+    expect(screen.getByTestId("composer-reason").textContent).toBe("You can view this workspace; ask an admin for driver access");
+    expect(screen.queryByTestId("cloud-agent-lease")).toBeNull();
+  });
+
+  it("uses the share list's word on access for a workspace that was asleep from the start", async () => {
+    cache["t-1"] = { tab: tabInfo(), events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    act(() => rememberYou(KEY, { role: "viewer", canApprove: false }));
+    render(view({ state: "suspended" }, "suspended"));
+    await waitFor(() => expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).disabled).toBe(true));
+    expect(screen.getByTestId("composer-reason").textContent).toBe("You can view this workspace; ask an admin for driver access");
+  });
 
   it("disables the composer for a viewer and says why", async () => {
     liveTabs = [tabInfo()];

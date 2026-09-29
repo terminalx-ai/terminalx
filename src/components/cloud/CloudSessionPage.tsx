@@ -46,7 +46,7 @@ import {
   type CloudTerminal,
 } from "@/lib/cloudTerminals";
 import { getInstance } from "@/lib/terminal";
-import { canDrive, effectiveYou, notShared, presenceTab, startCollab, useCollab } from "@/lib/cloudCollab";
+import { canDrive, effectiveYou, notShared, presenceTab, rememberYou, startCollab, useCollab } from "@/lib/cloudCollab";
 import { rememberPeople, usePeople } from "@/lib/cloudPeople";
 import { getCloudAgents } from "@/lib/cloudAgents";
 import { useTheme } from "@/lib/theme";
@@ -536,7 +536,11 @@ function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: Work
     let cancelled = false;
     void api
       .cloudWorkspaceShares(cloudTarget.workspaceId)
-      .then((listed) => !cancelled && rememberPeople(listed.shares))
+      .then((listed) => {
+        if (cancelled) return;
+        rememberPeople(listed.shares);
+        rememberYou(key, listed.you);
+      })
       .catch(() => undefined);
     return () => {
       cancelled = true;

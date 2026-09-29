@@ -227,13 +227,19 @@ impl Collaboration {
         self.members.lock().unwrap().as_ref().and_then(|members| members.get(user_id).copied()).unwrap_or(Access::NONE)
     }
 
-    /// A connection's access: a `manage` attachment (an organization
-    /// admin's desktop) manages whatever the list says; a `participate` one
-    /// has the person's role.
+    /// A connection's access: a `participate` attachment has the person's
+    /// role. A `manage` attachment (an organization admin's desktop) manages
+    /// only while the list still says its person is a manager: an admin
+    /// demoted since has the role the list gives them now. Before the API has
+    /// listed anyone, `manage` keeps its pre-PRO-30 meaning.
     pub fn access_for(&self, authority: Authority, user_id: Option<&str>) -> Access {
-        match authority {
-            Authority::Manage => Access::MANAGER,
-            Authority::Participate => self.access_of(user_id),
+        match (authority, user_id) {
+            (Authority::Manage, Some(user)) if self.known() => match self.access_of(Some(user)) {
+                access if access.role == Role::Manager => Access::MANAGER,
+                access => access,
+            },
+            (Authority::Manage, _) => Access::MANAGER,
+            (Authority::Participate, user) => self.access_of(user),
         }
     }
 
@@ -443,6 +449,17 @@ mod tests {
 
     fn map(entries: &[(&str, Role, bool)]) -> HashMap<String, Access> {
         entries.iter().map(|(user, role, can_approve)| (user.to_string(), Access { role: *role, can_approve: *can_approve })).collect()
+    }
+
+    #[test]
+    fn a_demoted_admin_is_no_longer_a_manager() {
+        let collab = Collaboration::new();
+        collab.set_members(map(&[("admin", Role::Manager, true), ("creator", Role::Driver, true)]));
+        assert_eq!(collab.access_for(Authority::Manage, Some("admin")), Access::MANAGER);
+        // Demoted to member: not listed (or listed as the creator's driver).
+        collab.set_members(map(&[("creator", Role::Driver, true)]));
+        assert_eq!(collab.access_for(Authority::Manage, Some("admin")), Access::NONE);
+        assert_eq!(collab.access_for(Authority::Manage, Some("creator")), Access { role: Role::Driver, can_approve: true });
     }
 
     #[test]

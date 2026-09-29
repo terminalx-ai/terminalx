@@ -28,6 +28,12 @@ export interface CollabSnapshot {
   /** The current connection was granted `collab/1`. */
   available: boolean;
   you: WorkspaceYou | null;
+  /**
+   * The last access this person was known to have here, kept across
+   * disconnects and filled from the share list, so a sleeping workspace still
+   * shows a viewer's controls as a viewer's.
+   */
+  lastYou: WorkspaceYou | null;
   participants: Participant[];
   /** By tab; null once the runtime said the tab has no lease. */
   leases: Record<string, TabLease | null>;
@@ -55,7 +61,7 @@ export const TYPING_REFRESH_MS = 10_000;
 /** Back to "viewing" after this long without a keystroke. */
 export const TYPING_IDLE_MS = 4_000;
 
-const EMPTY: CollabSnapshot = { available: false, you: null, participants: [], leases: {}, notes: {}, error: null };
+const EMPTY: CollabSnapshot = { available: false, you: null, lastYou: null, participants: [], leases: {}, notes: {}, error: null };
 const stores = new Map<string, Store>();
 
 /**
@@ -128,7 +134,22 @@ export function canApprove(you: WorkspaceYou | null): boolean {
 
 /** A participate connection the workspace is not shared with: it sees no content. */
 export function notShared(state: WorkspaceConnectionState, you: WorkspaceYou | null): boolean {
-  return state.state === "connected" && state.authority === "participate" && you?.role === "none";
+  // `listed: false`: the runtime has no member list yet and serves what it
+  // did before sharing existed, so this is not "not shared".
+  return state.state === "connected" && state.authority === "participate" && you?.role === "none" && you.listed !== false;
+}
+
+/** Remember this person's access from the share list (it answers while the workspace sleeps). */
+export function rememberYou(key: string, you: { role: WorkspaceYou["role"]; canApprove: boolean }) {
+  const s = store(key);
+  if (s.snapshot.you) return;
+  set(s, { lastYou: { userId: s.snapshot.lastYou?.userId ?? "", role: you.role, canApprove: you.canApprove } });
+}
+
+/** Who this person is for gating controls: live when connected, else the last known. */
+export function knownYou(state: WorkspaceConnectionState, snapshot: CollabSnapshot): WorkspaceYou | null {
+  if (state.state === "connected") return snapshot.available ? (snapshot.you ?? (state.you ?? null)) : null;
+  return snapshot.lastYou;
 }
 
 export function applyCollabEvent(key: string, event: CollabEvent) {
@@ -150,7 +171,7 @@ export function applyCollabEvent(key: string, event: CollabEvent) {
     }
     case "you": {
       const before = s.snapshot.you;
-      set(s, { you: event.you });
+      set(s, { you: event.you, lastYou: event.you });
       // Shared again (or for the first time): what was hidden can be read now.
       if (before?.role === "none" && event.you.role !== "none" && s.client) void refreshCollab(key, s.client);
       break;
@@ -183,12 +204,12 @@ export function startCollab(key: string, client: WorkspaceRpcClient): () => void
   const state = client.connection;
   if (!collabGranted(state)) {
     s.client = null;
-    set(s, { ...EMPTY });
+    set(s, { ...EMPTY, lastYou: s.snapshot.lastYou });
     return () => undefined;
   }
   s.client = client;
   const you = state.state === "connected" ? (state.you ?? null) : null;
-  set(s, { available: true, you, error: null });
+  set(s, { available: true, you, lastYou: you ?? s.snapshot.lastYou, error: null });
   const stop = new WorkspaceCollab(client).onEvent((event) => applyCollabEvent(key, event));
   if (you?.role !== "none") {
     void refreshCollab(key, client);

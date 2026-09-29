@@ -141,9 +141,11 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
     }
     // Competing input is serialized by the tab's driver lease: nobody else
     // sends, steers or stops (managers may stop) while it is held, and an
-    // applied send or steer claims it (below).
+    // applied send or steer claims it (below). Whether a turn ran is read
+    // before this command starts one: only a lease live then counts.
+    let busy_before = agents.ops.busy(&tab.session_id, &lease.tab_id);
     if let (Some(collab), "send" | "steer" | "stop") = (agents.collab(), lease.kind.as_str()) {
-        let busy = agents.ops.busy(&tab.session_id, &lease.tab_id);
+        let busy = busy_before;
         let held = collab
             .held_by_other(&lease.tab_id, &lease.actor.user_id, now_ms(), busy)
             .filter(|_| !(lease.kind == "stop" && access.role == Role::Manager));
@@ -160,7 +162,7 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
     let (outcome, category, extra) = apply(agents, lease, &tab.session_id, &plaintext);
     // Only input that reached the agent (or its queue) claims the tab.
     if let (Some(collab), "applied", "send" | "steer") = (agents.collab(), outcome, lease.kind.as_str()) {
-        let _ = collab.claim(&lease.tab_id, &lease.actor.user_id, now_ms(), true, false);
+        let _ = collab.claim(&lease.tab_id, &lease.actor.user_id, now_ms(), busy_before, false);
     }
     finish(agents, lease, outcome, category, extra)
 }

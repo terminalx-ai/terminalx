@@ -38,7 +38,7 @@ import { TERMINAL_OUTBOX_STATES, type CloudAgentScope, type OutboxEntry, type Wa
 import type { ImageInput } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
 import { cn } from "@/lib/cn";
-import { canApprove, canDrive, effectiveYou, notShared, presenceTab, presenceTyping, useCollab } from "@/lib/cloudCollab";
+import { canApprove, canDrive, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
 import { LeaseBar, NotesPanel, NotSharedNotice, useNowUntil } from "./CloudCollab";
 
@@ -184,7 +184,7 @@ export function CloudAgentsView({
           wakeWorkspace={wakeWorkspace}
           sleeping={!connected && (workspaceState === "suspended" || state.state === "suspended")}
           collabKey={key}
-          you={connected && collab.available ? you : null}
+          you={knownYou(state, collab)}
         />
       ) : (
         <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
@@ -416,6 +416,9 @@ function CloudAgentPane({
         : `${nameOf(liveLease!.holderId)} is driving this tab. You can send once they release it.`;
   const mayStop = !you || you.role === "manager" || (!!liveLease && liveLease.holderId === you.userId) || (!liveLease && canDrive(you));
   const approveBlocked = you && !canApprove(you) ? "Waiting for someone who can approve" : null;
+  // Presence, the lease bar and notes need the live runtime; `you` alone may
+  // be the last known access of a sleeping workspace.
+  const collabLive = connected && collab.available && !!you;
   const noteCount = collab.notes[tab.tabId]?.notes.length ?? 0;
   const log = useTabLog(info.sessionId, tab.tabId);
   const [draft, setDraft] = useState("");
@@ -512,7 +515,7 @@ function CloudAgentPane({
 
   const changeDraft = (text: string) => {
     setDraft(text);
-    if (you && text) presenceTyping(collabKey);
+    if (collabLive && text) presenceTyping(collabKey);
   };
 
   const configure = (patch: { model?: string; effort?: string | null; mode?: string }) => {
@@ -543,7 +546,7 @@ function CloudAgentPane({
   return (
     <div className="flex min-h-0 flex-1" data-testid="cloud-agent-pane">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {you && (
+        {collabLive && (
           <LeaseBar
             collabKey={collabKey}
             client={client}
@@ -612,7 +615,7 @@ function CloudAgentPane({
           />
         </div>
       </div>
-      {you && notesOpen && <NotesPanel collabKey={collabKey} client={client} tabId={tab.tabId} onClose={() => setNotesOpen(false)} />}
+      {collabLive && notesOpen && <NotesPanel collabKey={collabKey} client={client} tabId={tab.tabId} onClose={() => setNotesOpen(false)} />}
     </div>
   );
 }

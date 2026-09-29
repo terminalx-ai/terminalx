@@ -60,6 +60,8 @@ export interface WorkspaceYou {
   userId: string;
   role: CollaborationRole;
   canApprove: boolean;
+  /** False while the runtime has no member list yet (then `role` says nothing about sharing). */
+  listed?: boolean;
 }
 
 export type WorkspaceConnectionState =

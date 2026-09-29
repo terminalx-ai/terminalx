@@ -709,7 +709,7 @@ async fn roles_decide_what_a_participant_reads_types_and_holds() {
         { "userId": "bob", "role": "viewer", "canApprove": true },
     ])));
     let (admin, mut admin_events, hello) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
-    assert_eq!(hello["you"], json!({ "userId": "admin", "role": "manager", "canApprove": true }));
+    assert_eq!(hello["you"], json!({ "userId": "admin", "role": "manager", "canApprove": true, "listed": true }));
     let (alice, _alice_events, hello) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
     assert_eq!(hello["you"]["role"], "driver");
     let (bob, _bob_events, _) = person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
@@ -860,4 +860,80 @@ async fn the_driver_lease_is_visible_and_only_a_manager_takes_it_over() {
     f.rpc.collab.claim("tab-1", "alice", 1, false, false).unwrap();
     let state = tokio::time::timeout(Duration::from_secs(5), call(&f.rpc, &vic, "collab.state", json!({}))).await.expect("no deadlock").unwrap();
     assert_eq!(state["leases"], json!([]), "an idle lease past its expiry is not live");
+}
+
+// ---- security review of PRO-30 ------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_demoted_admins_manage_connection_loses_management_and_is_closed() {
+    let f = fixture();
+    let agents = with_tab(&f);
+    f.rpc.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }, { "userId": "creator", "role": "driver", "canApprove": true }])));
+    let (admin, _events, hello) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    assert_eq!(hello["authority"], "manage");
+    let before = agents.keys.current().unwrap().0;
+    // Demoted to a member the workspace is not shared with.
+    f.rpc.set_collaboration(members(json!([{ "userId": "creator", "role": "driver", "canApprove": true }])));
+    tokio::time::timeout(Duration::from_secs(5), admin.closed()).await.expect("the demoted admin's connection is closed");
+    assert_ne!(agents.keys.current().unwrap().0, before, "the key rotated");
+    // Nothing on it works any more, even before the transport hangs up.
+    assert_eq!(code(call(&f.rpc, &admin, "pty.create", json!({ "clientRequestId": "request-demoted-1" })).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &admin, "keys.get", json!({})).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &admin, "fs.write", json!({ "path": "x", "text": "x", "clientRequestId": "request-demoted-2" })).await), "forbidden");
+    // A demoted admin who created the workspace keeps the creator's driver role, as a participant.
+    let (creator, _events, hello) = person(&f.rpc, "d-creator", Authority::Manage, "creator").await;
+    assert_eq!((hello["authority"].as_str(), hello["you"]["role"].as_str()), (Some("participate"), Some("driver")));
+    assert_eq!(code(call(&f.rpc, &creator, "pty.create", json!({ "clientRequestId": "request-demoted-3" })).await), "forbidden");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_member_list_stops_streams_of_people_without_access() {
+    let f = fixture();
+    with_tab(&f);
+    let (admin, _admin_events, _) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    let created = call(&f.rpc, &admin, "pty.create", json!({ "clientRequestId": "request-first-list" })).await.unwrap();
+    let pty_id = created["ptyId"].as_str().unwrap().to_string();
+    // Before any list, a participant may still watch, as before PRO-30.
+    let (carol, mut carol_events, hello) = person(&f.rpc, "d-carol", Authority::Participate, "carol").await;
+    assert_eq!(hello["you"]["listed"], false, "no list yet is not \"not shared\"");
+    call(&f.rpc, &carol, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    // The first list does not name her: her stream ends, her connection stays.
+    f.rpc.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }])));
+    let you = next_event(&mut carol_events, "collab.you").await;
+    assert_eq!((you["you"]["role"].as_str(), you["you"]["listed"].as_bool()), (Some("none"), Some(true)));
+    inject(&f, &pty_id, b"secret output");
+    let leaked = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            match carol_events.recv().await {
+                Some(event) if event["event"] == "pty.output" => return event,
+                Some(_) => continue,
+                None => std::future::pending::<()>().await,
+            }
+        }
+    })
+    .await;
+    assert!(leaked.is_err(), "no terminal output after the list: {leaked:?}");
+    assert!(tokio::time::timeout(Duration::from_millis(50), carol.closed()).await.is_err(), "the connection stays (it shows \"not shared\")");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_holder_removed_while_the_runtime_was_down_triggers_a_rotation() {
+    let f = fixture();
+    let agents = with_tab(&f);
+    f.rpc.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }, { "userId": "vic", "role": "viewer" }])));
+    let (vic, _events, _) = person(&f.rpc, "d-vic", Authority::Participate, "vic").await;
+    let handed = call(&f.rpc, &vic, "keys.get", json!({})).await.unwrap()["currentKeyId"].clone();
+    assert_eq!(agents.key_holders(), vec!["vic".to_string()]);
+    // The runtime restarts (a suspend); the share is revoked meanwhile.
+    let restarted = WorkspaceRpc::new(&f.root, 7, Arc::new(BroadcastSink::new(64)), f.terminals.clone(), None).unwrap();
+    let reopened = crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), Arc::new(OneTab), None, None, 7).unwrap();
+    restarted.set_agents(reopened.clone());
+    assert_eq!(reopened.keys.current().unwrap().0, handed.as_str().unwrap(), "the same key after the restart");
+    restarted.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }])));
+    assert_ne!(reopened.keys.current().unwrap().0, handed.as_str().unwrap(), "rotated on the first list after the restart");
+    assert!(reopened.key_holders().is_empty(), "nobody holds the new key yet");
+    // Someone still listed is no reason to rotate again.
+    let current = reopened.keys.current().unwrap().0;
+    restarted.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }, { "userId": "bob", "role": "viewer" }])));
+    assert_eq!(reopened.keys.current().unwrap().0, current);
 }

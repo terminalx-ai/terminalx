@@ -42,8 +42,17 @@ list and narrows a stamped role by it, so whichever of the two saw a
 revocation first wins.
 
 Until the API has sent a list (an API before PRO-30), participants keep what
-they had: reads of files, Git and terminals, and nothing new. A list the
-runtime cannot read, or of an unknown version, gives participants nothing.
+they had: reads of files, Git and terminals, and nothing new. `you` then
+says `listed: false`, and the desktop does not read its role as "not
+shared". The runtime applies the list it fetched before it registers with
+the relay, so this window is only as long as an API before PRO-30 lasts. A
+list the runtime cannot read, or of an unknown version, gives participants
+nothing.
+
+A `manage` attachment manages only while the list says its person is a
+manager. An admin demoted since the attachment was issued acts with the
+role the list gives them now (the API also revokes their manage
+attachments on demotion).
 
 Note the change for members nobody shared the workspace with: before PRO-30 a
 `participate` attachment could read files, Git and terminals of an
@@ -103,15 +112,20 @@ role changed).
 While anyone is attached, the runtime refreshes every 5 s (15-30 s when idle)
 and re-applies the list:
 
-1. Connections of a person who lost access are closed; attachments the API
-   revoked are closed as before.
+1. Connections of a person who lost access are closed, `manage` ones included;
+   attachments the API revoked are closed as before. Streams (terminals,
+   file watches, agent tabs) of anyone left without access are ended, also
+   on the first list after a start.
 2. A person who may no longer drive loses terminal control (announced) and
    their tab leases.
 3. Queued follow-ups of anyone who may no longer drive are dropped, with a
    note in the transcript. Each follow-up is also re-checked right before it
    is typed.
 4. The workspace content key rotates when anyone lost access, as it does for
-   revocations and for a workspace turning private.
+   revocations and for a workspace turning private. Who was handed the
+   current key is recorded durably (`<data dir>/cloud-agent/key-holders.json`),
+   so a person removed while the runtime was suspended also causes a rotation
+   on the first list after it wakes.
 
 Live calls check the current list on every call, so a downgraded driver's next
 terminal write is refused even before step 2 runs. On the server, queued

@@ -402,9 +402,22 @@ impl WorkspaceRpc {
         self.collab.access_for(peer.authority, peer.user_id.as_deref())
     }
 
+    /// The authority a connection acts with now: its attachment's, except
+    /// that a `manage` attachment whose person is no longer a manager (an
+    /// admin demoted since it was issued) acts as a participant.
+    fn authority(&self, peer: &Peer) -> Authority {
+        match peer.authority {
+            Authority::Manage if self.access(peer).role == Role::Manager => Authority::Manage,
+            _ => Authority::Participate,
+        }
+    }
+
+    /// `listed` is false until the API has said who has access: the runtime
+    /// then serves participants what it did before sharing existed, and
+    /// clients must not read the role as "not shared".
     fn you(&self, peer: &Peer) -> Value {
         let access = self.access(peer);
-        json!({ "userId": peer.user_id, "role": access.role, "canApprove": access.can_approve })
+        json!({ "userId": peer.user_id, "role": access.role, "canApprove": access.can_approve, "listed": self.collab.known() })
     }
 
     /// Apply the API's latest member list (`collaboration` on `/refresh`):
@@ -426,17 +439,29 @@ impl WorkspaceRpc {
         }
         for peer in &self.live_peers() {
             let Some(user) = peer.user_id.as_deref() else { continue };
-            if peer.authority == Authority::Participate && diff.lost.iter().any(|lost| lost == user) {
+            if diff.lost.iter().any(|lost| lost == user) {
+                // Whatever the attachment: a demoted admin's `manage`
+                // connection goes too.
                 log::info!("closing a connection whose person no longer has access to the workspace");
                 peer.closed.notify_one();
-            } else if peer.granted("collab/1") && diff.changed.iter().any(|changed| changed == user) {
+                continue;
+            }
+            if !self.access(peer).can_view() {
+                // Anything it opened before the list said so (the first list
+                // after a start, or a demotion) stops streaming now.
+                self.drop_peer_subscriptions(peer);
+            }
+            if peer.granted("collab/1") && (first || diff.changed.iter().any(|changed| changed == user)) {
                 peer.notify("collab.you", json!({ "you": self.you(peer) }));
             }
         }
         self.revalidate_terminal_control();
         if let Some(agents) = self.agents.get() {
             agents.revalidate_follow_ups();
-            if !diff.lost.is_empty() {
+            // Also after a restart, when nothing is known about the previous
+            // list: anyone the current key was handed to who has no access now.
+            let holder_gone = agents.key_holders().iter().any(|user| !self.collab.access_of(Some(user)).can_view());
+            if !diff.lost.is_empty() || holder_gone {
                 match agents.rotate_key() {
                     Ok(key_id) => log::info!("rotated the workspace content key to {key_id} after access was revoked"),
                     Err(error) => log::error!("rotate the workspace content key: {error:#}"),
@@ -560,7 +585,7 @@ impl WorkspaceRpc {
                 "protocol": PROTOCOL,
                 "runtime": { "version": self.version, "runtimeGeneration": self.generation(), "epoch": self.epoch },
                 "capabilities": granted,
-                "authority": peer.authority,
+                "authority": self.authority(peer),
                 "limits": {
                     "maxFrameBytes": MAX_FRAME_BYTES,
                     "maxPtys": MAX_PTYS,
@@ -584,10 +609,11 @@ impl WorkspaceRpc {
             }
             Some(_) => {}
         }
-        if peer.authority < spec.authority {
+        let authority = self.authority(peer);
+        if authority < spec.authority {
             return Err(RpcError::forbidden(format!("{method} needs manage authority")));
         }
-        if peer.authority == Authority::Participate {
+        if authority == Authority::Participate {
             self.authorize_participant(peer, spec)?;
         }
         if !spec.idempotent {
@@ -694,7 +720,16 @@ impl WorkspaceRpc {
                 self.agents()?.poll.raise();
                 Ok(json!({}))
             }
-            "keys.get" => Ok(self.agents()?.keys.handout(crate::cloud_agents::now_ms())),
+            "keys.get" => {
+                let agents = self.agents()?;
+                let handout = agents.keys.handout(crate::cloud_agents::now_ms());
+                // Who holds the current key, durably: a person removed while
+                // the runtime was down still triggers a rotation (§20.5).
+                if let Some(user) = peer.user_id.as_deref() {
+                    agents.note_key_holder(user);
+                }
+                Ok(handout)
+            }
             "collab.state" => self.collab_state(peer),
             "presence.update" => self.presence_update(peer, params),
             "notes.list" => self.notes_list(params),
@@ -710,6 +745,20 @@ impl WorkspaceRpc {
         }
     }
 
+    /// End every stream a connection opened, keeping the connection.
+    fn drop_peer_subscriptions(&self, peer: &Peer) {
+        self.files.disconnect(peer.id);
+        let doomed: Vec<(String, Subscription)> = {
+            let mut subscriptions = self.subscriptions.lock().unwrap();
+            let ids: Vec<String> =
+                subscriptions.iter().filter(|(_, sub)| sub.peer() == peer.id).map(|(id, _)| id.clone()).collect();
+            ids.into_iter().filter_map(|id| subscriptions.remove(&id).map(|sub| (id, sub))).collect()
+        };
+        for (id, subscription) in doomed {
+            self.drop_subscription(&id, subscription);
+        }
+    }
+
     /// Drop everything a closed connection subscribed to.
     pub fn disconnect(&self, peer: &Peer) {
         self.files.disconnect(peer.id);
@@ -721,15 +770,7 @@ impl WorkspaceRpc {
                 self.broadcast_presence();
             }
         }
-        let doomed: Vec<(String, Subscription)> = {
-            let mut subscriptions = self.subscriptions.lock().unwrap();
-            let ids: Vec<String> =
-                subscriptions.iter().filter(|(_, sub)| sub.peer() == peer.id).map(|(id, _)| id.clone()).collect();
-            ids.into_iter().filter_map(|id| subscriptions.remove(&id).map(|sub| (id, sub))).collect()
-        };
-        for (id, subscription) in doomed {
-            self.drop_subscription(&id, subscription);
-        }
+        self.drop_peer_subscriptions(peer);
     }
 
     fn drop_subscription(&self, id: &str, subscription: Subscription) {
@@ -1479,7 +1520,7 @@ impl WorkspaceRpc {
         }
         // The same rule as a mailbox send (contract §20.5), for managers
         // too: they take a held lease over explicitly.
-        if peer.authority == Authority::Participate && !self.access(peer).can_drive() {
+        if self.authority(peer) == Authority::Participate && !self.access(peer).can_drive() {
             return Err(RpcError::forbidden("sending needs driver access to the workspace"));
         }
         let busy = agents_busy(&self.agents, &session.id, &tab.id);
@@ -1490,13 +1531,15 @@ impl WorkspaceRpc {
                     return Err(lease_refusal(LeaseRefusal::Held(held)));
                 }
             }
-            None if peer.authority == Authority::Participate => return Err(RpcError::forbidden("sending needs a signed-in person")),
+            None if self.authority(peer) == Authority::Participate => return Err(RpcError::forbidden("sending needs a signed-in person")),
             None => {}
         }
         let outcome = self.manager()?.send(&session.id, &tab.id, text.to_string(), Vec::new()).map_err(RpcError::internal)?;
         // Only what reached the agent claims the tab.
         if let Some(user) = peer.user_id.as_deref() {
-            let _ = self.collab.claim(&tab.id, user, now, true, false);
+            // As busy as it was before this send: an expired lease of someone
+            // else never blocks it (their idle lease is not live, this turn is).
+            let _ = self.collab.claim(&tab.id, user, now, busy, false);
         }
         Ok(json!({ "sessionId": session.id, "tabId": tab.id, "outcome": outcome }))
     }

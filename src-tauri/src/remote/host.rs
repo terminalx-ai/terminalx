@@ -433,6 +433,9 @@ impl RelayHost {
         let (cell_url, assignment_epoch) = assign(&session.director_url, &session.relay_token, &relay_host_id).await?;
         // Offsets, cursors and `rpc.hello` report the generation registered.
         self.rpc.set_generation(identity.runtime_generation);
+        // Who has access is known before any client can connect, not only
+        // after the first refresh (contract §20.5).
+        self.rpc.set_collaboration(session.collaboration.clone());
         let (mut socket, relay_generation) =
             self.open_control(&cell_url, assignment_epoch, &session.relay_token, &identity).await?;
         let (commands, mut command_rx) = mpsc::unbounded_channel();

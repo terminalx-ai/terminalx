@@ -314,6 +314,15 @@ pub struct CloudAgents {
     /// in tests without one: actors then have the role the API stamped.
     collab: OnceLock<Arc<Collaboration>>,
     dir: PathBuf,
+    holders_lock: Mutex<()>,
+}
+
+/// Who was handed the current workspace content key.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KeyHolders {
+    key_id: String,
+    users: Vec<String>,
 }
 
 impl CloudAgents {
@@ -350,6 +359,7 @@ impl CloudAgents {
             quiesced: AtomicBool::new(false),
             collab: OnceLock::new(),
             dir: dir.to_path_buf(),
+            holders_lock: Mutex::new(()),
         }))
     }
 
@@ -362,6 +372,46 @@ impl CloudAgents {
 
     pub fn collab(&self) -> Option<&Arc<Collaboration>> {
         self.collab.get()
+    }
+
+    /// Record that `user` was handed the current workspace content key
+    /// (`keys.get`), durably in `key-holders.json`. A new key starts a new
+    /// record.
+    pub fn note_key_holder(&self, user: &str) {
+        let Some((key_id, _)) = self.keys.current() else { return };
+        let _guard = self.holders_lock.lock().unwrap();
+        let mut record = self.holders_record();
+        if record.key_id != key_id {
+            record = KeyHolders { key_id, users: Vec::new() };
+        }
+        if record.users.iter().any(|known| known == user) {
+            return;
+        }
+        record.users.push(user.to_string());
+        let path = self.dir.join("key-holders.json");
+        match serde_json::to_vec(&record) {
+            Ok(bytes) => {
+                if let Err(error) = crate::cloud_bootstrap::write_durable(&path, &bytes) {
+                    log::warn!("record who holds the workspace content key: {error:#}");
+                }
+            }
+            Err(error) => log::warn!("record who holds the workspace content key: {error}"),
+        }
+    }
+
+    /// The people the current key was handed to (across restarts).
+    pub fn key_holders(&self) -> Vec<String> {
+        let Some((key_id, _)) = self.keys.current() else { return Vec::new() };
+        let record = self.holders_record();
+        if record.key_id == key_id {
+            record.users
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn holders_record(&self) -> KeyHolders {
+        std::fs::read(self.dir.join("key-holders.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
     }
 
     /// What a mailbox actor may do now (contract §20.4-20.5).

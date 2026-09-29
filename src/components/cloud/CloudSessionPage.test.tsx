@@ -574,6 +574,14 @@ describe("shared cloud workspaces (PRO-30)", () => {
     expect(client.call.mock.calls.map(([method]) => method)).not.toContain("collab.state");
   });
 
+  it("does not say \"not shared\" before the runtime has a member list", async () => {
+    listed = [info()];
+    await openReady();
+    act(() => emit(shared({ userId: "u-me", role: "none", canApprove: false, listed: false } as never, { authority: "participate" })));
+    await screen.findByTestId("cloud-terminal");
+    expect(screen.queryByTestId("cloud-not-shared")).toBeNull();
+  });
+
   it("lists the terminals once the workspace is shared with this person, without reconnecting", async () => {
     listed = [info()];
     await openReady();
