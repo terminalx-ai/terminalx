@@ -383,19 +383,21 @@ impl CloudAgents {
     }
 
     /// Drop queued follow-ups whose sender lost driver access, saying so in
-    /// their transcripts (contract §20.5).
-    pub fn revalidate_follow_ups(&self) {
+    /// their transcripts (contract §20.5). False when the queue could not
+    /// be rewritten.
+    pub fn revalidate_follow_ups(&self) -> bool {
         let dropped = match self.follow_ups.retain(|follow_up| self.follow_up_allowed(follow_up)) {
             Ok(dropped) => dropped,
             Err(error) => {
                 log::warn!("revalidate queued follow-ups: {error:#}");
-                return;
+                return false;
             }
         };
         for (tab_id, follow_up) in dropped {
             self.ops.note(&follow_up.session_id, &tab_id, "Dropped a queued message from a person who no longer has driver access.");
             self.changed(Some(&tab_id), true);
         }
+        true
     }
 
     pub fn state_dir(data_dir: &Path) -> PathBuf {
@@ -512,9 +514,12 @@ impl CloudAgents {
             }
             // Checked again right before it is typed: the sender's access
             // may have changed while it waited.
+            // Never typed while it may not be; if the queue cannot be
+            // rewritten it waits for the next nudge rather than spinning.
             if !self.follow_up_allowed(&next) {
-                self.revalidate_follow_ups();
-                self.nudge_follow_ups(&tab_id);
+                if self.revalidate_follow_ups() {
+                    self.nudge_follow_ups(&tab_id);
+                }
                 continue;
             }
             // Taken durably before it is typed: a crash in between loses

@@ -854,4 +854,10 @@ async fn the_driver_lease_is_visible_and_only_a_manager_takes_it_over() {
     call(&f.rpc, &admin, "lease.release", json!({ "tabId": "tab-1" })).await.unwrap();
     assert_eq!(call(&f.rpc, &bob, "lease.acquire", json!({ "tabId": "tab-1" })).await.unwrap()["lease"]["holderId"], "bob");
     assert_eq!(call(&f.rpc, &vic, "collab.state", json!({})).await.unwrap()["leases"][0]["holderId"], "bob");
+    // A lease past its idle expiry is checked against the tab's turn without
+    // holding the lease lock (reading the tabs reads the leases).
+    f.rpc.collab.release("tab-1", "bob", false);
+    f.rpc.collab.claim("tab-1", "alice", 1, false, false).unwrap();
+    let state = tokio::time::timeout(Duration::from_secs(5), call(&f.rpc, &vic, "collab.state", json!({}))).await.expect("no deadlock").unwrap();
+    assert_eq!(state["leases"], json!([]), "an idle lease past its expiry is not live");
 }

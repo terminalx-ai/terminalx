@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import type { WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import {
   WorkspaceCollab,
@@ -44,8 +44,8 @@ interface Presence {
 }
 
 interface Store {
+  key: string;
   snapshot: CollabSnapshot;
-  listeners: Set<() => void>;
   presence: Presence;
   client: WorkspaceRpcClient | null;
 }
@@ -58,10 +58,31 @@ export const TYPING_IDLE_MS = 4_000;
 const EMPTY: CollabSnapshot = { available: false, you: null, participants: [], leases: {}, notes: {}, error: null };
 const stores = new Map<string, Store>();
 
+/**
+ * Subscribers per workspace key, kept apart from the stores so a view that
+ * stays mounted across `resetCollab` follows the new store, not the
+ * discarded one.
+ */
+const listeners = new Map<string, Set<() => void>>();
+
+function notify(key: string) {
+  for (const listener of [...(listeners.get(key) ?? [])]) listener();
+}
+
+function subscribeTo(key: string, listener: () => void): () => void {
+  let set = listeners.get(key);
+  if (!set) listeners.set(key, (set = new Set()));
+  set.add(listener);
+  return () => {
+    set.delete(listener);
+    if (set.size === 0 && listeners.get(key) === set) listeners.delete(key);
+  };
+}
+
 function store(key: string): Store {
   let s = stores.get(key);
   if (!s) {
-    s = { snapshot: EMPTY, listeners: new Set(), presence: { tabId: null, activity: "viewing", typingSentAt: 0, idle: null }, client: null };
+    s = { key, snapshot: { ...EMPTY }, presence: { tabId: null, activity: "viewing", typingSentAt: 0, idle: null }, client: null };
     stores.set(key, s);
   }
   return s;
@@ -69,19 +90,14 @@ function store(key: string): Store {
 
 function set(s: Store, change: Partial<CollabSnapshot>) {
   s.snapshot = { ...s.snapshot, ...change };
-  for (const listener of [...s.listeners]) listener();
+  // A store dropped by `resetCollab` no longer speaks for its key.
+  if (stores.get(s.key) === s) notify(s.key);
 }
 
 export function useCollab(key: string): CollabSnapshot {
-  const s = store(key);
-  return useSyncExternalStore(
-    (listener) => {
-      s.listeners.add(listener);
-      return () => s.listeners.delete(listener);
-    },
-    () => s.snapshot,
-    () => EMPTY,
-  );
+  const subscribe = useCallback((listener: () => void) => subscribeTo(key, listener), [key]);
+  const snapshot = useCallback(() => store(key).snapshot, [key]);
+  return useSyncExternalStore(subscribe, snapshot, () => EMPTY);
 }
 
 export function getCollab(key: string): CollabSnapshot {
@@ -92,6 +108,8 @@ export function getCollab(key: string): CollabSnapshot {
 export function resetCollab() {
   for (const s of stores.values()) if (s.presence.idle) clearTimeout(s.presence.idle);
   stores.clear();
+  // Mounted views read their (now empty) new store.
+  for (const key of [...listeners.keys()]) notify(key);
 }
 
 /** Who this connection is: the runtime's latest word, else its `rpc.hello`. */

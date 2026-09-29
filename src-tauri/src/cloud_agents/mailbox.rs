@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use super::api::{Ack, AckOutcome, CallError, Lease};
 use super::receipts::{FollowUp, Known, Receipt};
 use super::{crypto, now_ms, CloudAgents, DecisionError, Settings};
-use crate::remote::collab::{LeaseRefusal, Role};
+use crate::remote::collab::Role;
 
 const LEASE_LIMIT: u32 = 16;
 const ATTACHED_POLL: Duration = Duration::from_secs(3);
@@ -139,19 +139,14 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
     if !allowed {
         return finish(agents, lease, "rejected", Some("forbidden"), json!({}));
     }
-    // Competing input is serialized by the tab's driver lease: a send or
-    // steer claims it, and nobody else sends or stops while it is held.
+    // Competing input is serialized by the tab's driver lease: nobody else
+    // sends, steers or stops (managers may stop) while it is held, and an
+    // applied send or steer claims it (below).
     if let (Some(collab), "send" | "steer" | "stop") = (agents.collab(), lease.kind.as_str()) {
         let busy = agents.ops.busy(&tab.session_id, &lease.tab_id);
-        let now = now_ms();
-        let held = if lease.kind == "stop" {
-            collab.lease(&lease.tab_id, now, busy).filter(|held| held.holder_id != lease.actor.user_id && access.role != Role::Manager)
-        } else {
-            collab.claim(&lease.tab_id, &lease.actor.user_id, now, busy, false).err().and_then(|refusal| match refusal {
-                LeaseRefusal::Held(held) => Some(held),
-                LeaseRefusal::Forbidden => None,
-            })
-        };
+        let held = collab
+            .held_by_other(&lease.tab_id, &lease.actor.user_id, now_ms(), busy)
+            .filter(|_| !(lease.kind == "stop" && access.role == Role::Manager));
         if let Some(held) = held {
             return finish(agents, lease, "rejected", Some("lease-held"), json!({ "holderId": held.holder_id }));
         }
@@ -163,6 +158,10 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
         return Receipt { outcome: "rejected".into(), category: Some("receipt-store-failed".into()), result_iv: None, result_ciphertext: None };
     }
     let (outcome, category, extra) = apply(agents, lease, &tab.session_id, &plaintext);
+    // Only input that reached the agent (or its queue) claims the tab.
+    if let (Some(collab), "applied", "send" | "steer") = (agents.collab(), outcome, lease.kind.as_str()) {
+        let _ = collab.claim(&lease.tab_id, &lease.actor.user_id, now_ms(), true, false);
+    }
     finish(agents, lease, outcome, category, extra)
 }
 

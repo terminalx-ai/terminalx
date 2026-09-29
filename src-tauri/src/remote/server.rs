@@ -766,23 +766,25 @@ impl WorkspaceRpc {
 
     // ---- collaboration (collab/1, PRO-30) -----------------------------------
 
-    /// Whether the tab's turn is running, which keeps its lease alive.
-    fn tab_busy(&self, tab_id: &str) -> bool {
-        self.agents
-            .get()
-            .and_then(|agents| agents.tab(tab_id))
-            .is_some_and(|tab| agents_busy(&self.agents, &tab.session_id, tab_id))
-    }
-
-    /// An agent tab of this runtime, named by exact id.
-    fn known_tab(&self, params: &Value) -> Result<String, RpcError> {
+    /// An agent tab of this runtime, named by exact id: `(sessionId, tabId)`.
+    fn known_tab(&self, params: &Value) -> Result<(String, String), RpcError> {
         let tab_id = required_str(params, "tabId")?;
-        self.agents()?.tab(tab_id).map(|tab| tab.tab_id).ok_or_else(|| RpcError::not_found("no such tab"))
+        self.agents()?
+            .ops
+            .tabs()
+            .into_iter()
+            .find(|tab| tab.tab_id == tab_id)
+            .map(|tab| (tab.session_id, tab.tab_id))
+            .ok_or_else(|| RpcError::not_found("no such tab"))
     }
 
     fn collab_state(&self, peer: &Peer) -> Result<Value, RpcError> {
         let now = crate::cloud_agents::now_ms();
-        let leases = self.collab.leases(now, &|tab_id| self.tab_busy(tab_id));
+        // One read of the tabs for every lease; a running turn keeps its
+        // lease past the idle expiry.
+        let sessions: HashMap<String, String> =
+            self.agents.get().map(|agents| agents.ops.tabs().into_iter().map(|tab| (tab.tab_id, tab.session_id)).collect()).unwrap_or_default();
+        let leases = self.collab.leases(now, &|tab_id| sessions.get(tab_id).is_some_and(|session| agents_busy(&self.agents, session, tab_id)));
         Ok(json!({ "you": self.you(peer), "participants": self.participants(), "leases": leases }))
     }
 
@@ -810,7 +812,7 @@ impl WorkspaceRpc {
     }
 
     fn notes_list(&self, params: Value) -> Result<Value, RpcError> {
-        let tab_id = self.known_tab(&params)?;
+        let (_, tab_id) = self.known_tab(&params)?;
         let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(100).clamp(1, 200) as usize;
         let (notes, more) = self.collab.notes(&tab_id, params.get("beforeId").and_then(Value::as_str), limit);
         Ok(json!({ "notes": notes, "more": more }))
@@ -819,7 +821,7 @@ impl WorkspaceRpc {
     /// A note for the people in the workspace. It never reaches the agent:
     /// it is not typed, queued or checkpointed.
     fn notes_post(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
-        let tab_id = self.known_tab(&params)?;
+        let (_, tab_id) = self.known_tab(&params)?;
         let author = peer.user_id.as_deref().ok_or_else(|| RpcError::forbidden("notes need a signed-in person"))?;
         let text = required_str(&params, "text")?;
         if text.trim().is_empty() || text.chars().count() > collab::MAX_NOTE_CHARS {
@@ -830,19 +832,19 @@ impl WorkspaceRpc {
     }
 
     fn lease_acquire(&self, peer: &Peer, params: Value, take_over: bool) -> Result<Value, RpcError> {
-        let tab_id = self.known_tab(&params)?;
+        let (session_id, tab_id) = self.known_tab(&params)?;
         let user = peer.user_id.as_deref().ok_or_else(|| RpcError::forbidden("driving needs a signed-in person"))?;
         let access = self.access(peer);
         if !access.can_drive() || take_over && access.role != Role::Manager {
             return Err(lease_refusal(LeaseRefusal::Forbidden));
         }
-        let busy = self.tab_busy(&tab_id);
+        let busy = agents_busy(&self.agents, &session_id, &tab_id);
         let lease = self.collab.claim(&tab_id, user, crate::cloud_agents::now_ms(), busy, take_over).map_err(lease_refusal)?;
         Ok(json!({ "lease": lease }))
     }
 
     fn lease_release(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
-        let tab_id = self.known_tab(&params)?;
+        let (_, tab_id) = self.known_tab(&params)?;
         let user = peer.user_id.as_deref().unwrap_or("");
         let force = self.access(peer).role == Role::Manager;
         if !self.collab.release(&tab_id, user, force) && self.collab.lease(&tab_id, crate::cloud_agents::now_ms(), true).is_some() {
@@ -1456,6 +1458,10 @@ impl WorkspaceRpc {
                     agents.checkpoints.remove(tab_id);
                 }
             }
+            // A removed tab's notes and lease go with it.
+            for tab_id in &closing {
+                self.collab.forget_tab(tab_id);
+            }
         }
         if let Some(agents) = self.agents.get() {
             agents.changed(None, false);
@@ -1471,17 +1477,27 @@ impl WorkspaceRpc {
         if text.trim().is_empty() {
             return Err(RpcError::invalid("text is empty"));
         }
-        if peer.authority == Authority::Participate {
-            // The same rule as a mailbox send (contract §20.5).
-            let user = peer
-                .user_id
-                .as_deref()
-                .filter(|_| self.access(peer).can_drive())
-                .ok_or_else(|| RpcError::forbidden("sending needs driver access to the workspace"))?;
-            let busy = self.manager()?.is_running(&session.id, &tab.id);
-            self.collab.claim(&tab.id, user, crate::cloud_agents::now_ms(), busy, false).map_err(lease_refusal)?;
+        // The same rule as a mailbox send (contract §20.5), for managers
+        // too: they take a held lease over explicitly.
+        if peer.authority == Authority::Participate && !self.access(peer).can_drive() {
+            return Err(RpcError::forbidden("sending needs driver access to the workspace"));
+        }
+        let busy = agents_busy(&self.agents, &session.id, &tab.id);
+        let now = crate::cloud_agents::now_ms();
+        match peer.user_id.as_deref() {
+            Some(user) => {
+                if let Some(held) = self.collab.held_by_other(&tab.id, user, now, busy) {
+                    return Err(lease_refusal(LeaseRefusal::Held(held)));
+                }
+            }
+            None if peer.authority == Authority::Participate => return Err(RpcError::forbidden("sending needs a signed-in person")),
+            None => {}
         }
         let outcome = self.manager()?.send(&session.id, &tab.id, text.to_string(), Vec::new()).map_err(RpcError::internal)?;
+        // Only what reached the agent claims the tab.
+        if let Some(user) = peer.user_id.as_deref() {
+            let _ = self.collab.claim(&tab.id, user, now, true, false);
+        }
         Ok(json!({ "sessionId": session.id, "tabId": tab.id, "outcome": outcome }))
     }
 

@@ -251,15 +251,22 @@ impl Collaboration {
         stamped.meet(self.access_of(Some(user_id)))
     }
 
+    /// Live leases. `busy` is asked with no lock held: it may read the
+    /// tabs, which read the leases.
     pub fn leases(&self, now: u64, busy: &dyn Fn(&str) -> bool) -> Vec<TabLease> {
-        let mut leases: Vec<TabLease> =
-            self.leases.lock().unwrap().values().filter(|lease| lease.expires_at > now || busy(&lease.tab_id)).cloned().collect();
+        let all: Vec<TabLease> = self.leases.lock().unwrap().values().cloned().collect();
+        let mut leases: Vec<TabLease> = all.into_iter().filter(|lease| lease.expires_at > now || busy(&lease.tab_id)).collect();
         leases.sort_by(|a, b| a.tab_id.cmp(&b.tab_id));
         leases
     }
 
     pub fn lease(&self, tab_id: &str, now: u64, busy: bool) -> Option<TabLease> {
         self.leases.lock().unwrap().get(tab_id).filter(|lease| busy || lease.expires_at > now).cloned()
+    }
+
+    /// Whether someone other than `user` holds a live lease on the tab.
+    pub fn held_by_other(&self, tab_id: &str, user_id: &str, now: u64, busy: bool) -> Option<TabLease> {
+        self.lease(tab_id, now, busy).filter(|lease| lease.holder_id != user_id)
     }
 
     /// Take or extend the tab's lease for `user`. Another person's live
@@ -272,7 +279,8 @@ impl Collaboration {
             Some(lease) if lease.holder_id == user_id => TabLease { expires_at: now + LEASE_IDLE_MS, ..lease },
             _ => TabLease { tab_id: tab_id.to_string(), holder_id: user_id.to_string(), acquired_at: now, expires_at: now + LEASE_IDLE_MS },
         };
-        let changed = leases.get(tab_id).map(|old| old.holder_id != lease.holder_id || old.acquired_at != lease.acquired_at) != Some(false);
+        // An extension is announced too: clients show the expiry.
+        let changed = leases.get(tab_id) != Some(&lease);
         leases.insert(tab_id.to_string(), lease.clone());
         drop(leases);
         if changed {
@@ -491,9 +499,11 @@ mod tests {
         let first = collab.claim("t", "a", 1000, false, false).unwrap();
         assert_eq!(first.expires_at, 1000 + LEASE_IDLE_MS);
         assert_eq!(collab.claim("t", "b", 2000, false, false), Err(LeaseRefusal::Held(first.clone())));
-        // Extending does not announce a new holder.
+        // An extension is announced (clients show the expiry); the same
+        // claim again is not.
         collab.claim("t", "a", 3000, false, false).unwrap();
-        assert_eq!(changes.lock().unwrap().len(), 1);
+        collab.claim("t", "a", 3000, false, false).unwrap();
+        assert_eq!(changes.lock().unwrap().len(), 2);
         // A running turn keeps the lease past its idle expiry.
         let late = 3000 + LEASE_IDLE_MS + 1;
         assert!(collab.claim("t", "b", late, true, false).is_err());
