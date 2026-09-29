@@ -1,51 +1,36 @@
 name: Release terminalx-serve
 
-# Publishes the headless cloud-workspace runtime. The TerminalX cloud server
-# polls this repository's releases and provisions the newest compatible
-# `terminalx-serve-linux-x64`, checked against the release's SHA256SUMS and
-# gated on the `protocol` in `terminalx-serve.json`. Two paths:
+# Publishes the headless cloud-workspace runtime as runtime-only prereleases.
+# The TerminalX cloud server polls them and provisions the newest compatible
+# `terminalx-serve-linux-x64`, checked against SHA256SUMS and gated on the
+# `protocol` in `terminalx-serve.json`.
 #
-# - Runtime prereleases. After CI passes on a push to main, if src-tauri/
-#   changed since the newest runtime prerelease (or by hand from main), build
-#   and publish `runtime-v<serve version>-<UTC yyyymmddHHMMSS>-<sha7>` as a
-#   prerelease. Never marked latest, so the desktop updater's
-#   /releases/latest/download/latest.json is never affected. The newest 10
-#   are kept.
-# - Desktop releases. When a desktop release is published (or by hand with
-#   its tag), attach the runtime to it and add its lines to its SHA256SUMS.
+# After CI succeeds on a push to main (or by hand from main), and only if the
+# commit is a strict descendant of the newest runtime prerelease's commit, is
+# still on main, and changed src-tauri/, this builds and publishes
+# `runtime-v<serve version>-<commit UTC yyyymmddHHMMSS>-<sha7>`. Anything
+# else, including a re-run of an old CI or release run, is a skip, so a
+# publish can never roll the fleet back. Prereleases are never marked latest
+# (the desktop updater's latest.json is never involved), and only the newest
+# 10 are kept. Nothing here touches any other release.
 #
-# Nothing here creates, edits or deletes any other release, and nothing
-# touches latest.json. Built on Ubuntu 22.04, so the glibc floor stays at or
-# below 2.35 (Ubuntu 22.04 and 24.04, Debian 12).
+# The build job runs third-party build scripts and the freshly built binary,
+# so it gets a read-only token and no GH_TOKEN; only the publish job can
+# write. Built on Ubuntu 22.04: glibc floor 2.35 or lower.
 
 on:
   workflow_run:
     workflows: [CI]
     types: [completed]
     branches: [main]
-  release:
-    types: [published]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: >-
-          Empty: publish a runtime prerelease from main. A desktop release tag
-          (e.g. v0.2.5): attach the runtime to that published release.
-        required: false
-        type: string
-
-concurrency:
-  group: release-serve-${{ github.event.release.tag_name || inputs.tag || 'runtime' }}
-  cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  GH_TOKEN: ${{ github.token }}
-  GH_REPO: ${{ github.repository }}
   RUNTIME_TAG_PATTERN: '^runtime-v[0-9]+\.[0-9]+\.[0-9]+-[0-9]{14}-[0-9a-f]{7}$'
   KEEP_RUNTIME_RELEASES: 10
 
@@ -59,23 +44,25 @@ jobs:
       tag: ${{ steps.plan.outputs.tag }}
       built_at: ${{ steps.plan.outputs.built_at }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
+          persist-credentials: false
       - id: plan
         env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
           RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           RUN_EVENT: ${{ github.event.workflow_run.event }}
           RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
           RUN_SHA: ${{ github.event.workflow_run.head_sha }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
-          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           out() { echo "$1=$2" >> "$GITHUB_OUTPUT"; echo "$1=$2"; }
+          skip() { echo "::notice::$1"; out mode skip; exit 0; }
           runtime_releases() {
             gh api --paginate "repos/$GH_REPO/releases" \
               --jq '.[] | select(.prerelease and (.draft | not)) | [.created_at, .tag_name] | @tsv' \
@@ -83,57 +70,43 @@ jobs:
                   if [[ "$tag" =~ $RUNTIME_TAG_PATTERN ]]; then printf '%s\t%s\n' "$created" "$tag"; fi
                 done | sort -r
           }
-          skip() { echo "::notice::$1"; out mode skip; exit 0; }
-          runtime() {
-            local sha=$1 version
-            version=$(git show "$sha:src-tauri/serve/Cargo.toml" | sed -n 's/^version = "\([0-9.]*\)"$/\1/p' | head -1)
-            [ -n "$version" ] || { echo "::error::no serve version at $sha"; exit 1; }
-            local stamp
-            stamp=$(date -u +%Y%m%d%H%M%S)
-            out mode runtime
-            out ref "$sha"
-            out tag "runtime-v$version-$stamp-${sha:0:7}"
-            out built_at "$(date -u -d "${stamp:0:8} ${stamp:8:2}:${stamp:10:2}:${stamp:12:2}" +%Y-%m-%dT%H:%M:%SZ)"
-          }
-          attach() {
-            local tag=$1
-            [[ "$tag" =~ $RUNTIME_TAG_PATTERN ]] && skip "$tag is a runtime prerelease"
-            local state
-            state=$(gh release view "$tag" --json isDraft,isPrerelease -q '"\(.isDraft) \(.isPrerelease)"')
-            [ "$state" = "false false" ] || skip "$tag is not a published desktop release ($state)"
-            out mode attach
-            out ref "$tag"
-            out tag "$tag"
-            out built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            exit 0
-          }
           case "$EVENT" in
-            release)
-              [ "$RELEASE_PRERELEASE" = true ] && skip "prereleases get no runtime attached"
-              attach "$RELEASE_TAG" ;;
-            workflow_dispatch)
-              if [ -n "$INPUT_TAG" ]; then attach "$INPUT_TAG"; fi
-              [ "$GITHUB_REF" = refs/heads/main ] || skip "runtime prereleases are built from main only"
-              runtime "$GITHUB_SHA" ;;
             workflow_run)
               [ "$RUN_CONCLUSION" = success ] || skip "CI concluded $RUN_CONCLUSION"
-              [ "$RUN_EVENT" = push ] && [ "$RUN_BRANCH" = main ] || skip "not a push to main"
-              # Changed since the newest runtime prerelease, not only in the
-              # last commit, so a multi-commit push or a skipped run is caught.
-              previous=$(runtime_releases | head -1 | cut -f2)
-              if [ -n "$previous" ]; then
-                base=$(git rev-list -n 1 "refs/tags/$previous" 2>/dev/null || true)
-                if [ -n "$base" ] && git merge-base --is-ancestor "$base" "$RUN_SHA"; then
-                  git diff --quiet "$base" "$RUN_SHA" -- src-tauri && skip "src-tauri unchanged since $previous"
-                fi
-              fi
-              runtime "$RUN_SHA" ;;
+              [ "$RUN_EVENT" = push ] && [ "$RUN_BRANCH" = main ] && [ "$RUN_REPO" = "$GH_REPO" ] \
+                || skip "not a push to main of $GH_REPO"
+              sha=$RUN_SHA ;;
+            workflow_dispatch)
+              [ "$GITHUB_REF" = refs/heads/main ] || skip "runtime prereleases are built from main only"
+              sha=$GITHUB_SHA ;;
             *) skip "unhandled event $EVENT" ;;
           esac
+          # Still on main: the tip itself, or an ancestor of it.
+          tip=$(gh api "repos/$GH_REPO/branches/main" --jq .commit.sha)
+          git fetch --quiet --no-tags origin "$tip"
+          git merge-base --is-ancestor "$sha" "$tip" || skip "$sha is not on main (tip $tip)"
+          # Strictly newer than the newest runtime prerelease, whose commit is
+          # the ancestry baseline; equal or older (a re-run) is a skip.
+          previous=$(runtime_releases | head -1 | cut -f2)
+          base=
+          if [ -n "$previous" ]; then
+            base=$(git rev-list -n 1 "refs/tags/$previous" 2>/dev/null) || skip "cannot resolve $previous"
+            [ "$base" != "$sha" ] || skip "$previous already covers $sha"
+            git merge-base --is-ancestor "$base" "$sha" || skip "$sha is not newer than $previous"
+            git diff --quiet "$base" "$sha" -- src-tauri && skip "src-tauri unchanged since $previous"
+          fi
+          version=$(git show "$sha:src-tauri/serve/Cargo.toml" | sed -n 's/^version = "\([0-9.]*\)"$/\1/p' | head -1)
+          [ -n "$version" ] || { echo "::error::no serve version at $sha"; exit 1; }
+          # The committer time orders tags by commit, not by when this ran.
+          committed=$(git show -s --format=%ct "$sha")
+          out mode runtime
+          out ref "$sha"
+          out tag "runtime-v$version-$(date -u -d "@$committed" +%Y%m%d%H%M%S)-${sha:0:7}"
+          out built_at "$(date -u -d "@$committed" +%Y-%m-%dT%H:%M:%SZ)"
 
   build:
     needs: plan
-    if: needs.plan.outputs.mode != 'skip'
+    if: needs.plan.outputs.mode == 'runtime'
     strategy:
       fail-fast: true
       matrix:
@@ -145,9 +118,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ needs.plan.outputs.ref }}
+          persist-credentials: false
       - name: The ref carries the serve crate and its runtime protocol
         run: |
           test -f src-tauri/serve/Cargo.toml || { echo "::error::no src-tauri/serve"; exit 1; }
@@ -167,7 +141,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/out"
           cp src-tauri/target/release/terminalx-serve "$RUNNER_TEMP/out/${{ matrix.asset }}"
           chmod 0755 "$RUNNER_TEMP/out/${{ matrix.asset }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.asset }}
           path: ${{ runner.temp }}/out/${{ matrix.asset }}
@@ -178,43 +152,66 @@ jobs:
     needs: [plan, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
+    # Only runs that plan decided to publish get here, so skipped runs (PR
+    # CI, failed CI, forks) never queue behind or cancel a real publish.
+    concurrency:
+      group: release-serve-publish
+      cancel-in-progress: false
     env:
-      MODE: ${{ needs.plan.outputs.mode }}
       REF: ${{ needs.plan.outputs.ref }}
       TAG: ${{ needs.plan.outputs.tag }}
       BUILT_AT: ${{ needs.plan.outputs.built_at }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ needs.plan.outputs.ref }}
           sparse-checkout: src-tauri/serve/Cargo.toml
           sparse-checkout-cone-mode: false
-      - uses: actions/download-artifact@v4
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: assets
           merge-multiple: true
       - name: Write terminalx-serve.json
         run: |
           python3 - <<'PY'
-          import json, os, subprocess, tomllib
+          import json, os, tomllib
           with open('src-tauri/serve/Cargo.toml', 'rb') as f:
               crate = tomllib.load(f)['package']
           manifest = {
               'version': crate['version'],
               'protocol': int(crate['metadata']['terminalx']['runtime-protocol']),
-              'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'commit': os.environ['REF'],
               'builtAt': os.environ['BUILT_AT'],
           }
           with open('assets/terminalx-serve.json', 'w') as f:
               json.dump(manifest, f, indent=2)
           print(json.dumps(manifest))
           PY
+      # Publishes serialize here, so the ancestry check is repeated against
+      # whatever runtime prerelease is newest now, not when plan ran.
       - name: Publish the runtime prerelease
-        if: env.MODE == 'runtime'
         working-directory: assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           [[ "$TAG" =~ $RUNTIME_TAG_PATTERN ]] || { echo "::error::bad runtime tag $TAG"; exit 1; }
+          newest=$(gh api --paginate "repos/$GH_REPO/releases" \
+            --jq '.[] | select(.prerelease and (.draft | not)) | [.created_at, .tag_name] | @tsv' \
+            | while IFS=$'\t' read -r created tag; do
+                if [[ "$tag" =~ $RUNTIME_TAG_PATTERN ]]; then printf '%s\t%s\n' "$created" "$tag"; fi
+              done | sort -r | head -1 | cut -f2)
+          if [ -n "$newest" ]; then
+            status=$(gh api "repos/$GH_REPO/compare/$newest...$REF" --jq .status)
+            if [ "$status" != ahead ]; then
+              echo "::notice::$REF is $status relative to $newest; not publishing"
+              exit 0
+            fi
+          fi
           files=(terminalx-serve-linux-x64 terminalx-serve-linux-arm64 terminalx-serve.json)
           sha256sum "${files[@]}" > SHA256SUMS
           cat SHA256SUMS
@@ -223,35 +220,20 @@ jobs:
             --title "$TAG" \
             --notes "Cloud workspace runtime (terminalx-serve) built from $REF. Runtime-only prerelease: no desktop app, never marked latest."
       - name: Prune runtime prereleases beyond the newest ${{ env.KEEP_RUNTIME_RELEASES }}
-        if: env.MODE == 'runtime'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           # Only prereleases whose tag is a runtime tag are ever candidates.
-          runtime_releases() {
-            gh api --paginate "repos/$GH_REPO/releases" \
-              --jq '.[] | select(.prerelease and (.draft | not)) | [.created_at, .tag_name] | @tsv' \
-              | while IFS=$'\t' read -r created tag; do
-                  if [[ "$tag" =~ $RUNTIME_TAG_PATTERN ]]; then printf '%s\t%s\n' "$created" "$tag"; fi
-                done | sort -r
-          }
-          runtime_releases \
+          gh api --paginate "repos/$GH_REPO/releases" \
+            --jq '.[] | select(.prerelease and (.draft | not)) | [.created_at, .tag_name] | @tsv' \
+            | while IFS=$'\t' read -r created tag; do
+                if [[ "$tag" =~ $RUNTIME_TAG_PATTERN ]]; then printf '%s\t%s\n' "$created" "$tag"; fi
+              done | sort -r \
             | tail -n +"$((KEEP_RUNTIME_RELEASES + 1))" | cut -f2 \
             | while read -r old; do
                 [[ "$old" =~ $RUNTIME_TAG_PATTERN ]] || continue
                 echo "deleting $old"
                 gh release delete "$old" --cleanup-tag --yes
               done
-      # Attach path: one job owns SHA256SUMS, existing lines stay, and only
-      # lines for these files are replaced, so a re-run never duplicates them.
-      - name: Attach to the desktop release
-        if: env.MODE == 'attach'
-        working-directory: assets
-        run: |
-          set -euo pipefail
-          ls -l
-          gh release download "$TAG" --pattern SHA256SUMS --output SHA256SUMS.old || : > SHA256SUMS.old
-          files=(terminalx-serve-linux-x64 terminalx-serve-linux-arm64 terminalx-serve.json)
-          grep -Ev '  (terminalx-serve-linux-[a-z0-9]+|terminalx-serve\.json)$' SHA256SUMS.old > SHA256SUMS || true
-          sha256sum "${files[@]}" >> SHA256SUMS
-          cat SHA256SUMS
-          gh release upload "$TAG" "${files[@]}" SHA256SUMS --clobber
