@@ -72,7 +72,7 @@ it("shows timings, operations with retry hints, restart decisions, connections a
 
   const create = await screen.findByLabelText("Create timings");
   expect(create.textContent).toContain("12 samples");
-  expect(create.textContent).toContain("Total p50 41.0 s · p95 1 m 28 s");
+  expect(create.textContent).toContain("Total p50 41s · p95 1m 28s");
   expect(within(create).getByText("creating-machine")).toBeTruthy();
   expect(screen.getByLabelText("Resume timings").textContent).toContain("p50 — · p95 —");
 
@@ -92,12 +92,21 @@ it("shows timings, operations with retry hints, restart decisions, connections a
   expect(api.cloudDiagnostics).toHaveBeenCalledWith(7);
 });
 
-it("tells a member diagnostics are for administrators and shows nothing else", async () => {
+it("tells a member the organization's diagnostics are for administrators and keeps this Mac's closes", async () => {
   vi.mocked(api.cloudDiagnostics).mockRejectedValue({ code: "organization_admin_required", status: 403 });
   render(<OrganizationDiagnostics contextRevision="rev-1" />);
   expect(await screen.findByText(/Only organization owners and administrators/)).toBeTruthy();
   expect(screen.queryByLabelText("Recent operations")).toBeNull();
-  expect(screen.queryByRole("button", { name: /Export diagnostics/ })).toBeNull();
+  expect(screen.queryByLabelText("Create timings")).toBeNull();
+  expect(screen.getByLabelText("Connection closes on this Mac").textContent).toContain("auth_expired");
+  expect(screen.getByRole("button", { name: /Export diagnostics/ })).toBeTruthy();
+});
+
+it("formats durations without a 60-second remainder", async () => {
+  const { formatDuration } = await import("@/lib/cloudDiagnostics");
+  expect(formatDuration(119_600)).toBe("2m");
+  expect(formatDuration(300)).toBe("300ms");
+  expect(formatDuration(null)).toBe("—");
 });
 
 it("says the server does not offer diagnostics yet and still shows local closes", async () => {
@@ -124,4 +133,14 @@ it("exports only to a path the user chose, with the selected window", async () =
   fireEvent.click(screen.getByRole("button", { name: /Export diagnostics/ }));
   await waitFor(() => expect(api.cloudDiagnosticsExport).toHaveBeenCalledWith("/tmp/diagnostics.json", 30));
   expect((await screen.findByText(/Saved to/)).textContent).toContain("/tmp/diagnostics.json");
+});
+
+it("explains a refused export in words", async () => {
+  vi.mocked(api.cloudDiagnostics).mockResolvedValue(diagnostics());
+  vi.mocked(api.cloudDiagnosticsExport).mockRejectedValue("cloud_diagnostics_export_write_failed");
+  vi.mocked(save).mockResolvedValue("/read-only/diagnostics.json");
+  render(<OrganizationDiagnostics contextRevision="rev-1" />);
+  await screen.findByLabelText("Recent operations");
+  fireEvent.click(screen.getByRole("button", { name: /Export diagnostics/ }));
+  expect((await screen.findByRole("alert")).textContent).toContain("could not be written there");
 });

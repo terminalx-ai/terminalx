@@ -1,3 +1,5 @@
+import { formatDuration as formatElapsed } from "@/lib/time";
+
 // Cloud diagnostics (PRO-38): the organization's recent cloud operations,
 // create/resume stage timings and relay close reasons, for owners and
 // administrators, plus the typed relay closes this desktop met. The Rust
@@ -24,6 +26,7 @@ export interface DiagnosticsOperationTimings {
 export interface DiagnosticsRestartDecision {
   path: string;
   reason: string | null;
+  decidedAt?: number | null;
   fencedAt: number | null;
   replacedRuntimeGeneration: number | null;
   fence: string | null;
@@ -60,6 +63,10 @@ export interface DiagnosticsWorkspace {
   state: string;
   runtimeGeneration: number | null;
   lastActivityAt: number | null;
+  activityReportedAt?: number | null;
+  activeTurns?: number | null;
+  pendingApprovals?: number | null;
+  oomRelaunchCount?: number | null;
   connections: { ready: number; waitingForRuntime: number; expired: number };
   lastOperationId: string | null;
 }
@@ -129,9 +136,20 @@ export function diagnosticsErrorMessage(error: unknown): string {
   }
 }
 
+export function exportErrorMessage(error: unknown): string {
+  const code = typeof error === "string" ? error : "";
+  switch (code) {
+    case "cloud_diagnostics_export_path_invalid":
+      return "Choose a location on this Mac for the export.";
+    case "cloud_diagnostics_export_write_failed":
+      return "The file could not be written there. Choose another location.";
+    default:
+      return "The export could not be saved.";
+  }
+}
+
 export function formatDuration(ms: number | null | undefined): string {
   if (ms == null) return "—";
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
-  return `${Math.floor(ms / 60_000)} m ${Math.round((ms % 60_000) / 1000)} s`;
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return formatElapsed(ms);
 }

@@ -2,11 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Download, Loader2, RefreshCw } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
-import { api, errorMessage } from "@/lib/api";
+import { api } from "@/lib/api";
 import {
   DEFAULT_DIAGNOSTICS_WINDOW_DAYS,
   DIAGNOSTICS_WINDOW_OPTIONS,
   diagnosticsErrorMessage,
+  exportErrorMessage,
   formatDuration,
   retryHint,
   type CloudDiagnostics,
@@ -47,7 +48,7 @@ function Timings({ label, timings }: { label: string; timings: DiagnosticsOperat
  * Cloud diagnostics for organization owners and administrators (PRO-38).
  * The server decides who may see them; a member gets a short explanation.
  */
-export function OrganizationDiagnostics({ contextRevision }: { contextRevision: string }) {
+export function OrganizationDiagnostics({ contextRevision, member = false }: { contextRevision: string; member?: boolean }) {
   const [windowDays, setWindowDays] = useState<number>(DEFAULT_DIAGNOSTICS_WINDOW_DAYS);
   const [diagnostics, setDiagnostics] = useState<CloudDiagnostics | null>(null);
   const [closes, setCloses] = useState<ConnectionClose[]>([]);
@@ -60,7 +61,10 @@ export function OrganizationDiagnostics({ contextRevision }: { contextRevision: 
   const load = useCallback(async (days: number) => {
     const current = ++loadSeq.current;
     setLoading(true);
-    const [server, local] = await Promise.allSettled([api.cloudDiagnostics(days), api.cloudConnectionDiagnostics()]);
+    // The account already says this is a member: skip a request the server refuses.
+    const refused = Promise.reject({ code: "organization_admin_required" });
+    refused.catch(() => {});
+    const [server, local] = await Promise.allSettled([member ? refused : api.cloudDiagnostics(days), api.cloudConnectionDiagnostics()]);
     if (current !== loadSeq.current) return;
     if (server.status === "fulfilled") {
       setDiagnostics(server.value);
@@ -71,7 +75,7 @@ export function OrganizationDiagnostics({ contextRevision }: { contextRevision: 
     }
     setCloses(local.status === "fulfilled" ? local.value : []);
     setLoading(false);
-  }, []);
+  }, [member]);
 
   useEffect(() => {
     setDiagnostics(null);
@@ -96,24 +100,15 @@ export function OrganizationDiagnostics({ contextRevision }: { contextRevision: 
       await api.cloudDiagnosticsExport(path, windowDays);
       setExportResult({ ok: true, text: `Saved to ${path}` });
     } catch (failure) {
-      setExportResult({ ok: false, text: `Export failed: ${errorMessage(failure)}` });
+      setExportResult({ ok: false, text: exportErrorMessage(failure) });
     } finally {
       setExporting(false);
     }
   };
 
-  const code = errorCode(error);
-  if (code === "organization_admin_required") {
-    return (
-      <div className="rounded-lg border border-hairline p-3">
-        <div className="text-sm font-medium">Cloud diagnostics</div>
-        <p className="mt-1 text-[11px] text-muted-foreground" role="status">
-          {diagnosticsErrorMessage(error)}
-        </p>
-      </div>
-    );
-  }
-
+  // A member sees why the organization's part is missing, and still gets
+  // this Mac's own connection closes and their export.
+  const memberOnly = errorCode(error) === "organization_admin_required";
   const operations = diagnostics?.operations ?? [];
   const workspaces = diagnostics?.workspaces ?? [];
   return (
@@ -121,19 +116,21 @@ export function OrganizationDiagnostics({ contextRevision }: { contextRevision: 
       <div className="flex items-center justify-between gap-2">
         <div className="text-sm font-medium">Cloud diagnostics</div>
         <div className="flex items-center gap-1">
-          <select
-            aria-label="Diagnostics window"
-            className="h-7 rounded-md border border-hairline bg-background px-2 text-xs"
-            value={windowDays}
-            disabled={loading}
-            onChange={(event) => setWindowDays(Number(event.target.value))}
-          >
-            {DIAGNOSTICS_WINDOW_OPTIONS.map((days) => (
-              <option key={days} value={days}>
-                Last {days} {days === 1 ? "day" : "days"}
-              </option>
-            ))}
-          </select>
+          {!memberOnly && (
+            <select
+              aria-label="Diagnostics window"
+              className="h-7 rounded-md border border-hairline bg-background px-2 text-xs"
+              value={windowDays}
+              disabled={loading}
+              onChange={(event) => setWindowDays(Number(event.target.value))}
+            >
+              {DIAGNOSTICS_WINDOW_OPTIONS.map((days) => (
+                <option key={days} value={days}>
+                  Last {days} {days === 1 ? "day" : "days"}
+                </option>
+              ))}
+            </select>
+          )}
           <Button variant="ghost" size="icon-xs" aria-label="Refresh cloud diagnostics" disabled={loading} onClick={() => void load(windowDays)}>
             <RefreshCw className={loading ? "animate-spin" : undefined} />
           </Button>
@@ -144,10 +141,16 @@ export function OrganizationDiagnostics({ contextRevision }: { contextRevision: 
         workspace or repository names, credentials, tokens or logs.
       </p>
 
-      {error != null && (
-        <p role="alert" className="mt-2 text-[11px] text-destructive">
+      {memberOnly ? (
+        <p role="status" className="mt-2 text-[11px] text-muted-foreground">
           {diagnosticsErrorMessage(error)}
         </p>
+      ) : (
+        error != null && (
+          <p role="alert" className="mt-2 text-[11px] text-destructive">
+            {diagnosticsErrorMessage(error)}
+          </p>
+        )
       )}
       {loading && !diagnostics && (
         <p role="status" className="mt-2 flex items-center gap-1.5 text-[11px] text-muted-foreground">
@@ -188,6 +191,7 @@ export function OrganizationDiagnostics({ contextRevision }: { contextRevision: 
                     <div className="text-muted-foreground">
                       Restart: {operation.restartDecision.path}
                       {operation.restartDecision.reason ? ` (${operation.restartDecision.reason})` : ""}
+                      {operation.restartDecision.decidedAt ? ` · decided ${formatTime(operation.restartDecision.decidedAt)}` : ""}
                       {operation.restartDecision.fence ? ` · fence ${operation.restartDecision.fence}` : ""}
                       {operation.restartDecision.replacedRuntimeGeneration != null
                         ? ` · replaced generation ${operation.restartDecision.replacedRuntimeGeneration}`
@@ -208,6 +212,7 @@ export function OrganizationDiagnostics({ contextRevision }: { contextRevision: 
                 <li key={workspace.workspaceId} className="flex flex-wrap gap-x-2">
                   <span className="truncate font-mono">{workspace.workspaceId}</span>
                   <span className="text-muted-foreground">{workspace.state}</span>
+                  {workspace.oomRelaunchCount ? <span className="text-destructive">{workspace.oomRelaunchCount} out-of-memory relaunches</span> : null}
                   <span className="ml-auto tabular-nums">
                     {workspace.connections.ready} ready · {workspace.connections.waitingForRuntime} waiting · {workspace.connections.expired} expired
                   </span>

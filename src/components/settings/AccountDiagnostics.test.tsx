@@ -52,11 +52,11 @@ it("signed out: local workflows only, no diagnostics section and no cloud reques
   expect(mocks.api.cloudConnectionDiagnostics).not.toHaveBeenCalled();
 });
 
-it("a member of the active organization gets no diagnostics request", async () => {
+it("a member of the active organization gets this Mac's closes but no organization request", async () => {
   mocks.status = signedIn("member");
   render(<AccountTab />);
-  await Promise.resolve();
-  expect(screen.queryByText("Cloud diagnostics")).toBeNull();
+  expect(await screen.findByText(/Only organization owners and administrators/)).toBeTruthy();
+  expect(mocks.api.cloudConnectionDiagnostics).toHaveBeenCalled();
   expect(mocks.api.cloudDiagnostics).not.toHaveBeenCalled();
 });
 

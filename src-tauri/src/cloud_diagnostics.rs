@@ -148,6 +148,8 @@ pub struct RestartDecision {
     #[serde(default)]
     pub reason: Option<String>,
     #[serde(default)]
+    pub decided_at: Option<i64>,
+    #[serde(default)]
     pub fenced_at: Option<i64>,
     #[serde(default)]
     pub replaced_runtime_generation: Option<u64>,
@@ -179,6 +181,14 @@ pub struct DiagnosticsWorkspace {
     pub runtime_generation: Option<u64>,
     #[serde(default)]
     pub last_activity_at: Option<i64>,
+    #[serde(default)]
+    pub activity_reported_at: Option<i64>,
+    #[serde(default)]
+    pub active_turns: Option<u32>,
+    #[serde(default)]
+    pub pending_approvals: Option<u32>,
+    #[serde(default)]
+    pub oom_relaunch_count: Option<u32>,
     #[serde(default)]
     pub connections: ConnectionCounts,
     #[serde(default)]
@@ -230,7 +240,9 @@ pub struct ConnectionClose {
 }
 
 /// The last [`CLOSE_LOG_CAPACITY`] typed relay closes, newest last. Memory
-/// only: it is gone when the app quits and leaves only in an export.
+/// only: it is gone when the app quits and leaves only in an export. A 4101
+/// is either the relay's close or the client's own check of the runtime
+/// generation in `rpc.hello`; both mean the attachment was stale.
 #[derive(Default)]
 pub struct ConnectionCloseLog {
     entries: Mutex<VecDeque<ConnectionClose>>,
@@ -349,6 +361,7 @@ fn server_section(diagnostics: &CloudDiagnostics) -> Value {
                 "restartDecision": operation.restart_decision.as_ref().map(|decision| json!({
                     "path": code(&decision.path),
                     "reason": decision.reason.as_deref().map(code),
+                    "decidedAt": decision.decided_at,
                     "fencedAt": decision.fenced_at,
                     "replacedRuntimeGeneration": decision.replaced_runtime_generation,
                     "fence": decision.fence.as_deref().map(code),
@@ -374,6 +387,10 @@ fn server_section(diagnostics: &CloudDiagnostics) -> Value {
                 "state": code(&workspace.state),
                 "runtimeGeneration": workspace.runtime_generation,
                 "lastActivityAt": workspace.last_activity_at,
+                "activityReportedAt": workspace.activity_reported_at,
+                "activeTurns": workspace.active_turns,
+                "pendingApprovals": workspace.pending_approvals,
+                "oomRelaunchCount": workspace.oom_relaunch_count,
                 "connections": {
                     "ready": workspace.connections.ready,
                     "waitingForRuntime": workspace.connections.waiting_for_runtime,
@@ -462,11 +479,20 @@ fn id(value: &str) -> String {
     if is_id(value) { value.to_string() } else { REDACTED.to_string() }
 }
 
+/// The longest run of letters and digits an identifier or code may have
+/// between separators: a UUID group is 12, a code word rarely passes 16.
+/// Longer runs are what random tokens, hashes and keys look like.
+const MAX_RUN: usize = 20;
+
+fn has_token_run(value: &str) -> bool {
+    value.split(|c: char| !c.is_ascii_alphanumeric()).any(|run| run.len() > MAX_RUN)
+}
+
 /// Well-known credential prefixes that fit the lowercase code alphabet
 /// (anything with an uppercase letter is refused by the alphabet already).
 fn looks_secret(value: &str) -> bool {
     const PREFIXES: &[&str] = &["sk-", "sk_", "pk_", "rk_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "xox", "eyj", "lin_api_"];
-    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+    PREFIXES.iter().any(|prefix| value.starts_with(prefix)) || has_token_run(value)
 }
 
 /// The final pass: every string in the export is an identifier, a code, a
@@ -484,7 +510,7 @@ fn redact(value: Value) -> Value {
 // ---------------------------------------------------------------- commands
 
 pub mod commands {
-    use std::path::Path;
+    use std::path::PathBuf;
 
     use super::*;
     use crate::cloud_remote::CloudRemote;
@@ -528,12 +554,17 @@ pub mod commands {
         state: tauri::State<'_, crate::AppState>,
         remote: tauri::State<'_, Arc<CloudRemote>>,
     ) -> Result<(), String> {
-        let target = Path::new(&path);
-        if !target.is_absolute() || target.extension().and_then(|extension| extension.to_str()) != Some("json") {
+        let mut target = PathBuf::from(&path);
+        if !target.is_absolute() {
             return Err("cloud_diagnostics_export_path_invalid".into());
         }
+        // A dialog without an extension filter may hand back a bare name.
+        if !target.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("json")) {
+            target.as_mut_os_string().push(".json");
+        }
         let window_days = window(window_days);
-        let server = if state.account.context().is_some() { fetch(&state, window_days).await } else { Err(CloudWorkspaceClientError::local("account_signed_out", false)) };
+        // Signed out, the service answers `account_signed_out` without a request.
+        let server = fetch(&state, window_days).await;
         let closes = remote.close_log().snapshot();
         let export = build_export(&ExportInputs {
             app: AppInfo {
@@ -547,7 +578,11 @@ pub mod commands {
             closes: &closes,
         });
         let text = serde_json::to_string_pretty(&export).map_err(|_| "cloud_diagnostics_export_failed".to_string())?;
-        std::fs::write(target, text).map_err(|_| "cloud_diagnostics_export_write_failed".to_string())
+        tauri::async_runtime::spawn_blocking(move || std::fs::write(target, text))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .ok_or_else(|| "cloud_diagnostics_export_write_failed".to_string())
     }
 }
 
@@ -577,11 +612,11 @@ mod tests {
                 "type": "resume", "state": "failed", "stage": "connecting-relay",
                 "errorCode": "cloud_provider_credential_invalid", "retryAction": "fix-provider-credentials",
                 "attemptCount": 2, "createdAt": 1, "updatedAt": 2, "durationMs": 1,
-                "restartDecision": { "path": "fenced-restart", "reason": "warm-grace-expired", "fencedAt": 2, "replacedRuntimeGeneration": 3, "fence": "rotate" },
+                "restartDecision": { "path": "fenced-restart", "reason": "warm-grace-expired", "decidedAt": 2, "fencedAt": 2, "replacedRuntimeGeneration": 3, "fence": "rotate" },
                 "history": [{ "state": "running", "stage": "preflight", "errorCode": null, "detailCode": null, "at": 1 }]
             }],
             "workspaces": [{ "workspaceId": "cw_1", "provider": "local-docker", "state": "ready", "runtimeGeneration": 4,
-                "lastActivityAt": 5, "connections": { "ready": 1, "waitingForRuntime": 0, "expired": 2 }, "lastOperationId": "op_7d2c9a4e-1b1f-4c55-9e0a-3f1c2b3a4d5e" }],
+                "lastActivityAt": 5, "activityReportedAt": 5, "activeTurns": 1, "pendingApprovals": 0, "oomRelaunchCount": 3, "connections": { "ready": 1, "waitingForRuntime": 0, "expired": 2 }, "lastOperationId": "op_7d2c9a4e-1b1f-4c55-9e0a-3f1c2b3a4d5e" }],
             "closeReasons": [{ "code": 4100, "name": "runtime_unavailable", "retryAction": "recheck-readiness" }]
         })
     }
@@ -627,6 +662,8 @@ mod tests {
         assert_eq!(server["operations"][0]["restartDecision"]["reason"], "warm-grace-expired");
         assert_eq!(server["stageTimings"]["create"]["stages"]["creating-machine"]["p95"], 50000.0);
         assert_eq!(server["workspaces"][0]["connections"]["expired"], 2);
+        assert_eq!(server["workspaces"][0]["oomRelaunchCount"], 3);
+        assert_eq!(server["operations"][0]["restartDecision"]["decidedAt"], 2);
         assert_eq!(export["connections"]["closes"][0]["name"], "stale_generation");
         assert!(server.get("organizationId").is_none());
     }
@@ -645,12 +682,24 @@ mod tests {
         value["operations"][0]["errorCode"] = json!("ghp_abcdefghijklmnopqrstuvwxyz0123456789");
         value["operations"][0]["history"][0]["detailCode"] = json!("sk-live-abc");
         value["operations"][0]["workspaceId"] = json!("eyjhbgcioijiuzi1nij9");
+        // Lowercase token shapes with no known prefix: hex, base32, a hash.
+        value["operations"][0]["retryAction"] = json!("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08");
+        value["operations"][0]["operationId"] = json!("op_mfrggzdfmztwq2lknnwg23tpobyxe43u");
+        value["workspaces"][0]["state"] = json!("canary-refresh-token-4e9f8a7b6c5d4e3f2a1b0c9d");
         let diagnostics: CloudDiagnostics = serde_json::from_value(value).unwrap();
         let export = build_export(&ExportInputs { app: app(), exported_at: 1, window_days: 7, server: Ok(&diagnostics), closes: &[] });
         let operation = &export["server"]["diagnostics"]["operations"][0];
         assert_eq!(operation["errorCode"], REDACTED);
         assert_eq!(operation["history"][0]["detailCode"], REDACTED);
         assert_eq!(operation["workspaceId"], REDACTED);
+        assert_eq!(operation["retryAction"], REDACTED);
+        assert_eq!(operation["operationId"], REDACTED);
+        assert_eq!(export["server"]["diagnostics"]["workspaces"][0]["state"], REDACTED);
+        // Real identifiers and codes still pass.
+        assert_eq!(operation["type"], "resume");
+        assert_eq!(export["server"]["diagnostics"]["workspaces"][0]["workspaceId"], "cw_1");
+        assert!(is_id("op_7d2c9a4e-1b1f-4c55-9e0a-3f1c2b3a4d5e"));
+        assert!(is_code("cloud_workspace_credential_verification_unavailable"));
     }
 
     /// The canary test: every secret or content category is seeded into every

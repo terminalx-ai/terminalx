@@ -112,7 +112,8 @@ Some detail on each:
   close reasons in Settings → Account → Cloud diagnostics, fetched from
   `/v1/desktop/orgs/:orgId/cloud-diagnostics` on the same API — no other host.
   The server sends identifiers, states, codes and timings only. The last 50
-  relay closes (4100–4104) this Mac met are kept in memory, never on disk.
+  relay closes (4100–4104) this Mac met are kept in memory, never on disk;
+  members see those but make no diagnostics request.
   **Export diagnostics…** writes a JSON file only where you choose and never
   uploads it; see [docs/ACCOUNTS.md](docs/ACCOUNTS.md#cloud-diagnostics-and-export)
   for exactly what it holds.
