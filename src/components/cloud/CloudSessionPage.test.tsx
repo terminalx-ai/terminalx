@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, workspaceConnection } from "@/lib/api";
 import { resetPurged } from "@/lib/cloudLifecycle";
 import { resetCloudTerminals } from "@/lib/cloudTerminals";
+import { resetCollab } from "@/lib/cloudCollab";
+import { resetPeople } from "@/lib/cloudPeople";
 import { CloudSessionPage } from "./CloudSessionPage";
 
 /** Input handlers of every xterm made, so a test can type into one. */
@@ -56,6 +58,7 @@ vi.mock("@/lib/api", () => ({
     cloudWorkspaceDisposition: vi.fn(),
     cloudWorkspaceOperation: vi.fn(),
     cloudAgentPurgeWorkspace: vi.fn(),
+    cloudWorkspaceShares: vi.fn(),
   },
   pty: {},
   closeWorkspaceConnection: vi.fn(),
@@ -87,9 +90,16 @@ const info = (fields: Record<string, unknown> = {}) => ({
 });
 
 const stateListeners = new Set<(state: unknown) => void>();
+const notificationListeners = new Set<(notification: unknown) => void>();
 let listed: ReturnType<typeof info>[] = [];
 let epoch = "e1";
+let collabState: Record<string, unknown> = {};
 const client = {
+  connection: { state: "idle" } as Record<string, unknown>,
+  onNotification: (listener: (notification: unknown) => void) => {
+    notificationListeners.add(listener);
+    return () => notificationListeners.delete(listener);
+  },
   onState: (listener: (state: unknown) => void) => {
     stateListeners.add(listener);
     listener({ state: "connecting", attempt: 0 });
@@ -106,7 +116,7 @@ const client = {
   resizePty: vi.fn(async () => ({})),
   controlPty: vi.fn(async () => info({ control: "you", cols: 132, rows: 40 })),
   killPty: vi.fn(async () => undefined),
-  call: vi.fn(async () => ({})),
+  call: vi.fn(async (method: string, _params?: unknown): Promise<unknown> => (method === "collab.state" ? collabState : {})),
   mutate: vi.fn(async () => ({})),
   subscribeSession: vi.fn(async () => () => undefined),
 };
@@ -117,7 +127,11 @@ const fakeConnection = () => ({
   close: vi.fn(),
 });
 const emit = (state: unknown) => {
+  client.connection = state as Record<string, unknown>;
   for (const listener of [...stateListeners]) listener(state);
+};
+const notify = (event: string, params: Record<string, unknown>) => {
+  for (const listener of [...notificationListeners]) listener({ event, params });
 };
 const connectedState = (fields: Record<string, unknown> = {}) => ({
   state: "connected",
@@ -132,6 +146,13 @@ const connectedState = (fields: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   vi.clearAllMocks();
   stateListeners.clear();
+  notificationListeners.clear();
+  client.connection = { state: "idle" };
+  collabState = { you: { userId: "u-me", role: "manager", canApprove: true }, participants: [], leases: [] };
+  vi.mocked(api.cloudWorkspaceShares).mockResolvedValue({
+    shares: [{ userId: "u-alice", email: "alice@example.com", name: "Alice", role: "driver", canApprove: false, createdBy: "u-me", createdAt: 1, updatedAt: 1 }],
+    you: { role: "manager", canApprove: true, canManageShares: true },
+  });
   typed.length = 0;
   listed = [];
   epoch = "e1";
@@ -145,6 +166,8 @@ afterEach(() => {
   cleanup();
   resetCloudTerminals();
   resetPurged();
+  resetCollab();
+  resetPeople();
 });
 
 async function openReady() {
@@ -393,5 +416,95 @@ describe("cloud workspace session page", () => {
     render(<CloudSessionPage onBack={() => undefined} />);
     const buttons = await screen.findAllByRole("button", { name: "Open session" });
     expect((buttons.at(-1) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe("shared cloud workspaces (PRO-30)", () => {
+  const shared = (you: Record<string, unknown>, fields: Record<string, unknown> = {}) => {
+    // The runtime's collab.state agrees with rpc.hello.
+    collabState = { ...collabState, you };
+    return connectedState({ capabilities: ["pty/1", "session/1", "collab/1"], you, ...fields });
+  };
+
+  it("shows who is in the workspace, where, and who is typing, from the runtime's notifications", async () => {
+    listed = [info()];
+    collabState = {
+      you: { userId: "u-me", role: "manager", canApprove: true },
+      participants: [{ userId: "u-me", role: "manager", canApprove: true, surfaces: 1, tabId: "remote-pty-1", activity: "viewing", since: 1 }],
+      leases: [],
+    };
+    await openReady();
+    act(() => emit(shared({ userId: "u-me", role: "manager", canApprove: true })));
+    await waitFor(() => expect(client.call).toHaveBeenCalledWith("collab.state", {}));
+    await waitFor(() => expect(screen.getAllByTestId("cloud-participant")).toHaveLength(1));
+    act(() =>
+      notify("collab.presence", {
+        participants: [
+          { userId: "u-me", role: "manager", canApprove: true, surfaces: 1, tabId: "remote-pty-1", activity: "viewing", since: 1 },
+          { userId: "u-alice", role: "driver", canApprove: false, surfaces: 2, tabId: "remote-pty-1", activity: "typing", since: 2 },
+        ],
+      }),
+    );
+    const people = await screen.findAllByTestId("cloud-participant");
+    expect(people).toHaveLength(2);
+    await waitFor(() => expect(people[1]!.textContent).toContain("Alice"));
+    expect(people[1]!.textContent).toContain("Driver");
+    expect(people[1]!.textContent).toContain("×2");
+    expect(people[1]!.textContent).toContain("on Terminal 1");
+    expect(people[1]!.querySelector("[data-testid=cloud-participant-typing]")).toBeTruthy();
+    expect(people[0]!.textContent).toContain("You");
+    // The terminal this person looks at is their presence.
+    await waitFor(() => expect(client.call).toHaveBeenCalledWith("presence.update", { tabId: "remote-pty-1", activity: "viewing" }));
+  });
+
+  it("hides presence on a runtime without collab/1 and never calls it", async () => {
+    listed = [info()];
+    await openReady();
+    act(() => emit(connectedState({ capabilities: ["pty/1"] })));
+    await screen.findByTestId("cloud-terminal");
+    expect(screen.queryByTestId("cloud-participants")).toBeNull();
+    expect(client.call.mock.calls.map(([method]) => method)).not.toContain("collab.state");
+    expect(client.call.mock.calls.map(([method]) => method)).not.toContain("presence.update");
+  });
+
+  it("tells someone the workspace was not shared with instead of showing empty lists", async () => {
+    listed = [info()];
+    await openReady();
+    act(() => emit(shared({ userId: "u-me", role: "none", canApprove: false }, { authority: "participate" })));
+    const notice = await screen.findByTestId("cloud-not-shared");
+    expect(notice.textContent).toContain("This workspace has not been shared with you");
+    expect(screen.queryByTestId("cloud-terminal")).toBeNull();
+    expect(screen.queryByTestId("cloud-agents-stub")).toBeNull();
+    // Nothing in collab/1 answers someone with no role.
+    expect(client.call.mock.calls.map(([method]) => method)).not.toContain("collab.state");
+  });
+
+  it("names the person typing in a terminal and lets a driver take control", async () => {
+    listed = [info({ control: "other", controllerId: "u-alice" })];
+    await openReady();
+    act(() => emit(shared({ userId: "u-me", role: "driver", canApprove: false }, { authority: "participate" })));
+    const viewer = await screen.findByTestId("cloud-terminal-viewer");
+    await waitFor(() => expect(viewer.textContent).toContain("Alice is typing in this terminal"));
+    fireEvent.click(screen.getByRole("button", { name: "Take control" }));
+    await waitFor(() => expect(client.controlPty).toHaveBeenCalledWith("remote-pty-1", 132, 40));
+    // Creating terminals stays with manage attachments.
+    expect(screen.queryByRole("button", { name: "New cloud terminal" })).toBeNull();
+  });
+
+  it("never offers a viewer control of a terminal", async () => {
+    listed = [info({ control: "other", controllerId: "u-alice" })];
+    await openReady();
+    act(() => emit(shared({ userId: "u-me", role: "viewer", canApprove: true }, { authority: "participate" })));
+    const viewer = await screen.findByTestId("cloud-terminal-viewer");
+    await waitFor(() => expect(viewer.textContent).toContain("Alice is typing in this terminal"));
+    expect(viewer.textContent).toContain("ask an admin for driver access");
+    expect(screen.queryByRole("button", { name: "Take control" })).toBeNull();
+  });
+
+  it("opens the share dialog for the workspace", async () => {
+    await openReady();
+    fireEvent.click(await screen.findByRole("button", { name: /Share/ }));
+    expect(await screen.findByTestId("cloud-share-dialog")).toBeTruthy();
+    await waitFor(() => expect(api.cloudWorkspaceShares).toHaveBeenCalledWith("ws-ready"));
   });
 });

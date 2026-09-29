@@ -1,6 +1,8 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, closeWorkspaceConnections, errorMessage, type AccountStatus } from "@/lib/api";
+import { resetCollab } from "@/lib/cloudCollab";
+import { resetPeople } from "@/lib/cloudPeople";
 import { resetCloudTerminals } from "@/lib/cloudTerminals";
 import { dropEditors } from "@/lib/editors";
 import { resetCloudFiles } from "@/lib/workspaceFiles";
@@ -33,6 +35,8 @@ function applyStatus(status: AccountStatus) {
   if (scopeOf(state.status) !== scopeOf(status)) {
     closeWorkspaceConnections();
     resetCloudTerminals();
+    resetCollab();
+    resetPeople();
     resetCloudFiles();
     dropEditors((entry) => !!entry.source);
   }

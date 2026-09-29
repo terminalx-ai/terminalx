@@ -48,6 +48,7 @@ export function Composer({
   contextMax,
   handoffs,
   disabledReason,
+  disabled = false,
   autoFocus,
 }: {
   tab: TabEntry;
@@ -65,6 +66,8 @@ export function Composer({
   /** Next-step prompts offered after a turn lands (commit, PR, run). */
   handoffs?: { label: string; prompt: string }[];
   disabledReason?: string | null;
+  /** Nothing can be typed or sent (shown with `disabledReason`); stopping stays with the owner. */
+  disabled?: boolean;
   autoFocus?: boolean;
 }) {
   const models = useModels(tab.harness);
@@ -212,7 +215,7 @@ export function Composer({
 
   const send = useCallback(async () => {
     const text = draft.trim();
-    if ((!text && !attachments.length) || sending) return;
+    if ((!text && !attachments.length) || sending || disabled) return;
     setSending(true);
     try {
       await onSend(text, attach.images);
@@ -226,7 +229,7 @@ export function Composer({
     onDraftChange("");
     attach.clear();
     ref.current?.focus();
-  }, [draft, attachments, attach, sending, onSend, onDraftChange]);
+  }, [draft, attachments, attach, sending, disabled, onSend, onDraftChange]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (pickerOpen && items.length) {
@@ -311,6 +314,7 @@ export function Composer({
           }}
           onSelect={(e) => setCaret((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
           onKeyDown={onKeyDown}
+          disabled={disabled}
           rows={1}
           placeholder={placeholder}
           className="max-h-60 w-full resize-none bg-transparent px-1.5 py-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
@@ -437,7 +441,7 @@ export function Composer({
                 size="icon-sm"
                 variant={draft.trim() || attachments.length ? "accent" : "secondary"}
                 aria-label="Send"
-                disabled={sending || (!draft.trim() && !attachments.length)}
+                disabled={disabled || sending || (!draft.trim() && !attachments.length)}
                 onClick={() => void send()}
               >
                 <ArrowUp />
