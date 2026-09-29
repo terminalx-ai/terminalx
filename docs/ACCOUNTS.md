@@ -353,6 +353,55 @@ reconciles a hashed resume credential through `pairing.getEndpoints`. The newly
 authenticated device then appears in Settings → Devices; use Revoke to remove
 the row, close its live connection, and let the script finish.
 
+## Cloud diagnostics and export
+
+**Contract:** `GET /v1/desktop/orgs/:orgId/cloud-diagnostics?windowDays=1..30`
+(terminalx-saas, PRO-38), with the same desktop bearer and cloud-workspace
+contract headers as `/v1/desktop/orgs/:orgId/cloud-workspaces`. Owners and
+administrators only; a member gets `403 organization_admin_required`. A server
+without the endpoint answers 404, which Settings shows as "not available on
+this server".
+
+**Network.** One new request, to the TerminalX cloud API the app already signs
+in against (`login.terminalx.ai`, or the debug-only
+`TERMINALX_DEV_API_BASE_URL`). No new third-party host. It is made only while
+signed in with an organization, when Settings → Account shows the diagnostics
+section or an export is requested; signed out, nothing is fetched and every
+local workflow is unchanged. The desktop skips the request when the active
+organization's role is `member`.
+
+**What the server sends.** Operation and workspace identifiers, operation type,
+state, stage, error and detail codes, retry actions, attempt counts, timestamps
+and durations, restart decisions (warm reconnect or fenced restart), connection
+counts, stage timing percentiles and the close-reason legend. Never workspace
+or repository names, credentials, tokens, provider resource ids or log
+contents. The desktop decodes a typed subset and drops unknown fields.
+
+**Local connection diagnostics.** The desktop cloud client records each typed
+relay close (4100 `runtime_unavailable`, 4101 `stale_generation`, 4102
+`auth_expired`, 4103 `update_required`, 4104 `backpressure`) as
+`{ workspaceId, code, name, at }` in a ring buffer of 50 entries in memory. It
+is never written to disk except inside an export the user asks for.
+
+**Export.** Settings → Account → Cloud diagnostics → **Export diagnostics…**
+opens a save dialog and writes one JSON file to the chosen path; it is never
+uploaded. `src-tauri/src/cloud_diagnostics.rs` builds it from an allowlist
+(never by serializing app state), then redacts every string that is not an
+identifier or a machine code. It contains:
+
+- `app`: version, OS and architecture; `exportedAt`; `windowDays`;
+- `server`: the diagnostics above (without the organization id), or, when
+  they could not be fetched, only the error code and HTTP status;
+- `connections.closes`: the local close log;
+- `excluded`: the list of categories below.
+
+It excludes API keys and provider credentials, access and refresh tokens,
+desktop auth, device and pairing codes, relay and attach tickets, runtime
+credentials, workspace and repository names or paths, file contents, terminal
+output, transcripts and prompts. The builder has no input that carries them,
+and `default_export_contains_no_canary` seeds canary values for each category
+into every input and unexpected field and asserts none reaches the file.
+
 ## Would require a server change (out of scope)
 
 **Contract:** `docs/reference/cloud-endpoints.md` § “User-scoped
