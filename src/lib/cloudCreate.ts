@@ -304,6 +304,7 @@ const MESSAGES: Record<string, string> = {
   cloud_provider_connection_required: "Connect a compute provider in Settings first.",
   cloud_provider_connection_attention_required: "The compute provider connection needs attention in Settings.",
   cloud_provider_billing_required: "The compute provider account needs billing set up.",
+  cloud_provider_permission_denied: "The provider key is valid but lacks a permission TerminalX needs. An admin can check its scope in the provider console.",
   cloud_workspace_repository_not_accessible: "The GitHub App cannot read that repository. Choose it in Settings → GitHub.",
   cloud_workspace_repository_ref_not_found: "That branch does not exist in the repository.",
   cloud_workspace_repository_credential_required: "Connect GitHub in Settings to use private repositories.",

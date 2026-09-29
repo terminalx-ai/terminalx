@@ -1492,6 +1492,7 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_provider_account_mismatch"
             | "cloud_provider_disposition_required"
             | "cloud_provider_credential_invalid"
+            | "cloud_provider_permission_denied"
             | "cloud_provider_rate_limited"
             | "cloud_provider_invalid_response"
             | "cloud_provider_billing_required"
@@ -1658,7 +1659,6 @@ fn known_operation_error_code(code: &str) -> bool {
                 | "provider_permanent_delete_unavailable"
                 | "runtime_checkpoint_pending"
                 | "cloud_workspace_runtime_bootstrap_failed"
-                | "cloud_provider_permission_denied"
         )
 }
 
@@ -2201,6 +2201,16 @@ mod tests {
         request.join().unwrap();
         assert_eq!(error.code, "cloud_workspace_unavailable");
         assert!(!serde_json::to_string(&error).unwrap().contains("canary"));
+    }
+
+    #[test]
+    fn a_valid_key_without_a_permission_is_reported_as_such() {
+        let body = r#"{"error":"cloud_provider_permission_denied"}"#;
+        let (base, _, request) = serve_once(response("422 Unprocessable Entity", body, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.providers().unwrap_err();
+        request.join().unwrap();
+        assert_eq!(error.code, "cloud_provider_permission_denied");
     }
 
     #[test]
