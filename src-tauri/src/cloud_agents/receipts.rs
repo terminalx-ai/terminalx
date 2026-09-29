@@ -34,8 +34,11 @@ pub struct Receipt {
     pub result_ciphertext: Option<String>,
 }
 
+/// One line of `receipts.jsonl`. Its fields are single words today, so this
+/// naming changes nothing on disk; camelCase keeps any new field in line with
+/// the `Receipt` inside it. Only this module reads the file.
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "t", rename_all = "camelCase")]
+#[serde(tag = "t", rename_all = "camelCase", rename_all_fields = "camelCase")]
 enum Record {
     Applying { id: String },
     Receipt { id: String, receipt: Receipt },
@@ -284,6 +287,20 @@ impl FollowUps {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `receipts.jsonl` lines runtimes have already written must still read.
+    #[test]
+    fn receipt_log_lines_keep_their_shape() {
+        let line = serde_json::to_value(Record::Receipt { id: "c1".into(), receipt: applied() }).unwrap();
+        assert_eq!(
+            line,
+            serde_json::json!({ "t": "receipt", "id": "c1", "receipt": { "outcome": "applied", "resultIv": "iv", "resultCiphertext": "ct" } })
+        );
+        assert_eq!(serde_json::to_value(Record::Applying { id: "c1".into() }).unwrap(), serde_json::json!({ "t": "applying", "id": "c1" }));
+        assert_eq!(serde_json::to_value(Record::Acked { id: "c1".into() }).unwrap(), serde_json::json!({ "t": "acked", "id": "c1" }));
+        let written = r#"{"t":"receipt","id":"c1","receipt":{"outcome":"applied","resultIv":"iv","resultCiphertext":"ct"}}"#;
+        assert!(matches!(serde_json::from_str::<Record>(written).unwrap(), Record::Receipt { id, receipt } if id == "c1" && receipt == applied()));
+    }
 
     fn applied() -> Receipt {
         Receipt { outcome: "applied".into(), category: None, result_iv: Some("iv".into()), result_ciphertext: Some("ct".into()) }
