@@ -15,6 +15,7 @@ import {
   checkpointText,
   deletion,
   isArchived,
+  isOpen,
   lifecycleErrorMessage,
   operationFailureText,
   purgeNoticeText,
@@ -119,20 +120,20 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
   }, [opened, onBack, reload]);
 
   // While any workspace is still starting (provisioning, or ready with its
-  // agent not yet running) or archiving, keep it current. The create form
-  // polls the workspace it tracks itself, so the list waits while it is
-  // open; a delete's progress polls its own operation and reloads when done.
+  // agent not yet running) or has an action in progress (stop, resume,
+  // archive, delete), keep the list current, also while the create form is
+  // open: the form's own snapshots only cover the workspace it tracks.
   const starting =
     workspaces?.some(
       (item) =>
         ((item.workspace.state === "provisioning" || item.workspace.launch) && !settled(phaseOf(item))) ||
-        archiving(item),
+        isOpen(item.latestOperation),
     ) ?? false;
   useEffect(() => {
-    if (!starting || connection || creating) return;
+    if (!starting || connection) return;
     const timer = window.setInterval(reload, 3000);
     return () => window.clearInterval(timer);
-  }, [starting, connection, creating, reload]);
+  }, [starting, connection, reload]);
 
   useEffect(() => {
     if (!connection) return;
@@ -268,6 +269,16 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
                       <span className="text-xs text-muted-foreground" data-testid="cloud-workspace-state">
                         {describeWorkspace(item)}
                       </span>
+                      {item.workspace.launch?.workBranch && (
+                        <span
+                          className="inline-flex min-w-0 items-center gap-1 font-mono text-[11px] text-muted-foreground"
+                          title="This workspace's own branch"
+                          data-testid="cloud-workspace-branch"
+                        >
+                          <GitBranch className="size-3 shrink-0" />
+                          <span className="truncate">{item.workspace.launch.workBranch}</span>
+                        </span>
+                      )}
                     </div>
                     {!deleting && item.workspace.state === "suspended" && (
                       <Button size="sm" variant="ghost" title="Read saved agent conversations without waking the workspace" onClick={() => void open(item, false)}>
@@ -435,38 +446,30 @@ const STATE_TEXT: Record<string, string> = {
 };
 
 /**
- * The list's one line of state. What is happening to the workspace itself
- * (deleting, archiving, stopped, needing attention) comes first; the startup
- * phase of its first task only while it is otherwise ready or starting.
+ * The list's one line of state; the work branch has a line of its own. What
+ * is happening to the workspace itself (deleting, archiving, stopping,
+ * resuming, stopped, needing attention) comes first; the startup phase of its
+ * first task only while it is otherwise ready or starting.
  */
 export function describeWorkspace(item: CloudWorkspaceListItem, now = Date.now()): string {
   const { state, launch } = item.workspace;
+  const operation = item.latestOperation;
   // A delete that stopped says why on its own line below; the row keeps its state.
   if (deletion(item) === "running") return "Deleting…";
   if (archiving(item)) return archivingText(item);
-  const branch = launch?.workBranch;
+  if (isOpen(operation) && operation?.action === "suspend") return "Stopping…";
+  if (isOpen(operation) && operation?.action === "resume") return "Resuming…";
   const phase = phaseOf(item);
-  let text: string;
   if (state === "attention-required") {
-    const code = item.latestOperation?.state === "failed" ? item.latestOperation.errorCode : null;
-    text =
-      phase === "failed" && launch
-        ? `Needs attention: ${failureMessage(item)}`
-        : code
-          ? `Needs attention: ${operationFailureText(item.latestOperation!)}`
-          : "Needs attention";
-  } else if (state === "suspended" || state === "archived" || state === "destroyed") {
-    text = STATE_TEXT[state];
-  } else if (phase === "failed" && launch) {
-    text = `The agent did not start: ${failureMessage(item)}`;
-  } else if (runtimeNotPickedUp(item, now) !== null) {
-    text = "Ready · the runtime has not picked up the first task";
-  } else if (state === "provisioning" || (launch && !settled(phase))) {
-    text = PHASES.find((p) => p.id === phase)?.label ?? phase;
-  } else {
-    text = STATE_TEXT[state] ?? state;
+    if (phase === "failed" && launch) return `Needs attention: ${failureMessage(item)}`;
+    if (operation?.state === "failed" && operation.errorCode) return `Needs attention: ${operationFailureText(operation)}`;
+    return "Needs attention";
   }
-  return branch ? `${text} · ${branch}` : text;
+  if (state === "suspended" || state === "archived" || state === "destroyed") return STATE_TEXT[state];
+  if (phase === "failed" && launch) return `The agent did not start: ${failureMessage(item)}`;
+  if (runtimeNotPickedUp(item, now) !== null) return "Ready · the runtime has not picked up the first task";
+  if (state === "provisioning" || (launch && !settled(phase))) return PHASES.find((p) => p.id === phase)?.label ?? phase;
+  return STATE_TEXT[state] ?? state;
 }
 
 /** Says, wherever a cloud shell is shown, that it runs in the cloud workspace and not on this Mac. */
