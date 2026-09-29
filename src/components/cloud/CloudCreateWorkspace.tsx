@@ -20,6 +20,8 @@ import {
   launchLatency,
   loadPending,
   phaseOf,
+  runtimeNotPickedUp,
+  RUNTIME_NOT_PICKED_UP,
   savePending,
   settled,
   usableProviders,
@@ -56,12 +58,15 @@ export function CloudCreateWorkspace({
   organizationId,
   onOpen,
   onChanged,
+  onProgress,
 }: {
   organizationId: string;
   /** Open a session in a workspace whose agent is running. */
   onOpen: (item: CloudWorkspaceListItem) => void;
   /** A workspace was created, canceled or retried: the list is stale. */
   onChanged?: () => void;
+  /** Each newer snapshot of the workspace being created, so the list shows what this form shows. */
+  onProgress?: (snapshot: CloudWorkspaceSnapshot) => void;
 }) {
   const [providers, setProviders] = useState<CloudProviderSummary[] | null>(null);
   const [selected, setSelected] = useState<CloudSelectedRepository[] | null>(null);
@@ -80,7 +85,13 @@ export function CloudCreateWorkspace({
   const [step, setStep] = useState<CreateStep | null>(null);
   const [error, setError] = useState<{ code: string; message: string; retry: boolean } | null>(null);
   const [pending, setPending] = useState<PendingCreate | null>(() => loadPending(organizationId));
-  const [tracked, setTracked] = useState<CloudWorkspaceSnapshot | null>(null);
+  const [tracked, setTrackedState] = useState<CloudWorkspaceSnapshot | null>(null);
+  const progress = useRef(onProgress);
+  progress.current = onProgress;
+  const setTracked = useCallback((snapshot: CloudWorkspaceSnapshot | null) => {
+    setTrackedState(snapshot);
+    if (snapshot) progress.current?.(snapshot);
+  }, []);
   const models = useModels(form.agent);
   const model = models.find((item) => item.id === form.model) ?? null;
 
@@ -399,6 +410,7 @@ export function CreationProgress({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const phase = phaseOf(snapshot);
   const operationId = snapshot.operation.id;
   const latest = useRef(onUpdate);
@@ -408,6 +420,7 @@ export function CreationProgress({
     if (settled(phase)) return;
     let stopped = false;
     const timer = window.setInterval(() => {
+      setNow(Date.now());
       api
         .cloudWorkspaceOperation(operationId)
         .then((next) => {
@@ -439,6 +452,10 @@ export function CreationProgress({
   const latency = launchLatency(snapshot);
   const launch = snapshot.workspace.launch;
   const retryable = phase === "failed" && snapshot.workspace.state === "attention-required";
+  const notPickedUp = runtimeNotPickedUp(snapshot, now) !== null;
+  // A Ready workspace can always be opened, even while its agent is still
+  // starting or its runtime never picks up the first task.
+  const openable = phase === "running" || (snapshot.workspace.state === "ready" && !settled(phase));
 
   return (
     <div className="flex flex-col gap-3" data-testid="cloud-create-progress" data-phase={phase}>
@@ -477,12 +494,17 @@ export function CreationProgress({
           {latency !== null && ` Ready in ${(latency / 1000).toFixed(1)} s.`}
         </p>
       )}
+      {notPickedUp && (
+        <p className="text-xs text-amber-600" role="status" data-testid="cloud-create-not-picked-up">
+          {RUNTIME_NOT_PICKED_UP}
+        </p>
+      )}
       {phase === "failed" && <p className="text-xs text-red-500">{failureMessage(snapshot)}</p>}
       {phase === "canceled" && <p className="text-xs text-muted-foreground">Canceled. Its compute is released and the first prompt was not sent.</p>}
       {error && <p className="text-xs text-red-500">{error}</p>}
       <div className="flex items-center gap-2">
-        {phase === "running" && (
-          <Button size="sm" onClick={() => onOpen({ workspace: snapshot.workspace, latestOperation: snapshot.operation })}>
+        {openable && (
+          <Button size="sm" variant={phase === "running" ? "default" : "outline"} onClick={() => onOpen({ workspace: snapshot.workspace, latestOperation: snapshot.operation })}>
             Open session
           </Button>
         )}

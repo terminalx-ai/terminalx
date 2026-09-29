@@ -126,6 +126,8 @@ const MESSAGES: Record<string, string> = {
   cloud_workspace_operation_in_progress: "Another action on this workspace is still running. Try again when it finishes.",
   cloud_provider_connection_attention_required: "The provider connection needs attention (it is being disconnected or its credential failed).",
   cloud_provider_credential_invalid: "The provider credential is no longer valid. An admin can repair it, then retry.",
+  cloud_provider_permission_denied: "The provider refused this action, though its credential is still valid. Retry, or check the key's permissions at the provider.",
+  cloud_workspace_runtime_bootstrap_failed: "The workspace's runtime could not be set up on its machine. Retry; the provider credential is fine.",
   cloud_provider_unavailable: "The provider did not answer. Retry resumes where it stopped.",
   cloud_provider_rate_limited: "The provider is rate limiting. Retry resumes where it stopped.",
   provider_permanent_delete_unavailable: "This provider connection cannot delete workspaces permanently.",
@@ -137,6 +139,15 @@ const MESSAGES: Record<string, string> = {
 
 export function lifecycleErrorMessage(code: string): string {
   return MESSAGES[code] ?? `The action failed (${code}).`;
+}
+
+/**
+ * Why a lifecycle operation stopped: the message for its code, followed by
+ * the provider's own safe error code when the server reports one.
+ */
+export function operationFailureText(operation: Pick<CloudWorkspaceOperation, "errorCode" | "providerErrorCode">): string {
+  const message = lifecycleErrorMessage(operation.errorCode ?? "cloud_workspace_unknown_error");
+  return operation.providerErrorCode ? `${message} (Provider code: ${operation.providerErrorCode})` : message;
 }
 
 // ---- what a destructive action would put at risk

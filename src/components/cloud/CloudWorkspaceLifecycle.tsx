@@ -13,6 +13,7 @@ import {
   deadlineText,
   isOpen,
   lifecycleErrorMessage,
+  operationFailureText,
   remaining,
   repositoryRiskLines,
   risksOf,
@@ -356,7 +357,7 @@ export function DeletionProgress({
             ? `Deleting: ${items.length - left.length} of ${items.length} removed.`
             : "Deleting…"
           : operation.state === "failed"
-            ? `The delete stopped: ${lifecycleErrorMessage(operation.errorCode ?? "cloud_workspace_unknown_error")}`
+            ? `The delete stopped: ${operationFailureText(operation)}`
             : "Deleted."}
       </span>
       {left.length > 0 && (

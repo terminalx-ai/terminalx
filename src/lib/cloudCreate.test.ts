@@ -7,6 +7,8 @@ import {
   failureMessage,
   launchLatency,
   phaseOf,
+  RUNTIME_PICKUP_MS,
+  runtimeNotPickedUp,
   validBranch,
   validateForm,
   type CreateApi,
@@ -186,5 +188,44 @@ describe("phases", () => {
     expect(failureMessage(snapshot({ operation: { state: "failed", errorCode: "provider_retry_exhausted" } }))).toMatch(/provider_retry_exhausted/);
     const running = snapshot({ workspace: { launch: launch("running", { timings: { ...launch("running").timings, runningAt: 7400 } }) } });
     expect(launchLatency(running)).toBe(6400);
+  });
+});
+
+describe("a runtime that never picks up the launch intent", () => {
+  const ready = (launchPatch: object = {}, operation: object = { state: "succeeded", stage: "ready", updatedAt: 5000 }) =>
+    snapshot({ workspace: { state: "ready", launch: launch("authenticating-runtime", launchPatch) }, operation });
+
+  it("says so once the workspace has been Ready for the bounded time", () => {
+    const item = ready({ timings: { ...launch("x").timings, authenticatingAt: 4000 } });
+    expect(phaseOf(item)).toBe("authenticating-runtime");
+    expect(runtimeNotPickedUp(item, 4000 + RUNTIME_PICKUP_MS - 1)).toBeNull();
+    expect(runtimeNotPickedUp(item, 4000 + RUNTIME_PICKUP_MS)).toBe(RUNTIME_PICKUP_MS);
+  });
+
+  it("measures from the create operation's success when the launch has no runtime timing", () => {
+    const item = ready();
+    expect(runtimeNotPickedUp(item, 5000 + RUNTIME_PICKUP_MS - 1)).toBeNull();
+    expect(runtimeNotPickedUp(item, 5000 + RUNTIME_PICKUP_MS)).not.toBeNull();
+  });
+
+  it("also covers an older server that leaves the phase to the desktop", () => {
+    const item = snapshot({ workspace: { state: "ready", launch: { ...launch("authenticating-runtime"), phase: undefined } }, operation: { state: "succeeded", stage: "ready", updatedAt: 5000 } });
+    expect(runtimeNotPickedUp(item, 5000 + RUNTIME_PICKUP_MS)).not.toBeNull();
+  });
+
+  it("stays quiet while the workspace is not Ready, or once the runtime has claimed the intent", () => {
+    const later = 10 * RUNTIME_PICKUP_MS;
+    expect(runtimeNotPickedUp(snapshot({ workspace: { state: "provisioning", launch: launch("authenticating-runtime") } }), later)).toBeNull();
+    expect(runtimeNotPickedUp(snapshot({ workspace: { state: "suspended", launch: launch("authenticating-runtime") } }), later)).toBeNull();
+    expect(runtimeNotPickedUp(ready({ state: "claimed" }), later)).toBeNull();
+    expect(runtimeNotPickedUp(snapshot({ workspace: { state: "ready", launch: launch("syncing-repository") } }), later)).toBeNull();
+    expect(runtimeNotPickedUp(snapshot({ workspace: { state: "ready" }, operation: { state: "succeeded" } }), later)).toBeNull();
+  });
+
+  it("names a runtime that cannot run launch intents", () => {
+    const item = snapshot({ workspace: { state: "ready", launch: launch("failed", { state: "failed", category: "runtime-unsupported" }) } });
+    expect(phaseOf(item)).toBe("failed");
+    expect(failureMessage(item)).toMatch(/runtime cannot start agents from a first prompt/);
+    expect(failureMessage(item)).not.toMatch(/runtime-unsupported/);
   });
 });
