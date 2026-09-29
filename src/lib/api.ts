@@ -145,6 +145,9 @@ export const api = {
     invoke<CloudWorkspaceQuote>("cloud_workspace_quote", { input }),
   cloudWorkspaceCreate: (input: CloudWorkspaceCreateInput) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_create", { input }),
+  cloudWorkspacePreflight: (repositories: CloudWorkspaceRepositoryInput[]) =>
+    invoke<CloudWorkspacePreflight>("cloud_workspace_preflight", { repositories }),
+  cloudWorkspaceRepositories: () => invoke<CloudSelectedRepositories>("cloud_workspace_repositories"),
   cloudWorkspaces: () => invoke<CloudWorkspaceList>("cloud_workspaces"),
   cloudWorkspaceSuspend: (workspaceId: string) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_suspend", { workspaceId }),
@@ -265,7 +268,8 @@ export interface AccountStatus {
   organizations?: OrganizationSummary[];
 }
 
-export type CloudWorkspaceProviderId = "machine0" | "box";
+/** `local-docker` is offered by debug builds only (terminalx-saas `cloud:e2e:local --serve`). */
+export type CloudWorkspaceProviderId = "machine0" | "box" | "local-docker";
 export type CloudWorkspaceReleaseDisposition = "destroyed" | "archived" | "terminalx-only";
 export type CloudWorkspaceNetworkPolicy = "relay-only" | "provider-public-network";
 
@@ -385,6 +389,43 @@ export interface CloudWorkspace {
   createdAt: number;
   updatedAt: number;
   releaseDisposition: CloudWorkspaceReleaseDisposition | null;
+  /** The launch intent it was created with (PRO-21, contract §19). */
+  launch?: CloudWorkspaceLaunch | null;
+}
+
+export type CloudWorkspaceLaunchPhase =
+  | "allocating"
+  | "booting"
+  | "authenticating-runtime"
+  | "syncing-repository"
+  | "starting-agent"
+  | "running"
+  | "failed"
+  | "canceled";
+
+export interface CloudWorkspaceLaunch {
+  launchId: string;
+  /** A newer server may add phases; unknown ones are shown as they come. */
+  phase: CloudWorkspaceLaunchPhase | (string & {});
+  state: string;
+  workBranch: string;
+  agent: string;
+  model: string | null;
+  effort: string | null;
+  mode: string | null;
+  hasPrompt: boolean;
+  category: string | null;
+  sessionId: string | null;
+  tabId: string | null;
+  timings: {
+    requestedAt: number | null;
+    bootingAt: number | null;
+    authenticatingAt: number | null;
+    syncingAt: number | null;
+    startingAgentAt: number | null;
+    runningAt: number | null;
+    failedAt: number | null;
+  };
 }
 
 export interface CloudWorkspaceOperation {
@@ -429,6 +470,48 @@ export interface CloudWorkspaceCreateInput {
   accessMode: "private" | "organization";
   confirmProviderSpend: true;
   idempotencyKey: string;
+  /** The primary repository first, then additional ones (at most five). */
+  repositories?: CloudWorkspaceRepositoryInput[];
+  launch?: CloudWorkspaceLaunchInput | null;
+}
+
+export interface CloudWorkspaceRepositoryInput {
+  cloneUrl: string;
+  /** The base branch; the repository's default branch when absent. */
+  ref?: string | null;
+}
+
+export interface CloudWorkspaceLaunchInput {
+  agent: string;
+  model?: string | null;
+  effort?: string | null;
+  mode?: string | null;
+  prompt?: string | null;
+}
+
+export interface CloudWorkspacePreflight {
+  ready: boolean;
+  checks: {
+    kind: string;
+    cloneUrl: string | null;
+    status: "verified" | "failed";
+    errorCode: string | null;
+    retryable: boolean;
+  }[];
+}
+
+export interface CloudSelectedRepository {
+  fullName: string;
+  cloneUrl: string | null;
+  defaultBranch: string | null;
+  private: boolean;
+  state: "accessible" | "missing" | "installation-suspended" | "installation-revoked" | (string & {});
+  reason: string | null;
+}
+
+export interface CloudSelectedRepositories {
+  configured: boolean;
+  repositories: CloudSelectedRepository[];
 }
 
 export interface CloudWorkspaceClientError {
@@ -475,6 +558,28 @@ export type CloudWorkspaceSafeErrorCode =
   | "cloud_workspace_rate_limited"
   | "machine0_invalid_response"
   | "machine0_unavailable"
+  | "cloud_workspace_policy_denied"
+  | "cloud_provisioning_paused"
+  | "cloud_compute_policy_conflict"
+  | "cloud_environment_changed"
+  | "cloud_environment_repository_not_in_image"
+  | "cloud_environment_version_missing"
+  | "cloud_workspace_repository_invalid"
+  | "cloud_workspace_github_installation_unavailable"
+  | "github_app_not_configured"
+  | "github_app_unavailable"
+  | "github_repository_not_accessible"
+  | "github_repository_not_authorized"
+  | "github_repository_not_granted"
+  | "github_repository_unavailable"
+  | "github_installation_suspended"
+  | "github_installation_revoked"
+  | "cloud_workspace_name_invalid"
+  | "cloud_workspace_repositories_too_many"
+  | "cloud_workspace_repository_duplicate"
+  | "cloud_workspace_repository_ref_invalid"
+  | "cloud_workspace_launch_invalid"
+  | "cloud_workspace_prompt_too_long"
   | "cloud_workspace_unknown_error"
   | "cloud_workspace_invalid_response"
   | "cloud_workspace_unavailable"

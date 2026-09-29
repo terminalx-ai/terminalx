@@ -92,6 +92,9 @@ pub enum CallError {
     /// 401: bad credential, fenced generation or a malformed body.
     Rejected,
     Transient(anyhow::Error),
+    /// The launch intent was settled on the server (canceled, expired) while
+    /// this runtime held it: stop, deliver nothing.
+    Settled(String),
 }
 
 impl std::fmt::Display for CallError {
@@ -99,6 +102,7 @@ impl std::fmt::Display for CallError {
         match self {
             Self::Rejected => write!(f, "the API rejected the runtime credential"),
             Self::Transient(error) => write!(f, "{error:#}"),
+            Self::Settled(state) => write!(f, "settled on the server: {state}"),
         }
     }
 }
@@ -130,7 +134,7 @@ impl HttpMailboxApi {
         Self { origin: origin.trim_end_matches('/').to_string(), credential, agent }
     }
 
-    fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<(u16, Value), CallError> {
+    pub(crate) fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<(u16, Value), CallError> {
         let credential = (self.credential)().ok_or(CallError::Rejected)?;
         let bearer = Zeroizing::new(format!("Bearer {}", credential.as_str()));
         let request = self

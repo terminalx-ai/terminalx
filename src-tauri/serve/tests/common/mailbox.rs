@@ -90,7 +90,24 @@ pub struct State {
     /// Acks of these commands answer 503 without settling, this many more
     /// times (`u32::MAX`: until cleared), as a lost ack response would.
     pub fail_acks: HashMap<String, u32>,
+    /// The workspace's launch intent (contract §19.3), when it has one.
+    pub launch: Option<Launch>,
     next: u64,
+}
+
+/// A launch intent as the server keeps it: one per workspace, claimed by a
+/// receipt store's incarnation and settled once.
+#[derive(Clone, Debug)]
+pub struct Launch {
+    /// The claim response's `launch` object while `deliver`able.
+    pub intent: Value,
+    pub state: String,
+    pub claimed_by: Option<String>,
+    pub claims: u32,
+    pub phases: Vec<String>,
+    /// Every completion the runtime reported, answered or not.
+    pub completions: Vec<Value>,
+    pub category: Option<String>,
 }
 
 pub struct FakeMailbox {
@@ -116,6 +133,24 @@ impl FakeMailbox {
     /// The `mailbox` section of a `--relay-link` file.
     pub fn link_section(&self) -> Value {
         json!({ "origin": self.origin, "runtimeCredential": CREDENTIAL, "organizationId": ORG, "workspaceId": WORKSPACE })
+    }
+
+    /// Give the workspace a launch intent (§19): `intent` is the claim's
+    /// `launch` object without `state` and `redelivery`.
+    pub fn set_launch(&self, intent: Value) {
+        self.state.lock().unwrap().launch = Some(Launch {
+            intent,
+            state: "pending".into(),
+            claimed_by: None,
+            claims: 0,
+            phases: Vec::new(),
+            completions: Vec::new(),
+            category: None,
+        });
+    }
+
+    pub fn launch(&self) -> Launch {
+        self.state.lock().unwrap().launch.clone().expect("a launch intent")
     }
 
     /// Encrypt and queue a command as a client would. Returns its client id.
@@ -263,6 +298,9 @@ fn route(method: &str, path: &str, body: &Value, state: &mut State) -> (u16, Val
             let id = &rest["/agent-commands/".len()..rest.len() - "/ack".len()];
             ack(id, body, state)
         }
+        ("POST", "/launch-intent/claim") => claim_launch(body, state),
+        ("POST", "/launch-intent/phase") => launch_phase(body, state),
+        ("POST", "/launch-intent/complete") => complete_launch(body, state),
         ("PUT", rest) if rest.starts_with("/transcript-checkpoints/") => put_checkpoint(&rest["/transcript-checkpoints/".len()..], body, state),
         ("DELETE", rest) if rest.starts_with("/transcript-checkpoints/") => {
             let tab = rest["/transcript-checkpoints/".len()..].to_string();
@@ -272,6 +310,75 @@ fn route(method: &str, path: &str, body: &Value, state: &mut State) -> (u16, Val
         }
         _ => (404, json!({ "error": "not_found" })),
     }
+}
+
+fn claim_launch(body: &Value, state: &mut State) -> (u16, Value) {
+    let Some(incarnation) = body["storageIncarnationId"].as_str().filter(|v| (16..=128).contains(&v.len())).map(String::from) else {
+        return (401, json!({ "error": "cloud_workspace_bootstrap_invalid" }));
+    };
+    let Some(launch) = state.launch.as_mut() else { return (200, json!({ "v": 1, "launch": null })) };
+    launch.claims += 1;
+    let mut reply = launch.intent.clone();
+    match launch.state.as_str() {
+        "pending" => {
+            launch.state = "claimed".into();
+            launch.claimed_by = Some(incarnation);
+            reply["state"] = json!("deliver");
+            reply["redelivery"] = json!(false);
+        }
+        "claimed" if launch.claimed_by.as_deref() == Some(incarnation.as_str()) => {
+            reply["state"] = json!("deliver");
+            reply["redelivery"] = json!(true);
+        }
+        "claimed" => {
+            launch.state = "outcome-unknown".into();
+            launch.category = Some("runtime-storage-replaced".into());
+            reply["state"] = json!("outcome-unknown");
+        }
+        settled => reply["state"] = json!(settled),
+    }
+    if reply["state"] != "deliver" {
+        reply.as_object_mut().unwrap().remove("prompt");
+        reply["redelivery"] = json!(false);
+    }
+    (200, json!({ "v": 1, "launch": reply }))
+}
+
+fn launch_phase(body: &Value, state: &mut State) -> (u16, Value) {
+    let Some(launch) = state.launch.as_mut().filter(|launch| launch.intent["launchId"] == body["launchId"]) else {
+        return (404, json!({ "error": "cloud_workspace_launch_intent_not_found" }));
+    };
+    let phase = body["phase"].as_str().unwrap_or_default();
+    if !matches!(phase, "syncing-repository" | "starting-agent") {
+        return (401, json!({ "error": "cloud_workspace_bootstrap_invalid" }));
+    }
+    if launch.state != "claimed" {
+        return (409, json!({ "error": "cloud_workspace_launch_intent_settled", "state": launch.state }));
+    }
+    if !launch.phases.iter().any(|p| p == phase) {
+        launch.phases.push(phase.into());
+    }
+    (200, json!({ "v": 1, "state": launch.state }))
+}
+
+fn complete_launch(body: &Value, state: &mut State) -> (u16, Value) {
+    let Some(launch) = state.launch.as_mut().filter(|launch| launch.intent["launchId"] == body["launchId"]) else {
+        return (404, json!({ "error": "cloud_workspace_launch_intent_not_found" }));
+    };
+    let outcome = body["outcome"].as_str().unwrap_or_default().to_string();
+    if !matches!(outcome.as_str(), "started" | "failed" | "outcome-unknown") {
+        return (401, json!({ "error": "cloud_workspace_bootstrap_invalid" }));
+    }
+    launch.completions.push(body.clone());
+    if launch.state == "claimed" {
+        launch.state = outcome;
+        launch.category = body["category"].as_str().map(String::from);
+        return (200, json!({ "v": 1, "state": launch.state }));
+    }
+    if launch.state == outcome {
+        return (200, json!({ "v": 1, "state": launch.state }));
+    }
+    (409, json!({ "error": "cloud_workspace_launch_intent_settled", "state": launch.state }))
 }
 
 fn token() -> String {

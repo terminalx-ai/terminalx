@@ -217,3 +217,47 @@ standing in for the bootstrap:
 `scripts/remote-runtime/fake-claude` stands in for Claude Code in tests. It
 speaks the harness's hooks and writes a Claude-format transcript, so the real
 PTY-first harness runs against it.
+
+## Creating a workspace with a first task (PRO-21)
+
+The create form (`CloudCreateWorkspace`, `src/lib/cloudCreate.ts`) takes the
+organization's selected GitHub repositories (PRO-14): a primary one, up to
+four more, and a base branch for each. It also takes the first prompt, the
+agent, model, effort and permission mode, and who can see the workspace. The
+server stores the prompt as an encrypted, expiring **launch intent**
+(terminalx-saas contract §19), not as a mailbox command. A desktop that has
+never attached holds no workspace content key to encrypt a command with.
+
+- **Before anything is quoted:** names, branch names (`git check-ref-format`
+  rules), duplicates and the prompt size are checked on this machine. The
+  repositories and refs are then checked against GitHub (`/preflight`).
+  Quota and policy refusals (`cloud_workspace_quota_exceeded`,
+  `cloud_workspace_policy_denied`, `cloud_provisioning_paused`) are shown in
+  words.
+- **Retry:** the idempotency key and exact request are kept (in
+  `localStorage`) until the server answers. A retry after an unknown outcome
+  resends the same bytes and gets back the same workspace and its single
+  intent. A failed create whose machine exists is retried with `resume`,
+  which reuses that machine.
+- **Cancel:** while the operation is cancelable. A canceled intent is never
+  delivered.
+- **Progress:** allocating, booting, authenticating runtime, syncing
+  repository, starting agent, running. These phases come from the
+  workspace's `launch.phase`, polled from its operation.
+
+The runtime half is `src-tauri/src/cloud_agents/launch.rs`:
+
+1. Claim the intent with the receipt store's `storageIncarnationId`.
+2. For each repository, switch to its base ref, then create the workspace's
+   own work branch. If the branch already exists, it came from an earlier
+   attempt of this same workspace, so switch to it instead.
+3. Start the agent tab in the primary repository and send the prompt.
+4. Report the outcome.
+
+`launch.json` (next to `receipts.jsonl`) records `applying` durably before
+the agent is touched, and the outcome after. So a restart or a lost
+completion reports the stored outcome, and a runtime that died mid-start
+reports `outcome-unknown`. In neither case is the prompt sent twice. Tests:
+`cloud_agents::launch` unit tests and `serve/tests/launch_intent.rs`. The
+latter runs the real runtime with the fake Claude against the fake API and
+checks both work branches, one prompt, and no second prompt after a restart.

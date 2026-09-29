@@ -1341,3 +1341,72 @@ async fn cloud_git_reviews_commits_pushes_and_opens_a_draft_pr_through_the_relay
     drop(runtime);
     let _ = std::fs::remove_dir_all(&data);
 }
+
+/// PRO-21: a workspace created with a first prompt. The runtime consumes the
+/// launch intent by itself; the desktop that attaches over the relay finds
+/// the agent tab already holding that prompt (once), and continues in it
+/// through the mailbox like any other tab.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs terminalx-saas, bun and Redis: scripts/remote-runtime/e2e.sh"]
+async fn a_launched_workspace_opens_on_its_first_prompt_through_the_relay() {
+    use common::agent::{AgentWorld, Serve};
+    use common::mailbox::FakeMailbox;
+
+    assert!(std::process::Command::new("python3").arg("--version").output().is_ok(), "the fake agent needs python3");
+    let harness = Harness::start();
+    let world = AgentWorld::new();
+    let mailbox = FakeMailbox::start(7);
+    mailbox.set_launch(json!({
+        "launchId": "launch_relay", "workBranch": "terminalx/relay-launch-000000000001", "title": "First task",
+        "agent": "claude", "mode": "manual", "prompt": "echo:the first task", "repositories": [],
+    }));
+    let mut secret = [0u8; 32];
+    secret[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    secret[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    let relay_host_id = relay_host_id_for_secret(secret);
+    let relay_token = harness.post("/runtime-token", json!({ "relayHostId": relay_host_id, "runtimeGeneration": 7 }))["relayToken"].as_str().unwrap().to_string();
+    let link_dir = tempfile::tempdir().unwrap();
+    let link = link_dir.path().join("link.json");
+    let attachment_id = "att-launch-1";
+    let attachments = vec![attachment(attachment_id, "desktop-launch", &uuid::Uuid::new_v4().simple().to_string(), "runtime")];
+    std::fs::write(
+        &link,
+        json!({
+            "v": 1, "hostSecretB64": STANDARD.encode(secret), "relayToken": relay_token, "directorUrl": harness.director,
+            "attachments": attachments, "mailbox": mailbox.link_section(),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut command = world.command();
+    command.args(["--runtime-kind", "cloud-workspace", "--relay-link"]).arg(&link);
+    let runtime = Serve::start(command, &world.data);
+    let launch = tokio::task::block_in_place(|| {
+        common::agent::wait_until("the launch", || Some(mailbox.launch()).filter(|launch| launch.state == "started"))
+    });
+    let tab = launch.completions[0]["tabId"].as_str().unwrap().to_string();
+    let session = launch.completions[0]["sessionId"].as_str().unwrap().to_string();
+
+    let pairing_dir = link_dir.path().join("link.json.attachments");
+    let mut desk = Client::start(source(&harness, &pairing_dir, attachment_id, "desktop-launch", &relay_host_id));
+    desk.connected().await;
+    let listed = desk.ok("session.tabs", json!({})).await;
+    let tabs = listed["tabs"].as_array().unwrap();
+    assert_eq!(tabs.len(), 1, "{listed}");
+    assert_eq!(tabs[0]["tabId"].as_str(), Some(tab.as_str()));
+    let mut feeds = Feeds::new();
+    desk.subscribe_tab(&mut feeds, &session, &tab).await;
+    desk.until_tab(&mut feeds, &tab, "the first task's reply", |f| has(f, "the first task")).await;
+    assert_eq!(feeds[&tab].texts("user_message"), vec!["echo:the first task"], "the prompt is in the tab once");
+
+    // The desktop continues in that tab through the mailbox.
+    let (key_id, keys) = workspace_keys(&mut desk).await;
+    let next = mailbox.enqueue(&key_id, &keys[&key_id], &tab, "send", json!({ "v": 1, "text": "echo:and then this" }), "manage");
+    desk.ok("session.nudge", json!({})).await;
+    assert_eq!(settled(&mailbox, &next).state, "applied");
+    desk.until_tab(&mut feeds, &tab, "the follow-up", |f| has(f, "and then this")).await;
+    assert_eq!(feeds[&tab].texts("user_message"), vec!["echo:the first task", "echo:and then this"]);
+    assert_eq!(mailbox.launch().completions.len(), 1);
+    desk.supervisor.stop();
+    drop(runtime);
+}

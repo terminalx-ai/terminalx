@@ -6,6 +6,9 @@ import { Button } from "@/components/ui/button";
 import { CloudAgentsView } from "./CloudAgents";
 import { CloudFilesView } from "./CloudFiles";
 import { CloudGitView } from "./CloudGit";
+import { CloudCreateWorkspace } from "./CloudCreateWorkspace";
+import { useAccount } from "@/lib/account";
+import { PHASES, phaseOf, settled } from "@/lib/cloudCreate";
 import {
   api,
   devWorkspaceConnection,
@@ -59,13 +62,32 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
   const [state, setState] = useState<WorkspaceConnectionState>({ state: "idle" });
   const [error, setError] = useState<string | null>(null);
   const [pairingCode, setPairingCode] = useState("");
+  const [creating, setCreating] = useState(false);
+  const { status } = useAccount();
+  const scope = status.state === "signed-in" ? (status.context?.scope ?? "signed-in") : "signed-out";
 
-  useEffect(() => {
+  const reload = useCallback(() => {
     api
       .cloudWorkspaces()
-      .then((list) => setWorkspaces(list.workspaces))
+      .then((list) => {
+        setWorkspaces(list.workspaces);
+        setListError(null);
+      })
       .catch((e: unknown) => setListError(errorCode(e)));
   }, []);
+
+  useEffect(() => reload(), [reload]);
+
+  // While any workspace is still starting (provisioning, or ready with its
+  // agent not yet running), keep its phase current. The create form polls
+  // the workspace it tracks itself, so the list waits while it is open.
+  const starting =
+    workspaces?.some((item) => (item.workspace.state === "provisioning" || item.workspace.launch) && !settled(phaseOf(item))) ?? false;
+  useEffect(() => {
+    if (!starting || connection || creating) return;
+    const timer = window.setInterval(reload, 3000);
+    return () => window.clearInterval(timer);
+  }, [starting, connection, creating, reload]);
 
   useEffect(() => {
     if (!connection) return;
@@ -120,7 +142,39 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
         </span>
       </div>
       {!connection ? (
-        <div className="mx-auto flex w-full max-w-xl flex-col gap-4 p-6">
+        <div className="mx-auto flex w-full max-w-xl flex-col gap-4 overflow-y-auto p-6">
+          <section className="flex flex-col gap-2" data-testid="cloud-create-section">
+            <div className="flex items-center gap-2">
+              <h2 className="text-sm font-medium">New cloud workspace</h2>
+              {!creating && (
+                <Button size="sm" variant="outline" className="ml-auto" onClick={() => setCreating(true)}>
+                  <Plus className="size-3.5" /> New workspace
+                </Button>
+              )}
+              {creating && (
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="ml-auto size-6"
+                  aria-label="Close the new workspace form"
+                  onClick={() => {
+                    setCreating(false);
+                    reload();
+                  }}
+                >
+                  <X className="size-3" />
+                </Button>
+              )}
+            </div>
+            {creating && (
+              <CloudCreateWorkspace
+                key={scope}
+                organizationId={scope}
+                onChanged={reload}
+                onOpen={(item) => void open(item, false)}
+              />
+            )}
+          </section>
           <section className="flex flex-col gap-2">
             <h2 className="text-sm font-medium">Workspaces in this organization</h2>
             {listError && <p className="text-xs text-muted-foreground">Cloud workspaces are unavailable ({listError}).</p>}
@@ -130,7 +184,9 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
               <div key={item.workspace.id} className="flex items-center gap-3 rounded-md border border-hairline px-3 py-2">
                 <div className="flex min-w-0 flex-1 flex-col">
                   <span className="truncate text-sm">{item.workspace.name}</span>
-                  <span className="text-xs text-muted-foreground">{item.workspace.state}</span>
+                  <span className="text-xs text-muted-foreground" data-testid="cloud-workspace-state">
+                    {describeWorkspace(item)}
+                  </span>
                 </div>
                 {item.workspace.state === "suspended" && (
                   <Button size="sm" variant="ghost" title="Read saved agent conversations without waking the workspace" onClick={() => void open(item, false)}>
@@ -174,6 +230,15 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
       )}
     </div>
   );
+}
+
+/** The list's one line of state: the startup phase while a workspace starts. */
+function describeWorkspace(item: CloudWorkspaceListItem): string {
+  const branch = item.workspace.launch?.workBranch;
+  const phase = phaseOf(item);
+  const starting = item.workspace.state === "provisioning" || (Boolean(item.workspace.launch) && !settled(phase));
+  const text = starting ? (PHASES.find((p) => p.id === phase)?.label ?? phase) : item.workspace.state;
+  return branch ? `${text} · ${branch}` : text;
 }
 
 /** Says, wherever a cloud shell is shown, that it runs in the cloud workspace and not on this Mac. */

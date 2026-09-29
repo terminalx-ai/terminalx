@@ -496,6 +496,21 @@ pub async fn cloud_workspace_create(
 }
 
 #[tauri::command]
+pub async fn cloud_workspace_preflight(
+    repositories: Vec<crate::cloud_workspaces::CreateRepository>,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspacePreflight, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.preflight(repositories))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_repositories(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::SelectedRepositories, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.selected_repositories())
+}
+
+#[tauri::command]
 pub async fn cloud_workspaces(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceList, crate::cloud_workspaces::CloudWorkspaceClientError> {
