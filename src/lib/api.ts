@@ -166,6 +166,14 @@ export const api = {
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_unarchive", { workspaceId }),
   cloudWorkspaceDisposition: (workspaceId: string) =>
     invoke<CloudWorkspaceDisposition>("cloud_workspace_disposition", { workspaceId }),
+  /** Who the workspace is shared with, and what the caller may do (PRO-30, docs/CLOUD-SHARING.md). */
+  cloudWorkspaceShares: (workspaceId: string) => invoke<CloudWorkspaceShares>("cloud_workspace_shares", { workspaceId }),
+  /** Grant or change a member's share; only managers and the workspace's creator may. */
+  cloudWorkspaceSharePut: (workspaceId: string, userId: string, role: CloudShareRole, canApprove: boolean) =>
+    invoke<{ share: CloudWorkspaceShare; created?: boolean }>("cloud_workspace_share_put", { workspaceId, userId, role, canApprove }),
+  /** Revoke a member's share; their connections to the workspace close. */
+  cloudWorkspaceShareRevoke: (workspaceId: string, userId: string) =>
+    invoke<{ share: CloudWorkspaceShare }>("cloud_workspace_share_revoke", { workspaceId, userId }),
   /** Drop the agent outbox, transcript cache and keys this Mac kept for a deleted workspace. */
   cloudAgentPurgeWorkspace: (organizationId: string, workspaceId: string) =>
     invoke<{ removed: boolean; unsentCommands: number; cachedTabs: number }>("cloud_agent_purge_workspace", { organizationId, workspaceId }),
@@ -448,6 +456,27 @@ export interface CloudWorkspaceDisposition {
   runtimeFacts: { available: boolean };
 }
 
+/** What a share grants (contract §20.2). */
+export type CloudShareRole = "viewer" | "driver";
+/** A person's effective role on a workspace (§20.1); `none` sees no content. */
+export type CloudCollaborationRole = "manager" | "driver" | "viewer" | "none";
+
+export interface CloudWorkspaceShare {
+  userId: string;
+  email: string;
+  name: string | null;
+  role: CloudShareRole;
+  canApprove: boolean;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CloudWorkspaceShares {
+  shares: CloudWorkspaceShare[];
+  you: { role: CloudCollaborationRole; canApprove: boolean; canManageShares: boolean };
+}
+
 export type CloudWorkspaceLaunchPhase =
   | "allocating"
   | "booting"
@@ -636,6 +665,13 @@ export type CloudWorkspaceSafeErrorCode =
   | "github_repository_unavailable"
   | "github_installation_suspended"
   | "github_installation_revoked"
+  | "organization_member_not_found"
+  | "cloud_workspace_share_not_found"
+  | "cloud_workspace_share_redundant"
+  | "cloud_workspace_share_requires_organization_access"
+  | "cloud_workspace_share_limit"
+  | "cloud_workspace_share_forbidden"
+  | "cloud_workspace_collaboration_forbidden"
   | "cloud_workspace_name_invalid"
   | "cloud_workspace_repositories_too_many"
   | "cloud_workspace_repository_duplicate"
