@@ -549,6 +549,44 @@ pub async fn cloud_workspace_release(
     cloud_workspace_lifecycle(state, workspace_id, crate::cloud_workspaces::OperationAction::Delete).await
 }
 
+/// Archive (30-day trash) or permanently delete; `force` only after the
+/// person confirmed stopping running agent work.
+#[tauri::command]
+pub async fn cloud_workspace_archive(
+    workspace_id: String,
+    force: bool,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
+        .lifecycle_with(&workspace_id, crate::cloud_workspaces::OperationAction::Archive, force))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_delete(
+    workspace_id: String,
+    force: bool,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
+        .lifecycle_with(&workspace_id, crate::cloud_workspaces::OperationAction::Delete, force))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_unarchive(
+    workspace_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.unarchive(&workspace_id))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_disposition(
+    workspace_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceDisposition, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.disposition(&workspace_id))
+}
+
 #[tauri::command]
 pub async fn cloud_workspace_operation(
     operation_id: String,

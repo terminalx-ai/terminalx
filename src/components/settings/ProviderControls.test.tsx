@@ -145,6 +145,13 @@ describe("organization provider controls", () => {
       /original provider account|different provider account/,
     );
   });
+  it("says a valid key lacks a permission instead of calling it unavailable", async () => {
+    vi.mocked(api.cloudProviderConnect).mockRejectedValue({ code: "cloud_provider_permission_denied" });
+    await ready();
+    await replace();
+    expect((await screen.findByRole("alert")).textContent).toMatch(/valid but lacks a permission/);
+    expect(screen.getByText("Original account")).toBeTruthy();
+  });
   it("requires an explicit disposition and keeps unavailable cleanup visible after retry", async () => {
     detail.state = "attention-required";
     detail.disconnectDisposition = "destroy";

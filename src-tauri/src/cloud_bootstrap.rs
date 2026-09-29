@@ -52,7 +52,9 @@ pub const TOKEN_PATH_ENV: &str = "TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_TOKEN_PATH
 /// `github-broker-v1` tells it this runtime installs the GitHub token shim
 /// (`cloud_github`) and takes GitHub tokens only from
 /// `/v1/cloud-workspace-bootstrap/github-token`, never in first-run setup.
-pub const CAPABILITIES: &str = "organization-access-v1,agent-grants-v1,github-broker-v1";
+/// `quiesce-v1` asks for an archive's final-checkpoint request in the
+/// refresh answer (`cloud_quiesce`, contract §10.3).
+pub const CAPABILITIES: &str = "organization-access-v1,agent-grants-v1,github-broker-v1,quiesce-v1";
 const CAPABILITIES_HEADER: &str = "x-terminalx-cloud-workspace-runtime-capabilities";
 pub(crate) const VERSION_HEADER: &str = "x-terminalx-cloud-workspace-runtime-version";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -213,6 +215,21 @@ pub struct Session {
     /// Pending attachments and revocations, handed to the relay host (PRO-13).
     pub attachments: Vec<serde_json::Value>,
     pub revocations: Vec<serde_json::Value>,
+    /// An archive waiting for this runtime's final checkpoint
+    /// (terminalx-saas contract §10.3); `cloud_quiesce` answers it.
+    pub quiesce: Option<QuiesceRequest>,
+}
+
+/// Read leniently: a field the server adds later must not fail the whole
+/// refresh (and with it the relay token).
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct QuiesceRequest {
+    pub operation_id: String,
+    pub reason: String,
+    pub requested_at: u64,
+    /// Epoch milliseconds; the archive goes ahead without us after it.
+    pub deadline: u64,
 }
 
 #[derive(Deserialize)]
@@ -245,6 +262,11 @@ pub struct Refreshed {
     setup: Option<serde_json::Value>,
     #[serde(default)]
     access_mode: Option<AccessMode>,
+    // Sent (possibly null) because this runtime advertises `quiesce-v1`.
+    // Kept raw and parsed on its own, so a malformed request is dropped
+    // instead of failing the refresh.
+    #[serde(default)]
+    quiesce: Option<serde_json::Value>,
 }
 
 impl Drop for Redeemed {
@@ -524,6 +546,7 @@ fn redeem(config: &Config, api: &dyn Api, key: &HostKey, stored: Option<(&str, &
                 access_mode: AccessMode::Private,
                 attachments: Vec::new(),
                 revocations: Vec::new(),
+                quiesce: None,
             }
         }
     };
@@ -574,6 +597,16 @@ impl Bootstrapped {
             serde_json::json!({ "pairingCode": pairing_code }),
             None,
         )?;
+        Ok(())
+    }
+
+    /// Answer an archive's quiesce request once
+    /// (`POST /v1/cloud-workspace-bootstrap/checkpoint`, contract §10.3). A
+    /// 401 means the answer is no longer wanted (already recorded, or the
+    /// archive moved on without it).
+    pub fn report_checkpoint(&self, api: &HttpApi, operation_id: &str, committed: bool) -> Result<(), CallError> {
+        let body = serde_json::json!({ "v": 1, "operationId": operation_id, "result": if committed { "committed" } else { "failed" } });
+        let _: serde_json::Value = api.post("/v1/cloud-workspace-bootstrap/checkpoint", &self.credential, body, None)?;
         Ok(())
     }
 
@@ -648,6 +681,15 @@ fn session_from_refresh(mut refreshed: Refreshed, relay_host_id: &str) -> Result
         access_mode: refreshed.access_mode.unwrap_or(AccessMode::Private),
         attachments: std::mem::take(&mut refreshed.attachments),
         revocations: std::mem::take(&mut refreshed.revocations),
+        quiesce: refreshed.quiesce.take().filter(|value| !value.is_null()).and_then(|value| {
+            match serde_json::from_value::<QuiesceRequest>(value) {
+                Ok(request) if opaque_id(&request.operation_id) => Some(request),
+                _ => {
+                    log::warn!("ignoring a malformed quiesce request");
+                    None
+                }
+            }
+        }),
     })
 }
 
@@ -954,6 +996,7 @@ mod tests {
                 revocations: vec![],
                 setup: None,
                 access_mode: Some(AccessMode::Organization),
+                quiesce: None,
             })
         }
     }
@@ -1281,6 +1324,22 @@ mod tests {
         let refresh = r#"{"v":1,"workspaceId":"w","organizationId":"o","relayToken":"t","relayTokenExpiresAt":5,"directorUrl":"http://127.0.0.1:9","attachments":[],"revocations":[]}"#;
         let session = session_from_refresh(serde_json::from_str(refresh).unwrap(), "h").unwrap();
         assert_eq!(session.access_mode, AccessMode::Private, "absent access mode is the closed default");
+        assert_eq!(session.quiesce, None);
+    }
+
+    #[test]
+    fn a_quiesce_request_rides_on_the_refresh() {
+        let base = r#"{"v":1,"workspaceId":"w","organizationId":"o","relayToken":"t","relayTokenExpiresAt":5,"directorUrl":"http://127.0.0.1:9","attachments":[],"revocations":[]"#;
+        let with = |quiesce: &str| session_from_refresh(serde_json::from_str(&format!("{base},\"quiesce\":{quiesce}}}")).unwrap(), "h").unwrap();
+        assert_eq!(with("null").quiesce, None, "nothing pending");
+        let request = with(r#"{"operationId":"operation_1","reason":"archive","requestedAt":10,"deadline":60010}"#).quiesce.unwrap();
+        assert_eq!(request, QuiesceRequest { operation_id: "operation_1".into(), reason: "archive".into(), requested_at: 10, deadline: 60010 });
+        assert_eq!(with(r#"{"operationId":"../x y","reason":"archive","requestedAt":10,"deadline":60010}"#).quiesce, None);
+        // A newer server's extra field is tolerated; a mistyped one only drops the request.
+        assert!(with(r#"{"operationId":"op_2","reason":"archive","requestedAt":10,"deadline":60010,"later":true}"#).quiesce.is_some());
+        let mistyped = with(r#"{"operationId":"op_3","reason":"archive","requestedAt":10,"deadline":"soon"}"#);
+        assert_eq!((mistyped.quiesce, mistyped.workspace_id.as_str()), (None, "w"));
+        assert!(CAPABILITIES.split(',').any(|capability| capability == "quiesce-v1"));
     }
 
     #[test]

@@ -60,6 +60,10 @@ pub fn poll_once(agents: &CloudAgents, unacked: &mut Vec<(Lease, Receipt)>) -> R
             unacked.push((lease, receipt));
         }
     }
+    // Quiesced for an archive: what is queued stays in the mailbox.
+    if agents.quiesced() {
+        return Ok(false);
+    }
     let leased = api.lease(agents.receipts.incarnation(), LEASE_LIMIT)?;
     for id in &leased.outcome_unknown {
         log::warn!("agent command {id} settled as outcome-unknown by the server (its receipts were in another store)");

@@ -106,7 +106,11 @@ restarts, which would hit the unit's start limit during a short outage:
 The token is kept in every failure case.
 
 Requests carry `x-terminalx-cloud-workspace-runtime-version` and, on refresh,
-`x-terminalx-cloud-workspace-runtime-capabilities: organization-access-v1`. The `ready`
+`x-terminalx-cloud-workspace-runtime-capabilities` (`organization-access-v1`,
+`agent-grants-v1`, `github-broker-v1`, `quiesce-v1`; see `CAPABILITIES` in
+`src/cloud_bootstrap.rs`). With `quiesce-v1` the refresh answer carries an archive's
+final-checkpoint request, which `src/cloud_quiesce.rs` answers (see
+[CLOUD-LIFECYCLE.md](CLOUD-LIFECYCLE.md)). The `ready`
 line reports `cloudWorkspace` (`workspaceId`, `relayHostId`, `capabilities`), or `null`
 without a bootstrap. The
 session is refreshed every 30 seconds in the background.

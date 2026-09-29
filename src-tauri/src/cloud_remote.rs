@@ -220,6 +220,10 @@ impl AttachSource for ApiSource {
                     .map_err(|e| error(e.code))?;
                 return Ok(OpenOutcome::WaitingForRuntime);
             }
+            // In the archive: its saved conversations are read without
+            // compute, and nothing wakes it until it is unarchived (§10.1).
+            WorkspaceState::Archived if activation < Activation::Wake => return Ok(OpenOutcome::Suspended),
+            WorkspaceState::Archived => anyhow::bail!("cloud_workspace_archived"),
             WorkspaceState::Provisioning => return Ok(OpenOutcome::WaitingForRuntime),
             WorkspaceState::Destroyed | WorkspaceState::AttentionRequired => anyhow::bail!("cloud_workspace_unavailable"),
             WorkspaceState::Ready => {}

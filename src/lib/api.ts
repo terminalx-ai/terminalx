@@ -156,6 +156,20 @@ export const api = {
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_resume", { workspaceId }),
   cloudWorkspaceRelease: (workspaceId: string) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_release", { workspaceId }),
+  /** Archive (30-day trash). `force` only after the person confirmed stopping running agent work. */
+  cloudWorkspaceArchive: (workspaceId: string, force: boolean) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_archive", { workspaceId, force }),
+  /** Permanent delete, a resumable cleanup job; retrying resumes the same operation. */
+  cloudWorkspaceDelete: (workspaceId: string, force: boolean) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_delete", { workspaceId, force }),
+  /** Out of the archive; it stays suspended until the next interactive action. */
+  cloudWorkspaceUnarchive: (workspaceId: string) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_unarchive", { workspaceId }),
+  cloudWorkspaceDisposition: (workspaceId: string) =>
+    invoke<CloudWorkspaceDisposition>("cloud_workspace_disposition", { workspaceId }),
+  /** Drop the agent outbox, transcript cache and keys this Mac kept for a deleted workspace. */
+  cloudAgentPurgeWorkspace: (organizationId: string, workspaceId: string) =>
+    invoke<{ removed: boolean; unsentCommands: number; cachedTabs: number }>("cloud_agent_purge_workspace", { organizationId, workspaceId }),
   cloudWorkspaceOperation: (operationId: string) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_operation", { operationId }),
   cloudWorkspaceOperationCancel: (operationId: string) =>
@@ -391,13 +405,54 @@ export interface CloudWorkspace {
   orgId: string;
   name: string;
   provider: CloudWorkspaceProviderId;
-  state: "provisioning" | "ready" | "suspended" | "attention-required" | "destroyed";
+  state: "provisioning" | "ready" | "suspended" | "archived" | "attention-required" | "destroyed";
   accessMode: "private" | "organization";
   createdAt: number;
   updatedAt: number;
   releaseDisposition: CloudWorkspaceReleaseDisposition | null;
   /** The launch intent it was created with (PRO-21, contract §19). */
   launch?: CloudWorkspaceLaunch | null;
+  /** Set while archived, including an archive that failed (terminalx-saas contract §10.1). */
+  archivedAt?: number | null;
+  /** When an archived workspace is deleted for good. */
+  deleteAfter?: number | null;
+  deletedAt?: number | null;
+}
+
+/** A delete's cleanup report, until the provider confirms (§10.4). Unknown kinds and states are shown as they come. */
+export interface CloudWorkspaceCleanup {
+  complete: boolean;
+  items: {
+    kind: "runtime-credentials" | "client-attachments" | "provider-compute" | "provider-storage" | "workspace-content" | (string & {});
+    state: "removed" | "pending" | "retained-by-provider" | "unconfirmed" | (string & {});
+    providerStage: string | null;
+    expectedBy: number | null;
+  }[];
+}
+
+/** A deleted workspace, content-free, listed for 30 days so this Mac purges what it kept (§10.5). */
+export interface CloudWorkspaceTombstone {
+  id: string;
+  orgId: string;
+  deletedAt: number;
+  expiresAt: number;
+}
+
+/** What the server knows before an archive or delete (§10.2). */
+export interface CloudWorkspaceDisposition {
+  workspaceId: string;
+  state: string;
+  provider: string;
+  archivedAt: number | null;
+  deleteAfter: number | null;
+  activeOperation: { id: string; action: string; state: string } | null;
+  runtime: { reporting: boolean; reportedAt: number | null; stale: boolean; activeTurns: number; pendingApprovals: number };
+  attachedClients: number;
+  providerCapabilities: { permanentDelete: boolean; releaseDisposition: string };
+  archiveRetentionDays: number;
+  blockers: ("active-turns" | "pending-approvals" | "operation-in-progress" | (string & {}))[];
+  removedOnDelete: string[];
+  runtimeFacts: { available: boolean };
 }
 
 export type CloudWorkspaceLaunchPhase =
@@ -439,7 +494,7 @@ export interface CloudWorkspaceOperation {
   id: string;
   workspaceId: string;
   type: "create";
-  action: "suspend" | "resume" | "delete" | null;
+  action: "suspend" | "resume" | "archive" | "delete" | null;
   state: "queued" | "running" | "cancel-requested" | "succeeded" | "failed" | "canceled";
   stage: "queued" | "preflight" | "creating-machine" | "bootstrapping" | "connecting-relay" | "cleanup" | "ready";
   cancelable: boolean;
@@ -449,11 +504,16 @@ export interface CloudWorkspaceOperation {
   nextAttemptAt: number | null;
   retryReason: "rate-limited" | null;
   errorCode: CloudWorkspaceOperationErrorCode | null;
+  /** The provider's own normalized error code for a failed operation, when the server reports one; never a message or body. */
+  providerErrorCode?: string | null;
   progress: { phase: "allocating" | "starting" | "installing-runtime" | "connecting-relay" | "suspending" | "releasing"; retryAt: number | null } | null;
   events: {
     code: "operation-queued" | "provider-preflight-started" | "machine-allocation-started" | "runtime-installation-started" | "credentials-installing" | "credentials-ready" | "repository-cloning" | "repository-ready" | "repository-clone-failed" | "relay-connection-started" | "provider-cleanup-started" | "workspace-ready" | "operation-failed" | "operation-canceled";
     occurredAt: number;
   }[] | null;
+  /** An archive's final checkpoint (§10.3). */
+  checkpoint?: "committed" | "failed" | "timed-out" | "skipped" | (string & {}) | null;
+  cleanup?: CloudWorkspaceCleanup | null;
 }
 
 export interface CloudWorkspaceSnapshot {
@@ -468,6 +528,7 @@ export interface CloudWorkspaceListItem {
 
 export interface CloudWorkspaceList {
   workspaces: CloudWorkspaceListItem[];
+  tombstones?: CloudWorkspaceTombstone[];
 }
 
 /** Retain this exact key when reconciling an ambiguous create response. */
@@ -542,6 +603,7 @@ export type CloudWorkspaceSafeErrorCode =
   | "cloud_provider_connection_attention_required"
   | "cloud_provider_operation_in_progress"
   | "cloud_provider_credential_invalid"
+  | "cloud_provider_permission_denied"
   | "cloud_provider_rate_limited"
   | "cloud_provider_invalid_response"
   | "cloud_provider_billing_required"
@@ -558,6 +620,9 @@ export type CloudWorkspaceSafeErrorCode =
   | "cloud_workspace_agent_credential_required"
   | "cloud_workspace_device_auth_unavailable"
   | "cloud_workspace_operation_in_progress"
+  | "cloud_workspace_active_work"
+  | "cloud_workspace_archived"
+  | "cloud_teardown_in_progress"
   | "cloud_workspace_quota_exceeded"
   | "idempotency_key_reused"
   | "cloud_workspace_quote_expired"
@@ -612,7 +677,11 @@ export type CloudWorkspaceOperationErrorCode =
   | "cloud_provider_state_conflict"
   | "cloud_provider_idempotency_key_reused"
   | "cloud_provider_idempotency_window_expired"
-  | "cloud_provider_unsupported";
+  | "cloud_provider_unsupported"
+  | "provider_permanent_delete_unavailable"
+  | "runtime_checkpoint_pending"
+  | "cloud_workspace_runtime_bootstrap_failed"
+  | "cloud_provider_permission_denied";
 
 export interface CliToolStatus {
   installed: boolean;
@@ -1331,6 +1400,20 @@ async function adopt(
     if (state.state === "stopped") connection.close();
   });
   return connection;
+}
+
+/** Whether something already holds a connection to this target. */
+export function hasWorkspaceConnection(target: WorkspaceTarget): boolean {
+  return connections.has(workspaceTargetKey(target));
+}
+
+/** Drop one workspace's connection, if any: it was deleted or archived. */
+export function closeWorkspaceConnection(target: WorkspaceTarget): void {
+  const key = workspaceTargetKey(target);
+  const pending = connections.get(key);
+  if (!pending) return;
+  connections.delete(key);
+  void pending.then((connection) => connection.close()).catch(() => undefined);
 }
 
 /** Drop every cloud connection and what it cached, e.g. on sign-out or an organization switch. */

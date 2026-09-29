@@ -23,6 +23,7 @@ use super::{crypto, now_ms, CloudAgents, Signal};
 pub const PROJECTION_BUDGET: usize = 1024 * 1024;
 const COALESCE: Duration = Duration::from_secs(5);
 const RETRY: Duration = Duration::from_secs(15);
+const FINAL_RETRY: Duration = Duration::from_secs(1);
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct Cursors {
@@ -214,6 +215,44 @@ pub fn upload(agents: &CloudAgents, tab_id: &str) -> Result<(), CallError> {
         }
     }
     Ok(())
+}
+
+/// An archive's final checkpoint (contract §10.3): stop taking new work,
+/// then upload every tab's newest transcript, the running turn's committed
+/// part included, retrying until `deadline`. True when every upload was
+/// stored (or there was nothing to upload).
+pub fn final_checkpoint(agents: &CloudAgents, deadline: Instant) -> bool {
+    agents.quiesce();
+    let mut pending: Vec<String> = agents.tabs().into_iter().map(|tab| tab.tab_id).collect();
+    loop {
+        pending.retain(|tab_id| {
+            // Taken before the upload, as `due` does: an event marked while
+            // it is on its way stays dirty for the regular flush.
+            agents.checkpoints.dirty.lock().unwrap().remove(tab_id);
+            match upload(agents, tab_id) {
+                Ok(()) => {
+                    agents.checkpoints.last_upload.lock().unwrap().insert(tab_id.clone(), Instant::now());
+                    false
+                }
+                Err(error) => {
+                    log::warn!("final checkpoint of {tab_id}: {error}");
+                    true
+                }
+            }
+        });
+        let now = Instant::now();
+        if pending.is_empty() {
+            return true;
+        }
+        if now + FINAL_RETRY >= deadline {
+            // Left for the regular flush, should the runtime keep running.
+            for tab_id in pending {
+                agents.checkpoints.mark(&tab_id, false);
+            }
+            return false;
+        }
+        std::thread::sleep(FINAL_RETRY);
+    }
 }
 
 pub fn run(agents: &CloudAgents) {

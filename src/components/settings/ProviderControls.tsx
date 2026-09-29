@@ -16,6 +16,8 @@ export function providerActionMessage(error: unknown): string {
       return "This key belongs to a different provider account. Existing resources keep their original ownership. Use a key from the original account to clean up resources; migrate them in the provider console before changing accounts.";
     case "cloud_provider_credential_invalid":
       return "Validation failed. The saved credential was not replaced. Ask an organization administrator to validate a working key for the original provider account.";
+    case "cloud_provider_permission_denied":
+      return "The key is valid but lacks a permission TerminalX needs. Check its scope at the provider, then retry. The saved connection is unchanged.";
     case "cloud_provider_operation_in_progress":
       return "A provider operation is still running. Its credential remains available. Refresh and retry after the operation finishes.";
     case "cloud_provider_connection_required":
