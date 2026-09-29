@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Archive, ArchiveRestore, ArrowLeft, Bot, Cloud, FolderTree, GitBranch, Loader2, Pause, Plug, Plus, TerminalSquare, Trash2, X } from "lucide-react";
-import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { Archive, ArchiveRestore, ArrowLeft, Bot, Cloud, FolderTree, GitBranch, Loader2, Pause, Plug, Plus, TerminalSquare, Trash2, UserPlus, X } from "lucide-react";
+import type { WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { TerminalView, createTerminal } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
 import { CloudAgentsView } from "./CloudAgents";
 import { CloudFilesView } from "./CloudFiles";
 import { CloudGitView } from "./CloudGit";
 import { CloudCreateWorkspace } from "./CloudCreateWorkspace";
+import { NotSharedNotice, ParticipantsBar } from "./CloudCollab";
+import { CloudShareDialog } from "./CloudShareDialog";
 import { actionsFor, archiveLine, CloudWorkspaceLifecycleDialog, DeletionProgress, type LifecycleAction } from "./CloudWorkspaceLifecycle";
 import { useAccount } from "@/lib/account";
 import { PHASES, phaseOf, settled } from "@/lib/cloudCreate";
@@ -41,6 +43,9 @@ import {
   type CloudTerminal,
 } from "@/lib/cloudTerminals";
 import { getInstance } from "@/lib/terminal";
+import { canDrive, effectiveYou, notShared, presenceTab, startCollab, useCollab } from "@/lib/cloudCollab";
+import { rememberPeople, usePeople } from "@/lib/cloudPeople";
+import { getCloudAgents } from "@/lib/cloudAgents";
 import { useTheme } from "@/lib/theme";
 
 /** Where an open session's commands run, as the page labels it. */
@@ -448,8 +453,34 @@ function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: Work
   const connected = state.state === "connected";
   const manage = connected && state.authority === "manage";
   const base = useCallback(() => createTerminal(mode.current), []);
+  const collab = useCollab(key);
+  const you = effectiveYou(state, collab);
+  const shared = connected && collab.available ? you : null;
+  // Drivers and managers of a shared workspace may take a terminal over; viewers never.
+  const mayControl = manage || canDrive(shared);
+  const [sharing, setSharing] = useState(false);
+  const cloudTarget = connection.target.kind === "cloud" ? connection.target : null;
 
   const generation = connected ? `${state.runtimeGeneration}:${state.runtimeEpoch ?? ""}` : null;
+
+  // Presence, notes and leases, once per connection (only with collab/1).
+  useEffect(() => {
+    if (!generation) return;
+    return startCollab(key, client);
+  }, [generation, key, client]);
+
+  // Names for the people the runtime reports, from the share list.
+  useEffect(() => {
+    if (!cloudTarget) return;
+    let cancelled = false;
+    void api
+      .cloudWorkspaceShares(cloudTarget.workspaceId)
+      .then((listed) => !cancelled && rememberPeople(listed.shares))
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [cloudTarget?.workspaceId]);
   useEffect(() => {
     if (!generation) return;
     let cancelled = false;
@@ -495,8 +526,51 @@ function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: Work
 
   const active = terminals.find((terminal) => terminal.id === selected) ?? null;
 
+  // Others see which terminal this person is on; the agent view reports its own tab.
+  const presenceTerminal = view.kind === "terminal" ? (active?.ptyId ?? null) : null;
+  useEffect(() => {
+    if (view.kind === "terminal" && collab.available) presenceTab(key, presenceTerminal);
+  }, [view.kind, presenceTerminal, collab.available, key]);
+
+  const tabLabel = useCallback(
+    (tabId: string) => {
+      const terminal = terminals.find((item) => item.ptyId === tabId);
+      if (terminal) return terminal.title;
+      const agent = getCloudAgents({ organizationId: agentScope.organizationId, workspaceId: agentScope.workspaceId }).tabs.find((tab) => tab.tabId === tabId);
+      return agent ? (agent.info.title ?? "an agent tab") : null;
+    },
+    [terminals, agentScope.organizationId, agentScope.workspaceId],
+  );
+
+  if (notShared(state, you)) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col">
+        {cloudTarget && (
+          <div className="flex shrink-0 items-center justify-end border-b border-hairline px-3 py-1">
+            <Button size="sm" variant="ghost" onClick={() => setSharing(true)}>
+              <UserPlus className="size-3.5" /> People
+            </Button>
+          </div>
+        )}
+        <NotSharedNotice />
+        {sharing && cloudTarget && <CloudShareDialog workspaceId={cloudTarget.workspaceId} name={opened.name} onClose={() => setSharing(false)} />}
+      </div>
+    );
+  }
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {(cloudTarget || collab.available) && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-hairline px-3 py-1" data-testid="cloud-collab-bar">
+          <ParticipantsBar collabKey={key} you={shared} tabLabel={tabLabel} />
+          {cloudTarget && (
+            <Button size="sm" variant="ghost" className="ml-auto" onClick={() => setSharing(true)}>
+              <UserPlus className="size-3.5" /> Share
+            </Button>
+          )}
+        </div>
+      )}
+      {sharing && cloudTarget && <CloudShareDialog workspaceId={cloudTarget.workspaceId} name={opened.name} onClose={() => setSharing(false)} />}
       <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-hairline px-3 py-1" role="tablist">
         {terminals.map((terminal) => (
           <div key={terminal.id} className="flex items-center" data-testid="cloud-terminal-tab">
@@ -568,6 +642,8 @@ function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: Work
             client={client}
             connected={connected}
             manage={manage}
+            mayControl={mayControl}
+            you={shared}
             base={base}
           />
         ) : (
@@ -584,6 +660,8 @@ function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: Work
           state={state}
           workspaceState={opened.workspaceState}
           wakeWorkspace={() => void connection.activate("wake").catch(() => undefined)}
+          collabKey={key}
+          active={view.kind === "agent"}
         />
       </div>
       {/* Mounted once first shown, then kept: open files and unsaved text stay. */}
@@ -607,6 +685,8 @@ function CloudTerminalPane({
   client,
   connected,
   manage,
+  mayControl,
+  you,
   base,
 }: {
   workspace: string;
@@ -614,8 +694,13 @@ function CloudTerminalPane({
   client: WorkspaceRpcClient;
   connected: boolean;
   manage: boolean;
+  /** May take control (manage authority, or a driver or manager of a shared workspace). */
+  mayControl: boolean;
+  /** Set on a runtime with `collab/1`. */
+  you: WorkspaceYou | null;
   base: () => ReturnType<typeof createTerminal>;
 }) {
+  const nameOf = usePeople();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const create = useCallback(() => cloudTerminalFactory(workspace, terminal, base)(), [workspace, terminal.id]);
@@ -645,10 +730,8 @@ function CloudTerminalPane({
     <div className="flex min-h-0 flex-1 flex-col" data-testid="cloud-terminal">
       {!terminal.gone && !terminal.exited && !controlling && (
         <div className="flex items-center gap-2 border-b border-hairline px-3 py-1 text-xs text-muted-foreground" data-testid="cloud-terminal-viewer">
-          <span>
-            {manage ? "Another device controls this terminal's input and size; you are watching." : "View only: this attachment cannot type into or resize terminals."}
-          </span>
-          {manage && (
+          <span>{viewerText(terminal, manage, mayControl, you, nameOf)}</span>
+          {mayControl && (
             <Button size="sm" variant="outline" disabled={busy || !connected} onClick={() => void control()}>
               Take control
             </Button>
@@ -668,10 +751,31 @@ function CloudTerminalPane({
   );
 }
 
+/** Why this view only watches the terminal, and who is typing in it. */
+function viewerText(
+  terminal: CloudTerminal,
+  manage: boolean,
+  mayControl: boolean,
+  you: WorkspaceYou | null,
+  nameOf: (userId: string | null | undefined) => string,
+): string {
+  const controller = terminal.controllerId;
+  if (controller && controller === you?.userId) return "You control this terminal from another window or device; you are watching here.";
+  if (controller) {
+    const who = nameOf(controller);
+    return mayControl ? `${who} is typing in this terminal; you are watching.` : `${who} is typing in this terminal. View only: you can watch; ask an admin for driver access to type.`;
+  }
+  if (you && !mayControl) return "View only: you can watch this terminal; ask an admin for driver access to type.";
+  if (manage || mayControl) return "Another device controls this terminal's input and size; you are watching.";
+  return "View only: this attachment cannot type into or resize terminals.";
+}
+
 function inputErrorText(code: string): string {
   switch (code) {
     case "not_controller":
       return "another device controls this terminal. Take control to type.";
+    case "forbidden":
+      return "your access to this workspace does not allow typing in terminals.";
     case "unavailable":
       return "the shell has exited.";
     case "not_found":

@@ -301,10 +301,21 @@ impl Collaboration {
         }
     }
 
-    /// The holder's turn ended: the lease lapses after the idle period.
+    /// The holder's turn ended: the lease lapses after the idle period,
+    /// counted from now. Announced, so clients show the new expiry.
     pub fn turn_settled(&self, tab_id: &str, now: u64) {
-        if let Some(lease) = self.leases.lock().unwrap().get_mut(tab_id) {
-            lease.expires_at = lease.expires_at.max(now + LEASE_IDLE_MS);
+        let extended = {
+            let mut leases = self.leases.lock().unwrap();
+            match leases.get_mut(tab_id) {
+                Some(lease) if lease.expires_at < now + LEASE_IDLE_MS => {
+                    lease.expires_at = now + LEASE_IDLE_MS;
+                    Some(lease.clone())
+                }
+                _ => None,
+            }
+        };
+        if let Some(lease) = extended {
+            self.emit(Change::Lease { tab_id: tab_id.to_string(), lease: Some(lease) });
         }
     }
 

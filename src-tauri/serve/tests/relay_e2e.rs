@@ -340,7 +340,7 @@ async fn desktop_drives_a_remote_runtime_through_the_relay() {
     let mut client = Client::start(source.clone());
     let ClientState::Connected { runtime_generation, capabilities, authority, .. } = client.connected().await else { unreachable!() };
     assert_eq!(runtime_generation, 7);
-    assert_eq!(capabilities, ["pty/1", "fs/1", "git/1", "session/1", "keys/1", "lifecycle/1"]);
+    assert_eq!(capabilities, ["pty/1", "fs/1", "git/1", "session/1", "keys/1", "lifecycle/1", "collab/1"]);
     assert_eq!(authority, "manage");
 
     // A terminal, created once even when the create is resent.

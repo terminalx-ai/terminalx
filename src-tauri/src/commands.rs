@@ -587,6 +587,37 @@ pub async fn cloud_workspace_disposition(
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.disposition(&workspace_id))
 }
 
+/// Who a cloud workspace is shared with, and the caller's own standing (PRO-30).
+#[tauri::command]
+pub async fn cloud_workspace_shares(
+    workspace_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceShares, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.shares(&workspace_id))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_share_put(
+    workspace_id: String,
+    user_id: String,
+    role: crate::cloud_workspaces::ShareRole,
+    can_approve: bool,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceShareChange, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
+        .share_put(&workspace_id, &user_id, role, can_approve))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_share_revoke(
+    workspace_id: String,
+    user_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceShareChange, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
+        .share_revoke(&workspace_id, &user_id))
+}
+
 #[tauri::command]
 pub async fn cloud_workspace_operation(
     operation_id: String,
