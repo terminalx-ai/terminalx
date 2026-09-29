@@ -232,6 +232,56 @@ channel.
 The check only ever happens when the reader presses "Check for updates" in
 Settings → About. Nothing runs on launch or on a timer.
 
+## The cloud runtime (`terminalx-serve`)
+
+Cloud workspaces run the headless `terminalx-serve` binary, not the desktop
+app. `.github/workflows/release-serve.yml` attaches it to every release, so
+there is no manual step:
+
+1. Publishing a GitHub Release triggers the workflow for that release's tag.
+2. It builds `src-tauri/serve` in release mode on Ubuntu 22.04, for x86-64
+   and arm64. Building on 22.04 keeps the glibc floor at 2.35, so the binary
+   runs on Ubuntu 22.04 and 24.04 and Debian 12; the job log prints the
+   highest `GLIBC_` symbol it needs.
+3. Each binary runs `--self-test` (start, shell PTY, clean exit) before it is
+   uploaded.
+4. It uploads `terminalx-serve-linux-x64` and `terminalx-serve-linux-arm64`
+   to the release and adds their lines to the release's `SHA256SUMS`. The
+   existing lines stay; only lines for these two files are replaced, so a
+   re-run neither duplicates nor drops anything.
+
+The TerminalX cloud server polls this repository's releases and installs the
+newest stable release that carries `terminalx-serve-linux-x64` and is at
+least its minimum compatible version. It checks the file against
+`SHA256SUMS`, so a release must keep both. A release without the binary (for
+example while the workflow is still running) is skipped, and the server keeps
+the version it had.
+
+To attach the binary to a release that already exists, run the workflow by
+hand (Actions → Release terminalx-serve → Run workflow) with the tag, or:
+
+```sh
+gh workflow run release-serve.yml -f tag=v0.2.5
+```
+
+The tag must contain `src-tauri/serve`; releases before 0.2.5 do not.
+
+To build it locally for x86-64 from an Apple Silicon Mac, cross-compile in
+Docker rather than emulating amd64 (the linker segfaults under QEMU):
+
+```sh
+docker run --rm -v "$PWD":/src -w /src/src-tauri/serve rust:1-bookworm bash -c '
+  dpkg --add-architecture amd64 && apt-get update &&
+  apt-get install -y gcc-x86-64-linux-gnu libssl-dev:amd64 &&
+  rustup target add x86_64-unknown-linux-gnu &&
+  PKG_CONFIG_ALLOW_CROSS=1 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
+    cargo build --locked --release --bin terminalx-serve --target x86_64-unknown-linux-gnu'
+```
+
+Check its glibc floor before running it on an older host
+(`x86_64-linux-gnu-objdump -T … | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1`;
+2.34 as of 0.2.2). The release workflow's build is the one to ship.
+
 ## Notes
 
 - The build script links clang's builtins archive (`libclang_rt.osx.a` from

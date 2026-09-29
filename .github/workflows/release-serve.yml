@@ -1,0 +1,98 @@
+name: Release terminalx-serve
+
+# Attaches the headless cloud-workspace runtime to a GitHub Release. The
+# TerminalX cloud server polls releases and provisions the newest compatible
+# `terminalx-serve-linux-x64` it finds, verified against the release's
+# SHA256SUMS, so both files must be on the release.
+#
+# Built on Ubuntu 22.04 so the binary's glibc floor (2.35) runs on Ubuntu
+# 22.04 and 24.04 and Debian 12.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and attach, for example v0.2.5
+        required: true
+        type: string
+
+concurrency:
+  group: release-serve-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            asset: terminalx-serve-linux-x64
+          - runner: ubuntu-22.04-arm
+            asset: terminalx-serve-linux-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: The tag carries the serve crate
+        run: test -f src-tauri/serve/Cargo.toml || { echo "::error::$TAG has no src-tauri/serve"; exit 1; }
+      - name: Show the Rust toolchain
+        run: rustup show && cargo --version
+      - name: Build terminalx-serve (release)
+        working-directory: src-tauri/serve
+        run: cargo build --locked --release --bin terminalx-serve
+      - name: Self-test (start, shell PTY, clean exit)
+        working-directory: src-tauri/serve
+        run: ../target/release/terminalx-serve --data-dir "$RUNNER_TEMP/serve" --project-root "$GITHUB_WORKSPACE" --runtime-kind cloud-workspace --self-test
+      - name: Report the glibc floor
+        run: objdump -T src-tauri/target/release/terminalx-serve | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+      - name: Stage the asset
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          cp src-tauri/target/release/terminalx-serve "$RUNNER_TEMP/out/${{ matrix.asset }}"
+          chmod 0755 "$RUNNER_TEMP/out/${{ matrix.asset }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ runner.temp }}/out/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      # One job owns SHA256SUMS so the two architectures never race on it.
+      # Existing lines stay; only lines for the assets being re-uploaded are
+      # replaced, which keeps a re-run from duplicating them.
+      - name: Upload the binaries and append them to SHA256SUMS
+        working-directory: assets
+        run: |
+          set -euo pipefail
+          ls -l
+          gh release download "$TAG" --pattern SHA256SUMS --output SHA256SUMS.old || : > SHA256SUMS.old
+          names=(terminalx-serve-linux-*)
+          grep -Ev '  terminalx-serve-linux-[a-z0-9]+$' SHA256SUMS.old > SHA256SUMS || true
+          sha256sum "${names[@]}" >> SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "$TAG" "${names[@]}" SHA256SUMS --clobber
