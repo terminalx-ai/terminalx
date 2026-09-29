@@ -54,19 +54,26 @@ pub const TOKEN_PATH_ENV: &str = "TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_TOKEN_PATH
 /// `/v1/cloud-workspace-bootstrap/github-token`, never in first-run setup.
 /// `quiesce-v1` asks for an archive's final-checkpoint request in the
 /// refresh answer (`cloud_quiesce`, contract §10.3).
-pub const CAPABILITIES: &str = "organization-access-v1,agent-grants-v1,github-broker-v1,quiesce-v1";
+/// `environment-template-v1` asks for the checkout plan of a workspace pinned
+/// to an Environment version (`cloud_environment`); on its own it never
+/// brings stored credentials.
+pub const CAPABILITIES: &str = "organization-access-v1,agent-grants-v1,github-broker-v1,quiesce-v1,environment-template-v1";
 const CAPABILITIES_HEADER: &str = "x-terminalx-cloud-workspace-runtime-capabilities";
 pub(crate) const VERSION_HEADER: &str = "x-terminalx-cloud-workspace-runtime-version";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-pub const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+/// As often as the legacy runtime refreshed: a new attachment waits for the
+/// next refresh before the relay host can answer it.
+pub const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const STATE_DIR: &str = "cloud-workspace";
 const HOST_KEY_FILE: &str = "host-key.json";
 const STATE_FILE: &str = "runtime.json";
 /// Next to the bootstrap token, in the runtime's state root
 /// (`/var/lib/terminalx`), where the worker's memory probe reads it.
 const BASELINE_FILE: &str = "memory-baseline.json";
+/// Also in the state root, where the worker and the local e2e read it.
+const CHECKOUT_FILE: &str = "environment-checkout.json";
 const MAX_LIST: usize = 256;
 
 /// The server refused the token or the credential. Retrying cannot help:
@@ -218,6 +225,9 @@ pub struct Session {
     /// An archive waiting for this runtime's final checkpoint
     /// (terminalx-saas contract §10.3); `cloud_quiesce` answers it.
     pub quiesce: Option<QuiesceRequest>,
+    /// The checkout plan of a workspace pinned to an Environment version,
+    /// parsed only when it is applied (`cloud_environment`).
+    pub environment: Option<serde_json::Value>,
 }
 
 /// Read leniently: a field the server adds later must not fail the whole
@@ -349,6 +359,8 @@ pub struct Bootstrapped {
     baseline_path: PathBuf,
     /// The generation the baseline was last recorded for.
     baseline_generation: std::sync::atomic::AtomicU64,
+    /// The environment setup last applied in this process.
+    environment_attempted: Mutex<Option<serde_json::Value>>,
     // Held for the life of the process: one runtime per state directory.
     _lock: StateLock,
 }
@@ -420,6 +432,7 @@ pub fn establish(config: &Config, api: &dyn Api, policy: &Policy) -> Result<Boot
                     rejected: std::sync::atomic::AtomicBool::new(false),
                     baseline_path: config.baseline_path(),
                     baseline_generation: std::sync::atomic::AtomicU64::new(u64::MAX),
+                    environment_attempted: Mutex::new(None),
                     _lock: lock,
                 })
             }
@@ -547,6 +560,7 @@ fn redeem(config: &Config, api: &dyn Api, key: &HostKey, stored: Option<(&str, &
                 attachments: Vec::new(),
                 revocations: Vec::new(),
                 quiesce: None,
+                environment: None,
             }
         }
     };
@@ -610,6 +624,18 @@ impl Bootstrapped {
         Ok(())
     }
 
+    /// Confirm a device's revocation was applied, so the API forgets it
+    /// (`POST /v1/cloud-workspace-bootstrap/revocations/:id/complete`).
+    /// Until then every refresh lists it again.
+    pub fn complete_revocation(&self, api: &HttpApi, attachment_id: &str) -> Result<(), CallError> {
+        if attachment_id.is_empty() || attachment_id.len() > 256 || !attachment_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')) {
+            return Err(CallError::Transient(anyhow!("invalid revocation id")));
+        }
+        let _: serde_json::Value =
+            api.post(&format!("/v1/cloud-workspace-bootstrap/revocations/{attachment_id}/complete"), &self.credential, serde_json::json!({}), None)?;
+        Ok(())
+    }
+
     /// Tell the API what the runtime has been doing
     /// (`POST /v1/cloud-workspace-bootstrap/activity`, see `cloud_activity`).
     pub fn report_activity(&self, api: &HttpApi, report: &serde_json::Value) -> Result<(), CallError> {
@@ -633,6 +659,35 @@ impl Bootstrapped {
         match crate::memory_baseline::record(&self.baseline_path, generation) {
             Ok(()) => self.baseline_generation.store(generation, Ordering::Relaxed),
             Err(error) => log::warn!("record the memory baseline at {}: {error:#}", self.baseline_path.display()),
+        }
+    }
+
+    /// Switch the pinned Environment's checkouts and report the outcome
+    /// (`cloud_environment`, PRO-15). Each version is tried once per process;
+    /// the outcome is recorded only once the API has it, so a failed checkout
+    /// or report is tried again on the next boot. Returns at once when there
+    /// is nothing to do, so it can run on every refresh.
+    pub fn apply_environment(&self, api: &HttpApi) {
+        let raw = self.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).environment.clone();
+        let Some(raw) = raw else { return };
+        {
+            let mut attempted = self.environment_attempted.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if attempted.as_ref() == Some(&raw) {
+                return;
+            }
+            *attempted = Some(raw.clone());
+        }
+        let Some(environment) = crate::cloud_environment::parse(&raw) else { return };
+        let record = self.baseline_path.with_file_name(CHECKOUT_FILE);
+        if !crate::cloud_environment::pending(&environment, &record) {
+            return;
+        }
+        let applied = crate::cloud_environment::apply(&environment);
+        let reported: Result<serde_json::Value, CallError> =
+            api.post("/v1/cloud-workspace-bootstrap/progress", &self.credential, serde_json::json!({ "v": 1, "code": applied.code }), None);
+        match reported {
+            Ok(_) => applied.commit(&record),
+            Err(error) => log::warn!("report the environment checkout: {}", describe(&error)),
         }
     }
 
@@ -668,7 +723,8 @@ fn session_from_refresh(mut refreshed: Refreshed, relay_host_id: &str) -> Result
     if refreshed.attachments.len() > MAX_LIST || refreshed.revocations.len() > MAX_LIST {
         bail!("refresh listed too many attachments or revocations");
     }
-    if refreshed.setup.is_some() {
+    let environment = refreshed.setup.as_ref().and_then(crate::cloud_environment::raw);
+    if refreshed.setup.as_ref().is_some_and(|setup| !environment_only(setup)) {
         log::warn!("the server sent first-run setup, which this runtime does not apply yet");
     }
     Ok(Session {
@@ -690,6 +746,19 @@ fn session_from_refresh(mut refreshed: Refreshed, relay_host_id: &str) -> Result
                 }
             }
         }),
+        environment,
+    })
+}
+
+/// A setup with nothing but the checkout plan: what `environment-template-v1`
+/// alone brings.
+fn environment_only(setup: &serde_json::Value) -> bool {
+    setup.as_object().is_some_and(|fields| {
+        fields.iter().all(|(name, value)| match name.as_str() {
+            "version" | "environment" => true,
+            "credentials" => value.as_array().is_some_and(Vec::is_empty),
+            _ => false,
+        })
     })
 }
 

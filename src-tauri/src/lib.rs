@@ -13,6 +13,7 @@ mod binpath;
 mod cloud_activity;
 mod cloud_bootstrap;
 mod cloud_quiesce;
+mod cloud_environment;
 pub mod cloud_agents;
 mod cloud_github;
 mod cloud_config;

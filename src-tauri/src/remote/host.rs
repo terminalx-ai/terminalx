@@ -35,6 +35,10 @@ use crate::relay_e2ee::{answer_relay_challenge, begin_e2ee_session, E2eeHello, E
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const SILENCE_TIMEOUT: Duration = Duration::from_secs(90);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
+/// How often pending attachments and revocations are read from the link: a
+/// device waiting for its pairing code waits at most this long plus the
+/// bootstrap's refresh interval.
+const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Answered from their own task (see `serve_connection`).
 const SLOW_METHODS: &[&str] = &[
     "git.push",
@@ -102,12 +106,16 @@ pub trait RuntimeLink: Send + Sync + 'static {
     /// Publish the pairing code for an attachment
     /// (`/v1/cloud-workspace-bootstrap/attachments/:id/complete`).
     fn complete_attachment(&self, attachment_id: &str, pairing_code: &str) -> Result<()>;
+    /// Confirm a revocation was applied
+    /// (`/v1/cloud-workspace-bootstrap/revocations/:id/complete`).
+    fn complete_revocation(&self, attachment_id: &str) -> Result<()>;
 }
 
 /// A link read from a JSON file, for local development and tests. It is
 /// re-read on every refresh, so a harness can add attachments or rotate the
 /// relay token while the runtime runs. Pairing codes are written next to it
-/// as `<file>.attachments/<attachment id>.pairing`.
+/// as `<file>.attachments/<attachment id>.pairing`, and completed
+/// revocations as `<file>.attachments/<attachment id>.revoked`.
 pub struct FileLink {
     path: PathBuf,
     secret: [u8; 32],
@@ -170,14 +178,24 @@ impl RuntimeLink for FileLink {
     }
 
     fn complete_attachment(&self, attachment_id: &str, pairing_code: &str) -> Result<()> {
+        self.write_beside(attachment_id, "pairing", pairing_code)
+    }
+
+    fn complete_revocation(&self, attachment_id: &str) -> Result<()> {
+        self.write_beside(attachment_id, "revoked", "")
+    }
+}
+
+impl FileLink {
+    fn write_beside(&self, attachment_id: &str, extension: &str, contents: &str) -> Result<()> {
         if !attachment_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')) {
             bail!("invalid attachment id");
         }
         let dir = Self::pairing_dir(&self.path);
         std::fs::create_dir_all(&dir)?;
-        let target = dir.join(format!("{attachment_id}.pairing"));
-        let temporary = dir.join(format!(".{attachment_id}.pairing.new"));
-        std::fs::write(&temporary, pairing_code)?;
+        let target = dir.join(format!("{attachment_id}.{extension}"));
+        let temporary = dir.join(format!(".{attachment_id}.{extension}.new"));
+        std::fs::write(&temporary, contents)?;
         std::fs::rename(temporary, target)?;
         Ok(())
     }
@@ -245,6 +263,11 @@ struct HostState {
     devices: HashMap<String, Device>,
     /// Attachments already answered with a pairing code in this process.
     completed: HashSet<String>,
+    /// Revocations confirmed to the API in this process. The session read
+    /// right after a confirmation may still list them.
+    confirmed: HashSet<String>,
+    /// A revocation removed a device but the list could not be written.
+    devices_unsaved: bool,
     /// Open client connections per device, closed on revocation.
     connections: HashMap<String, Vec<mpsc::UnboundedSender<()>>>,
 }
@@ -311,8 +334,9 @@ impl RelayHost {
         Arc::new(Self { link, rpc, keypair, state: Mutex::new(state), status, devices_path })
     }
 
-    fn save_devices(&self, devices: &HashMap<String, Device>) {
-        let Some(path) = &self.devices_path else { return };
+    /// Whether the device list is on disk (or there is no disk to keep it on).
+    fn save_devices(&self, devices: &HashMap<String, Device>) -> bool {
+        let Some(path) = &self.devices_path else { return true };
         let write = || -> Result<()> {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -324,8 +348,12 @@ impl RelayHost {
             std::fs::rename(&temporary, path)?;
             Ok(())
         };
-        if let Err(error) = write() {
-            log::warn!("relay host: could not save the device list: {error:#}");
+        match write() {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("relay host: could not save the device list: {error:#}");
+                false
+            }
         }
     }
 
@@ -622,7 +650,9 @@ impl RelayHost {
                         let _ = live.commands.send(ControlCommand::Reregister);
                         return;
                     }
-                    self.apply_revocations(&live, &session.revocations);
+                    if self.apply_revocations(&live, &session.revocations) {
+                        self.complete_revocations(&session.revocations).await;
+                    }
                     for attachment in session.attachments {
                         if let Err(error) = self.answer_attachment(&live, &director_url, attachment).await {
                             log::warn!("relay host: could not answer an attachment: {error:#}");
@@ -635,11 +665,33 @@ impl RelayHost {
                 }
                 Err(error) => log::warn!("relay host: refresh failed: {error:#}"),
             }
-            tokio::time::sleep(REFRESH_INTERVAL).await;
+            tokio::time::sleep(SESSION_POLL_INTERVAL).await;
         }
     }
 
-    fn apply_revocations(&self, live: &Live, revocations: &[Revocation]) {
+    /// Tell the API each applied revocation, so it stops listing it. A
+    /// failure is retried on the next poll: the revocation is listed again
+    /// and applying it twice changes nothing.
+    async fn complete_revocations(&self, revocations: &[Revocation]) {
+        for revocation in revocations {
+            if self.state.lock().unwrap().confirmed.contains(&revocation.id) {
+                continue;
+            }
+            let (link, id) = (self.link.clone(), revocation.id.clone());
+            match tokio::task::spawn_blocking(move || link.complete_revocation(&id)).await {
+                Ok(Ok(())) => {
+                    self.state.lock().unwrap().confirmed.insert(revocation.id.clone());
+                }
+                Ok(Err(error)) => log::warn!("relay host: could not complete a revocation: {error:#}"),
+                Err(error) => log::warn!("relay host: could not complete a revocation: {error}"),
+            }
+        }
+    }
+
+    /// Whether the revocations are durable: a revocation confirmed to the API
+    /// is never listed again, so it must not be confirmed while the device
+    /// list on disk still admits the device.
+    fn apply_revocations(&self, live: &Live, revocations: &[Revocation]) -> bool {
         let mut state = self.state.lock().unwrap();
         let mut changed = false;
         for revocation in revocations {
@@ -652,9 +704,10 @@ impl RelayHost {
             }
             state.completed.insert(revocation.id.clone());
         }
-        if changed {
-            self.save_devices(&state.devices);
+        if changed || state.devices_unsaved {
+            state.devices_unsaved = !self.save_devices(&state.devices);
         }
+        !state.devices_unsaved
     }
 
     async fn answer_attachment(&self, live: &Live, director_url: &str, attachment: Attachment) -> Result<()> {

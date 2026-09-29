@@ -36,7 +36,11 @@ impl RuntimeLink for BootstrapLink {
             .iter()
             .filter_map(|value| serde_json::from_value::<Attachment>(value.clone()).map_err(|error| log::warn!("skipping an attachment: {error}")).ok())
             .collect();
-        let revocations = session.revocations.iter().filter_map(|value| serde_json::from_value::<Revocation>(value.clone()).ok()).collect();
+        let revocations = session
+            .revocations
+            .iter()
+            .filter_map(|value| serde_json::from_value::<Revocation>(value.clone()).map_err(|error| log::warn!("skipping a revocation: {error}")).ok())
+            .collect();
         Ok(RelaySession {
             relay_token: session.relay_token.clone(),
             director_url: session.director_url.clone(),
@@ -49,6 +53,14 @@ impl RuntimeLink for BootstrapLink {
         match self.cloud.complete_attachment(&self.api, attachment_id, pairing_code) {
             Ok(()) => Ok(()),
             Err(CallError::Rejected) => Err(anyhow!("the API refused the pairing code for attachment {attachment_id}")),
+            Err(CallError::Transient(error)) => Err(error),
+        }
+    }
+
+    fn complete_revocation(&self, attachment_id: &str) -> Result<()> {
+        match self.cloud.complete_revocation(&self.api, attachment_id) {
+            Ok(()) => Ok(()),
+            Err(CallError::Rejected) => Err(anyhow!("the API refused to complete revocation {attachment_id}")),
             Err(CallError::Transient(error)) => Err(error),
         }
     }
