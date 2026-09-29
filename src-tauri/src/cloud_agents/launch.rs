@@ -363,7 +363,7 @@ fn validate(claim: &Claim) -> Result<()> {
         bail!("too many repositories");
     }
     for repository in &claim.repositories {
-        if !repository.base_ref.as_deref().map_or(true, valid_branch) {
+        if repository.base_ref.as_deref().is_some_and(|base| !valid_branch(base)) {
             bail!("invalid base ref");
         }
         if !valid_repository_path(&repository.path) {
