@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Check, Loader2, Pencil } from "lucide-react";
 import { OrganizationCompute } from "./OrganizationCompute";
+import { OrganizationDiagnostics } from "./OrganizationDiagnostics";
 import { OrganizationGithubApp } from "./OrganizationGithubApp";
 import { OrganizationMembers } from "./OrganizationMembers";
 import { OrganizationWorkspaceConfig } from "./OrganizationWorkspaceConfig";
@@ -32,6 +33,9 @@ export function AccountTab() {
 
   if (status.state === "signed-in" && status.identity) {
     const identity = status.identity;
+    // Diagnostics are for owners and administrators; the server decides, this only skips a request a member would have refused.
+    const named = (status.organizations ?? []).filter((organization) => organization.name === identity.organization);
+    const activeRole = named.length === 1 ? named[0].role : null;
     return (
       <div className="flex flex-col gap-4">
         <div className="flex items-center gap-3 rounded-lg bg-well px-3 py-3">
@@ -50,6 +54,7 @@ export function AccountTab() {
         {identity.organization && <OrganizationCompute contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationGithubApp contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationWorkspaceConfig contextRevision={status.context?.revision ?? ""} />}
+        {identity.organization && activeRole !== "member" && <OrganizationDiagnostics contextRevision={status.context?.revision ?? ""} />}
         {pairing.status.host && (
           <div className="rounded-lg border border-hairline px-3 py-3">
             <div className="text-xs font-medium">What this Mac shares</div>
