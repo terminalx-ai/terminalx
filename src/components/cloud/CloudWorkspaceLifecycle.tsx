@@ -15,6 +15,7 @@ import {
   lifecycleErrorMessage,
   operationFailureText,
   remaining,
+  repositoryLabel,
   repositoryRiskLines,
   risksOf,
   type RuntimeCheck,
@@ -176,7 +177,7 @@ export function CloudWorkspaceLifecycleDialog({
                 <GitBranch className="mt-0.5 size-3.5 shrink-0 text-warning" />
                 <span className="min-w-0">
                   <span className="font-mono">
-                    {repo.path}
+                    {repositoryLabel(repo, workspace.name)}
                     {repo.branch ? ` · ${repo.branch}` : ""}
                   </span>
                   : {repositoryRiskLines(repo).join(", ")}

@@ -61,6 +61,11 @@ export function NewSessionView({
   const cloudChoices = useCloudProjectChoices();
   // Opens on a click (also one sent through the accessibility tree), not only on pointerdown or Enter.
   const projectMenu = useRowMenu();
+  // Every picker opens on a click and an accessibility press, not only the project one.
+  const agentMenu = useRowMenu();
+  const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
+  const effortMenu = useRowMenu();
+  const modeMenu = useRowMenu();
   const [confirm, setConfirm] = useState<PreparedCreate | null>(null);
   const [starting, setStarting] = useState<string | null>(null);
 
@@ -293,8 +298,8 @@ export function NewSessionView({
               </DropdownMenuContent>
             </DropdownMenu>
 
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
+            <DropdownMenu {...agentMenu.root}>
+              <DropdownMenuTrigger asChild {...agentMenu.trigger}>
                 <Button variant="secondary" size="sm" className={pill}>
                   {harness && <AgentMark id={harness.id} className="size-3.5" decorative brand />}
                   {harness?.name ?? "Agent"}
@@ -314,8 +319,8 @@ export function NewSessionView({
             </DropdownMenu>
 
             {harness && models.length > 0 && (
-              <DropdownMenu onOpenChange={(open) => open && void refreshModels()}>
-                <DropdownMenuTrigger asChild>
+              <DropdownMenu {...modelMenu.root}>
+                <DropdownMenuTrigger asChild {...modelMenu.trigger}>
                   <Button variant="secondary" size="sm" className={pill}>
                     {model?.label ?? modelId ?? "Model"}
                     <ChevronDown className="text-faint" />
@@ -339,8 +344,8 @@ export function NewSessionView({
             )}
 
             {harness && model && model.efforts.length > 0 && (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
+              <DropdownMenu {...effortMenu.root}>
+                <DropdownMenuTrigger asChild {...effortMenu.trigger}>
                   <Button variant="secondary" size="sm" className={pill}>
                     {effort ? (EFFORT_LABEL[effort] ?? effort) : "Effort"}
                     <ChevronDown className="text-faint" />
@@ -359,8 +364,8 @@ export function NewSessionView({
               </DropdownMenu>
             )}
 
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
+            <DropdownMenu {...modeMenu.root}>
+              <DropdownMenuTrigger asChild {...modeMenu.trigger}>
                 <Button variant="secondary" size="sm" className={pill}>
                   {mode.label}
                   <ChevronDown className="text-faint" />

@@ -17,6 +17,7 @@ import { RepoPanel, type RepoView } from "@/components/changes/RepoPanel";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { cloudGitSource, desktopGitIdentity } from "@/lib/gitSource";
+import { repositoryLabel } from "@/lib/cloudLifecycle";
 
 type Panel = "repo" | "pr";
 
@@ -279,7 +280,7 @@ export function UnpublishedWork({ client, active, generation, tick }: { client: 
       {atRisk.map((repo) => (
         <div key={repo.path} className="rounded-md bg-warning/10 px-2 py-1.5" data-testid="cloud-unpublished-repo">
           <div className="font-mono">
-            {repo.path}
+            {repositoryLabel(repo)}
             {repo.branch ? ` · ${repo.branch}` : ""}
           </div>
           <ul className="mt-0.5 list-disc pl-4 text-muted-foreground">

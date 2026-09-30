@@ -78,6 +78,7 @@ impl std::error::Error for ComputerError {}
 pub fn recovery_for(code: &str) -> &'static str {
     match code {
         "app_not_found" => "Run terminalx computer list-apps and retry with the bundle id or pid:<n>; website names are not desktop apps.",
+        "app_not_running" => "The target quit and computer use never launches apps: start it, run terminalx computer list-apps, then retry with pid:<n>.",
         "app_blocked" => "Stop; this app is intentionally blocked from computer use.",
         "window_not_found" | "window_stale" => "Run terminalx computer list-windows --app <app>, choose a current selector, then rerun get-app-state.",
         "window_not_focused" => "Retry once with --restore-window; if restore was already requested, bring the app forward manually.",
@@ -453,6 +454,7 @@ mod tests {
     fn every_guide_error_code_has_recovery_copy_in_the_terminalx_identity() {
         for code in [
             "app_not_found",
+            "app_not_running",
             "app_blocked",
             "window_not_found",
             "window_stale",

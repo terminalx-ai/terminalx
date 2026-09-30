@@ -732,7 +732,20 @@ pub fn shell_quote(value: &str) -> String {
 fn follow_up_command(result: &Value, params: &Value) -> String {
     let snapshot = result.get("snapshot").cloned().unwrap_or(Value::Null);
     let app = snapshot.get("app").cloned().unwrap_or(Value::Null);
-    let selector = s(&app, "bundleId")
+    // A pid target stays a pid target: builds can share a bundle id, and the
+    // follow-up must reach the same running instance, not another copy.
+    let by_pid = params
+        .get("app")
+        .and_then(Value::as_str)
+        .is_some_and(|app| app.trim().to_ascii_lowercase().starts_with("pid:"));
+    let pid_selector = app
+        .get("pid")
+        .and_then(Value::as_i64)
+        .filter(|_| by_pid)
+        .map(|pid| format!("pid:{pid}"));
+    let selector = pid_selector
+        .as_deref()
+        .or_else(|| s(&app, "bundleId"))
         .or_else(|| s(&app, "name"))
         .unwrap_or("<app>");
     let mut args = vec![
@@ -976,6 +989,10 @@ mod tests {
         assert!(verified.starts_with("Set Value completed via accessibility, verified value; 2 visible elements in current window."));
         assert!(verified.contains("Use `terminalx computer get-app-state --app com.apple.finder --window-id 77 --restore-window` to inspect."));
         assert!(verified.contains("Screenshot saved to /tmp/x-screenshot.png."));
+
+        // A pid target's follow-up keeps the pid, never the (possibly shared) bundle id.
+        let by_pid = format_action(ActionMethod::Click, &sample_action(), &json!({"app": "pid:12", "restoreWindow": true}));
+        assert!(by_pid.contains("Use `terminalx computer get-app-state --app pid:12 --window-id 77 --restore-window` to inspect."));
 
         let mut synthetic = sample_action();
         synthetic["action"] = json!({"path": "synthetic"});

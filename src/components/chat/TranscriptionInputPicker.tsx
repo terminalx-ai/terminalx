@@ -1,15 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/menu";
+import { useRowMenu } from "@/components/ui/useRowMenu";
 import { useDictation } from "@/lib/dictation";
 import { refreshTranscriptionInputs, selectTranscriptionInput, useTranscriptionInput } from "@/lib/transcriptionInput";
 
 export function TranscriptionInputPicker({ compact = false }: { compact?: boolean }) {
   const input = useTranscriptionInput();
   const { phase } = useDictation();
-  const [open, setOpen] = useState(false);
   const busy = phase !== "idle" || input.saving;
+  // Opens on a click and an accessibility press too; the list is re-read each time it opens.
+  const menu = useRowMenu({ onOpenChange: (next) => { if (next && !busy) void refreshTranscriptionInputs(); } });
+  const { open, setOpen } = menu;
   useEffect(() => { if (busy) setOpen(false); }, [busy]);
   const missing = input.selected !== null && input.inputs !== null && !input.inputs.some((device) => device.id === input.selected);
   const noInputs = input.inputs?.length === 0;
@@ -35,11 +38,8 @@ export function TranscriptionInputPicker({ compact = false }: { compact?: boolea
     detail = "No system default microphone is available. Choose an available input.";
   }
   return (
-    <DropdownMenu open={open && !busy} onOpenChange={(next) => {
-      setOpen(next);
-      if (next && !busy) void refreshTranscriptionInputs();
-    }}>
-      <DropdownMenuTrigger asChild>
+    <DropdownMenu open={open && !busy} onOpenChange={setOpen}>
+      <DropdownMenuTrigger asChild {...menu.trigger}>
         <Button type="button" variant={compact ? "ghost" : "outline"} size="sm"
           disabled={busy}
           aria-label={`Transcription audio input: ${label}`}

@@ -108,6 +108,24 @@ describe("CloudWorkspaceLifecycleDialog", () => {
     expect(mocked.cloudWorkspaceArchive).toHaveBeenCalledWith("ws-1", true);
   });
 
+  it("names a blank project's workspace folder, never \".\"", async () => {
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition());
+    const blank: RuntimeCheck = {
+      kind: "checked",
+      facts: {
+        v: 1,
+        repositories: [{ path: ".", branch: "terminalx/parity-test-3517a6f24194", dirtyFiles: 1, untrackedFiles: 0, unpushedCommits: null, hasUpstream: false, localOnlyCommits: 1, openPullRequests: null }],
+        activeTasks: [],
+        runningProcesses: 0,
+        observedAt: 1,
+      },
+    };
+    renderDialog(item("ready", { name: "parity-test" }), "delete", blank);
+    const repo = await screen.findByTestId("cloud-lifecycle-repo");
+    expect(repo.textContent).toBe("parity-test · terminalx/parity-test-3517a6f24194: 1 uncommitted file, 1 commit on no remote branch");
+    expect(repo.textContent).not.toMatch(/^\./);
+  });
+
   it("archives a clean, idle workspace without force", async () => {
     mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition());
     mocked.cloudWorkspaceArchive.mockResolvedValue(snapshot("archive") as never);
