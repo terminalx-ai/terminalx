@@ -57,6 +57,9 @@ const SLOW_METHODS: &[&str] = &[
     "session.create",
     "session.send",
     "session.close",
+    // CS-12: removing a worktree, and the first read of Codex's model list.
+    "session.delete",
+    "runtime.agents",
     "fs.search",
 ];
 

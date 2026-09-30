@@ -631,3 +631,309 @@ async fn participants_read_git_and_disposition_facts_but_never_publish() {
     assert_eq!(facts["runningProcesses"], 0);
     assert_eq!(facts["activeTasks"], json!([]));
 }
+
+// ---- CS-12: agents/1, session/2, pty/2 ---------------------------------------
+
+/// A session in the index, made by the same `session_ops` the runtime uses.
+fn seed_session(project: &Path, title: &str, cwd: Option<&Path>) -> SessionEntry {
+    crate::session_ops::create_session_entry(crate::session_ops::NewSession {
+        project_path: project.to_string_lossy().into_owned(),
+        title: Some(title.into()),
+        use_worktree: false,
+        base_ref: None,
+        worktree_name: None,
+        on_main: true,
+        issue: None,
+        automation: None,
+        cwd: cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
+        tab: Some(crate::session_ops::NewTab { harness: "claude".into(), model: "opus".into(), effort: None, permission_mode: None }),
+    })
+    .unwrap()
+}
+
+/// Claude and Codex installed at VM paths, OpenCode not.
+fn installed_agents() -> Vec<crate::harness::HarnessInfo> {
+    crate::harness::catalog()
+        .into_iter()
+        .map(|mut agent| {
+            if agent.id == "claude" || agent.id == "codex" {
+                agent.available = true;
+                agent.path = Some(format!("/home/vm/.local/bin/{}", agent.binary));
+            } else {
+                agent.available = false;
+            }
+            agent
+        })
+        .collect()
+}
+
+async fn hello_with(rpc: &Arc<WorkspaceRpc>, device: &str, authority: Authority, want: &[&str]) -> (Arc<Peer>, Notifications) {
+    let (peer, events) = Peer::new(device.into(), authority);
+    call(rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": want })).await.unwrap();
+    (peer, events)
+}
+
+/// No notification named `event` arrives within a short wait.
+async fn no_event(events: &mut Notifications, event: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(600);
+    while let Ok(Some(next)) = tokio::time::timeout_at(deadline, events.recv()).await {
+        assert_ne!(next["event"], event, "unexpected {event}: {next}");
+    }
+}
+
+const SESSION_1: &[&str] = &["pty/1", "fs/1", "git/1", "session/1", "keys/1", "lifecycle/1"];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_1_desktop_is_served_as_before_and_never_sees_the_additions() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let session = seed_session(&f.root, "Fix login", None);
+    let (old, mut events) = hello_with(&f.rpc, "device-old", Authority::Manage, SESSION_1).await;
+    let listed = call(&f.rpc, &old, "session.list", json!({})).await.unwrap();
+    assert_eq!(listed["sessions"][0]["id"], session.id.as_str());
+    for (method, params) in [
+        ("session.update", json!({ "sessionId": session.id, "title": "x", "clientRequestId": "request-old-1" })),
+        ("session.addTab", json!({ "sessionId": session.id, "agent": "claude", "clientRequestId": "request-old-2" })),
+        ("session.delete", json!({ "sessionId": session.id, "clientRequestId": "request-old-3" })),
+        ("runtime.agents", json!({})),
+    ] {
+        assert_eq!(code(call(&f.rpc, &old, method, params).await), "capability_not_granted", "{method}");
+    }
+    // pty/1 has no sessionId; a terminal made without one is listed without one.
+    assert_eq!(
+        code(call(&f.rpc, &old, "pty.create", json!({ "sessionId": session.id, "clientRequestId": "request-old-4" })).await),
+        "invalid_params"
+    );
+    let pty = call(&f.rpc, &old, "pty.create", json!({ "clientRequestId": "request-old-5" })).await.unwrap();
+    assert!(pty.get("sessionId").is_none());
+    // Another client's session/2 change does not reach it as session.sessions.
+    let (new, _new_events) = hello_with(&f.rpc, "device-new", Authority::Manage, &protocol::CAPABILITIES).await;
+    call(&f.rpc, &new, "session.update", json!({ "sessionId": session.id, "pinned": true, "clientRequestId": "request-new-1" })).await.unwrap();
+    no_event(&mut events, "session.sessions").await;
+    assert_eq!(call(&f.rpc, &old, "session.list", json!({})).await.unwrap()["sessions"][0]["pinned"], true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn participants_are_refused_every_session_2_write_and_see_only_shared_sessions() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    f.rpc.set_offered_for_tests(installed_agents());
+    let session = seed_session(&f.root, "Fix login", None);
+    let (participant, _events) = hello_with(&f.rpc, "device-phone", Authority::Participate, &protocol::CAPABILITIES).await;
+    for (method, params) in [
+        ("session.update", json!({ "sessionId": session.id, "title": "x", "clientRequestId": "request-part-1" })),
+        ("session.addTab", json!({ "sessionId": session.id, "agent": "claude", "clientRequestId": "request-part-2" })),
+        ("session.delete", json!({ "sessionId": session.id, "clientRequestId": "request-part-3" })),
+        ("pty.create", json!({ "sessionId": session.id, "clientRequestId": "request-part-4" })),
+    ] {
+        assert_eq!(code(call(&f.rpc, &participant, method, params).await), "forbidden", "{method}");
+    }
+    assert_eq!(index::get(&session.id).unwrap().title, "Fix login", "nothing changed");
+    // Nothing is shared with a participant yet: it lists no sessions.
+    assert_eq!(call(&f.rpc, &participant, "session.list", json!({})).await.unwrap()["sessions"], json!([]));
+    // Reading what can run is not a write.
+    assert!(call(&f.rpc, &participant, "runtime.agents", json!({})).await.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_updates_adds_tabs_and_deletes_sessions_and_is_told_the_list() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    f.rpc.set_offered_for_tests(installed_agents());
+    let session = seed_session(&f.root, "Fix login", None);
+    let other_dir = f._dir.path().join("elsewhere");
+    std::fs::create_dir(&other_dir).unwrap();
+    let elsewhere = seed_session(&other_dir, "Another project", None);
+    let (manager, mut events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+
+    // update: title, pin and archive, one at a time or together.
+    let updated = call(
+        &f.rpc,
+        &manager,
+        "session.update",
+        json!({ "sessionId": session.id, "title": "  Fix the login  ", "pinned": true, "clientRequestId": "request-upd-1" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!((updated["session"]["title"].as_str(), updated["session"]["pinned"].as_bool()), (Some("Fix the login"), Some(true)));
+    let pushed = next_event(&mut events, "session.sessions").await;
+    assert_eq!(pushed["sessions"].as_array().unwrap().len(), 1, "only this workspace's sessions");
+    assert_eq!(pushed["sessions"][0]["title"], "Fix the login");
+    call(&f.rpc, &manager, "session.update", json!({ "sessionId": session.id, "archived": true, "clientRequestId": "request-upd-2" }))
+        .await
+        .unwrap();
+    let stored = index::get(&session.id).unwrap();
+    assert!(stored.archived && stored.pinned && stored.title == "Fix the login");
+    for (params, expected) in [
+        (json!({ "sessionId": session.id, "clientRequestId": "request-upd-3" }), "invalid_params"),
+        (json!({ "sessionId": session.id, "title": "   ", "clientRequestId": "request-upd-4" }), "invalid_params"),
+        (json!({ "sessionId": session.id, "title": "x".repeat(201), "clientRequestId": "request-upd-5" }), "invalid_params"),
+        (json!({ "sessionId": session.id, "title": "x" }), "invalid_params"),
+        (json!({ "sessionId": elsewhere.id, "title": "x", "clientRequestId": "request-upd-6" }), "not_found"),
+    ] {
+        assert_eq!(code(call(&f.rpc, &manager, "session.update", params.clone()).await), expected, "{params}");
+    }
+
+    // addTab: an installed agent and a known mode, through session_ops.
+    let added = call(
+        &f.rpc,
+        &manager,
+        "session.addTab",
+        json!({ "sessionId": session.id, "agent": "codex", "model": "gpt-5.5", "mode": "plan", "clientRequestId": "request-tab-1" }),
+    )
+    .await
+    .unwrap();
+    let tab_id = added["tabId"].as_str().unwrap().to_string();
+    let stored = index::get(&session.id).unwrap();
+    assert_eq!(stored.tabs.len(), 2);
+    assert_eq!(stored.active_tab.as_deref(), Some(tab_id.as_str()));
+    let tab = stored.tab(&tab_id).unwrap();
+    assert_eq!((tab.harness.as_str(), tab.model.as_str(), tab.permission_mode.as_str()), ("codex", "gpt-5.5", "plan"));
+    // A resend is answered from the cache, not added twice.
+    let again = call(
+        &f.rpc,
+        &manager,
+        "session.addTab",
+        json!({ "sessionId": session.id, "agent": "codex", "model": "gpt-5.5", "mode": "plan", "clientRequestId": "request-tab-1" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(again["tabId"], tab_id.as_str());
+    assert_eq!(index::get(&session.id).unwrap().tabs.len(), 2);
+    for (params, expected) in [
+        (json!({ "sessionId": session.id, "agent": "opencode", "clientRequestId": "request-tab-2" }), "unavailable"),
+        (json!({ "sessionId": session.id, "agent": "vim", "clientRequestId": "request-tab-3" }), "invalid_params"),
+        (json!({ "sessionId": session.id, "agent": "claude", "mode": "yolo", "clientRequestId": "request-tab-4" }), "invalid_params"),
+        (json!({ "sessionId": elsewhere.id, "agent": "claude", "clientRequestId": "request-tab-5" }), "not_found"),
+    ] {
+        assert_eq!(code(call(&f.rpc, &manager, "session.addTab", params.clone()).await), expected, "{params}");
+    }
+
+    // delete: gone from the index and the list, and only this workspace's.
+    assert_eq!(
+        code(call(&f.rpc, &manager, "session.delete", json!({ "sessionId": elsewhere.id, "clientRequestId": "request-del-1" })).await),
+        "not_found"
+    );
+    let deleted = call(&f.rpc, &manager, "session.delete", json!({ "sessionId": session.id, "clientRequestId": "request-del-2" })).await.unwrap();
+    assert_eq!(deleted["deleted"], json!([session.id]));
+    assert!(index::get(&session.id).is_err());
+    assert!(index::get(&elsewhere.id).is_ok());
+    loop {
+        if next_event(&mut events, "session.sessions").await["sessions"] == json!([]) {
+            break;
+        }
+    }
+    assert_eq!(call(&f.rpc, &manager, "session.list", json!({})).await.unwrap()["sessions"], json!([]));
+    assert_eq!(
+        code(call(&f.rpc, &manager, "session.delete", json!({ "sessionId": session.id, "clientRequestId": "request-del-3" })).await),
+        "not_found"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_terminal_opened_for_a_session_carries_its_id_and_closes_with_it() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let checkout = f.root.join("checkout");
+    std::fs::create_dir(&checkout).unwrap();
+    let session = seed_session(&f.root, "Fix login", Some(&checkout));
+    let outside = seed_session(&f.root, "Elsewhere", Some(f._dir.path()));
+    let (manager, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+
+    let pty = call(&f.rpc, &manager, "pty.create", json!({ "sessionId": session.id, "clientRequestId": "request-pty-1" })).await.unwrap();
+    assert_eq!(pty["sessionId"], session.id.as_str());
+    assert_eq!(pty["cwd"], "checkout", "it opens in the session's checkout");
+    // A checkout outside the workspace is never used as a terminal's cwd.
+    let rooted = call(&f.rpc, &manager, "pty.create", json!({ "sessionId": outside.id, "clientRequestId": "request-pty-2" })).await.unwrap();
+    assert_eq!(rooted["cwd"], "");
+    let plain = call(&f.rpc, &manager, "pty.create", json!({ "clientRequestId": "request-pty-3" })).await.unwrap();
+    assert!(plain.get("sessionId").is_none());
+    assert_eq!(
+        code(call(&f.rpc, &manager, "pty.create", json!({ "sessionId": "no-such-session", "clientRequestId": "request-pty-4" })).await),
+        "not_found"
+    );
+
+    let listed = call(&f.rpc, &manager, "pty.list", json!({})).await.unwrap();
+    let ids: Vec<Option<&str>> = listed["terminals"].as_array().unwrap().iter().map(|t| t["sessionId"].as_str()).collect();
+    assert_eq!(ids, vec![Some(session.id.as_str()), Some(outside.id.as_str()), None]);
+
+    call(&f.rpc, &manager, "session.delete", json!({ "sessionId": session.id, "clientRequestId": "request-del-1" })).await.unwrap();
+    let listed = call(&f.rpc, &manager, "pty.list", json!({})).await.unwrap();
+    let ids: Vec<Option<&str>> = listed["terminals"].as_array().unwrap().iter().map(|t| t["sessionId"].as_str()).collect();
+    assert_eq!(ids, vec![Some(outside.id.as_str()), None], "the deleted session's terminal is closed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_agents_lists_installed_agents_with_models_efforts_and_modes() {
+    let f = fixture();
+    f.rpc.set_offered_for_tests(installed_agents());
+    let (peer, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &["agents/1"]).await;
+    let listed = call(&f.rpc, &peer, "runtime.agents", json!({})).await.unwrap();
+    let agents = listed["agents"].as_array().unwrap();
+    let ids: Vec<&str> = agents.iter().map(|agent| agent["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["claude", "codex"], "only installed agents");
+    let claude = &agents[0];
+    assert_eq!(claude["name"], "Claude Code");
+    assert_eq!(claude["defaultMode"], index::DEFAULT_PERMISSION_MODE);
+    assert_eq!(claude["modes"], json!(PERMISSION_MODES));
+    assert_eq!(claude["caps"]["effort"], true);
+    let opus = claude["models"].as_array().unwrap().iter().find(|model| model["id"] == "opus").unwrap();
+    assert_eq!(opus["isDefault"], true);
+    assert!(opus["efforts"].as_array().unwrap().iter().any(|effort| effort == "high"));
+    assert!(!agents[1]["models"].as_array().unwrap().is_empty(), "codex models come from its list");
+    // A path on the VM never leaves it.
+    assert!(!listed.to_string().contains("/home/vm"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_terminal_names_its_session_only_to_pty_2_peers_that_may_see_it() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let session = seed_session(&f.root, "Fix login", None);
+    let (manager, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+    let created = call(&f.rpc, &manager, "pty.create", json!({ "sessionId": session.id, "clientRequestId": "request-scope-1" })).await.unwrap();
+    let pty_id = created["ptyId"].as_str().unwrap().to_string();
+
+    // A pty/1 manager sees the terminal, not the session it belongs to.
+    let (old, _old_events) = hello_with(&f.rpc, "device-old", Authority::Manage, SESSION_1).await;
+    let listed = call(&f.rpc, &old, "pty.list", json!({})).await.unwrap();
+    assert_eq!(listed["terminals"][0]["ptyId"], pty_id.as_str());
+    assert!(listed["terminals"][0].get("sessionId").is_none());
+    let attached = call(&f.rpc, &old, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    assert!(attached.get("sessionId").is_none());
+    let controlled = call(&f.rpc, &old, "pty.control", json!({ "ptyId": pty_id })).await.unwrap();
+    assert!(controlled.get("sessionId").is_none());
+
+    // A participant with pty/2 is not shown a session that is not shared with it.
+    let (participant, _part_events) = hello_with(&f.rpc, "device-phone", Authority::Participate, &protocol::CAPABILITIES).await;
+    let listed = call(&f.rpc, &participant, "pty.list", json!({})).await.unwrap();
+    assert!(listed["terminals"][0].get("sessionId").is_none());
+    let attached = call(&f.rpc, &participant, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    assert!(attached.get("sessionId").is_none());
+
+    // The pty/2 manager, who may see the session, is told it.
+    let listed = call(&f.rpc, &manager, "pty.list", json!({})).await.unwrap();
+    assert_eq!(listed["terminals"][0]["sessionId"], session.id.as_str());
+    let attached = call(&f.rpc, &manager, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    assert_eq!(attached["sessionId"], session.id.as_str());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_a_sessions_last_tab_with_remove_closes_its_terminals() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let session = seed_session(&f.root, "Fix login", None);
+    let kept = seed_session(&f.root, "Keep me", None);
+    let (manager, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+    for (session_id, request) in [(&session.id, "request-close-1"), (&kept.id, "request-close-2")] {
+        call(&f.rpc, &manager, "pty.create", json!({ "sessionId": session_id, "clientRequestId": request })).await.unwrap();
+    }
+    let tab_id = session.tabs[0].id.clone();
+    call(&f.rpc, &manager, "session.close", json!({ "sessionId": session.id, "tabId": tab_id, "remove": true, "clientRequestId": "request-close-3" }))
+        .await
+        .unwrap();
+    assert!(index::get(&session.id).is_err(), "its last tab went, so the session did");
+    let listed = call(&f.rpc, &manager, "pty.list", json!({})).await.unwrap();
+    let ids: Vec<Option<&str>> = listed["terminals"].as_array().unwrap().iter().map(|t| t["sessionId"].as_str()).collect();
+    assert_eq!(ids, vec![Some(kept.id.as_str())], "the removed session's terminal is closed, others stay");
+}

@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 import type { RpcWireRequest } from "./rpc";
-import { WorkspaceRpcClient, WorkspaceRpcError, type WorkspaceConnectionState, type WorkspaceTransport } from "./workspace";
+import {
+  METHOD_CAPABILITIES,
+  MUTATING_METHODS,
+  WORKSPACE_CAPABILITIES,
+  WorkspaceRpcClient,
+  WorkspaceRpcError,
+  type RuntimeSession,
+  type WorkspaceConnectionState,
+  type WorkspaceTransport,
+} from "./workspace";
+// The runtime's side of the contract, read as text so the two cannot drift.
+import protocolSource from "../../../src-tauri/src/remote/protocol.rs?raw";
 
 const connected = (generation = 7, capabilities = ["pty/1", "fs/1", "git/1", "session/1"], epoch = "e1"): WorkspaceConnectionState => ({
   state: "connected",
@@ -25,6 +36,8 @@ class FakeRuntime implements WorkspaceTransport {
   writes: string[] = [];
   created = 0;
   agentEvents: { seq: number; id: string }[] = [];
+  sessions: RuntimeSession[] = [session("s1", "Fix login")];
+  updates = 0;
   private cache = new Map<string, unknown>();
   private applied = new Map<string, number>();
   private subscription = 0;
@@ -130,11 +143,43 @@ class FakeRuntime implements WorkspaceTransport {
       }
       case "session.nudge":
         return ok({});
+      case "session.list":
+        return ok({ sessions: this.sessions });
+      case "session.update": {
+        const session = this.sessions.find((entry) => entry.id === params.sessionId);
+        if (!session) return { id: frame.id, ok: false, error: { code: "not_found", message: "no such session" } };
+        this.updates++;
+        Object.assign(session, Object.fromEntries(["title", "pinned", "archived"].filter((field) => field in params).map((field) => [field, params[field]])));
+        const result = { session: { ...session } };
+        this.cache.set(key!, result);
+        return ok(result);
+      }
+      case "session.addTab": {
+        const result = { sessionId: params.sessionId, tabId: "t2", session: this.sessions[0], tab: null };
+        this.cache.set(key!, result);
+        return ok(result);
+      }
+      case "session.delete": {
+        this.sessions = this.sessions.filter((entry) => entry.id !== params.sessionId);
+        const result = { sessionId: params.sessionId, deleted: [params.sessionId] };
+        this.cache.set(key!, result);
+        return ok(result);
+      }
+      case "runtime.agents":
+        return ok({ agents: [{ id: "claude", name: "Claude Code", caps: { effort: true }, models: [{ id: "opus", label: "Opus 5", efforts: ["high"], defaultEffort: "high", acceptsImages: true, isDefault: true, upgrade: null, description: null }], modes: ["plan", "bypassPermissions"], defaultMode: "bypassPermissions" }] });
+      case "pty.list":
+        return ok({ epoch: this.epoch, terminals: [{ ptyId: "p1", epoch: this.epoch, sessionId: "s1" }, { ptyId: "p2", epoch: this.epoch }] });
       default:
         return { id: frame.id, ok: false, error: { code: "method_not_found", message: frame.method } };
     }
   }
 }
+
+function session(id: string, title: string): RuntimeSession {
+  return { id, projectPath: "/workspace", cwd: "/workspace", title, created: "", modified: "", archived: false, pinned: false, tabs: [] };
+}
+
+const SESSION_1 = ["pty/1", "fs/1", "git/1", "session/1", "keys/1", "lifecycle/1"];
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 let counter = 0;
@@ -408,5 +453,97 @@ describe("workspace RPC client", () => {
     runtime.deliver({ event: "session.tabs", params: { tabs: [] } });
     expect(broadcasts).toEqual(["session.tabs"]);
     client.close();
+  });
+
+  describe("CS-12: agents/1, session/2 and pty/2", () => {
+    it("asks for the same namespace versions the runtime serves, and gates each addition by its own version", () => {
+      const served = /pub const CAPABILITIES: \[&str; \d+\] =\s*\[([^\]]*)\]/.exec(protocolSource)?.[1];
+      expect(served?.match(/"[^"]+"/g)?.map((entry) => JSON.parse(entry))).toEqual([...WORKSPACE_CAPABILITIES]);
+      const methods = [...protocolSource.matchAll(/method\("([^"]+)", "([^"]+)", (Manage|Participate), (true|false)\)/g)].map(([, name, capability, authority, idempotent]) => ({
+        name: name!,
+        capability: capability!,
+        authority,
+        idempotent: idempotent === "true",
+      }));
+      for (const method of methods) {
+        const [namespace, version] = method.capability.split("/");
+        // Anything beyond "<own namespace>/1" must be named here, or an older runtime would be sent it.
+        if (namespace !== method.name.split(".")[0] || version !== "1") expect(METHOD_CAPABILITIES[method.name], method.name).toBe(method.capability);
+      }
+      for (const [name, capability] of Object.entries(METHOD_CAPABILITIES)) {
+        expect(methods.find((method) => method.name === name)?.capability, name).toBe(capability);
+      }
+      for (const name of ["session.update", "session.addTab", "session.delete"]) {
+        const method = methods.find((entry) => entry.name === name)!;
+        expect(method).toMatchObject({ authority: "Manage", idempotent: true });
+        expect(MUTATING_METHODS.has(name), name).toBe(true);
+      }
+    });
+
+    it("a session/1 runtime is never sent a session/2, pty/2 or agents/1 call", async () => {
+      const runtime = new FakeRuntime();
+      const client = new WorkspaceRpcClient(runtime, ids);
+      runtime.connect(SESSION_1);
+      expect(client.hasCapability("session/2")).toBe(false);
+      expect(client.hasCapability("session/1")).toBe(true);
+      await expect(client.updateSession("s1", { title: "x" })).rejects.toMatchObject({ code: "capability_not_granted" });
+      await expect(client.addSessionTab("s1", { agent: "claude" })).rejects.toMatchObject({ code: "capability_not_granted" });
+      await expect(client.deleteSession("s1")).rejects.toMatchObject({ code: "capability_not_granted" });
+      await expect(client.listRuntimeAgents()).rejects.toMatchObject({ code: "capability_not_granted" });
+      await expect(client.createPty({ cols: 80, rows: 24, sessionId: "s1" })).rejects.toMatchObject({ code: "capability_not_granted" });
+      expect(runtime.sent.map((frame) => frame.method)).toEqual([]);
+      // What session/1 had still works.
+      expect((await client.listSessions()).map((entry) => entry.id)).toEqual(["s1"]);
+      await client.createPty({ cols: 80, rows: 24 });
+      expect((runtime.sent.at(-1)!.params as Record<string, unknown>).sessionId).toBeUndefined();
+      client.close();
+    });
+
+    it("updates, adds tabs to and deletes sessions once each, and hands on the session list", async () => {
+      const runtime = new FakeRuntime();
+      const client = new WorkspaceRpcClient(runtime, ids);
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      const lists: string[][] = [];
+      client.onSessions((sessions) => lists.push(sessions.map((entry) => entry.title)));
+
+      runtime.loseAnswers = true;
+      const updating = client.updateSession("s1", { title: "Fix the login", pinned: true, archived: undefined });
+      await settle();
+      runtime.drop();
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      const updated = await updating;
+      expect(updated).toMatchObject({ title: "Fix the login", pinned: true, archived: false });
+      const sends = runtime.sent.filter((frame) => frame.method === "session.update");
+      expect(sends).toHaveLength(2);
+      expect((sends[0]!.params as Record<string, unknown>).clientRequestId).toBe((sends[1]!.params as Record<string, unknown>).clientRequestId);
+      expect("archived" in (sends[0]!.params as Record<string, unknown>)).toBe(false);
+      expect(runtime.updates).toBe(1);
+
+      expect(await client.addSessionTab("s1", { agent: "codex", model: "", effort: null, mode: "plan" })).toMatchObject({ tabId: "t2" });
+      const add = runtime.sent.find((frame) => frame.method === "session.addTab")!.params as Record<string, unknown>;
+      expect(add).toMatchObject({ sessionId: "s1", agent: "codex", mode: "plan" });
+      expect("model" in add || "effort" in add).toBe(false);
+
+      expect(await client.deleteSession("s1", { removeWorktree: true })).toEqual({ sessionId: "s1", deleted: ["s1"] });
+      expect(runtime.sent.find((frame) => frame.method === "session.delete")!.params).toMatchObject({ sessionId: "s1", removeWorktree: true });
+
+      runtime.deliver({ event: "session.sessions", params: { sessions: [session("s2", "Other")] } });
+      expect(lists).toEqual([["Other"]]);
+      client.close();
+    });
+
+    it("lists runtime agents and the session a terminal was opened for", async () => {
+      const runtime = new FakeRuntime();
+      const client = new WorkspaceRpcClient(runtime, ids);
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      const [agent] = await client.listRuntimeAgents();
+      expect(agent).toMatchObject({ id: "claude", defaultMode: "bypassPermissions" });
+      expect(agent!.models[0]).toMatchObject({ id: "opus", efforts: ["high"] });
+      await client.createPty({ cols: 80, rows: 24, sessionId: "s1" });
+      expect(runtime.sent.find((frame) => frame.method === "pty.create")!.params).toMatchObject({ sessionId: "s1" });
+      const listed = await client.listPtys();
+      expect(listed.terminals.map((terminal) => terminal.sessionId)).toEqual(["s1", undefined]);
+      client.close();
+    });
   });
 });
