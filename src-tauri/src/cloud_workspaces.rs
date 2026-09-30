@@ -2803,14 +2803,14 @@ mod tests {
         let body = r#"{"error":"cloud_workspace_concurrency_exceeded"}"#;
         let (base, _, request) = serve_once(response("409 Conflict", body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let error = service.create(launch_input(vec![repo("app", None)], None)).unwrap_err();
+        let error = service.create(None, launch_input(vec![repo("app", None)], None)).unwrap_err();
         request.join().unwrap();
         assert_eq!((error.code.as_str(), error.status), ("cloud_workspace_concurrency_exceeded", Some(409)));
         assert!(!error.retry_with_same_idempotency_key, "a refusal at the running limit is not outcome unknown");
 
         let (base, _, request) = serve_once(response("409 Conflict", body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let error = service.lifecycle("workspace-1", OperationAction::Resume).unwrap_err();
+        let error = service.lifecycle(None, "workspace-1", OperationAction::Resume).unwrap_err();
         request.join().unwrap();
         assert_eq!((error.code.as_str(), error.status), ("cloud_workspace_concurrency_exceeded", Some(409)));
         assert!(!error.requires_original_account_context);
