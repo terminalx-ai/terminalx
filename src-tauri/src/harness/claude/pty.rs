@@ -116,12 +116,104 @@ pub fn launch_command(opts: LaunchOptions<'_>) -> Option<String> {
     if let Some(e) = opts.effort.filter(|e| !e.is_empty()) {
         c.push_str(&format!(" --effort {}", quote(e)));
     }
-    c.push_str(&format!(" --permission-mode {}", super::normalize_mode(opts.permission_mode)));
+    let mode = super::normalize_mode(opts.permission_mode);
+    c.push_str(&format!(" --permission-mode {mode}"));
     if let Some(t) = opts.title.filter(|t| !t.is_empty()) {
         c.push_str(&format!(" --name {}", quote(t)));
     }
-    c.push_str(&format!(" --settings {}", quote(&opts.settings.to_string())));
+    // Bypass mode otherwise opens on the CLI's own "Yes, I accept" disclaimer,
+    // which nobody watching the chat can see. The reader accepted the same
+    // warning in the app's bypass dialog before this mode could be chosen, so
+    // this launch says so — per launch, never in the reader's own settings.
+    let mut settings = opts.settings.clone();
+    if mode == "bypassPermissions" {
+        if let Some(obj) = settings.as_object_mut() {
+            obj.insert("skipDangerousModePermissionPrompt".into(), json!(true));
+        }
+    }
+    c.push_str(&format!(" --settings {}", quote(&settings.to_string())));
     Some(c)
+}
+
+/// The full-screen questions the CLI can open on before its composer, each
+/// with what the reader should be told. The CLI draws with cursor moves rather
+/// than spaces, so both sides are compared with all whitespace removed.
+const BLOCKING_SCREENS: &[(&str, &str)] = &[
+    (
+        "Choose the text style that looks best with your terminal",
+        "Claude Code is showing its first-run setup (theme picker) instead of taking the prompt. Open the terminal view to finish it, then send again.",
+    ),
+    (
+        "Detected a custom API key in your environment",
+        "Claude Code is asking whether to use the ANTHROPIC_API_KEY in its environment. Open the terminal view to answer, then send again.",
+    ),
+    (
+        "Is this a project you created or one you trust",
+        "Claude Code is asking whether to trust this folder. Open the terminal view to answer, then send again.",
+    ),
+    (
+        "you accept all responsibility for actions taken while running in Bypass Permissions mode",
+        "Claude Code is asking to confirm Bypass Permissions mode. Open the terminal view to answer, then send again.",
+    ),
+    (
+        "Select login method",
+        "Claude Code is not signed in on this machine. Open the terminal view to sign in, then send again.",
+    ),
+];
+
+/// How much of the newest output to look at: a dialog is the last thing drawn.
+const SCREEN_TAIL_BYTES: usize = 64 * 1024;
+
+/// Printable text of terminal output: escape sequences (CSI, OSC, and
+/// two-byte escapes) and all whitespace dropped.
+fn screen_text(output: &[u8]) -> String {
+    let tail = &output[output.len().saturating_sub(SCREEN_TAIL_BYTES)..];
+    let text = String::from_utf8_lossy(tail);
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            if !c.is_whitespace() && !c.is_control() {
+                out.push(c);
+            }
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                // Parameters and intermediates, then one final byte.
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') | Some('P') | Some('_') | Some('^') => {
+                // A string, ended by BEL or ST (ESC \).
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The message for a first-run screen the CLI is sitting on, if the newest
+/// output shows one. Only meaningful before the CLI has said it is ready:
+/// once a dialog is answered its text stays in the scrollback.
+pub fn blocking_screen(output: &[u8]) -> Option<&'static str> {
+    let text = screen_text(output);
+    BLOCKING_SCREENS.iter().find_map(|(needle, message)| {
+        let needle: String = needle.chars().filter(|c| !c.is_whitespace()).collect();
+        text.contains(&needle).then_some(*message)
+    })
 }
 
 /// The reply a `PermissionRequest` hook prints. Its shape differs from
@@ -231,6 +323,60 @@ mod tests {
         })
         .unwrap();
         assert!(forked.contains("--resume 'parent' --fork-session --session-id 'new'"));
+    }
+
+    #[test]
+    fn bypass_mode_carries_its_acceptance_in_the_launch_settings_only() {
+        if crate::binpath::resolve("claude").is_none() {
+            return;
+        }
+        let settings = json!({"hooks": {}});
+        let launch = |mode| {
+            launch_command(LaunchOptions {
+                provider_session_id: "s",
+                resume: false,
+                fork_from: None,
+                model: "",
+                effort: None,
+                permission_mode: mode,
+                title: None,
+                settings: &settings,
+            })
+            .unwrap()
+        };
+        assert!(launch("bypass").contains(r#""skipDangerousModePermissionPrompt":true"#));
+        for mode in ["ask", "acceptEdits", "plan", "auto"] {
+            assert!(!launch(mode).contains("skipDangerousModePermissionPrompt"), "{mode}");
+        }
+    }
+
+    /// The theme picker as the CLI draws it: words placed by cursor moves,
+    /// colours, and a hidden cursor, not a line of spaced text.
+    const THEME_PICKER: &[u8] = b"\x1b[?25l\x1b[2J\x1b[1;1HWelcome\x1b[1Cto\x1b[1CClaude\x1b[1CCode\r\n\x1b[1mLet's\x1b[1Cget\x1b[1Cstarted.\x1b[22m\r\n\x1b[1mChoose\x1b[1Cthe\x1b[1Ctext\x1b[1Cstyle\x1b[1Cthat\x1b[1Clooks\x1b[1Cbest\x1b[1Cwith\x1b[1Cyour\x1b[1Cterminal\x1b[22m\r\n\x1b]0;claude\x07\x1b[38;5;2m\xe2\x9d\xaf 2. Dark mode\x1b[39m";
+
+    #[test]
+    fn a_first_run_screen_is_recognised_through_the_terminal_escapes() {
+        let message = blocking_screen(THEME_PICKER).expect("the theme picker blocks the prompt");
+        assert!(message.contains("first-run setup"));
+
+        let api_key = b"\x1b[33mDetected a custom API key in your environment\x1b[39m\r\n\r\nANTHROPIC_API_KEY: sk-ant-...abcd\r\n\r\nDo you want to use this API key?";
+        assert!(blocking_screen(api_key).unwrap().contains("ANTHROPIC_API_KEY"));
+
+        let trust = b"Quick\x1b[1Csafety\x1b[1Ccheck:\x1b[1CIs\x1b[1Cthis\x1b[1Ca\x1b[1Cproject\x1b[1Cyou\x1b[1Ccreated\x1b[1Cor\x1b[1Cone\x1b[1Cyou\x1b[1Ctrust?";
+        assert!(blocking_screen(trust).unwrap().contains("trust this folder"));
+
+        let bypass = b"By proceeding, you accept all responsibility for actions taken while running\r\nin Bypass Permissions mode.\r\n\xe2\x9d\xaf No, exit\r\n  Yes, I accept";
+        assert!(blocking_screen(bypass).unwrap().contains("Bypass Permissions"));
+    }
+
+    #[test]
+    fn the_composer_is_not_a_blocking_screen() {
+        let composer = "\x1b[2m\u{2500}\u{2500}\u{2500}\x1b[22m\r\n\u{276f} \x1b[7m \x1b[27m\r\n\u{23f8} manual mode on \u{b7} ? for shortcuts";
+        assert_eq!(blocking_screen(composer.as_bytes()), None);
+        assert_eq!(blocking_screen(b""), None);
+        // Half an escape at the end of a read is not a panic.
+        assert_eq!(blocking_screen(b"\x1b[38;5"), None);
+        assert_eq!(blocking_screen(b"\x1b]0;title"), None);
     }
 
     /// Changing the permission mode restarts the CLI as a fork, because the
