@@ -22,7 +22,8 @@ import {
   updateProject,
   useSessionStore,
 } from "@/lib/sessions";
-import { bucketSessions, COLUMNS, type Buckets } from "@/lib/dashboard";
+import { bucketSessions, COLUMNS, type ColumnId } from "@/lib/dashboard";
+import { useCloudDashboard } from "@/lib/cloudDashboard";
 import type { Project } from "@/types/session";
 import { MASCOTS, PROJECT_COLORS, PixelMascot, colorCss } from "./PixelMascot";
 import { TITLEBAR_INSET } from "./AppShell";
@@ -30,6 +31,10 @@ import { useAutomationStore } from "@/lib/automations";
 import { AccountSidebarEntry } from "@/components/account/AccountSidebarEntry";
 import { ProjectNavigation } from "./SidebarTree";
 import { navigateTree } from "./treeKeyboard";
+import { refreshAccount } from "@/lib/account";
+import { refreshCloudCatalog } from "@/lib/cloudCatalog";
+import { TreeToggle } from "./SidebarRows";
+import { CloudSections, useCloudSections, useSectionCollapsed } from "./cloud/CloudSections";
 
 /**
  * The unified sidebar: global destinations followed by an expandable project
@@ -44,6 +49,7 @@ export function ProjectRail({
   onOpenAutomations,
   onOpenSkills,
   onSearch,
+  onOpenCloudPage,
 }: {
   onOpenSettings: () => void;
   onOpenAccount: () => void;
@@ -53,8 +59,16 @@ export function ProjectRail({
   onOpenAutomations: () => void;
   onOpenSkills: () => void;
   onSearch: () => void;
+  onOpenCloudPage?: () => void;
 }) {
   const store = useSessionStore();
+  // A destination looks active only while it is what the main slot shows: no session and no cloud workspace selected.
+  const onNavView = !store.selectedSessionId && !store.selectedCloudWorkspace;
+  // Section headers appear only when an organization section exists; otherwise the sidebar is as it was.
+  const cloud = useCloudSections();
+  const sectioned = cloud.orgs.length > 0;
+  const [localCollapsedPref, toggleLocal] = useSectionCollapsed("local");
+  const localCollapsed = sectioned && localCollapsedPref;
   const automationStore = useAutomationStore();
   const [error, setError] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
@@ -65,7 +79,9 @@ export function ProjectRail({
     .filter((p) => !!p.archived === showArchived || store.sessions.some((s) => s.id === store.selectedSessionId && s.projectPath === p.path))
     .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || a.name.localeCompare(b.name));
   const archivedCount = store.projects.filter((p) => p.archived).length;
-  const dashboardBuckets = useMemo(() => bucketSessions(store.sessions), [store.sessions]);
+  // The dashboard's totals count cloud sessions too (PRO-23 CS-19), like the dashboard itself.
+  const cloudSessions = useCloudDashboard();
+  const dashboardBuckets = useMemo(() => (cloudSessions.length ? bucketSessions([...store.sessions, ...cloudSessions]) : bucketSessions(store.sessions)), [store.sessions, cloudSessions]);
   const automationRunning = automationStore.automations.some((automation) => automation.lastOutcome === "pending" || automation.lastOutcome === "running");
   const automationFailures = automationStore.automations.filter((automation) => automation.lastOutcome === "failed").length;
   const selectedSession = store.sessions.find((session) => session.id === store.selectedSessionId) ?? null;
@@ -102,16 +118,76 @@ export function ProjectRail({
   const refreshAll = async () => {
     setSpinning(true);
     try {
-      await refreshEverything();
+      // The account too: a silent token refresh may have brought organizations or capabilities.
+      await Promise.all([refreshEverything(), refreshAccount().then(() => refreshCloudCatalog())]);
     } finally {
       setSpinning(false);
     }
   };
 
+  const headerActions = (
+    <div className="flex items-center">
+      <WithTooltip label={store.showArchived ? "Show active sessions" : "Show archived sessions"}>
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          aria-label={store.showArchived ? "Show active sessions" : "Show archived sessions"}
+          aria-pressed={store.showArchived}
+          className={store.showArchived ? "bg-veil-strong text-foreground" : undefined}
+          onClick={() => setSessionsArchived(!store.showArchived)}
+        >
+          <Archive />
+        </Button>
+      </WithTooltip>
+      <WithTooltip label="Refresh every project">
+        <Button variant="ghost" size="icon-xs" aria-label="Refresh all" onClick={() => void refreshAll()}>
+          <RefreshCw className={cn(spinning && "animate-spin")} />
+        </Button>
+      </WithTooltip>
+      <WithTooltip label="Add project">
+        <Button variant="ghost" size="icon-xs" aria-label="Add project" onClick={() => void pickProject()}>
+          <FolderPlus />
+        </Button>
+      </WithTooltip>
+    </div>
+  );
+
+  const localRows = (
+    <>
+      {!localCollapsed && projects.length === 0 && (
+        <div className="px-2 py-6 text-center text-xs text-muted-foreground">
+          {showArchived ? "Nothing archived." : "Add a project to start."}
+        </div>
+      )}
+      {!localCollapsed && projects.map((project) => {
+        const expanded = expandedProjects.has(project.path);
+        return (
+          <ProjectRow
+            key={project.path}
+            project={project}
+            selected={store.selectedProject === project.path}
+            active={selectedSession?.projectPath === project.path}
+            expanded={expanded}
+            onToggle={() =>
+              setExpandedProjects((current) => {
+                const next = new Set(current);
+                if (next.has(project.path)) next.delete(project.path);
+                else next.add(project.path);
+                return next;
+              })
+            }
+          >
+            <ProjectNavigation project={project} expanded={expanded} />
+          </ProjectRow>
+        );
+      })}
+    </>
+  );
+
   return (
-    <div className="flex h-full w-full shrink-0 flex-col border-r border-hairline">
+    <div className="flex h-full min-h-0 w-full shrink-0 flex-col overflow-hidden border-r border-hairline" data-testid="sidebar-rail">
       <div data-tauri-drag-region="deep" className="h-(--titlebar-h) shrink-0" style={{ paddingLeft: TITLEBAR_INSET }} />
-      <div className="flex flex-col gap-0.5 px-2">
+      <div className="flex shrink-0 flex-col gap-0.5 px-2">
         <Button variant="ghost" className="justify-start gap-2 px-2" onClick={onSearch}>
           <Search />
           Search
@@ -119,7 +195,7 @@ export function ProjectRail({
         </Button>
         <Button
           variant="ghost"
-          className={cn("justify-start gap-2 px-2", store.view === "issues" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+          className={cn("justify-start gap-2 px-2", store.view === "issues" && onNavView ? "bg-selected text-foreground" : "")}
           onClick={onOpenIssues}
         >
           <CircleDot />
@@ -129,7 +205,7 @@ export function ProjectRail({
         <WithTooltip label="Agent dashboard" keys={keycaps("mod+shift+a")}>
           <Button
             variant="ghost"
-            className={cn("min-w-0 justify-start gap-2 px-2", store.view === "agents" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+            className={cn("min-w-0 justify-start gap-2 px-2", store.view === "agents" && onNavView ? "bg-selected text-foreground" : "")}
             onClick={onOpenAgents}
           >
             <LayoutGrid />
@@ -140,7 +216,7 @@ export function ProjectRail({
         <WithTooltip label="Stats & Usage" keys={keycaps("mod+shift+u")}>
           <Button
             variant="ghost"
-            className={cn("justify-start gap-2 px-2", store.view === "stats" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+            className={cn("justify-start gap-2 px-2", store.view === "stats" && onNavView ? "bg-selected text-foreground" : "")}
             onClick={onOpenStats}
           >
             <BarChart3 />
@@ -150,7 +226,7 @@ export function ProjectRail({
         <WithTooltip label="Automations" keys={keycaps("mod+shift+r")}>
           <Button
             variant="ghost"
-            className={cn("justify-start gap-2 px-2", store.view === "automations" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+            className={cn("justify-start gap-2 px-2", store.view === "automations" && onNavView ? "bg-selected text-foreground" : "")}
             onClick={onOpenAutomations}
           >
             <CalendarClock />
@@ -166,7 +242,7 @@ export function ProjectRail({
         <WithTooltip label="Skills" keys={keycaps("mod+shift+k")}>
           <Button
             variant="ghost"
-            className={cn("justify-start gap-2 px-2", store.view === "skills" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+            className={cn("justify-start gap-2 px-2", store.view === "skills" && onNavView ? "bg-selected text-foreground" : "")}
             onClick={onOpenSkills}
           >
             <Sparkles />
@@ -176,73 +252,54 @@ export function ProjectRail({
         </WithTooltip>
       </div>
 
-      <div className="mt-3 flex items-center justify-between pl-4 pr-2">
-        <button
-          type="button"
-          onClick={() => setShowArchived((v) => !v)}
-          className="text-[11px] font-medium uppercase tracking-wide text-faint hover:text-muted-foreground"
-          title={archivedCount ? `${archivedCount} archived` : undefined}
-        >
-          {showArchived ? "Archived" : "Projects"}
-        </button>
-        <div className="flex items-center">
-          <WithTooltip label={store.showArchived ? "Show active sessions" : "Show archived sessions"}>
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              aria-label={store.showArchived ? "Show active sessions" : "Show archived sessions"}
-              aria-pressed={store.showArchived}
-              className={store.showArchived ? "bg-veil-strong text-foreground" : undefined}
-              onClick={() => setSessionsArchived(!store.showArchived)}
-            >
-              <Archive />
-            </Button>
-          </WithTooltip>
-          <WithTooltip label="Refresh every project">
-            <Button variant="ghost" size="icon-xs" aria-label="Refresh all" onClick={() => void refreshAll()}>
-              <RefreshCw className={cn(spinning && "animate-spin")} />
-            </Button>
-          </WithTooltip>
-          <WithTooltip label="Add project">
-            <Button variant="ghost" size="icon-xs" aria-label="Add project" onClick={() => void pickProject()}>
-              <FolderPlus />
-            </Button>
-          </WithTooltip>
+      {!sectioned && (
+        <div className="mt-3 flex shrink-0 items-center justify-between pl-4 pr-2">
+          <button
+            type="button"
+            onClick={() => setShowArchived((v) => !v)}
+            className="text-[11px] font-medium uppercase tracking-wide text-faint hover:text-muted-foreground"
+            title={archivedCount ? `${archivedCount} archived` : undefined}
+          >
+            {showArchived ? "Archived" : "Projects"}
+          </button>
+          {headerActions}
         </div>
-      </div>
-      {error && <div className="mx-2 mt-1 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
+      )}
+      {error && <div className="mx-2 mt-1 shrink-0 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
 
-      <div className="mt-1 min-h-0 flex-1 overflow-y-auto scrollbar-thin px-2" role="tree" aria-label="Projects, workspaces, sessions, and tabs" onKeyDown={navigateTree}>
-        {projects.length === 0 && (
-          <div className="px-2 py-6 text-center text-xs text-muted-foreground">
-            {showArchived ? "Nothing archived." : "Add a project to start."}
+      {/*
+        The one scroll container between the fixed top and the fixed footer: Local and every
+        organization section. `basis-0` (not a 0% basis) so WebKit sizes it from the rail, not
+        from its content, in a short window.
+      */}
+      <div className="mt-1 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin px-2" role="tree" data-testid="sidebar-tree" aria-label="Projects, workspaces, sessions, and tabs" onKeyDown={navigateTree}>
+        {sectioned ? (
+          // With organization sections, Local is a section of the tree like them (PRO-23 CS-19):
+          // its header is a node the arrow keys reach, and its projects sit under it.
+          <div role="treeitem" aria-label="Local section" aria-expanded={!localCollapsed} className="min-w-0" data-testid="local-section">
+            <div data-tree-row className="mt-2 flex h-7 min-w-0 items-center justify-between">
+              <span className="flex min-w-0 items-center gap-1" data-testid="local-section-header">
+                <TreeToggle expanded={!localCollapsed} label="Local" onToggle={toggleLocal} />
+                <button
+                  type="button"
+                  onClick={() => setShowArchived((v) => !v)}
+                  className="truncate rounded-sm text-[11px] font-medium uppercase tracking-wide text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+                  title={archivedCount ? `Projects on this computer · ${archivedCount} archived` : "Projects on this computer"}
+                >
+                  {showArchived ? "Local · Archived" : "Local"}
+                </button>
+              </span>
+              {headerActions}
+            </div>
+            {!localCollapsed && <div role="group">{localRows}</div>}
           </div>
+        ) : (
+          localRows
         )}
-        {projects.map((project) => {
-          const expanded = expandedProjects.has(project.path);
-          return (
-            <ProjectRow
-              key={project.path}
-              project={project}
-              selected={store.selectedProject === project.path}
-              active={selectedSession?.projectPath === project.path}
-              expanded={expanded}
-              onToggle={() =>
-                setExpandedProjects((current) => {
-                  const next = new Set(current);
-                  if (next.has(project.path)) next.delete(project.path);
-                  else next.add(project.path);
-                  return next;
-                })
-              }
-            >
-              <ProjectNavigation project={project} expanded={expanded} />
-            </ProjectRow>
-          );
-        })}
+        {sectioned && <CloudSections onOpenCloudPage={onOpenCloudPage} onOpenAccount={onOpenAccount} />}
       </div>
 
-      <div className="border-t border-hairline p-2">
+      <div className="shrink-0 border-t border-hairline p-2">
         <AccountSidebarEntry onOpenAccount={onOpenAccount} />
         <Button variant="ghost" className="w-full justify-start gap-2 px-2" onClick={onOpenSettings}>
           <Settings />
@@ -255,7 +312,7 @@ export function ProjectRail({
 }
 
 /** Full column totals, including zero counts and read Done sessions. */
-function DashboardTotals({ buckets }: { buckets: Buckets }) {
+function DashboardTotals({ buckets }: { buckets: Record<ColumnId, readonly unknown[]> }) {
   return (
     <span className="ml-auto flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums">
       {COLUMNS.map(({ id, label }) => {

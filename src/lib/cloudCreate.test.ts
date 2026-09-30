@@ -104,7 +104,7 @@ describe("createWorkspace", () => {
     expect(api.cloudWorkspacePreflight).toHaveBeenCalledWith([
       { cloneUrl: "https://github.com/acme/app.git", ref: "main" },
       { cloneUrl: "https://github.com/acme/lib.git", ref: null },
-    ]);
+    ], null);
     expect(api.cloudWorkspaceCreate).toHaveBeenCalledWith({
       name: "Fix login",
       quoteId: "quote-1",
@@ -116,7 +116,7 @@ describe("createWorkspace", () => {
         { cloneUrl: "https://github.com/acme/lib.git", ref: null },
       ],
       launch: { agent: "claude", model: "sonnet", effort: "high", mode: "acceptEdits", prompt: "Fix the login" },
-    });
+    }, null);
     // Kept while in flight, dropped once the server answered.
     expect(kept.at(0)?.idempotencyKey).toBe("key-1");
     expect(kept.at(-1)).toBeNull();

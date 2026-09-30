@@ -54,6 +54,12 @@ const MAX_WRITERS: usize = 64;
 /// Methods a `participate` attachment could not call before PRO-30. With no
 /// member list from the API (an older API) they stay closed to it.
 const SHARED_ONLY: &[&str] = &["keys.get", "pty.write", "pty.resize", "pty.control"];
+/// Longest session title `session.update` accepts, in characters.
+const MAX_TITLE_CHARS: usize = 200;
+/// Launch modes a tab may be given (`src/lib/models.ts` `PERMISSION_MODES`).
+const PERMISSION_MODES: [&str; 5] = ["plan", "manual", "auto", "acceptEdits", "bypassPermissions"];
+/// Sink events after which the session list is sent again (`session/2`).
+const SESSION_EVENTS: [&str; 3] = ["session_created", "session_updated", crate::session_ops::SESSION_DELETED_EVENT];
 
 /// One attached client connection.
 pub struct Peer {
@@ -136,6 +142,10 @@ impl Peer {
         self.notify_sized(event, params, 0);
     }
 
+    fn granted(&self, capability: &str) -> bool {
+        self.granted.lock().unwrap().as_ref().is_some_and(|granted| granted.contains(capability))
+    }
+
     fn notify_sized(&self, event: &str, params: Value, size: usize) {
         self.queued.fetch_add(size, Ordering::SeqCst);
         if self.outbound.send((json!({ "event": event, "params": params }), size)).is_err() {
@@ -150,6 +160,8 @@ struct PtyState {
     /// Issued in creation order; clients name tabs "Terminal <number>".
     number: u64,
     cwd: String,
+    /// The session the terminal was opened for (`pty/2`), if any.
+    session_id: Option<String>,
     created_at_ms: u64,
     pid: Option<u32>,
     cols: u16,
@@ -249,6 +261,12 @@ pub struct WorkspaceRpc {
     /// Connections that said hello, for workspace-wide notifications.
     peers: Mutex<HashMap<u64, Weak<Peer>>>,
     tabs_changed: Arc<tokio::sync::Notify>,
+    /// Raised when a session is created, updated or deleted; the list goes
+    /// out as `session.sessions` to `session/2` connections.
+    sessions_changed: Arc<tokio::sync::Notify>,
+    /// Stands in for `harness::offered` in tests, which cannot install agents.
+    #[cfg(test)]
+    offered_for_tests: Mutex<Option<Vec<crate::harness::HarnessInfo>>>,
 }
 
 impl WorkspaceRpc {
@@ -282,6 +300,9 @@ impl WorkspaceRpc {
             agents: OnceLock::new(),
             peers: Mutex::new(HashMap::new()),
             tabs_changed: Arc::new(tokio::sync::Notify::new()),
+            sessions_changed: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            offered_for_tests: Mutex::new(None),
         });
         // Listeners run inline on the emitting thread, so no output is lost
         // to a lagging broadcast and offsets stay exact.
@@ -338,6 +359,38 @@ impl WorkspaceRpc {
                 }
             }),
         );
+        for event in SESSION_EVENTS {
+            let weak = Arc::downgrade(&rpc);
+            let updated = event == "session_updated";
+            sink.listen(
+                event,
+                Box::new(move |payload| {
+                    let Some(rpc) = weak.upgrade() else { return };
+                    // A new title or branch is in every checkpoint of the session.
+                    if let (true, Some(agents), Ok(session)) =
+                        (updated, rpc.agents.get(), serde_json::from_str::<SessionEntry>(payload))
+                    {
+                        for tab in &session.tabs {
+                            agents.checkpoints.mark(&tab.id, false);
+                        }
+                    }
+                    rpc.sessions_changed.notify_one();
+                }),
+            );
+        }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let weak = Arc::downgrade(&rpc);
+            let notify = rpc.sessions_changed.clone();
+            runtime.spawn(async move {
+                loop {
+                    notify.notified().await;
+                    // Coalesce a burst (a worktree delete removes several).
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    let Some(rpc) = weak.upgrade() else { return };
+                    let _ = tokio::task::spawn_blocking(move || rpc.broadcast_sessions()).await;
+                }
+            });
+        }
         Ok(rpc)
     }
 
@@ -383,6 +436,27 @@ impl WorkspaceRpc {
             if peer.granted.lock().unwrap().as_ref().is_some_and(|granted| granted.contains(capability)) {
                 peer.notify(event, params.clone());
             }
+        }
+    }
+
+    /// `session.sessions`: every `session/2` connection gets the sessions it
+    /// may see, by the same rule as `session.list`.
+    fn broadcast_sessions(&self) {
+        let peers: Vec<Arc<Peer>> = self.live_peers().into_iter().filter(|peer| peer.granted("session/2")).collect();
+        if peers.is_empty() {
+            return;
+        }
+        let sessions = match self.workspace_sessions() {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                log::warn!("session list for session.sessions: {}", error.message);
+                return;
+            }
+        };
+        for peer in peers {
+            // Workspace-wide, as `visible_sessions`.
+            let visible: Vec<&SessionEntry> = if self.access(&peer).can_view() { sessions.iter().collect() } else { Vec::new() };
+            peer.notify("session.sessions", json!({ "sessions": visible }));
         }
     }
 
@@ -646,7 +720,7 @@ impl WorkspaceRpc {
         result
     }
 
-    /// What a participant's role allows (contract §20.1). Before the API
+    /// What a participant's role allows (contract §21.1). Before the API
     /// has listed members, participants keep exactly what they had before
     /// sharing existed.
     fn authorize_participant(&self, peer: &Peer, spec: &protocol::Method) -> Result<(), RpcError> {
@@ -716,6 +790,10 @@ impl WorkspaceRpc {
             "session.tabs" => self.session_tabs(peer),
             "session.configure" => self.session_configure(peer, params),
             "session.markRead" => self.session_mark_read(peer, params),
+            "session.update" => self.session_update(peer, params),
+            "session.addTab" => self.session_add_tab(peer, params),
+            "session.delete" => self.session_delete(peer, params),
+            "runtime.agents" => self.runtime_agents(),
             "session.nudge" => {
                 self.agents()?.poll.raise();
                 Ok(json!({}))
@@ -724,7 +802,7 @@ impl WorkspaceRpc {
                 let agents = self.agents()?;
                 let handout = agents.keys.handout(crate::cloud_agents::now_ms());
                 // Who holds the current key, durably: a person removed while
-                // the runtime was down still triggers a rotation (§20.5).
+                // the runtime was down still triggers a rotation (§21.5).
                 if let Some(user) = peer.user_id.as_deref() {
                     agents.note_key_holder(user);
                 }
@@ -896,9 +974,20 @@ impl WorkspaceRpc {
 
     // ---- terminals -------------------------------------------------------
 
-    /// What a client needs to show and resume one terminal.
-    fn describe_pty(&self, pty_id: &str, pty: &PtyState, peer: &Peer) -> Value {
-        json!({
+    /// The sessions whose terminals `peer` may see tied to them: `None`
+    /// without `pty/2`, otherwise its `visible_sessions`. Read before the
+    /// terminals are locked.
+    fn pty_session_scope(&self, peer: &Peer) -> Option<HashSet<String>> {
+        if !peer.granted("pty/2") {
+            return None;
+        }
+        Some(self.visible_sessions(peer).map(|sessions| sessions.into_iter().map(|session| session.id).collect()).unwrap_or_default())
+    }
+
+    /// What a client needs to show and resume one terminal. `scope` is
+    /// [`Self::pty_session_scope`] for `peer`.
+    fn describe_pty(&self, pty_id: &str, pty: &PtyState, peer: &Peer, scope: Option<&HashSet<String>>) -> Value {
+        let mut described = json!({
             "ptyId": pty_id,
             "number": pty.number,
             "epoch": self.epoch,
@@ -912,7 +1001,13 @@ impl WorkspaceRpc {
             "exitCode": pty.exit.flatten(),
             "control": pty.control_for(peer),
             "controllerId": pty.controller_user.as_ref().and_then(|(user, _)| user.clone()),
-        })
+        });
+        // `pty/2`, and only a session this peer may see; absent for a
+        // terminal that belongs to no session.
+        if let Some(session_id) = pty.session_id.as_ref().filter(|id| scope.is_some_and(|visible| visible.contains(*id))) {
+            described["sessionId"] = json!(session_id);
+        }
+        described
     }
 
     fn pty_create(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
@@ -925,6 +1020,8 @@ impl WorkspaceRpc {
             rows: u16,
             #[serde(default)]
             cwd: Option<String>,
+            #[serde(default)]
+            session_id: Option<String>,
             #[allow(dead_code)]
             client_request_id: String,
         }
@@ -932,9 +1029,20 @@ impl WorkspaceRpc {
         if p.cols == 0 || p.rows == 0 || p.cols > 1000 || p.rows > 1000 {
             return Err(RpcError::invalid("cols and rows must be between 1 and 1000"));
         }
-        let cwd = match &p.cwd {
-            Some(relative) => self.existing_path(relative)?,
-            None => self.root.clone(),
+        let session = match &p.session_id {
+            Some(_) if !peer.granted("pty/2") => return Err(RpcError::invalid("sessionId needs pty/2")),
+            Some(session_id) => Some(self.visible_session(peer, session_id)?),
+            None => None,
+        };
+        let cwd = match (&p.cwd, &session) {
+            (Some(relative), _) => self.existing_path(relative)?,
+            // A session's terminal opens in its checkout (its worktree), when
+            // that is inside the workspace; otherwise at the root.
+            (None, Some(session)) => std::fs::canonicalize(&session.cwd)
+                .ok()
+                .filter(|cwd| cwd.starts_with(&self.root) && cwd.is_dir())
+                .unwrap_or_else(|| self.root.clone()),
+            (None, None) => self.root.clone(),
         };
         if !cwd.is_dir() {
             return Err(RpcError::invalid("cwd is not a directory"));
@@ -952,6 +1060,7 @@ impl WorkspaceRpc {
                 PtyState {
                     number: self.next_pty_number.fetch_add(1, Ordering::SeqCst),
                     cwd: self.relative(&cwd),
+                    session_id: session.map(|session| session.id),
                     created_at_ms: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|elapsed| elapsed.as_millis() as u64)
@@ -973,6 +1082,7 @@ impl WorkspaceRpc {
                 },
             );
         }
+        let scope = self.pty_session_scope(peer);
         let cwd = cwd.to_string_lossy().into_owned();
         let spec = PaneSpec { cwd: &cwd, cols: p.cols, rows: p.rows, command: None, env: &[] };
         if let Err(error) = self.terminals.spawn(self.sink.clone(), &pty_id, spec) {
@@ -1000,14 +1110,18 @@ impl WorkspaceRpc {
         let mut ptys = self.ptys.lock().unwrap();
         let pty = ptys.get_mut(&pty_id).ok_or_else(|| RpcError::internal("the terminal exited while starting"))?;
         pty.pid = self.terminals.pid(&pty_id);
-        Ok(self.describe_pty(&pty_id, pty, peer))
+        Ok(self.describe_pty(&pty_id, pty, peer, scope.as_ref()))
     }
 
     /// Terminals of this runtime, oldest first; closed ones are gone.
     fn pty_list(&self, peer: &Peer) -> Result<Value, RpcError> {
+        let scope = self.pty_session_scope(peer);
         let ptys = self.ptys.lock().unwrap();
-        let mut listed: Vec<(u64, Value)> =
-            ptys.iter().filter(|(_, pty)| !pty.closed).map(|(id, pty)| (pty.number, self.describe_pty(id, pty, peer))).collect();
+        let mut listed: Vec<(u64, Value)> = ptys
+            .iter()
+            .filter(|(_, pty)| !pty.closed)
+            .map(|(id, pty)| (pty.number, self.describe_pty(id, pty, peer, scope.as_ref())))
+            .collect();
         listed.sort_by_key(|(number, _)| *number);
         Ok(json!({
             "epoch": self.epoch,
@@ -1124,6 +1238,7 @@ impl WorkspaceRpc {
     /// Take over a terminal's input and size, optionally at this client's size.
     fn pty_control(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
         let size = Self::size_params(&params)?;
+        let scope = self.pty_session_scope(peer);
         let mut ptys = self.ptys.lock().unwrap();
         let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
         let changed = pty.controller.as_deref() != Some(peer.device_id.as_str());
@@ -1147,7 +1262,7 @@ impl WorkspaceRpc {
         if let (Some((cols, rows)), None) = (size, pty.exit) {
             self.apply_size(&pty_id, pty, cols, rows)?;
         }
-        Ok(self.describe_pty(&pty_id, pty, peer))
+        Ok(self.describe_pty(&pty_id, pty, peer, scope.as_ref()))
     }
 
     fn pty_kill(&self, params: Value) -> Result<Value, RpcError> {
@@ -1196,6 +1311,7 @@ impl WorkspaceRpc {
             }
         }
         let subscription_id = Self::subscription_id();
+        let scope = self.pty_session_scope(peer);
         let mut ptys = self.ptys.lock().unwrap();
         let pty_id = required_str(&params, "ptyId")?.to_string();
         let pty = ptys.get_mut(&pty_id).filter(|pty| !pty.closed).ok_or_else(|| RpcError::not_found("no such terminal"))?;
@@ -1217,7 +1333,7 @@ impl WorkspaceRpc {
             at += chunk.len() as u64;
         }
         pty.subscribers.insert(subscription_id.clone(), peer.clone());
-        let mut result = self.describe_pty(&pty_id, pty, peer);
+        let mut result = self.describe_pty(&pty_id, pty, peer, scope.as_ref());
         result["subscriptionId"] = json!(subscription_id);
         result["offset"] = json!(from);
         result["end"] = json!(from + first.len() as u64);
@@ -1378,14 +1494,20 @@ impl WorkspaceRpc {
         self.sessions.as_ref().ok_or_else(|| RpcError::new("unavailable", "agents are not running in this runtime"))
     }
 
-    fn visible_sessions(&self, peer: &Peer) -> Result<Vec<SessionEntry>, RpcError> {
+    /// Every session of this workspace, whoever asks.
+    fn workspace_sessions(&self) -> Result<Vec<SessionEntry>, RpcError> {
         let root = self.root.to_string_lossy();
-        // Sharing is workspace-wide: a person it is shared with sees every
-        // session, anyone else none.
+        Ok(index::load().map_err(RpcError::internal)?.into_iter().filter(|session| session.project_path == root).collect())
+    }
+
+    /// Sharing is workspace-wide (PRO-30): a person it is shared with sees
+    /// every session, anyone else none. `session.list`, `session.sessions`
+    /// and the terminals' `sessionId` all follow this rule.
+    fn visible_sessions(&self, peer: &Peer) -> Result<Vec<SessionEntry>, RpcError> {
         if !self.access(peer).can_view() {
             return Ok(Vec::new());
         }
-        Ok(index::load().map_err(RpcError::internal)?.into_iter().filter(|session| session.project_path == root).collect())
+        self.workspace_sessions()
     }
 
     fn visible_session(&self, peer: &Peer, session_id: &str) -> Result<SessionEntry, RpcError> {
@@ -1422,19 +1544,16 @@ impl WorkspaceRpc {
             #[serde(default)]
             title: Option<String>,
         }
-        let p: Params = parse(params)?;
+        let mut p: Params = parse(params)?;
+        // A blank mode is no mode: the tab takes the default launch mode.
+        p.mode = index::requested_mode(p.mode.take());
         let manager = self.manager()?;
-        if let Some(mode) = p.mode.as_deref() {
-            if !matches!(mode, "plan" | "manual" | "auto" | "acceptEdits" | "bypassPermissions") {
-                return Err(RpcError::invalid(format!("unknown permission mode {mode}")));
+        self.check_new_tab(&p.agent, p.mode.as_deref())?;
+        if p.use_worktree {
+            // A blank project made before its folder was set up with Git: set it up now, so a worktree can be cut.
+            if let Err(error) = crate::cloud_agents::launch::init_blank_repository(&self.root, "main") {
+                log::warn!("prepare the blank project folder: {error:#}");
             }
-        }
-        let agent = crate::harness::offered()
-            .into_iter()
-            .find(|harness| harness.id == p.agent)
-            .ok_or_else(|| RpcError::invalid(format!("agent {} is not offered", p.agent)))?;
-        if !agent.available {
-            return Err(RpcError::new("unavailable", format!("{} is not installed in this workspace", agent.name)));
         }
         let entry = crate::session_ops::create_session_blocking(
             &*self.sink,
@@ -1469,8 +1588,202 @@ impl WorkspaceRpc {
         Ok(json!({ "sessionId": entry.id, "tabId": tab.id, "session": entry, "outcome": outcome, "tab": info }))
     }
 
+    /// The agents a new tab may run: offered and installed here.
+    fn offered_agents(&self) -> Vec<crate::harness::HarnessInfo> {
+        #[cfg(test)]
+        if let Some(offered) = self.offered_for_tests.lock().unwrap().clone() {
+            return offered;
+        }
+        crate::harness::offered()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_offered_for_tests(&self, offered: Vec<crate::harness::HarnessInfo>) {
+        *self.offered_for_tests.lock().unwrap() = Some(offered);
+    }
+
+    /// Refuse a new tab whose agent is not installed or whose mode is unknown.
+    fn check_new_tab(&self, agent: &str, mode: Option<&str>) -> Result<(), RpcError> {
+        if let Some(mode) = mode {
+            if !PERMISSION_MODES.contains(&mode) {
+                return Err(RpcError::invalid(format!("unknown permission mode {mode}")));
+            }
+        }
+        let agent = self
+            .offered_agents()
+            .into_iter()
+            .find(|harness| harness.id == agent)
+            .ok_or_else(|| RpcError::invalid(format!("agent {agent} is not offered")))?;
+        if !agent.available {
+            return Err(RpcError::new("unavailable", format!("{} is not installed in this workspace", agent.name)));
+        }
+        Ok(())
+    }
+
+    /// `agents/1`: the installed agents, each with its models (and their
+    /// efforts) and the launch modes it takes. Paths on the VM stay here.
+    fn runtime_agents(&self) -> Result<Value, RpcError> {
+        let installed: Vec<crate::harness::HarnessInfo> = self.offered_agents().into_iter().filter(|agent| agent.available).collect();
+        // Codex's list depends on the signed-in account; ask only when it can run.
+        let codex = if installed.iter().any(|agent| agent.id == "codex") {
+            match &self.sessions {
+                Some(manager) => manager.codex_models().get(false),
+                None => crate::harness::codex::models::fallback(),
+            }
+        } else {
+            Vec::new()
+        };
+        let models = crate::models::offered(codex);
+        let agents: Vec<Value> = installed
+            .into_iter()
+            .map(|agent| {
+                let own: Vec<Value> = models
+                    .iter()
+                    .filter(|model| model.harness == agent.id)
+                    .map(|model| {
+                        json!({
+                            "id": model.id,
+                            "label": model.label,
+                            "efforts": model.efforts,
+                            "defaultEffort": model.default_effort,
+                            "acceptsImages": model.accepts_images,
+                            "isDefault": model.is_default,
+                            "upgrade": model.upgrade,
+                            "description": model.description,
+                        })
+                    })
+                    .collect();
+                let modes: &[&str] = if agent.caps.permission_modes { &PERMISSION_MODES } else { &[] };
+                json!({
+                    "id": agent.id,
+                    "name": agent.name,
+                    "caps": agent.caps,
+                    "models": own,
+                    "modes": modes,
+                    "defaultMode": index::DEFAULT_PERMISSION_MODE,
+                })
+            })
+            .collect();
+        Ok(json!({ "agents": agents }))
+    }
+
+    /// `session/2`: rename, pin or archive a session. Archiving only hides it.
+    fn session_update(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
+        let mut patch: crate::session_ops::SessionPatch = parse(params)?;
+        if let Some(title) = patch.title.take() {
+            let title = title.trim().to_string();
+            if title.is_empty() {
+                return Err(RpcError::invalid("title is empty"));
+            }
+            if title.chars().count() > MAX_TITLE_CHARS {
+                return Err(RpcError::invalid(format!("title is longer than {MAX_TITLE_CHARS} characters")));
+            }
+            patch.title = Some(title);
+        }
+        if patch.is_empty() {
+            return Err(RpcError::invalid("name a title, pinned or archived"));
+        }
+        let updated = crate::session_ops::update_session_meta(&session.id, &patch).map_err(RpcError::internal)?;
+        self.sink.emit("session_updated", &updated);
+        if let Some(agents) = self.agents.get() {
+            // Tab titles fall back to the session's.
+            agents.changed(None, false);
+        }
+        Ok(json!({ "session": updated }))
+    }
+
+    /// `session/2`: another agent tab in an existing session.
+    fn session_add_tab(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Params {
+            session_id: String,
+            agent: String,
+            #[serde(default)]
+            model: String,
+            #[serde(default)]
+            effort: Option<String>,
+            #[serde(default)]
+            mode: Option<String>,
+        }
+        let p: Params = parse(params)?;
+        let session = self.visible_session(peer, &p.session_id)?;
+        let mode = index::requested_mode(p.mode);
+        self.check_new_tab(&p.agent, mode.as_deref())?;
+        let tab = crate::session_ops::add_tab_entry(
+            &session.id,
+            &crate::session_ops::NewTab { harness: p.agent, model: p.model, effort: p.effort, permission_mode: mode },
+        )
+        .map_err(RpcError::internal)?;
+        let updated = index::get(&session.id).map_err(RpcError::internal)?;
+        self.sink.emit("session_updated", &updated);
+        let info = self.agents.get().and_then(|agents| {
+            agents.changed(Some(&tab.id), true);
+            agents.tab(&tab.id)
+        });
+        Ok(json!({ "sessionId": session.id, "tabId": tab.id, "session": updated, "tab": info }))
+    }
+
+    /// `session/2`: delete a session, its transcripts and, when asked, its
+    /// worktree (with every session that ran in it). Its agents are stopped
+    /// and its terminals closed first.
+    fn session_delete(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
+        let remove_worktree = params.get("removeWorktree").and_then(Value::as_bool).unwrap_or(false);
+        let stop = |doomed: &SessionEntry| {
+            let Some(manager) = &self.sessions else { return };
+            for tab in &doomed.tabs {
+                if manager.is_running(&doomed.id, &tab.id) {
+                    if let Err(error) = manager.stop(&doomed.id, &tab.id) {
+                        log::warn!("stop {}/{} before delete: {error:#}", doomed.id, tab.id);
+                    }
+                }
+            }
+        };
+        let removed = crate::session_ops::delete_session_blocking(&*self.sink, &session.id, remove_worktree, &stop)
+            .map_err(RpcError::internal)?;
+        let removed_ids: HashSet<String> = removed.iter().map(|session| session.id.clone()).collect();
+        if let Some(agents) = self.agents.get() {
+            for tab in removed.iter().flat_map(|session| &session.tabs) {
+                let _ = agents.follow_ups.clear(&tab.id);
+                agents.checkpoints.remove(&tab.id);
+            }
+            agents.changed(None, false);
+        }
+        self.close_session_ptys(&removed_ids);
+        let mut deleted: Vec<String> = removed_ids.into_iter().collect();
+        deleted.sort();
+        Ok(json!({ "sessionId": session.id, "deleted": deleted }))
+    }
+
+    /// Close the terminals opened for sessions that are gone.
+    fn close_session_ptys(&self, sessions: &HashSet<String>) {
+        let (killed, ended) = {
+            let mut ptys = self.ptys.lock().unwrap();
+            let doomed: Vec<(String, bool)> = ptys
+                .iter_mut()
+                .filter(|(_, pty)| !pty.closed && pty.session_id.as_ref().is_some_and(|id| sessions.contains(id)))
+                .map(|(id, pty)| {
+                    pty.closed = true;
+                    (id.clone(), pty.exit.is_some())
+                })
+                .collect();
+            let mut ended = Vec::new();
+            for (id, exited) in &doomed {
+                if *exited {
+                    ended.extend(Self::remove_pty(&mut ptys, id));
+                }
+            }
+            (doomed.into_iter().map(|(id, _)| id).collect::<Vec<_>>(), ended)
+        };
+        for id in killed {
+            self.terminals.kill(&id);
+        }
+        self.forget_subscriptions(ended);
+    }
+
     fn session_close(&self, params: Value) -> Result<Value, RpcError> {
-        let manager = self.manager()?;
         let session = index::load()
             .map_err(RpcError::internal)?
             .into_iter()
@@ -1479,9 +1792,12 @@ impl WorkspaceRpc {
             .ok_or_else(|| RpcError::not_found("no such session"))?;
         let only = params.get("tabId").and_then(Value::as_str);
         let closing: Vec<String> = session.tabs.iter().filter(|tab| only.is_none_or(|id| id == tab.id)).map(|tab| tab.id.clone()).collect();
-        for tab_id in &closing {
-            if manager.is_running(&session.id, tab_id) {
-                manager.stop(&session.id, tab_id).map_err(RpcError::internal)?;
+        // Without agents (tests) nothing is running to stop.
+        if let Some(manager) = &self.sessions {
+            for tab_id in &closing {
+                if manager.is_running(&session.id, tab_id) {
+                    manager.stop(&session.id, tab_id).map_err(RpcError::internal)?;
+                }
             }
         }
         if params.get("remove").and_then(Value::as_bool) == Some(true) {
@@ -1503,6 +1819,14 @@ impl WorkspaceRpc {
             for tab_id in &closing {
                 self.collab.forget_tab(tab_id);
             }
+            match index::get(&session.id) {
+                Ok(remaining) => self.sink.emit("session_updated", &remaining),
+                Err(_) => {
+                    // Its last tab went: the session is gone, and so are its terminals.
+                    crate::session_ops::notify_sessions_deleted(&*self.sink, std::slice::from_ref(&session));
+                    self.close_session_ptys(&HashSet::from([session.id.clone()]));
+                }
+            }
         }
         if let Some(agents) = self.agents.get() {
             agents.changed(None, false);
@@ -1518,7 +1842,7 @@ impl WorkspaceRpc {
         if text.trim().is_empty() {
             return Err(RpcError::invalid("text is empty"));
         }
-        // The same rule as a mailbox send (contract §20.5), for managers
+        // The same rule as a mailbox send (contract §21.5), for managers
         // too: they take a held lease over explicitly.
         if self.authority(peer) == Authority::Participate && !self.access(peer).can_drive() {
             return Err(RpcError::forbidden("sending needs driver access to the workspace"));

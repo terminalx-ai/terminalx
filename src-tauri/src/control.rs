@@ -409,8 +409,10 @@ impl ControlService {
             #[serde(default)]
             mode: Option<String>,
         }
-        let p: Params = serde_json::from_value(params)
+        let mut p: Params = serde_json::from_value(params)
             .map_err(|e| ControlError::invalid(format!("Invalid session request: {e}")))?;
+        // A blank mode is no mode: the tab takes the default launch mode.
+        p.mode = crate::store::index::requested_mode(p.mode.take());
         if p.prompt.trim().is_empty() {
             return Err(ControlError::invalid("--prompt cannot be empty."));
         }

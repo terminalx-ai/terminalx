@@ -11,10 +11,11 @@ pub mod trust;
 
 use serde_json::{json, Value};
 
-/// What `--permission-mode` accepts. Anything unknown falls back to asking,
-/// never to bypassing.
+/// What `--permission-mode` accepts. No mode at all is the product default
+/// (bypass); anything *unknown* falls back to asking, never to bypassing.
 pub fn normalize_mode(mode: &str) -> &'static str {
-    match mode {
+    match mode.trim() {
+        "" => "bypassPermissions",
         "plan" => "plan",
         "manual" | "default" | "ask" => "manual",
         "auto" => "auto",
@@ -43,6 +44,9 @@ mod tests {
         assert_eq!(normalize_mode("accept_edits"), "acceptEdits");
         assert_eq!(normalize_mode("whatever"), "manual");
         assert_eq!(normalize_mode("bypass"), "bypassPermissions");
+        // Unset is not unknown: it is the default launch mode.
+        assert_eq!(normalize_mode(""), "bypassPermissions");
+        assert_eq!(normalize_mode(crate::store::index::DEFAULT_PERMISSION_MODE), "bypassPermissions");
     }
 
     #[test]

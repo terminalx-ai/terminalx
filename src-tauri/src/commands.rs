@@ -13,8 +13,8 @@ use crate::{git, harness, names, store};
 pub use crate::session_ops::{NewSession, NewTab};
 pub(crate) use crate::session_ops::create_session_blocking;
 use crate::session_ops::{
-    available_worktree_name, delete_workspace_entries, new_tab_entry, notify_sessions_deleted,
-    notify_workspace_deleted, notify_workspace_settled, remove_session_entries, sessions_in_workspace,
+    available_worktree_name, delete_workspace_entries, notify_workspace_deleted, notify_workspace_settled,
+    sessions_in_workspace,
 };
 
 type CmdResult<T> = Result<T, String>;
@@ -475,78 +475,88 @@ pub async fn cloud_provider_disconnect(
 pub async fn cloud_workspace_setup(
     provider: crate::cloud_workspaces::CloudWorkspaceProviderId,
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceSetup, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.setup(provider))
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.setup(org_id.as_deref(), provider))
 }
 
 #[tauri::command]
 pub async fn cloud_workspace_quote(
     input: crate::cloud_workspaces::CloudWorkspaceQuoteInput,
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceQuote, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.quote(input))
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.quote(org_id.as_deref(), input))
 }
 
 #[tauri::command]
 pub async fn cloud_workspace_create(
     input: crate::cloud_workspaces::CloudWorkspaceCreateInput,
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Create, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.create(input))
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Create, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.create(org_id.as_deref(), input))
 }
 
 #[tauri::command]
 pub async fn cloud_workspace_preflight(
     repositories: Vec<crate::cloud_workspaces::CreateRepository>,
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspacePreflight, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.preflight(repositories))
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.preflight(org_id.as_deref(), repositories))
 }
 
 #[tauri::command]
 pub async fn cloud_workspace_repositories(
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::SelectedRepositories, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.selected_repositories())
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.selected_repositories(org_id.as_deref()))
 }
 
 #[tauri::command]
 pub async fn cloud_workspaces(
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceList, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.workspaces())
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.workspaces(org_id.as_deref()))
 }
 
 async fn cloud_workspace_lifecycle(
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
     workspace_id: String,
     action: crate::cloud_workspaces::OperationAction,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.lifecycle(&workspace_id, action))
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.lifecycle(org_id.as_deref(), &workspace_id, action))
 }
 
 #[tauri::command]
 pub async fn cloud_workspace_suspend(
     workspace_id: String,
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_workspace_lifecycle(state, workspace_id, crate::cloud_workspaces::OperationAction::Suspend).await
+    cloud_workspace_lifecycle(state, org_id, workspace_id, crate::cloud_workspaces::OperationAction::Suspend).await
 }
 
 #[tauri::command]
 pub async fn cloud_workspace_resume(
     workspace_id: String,
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_workspace_lifecycle(state, workspace_id, crate::cloud_workspaces::OperationAction::Resume).await
+    cloud_workspace_lifecycle(state, org_id, workspace_id, crate::cloud_workspaces::OperationAction::Resume).await
 }
 
 #[tauri::command]
 pub async fn cloud_workspace_release(
     workspace_id: String,
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_workspace_lifecycle(state, workspace_id, crate::cloud_workspaces::OperationAction::Delete).await
+    cloud_workspace_lifecycle(state, org_id, workspace_id, crate::cloud_workspaces::OperationAction::Delete).await
 }
 
 /// Archive (30-day trash) or permanently delete; `force` only after the
@@ -556,9 +566,10 @@ pub async fn cloud_workspace_archive(
     workspace_id: String,
     force: bool,
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
-        .lifecycle_with(&workspace_id, crate::cloud_workspaces::OperationAction::Archive, force))
+        .lifecycle_with(org_id.as_deref(), &workspace_id, crate::cloud_workspaces::OperationAction::Archive, force))
 }
 
 #[tauri::command]
@@ -566,25 +577,28 @@ pub async fn cloud_workspace_delete(
     workspace_id: String,
     force: bool,
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
-        .lifecycle_with(&workspace_id, crate::cloud_workspaces::OperationAction::Delete, force))
+        .lifecycle_with(org_id.as_deref(), &workspace_id, crate::cloud_workspaces::OperationAction::Delete, force))
 }
 
 #[tauri::command]
 pub async fn cloud_workspace_unarchive(
     workspace_id: String,
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.unarchive(&workspace_id))
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.unarchive(org_id.as_deref(), &workspace_id))
 }
 
 #[tauri::command]
 pub async fn cloud_workspace_disposition(
     workspace_id: String,
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceDisposition, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.disposition(&workspace_id))
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.disposition(org_id.as_deref(), &workspace_id))
 }
 
 /// Who a cloud workspace is shared with, and the caller's own standing (PRO-30).
@@ -592,8 +606,9 @@ pub async fn cloud_workspace_disposition(
 pub async fn cloud_workspace_shares(
     workspace_id: String,
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceShares, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.shares(&workspace_id))
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.shares(org_id.as_deref(), &workspace_id))
 }
 
 #[tauri::command]
@@ -603,9 +618,10 @@ pub async fn cloud_workspace_share_put(
     role: crate::cloud_workspaces::ShareRole,
     can_approve: bool,
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceShareChange, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
-        .share_put(&workspace_id, &user_id, role, can_approve))
+        .share_put(org_id.as_deref(), &workspace_id, &user_id, role, can_approve))
 }
 
 #[tauri::command]
@@ -613,25 +629,28 @@ pub async fn cloud_workspace_share_revoke(
     workspace_id: String,
     user_id: String,
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceShareChange, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
-        .share_revoke(&workspace_id, &user_id))
+        .share_revoke(org_id.as_deref(), &workspace_id, &user_id))
 }
 
 #[tauri::command]
 pub async fn cloud_workspace_operation(
     operation_id: String,
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.operation(&operation_id))
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.operation(org_id.as_deref(), &operation_id))
 }
 
 #[tauri::command]
 pub async fn cloud_workspace_operation_cancel(
     operation_id: String,
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.cancel_operation(&operation_id))
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.cancel_operation(org_id.as_deref(), &operation_id))
 }
 
 #[tauri::command]
@@ -837,15 +856,7 @@ pub async fn create_session(app: AppHandle, req: NewSession) -> CmdResult<Sessio
 
 #[tauri::command]
 pub fn add_tab(session_id: String, tab: NewTab) -> CmdResult<TabEntry> {
-    let t = new_tab_entry(&tab);
-    let out = t.clone();
-    index::update_session(&session_id, |s| {
-        s.tabs.push(t);
-        s.active_tab = Some(out.id.clone());
-        Ok(())
-    })
-    .map_err(err)?;
-    Ok(out)
+    crate::session_ops::add_tab_entry(&session_id, &tab)
 }
 
 #[tauri::command]
@@ -868,29 +879,20 @@ pub fn remove_tab(app: AppHandle, session_id: String, tab_id: String) -> CmdResu
 
 #[tauri::command]
 pub fn rename_session(session_id: String, title: String) -> CmdResult<()> {
-    index::update_session(&session_id, |s| {
-        s.title = title;
-        Ok(())
-    })
-    .map_err(err)
+    let patch = crate::session_ops::SessionPatch { title: Some(title), ..Default::default() };
+    crate::session_ops::update_session_meta(&session_id, &patch).map(|_| ())
 }
 
 #[tauri::command]
 pub fn set_session_archived(session_id: String, archived: bool) -> CmdResult<()> {
-    index::update_session(&session_id, |s| {
-        s.archived = archived;
-        Ok(())
-    })
-    .map_err(err)
+    let patch = crate::session_ops::SessionPatch { archived: Some(archived), ..Default::default() };
+    crate::session_ops::update_session_meta(&session_id, &patch).map(|_| ())
 }
 
 #[tauri::command]
 pub fn set_session_pinned(session_id: String, pinned: bool) -> CmdResult<()> {
-    index::update_session(&session_id, |s| {
-        s.pinned = pinned;
-        Ok(())
-    })
-    .map_err(err)
+    let patch = crate::session_ops::SessionPatch { pinned: Some(pinned), ..Default::default() };
+    crate::session_ops::update_session_meta(&session_id, &patch).map(|_| ())
 }
 
 #[tauri::command]
@@ -911,37 +913,12 @@ pub fn set_active_tab(session_id: String, tab_id: String) -> CmdResult<()> {
 pub async fn delete_session(app: AppHandle, session_id: String, remove_worktree: bool) -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let entry = index::get(&session_id).map_err(err)?;
-        let worktree = remove_worktree.then(|| entry.worktree_name.clone()).flatten();
-        let attached = if worktree.is_some() {
-            sessions_in_workspace(Path::new(&entry.cwd))?
-        } else {
-            vec![entry.clone()]
-        };
-        for session in &attached {
+        let stop = |session: &SessionEntry| {
             for tab in &session.tabs {
                 kill_tab(&state, &session.id, &tab.id);
             }
-        }
-        let worktree_removed = match worktree.as_deref() {
-            Some(name) => match git::remove_worktree(Path::new(&entry.project_path), name) {
-                Ok(()) => true,
-                Err(e) => {
-                    log::warn!("worktree cleanup for {session_id} failed: {e:#}");
-                    false
-                }
-            },
-            None => false,
         };
-        // A worktree that survived keeps hosting its other sessions.
-        let doomed: Vec<SessionEntry> = if worktree_removed { attached } else { vec![entry.clone()] };
-        remove_session_entries(&doomed)?;
-        if worktree_removed {
-            notify_workspace_deleted(&app, &entry.project_path, &doomed);
-        } else {
-            notify_sessions_deleted(&app, &doomed);
-        }
-        Ok(())
+        crate::session_ops::delete_session_blocking(&app, &session_id, remove_worktree, &stop).map(|_| ())
     })
     .await
     .map_err(err)?
@@ -1921,6 +1898,12 @@ mod command_tests {
             tab.permission_mode,
             crate::store::index::DEFAULT_PERMISSION_MODE
         );
+
+        // Blank is unset too; a named mode is the reader's and is kept.
+        let blank = new_tab_entry(&NewTab { harness: "codex".into(), model: String::new(), effort: None, permission_mode: Some(String::new()) });
+        assert_eq!(blank.permission_mode, "bypassPermissions");
+        let chosen = new_tab_entry(&NewTab { harness: "claude".into(), model: String::new(), effort: None, permission_mode: Some("manual".into()) });
+        assert_eq!(chosen.permission_mode, "manual");
     }
 
     #[test]

@@ -23,12 +23,17 @@ export const yieldsToRowActions =
  * absolutely positioned overlay, so a `min-w-0 truncate` label naturally leaves
  * room for it. It is `display: none` until the row is hovered, holds focus, or
  * has an open menu, so hidden buttons are neither painted nor tabbable.
+ * `persistent` keeps them in the accessibility tree and the Tab order,
+ * visually hidden until then (cloud rows, PRO-61).
  */
-export function RowActions({ children, className }: { children: ReactNode; className?: string }) {
+export function RowActions({ children, className, persistent = false }: { children: ReactNode; className?: string; persistent?: boolean }) {
   return (
     <span
       className={cn(
-        "hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex",
+        persistent
+          ? // Always in the accessibility tree and reachable with Tab; drawn only on hover, focus or an open menu.
+            "sr-only flex shrink-0 items-center gap-0.5 group-hover/row:not-sr-only group-focus-within/row:not-sr-only group-has-[[data-state=open]]/row:not-sr-only"
+          : "hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex",
         className,
       )}
     >

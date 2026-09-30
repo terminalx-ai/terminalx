@@ -1,5 +1,5 @@
 //! Who may do what in a shared cloud workspace (`collab/1`, terminalx-saas
-//! contract §20, PRO-30): the people the API says have access and their
+//! contract §21, PRO-30): the people the API says have access and their
 //! roles, the per-tab driver lease that serializes competing agent input,
 //! and attributed human notes.
 //!
@@ -93,7 +93,7 @@ impl Members {
                 .into_iter()
                 .filter(|member| member.role != Role::None && !member.user_id.is_empty())
                 .map(|member| {
-                    // Managers always approve (contract §20.1).
+                    // Managers always approve (contract §21.1).
                     let can_approve = member.can_approve || member.role == Role::Manager;
                     (member.user_id, Access { role: member.role, can_approve })
                 })

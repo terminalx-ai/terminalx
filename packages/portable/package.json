@@ -7,6 +7,7 @@
     ".": "./src/index.ts",
     "./dashboard": "./src/dashboard.ts",
     "./events": "./src/events.ts",
+    "./repositoryIdentity": "./src/repositoryIdentity.ts",
     "./rpc": "./src/rpc.ts",
     "./transcript": "./src/transcript.ts",
     "./workspace": "./src/workspace.ts",

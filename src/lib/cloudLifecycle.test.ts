@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentTabInfo } from "@terminalx/portable/workspace";
+import type { AgentTabInfo, WorkspaceConnectionState } from "@terminalx/portable/workspace";
 
 const mocks = vi.hoisted(() => ({ purge: vi.fn(), close: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -16,11 +16,14 @@ vi.mock("@/lib/api", () => ({
 
 import { applyLiveTabs, getCloudAgents, resetCloudAgents } from "./cloudAgents";
 import { dropEditors, getEditors, openFile, setEditorDirty } from "./editors";
+import { hasWorkspaceConnection, workspaceConnection, type CloudWorkspace, type CloudWorkspaceDisposition } from "@/lib/api";
 import {
+  checkRuntime,
   cleanupStateText,
   deadlineText,
   purgeNoticeText,
   purgeTombstones,
+  repositoryLabel,
   repositoryRiskLines,
   resetPurged,
   risksOf,
@@ -135,6 +138,16 @@ describe("risks and wording", () => {
     ).toEqual(["4 commits on no remote branch"]);
   });
 
+  it("names the workspace folder (a blank project's one repository) by the workspace, or Project folder", () => {
+    for (const path of [".", "./", "", " . "]) {
+      expect(repositoryLabel({ path }, "parity-test")).toBe("parity-test");
+      expect(repositoryLabel({ path }, null)).toBe("Project folder");
+      expect(repositoryLabel({ path }, "  ")).toBe("Project folder");
+    }
+    expect(repositoryLabel({ path: "site" }, "parity-test")).toBe("site");
+    expect(repositoryLabel({ path: "./packages/api/" }, "parity-test")).toBe("packages/api");
+  });
+
   it("says when the deadline is and what a cleanup item waits for", () => {
     const now = Date.UTC(2026, 8, 29);
     expect(deadlineText(now + 29.5 * 86_400_000, now)).toBe("in 29 days");
@@ -144,5 +157,81 @@ describe("risks and wording", () => {
       "Waiting for the provider to confirm (blocked), expected in 2 days",
     );
     expect(cleanupStateText({ kind: "x", state: "retained-by-provider", providerStage: null, expectedBy: null })).toMatch(/Kept by the provider/);
+  });
+});
+
+describe("checkRuntime", () => {
+  const workspace = (state: string) => ({ id: "ws-1", orgId: "org-1", name: "boat-e2e-3", state }) as CloudWorkspace;
+  const server = (state: string) => ({ state, runtimeFacts: { available: true } }) as CloudWorkspaceDisposition;
+  const facts = { v: 1, repositories: [], activeTasks: [], runningProcesses: 0, observedAt: 1 };
+
+  /** A connection whose client starts in `initial` and moves through `later`, one state per tick. */
+  function connectWith(initial: WorkspaceConnectionState["state"], later: WorkspaceConnectionState[] = []) {
+    let state: WorkspaceConnectionState = { state: initial } as WorkspaceConnectionState;
+    const listeners = new Set<(state: WorkspaceConnectionState) => void>();
+    const client = {
+      get connection() {
+        return state;
+      },
+      onState(listener: (state: WorkspaceConnectionState) => void) {
+        listeners.add(listener);
+        listener(state);
+        return () => listeners.delete(listener);
+      },
+      call: vi.fn(async () => facts),
+    };
+    void (async () => {
+      for (const next of later) {
+        await Promise.resolve();
+        state = next;
+        for (const listener of [...listeners]) listener(next);
+      }
+    })();
+    vi.mocked(workspaceConnection).mockResolvedValue({ client } as never);
+    return client;
+  }
+
+  beforeEach(() => {
+    vi.mocked(workspaceConnection).mockReset();
+    vi.mocked(hasWorkspaceConnection).mockReturnValue(false);
+  });
+
+  it("never connects to a workspace the server reports stopped, even if the list row still says ready", async () => {
+    expect(await checkRuntime(workspace("ready"), server("suspended"))).toEqual({ kind: "offline" });
+    expect(await checkRuntime(workspace("archived"), null)).toEqual({ kind: "offline" });
+    expect(workspaceConnection).not.toHaveBeenCalled();
+  });
+
+  it("asks a running workspace's runtime over a connect that cannot wake it", async () => {
+    const client = connectWith("opening", [{ state: "connecting", attempt: 1 }, { state: "connected" } as WorkspaceConnectionState]);
+    expect(await checkRuntime(workspace("ready"), server("ready"))).toEqual({ kind: "checked", facts });
+    expect(workspaceConnection).toHaveBeenCalledWith({ kind: "cloud", organizationId: "org-1", workspaceId: "ws-1" }, "connect");
+    expect(client.call).toHaveBeenCalledWith("lifecycle.dispositionFacts");
+    // The connection was made for the check, so it is closed after it.
+    expect(mocks.close).toHaveBeenCalled();
+  });
+
+  it("goes by the server's fresh state over a stale list row", async () => {
+    connectWith("connected");
+    expect(await checkRuntime(workspace("suspended"), server("ready"))).toMatchObject({ kind: "checked" });
+  });
+
+  it("says a running workspace it could not reach in time is unreachable, not offline", async () => {
+    connectWith("opening", [{ state: "reconnecting", attempt: 1, reason: "relay timed out", retryInMs: 1000 }]);
+    expect(await checkRuntime(workspace("ready"), server("ready"), 20)).toEqual({ kind: "unreachable" });
+    connectWith("stopped");
+    expect(await checkRuntime(workspace("ready"), server("ready"))).toEqual({ kind: "unreachable" });
+  });
+
+  it("reports offline when the attach finds the workspace suspended after all", async () => {
+    connectWith("opening", [{ state: "suspended" }]);
+    expect(await checkRuntime(workspace("ready"), server("ready"))).toEqual({ kind: "offline" });
+  });
+
+  it("keeps a connection it reused, and handles one already suspended", async () => {
+    vi.mocked(hasWorkspaceConnection).mockReturnValue(true);
+    connectWith("suspended");
+    expect(await checkRuntime(workspace("ready"), server("ready"))).toEqual({ kind: "offline" });
+    expect(mocks.close).not.toHaveBeenCalled();
   });
 });

@@ -53,7 +53,7 @@ use std::time::{Duration, Instant};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use raccoon_lib::remote::client::{decode_pairing_code, AttachGrant, AttachSource, AttachTicket, ClientEvent, ClientState, OpenOutcome, Supervisor};
 use raccoon_lib::remote::host::relay_host_id_for_secret;
-use raccoon_lib::remote::protocol::Activation;
+use raccoon_lib::remote::protocol::{Activation, CAPABILITIES};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
@@ -340,7 +340,8 @@ async fn desktop_drives_a_remote_runtime_through_the_relay() {
     let mut client = Client::start(source.clone());
     let ClientState::Connected { runtime_generation, capabilities, authority, .. } = client.connected().await else { unreachable!() };
     assert_eq!(runtime_generation, 7);
-    assert_eq!(capabilities, ["pty/1", "fs/1", "git/1", "session/1", "keys/1", "lifecycle/1", "collab/1"]);
+    // The supervisor asks for every namespace version this build speaks.
+    assert_eq!(capabilities, CAPABILITIES);
     assert_eq!(authority, "manage");
 
     // A terminal, created once even when the create is resent.
@@ -1098,7 +1099,7 @@ async fn a_shared_workspace_serializes_input_and_stops_access_when_revoked() {
     let link = link_dir.path().join("link.json");
     let pairing_dir = link_dir.path().join("link.json.attachments");
     // The API's side, played by the test: attachments with their person, and
-    // who the workspace is shared with (`collaboration`, contract §20.3).
+    // who the workspace is shared with (`collaboration`, contract §21.3).
     let attachments = Mutex::new(Vec::<Value>::new());
     let members = Mutex::new(json!([
         { "userId": "admin", "role": "manager", "canApprove": true },

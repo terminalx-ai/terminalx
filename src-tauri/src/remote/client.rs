@@ -126,7 +126,7 @@ pub enum ClientState {
         capabilities: Vec<String>,
         authority: String,
         /// The person's collaboration role when `collab/1` was granted
-        /// (`{ userId, role, canApprove }`, saas contract §20.5).
+        /// (`{ userId, role, canApprove }`, saas contract §21.5).
         you: Option<Value>,
     },
     Reconnecting { attempt: u32, reason: String, retry_in_ms: u64 },

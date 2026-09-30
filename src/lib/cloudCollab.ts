@@ -4,6 +4,7 @@ import {
   WorkspaceCollab,
   collabGranted,
   leaseHeldBy,
+  leaseLive,
   type CollabEvent,
   type Participant,
   type PresenceActivity,
@@ -116,6 +117,82 @@ export function resetCollab() {
   stores.clear();
   // Mounted views read their (now empty) new store.
   for (const key of [...listeners.keys()]) notify(key);
+}
+
+/** Forget one organization's workspaces (the user left it); keys are `cloud:<orgId>:<workspaceId>`. */
+export function dropCollabIn(orgId: string) {
+  const prefix = `cloud:${orgId}:`;
+  for (const [key, s] of [...stores]) {
+    if (!key.startsWith(prefix)) continue;
+    if (s.presence.idle) clearTimeout(s.presence.idle);
+    stores.delete(key);
+    notify(key);
+  }
+}
+
+/** What a composer says to someone the workspace is shared with as a viewer. */
+export const VIEWER_REASON = "You can view this workspace; ask an admin for driver access";
+/** What a composer says to a member the workspace is not shared with. */
+export const NOT_SHARED_REASON = "This workspace has not been shared with you. Ask an organization admin or its creator to share it.";
+/** Shown on permission requests to someone who may not answer them. */
+export const APPROVE_BLOCKED_REASON = "Waiting for someone who can approve";
+
+/**
+ * This person's access from the workspace list (saas contract §21.2), before
+ * or without a connection. Null on an older server, which does not say.
+ */
+export function listedYou(you: { role: WorkspaceYou["role"]; canApprove: boolean } | null | undefined): WorkspaceYou | null {
+  return you ? { userId: "", role: you.role, canApprove: you.canApprove } : null;
+}
+
+/** Whether `you` says anything about sharing (a runtime without a member list yet does not). */
+export function sharingKnown(you: WorkspaceYou | null | undefined): you is WorkspaceYou {
+  return !!you && you.listed !== false;
+}
+
+/** Why this person may not send to a shared workspace's agents at all, or null. */
+export function roleBlockReason(you: WorkspaceYou | null | undefined): string | null {
+  if (!sharingKnown(you)) return null;
+  if (you.role === "none") return NOT_SHARED_REASON;
+  if (you.role === "viewer") return VIEWER_REASON;
+  return null;
+}
+
+export interface TabGate {
+  /** The lease the runtime still honours: live, or held for a running turn. */
+  liveLease: TabLease | null;
+  /** Why the composer is off for this person on this tab, or null. */
+  blocked: string | null;
+  mayStop: boolean;
+  /** Why this person may not answer the tab's permission requests, or null. */
+  approveBlocked: string | null;
+}
+
+/**
+ * The PRO-30 rules for one agent tab: viewers read, one driver at a time holds
+ * the tab's lease (a manager may take it over), and only approvers answer
+ * permission requests. `you` null: sharing does not apply (an older runtime).
+ */
+export function tabGate(
+  you: WorkspaceYou | null,
+  lease: TabLease | null,
+  now: number,
+  turnRunning: boolean,
+  nameOf: (userId: string | null | undefined) => string,
+): TabGate {
+  // The runtime keeps the holder's lease for as long as their turn runs.
+  const liveLease = leaseLive(lease, now) || (lease && turnRunning) ? lease : null;
+  const heldByOther = !!you && !!liveLease && liveLease.holderId !== you.userId;
+  let blocked: string | null = null;
+  if (you && !canDrive(you)) blocked = you.role === "none" && you.listed !== false ? NOT_SHARED_REASON : VIEWER_REASON;
+  else if (you && heldByOther)
+    blocked =
+      you.role === "manager"
+        ? `${nameOf(liveLease!.holderId)} is driving this tab. Take over to send.`
+        : `${nameOf(liveLease!.holderId)} is driving this tab. You can send once they release it.`;
+  const mayStop = !you || you.role === "manager" || (!!liveLease && liveLease.holderId === you.userId) || (!liveLease && canDrive(you));
+  const approveBlocked = you && !canApprove(you) ? APPROVE_BLOCKED_REASON : null;
+  return { liveLease, blocked, mayStop, approveBlocked };
 }
 
 /** Who this connection is: the runtime's latest word, else its `rpc.hello`. */

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudWorkspaceShare, CloudWorkspaceShares } from "@/lib/api";
 
@@ -12,8 +12,11 @@ vi.mock("@/lib/api", () => ({
   api: { cloudWorkspaceShares: mocks.shares, cloudWorkspaceSharePut: mocks.put, cloudWorkspaceShareRevoke: mocks.revoke },
 }));
 vi.mock("@/lib/organizationMembers", () => ({ organizationMembers: { list: mocks.members } }));
+// The account's default organization decides whether the roster applies.
+const account = vi.hoisted(() => ({ status: { identity: { organizationId: "org-1" } } as unknown }));
+vi.mock("@/lib/account", () => ({ useAccount: () => account }));
 
-import { CloudShareDialog, shareErrorMessage } from "./CloudShareDialog";
+import { CloudShareDialog, CloudShareDialogHost, openShareDialog, shareErrorMessage } from "./CloudShareDialog";
 import { personName, resetPeople } from "@/lib/cloudPeople";
 
 const share = (fields: Partial<CloudWorkspaceShare> = {}): CloudWorkspaceShare => ({
@@ -62,7 +65,7 @@ afterEach(() => {
   resetPeople();
 });
 
-const dialog = () => render(<CloudShareDialog workspaceId="ws-1" name="Payments" onClose={() => undefined} />);
+const dialog = () => render(<CloudShareDialog orgId="org-1" workspaceId="ws-1" name="Payments" onClose={() => undefined} />);
 
 describe("share dialog", () => {
   it("adds someone from the roster who is not shared yet", async () => {
@@ -76,7 +79,7 @@ describe("share dialog", () => {
     fireEvent.change(screen.getByLabelText("New person's role"), { target: { value: "driver" } });
     fireEvent.click(screen.getByRole("switch", { name: "New person can approve permissions" }));
     fireEvent.click(screen.getByRole("button", { name: /Share/ }));
-    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith("ws-1", "u-bob", "driver", true));
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith("ws-1", "u-bob", "driver", true, "org-1"));
     await waitFor(() => expect(screen.getAllByTestId("cloud-share-row")).toHaveLength(2));
     // Their name is known wherever the workspace shows them now.
     expect(personName("u-bob")).toBe("Bob");
@@ -86,11 +89,11 @@ describe("share dialog", () => {
     dialog();
     const row = await screen.findByTestId("cloud-share-row");
     fireEvent.change(within(row).getByLabelText("Role for Alice"), { target: { value: "driver" } });
-    await waitFor(() => expect(mocks.put).toHaveBeenLastCalledWith("ws-1", "u-alice", "driver", false));
+    await waitFor(() => expect(mocks.put).toHaveBeenLastCalledWith("ws-1", "u-alice", "driver", false, "org-1"));
     fireEvent.click(within(await screen.findByTestId("cloud-share-row")).getByRole("switch", { name: "Can approve permissions: Alice" }));
-    await waitFor(() => expect(mocks.put).toHaveBeenLastCalledWith("ws-1", "u-alice", "driver", true));
+    await waitFor(() => expect(mocks.put).toHaveBeenLastCalledWith("ws-1", "u-alice", "driver", true, "org-1"));
     fireEvent.click(within(await screen.findByTestId("cloud-share-row")).getByRole("button", { name: "Revoke Alice" }));
-    await waitFor(() => expect(mocks.revoke).toHaveBeenCalledWith("ws-1", "u-alice"));
+    await waitFor(() => expect(mocks.revoke).toHaveBeenCalledWith("ws-1", "u-alice", "org-1"));
     await waitFor(() => expect(screen.queryByTestId("cloud-share-row")).toBeNull());
   });
 
@@ -126,5 +129,27 @@ describe("share dialog", () => {
     expect(screen.queryByLabelText("Add person")).toBeNull();
     expect(screen.queryByRole("button", { name: /Revoke/ })).toBeNull();
     expect(within(row).queryByRole("combobox")).toBeNull();
+  });
+
+  it("manages a workspace in another organization by its own organization, without the default one's roster", async () => {
+    render(<CloudShareDialog orgId="org-2" workspaceId="ws-1" name="Payments" onClose={() => undefined} />);
+    const row = await screen.findByTestId("cloud-share-row");
+    expect(mocks.shares).toHaveBeenCalledWith("ws-1", "org-2");
+    // The default organization's members would be the wrong people to offer.
+    expect(screen.queryByLabelText("Add person")).toBeNull();
+    expect(screen.getByTestId("cloud-share-other-org")).toBeTruthy();
+    expect(mocks.members).not.toHaveBeenCalled();
+    fireEvent.click(within(row).getByRole("button", { name: "Revoke Alice" }));
+    await waitFor(() => expect(mocks.revoke).toHaveBeenCalledWith("ws-1", "u-alice", "org-2"));
+  });
+
+  it("opens from anywhere through the one mounted host", async () => {
+    render(<CloudShareDialogHost />);
+    expect(screen.queryByTestId("cloud-share-dialog")).toBeNull();
+    act(() => openShareDialog({ orgId: "org-1", workspaceId: "ws-1", name: "Payments" }));
+    await screen.findByTestId("cloud-share-dialog");
+    expect(mocks.shares).toHaveBeenCalledWith("ws-1", "org-1");
+    act(() => openShareDialog(null));
+    await waitFor(() => expect(screen.queryByTestId("cloud-share-dialog")).toBeNull());
   });
 });

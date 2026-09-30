@@ -56,7 +56,15 @@ terminalx computer drag --app <app> (--from-element-index/--to-element-index | -
 ```
 
 Every command takes `--json`; action commands share `--window-id` or
-`--window-index`, `--restore-window`, and `--no-screenshot`. Secrets go in
+`--window-index`, `--restore-window`, and `--no-screenshot`.
+`--restore-window` activates the exact running instance the `--app` selector
+resolved to (`NSRunningApplication(processIdentifier:)` on macOS). It never
+opens an app by bundle id through LaunchServices and never launches an app
+that is not running (`app_not_running`): when several builds share a bundle id
+(TerminalX Dev), `open -b` used to launch a stale registered copy that took
+over the running app's control socket. A name or bundle id selector picks a
+running instance (the frontmost, else the longest running); use `pid:N` to
+choose one. Secrets go in
 through `--text-stdin` / `--value-stdin` so they never appear in `ps` or
 shell history. Password managers are blocked (`app_blocked`), secure text
 fields are never read, and modifier chords are atomic.

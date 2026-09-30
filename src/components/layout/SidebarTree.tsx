@@ -1,16 +1,12 @@
-import { TAB_STATUS_LABEL } from "@/types/session";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Globe,
   Archive,
-  ArrowUp,
   CalendarClock,
-  ChevronDown,
   Ellipsis,
   FolderOpen,
   GitBranch,
   GitFork,
-  Lock,
   Pin,
   Plus,
   Sparkles,
@@ -20,9 +16,24 @@ import {
 } from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { AgentMark, agentName } from "@/components/AgentMark";
+import { AgentMark } from "@/components/AgentMark";
 import { WorkspaceNameEditor } from "@/components/session/WorkspaceNameEditor";
-import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
+import { RowActions } from "@/components/layout/RowActions";
+import {
+  AgentTabRow,
+  BrowserTabRow,
+  DiffStats,
+  GroupTitle,
+  ItemTitle,
+  RowChip,
+  RowTime,
+  ShellTabRow,
+  StatusStripe,
+  TreeGroup,
+  TreeNode,
+  TreeRow,
+  TreeToggle,
+} from "@/components/layout/SidebarRows";
 import { Button } from "@/components/ui/button";
 import {
   ContextMenu,
@@ -39,7 +50,6 @@ import {
 } from "@/components/ui/menu";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { api, errorMessage } from "@/lib/api";
-import { cn } from "@/lib/cn";
 import { workspaceName as sessionWorkspaceName } from "@/lib/dashboard";
 import { openSettle, openWorkspaceDelete } from "@/lib/dialogs";
 import { useMobileDrivenTabs } from "@/lib/mobileDriver";
@@ -61,7 +71,6 @@ import {
   useSessionStore,
 } from "@/lib/sessions";
 import { useTabViews } from "@/lib/tabViews";
-import { relativeTime } from "@/lib/time";
 import { activatePeer, browserPageLabel, closePeer, peerOrder, selectedPeer, tabNodeId, tabPanelId, type PeerTab } from "@/lib/sessionTabs";
 import { openBrowserTab, pagesFor, useBrowser } from "@/lib/browser";
 import { openTerminal, useTerminals } from "@/lib/terminal";
@@ -150,7 +159,7 @@ export function ProjectNavigation({ project, expanded }: { project: Project; exp
   }, [activeWorkspaceKey, project.path, selectedSession?.activeTab, selectedSession?.id, selectedSession?.projectPath, selectedPeerId, store.navigationVersion]);
 
   return (
-    <div hidden={!expanded} className={cn("pb-1 pl-2", !expanded && "hidden")} role="group">
+    <TreeGroup expanded={expanded} className="pb-1 pl-2">
       {groups.length === 0 ? (
         <div className="px-5 py-2 text-[11px] text-faint">
           {store.workspacesLoading[project.path] ? "Reading workspaces…" : "No workspaces found."}
@@ -172,7 +181,7 @@ export function ProjectNavigation({ project, expanded }: { project: Project; exp
           harnessNames={harnessNames}
         />
       ))}
-    </div>
+    </TreeGroup>
   );
 }
 
@@ -213,16 +222,8 @@ function WorkspaceNode({
   };
 
   return (
-    <div role="treeitem" aria-label={displayName} aria-expanded={expanded} className="min-w-0">
-      <div
-        data-tree-row
-        className={cn(
-          actionRow,
-          "relative flex min-h-7 items-center gap-1 rounded-md pr-1 text-[11px] text-muted-foreground",
-          active ? "bg-selected/60" : "hover:bg-selected/40",
-        )}
-        title={group.path}
-      >
+    <TreeNode label={displayName} expanded={expanded}>
+      <TreeRow level="group" selected={active} title={group.path}>
         <TreeToggle expanded={expanded} label={displayName} onToggle={onToggle} className="ml-0.5" />
         {project.kind === "folder" ? <FolderOpen className="size-3 shrink-0" /> : <GitBranch className="size-3 shrink-0" />}
         {workspace ? (
@@ -238,10 +239,10 @@ function WorkspaceNode({
             className="flex-1 text-left text-foreground/90"
           />
         ) : (
-          <button type="button" onClick={openWorkspace} className="min-w-0 flex-1 truncate rounded-sm text-left font-mono text-foreground/90 outline-none focus-visible:ring-2 focus-visible:ring-ring/40">{displayName}</button>
+          <GroupTitle label={displayName} onActivate={openWorkspace} />
         )}
-        <span className="shrink-0 rounded-sm bg-veil-raised px-1 text-[9px] text-faint">{kind}</span>
-        {workspace ? <WorkspaceStats workspace={workspace} /> : null}
+        <RowChip>{kind}</RowChip>
+        {workspace ? <DiffStats additions={workspace.additions} deletions={workspace.deletions} unpushed={workspace.unpushed} /> : null}
         {workspace ? (
           <RowActions>
             <WithTooltip label="New session here">
@@ -274,13 +275,13 @@ function WorkspaceNode({
             </DropdownMenu>
           </RowActions>
         ) : null}
-      </div>
+      </TreeRow>
       {renameError ? (
         <div role="alert" className="mx-6 mb-1 text-[11px] leading-tight text-destructive">
           {renameError}
         </div>
       ) : null}
-      <div hidden={!expanded} className={cn("pl-2", !expanded && "hidden")} role="group">
+      <TreeGroup expanded={expanded} className="pl-2">
         {group.sessions.map((session) => (
           <SessionNode
             key={session.id}
@@ -294,24 +295,8 @@ function WorkspaceNode({
           />
         ))}
         {group.sessions.length === 0 ? <div className="px-5 py-1 text-[11px] text-faint">No sessions yet.</div> : null}
-      </div>
-    </div>
-  );
-}
-
-function WorkspaceStats({ workspace }: { workspace: Workspace }) {
-  if (!workspace.additions && !workspace.deletions && !workspace.unpushed) return null;
-  return (
-    <span className={cn("flex shrink-0 items-center gap-1 tabular-nums", yieldsToRowActions)}>
-      {workspace.additions > 0 ? <span className="text-add">+{workspace.additions}</span> : null}
-      {workspace.deletions > 0 ? <span className="text-destructive">−{workspace.deletions}</span> : null}
-      {workspace.unpushed > 0 ? (
-        <span className="flex items-center text-warning" title={`${workspace.unpushed} unpushed commit${workspace.unpushed === 1 ? "" : "s"}`}>
-          <ArrowUp className="size-3" />
-          {workspace.unpushed}
-        </span>
-      ) : null}
-    </span>
+      </TreeGroup>
+    </TreeNode>
   );
 }
 
@@ -332,48 +317,23 @@ function SessionNode({
   mobileDriven: Set<string>;
   harnessNames: Map<string, string>;
 }) {
-  const status = sessionStatus(session);
   const terminals = useTerminals();
   const browser = useBrowser();
   const peers = peerOrder(session, terminals.panes, pagesFor(browser.pages, session.cwd));
   const activePeer = selectedPeer(session, peers, terminals.selected[session.id]);
   const branchBadge = session.issue && !session.worktreeName && !session.worktreeRemoved ? session.branch : null;
+  const isActive = (peer: PeerTab) => selected && activePeer?.kind === peer.kind && peer.id === activePeer.id;
+  const close = (peer: PeerTab) => () => void closePeer(session.id, peer, peers, activePeer);
+  const open = (peer: PeerTab) => () => { selectSession(session.id); activatePeer(session.id, peer); };
 
   return (
     <DropdownMenu>
-      <div role="treeitem" aria-label={session.title} aria-expanded={expanded} className="min-w-0">
-        <div
-          data-tree-row
-          className={cn(
-            actionRow,
-            "relative flex min-h-7 cursor-default items-center gap-1 rounded-md pr-1 outline-none",
-            selected ? "bg-selected" : "hover:bg-selected/50",
-          )}
-        >
-          <span
-            aria-hidden
-            className={cn(
-              "absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full",
-              status === "waiting" && "bg-warning",
-              status === "completed" && "bg-add",
-              status === "in_progress" && "bg-info animate-pulse-soft",
-            )}
-          />
+      <TreeNode label={session.title} expanded={expanded}>
+        <TreeRow level="item" selected={selected}>
+          <StatusStripe status={sessionStatus(session)} size="row" />
           <TreeToggle expanded={expanded} label={session.title} onToggle={onToggle} />
-          <button
-            type="button"
-            onClick={() => selectSession(session.id)}
-            className="flex min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-            title={session.title}
-          >
-            {session.pinned ? <Pin className="size-3 shrink-0 text-faint" /> : null}
-            {session.archived ? <Archive className="size-3 shrink-0 text-faint" aria-label="Archived session" /> : null}
-            <span className="min-w-0 flex-1 truncate text-[12px]">{session.title}</span>
-            {branchBadge ? <span className="max-w-20 shrink-0 truncate rounded-sm bg-veil-raised px-1 font-mono text-[9px] text-faint">{branchBadge}</span> : null}
-          </button>
-          <span className={cn("shrink-0 text-[10px] tabular-nums text-faint", yieldsToRowActions)}>
-            {relativeTime(session.modified)}
-          </span>
+          <ItemTitle title={session.title} pinned={session.pinned} archived={session.archived} badge={branchBadge} onActivate={() => selectSession(session.id)} />
+          <RowTime at={session.modified} />
           <RowActions>
             <NewTabButton session={session} />
             <DropdownMenuTrigger asChild>
@@ -382,7 +342,7 @@ function SessionNode({
               </Button>
             </DropdownMenuTrigger>
           </RowActions>
-        </div>
+        </TreeRow>
         {session.automation ? (
           <button
             type="button"
@@ -393,24 +353,45 @@ function SessionNode({
             <span className="truncate">{session.automation.name} #{session.automation.runNumber}</span>
           </button>
         ) : null}
-        <div hidden={!expanded} className={cn("pl-5", !expanded && "hidden")} role="group">
+        <TreeGroup expanded={expanded} className="pl-5">
           {peers.map((peer) => peer.kind === "agent" ? (
             <TabNode
               key={peer.id}
               session={session}
               tab={peer.tab}
-              active={selected && activePeer?.kind === "agent" && peer.id === activePeer.id}
+              active={isActive(peer)}
               label={peer.tab.title?.trim() || harnessNames.get(peer.tab.harness) || peer.tab.harness}
               terminal={tabViews[peer.id] === "terminal"}
               mobileDriven={mobileDriven.has(peer.id)}
-              onClose={() => void closePeer(session.id, peer, peers, activePeer)}
+              onClose={close(peer)}
             />
           ) : peer.kind === "browser" ? (
-            <BrowserNode key={peer.id} session={session} peer={peer} active={selected && activePeer?.kind === "browser" && peer.id === activePeer.id} onClose={() => void closePeer(session.id, peer, peers, activePeer)} />
-          ) : <ShellNode key={peer.id} session={session} peer={peer} active={selected && activePeer?.kind === "terminal" && peer.id === activePeer.id} onClose={() => void closePeer(session.id, peer, peers, activePeer)} />)}
+            <BrowserTabRow
+              key={peer.id}
+              nodeId={tabNodeId(peer)}
+              panelId={tabPanelId(peer)}
+              label={browserPageLabel(peer.page)}
+              url={peer.page.url}
+              agentTarget={peer.page.active}
+              selected={isActive(peer)}
+              onOpen={open(peer)}
+              onClose={close(peer)}
+            />
+          ) : (
+            <ShellTabRow
+              key={peer.id}
+              nodeId={tabNodeId(peer)}
+              panelId={tabPanelId(peer)}
+              title={peer.pane.title}
+              exited={peer.pane.exited}
+              selected={isActive(peer)}
+              onOpen={open(peer)}
+              onClose={close(peer)}
+            />
+          ))}
           {peers.length === 0 ? <div className="px-3 py-1 text-[11px] text-faint">No tabs.</div> : null}
-        </div>
-      </div>
+        </TreeGroup>
+      </TreeNode>
       <SessionMenu session={session} />
     </DropdownMenu>
   );
@@ -440,57 +421,18 @@ function TabNode({
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
-        <div
-          role="treeitem"
-          id={tabNodeId({ kind: "agent", id: tab.id })}
-          aria-controls={tabPanelId({ kind: "agent", id: tab.id })}
-          aria-label={label}
-          aria-description={agentName(tab.harness)}
-          aria-selected={active}
-          tabIndex={0}
-          onClick={open}
-          onKeyDown={(event) => {
-            if (event.target !== event.currentTarget) return;
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              open();
-            }
-          }}
-          onAuxClick={(event) => event.button === 1 && onClose()}
-          className={cn(
-            "group/tab relative flex h-6 min-w-0 cursor-default items-center gap-1.5 rounded-md px-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-            active ? "bg-(--surface-thumb) text-foreground shadow-button" : "text-muted-foreground hover:bg-selected/40 hover:text-foreground",
-          )}
-          title={`${label} · ${TAB_STATUS_LABEL[tab.status]}`}
-        >
-          <span
-            aria-hidden
-            className={cn(
-              "absolute left-0 top-1/2 h-3 w-0.5 -translate-y-1/2 rounded-full",
-              tab.status === "waiting" && "bg-warning",
-              tab.status === "completed" && "bg-add",
-              tab.status === "in_progress" && "bg-info animate-pulse-soft",
-            )}
-          />
-          <span role="img" aria-label={TAB_STATUS_LABEL[tab.status]} className="sr-only" />
-          <AgentMark id={tab.harness} className="size-3.5 shrink-0" decorative />
-          <span className="min-w-0 flex-1 truncate text-[11px]">{label}</span>
-          {mobileDriven ? <Lock className="size-3 shrink-0 text-warning" aria-label="Mobile is driving this terminal" /> : null}
-          {terminal ? <Terminal className="size-3 shrink-0 text-faint" aria-label="In terminal view" /> : null}
-          {(
-            <button
-              type="button"
-              aria-label={`Close ${label}`}
-              onClick={(event) => {
-                event.stopPropagation();
-                onClose();
-              }}
-              className="rounded-sm p-0.5 text-faint opacity-0 hover:bg-veil-strong hover:text-foreground group-hover/tab:opacity-100 focus-visible:opacity-100"
-            >
-              <X className="size-3" />
-            </button>
-          )}
-        </div>
+        <AgentTabRow
+          nodeId={tabNodeId({ kind: "agent", id: tab.id })}
+          panelId={tabPanelId({ kind: "agent", id: tab.id })}
+          harness={tab.harness}
+          label={label}
+          status={tab.status}
+          mobileDriven={mobileDriven}
+          terminalView={terminal}
+          selected={active}
+          onOpen={open}
+          onClose={onClose}
+        />
       </ContextMenuTrigger>
       <ContextMenuContent>
         <ContextMenuItem onSelect={() => openSkills({ agent: tab.harness, projectPath: session.cwd })}>
@@ -503,32 +445,6 @@ function TabNode({
       </ContextMenuContent>
     </ContextMenu>
   );
-}
-
-function ShellNode({ session, peer, active, onClose }: { session: SessionEntry; peer: Extract<PeerTab, { kind: "terminal" }>; active: boolean; onClose: () => void }) {
-  const open = () => { selectSession(session.id); activatePeer(session.id, peer); };
-  return <div role="treeitem" id={tabNodeId(peer)} aria-controls={tabPanelId(peer)} aria-label={`${peer.pane.title}${peer.pane.exited ? ", exited" : ""}`} aria-selected={active} tabIndex={0}
-    title={peer.pane.title} onClick={open} onAuxClick={(event) => event.button === 1 && onClose()}
-    onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); open(); } }}
-    className={cn("group/tab relative flex h-6 min-w-0 items-center gap-1.5 rounded-md px-2 text-[11px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40", active ? "bg-(--surface-thumb) text-foreground shadow-button" : "text-muted-foreground hover:bg-selected/40")}>
-    <Terminal className="size-3.5 shrink-0" />
-    <span className={cn("min-w-0 flex-1 truncate", peer.pane.exited && "text-faint line-through")}>{peer.pane.title}</span>
-    <button type="button" aria-label={`Close ${peer.pane.title} terminal tab`} onClick={(event) => { event.stopPropagation(); onClose(); }} className="rounded-sm p-0.5 text-faint opacity-0 hover:bg-veil-strong group-hover/tab:opacity-100 focus-visible:opacity-100"><X className="size-3" /></button>
-  </div>;
-}
-
-function BrowserNode({ session, peer, active, onClose }: { session: SessionEntry; peer: Extract<PeerTab, { kind: "browser" }>; active: boolean; onClose: () => void }) {
-  const label = browserPageLabel(peer.page);
-  const open = () => { selectSession(session.id); activatePeer(session.id, peer); };
-  return <div role="treeitem" id={tabNodeId(peer)} aria-controls={tabPanelId(peer)} aria-label={`${label} browser page`} aria-selected={active} tabIndex={0}
-    title={peer.page.url || label} onClick={open} onAuxClick={(event) => event.button === 1 && onClose()}
-    onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); open(); } }}
-    className={cn("group/tab relative flex h-6 min-w-0 items-center gap-1.5 rounded-md px-2 text-[11px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40", active ? "bg-(--surface-thumb) text-foreground shadow-button" : "text-muted-foreground hover:bg-selected/40")}>
-    <Globe className="size-3.5 shrink-0" />
-    <span className="min-w-0 flex-1 truncate">{label}</span>
-    {peer.page.active ? <span className="size-1.5 shrink-0 rounded-full bg-info" aria-label="Active page for agents" /> : null}
-    <button type="button" aria-label={`Close ${label} browser page`} onClick={(event) => { event.stopPropagation(); onClose(); }} className="rounded-sm p-0.5 text-faint opacity-0 hover:bg-veil-strong group-hover/tab:opacity-100 focus-visible:opacity-100"><X className="size-3" /></button>
-  </div>;
 }
 
 function NewTabButton({ session }: { session: SessionEntry }) {
@@ -583,20 +499,6 @@ function SessionMenu({ session }: { session: SessionEntry }) {
         <Trash2 /> Delete session…
       </DropdownMenuItem>
     </DropdownMenuContent>
-  );
-}
-
-function TreeToggle({ expanded, label, onToggle, className }: { expanded: boolean; label: string; onToggle: () => void; className?: string }) {
-  return (
-    <button
-      type="button"
-      data-tree-toggle
-      aria-label={`${expanded ? "Collapse" : "Expand"} ${label}`}
-      onClick={onToggle}
-      className={cn("shrink-0 rounded-sm p-0.5 outline-none focus-visible:ring-2 focus-visible:ring-ring/40", className)}
-    >
-      <ChevronDown className={cn("size-3 shrink-0 text-faint transition-transform", !expanded && "-rotate-90")} />
-    </button>
   );
 }
 

@@ -3,7 +3,7 @@
 Teammates see the same cloud workspace, know who else is there, talk to each
 other in notes, and take turns driving the agent, with explicit authority to
 send input and to approve actions. The server half is terminalx-saas
-contract §20 (`apps/api/docs/cloud-workspace-remote-runtime-contract.md`);
+contract §21 (`apps/api/docs/cloud-workspace-remote-runtime-contract.md`);
 this document is the runtime and desktop half.
 
 This is not desktop session sharing. `docs/MULTIPLAYER.md` plans sharing a
@@ -130,7 +130,7 @@ and re-applies the list:
 Live calls check the current list on every call, so a downgraded driver's next
 terminal write is refused even before step 2 runs. On the server, queued
 mailbox commands are re-checked when leased, and settled `rejected` /
-`access-revoked` without ever reaching the runtime (contract §20.4).
+`access-revoked` without ever reaching the runtime (contract §21.4).
 
 ### Keys (change to PRO-22)
 
@@ -248,8 +248,52 @@ drivers and managers of a shared workspace; viewers never get it.
 workspace has not been shared with you" instead of empty terminal and agent
 lists, with a People button that opens the read-only share list.
 
+### In the unified sidebar and SessionView (PRO-23)
+
+Cloud sessions now open in the same SessionView as local ones, and every
+organization is live in the sidebar. Sharing follows them there:
+
+* **Rows.** The workspace list carries this person's role and the share
+  count (saas contract §21.2, `you` and `sharedWith`), so rows are badged
+  without attaching: a lock chip ("View only" or "Not shared") for a viewer or
+  someone it is not shared with, else a people icon with the share count. It
+  shows on a workspace group row, and on session rows next to their location
+  chip when the project has one workspace. An older server sends neither
+  field and nothing is drawn.
+* **Share dialog.** "Share…" (managers) or "Sharing…" is the first item of
+  the workspace menu wherever it shows: a project or workspace row's "…" menu
+  and the session header's location chip. One dialog host is mounted in
+  `AppShell`; every call carries the workspace's organization (`orgId`), as
+  the share routes are authorized by membership in it. For a workspace in an
+  organization other than the default, the dialog lists and changes shares
+  but does not offer the default organization's roster for adding people.
+* **Session header.** Next to the connection chip: the lock chip, and the
+  other people in the workspace as initials (ringed while typing; name, role,
+  activity and tab in the tooltip; at most three, then "+N").
+* **Agent tabs** (`TabView`). The same rules as the workspace page, shared
+  through `tabGate` in `src/lib/cloudCollab.ts`: the lease bar and Notes
+  drawer, the composer closed for viewers and while someone else holds the
+  lease, Stop only for the holder and managers, and approvals only for
+  approvers (the cards are disabled with the reason). The cloud session
+  backend (`cloudReadOnlyReason`) reads the role, so a driver on a
+  `participate` attachment can send; with no role known (an older server or
+  runtime, or before the runtime has a member list) the attachment rule stays:
+  only `manage` sends.
+* **While asleep.** The last known access, else the list's `you`, gates the
+  same controls, so a sleeping workspace never shows a viewer an open
+  composer.
+* **Terminals.** Drivers get "Take control" and see who is typing.
+* **Leaving an organization** drops its workspaces' presence, notes and
+  leases with the rest of its cloud state.
+
+Not moved yet: the full participants bar (names, windows, tabs) stays on the
+workspace page; SessionView shows the compact avatars.
+
 ### Tests
 
+`src/lib/cloudCollab.test.ts` (gating), the PRO-30 blocks of
+`src/components/session/SessionView.cloud.test.tsx` and
+`src/components/layout/cloud/CloudSections.test.tsx`,
 `packages/portable/src/workspaceCollab.test.ts`,
 `src/components/cloud/CloudShareDialog.test.tsx`, the PRO-30 blocks of
 `CloudAgents.test.tsx` and `CloudSessionPage.test.tsx`, and the

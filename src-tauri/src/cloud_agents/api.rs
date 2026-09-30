@@ -18,7 +18,7 @@ pub struct Actor {
     pub user_id: String,
     pub authority: String,
     /// The actor's collaboration role and approval right when the API
-    /// leased the command (contract §20.4); absent before PRO-30.
+    /// leased the command (contract §21.4); absent before PRO-30.
     #[serde(default)]
     pub role: Option<String>,
     #[serde(default)]

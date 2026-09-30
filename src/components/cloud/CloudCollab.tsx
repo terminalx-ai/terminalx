@@ -3,7 +3,7 @@ import { Keyboard, Lock, StickyNote, Users, X } from "lucide-react";
 import type { WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { leaseHeldBy, leaseLive, type TabLease } from "@terminalx/portable/workspaceCollab";
 import { Button } from "@/components/ui/button";
-import { acquireLease, canDrive, loadNotes, postNote, releaseLease, takeOverLease, useCollab } from "@/lib/cloudCollab";
+import { acquireLease, canDrive, loadNotes, postNote, releaseLease, sharingKnown, takeOverLease, useCollab } from "@/lib/cloudCollab";
 import { initials, usePeople } from "@/lib/cloudPeople";
 import { cn } from "@/lib/cn";
 
@@ -62,6 +62,87 @@ export function ParticipantsBar({ collabKey, you, tabLabel }: { collabKey: strin
         );
       })}
     </div>
+  );
+}
+
+/** At most this many faces in a session header; the rest are counted. */
+const HEADER_FACES = 3;
+
+/**
+ * Who else is in a shared workspace, compact enough for a session header:
+ * initials (ringed while typing), with the details in the tooltip.
+ */
+export function PresenceAvatars({ collabKey, you, tabLabel }: { collabKey: string; you: WorkspaceYou | null; tabLabel?: (tabId: string) => string | null }) {
+  const collab = useCollab(collabKey);
+  const nameOf = usePeople();
+  const others = collab.participants.filter((person) => person.userId !== you?.userId);
+  if (!collab.available || !others.length) return null;
+  const shown = others.slice(0, HEADER_FACES);
+  const describe = (person: (typeof others)[number]) => {
+    const where = person.tabId && tabLabel ? tabLabel(person.tabId) : null;
+    return `${nameOf(person.userId)} · ${ROLE_BADGE[person.role] ?? person.role}${person.activity === "typing" ? " · typing" : ""}${where ? ` · on ${where}` : ""}`;
+  };
+  return (
+    <span className="ml-1 flex shrink-0 items-center -space-x-1" data-testid="session-presence" aria-label={`Also here: ${others.map((person) => nameOf(person.userId)).join(", ")}`}>
+      {shown.map((person) => (
+        <span
+          key={person.userId}
+          className={cn(
+            "flex size-5 items-center justify-center rounded-full border border-background bg-well text-[9px] font-medium text-foreground",
+            person.activity === "typing" && "ring-1 ring-accent",
+          )}
+          title={describe(person)}
+          data-testid="session-presence-person"
+        >
+          {initials(nameOf(person.userId))}
+        </span>
+      ))}
+      {others.length > shown.length && (
+        <span className="flex h-5 items-center rounded-full border border-background bg-well px-1 text-[9px] text-muted-foreground" title={others.slice(HEADER_FACES).map(describe).join("\n")}>
+          +{others.length - shown.length}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/**
+ * The lock chip of a shared workspace this person may only read, or is not
+ * shared with (PRO-23 view-only rule). Nothing when sharing is unknown.
+ */
+export function AccessChip({ you, className }: { you: WorkspaceYou | null; className?: string }) {
+  if (!sharingKnown(you) || (you.role !== "viewer" && you.role !== "none")) return null;
+  const viewer = you.role === "viewer";
+  return (
+    <span
+      className={cn("flex shrink-0 items-center gap-1 rounded-sm bg-veil-raised px-1 text-[10px] text-muted-foreground", className)}
+      title={viewer ? "Shared with you as a viewer: you can read it; ask an admin for driver access to send or type." : "Not shared with you: ask an organization admin or its creator to share it."}
+      data-testid="cloud-access-chip"
+    >
+      <Lock className="size-2.5" />
+      {viewer ? "View only" : "Not shared"}
+    </span>
+  );
+}
+
+/**
+ * A sidebar row's sharing state (saas contract §21.2, from the workspace
+ * list): the lock chip for a viewer or someone it is not shared with, else
+ * how many people it is shared with. Nothing on an older server.
+ */
+export function ShareBadge({ you, sharedWith, className }: { you?: { role: WorkspaceYou["role"]; canApprove: boolean } | null; sharedWith?: number | null; className?: string }) {
+  if (!you) return null;
+  if (you.role === "viewer" || you.role === "none") return <AccessChip you={{ userId: "", ...you }} className={className} />;
+  if (!sharedWith) return null;
+  return (
+    <span
+      className={cn("flex shrink-0 items-center gap-0.5 text-[10px] text-faint", className)}
+      title={`Shared with ${sharedWith} ${sharedWith === 1 ? "person" : "people"}`}
+      data-testid="cloud-share-badge"
+    >
+      <Users className="size-2.5" />
+      {sharedWith}
+    </span>
   );
 }
 

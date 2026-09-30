@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { ArrowUp, AtSign, ChevronDown, FileText, SlashSquare, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
+import { useRowMenu } from "@/components/ui/useRowMenu";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -78,6 +79,9 @@ export function Composer({
   const [highlighted, setHighlighted] = useState(0);
   const [dismissedToken, setDismissedToken] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  // The model and permission pickers open on a click and an accessibility press too.
+  const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
+  const modeMenu = useRowMenu();
   const ref = useRef<HTMLTextAreaElement>(null);
   const attach = useImageAttachments({ textareaRef: ref, draft, onDraftChange });
   const { attachments } = attach;
@@ -345,8 +349,8 @@ export function Composer({
             </WithTooltip>
           )}
 
-          <DropdownMenu onOpenChange={(open) => open && void refreshModels()}>
-            <DropdownMenuTrigger asChild>
+          <DropdownMenu {...modelMenu.root}>
+            <DropdownMenuTrigger asChild {...modelMenu.trigger}>
               <Button variant="ghost" size="sm" className="gap-1.5 px-2 text-muted-foreground">
                 <AgentMark id={tab.harness} className="size-3.5" />
                 <span className="text-foreground">{model?.label ?? tab.model ?? "Model"}</span>
@@ -383,8 +387,8 @@ export function Composer({
             </DropdownMenuContent>
           </DropdownMenu>
 
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
+          <DropdownMenu {...modeMenu.root}>
+            <DropdownMenuTrigger asChild {...modeMenu.trigger}>
               <Button variant="ghost" size="sm" className="gap-1.5 px-2 text-muted-foreground">
                 <span
                   className={cn(

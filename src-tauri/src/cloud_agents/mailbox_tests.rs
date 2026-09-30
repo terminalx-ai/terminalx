@@ -69,6 +69,9 @@ impl AgentOps for FakeOps {
     fn note(&self, _: &str, _: &str, text: &str) {
         self.notes.lock().unwrap().push(text.into());
     }
+    fn session(&self, session_id: &str) -> Option<super::super::SessionSummary> {
+        (session_id == "s1").then(|| super::super::SessionSummary { title: "Fix the login".into(), branch: Some("terminalx/fix-login".into()) })
+    }
     fn events(&self, _: &str, _: &str) -> anyhow::Result<Vec<Value>> {
         Ok((1..=3).map(|seq| json!({ "seq": seq, "payload": { "type": "assistant_text", "text": format!("line {seq}") } })).collect())
     }
@@ -335,6 +338,9 @@ fn checkpoints_are_sealed_for_the_workspace_and_move_to_a_new_epoch_when_stale()
     let projection: Value = serde_json::from_slice(&crypto::gunzip(&packed, 1 << 22).unwrap()).unwrap();
     assert_eq!(projection["events"].as_array().unwrap().len(), 3);
     assert_eq!(projection["sessionId"], "s1");
+    // The session's title and branch travel inside the sealed content only.
+    assert_eq!(projection["session"], json!({ "title": "Fix the login", "branch": "terminalx/fix-login" }));
+    assert!(!String::from_utf8_lossy(&ciphertext).contains("Fix the login"));
     // Another tab's AAD does not open it.
     let other = crypto::checkpoint_aad("org_1", "ws_1", "tab-2", second.epoch, second.version, 1, &second.key_id);
     assert!(crypto::open_raw(&key, &crypto::unb64(&second.iv).unwrap(), &ciphertext, &other).is_err());
@@ -445,7 +451,7 @@ fn work_resumes_at_once_when_a_device_attaches_after_the_archive() {
     assert!(!h.agents.quiesced());
 }
 
-// ---- sharing (PRO-30, saas contract §20.4-20.5) ------------------------------
+// ---- sharing (PRO-30, saas contract §21.4-21.5) ------------------------------
 
 fn as_actor(lease: Lease, user: &str, role: &str, can_approve: bool) -> Lease {
     Lease {

@@ -219,7 +219,7 @@ pub struct Session {
     /// An archive waiting for this runtime's final checkpoint
     /// (terminalx-saas contract §10.3); `cloud_quiesce` answers it.
     pub quiesce: Option<QuiesceRequest>,
-    /// Who the workspace is shared with (contract §20.3), kept raw and read
+    /// Who the workspace is shared with (contract §21.3), kept raw and read
     /// by the relay host; absent from an API before PRO-30.
     pub collaboration: Option<serde_json::Value>,
 }
@@ -648,7 +648,7 @@ impl Bootstrapped {
     pub fn spawn_refresh_loop(self: Arc<Self>, api: Arc<dyn Api + Send + Sync>) {
         let spawned = std::thread::Builder::new().name("cloud-refresh".into()).spawn(move || loop {
             // Faster while a client is attached, so a revoked share or
-            // membership stops access promptly (contract §20.5).
+            // membership stops access promptly (contract §21.5).
             std::thread::sleep(if crate::cloud_activity::attached_count() > 0 { ATTACHED_REFRESH_INTERVAL } else { REFRESH_INTERVAL });
             match self.refresh(api.as_ref()) {
                 // A rotated session may carry a new runtime generation.

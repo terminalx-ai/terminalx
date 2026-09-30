@@ -21,9 +21,10 @@ pub mod rollout;
 /// `on-request` plus the `PreToolUse` gate in `pty.rs`, which is the only way
 /// to be asked about a tool Codex would have run without asking.
 pub fn stance(mode: &str) -> (&'static str, &'static str) {
-    match mode {
+    match mode.trim() {
         "plan" => ("on-request", "read-only"),
-        "bypassPermissions" => (pty::BYPASS, "danger-full-access"),
+        // No mode at all is the product default launch mode.
+        "bypassPermissions" | "bypass" | "" => (pty::BYPASS, "danger-full-access"),
         _ => ("on-request", "workspace-write"),
     }
 }
@@ -47,6 +48,8 @@ mod tests {
         }
         assert_eq!(stance("plan"), ("on-request", "read-only"));
         assert_eq!(stance("bypassPermissions"), (pty::BYPASS, "danger-full-access"));
+        assert_eq!(stance(""), (pty::BYPASS, "danger-full-access"), "unset is the default, bypass");
+        assert_eq!(stance(crate::store::index::DEFAULT_PERMISSION_MODE), (pty::BYPASS, "danger-full-access"));
     }
 
     #[test]

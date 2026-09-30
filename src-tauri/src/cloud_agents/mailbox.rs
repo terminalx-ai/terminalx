@@ -130,7 +130,7 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
         return finish(agents, lease, "rejected", Some("tab-unknown"), json!({}));
     };
     // The actor's role now: stamped by the API at lease time and narrowed
-    // by the runtime's latest member list (contract §20.4-20.5).
+    // by the runtime's latest member list (contract §21.4-21.5).
     let access = agents.actor_access(&lease.actor);
     let allowed = match lease.kind.as_str() {
         "permission-decision" => access.can_approve,

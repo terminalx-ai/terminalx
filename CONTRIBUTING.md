@@ -75,6 +75,27 @@ The same advice applies to release builds, and the reasoning is in
 [docs/RELEASING.md](docs/RELEASING.md): the Tauri build script re-runs whenever
 `TAURI_CONFIG` changes, and `pnpm tauri:dev` sets it.
 
+## Build cache
+
+Cargo never trims `src-tauri/target`. Every build of the app's own crates
+leaves its artifacts, its incremental cache and (on macOS) 256 debug-info
+object files behind, and each extra `CARGO_TARGET_DIR` above is a second full
+cache, so the directory reaches tens of gigabytes within weeks.
+
+`pnpm tauri:dev` prunes it on the way in, and you can run the same thing by hand:
+
+```sh
+pnpm clean:build              # prune
+pnpm clean:build --dry-run    # say what would go
+pnpm clean:build --all        # remove every build dir; the next build is cold
+```
+
+A prune keeps the three newest builds of the app's crates and every
+third-party crate, so the next build is still warm. It removes a side target
+directory (`target/check`, `target/release-build`, ...) only once nobody has
+built into it for 14 days, and leaves alone any directory a running build or
+dev app is using. `--keep` and `--idle-days` change those two numbers.
+
 ## Branches and worktrees
 
 Work on a branch off `main`. TerminalX is built with worktrees and it is a

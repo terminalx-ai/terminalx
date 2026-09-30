@@ -49,7 +49,8 @@ named `tab:<tab-id>`. A new tab gets `--session-id <uuid>` with a uuid minted by
 the app, so the transcript's path is known before the CLI has written a byte; an
 existing tab gets `--resume <provider session id>`, which appends to that same
 file. A forked tab gets `--resume <parent> --fork-session --session-id <new>`.
-The rest of the command line is `--model`, `--effort`, `--permission-mode`,
+The rest of the command line is `--model`, `--effort`, `--permission-mode`
+(`--dangerously-skip-permissions` for bypass, the default launch mode),
 `--name` (so the tab is recognisable in the CLI's own picker) and `--settings`.
 
 The pane's environment carries `RACCOON_TAB_ID`, `RACCOON_SESSION_ID`,
@@ -217,16 +218,29 @@ A restart resumes; it does not fork. `--permission-mode` *is* honoured on
 `--resume` — verified against the installed CLI by reading the mode back out of
 a `Stop` hook payload after a completed turn.
 
-### Workspace trust
+### Workspace trust and other first-run screens
 
-The interactive CLI asks "is this a folder you trust?" the first time it runs
-anywhere new, and a session's worktree is always somewhere new. That dialog
-would take the first prompt instead of the composer, and a reader watching the
-chat would never see it. The CLI names the alternative itself, so
-`claude/trust.rs` sets `projects[<cwd>].hasTrustDialogAccepted` in the CLI's own
-config for a checkout the reader already adopted by making the session, and
-leaves every other key alone. It only writes when the flag is missing or false,
-which is once per checkout, before that checkout's CLI has started.
+The interactive CLI can open on a full-screen question before its composer, and
+each would take the first prompt while a reader watching the chat never saw it:
+onboarding's theme picker on a machine that never finished it (every fresh
+cloud VM), "is this a folder you trust?" the first time it runs anywhere new
+(a session's worktree always is), and the bypass-permissions disclaimer.
+`claude/trust.rs` answers the first two in the CLI's own config before each
+launch — `hasCompletedOnboarding` and `projects[<cwd>].hasTrustDialogAccepted`
+— creating the config on a machine with neither a config nor a CLI backup of
+one (with a backup, the CLI's own restore offer is left to show), holding one
+lock across the read and write so parallel launches keep every entry, and
+leaving every other key,
+the reader's `theme` included, alone. It only writes when something is
+missing. Bypass is accepted per launch: `skipDangerousModePermissionPrompt`
+rides in the `--settings` payload of a bypass tab, since the app's own bypass
+dialog already asked. Other screens, such as "Detected a custom API key" when
+`ANTHROPIC_API_KEY` is set, are the reader's to answer.
+
+Anything still left is caught before the prompt is typed: a quiet Claude pane
+that never ran `SessionStart` has its screen read, and a known first-run screen
+turns into an error on the tab (open the terminal view to answer it) instead
+of a prompt typed into a dialog and a tab that says "Working" forever.
 
 ### Nested-session stamps are stripped
 

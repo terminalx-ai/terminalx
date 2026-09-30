@@ -100,6 +100,17 @@ struct CliLaunch {
     transcript_root: PathBuf,
 }
 
+/// How the wait for a pane's CLI to listen ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Readiness {
+    /// It said so, or went quiet on something that is not a known dialog.
+    Ready,
+    /// Neither signal came in time, or the CLI exited.
+    TimedOut,
+    /// It is sitting on a first-run screen; the message says which.
+    Blocked(&'static str),
+}
+
 type DeliveryReceipt = std::sync::mpsc::Sender<std::result::Result<(), String>>;
 
 /// A composer prompt waiting for the CLI transcript to echo it. Both CLIs
@@ -409,6 +420,11 @@ pub fn pty_first(harness: &str) -> Option<CliKind> {
 }
 
 impl SessionManager {
+    /// The Codex model list this manager starts tabs against.
+    pub fn codex_models(&self) -> Arc<codex::models::Cache> {
+        self.codex_models.clone()
+    }
+
     pub fn new(
         sink: Arc<dyn EventSink>,
         observer: Arc<dyn SessionObserver>,
@@ -1470,11 +1486,12 @@ impl SessionManager {
         })
         .ok_or_else(|| anyhow!("Claude Code is not installed. Install it and log in, then try again."))?;
 
-        // The CLI's trust dialog would take the first prompt instead of the
-        // composer, and a session's worktree is always a folder it has not
-        // seen. The reader adopted this checkout when they made the session.
-        if let Err(e) = claude::trust::ensure_trusted(&entry.cwd) {
-            log::warn!("trust {}: {e:#}", entry.cwd);
+        // The CLI's first-run screens — onboarding's theme picker on a fresh
+        // machine, the trust dialog for a folder it has not seen — would take
+        // the first prompt instead of the composer. The reader adopted this
+        // checkout when they made the session.
+        if let Err(e) = claude::trust::prepare(&entry.cwd) {
+            log::warn!("prepare the Claude Code config for {}: {e:#}", entry.cwd);
         }
         let path = claude::transcript::cli_transcript_path(&entry.cwd, &provider_id).ok_or_else(|| anyhow!("no home directory"))?;
         // The CLI keeps every transcript for this checkout here, and the file
@@ -1773,7 +1790,22 @@ impl SessionManager {
         let spawned = std::thread::Builder::new().name("cli-input".into()).spawn(move || {
             let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ready) = ready {
-                if !manager.wait_ready(&pane, &ready) {
+                let readiness = manager.wait_ready(&pane, &ready);
+                if let Readiness::Blocked(message) = readiness {
+                    // Typing into a first-run dialog would answer it with
+                    // whatever the prompt happens to contain, and the tab
+                    // would say "Working" over a CLI that never took it.
+                    log::warn!("[{pane}] the CLI is on a first-run screen: {message}");
+                    let mut rt = rt_arc.lock().unwrap();
+                    rt.turn_open = false;
+                    manager.apply(&mut rt, Payload::Error { message: message.to_string(), fatal: false }, None);
+                    manager.set_status(&mut rt, TabStatus::Idle);
+                    if let Some(receipt) = &receipt {
+                        let _ = receipt.send(Err(format!("{message} The prepared prompt is retained.")));
+                    }
+                    return;
+                }
+                if readiness == Readiness::TimedOut {
                     if let Some(receipt) = &receipt {
                         let mut rt = rt_arc.lock().unwrap();
                         rt.turn_open = false;
@@ -1832,24 +1864,37 @@ impl SessionManager {
     /// runs no hook at all until a prompt creates its session, which is the very
     /// thing being waited for. Its tab reads the screen, and that is not a
     /// failure, so it is not logged as one.
-    fn wait_ready(&self, pane: &str, ready: &tui::Ready) -> bool {
+    ///
+    /// A quiet Claude pane that never said it was up is read before it is
+    /// trusted: the CLI's first-run screens (onboarding, trust, a custom API
+    /// key, the bypass disclaimer) are quiet too, and are `Blocked`.
+    fn wait_ready(&self, pane: &str, ready: &tui::Ready) -> Readiness {
         let deadline = Instant::now() + tui::READY_TIMEOUT;
+        let blocked = || {
+            if !ready.announces_start() {
+                return None;
+            }
+            self.terminals.read_output(pane).and_then(|out| claude::pty::blocking_screen(&out))
+        };
         loop {
             if ready.settled() {
-                return true;
+                return Readiness::Ready;
             }
             if !self.terminals.is_running(pane) {
                 log::warn!("[{pane}] exited before it was ready");
-                return false;
+                return Readiness::TimedOut;
             }
             if Instant::now() >= deadline {
-                return false;
+                return blocked().map_or(Readiness::TimedOut, Readiness::Blocked);
             }
             if self.terminals.quiet_for(pane).is_some_and(|q| q >= tui::READY_QUIET) {
+                if let Some(message) = blocked() {
+                    return Readiness::Blocked(message);
+                }
                 if ready.announces_start() {
                     log::warn!("[{pane}] never ran its SessionStart hook; falling back to quiet output");
                 }
-                return true;
+                return Readiness::Ready;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }

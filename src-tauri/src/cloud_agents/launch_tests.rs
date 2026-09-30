@@ -373,3 +373,67 @@ fn launch_json_keeps_its_on_disk_shape() {
     std::fs::write(dir.path().join(FILE), r#"{"stage":"done","launch_id":"launch_1","outcome":{"outcome":"started","sessionId":"s1","tabId":"t1","branches":[]}}"#).unwrap();
     assert_eq!(Store::open(dir.path()).get("launch_1"), Some(done));
 }
+
+/// A cloud launch that names no mode — the field absent from the claim, or
+/// blank — starts its tab in the default launch mode, bypass, exactly as a
+/// desktop session does. A named mode is kept.
+#[test]
+fn a_claimed_launch_without_a_mode_starts_in_bypass() {
+    let absent: Claim = serde_json::from_value(serde_json::json!({
+        "launchId": "launch_1", "state": "deliver", "workBranch": "terminalx/x", "agent": "claude"
+    }))
+    .unwrap();
+    assert_eq!(absent.mode, None);
+    let mut blank = claim(Vec::new());
+    blank.mode = Some("  ".into());
+    for c in [absent, blank] {
+        let tab = crate::session_ops::new_tab_entry(&new_tab(&c));
+        assert_eq!(tab.permission_mode, "bypassPermissions");
+        assert_eq!(crate::harness::claude::normalize_mode(&tab.permission_mode), "bypassPermissions");
+    }
+    let named = crate::session_ops::new_tab_entry(&new_tab(&claim(Vec::new())));
+    assert_eq!(named.permission_mode, "acceptEdits");
+}
+
+#[test]
+fn a_blank_project_starts_in_a_git_initialised_folder_on_its_work_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let api = FakeApi::new(Some(claim(Vec::new())));
+    let starter = Arc::new(FakeStarter::default());
+    let launcher = make(dir.path(), api.clone(), starter.clone(), "incarnation-aaaaaaaaaaaa");
+    let root = dir.path().join("workspace");
+
+    assert_eq!(launcher.pass().unwrap(), Pass::Settled("started".into()));
+    let starts = starter.starts.lock().unwrap().clone();
+    assert_eq!(starts[0].0, root, "a launch with no repository starts in the workspace folder");
+    // A repository on the work branch with a first commit, so Changes, Git and worktrees work.
+    assert_eq!(git(&root, &["branch", "--show-current"]), "terminalx/fix-login-3f9a2c1b7d4e");
+    assert!(!git(&root, &["rev-parse", "HEAD"]).is_empty());
+    assert_eq!(git(&root, &["status", "--porcelain"]), "");
+    std::fs::write(root.join("notes.md"), "hello\n").unwrap();
+    assert_eq!(git(&root, &["status", "--porcelain"]), "?? notes.md");
+    git(&root, &["worktree", "add", "-q", "-b", "second", dir.path().join("second").to_str().unwrap()]);
+    // Nothing about the folder is reported as a repository branch.
+    assert!(api.completions.lock().unwrap()[0].branches.is_empty());
+}
+
+#[test]
+fn a_folder_that_already_holds_repositories_is_never_initialised() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("workspace");
+    std::fs::create_dir_all(root.join("images/app")).unwrap();
+    git(&root.join("images/app"), &["init", "-q"]);
+    assert!(!init_blank_repository(&root, "main").unwrap());
+    assert!(!root.join(".git").exists());
+
+    let repo = dir.path().join("already");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    assert!(!init_blank_repository(&repo, "main").unwrap());
+
+    let blank = dir.path().join("blank");
+    assert!(init_blank_repository(&blank, "main").unwrap());
+    // Once set up, it is a repository: a second call changes nothing.
+    assert!(!init_blank_repository(&blank, "main").unwrap());
+    assert_eq!(git(&blank, &["rev-list", "--count", "HEAD"]), "1");
+}

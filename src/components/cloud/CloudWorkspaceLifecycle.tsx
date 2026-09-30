@@ -15,11 +15,13 @@ import {
   lifecycleErrorMessage,
   operationFailureText,
   remaining,
+  repositoryLabel,
   repositoryRiskLines,
   risksOf,
   type RuntimeCheck,
 } from "@/lib/cloudLifecycle";
 import { errorCode } from "@/lib/cloudTerminals";
+import { cloudOrgArg } from "@/lib/cloudCatalog";
 
 export type LifecycleAction = "stop" | "archive" | "delete";
 
@@ -80,8 +82,9 @@ export function CloudWorkspaceLifecycleDialog({
     let live = true;
     setServer(undefined);
     setServerError(null);
+    setRuntime(null);
     api
-      .cloudWorkspaceDisposition(workspace.id)
+      .cloudWorkspaceDisposition(workspace.id, cloudOrgArg(workspace.orgId))
       .then((facts) => {
         if (!live) return;
         setServer(facts);
@@ -96,7 +99,7 @@ export function CloudWorkspaceLifecycleDialog({
     return () => {
       live = false;
     };
-    // The workspace's identity is what matters; `again` re-reads after a refusal.
+    // The workspace's identity is what matters; `again` re-reads after a refusal or on "Check again".
   }, [workspace.id, again]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const risks = risksOf(server ?? null, runtime);
@@ -118,10 +121,10 @@ export function CloudWorkspaceLifecycleDialog({
     try {
       const snapshot =
         action === "stop"
-          ? await api.cloudWorkspaceSuspend(workspace.id)
+          ? await api.cloudWorkspaceSuspend(workspace.id, cloudOrgArg(workspace.orgId))
           : action === "archive"
-            ? await api.cloudWorkspaceArchive(workspace.id, needsForce && force)
-            : await api.cloudWorkspaceDelete(workspace.id, needsForce && force);
+            ? await api.cloudWorkspaceArchive(workspace.id, needsForce && force, cloudOrgArg(workspace.orgId))
+            : await api.cloudWorkspaceDelete(workspace.id, needsForce && force, cloudOrgArg(workspace.orgId));
       onDone(snapshot);
     } catch (e) {
       const code = errorCode(e);
@@ -175,7 +178,7 @@ export function CloudWorkspaceLifecycleDialog({
                 <GitBranch className="mt-0.5 size-3.5 shrink-0 text-warning" />
                 <span className="min-w-0">
                   <span className="font-mono">
-                    {repo.path}
+                    {repositoryLabel(repo, workspace.name)}
                     {repo.branch ? ` · ${repo.branch}` : ""}
                   </span>
                   : {repositoryRiskLines(repo).join(", ")}
@@ -187,7 +190,15 @@ export function CloudWorkspaceLifecycleDialog({
             )}
             {runtime?.kind === "offline" && (
               <span className="text-muted-foreground">
-                The workspace is not running, so its uncommitted and unpushed work cannot be checked without waking it.
+                {offlineText(server?.state ?? workspace.state)}
+              </span>
+            )}
+            {runtime?.kind === "unreachable" && (
+              <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-muted-foreground">
+                Couldn't reach the workspace to check for uncommitted and unpushed work.
+                <Button size="xs" variant="ghost" onClick={() => setAgain((value) => value + 1)}>
+                  Check again
+                </Button>
               </span>
             )}
             {runtime?.kind === "unsupported" && <span className="text-muted-foreground">This workspace's runtime does not report unpublished work.</span>}
@@ -260,6 +271,12 @@ function ActionSummary({ action, retentionDays, removedOnDelete }: { action: Lif
   );
 }
 
+/** Why a workspace that is not running cannot be asked about its work. */
+function offlineText(state: string): string {
+  if (state === "provisioning") return "The workspace is still starting, so its uncommitted and unpushed work cannot be checked yet.";
+  return `The workspace ${state === "archived" ? "is archived" : "is not running"}, so its uncommitted and unpushed work cannot be checked without waking it.`;
+}
+
 function Warn({ text }: { text: string }) {
   return (
     <div className="flex items-start gap-2">
@@ -312,7 +329,7 @@ export function DeletionProgress({
     let live = true;
     const read = () =>
       api
-        .cloudWorkspaceOperation(operation.id)
+        .cloudWorkspaceOperation(operation.id, cloudOrgArg(item.workspace.orgId))
         .then((snapshot) => {
           if (!live) return;
           setOperation(snapshot.operation);
@@ -335,7 +352,7 @@ export function DeletionProgress({
     setBusy(true);
     setError(null);
     try {
-      const snapshot = await api.cloudWorkspaceDelete(item.workspace.id, false);
+      const snapshot = await api.cloudWorkspaceDelete(item.workspace.id, false, cloudOrgArg(item.workspace.orgId));
       setOperation(snapshot.operation);
       changed.current();
     } catch (e) {

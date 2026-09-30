@@ -205,6 +205,26 @@ mod tests {
         assert!(!yolo.contains(" -a "));
     }
 
+    /// No mode named is the default launch mode, bypass (`--yolo` is Codex's
+    /// undocumented alias for the documented flag used here), and a resumed
+    /// thread is launched in its tab's mode like a fresh one.
+    #[test]
+    fn an_unset_mode_launches_in_bypass_fresh_and_resumed() {
+        if crate::binpath::resolve("codex").is_none() {
+            return;
+        }
+        for resume in [None, Some("01a0-uuid")] {
+            for mode in ["", crate::store::index::DEFAULT_PERMISSION_MODE] {
+                let c = launch_command(LaunchOptions { resume, model: "", effort: None, permission_mode: mode }).unwrap();
+                assert!(c.contains(" --dangerously-bypass-approvals-and-sandbox"), "{mode:?} {resume:?}: {c}");
+                assert!(!c.contains(" -a "), "{mode:?} {resume:?}");
+            }
+            let manual = launch_command(LaunchOptions { resume, model: "", effort: None, permission_mode: "manual" }).unwrap();
+            assert!(manual.contains(" -a on-request -s workspace-write"));
+            assert!(!manual.contains("dangerously"));
+        }
+    }
+
     #[test]
     fn a_denial_is_said_in_json_and_carries_a_reason() {
         let deny = permission_decision(false);

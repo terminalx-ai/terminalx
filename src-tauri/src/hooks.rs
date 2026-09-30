@@ -33,10 +33,31 @@ pub const TOKEN_ENV: &str = "RACCOON_HOOK_TOKEN";
 /// socket path is shared with hooks; the token authenticates command requests.
 pub const CONTROL_SOCKET_ENV: &str = "TERMINALX_NEXT_SOCKET";
 pub const CONTROL_TOKEN_ENV: &str = "TERMINALX_NEXT_TOKEN";
-/// How long a hook waits for the app. A permission card is answered by a
-/// person, so this has to outlast a moment's thought without outlasting the
-/// CLI's own hook timeout.
+/// How long a reporting hook waits for the app. The CLI kills those after its
+/// own short timeout anyway; this only bounds a hook whose app has hung.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Beyond the app's own wait for a decision, so the app's answer — or its
+/// "lapsed" — is always what the hook prints.
+const DECISION_SLACK: Duration = Duration::from_secs(15);
+
+/// How long the hook for `event` waits for the app's reply.
+///
+/// A decision is made by a person, possibly on another device through the
+/// relay and a polled mailbox, so its hook has to wait as long as the app
+/// keeps the card open. It used to give up after 30 s like any other hook: a
+/// slower click then printed nothing, the CLI fell back to its own TUI prompt
+/// that nobody could see, and the app went on to show "Allowed" for an answer
+/// that had nowhere left to go — the tool never ran. The CLI's own timeout for
+/// these hooks (`PERMISSION_WAIT`) still ends a hook the app never answers.
+fn reply_timeout(event: &str) -> Duration {
+    match event {
+        // Claude's permission gate and both of Codex's.
+        "PermissionRequest" | "PreToolUse" => {
+            crate::harness::claude::pty::PERMISSION_WAIT.max(crate::harness::codex::pty::PERMISSION_WAIT) + DECISION_SLACK
+        }
+        _ => REPLY_TIMEOUT,
+    }
+}
 
 /// One hook occurrence, as the hook process sends it to the app.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -367,12 +388,13 @@ fn ask_app(event: &str, stdin: &str) -> Option<Value> {
         payload,
     };
     let path = std::env::var(SOCKET_ENV).ok()?;
+    let timeout = reply_timeout(&frame.event);
     let mut bytes = serde_json::to_vec(&frame).ok()?;
     bytes.push(b'\n');
     #[cfg(unix)]
     let line = {
         let mut stream = UnixStream::connect(path).ok()?;
-        stream.set_read_timeout(Some(REPLY_TIMEOUT)).ok()?;
+        stream.set_read_timeout(Some(timeout)).ok()?;
         stream.set_write_timeout(Some(Duration::from_secs(5))).ok()?;
         stream.write_all(&bytes).ok()?;
         stream.flush().ok()?;
@@ -381,7 +403,7 @@ fn ask_app(event: &str, stdin: &str) -> Option<Value> {
         line
     };
     #[cfg(windows)]
-    let line = crate::pipe_transport::exchange(Path::new(&path), bytes, REPLY_TIMEOUT).ok()?;
+    let line = crate::pipe_transport::exchange(Path::new(&path), bytes, timeout).ok()?;
     serde_json::from_str::<HookReply>(&line).ok()?.output
 }
 
@@ -416,6 +438,20 @@ mod tests {
         let hook = HookFrame { tab: "t".into(), session: "s".into(), token: "token".into(), event: "Stop".into(), payload: Value::Null };
         let response = crate::pipe_transport::exchange(&endpoint.socket, format!("{}\n", serde_json::to_string(&hook).unwrap()).into_bytes(), Duration::from_secs(2)).unwrap();
         assert_eq!(serde_json::from_str::<HookReply>(&response).unwrap().output.unwrap()["event"], "Stop");
+    }
+
+    #[test]
+    fn a_decision_hook_waits_as_long_as_the_app_keeps_the_card_open() {
+        // The app parks a permission card for PERMISSION_WAIT; a hook that
+        // stopped listening sooner would drop the reader's answer on the floor.
+        for event in ["PermissionRequest", "PreToolUse"] {
+            assert!(reply_timeout(event) > crate::harness::claude::pty::PERMISSION_WAIT, "{event}");
+            assert!(reply_timeout(event) > crate::harness::codex::pty::PERMISSION_WAIT, "{event}");
+        }
+        // Reporting hooks keep the short bound.
+        for event in ["SessionStart", "Stop", "PostToolUse", "Notification", "StatusLine"] {
+            assert_eq!(reply_timeout(event), REPLY_TIMEOUT, "{event}");
+        }
     }
 
     #[test]

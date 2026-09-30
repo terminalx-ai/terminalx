@@ -44,6 +44,8 @@ import {
   parseSmartInput,
   rankPaletteItems,
   searchPaletteIndex,
+  buildCloudPaletteSessions,
+  withCloudSessions,
   type MatchRange,
   type PaletteEntityBase,
   type PaletteMatch,
@@ -65,6 +67,7 @@ import {
   useSessionStore,
 } from "@/lib/sessions";
 import { SHORTCUTS, type Shortcut } from "@/lib/shortcuts";
+import { openCloudSession, useCloudDashboard } from "@/lib/cloudDashboard";
 import { setStatusSettings, useStatus } from "@/lib/status";
 import { THEMES, setMode, setTheme, useTheme } from "@/lib/theme";
 import { relativeTime } from "@/lib/time";
@@ -532,8 +535,15 @@ export function CommandPalette({
     }
   }, [lookupWorkItem, onCreated, resolvedWorkItem, setOpen, smartInput, smartProject, store.harnesses]);
 
+  // Cloud sessions of every live organization sit among the sessions (PRO-23 CS-19).
+  const cloudSessions = useCloudDashboard();
+  const paletteIndex = useMemo(
+    () => withCloudSessions(store.paletteIndex, buildCloudPaletteSessions(cloudSessions, store.harnesses)),
+    [store.paletteIndex, cloudSessions, store.harnesses],
+  );
+
   const groups = useMemo<PaletteGroup[]>(() => {
-    const entityMatches = searchPaletteIndex(store.paletteIndex, deferredQuery);
+    const entityMatches = searchPaletteIndex(paletteIndex, deferredQuery);
     const commandMatches = rankPaletteItems(commandEntries, deferredQuery);
     const rankedFiles = deferredQuery.trim() ? rankPaletteItems(fileEntries, deferredQuery) : [];
     const smartRows: PaletteRow[] = [];
@@ -588,7 +598,8 @@ export function CommandPalette({
     const sessionRows = entityMatches.sessions.map((match) => entityRow(
       { ...match, item: { ...match.item, secondary: `${match.item.secondary} · ${relativeTime(match.item.modified)}` } },
       "session",
-      () => selectSession(match.item.sessionId),
+      // A cloud session is selected, never woken (PRO-23 CS-19).
+      () => (match.item.cloudKey ? openCloudSession(match.item.cloudKey) : selectSession(match.item.sessionId)),
       { agentId: match.item.agentIds[0] },
     ));
     const workspaceRows = entityMatches.workspaces.map((match) => entityRow(match, "workspace", () => void openWorkspace(match.item.projectPath, match.item.workspace.path)));
@@ -611,7 +622,7 @@ export function CommandPalette({
       { id: "files", label: activeProject ? `Files · ${activeProject.name}` : "Files", rows: fileRows },
       { id: "commands", label: "Views and commands", rows: commandRows },
     ];
-  }, [activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, store.paletteIndex, store.projects, store.sessions, workItemLoading]);
+  }, [activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading]);
 
   const renderedGroups = useMemo(() => {
     let offset = 0;

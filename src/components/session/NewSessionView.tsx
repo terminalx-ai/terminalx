@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, FolderOpen, FolderGit2, GitBranch, Loader2 } from "lucide-react";
+import { ChevronDown, Cloud, FolderOpen, FolderGit2, GitBranch, Loader2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
@@ -18,7 +19,7 @@ import { DictationStatus, MicButton, NEW_SESSION_TARGET, useDictationInto } from
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "@/components/chat/useImageAttachments";
 import { RaccoonScene } from "@/components/raccoon/Raccoon";
 import { api, errorMessage, type ImageInput } from "@/lib/api";
-import { addProject, clearNewSessionPreset, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
+import { addProject, clearNewSessionPreset, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { EFFORT_LABEL, PERMISSION_MODES, refreshModels, upgradeHint, useModels } from "@/lib/models";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { chooseMode } from "@/lib/dialogs";
@@ -27,6 +28,11 @@ import { stopDictation } from "@/lib/dictation";
 import { cn } from "@/lib/cn";
 import type { WorkStatus } from "@/types/session";
 import { WorkspaceNameEditor } from "./WorkspaceNameEditor";
+import { CloudCreateConfirm, cloudStartError, useCloudDraft, useCloudProjectChoices } from "./CloudNewSession";
+import { useRowMenu } from "@/components/ui/useRowMenu";
+import { RunningLimitNotice } from "@/components/cloud/RunningLimitNotice";
+import { RUNNING_LIMIT_CODE, runningLimitMessage, runningLimitReached } from "@/lib/runningLimit";
+import { confirmCloudCreate, planCloudStart, prepareCloudCreate, startInWorkspace, type CloudSessionRequest, type PreparedCreate } from "@/lib/cloudNewSession";
 
 /**
  * Where a session is born. The box sits at the bottom, where the composer
@@ -47,21 +53,36 @@ export function NewSessionView({
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The organization whose running limit refused the last cloud start, to offer stopping a workspace. */
+  const [limitOrg, setLimitOrg] = useState<string | null>(null);
   const [status, setStatus] = useState<WorkStatus | null>(null);
   const [workspaceName, setWorkspaceName] = useState<string | null>(null);
   const [localUseWorktree, setLocalUseWorktree] = useState(prefs.useWorktree);
   const ref = useRef<HTMLTextAreaElement>(null);
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
+  // A cloud project's `+` (PRO-23): the same form, run in the organization's cloud.
+  const cloud = useCloudDraft();
+  const cloudChoices = useCloudProjectChoices();
+  // Opens on a click (also one sent through the accessibility tree), not only on pointerdown or Enter.
+  const projectMenu = useRowMenu();
+  // Every picker opens on a click and an accessibility press, not only the project one.
+  const agentMenu = useRowMenu();
+  const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
+  const effortMenu = useRowMenu();
+  const modeMenu = useRowMenu();
+  const [confirm, setConfirm] = useState<PreparedCreate | null>(null);
+  const [starting, setStarting] = useState<string | null>(null);
 
   const preset = store.newSessionPreset;
   // The rail is what the reader last pointed at, so it beats the project they
   // happened to start a session in some other day; a preset beats both.
   const wanted = preset?.projectPath ?? store.selectedProject ?? prefs.lastProject;
   const project = store.projects.find((p) => p.path === wanted) ?? store.projects[0] ?? null;
-  const isGit = project?.kind !== "folder";
+  const isGit = cloud ? true : project?.kind !== "folder";
   const useWorktree = isGit && (controlledUseWorktree ?? localUseWorktree);
   const harness = store.harnesses.find((h) => h.id === prefs.lastAgent) ?? store.harnesses[0] ?? null;
-  const available = harness?.available ?? false;
+  // A cloud session runs the agent installed on the workspace, not on this computer.
+  const available = cloud ? !!harness : (harness?.available ?? false);
   const models = useModels(harness?.id);
   const modelId = harness ? (prefs.lastModel[harness.id] ?? models.find((m) => m.isDefault)?.id ?? models[0]?.id ?? "") : "";
   const model = models.find((m) => m.id === modelId) ?? null;
@@ -73,16 +94,17 @@ export function NewSessionView({
   useEffect(() => {
     let cancelled = false;
     const at = preset?.cwd ?? project?.path;
-    if (!at || !isGit) return setStatus(null);
+    // Never a local path for a cloud draft.
+    if (!at || !isGit || cloud) return setStatus(null);
     api.workStatus(at).then((s) => !cancelled && setStatus(s)).catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [project, preset, isGit]);
+  }, [project, preset, isGit, cloud]);
 
   useEffect(() => {
     let cancelled = false;
-    if (!project || preset?.cwd || !useWorktree) {
+    if (!project || preset?.cwd || !useWorktree || cloud) {
       setWorkspaceName(null);
       return;
     }
@@ -94,7 +116,7 @@ export function NewSessionView({
     return () => {
       cancelled = true;
     };
-  }, [project?.path, preset?.cwd, useWorktree]);
+  }, [project?.path, preset?.cwd, useWorktree, !!cloud]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const pickProject = async () => {
     try {
@@ -116,11 +138,80 @@ export function NewSessionView({
 
   // A screenshot alone is a prompt, as it is in the session composer.
   const canSend = useMemo(
-    () => !!project && !!harness && available && (text.trim().length > 0 || hasImages) && (!useWorktree || !!preset?.cwd || !!workspaceName) && !busy,
-    [project, harness, available, text, hasImages, useWorktree, preset?.cwd, workspaceName, busy],
+    () =>
+      cloud
+        ? !!cloud.project && !!harness && text.trim().length > 0 && !hasImages && !busy && !confirm && cloud.project.selected
+        : !!project && !!harness && available && (text.trim().length > 0 || hasImages) && (!useWorktree || !!preset?.cwd || !!workspaceName) && !busy,
+    [cloud, project, harness, available, text, hasImages, useWorktree, preset?.cwd, workspaceName, busy, confirm],
   );
 
+  const cloudRequest = (): CloudSessionRequest => ({
+    agent: harness!.id,
+    model: modelId,
+    effort,
+    mode: prefs.lastMode,
+    prompt: text,
+    useWorktree,
+  });
+
+  /**
+   * A cloud start's error. At the running limit (the server's code, or the
+   * quota pre-check while the list shows running slots full), say how many
+   * run and offer to stop one.
+   */
+  const showCloudError = (e: unknown, orgId: string) => {
+    const code = e && typeof e === "object" && "code" in e ? String((e as { code: unknown }).code) : null;
+    const atRunningLimit = code === RUNNING_LIMIT_CODE || (code === "cloud_workspace_quota_exceeded" && runningLimitReached(orgId));
+    setLimitOrg(atRunningLimit ? orgId : null);
+    setError(atRunningLimit ? runningLimitMessage(orgId) : cloudStartError(e));
+  };
+
+  /** Start in the cloud: reuse or wake a workspace of the project, or prepare a new one for confirmation. */
+  const createCloud = async () => {
+    if (!cloud?.project || !harness || !canSend) return;
+    if (dictation.dictating) await stopDictation();
+    setBusy(true);
+    setError(null);
+    setLimitOrg(null);
+    const plan = planCloudStart(cloud.project);
+    try {
+      if (plan.kind === "create") {
+        setStarting("Checking your organization's limits…");
+        setConfirm(await prepareCloudCreate(cloud.project, cloudRequest()));
+      } else {
+        setStarting(plan.kind === "wake" ? `Resuming ${plan.node.item.workspace.name}…` : "Starting the session…");
+        await startInWorkspace(plan, cloudRequest());
+        setText("");
+      }
+    } catch (e) {
+      showCloudError(e, cloud.project.orgId);
+    } finally {
+      setStarting(null);
+      setBusy(false);
+    }
+  };
+
+  const confirmCreate = async () => {
+    if (!confirm) return;
+    setBusy(true);
+    setError(null);
+    setLimitOrg(null);
+    setStarting("Creating the workspace…");
+    try {
+      await confirmCloudCreate(confirm);
+      setConfirm(null);
+      setText("");
+      setStarting("Starting the workspace. The session opens when its agent is running.");
+    } catch (e) {
+      showCloudError(e, confirm.orgId);
+      setStarting(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const create = async () => {
+    if (cloud) return createCloud();
     if (!project || !harness || !canSend) return;
     if (dictation.dictating) await stopDictation();
     setBusy(true);
@@ -159,7 +250,11 @@ export function NewSessionView({
         <div className="w-full max-w-3xl">
           <div className="mb-2 flex items-baseline gap-3 px-1">
             <h1 className="text-xl font-semibold tracking-tight">What are we working on?</h1>
-            {project && (
+            {cloud ? (
+              <span className="flex min-w-0 items-center gap-2 truncate text-sm text-muted-foreground">
+                in <span className="truncate text-foreground">{cloud.project?.fullName ?? "a cloud project"}</span>
+              </span>
+            ) : project && (
               <span className="truncate text-sm text-muted-foreground">
                 in <span className="text-foreground">{project.name}</span>
                 {workspace && (
@@ -178,16 +273,16 @@ export function NewSessionView({
       <div className="shrink-0 px-6 pb-4">
         <div className="mx-auto w-full max-w-3xl">
           <div className="mb-2 flex flex-wrap items-center gap-1.5">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
+            <DropdownMenu {...projectMenu.root}>
+              <DropdownMenuTrigger asChild {...projectMenu.trigger}>
                 <Button variant="secondary" size="sm" className={pill}>
-                  {isGit ? <FolderGit2 /> : <FolderOpen />}
-                  {project?.name ?? "Choose project"}
+                  {cloud ? <Cloud /> : isGit ? <FolderGit2 /> : <FolderOpen />}
+                  {cloud ? (cloud.project?.fullName ?? "Cloud project") : (project?.name ?? "Choose project")}
                   <ChevronDown className="text-faint" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start">
-                <DropdownMenuLabel>Projects</DropdownMenuLabel>
+                <DropdownMenuLabel>{cloudChoices.length ? "Local" : "Projects"}</DropdownMenuLabel>
                 {store.projects.map((p) => (
                   <DropdownMenuItem
                     key={p.path}
@@ -202,13 +297,27 @@ export function NewSessionView({
                     <span className="truncate">{p.name}</span>
                   </DropdownMenuItem>
                 ))}
-                {store.projects.length > 0 && <DropdownMenuSeparator />}
+                {cloudChoices.map((section) => (
+                  <DropdownMenuGroup key={section.orgId} aria-label={`${section.orgName} cloud projects`}>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel>{section.orgName} cloud</DropdownMenuLabel>
+                    {section.projects.map((choice) => (
+                      <DropdownMenuItem key={choice.key} disabled={!choice.selected} onSelect={() => startCloudSessionIn(choice.key)}>
+                        <Cloud className={cn(choice.key === cloud?.project?.key && "text-foreground")} />
+                        <span className="truncate">{choice.fullName}</span>
+                        {choice.blank && <span className="ml-auto pl-3 text-[11px] text-faint">no repo</span>}
+                      </DropdownMenuItem>
+                    ))}
+                    {section.projects.length === 0 && <DropdownMenuItem disabled>No cloud projects yet</DropdownMenuItem>}
+                  </DropdownMenuGroup>
+                ))}
+                {(store.projects.length > 0 || cloudChoices.length > 0) && <DropdownMenuSeparator />}
                 <DropdownMenuItem onSelect={pickProject}>Add a project…</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
 
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
+            <DropdownMenu {...agentMenu.root}>
+              <DropdownMenuTrigger asChild {...agentMenu.trigger}>
                 <Button variant="secondary" size="sm" className={pill}>
                   {harness && <AgentMark id={harness.id} className="size-3.5" decorative brand />}
                   {harness?.name ?? "Agent"}
@@ -218,18 +327,18 @@ export function NewSessionView({
               <DropdownMenuContent align="start">
                 <DropdownMenuLabel>Agent</DropdownMenuLabel>
                 {store.harnesses.map((h) => (
-                  <DropdownMenuItem key={h.id} disabled={!h.available} onSelect={() => setPrefs({ lastAgent: h.id })}>
+                  <DropdownMenuItem key={h.id} disabled={!cloud && !h.available} onSelect={() => setPrefs({ lastAgent: h.id })}>
                     <AgentMark id={h.id} decorative brand />
                     <span>{h.name}</span>
-                    {!h.available && <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span>}
+                    {!cloud && !h.available && <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span>}
                   </DropdownMenuItem>
                 ))}
               </DropdownMenuContent>
             </DropdownMenu>
 
             {harness && models.length > 0 && (
-              <DropdownMenu onOpenChange={(open) => open && void refreshModels()}>
-                <DropdownMenuTrigger asChild>
+              <DropdownMenu {...modelMenu.root}>
+                <DropdownMenuTrigger asChild {...modelMenu.trigger}>
                   <Button variant="secondary" size="sm" className={pill}>
                     {model?.label ?? modelId ?? "Model"}
                     <ChevronDown className="text-faint" />
@@ -253,8 +362,8 @@ export function NewSessionView({
             )}
 
             {harness && model && model.efforts.length > 0 && (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
+              <DropdownMenu {...effortMenu.root}>
+                <DropdownMenuTrigger asChild {...effortMenu.trigger}>
                   <Button variant="secondary" size="sm" className={pill}>
                     {effort ? (EFFORT_LABEL[effort] ?? effort) : "Effort"}
                     <ChevronDown className="text-faint" />
@@ -273,8 +382,8 @@ export function NewSessionView({
               </DropdownMenu>
             )}
 
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
+            <DropdownMenu {...modeMenu.root}>
+              <DropdownMenuTrigger asChild {...modeMenu.trigger}>
                 <Button variant="secondary" size="sm" className={pill}>
                   {mode.label}
                   <ChevronDown className="text-faint" />
@@ -293,7 +402,20 @@ export function NewSessionView({
               </DropdownMenuContent>
             </DropdownMenu>
 
-            {!isGit ? (
+            {cloud ? (
+              <>
+                <span className="ml-1 flex items-center gap-1 rounded-full border border-hairline px-2 py-0.5 text-xs text-muted-foreground" data-testid="cloud-runs-in" title="The agent, its terminals and its files run on a cloud workspace of the organization, not on this computer.">
+                  <Cloud className="size-3.5" /> Runs in: <span className="text-foreground">{cloud.orgName} cloud</span>
+                </span>
+                <div className="ml-1 flex items-center gap-2 text-xs text-muted-foreground">
+                  <Switch size="sm" checked={useWorktree} onCheckedChange={setUseWorktree} aria-label="New worktree on the cloud workspace" />
+                  <span className="flex items-center gap-1">
+                    <GitBranch className="size-3.5" />
+                    {useWorktree ? "New worktree on the workspace" : "Work in the workspace's checkout"}
+                  </span>
+                </div>
+              </>
+            ) : !isGit ? (
               <span className="ml-1 flex items-center gap-1 text-xs text-muted-foreground" title="Agents, terminals, and files are available. Git features require a repository.">
                 <FolderOpen className="size-3.5" /> Folder · no Git
               </span>
@@ -337,6 +459,14 @@ export function NewSessionView({
           </div>
 
           <DictationStatus dictation={dictation} />
+          {cloud && confirm && (
+            <CloudCreateConfirm prepared={confirm} orgName={cloud.orgName} busy={busy} onConfirm={() => void confirmCreate()} onCancel={() => setConfirm(null)} />
+          )}
+          {cloud && starting && (
+            <div className="mb-2 flex items-center gap-2 px-1 text-xs text-muted-foreground" role="status" data-testid="cloud-start-status">
+              {busy && <Loader2 className="size-3.5 animate-spin" />} {starting}
+            </div>
+          )}
 
           <div className={cn("relative rounded-2xl bg-composer glass p-3 shadow-surface hairline", attach.dragging && "ring-2 ring-accent/60")} {...attach.dropZoneProps}>
             <DropHint dragging={attach.dragging} />
@@ -344,6 +474,7 @@ export function NewSessionView({
             <textarea
               ref={ref}
               autoFocus
+              data-new-session-prompt
               value={text}
               onChange={(e) => setText(e.target.value)}
               onKeyDown={(e) => {
@@ -354,7 +485,9 @@ export function NewSessionView({
               }}
               rows={3}
               placeholder={
-                !project
+                cloud
+                  ? "Describe the task. It runs in the cloud."
+                  : !project
                   ? "Add a project to get started."
                   : preset?.cwd
                     ? "Describe the task. It runs in this workspace."
@@ -365,10 +498,10 @@ export function NewSessionView({
               className="w-full resize-none bg-transparent text-[15px] leading-relaxed outline-none placeholder:text-faint"
             />
             <div className="flex items-center gap-1 pt-1">
-              <AttachButton attach={attach} />
+              {!cloud && <AttachButton attach={attach} />}
               <MicButton dictation={dictation} />
               <div className="min-w-0 text-xs text-faint">
-                {harness && !available ? (
+                {!cloud && harness && !available ? (
                   <span className="text-warning">
                     {harness.name} isn't installed. <code className="font-mono">{harness.installHint}</code>
                   </span>
@@ -385,6 +518,7 @@ export function NewSessionView({
             </div>
           </div>
           {error && <div className="mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
+          {cloud && error && limitOrg && <RunningLimitNotice orgId={limitOrg} />}
         </div>
       </div>
     </div>

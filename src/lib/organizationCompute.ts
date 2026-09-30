@@ -35,6 +35,12 @@ export interface ComputePolicyView {
   counts: ComputeCounts;
   /** Operator-set upper bound for any organization's workspace limit. */
   workspaceCeiling: number;
+  /**
+   * Operator-set upper bound for the running limit (saas PRO-76); null from
+   * an older server, where a blank running limit meant "up to the workspace
+   * limit".
+   */
+  runningWorkspaceCeiling: number | null;
   contextRevision: string;
 }
 
@@ -162,6 +168,7 @@ export function normalizePolicyView(value: unknown): ComputePolicyView {
     canEdit: value.canEdit === true,
     counts: { workspaces: number(value.counts.workspaces) ?? 0, running: number(value.counts.running) ?? 0 },
     workspaceCeiling: number(value.workspaceCeiling) ?? Math.max(number(policy.maxWorkspaces) ?? 1, 1),
+    runningWorkspaceCeiling: number(value.runningWorkspaceCeiling),
     contextRevision: typeof value.contextRevision === "string" ? value.contextRevision : "",
   };
 }
@@ -192,7 +199,7 @@ export const organizationCompute = {
     invoke<unknown>("organization_compute_provisioning_pause", { expectedVersion, paused, reason, contextRevision }).then(normalizePolicyView),
 };
 
-export const PROVIDER_LABEL: Record<string, string> = { machine0: "Machine0", box: "Box", hetzner: "Hetzner" };
+export const PROVIDER_LABEL: Record<string, string> = { machine0: "Machine0", box: "Box", hetzner: "Hetzner", "local-docker": "Local Docker" };
 export const providerLabel = (provider: string) => PROVIDER_LABEL[provider] ?? provider;
 
 /** Provider amounts are integer micros of the provider's billing currency. */
@@ -245,6 +252,18 @@ export function alertMessage(alert: ComputeAlert): string {
   }
 }
 
+/**
+ * The running limit that applies: the organization's own, else the operator
+ * ceiling, never above the ceiling or the workspace limit. A server before
+ * PRO-76 has no running ceiling, and a blank limit there means the workspace
+ * limit.
+ */
+export function effectiveRunningLimit(view: Pick<ComputePolicyView, "policy" | "workspaceCeiling" | "runningWorkspaceCeiling">): number {
+  const total = Math.min(view.policy.maxWorkspaces, view.workspaceCeiling);
+  const ceiling = view.runningWorkspaceCeiling ?? total;
+  return Math.min(view.policy.maxRunningWorkspaces ?? ceiling, ceiling, total);
+}
+
 export function computeErrorMessage(error: unknown): string {
   const failure = error as Partial<OrganizationComputeError> | null;
   const code = typeof failure?.code === "string" ? failure.code : "";
@@ -255,6 +274,8 @@ export function computeErrorMessage(error: unknown): string {
       return "Another admin changed these limits. The latest limits have been loaded; review them and try again.";
     case "cloud_workspace_request_invalid":
       return "Those limits are not valid. Check the values and try again.";
+    case "cloud_compute_running_limit_above_ceiling":
+      return "The running limit is above what this server allows. Choose a lower number.";
     case "organization_compute_outcome_unknown":
       return "TerminalX lost the response, so the change may or may not have been applied. The limits have been refreshed; check them before trying again.";
     case "account_context_changed_after_send":

@@ -16,8 +16,37 @@
 import { PortableRpcClient, type RpcCallResult, type RpcErrorData, type RpcResponse, type RpcWireRequest } from "./rpc";
 
 export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
-export const WORKSPACE_CAPABILITIES = ["pty/1", "fs/1", "git/1", "session/1", "keys/1", "lifecycle/1", "collab/1"] as const;
+/**
+ * Namespace versions, as `src-tauri/src/remote/protocol.rs` `CAPABILITIES`.
+ * A newer version only adds to its namespace (CS-12):
+ * - `session/2`: `session.update`, `session.addTab`, `session.delete` and the
+ *   `session.sessions` notification;
+ * - `pty/2`: `pty.create` takes a `sessionId`, and `pty.list` returns it;
+ * - `agents/1`: `runtime.agents`.
+ * An older runtime grants none of them; check `hasCapability` before offering
+ * the matching action.
+ */
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
+
+/**
+ * Methods served only under a specific namespace version. Every other method
+ * needs any version of the namespace it is named after.
+ */
+export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> = {
+  "session.update": "session/2",
+  "session.addTab": "session/2",
+  "session.delete": "session/2",
+  "runtime.agents": "agents/1",
+  // `collab/1` (PRO-30, docs/CLOUD-SHARING.md) also grants presence, notes
+  // and tab leases, which are not named after it.
+  "presence.update": "collab/1",
+  "notes.list": "collab/1",
+  "notes.post": "collab/1",
+  "lease.acquire": "collab/1",
+  "lease.release": "collab/1",
+  "lease.takeOver": "collab/1",
+};
 
 /** How much a caller may cost: only an interactive action may wake compute. */
 export type Activation = "cache-only" | "sync" | "connect" | "wake";
@@ -27,6 +56,9 @@ export const MUTATING_METHODS = new Set([
   "session.close",
   "session.send",
   "session.configure",
+  "session.update",
+  "session.addTab",
+  "session.delete",
   "pty.create",
   "fs.write",
   "fs.writePart",
@@ -46,13 +78,7 @@ export const MUTATING_METHODS = new Set([
   "notes.post",
 ]);
 
-/**
- * Methods whose namespace is not their prefix: `collab/1` (PRO-30,
- * docs/CLOUD-SHARING.md) also grants presence, notes and tab leases.
- */
-const NAMESPACE_OF: Record<string, string> = { presence: "collab", notes: "collab", lease: "collab" };
-
-/** A person's collaboration role on a shared workspace (contract §20.1). */
+/** A person's collaboration role on a shared workspace (saas contract §21.1). */
 export type CollaborationRole = "manager" | "driver" | "viewer" | "none";
 
 /** Who this connection is, from `rpc.hello` when `collab/1` is granted. */
@@ -108,6 +134,68 @@ export interface AgentTabInfo {
   modified: string;
 }
 
+/** An agent tab as the runtime's session index stores it. */
+export interface RuntimeSessionTab {
+  id: string;
+  harness: string;
+  title?: string | null;
+  model: string;
+  effort?: string | null;
+  permissionMode: string;
+  status: AgentTabStatus;
+  created: string;
+  modified: string;
+}
+
+/**
+ * A session in the runtime's own index (`session.list`, `session.sessions`).
+ * `cwd` and `projectPath` are paths on the VM: never hand them to a local command.
+ */
+export interface RuntimeSession {
+  id: string;
+  projectPath: string;
+  cwd: string;
+  worktreeName?: string | null;
+  branch?: string | null;
+  title: string;
+  created: string;
+  modified: string;
+  archived: boolean;
+  pinned: boolean;
+  tabs: RuntimeSessionTab[];
+  activeTab?: string | null;
+}
+
+/** `session.update`: `undefined` leaves a field as it is. Archiving only hides the session. */
+export interface RuntimeSessionPatch {
+  title?: string;
+  pinned?: boolean;
+  archived?: boolean;
+}
+
+/** One model of an agent (`runtime.agents`). */
+export interface RuntimeAgentModel {
+  id: string;
+  label: string;
+  efforts: string[];
+  defaultEffort: string | null;
+  acceptsImages: boolean;
+  isDefault: boolean;
+  upgrade: string | null;
+  description: string | null;
+}
+
+/** An agent installed on the runtime (`runtime.agents`, `agents/1`). */
+export interface RuntimeAgent {
+  id: string;
+  name: string;
+  caps: Record<string, boolean>;
+  models: RuntimeAgentModel[];
+  /** Launch modes it takes; empty when it has none. */
+  modes: string[];
+  defaultMode: string;
+}
+
 /** `session.status`: a subscribed tab's turn or process state changed. */
 export interface AgentTabStatusChange {
   sessionId: string;
@@ -143,6 +231,8 @@ export interface PtyInfo {
   control: PtyControl;
   /** The person controlling the terminal (PRO-30); null when nobody does, absent from older runtimes. */
   controllerId?: string | null;
+  /** The session the terminal was opened for (`pty/2`); absent otherwise and from older runtimes. */
+  sessionId?: string;
 }
 
 /** Where a terminal view left off, to resume without replaying what it shows. */
@@ -355,7 +445,9 @@ export class WorkspaceRpcClient {
     }
   }
 
-  async createPty(params: { cols: number; rows: number; cwd?: string }): Promise<PtyInfo> {
+  /** `sessionId` needs `pty/2`; an older runtime would open a terminal that belongs to no session. */
+  async createPty(params: { cols: number; rows: number; cwd?: string; sessionId?: string }): Promise<PtyInfo> {
+    if (params.sessionId !== undefined) this.assertCapability("pty/2", "pty.create");
     const info = await this.mutate<PtyInfo>("pty.create", params);
     this.ptyEpochs.set(info.ptyId, info.epoch);
     return info;
@@ -542,8 +634,20 @@ export class WorkspaceRpcClient {
     return result.tabs ?? [];
   }
 
-  /** A new agent tab: one session with one agent process. */
-  createAgentTab(params: { agent: string; model?: string; effort?: string | null; mode?: string; title?: string }): Promise<{ sessionId: string; tabId: string; tab?: AgentTabInfo }> {
+  /**
+   * A new agent tab: one session with one agent process. `useWorktree` gives
+   * the session its own worktree on the VM; `prompt` is sent as its first
+   * message (both from `session/1`, read by the runtime's `session_ops`).
+   */
+  createAgentTab(params: {
+    agent: string;
+    model?: string;
+    effort?: string | null;
+    mode?: string;
+    title?: string;
+    prompt?: string;
+    useWorktree?: boolean;
+  }): Promise<{ sessionId: string; tabId: string; tab?: AgentTabInfo; session?: RuntimeSession }> {
     const defined = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""));
     return this.mutate("session.create", defined);
   }
@@ -560,6 +664,61 @@ export class WorkspaceRpcClient {
 
   async markAgentTabRead(sessionId: string, tabId: string): Promise<void> {
     await this.call("session.markRead", { sessionId, tabId });
+  }
+
+  /** The sessions this connection may see (`session.list`). */
+  async listSessions(): Promise<RuntimeSession[]> {
+    const result = await this.call<{ sessions?: RuntimeSession[] }>("session.list");
+    return result.sessions ?? [];
+  }
+
+  /** Rename, pin or archive a session (`session/2`, manage only). */
+  async updateSession(sessionId: string, patch: RuntimeSessionPatch): Promise<RuntimeSession> {
+    const defined = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined));
+    const result = await this.mutate<{ session: RuntimeSession }>("session.update", { sessionId, ...defined });
+    return result.session;
+  }
+
+  /** Another agent tab in an existing session (`session/2`, manage only). */
+  addSessionTab(
+    sessionId: string,
+    params: { agent: string; model?: string; effort?: string | null; mode?: string },
+  ): Promise<{ sessionId: string; tabId: string; session: RuntimeSession; tab?: AgentTabInfo | null }> {
+    const defined = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""));
+    return this.mutate("session.addTab", { sessionId, ...defined });
+  }
+
+  /**
+   * Delete a session and its transcripts (`session/2`, manage only). With
+   * `removeWorktree`, its worktree goes too, with every session in it;
+   * `deleted` names them all.
+   */
+  deleteSession(sessionId: string, options: { removeWorktree?: boolean } = {}): Promise<{ sessionId: string; deleted: string[] }> {
+    return this.mutate("session.delete", { sessionId, ...(options.removeWorktree ? { removeWorktree: true } : {}) });
+  }
+
+  /** The agents installed on the runtime, with their models, efforts and modes (`agents/1`). */
+  async listRuntimeAgents(): Promise<RuntimeAgent[]> {
+    const result = await this.call<{ agents?: RuntimeAgent[] }>("runtime.agents");
+    return result.agents ?? [];
+  }
+
+  /** `session.sessions`: the whole visible session list, after any create, update or delete (`session/2`). */
+  onSessions(listener: (sessions: RuntimeSession[]) => void): () => void {
+    return this.onNotification((notification) => {
+      if (notification.event !== "session.sessions") return;
+      const sessions = notification.params.sessions;
+      if (Array.isArray(sessions)) listener(sessions as RuntimeSession[]);
+    });
+  }
+
+  /**
+   * Whether the connected runtime granted `capability`. False while not
+   * connected: an action that needs a newer runtime stays hidden until it is
+   * known to be there.
+   */
+  hasCapability(capability: WorkspaceCapability): boolean {
+    return this.state.state === "connected" && this.state.capabilities.includes(capability);
   }
 
   /** Ask the runtime to poll the command mailbox now rather than at its next interval. */
@@ -765,10 +924,19 @@ export class WorkspaceRpcClient {
 
   private assertGranted(method: string): void {
     if (this.state.state !== "connected") return;
-    const prefix = method.split(".")[0]!;
-    const namespace = NAMESPACE_OF[prefix] ?? prefix;
+    const required = METHOD_CAPABILITIES[method];
+    if (required) return this.assertCapability(required, method);
+    const namespace = method.split(".")[0];
     if (!this.state.capabilities.some((capability) => capability.startsWith(`${namespace}/`))) {
       throw new WorkspaceRpcError("capability_not_granted", `${namespace} is not available from this runtime`, method);
+    }
+  }
+
+  /** Refuse before sending when the connected runtime did not grant `capability`. */
+  private assertCapability(capability: WorkspaceCapability, method: string): void {
+    if (this.state.state !== "connected") return;
+    if (!this.state.capabilities.includes(capability)) {
+      throw new WorkspaceRpcError("capability_not_granted", `${capability} is not available from this runtime`, method);
     }
   }
 }

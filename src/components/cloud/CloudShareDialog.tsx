@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Loader2, UserPlus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { useAccount } from "@/lib/account";
 import { api, type CloudShareRole, type CloudWorkspaceShare, type CloudWorkspaceShares } from "@/lib/api";
 import { loadRoster, rememberPeople } from "@/lib/cloudPeople";
 import type { OrganizationMember } from "@/lib/organizationMembers";
@@ -44,8 +45,16 @@ export function shareErrorMessage(error: unknown, who?: string): string {
   }
 }
 
-/** Who a cloud workspace is shared with; managers and the creator can change it (PRO-30). */
-export function CloudShareDialog({ workspaceId, name, onClose }: { workspaceId: string; name: string; onClose: () => void }) {
+/**
+ * Who a cloud workspace is shared with; managers and the creator can change it
+ * (PRO-30). `orgId` is the workspace's organization: every organization is
+ * live (CS-18), and the share routes are authorized by membership in it.
+ */
+export function CloudShareDialog({ orgId = null, workspaceId, name, onClose }: { orgId?: string | null; workspaceId: string; name: string; onClose: () => void }) {
+  const { status } = useAccount();
+  // The member picker reads the default organization's roster; for another
+  // organization it would offer the wrong people.
+  const rosterApplies = !orgId || !status.identity?.organizationId || status.identity.organizationId === orgId;
   const [listed, setListed] = useState<CloudWorkspaceShares | null>(null);
   const [members, setMembers] = useState<OrganizationMember[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -55,19 +64,19 @@ export function CloudShareDialog({ workspaceId, name, onClose }: { workspaceId: 
 
   const reload = useCallback(async () => {
     try {
-      const next = await api.cloudWorkspaceShares(workspaceId);
+      const next = await api.cloudWorkspaceShares(workspaceId, orgId);
       rememberPeople(next.shares);
       setListed(next);
       setLoadError(null);
     } catch (e) {
       setLoadError(codeOf(e));
     }
-  }, [workspaceId]);
+  }, [workspaceId, orgId]);
 
   useEffect(() => {
     void reload();
-    void loadRoster().then(setMembers);
-  }, [reload]);
+    if (rosterApplies) void loadRoster().then(setMembers);
+  }, [reload, rosterApplies]);
 
   const manage = listed?.you.canManageShares ?? false;
   const shared = useMemo(() => new Set(listed?.shares.map((share) => share.userId) ?? []), [listed]);
@@ -94,7 +103,7 @@ export function CloudShareDialog({ workspaceId, name, onClose }: { workspaceId: 
   };
 
   const put = (share: Pick<CloudWorkspaceShare, "userId" | "role" | "canApprove">) =>
-    change(`put:${share.userId}`, nameOf(share.userId), () => api.cloudWorkspaceSharePut(workspaceId, share.userId, share.role, share.canApprove));
+    change(`put:${share.userId}`, nameOf(share.userId), () => api.cloudWorkspaceSharePut(workspaceId, share.userId, share.role, share.canApprove, orgId));
 
   const add = async () => {
     if (!adding.userId) return;
@@ -157,7 +166,7 @@ export function CloudShareDialog({ workspaceId, name, onClose }: { workspaceId: 
                           variant="ghost"
                           aria-label={`Revoke ${share.name || share.email}`}
                           disabled={busy !== null}
-                          onClick={() => void change(`revoke:${share.userId}`, share.name || share.email, () => api.cloudWorkspaceShareRevoke(workspaceId, share.userId))}
+                          onClick={() => void change(`revoke:${share.userId}`, share.name || share.email, () => api.cloudWorkspaceShareRevoke(workspaceId, share.userId, orgId))}
                         >
                           <X />
                         </Button>
@@ -172,7 +181,12 @@ export function CloudShareDialog({ workspaceId, name, onClose }: { workspaceId: 
                 ))}
               </ul>
             )}
-            {manage && (
+            {manage && !rosterApplies && (
+              <p className="text-muted-foreground" data-testid="cloud-share-other-org">
+                To add people, make this workspace's organization your default in Settings. You can change or revoke the shares above from here.
+              </p>
+            )}
+            {manage && rosterApplies && (
               <div className="flex flex-wrap items-center gap-2" data-testid="cloud-share-add">
                 <select
                   aria-label="Add person"
@@ -220,4 +234,34 @@ export function CloudShareDialog({ workspaceId, name, onClose }: { workspaceId: 
       </DialogContent>
     </Dialog>
   );
+}
+
+
+/** The workspace whose share dialog is open, wherever it was opened from (sidebar row or session header). */
+export interface ShareTarget {
+  orgId: string;
+  workspaceId: string;
+  name: string;
+}
+
+let shareTarget: ShareTarget | null = null;
+const shareListeners = new Set<() => void>();
+
+export function openShareDialog(target: ShareTarget | null) {
+  shareTarget = target;
+  for (const listener of [...shareListeners]) listener();
+}
+
+/** Mounted once (AppShell): the share dialog for `openShareDialog`. */
+export function CloudShareDialogHost() {
+  const target = useSyncExternalStore(
+    (listener) => {
+      shareListeners.add(listener);
+      return () => shareListeners.delete(listener);
+    },
+    () => shareTarget,
+    () => null,
+  );
+  if (!target) return null;
+  return <CloudShareDialog key={`${target.orgId}:${target.workspaceId}`} orgId={target.orgId} workspaceId={target.workspaceId} name={target.name} onClose={() => openShareDialog(null)} />;
 }

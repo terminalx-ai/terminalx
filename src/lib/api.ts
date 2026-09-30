@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   WorkspaceRpcClient,
@@ -24,6 +24,30 @@ import type {
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
 import type { PairingConnectionMode, PairingStatus } from "@/types/pairing";
+import { assertLocal } from "@/types/target";
+
+/**
+ * Arguments that name a place on this computer, or a local session. A cloud
+ * key or root (`cloud:`…) in one of them is a bug: it would run a local
+ * command against a path that only exists on a VM (PRO-23 rule 3).
+ */
+const LOCAL_PATH_ARGS = ["cwd", "path", "root", "projectPath", "sessionId", "from", "to", "dir", "file"] as const;
+
+/** Every Tauri call made here goes through this: local paths pass unchanged, cloud ones throw. */
+function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
+  if (args && typeof args === "object" && !Array.isArray(args) && !(args instanceof ArrayBuffer) && !(args instanceof Uint8Array)) {
+    const record = args as Record<string, unknown>;
+    try {
+      for (const key of LOCAL_PATH_ARGS) {
+        const value = record[key];
+        if (typeof value === "string") assertLocal(value, `${command}.${key}`);
+      }
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+  return args === undefined ? tauriInvoke<T>(command) : tauriInvoke<T>(command, args);
+}
 
 export interface NewTab {
   harness: string;
@@ -139,48 +163,56 @@ export const api = {
     invoke<CloudProviderConnection>("cloud_provider_disconnect", { provider, contextRevision, disposition }),
   cloudProviderConnect: (provider: CloudWorkspaceProviderId, input: CloudProviderConnectInput) =>
     invoke<CloudProviderConnection>("cloud_provider_connect", { provider, input }),
-  cloudWorkspaceSetup: (provider: CloudWorkspaceProviderId) =>
-    invoke<CloudWorkspaceSetup>("cloud_workspace_setup", { provider }),
-  cloudWorkspaceQuote: (input: CloudWorkspaceQuoteInput) =>
-    invoke<CloudWorkspaceQuote>("cloud_workspace_quote", { input }),
-  cloudWorkspaceCreate: (input: CloudWorkspaceCreateInput) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_create", { input }),
-  cloudWorkspacePreflight: (repositories: CloudWorkspaceRepositoryInput[]) =>
-    invoke<CloudWorkspacePreflight>("cloud_workspace_preflight", { repositories }),
-  cloudWorkspaceRepositories: () => invoke<CloudSelectedRepositories>("cloud_workspace_repositories"),
-  cloudWorkspaces: () => invoke<CloudWorkspaceList>("cloud_workspaces"),
-  cloudWorkspaceSuspend: (workspaceId: string) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_suspend", { workspaceId }),
-  cloudWorkspaceResume: (workspaceId: string) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_resume", { workspaceId }),
-  cloudWorkspaceRelease: (workspaceId: string) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_release", { workspaceId }),
+  // Cloud workspace routes take the Organization they act in (CS-18). None
+  // (or null) means the active Organization, as before; a named one must be
+  // the active one or, on a server that authorizes by membership, a member
+  // Organization. The native side checks it against the membership list.
+  cloudWorkspaceSetup: (provider: CloudWorkspaceProviderId, orgId?: string | null) =>
+    invoke<CloudWorkspaceSetup>("cloud_workspace_setup", { provider, orgId: orgId ?? null }),
+  cloudWorkspaceQuote: (input: CloudWorkspaceQuoteInput, orgId?: string | null) =>
+    invoke<CloudWorkspaceQuote>("cloud_workspace_quote", { input, orgId: orgId ?? null }),
+  cloudWorkspaceCreate: (input: CloudWorkspaceCreateInput, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_create", { input, orgId: orgId ?? null }),
+  cloudWorkspacePreflight: (repositories: CloudWorkspaceRepositoryInput[], orgId?: string | null) =>
+    invoke<CloudWorkspacePreflight>("cloud_workspace_preflight", { repositories, orgId: orgId ?? null }),
+  cloudWorkspaceRepositories: (orgId?: string | null) => invoke<CloudSelectedRepositories>("cloud_workspace_repositories", { orgId: orgId ?? null }),
+  cloudWorkspaces: (orgId?: string | null) => invoke<CloudWorkspaceList>("cloud_workspaces", { orgId: orgId ?? null }),
+  cloudWorkspaceSuspend: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_suspend", { workspaceId, orgId: orgId ?? null }),
+  cloudWorkspaceResume: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_resume", { workspaceId, orgId: orgId ?? null }),
+  cloudWorkspaceRelease: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_release", { workspaceId, orgId: orgId ?? null }),
   /** Archive (30-day trash). `force` only after the person confirmed stopping running agent work. */
-  cloudWorkspaceArchive: (workspaceId: string, force: boolean) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_archive", { workspaceId, force }),
+  cloudWorkspaceArchive: (workspaceId: string, force: boolean, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_archive", { workspaceId, force, orgId: orgId ?? null }),
   /** Permanent delete, a resumable cleanup job; retrying resumes the same operation. */
-  cloudWorkspaceDelete: (workspaceId: string, force: boolean) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_delete", { workspaceId, force }),
+  cloudWorkspaceDelete: (workspaceId: string, force: boolean, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_delete", { workspaceId, force, orgId: orgId ?? null }),
   /** Out of the archive; it stays suspended until the next interactive action. */
-  cloudWorkspaceUnarchive: (workspaceId: string) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_unarchive", { workspaceId }),
-  cloudWorkspaceDisposition: (workspaceId: string) =>
-    invoke<CloudWorkspaceDisposition>("cloud_workspace_disposition", { workspaceId }),
+  cloudWorkspaceUnarchive: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_unarchive", { workspaceId, orgId: orgId ?? null }),
+  cloudWorkspaceDisposition: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceDisposition>("cloud_workspace_disposition", { workspaceId, orgId: orgId ?? null }),
   /** Who the workspace is shared with, and what the caller may do (PRO-30, docs/CLOUD-SHARING.md). */
-  cloudWorkspaceShares: (workspaceId: string) => invoke<CloudWorkspaceShares>("cloud_workspace_shares", { workspaceId }),
+  cloudWorkspaceShares: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceShares>("cloud_workspace_shares", { workspaceId, orgId: orgId ?? null }),
   /** Grant or change a member's share; only managers and the workspace's creator may. */
-  cloudWorkspaceSharePut: (workspaceId: string, userId: string, role: CloudShareRole, canApprove: boolean) =>
-    invoke<{ share: CloudWorkspaceShare; created?: boolean }>("cloud_workspace_share_put", { workspaceId, userId, role, canApprove }),
+  cloudWorkspaceSharePut: (workspaceId: string, userId: string, role: CloudShareRole, canApprove: boolean, orgId?: string | null) =>
+    invoke<{ share: CloudWorkspaceShare; created?: boolean }>("cloud_workspace_share_put", { workspaceId, userId, role, canApprove, orgId: orgId ?? null }),
   /** Revoke a member's share; their connections to the workspace close. */
-  cloudWorkspaceShareRevoke: (workspaceId: string, userId: string) =>
-    invoke<{ share: CloudWorkspaceShare }>("cloud_workspace_share_revoke", { workspaceId, userId }),
+  cloudWorkspaceShareRevoke: (workspaceId: string, userId: string, orgId?: string | null) =>
+    invoke<{ share: CloudWorkspaceShare }>("cloud_workspace_share_revoke", { workspaceId, userId, orgId: orgId ?? null }),
   /** Drop the agent outbox, transcript cache and keys this Mac kept for a deleted workspace. */
+  /** The saved cloud catalog (PRO-57) of the signed-in user; refused once `revision` is not the current account. */
+  cloudCatalogLoad: (revision: string) => invoke<unknown>("cloud_catalog_load", { revision }),
+  cloudCatalogSave: (revision: string, catalog: unknown) => invoke<void>("cloud_catalog_save", { revision, catalog }),
   cloudAgentPurgeWorkspace: (organizationId: string, workspaceId: string) =>
     invoke<{ removed: boolean; unsentCommands: number; cachedTabs: number }>("cloud_agent_purge_workspace", { organizationId, workspaceId }),
-  cloudWorkspaceOperation: (operationId: string) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_operation", { operationId }),
-  cloudWorkspaceOperationCancel: (operationId: string) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_operation_cancel", { operationId }),
+  cloudWorkspaceOperation: (operationId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_operation", { operationId, orgId: orgId ?? null }),
+  cloudWorkspaceOperationCancel: (operationId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_operation_cancel", { operationId, orgId: orgId ?? null }),
   // Remote runtime connections (PRO-13); relay credentials and E2EE keys stay native.
   cloudRemoteAttach: (target: CloudWorkspaceTarget, activation: Activation) =>
     invoke<string>("cloud_remote_attach", { target, activation }),
@@ -273,12 +305,18 @@ export interface OrganizationSummary {
   id: string;
   name: string;
   role: string;
+  /** The user's personal organization (PRO-69); absent from older servers. */
+  isPersonal?: boolean;
+  /** What the cloud offers in this organization (PRO-69); absent from older servers. */
+  cloud?: { enabled: boolean; flags: Record<string, boolean> } | null;
 }
 
 export interface AccountIdentity {
   name: string | null;
   email: string;
   organization: string | null;
+  /** The active (default) organization's id. */
+  organizationId?: string | null;
 }
 
 export interface AccountStatus {
@@ -286,8 +324,15 @@ export interface AccountStatus {
   identity: AccountIdentity | null;
   expiresAt: number | null;
   lastError: string | null;
-  context?: { scope: string; revision: string } | null;
+  /**
+   * `scope` and `revision` include the active Organization; `account` is the
+   * user and profile alone (CS-18), what cloud state belongs to when every
+   * member Organization is live.
+   */
+  context?: { scope: string; revision: string; account?: string } | null;
   organizations?: OrganizationSummary[];
+  /** The server authorizes desktop cloud routes by membership (`cloud.desktop.multi-org.v1`, CS-18). */
+  multiOrg?: boolean;
 }
 
 /** `local-docker` is offered by debug builds only (terminalx-saas `cloud:e2e:local --serve`). */
@@ -418,6 +463,35 @@ export interface CloudWorkspace {
   /** When an archived workspace is deleted for good. */
   deleteAfter?: number | null;
   deletedAt?: number | null;
+  /**
+   * S1 list enrichment (PRO-56), optional because older servers do not send it: the
+   * repositories it was built from (primary first), and when anything last
+   * happened in it.
+   */
+  repositories?: CloudWorkspaceRepository[] | null;
+  createdBy?: string | null;
+  lastActivityAt?: number | null;
+  /** The runtime's own activity report (S1; named so it is not the runtime build). */
+  runtimeActivity?: { online: boolean; reportedAt: number | null; activeTurns: number; pendingApprovals: number } | null;
+  /** Monotonic per workspace (S1). */
+  revision?: number | null;
+  /** What opening it would grant this caller (S1). */
+  authority?: "manage" | "participate" | (string & {}) | null;
+  /** This person's collaboration role (PRO-30, saas contract §21.2); absent from older servers. */
+  you?: { role: CloudCollaborationRole; canApprove: boolean } | null;
+  /** How many members it is shared with; only reported to someone with a role. */
+  sharedWith?: number | null;
+}
+
+/** One repository checkout of a workspace, as the enriched list reports it (S1). */
+export interface CloudWorkspaceRepository {
+  identity: string | null;
+  /** Null for a repository no longer selected for the organization. */
+  fullName: string | null;
+  cloneUrl: string | null;
+  ref?: string | null;
+  targetDirectory?: string | null;
+  primary?: boolean;
 }
 
 /** A delete's cleanup report, until the provider confirms (§10.4). Unknown kinds and states are shown as they come. */
@@ -456,9 +530,9 @@ export interface CloudWorkspaceDisposition {
   runtimeFacts: { available: boolean };
 }
 
-/** What a share grants (contract §20.2). */
+/** What a share grants (contract §21.2). */
 export type CloudShareRole = "viewer" | "driver";
-/** A person's effective role on a workspace (§20.1); `none` sees no content. */
+/** A person's effective role on a workspace (§21.1); `none` sees no content. */
 export type CloudCollaborationRole = "manager" | "driver" | "viewer" | "none";
 
 export interface CloudWorkspaceShare {
@@ -551,6 +625,8 @@ export interface CloudWorkspaceListItem {
 export interface CloudWorkspaceList {
   workspaces: CloudWorkspaceListItem[];
   tombstones?: CloudWorkspaceTombstone[];
+  /** Non-archived workspaces against the organization's limit (S1); absent from older servers. */
+  quota?: { used: number; limit: number } | null;
 }
 
 /** Retain this exact key when reconciling an ambiguous create response. */
@@ -646,6 +722,7 @@ export type CloudWorkspaceSafeErrorCode =
   | "cloud_workspace_archived"
   | "cloud_teardown_in_progress"
   | "cloud_workspace_quota_exceeded"
+  | "cloud_workspace_concurrency_exceeded"
   | "idempotency_key_reused"
   | "cloud_workspace_quote_expired"
   | "cloud_workspace_request_invalid"
@@ -1450,4 +1527,14 @@ export function closeWorkspaceConnections(): void {
   const all = [...connections.values()];
   connections.clear();
   for (const pending of all) void pending.then((connection) => connection.close()).catch(() => undefined);
+}
+
+/** Drop one Organization's cloud connections only: the user left it (CS-18). */
+export function closeWorkspaceConnectionsIn(orgId: string): void {
+  const prefix = `cloud:${orgId}:`;
+  for (const [key, pending] of [...connections]) {
+    if (!key.startsWith(prefix)) continue;
+    connections.delete(key);
+    void pending.then((connection) => connection.close()).catch(() => undefined);
+  }
 }

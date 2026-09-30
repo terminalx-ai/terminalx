@@ -54,8 +54,11 @@ export function resetPeople() {
   changed();
 }
 
-/** A name resolver that re-renders when more names become known. */
-export function usePeople(): (userId: string | null | undefined) => string {
+/**
+ * A name resolver that re-renders when more names become known. `load`
+ * false: names already known only (a local session never fetches a roster).
+ */
+export function usePeople(load = true): (userId: string | null | undefined) => string {
   useSyncExternalStore(
     (listener) => {
       listeners.add(listener);
@@ -65,8 +68,8 @@ export function usePeople(): (userId: string | null | undefined) => string {
     () => version,
   );
   useEffect(() => {
-    void loadRoster();
-  }, []);
+    if (load) void loadRoster();
+  }, [load]);
   return personName;
 }
 

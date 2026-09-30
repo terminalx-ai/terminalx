@@ -37,7 +37,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const SILENCE_TIMEOUT: Duration = Duration::from_secs(90);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 /// While anyone is connected, access changes (revocations, shares) must
-/// apply promptly (contract §20.5).
+/// apply promptly (contract §21.5).
 const ATTACHED_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// Answered from their own task (see `serve_connection`).
 const SLOW_METHODS: &[&str] = &[
@@ -61,6 +61,9 @@ const SLOW_METHODS: &[&str] = &[
     "session.create",
     "session.send",
     "session.close",
+    // CS-12: removing a worktree, and the first read of Codex's model list.
+    "session.delete",
+    "runtime.agents",
     "fs.search",
 ];
 
@@ -94,7 +97,7 @@ pub struct RelaySession {
     pub director_url: String,
     pub attachments: Vec<Attachment>,
     pub revocations: Vec<Revocation>,
-    /// Who the workspace is shared with and how (contract §20.3); absent
+    /// Who the workspace is shared with and how (contract §21.3); absent
     /// from an API before PRO-30.
     pub collaboration: Option<Members>,
 }
@@ -434,7 +437,7 @@ impl RelayHost {
         // Offsets, cursors and `rpc.hello` report the generation registered.
         self.rpc.set_generation(identity.runtime_generation);
         // Who has access is known before any client can connect, not only
-        // after the first refresh (contract §20.5).
+        // after the first refresh (contract §21.5).
         self.rpc.set_collaboration(session.collaboration.clone());
         let (mut socket, relay_generation) =
             self.open_control(&cell_url, assignment_epoch, &session.relay_token, &identity).await?;
@@ -803,7 +806,7 @@ impl RelayHost {
                         let _ = socket.close(None).await;
                         return Ok(());
                     }
-                    // The person lost access to the workspace (contract §20.5).
+                    // The person lost access to the workspace (contract §21.5).
                     _ = peer.closed() => {
                         let _ = socket.close(None).await;
                         return Ok(());

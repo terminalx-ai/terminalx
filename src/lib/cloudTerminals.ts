@@ -34,6 +34,8 @@ export interface CloudTerminal {
   gone: "closed" | "runtime-restarted" | null;
   /** The last input refusal or failure, until the next accepted input. */
   inputError: string | null;
+  /** The runtime session it was opened for (`pty/2`); null for a workspace terminal or an older runtime. */
+  sessionId: string | null;
 }
 
 interface WorkspaceTerminals {
@@ -105,6 +107,7 @@ function fromInfo(workspace: string, info: PtyInfo): CloudTerminal {
     rows: info.rows,
     gone: null,
     inputError: null,
+    sessionId: info.sessionId ?? null,
   };
 }
 
@@ -226,8 +229,9 @@ export async function createCloudTerminal(
   client: WorkspaceRpcClient,
   size: { cols: number; rows: number },
   create: () => TerminalInstance,
+  options: { sessionId?: string } = {},
 ): Promise<CloudTerminal> {
-  const info = await client.createPty(size);
+  const info = await client.createPty(options.sessionId ? { ...size, sessionId: options.sessionId } : size);
   const terminal = fromInfo(workspace, info);
   update(workspace, (current) => ({
     terminals: current.terminals.some((item) => item.ptyId === info.ptyId) ? current.terminals : [...current.terminals, terminal],
@@ -303,6 +307,17 @@ export function dropCloudTerminals(workspace: string) {
   const next = { ...state };
   delete next[workspace];
   publish(next);
+}
+
+/** Forget one organization's terminals and views: the user left it (CS-18). */
+export function dropCloudTerminalsIn(orgId: string) {
+  // Workspaces are keyed `cloud:<orgId>:<workspaceId>`, and their terminals `cloud:<workspace>:<ptyId>`.
+  const prefix = `cloud:${orgId}:`;
+  const workspaces = new Set(Object.keys(state).filter((workspace) => workspace.startsWith(prefix)));
+  for (const id of [...bindings.keys(), ...cursors.keys()]) {
+    if (id.startsWith(`cloud:${prefix}`)) workspaces.add(id.split(":").slice(1, 4).join(":"));
+  }
+  for (const workspace of workspaces) dropCloudTerminals(workspace);
 }
 
 /** Forget every workspace's terminals and views (sign-out, organization switch). */
