@@ -16,6 +16,11 @@ vi.mock("@/lib/api", () => ({
     cloudWorkspaceResume: vi.fn(),
   },
 }));
+const account = vi.hoisted(() => ({ multiOrg: false }));
+vi.mock("@/lib/account", async (original) => ({
+  ...(await original<typeof import("@/lib/account")>()),
+  getAccount: () => ({ status: { state: "signed-in", identity: { email: "a@example.com", organizationId: "org-1" }, multiOrg: account.multiOrg }, ready: true, busy: false }),
+}));
 vi.mock("@/lib/models", async (original) => ({
   ...(await original<typeof import("@/lib/models")>()),
   useModels: (harness: string) =>
@@ -43,6 +48,7 @@ const snapshot = (phase: string, patch: { workspace?: object; operation?: object
 });
 
 beforeEach(() => {
+  account.multiOrg = false;
   localStorage.clear();
   for (const fn of Object.values(mocked)) fn.mockReset();
   mocked.cloudProviders.mockResolvedValue({ providers: [{ id: "box", displayName: "Boat", availability: "available", canManage: true, connection: null, capabilities: {} }] });
@@ -174,9 +180,30 @@ describe("CloudCreateWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Create workspace/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.getByTestId("cloud-create-progress").dataset.phase).toBe("canceled"));
-    expect(mocked.cloudWorkspaceOperationCancel).toHaveBeenCalledWith("op-1");
+    expect(mocked.cloudWorkspaceOperationCancel).toHaveBeenCalledWith("op-1", null);
     expect(screen.getByText(/first prompt was not sent/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+  });
+
+  it("names the workspace's organization when polling, cancelling and retrying on a multi-org server (CS-18)", async () => {
+    account.multiOrg = true;
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    mocked.cloudWorkspaceCreate.mockResolvedValue(snapshot("booting", { operation: { stage: "bootstrapping" } }));
+    mocked.cloudWorkspaceOperation.mockResolvedValue(snapshot("booting", { operation: { stage: "bootstrapping" } }));
+    mocked.cloudWorkspaceOperationCancel.mockResolvedValue(
+      snapshot("failed", { workspace: { state: "attention-required" }, operation: { state: "failed", stage: "connecting-relay", cancelable: false, errorCode: "provider_retry_exhausted" } }),
+    );
+    mocked.cloudWorkspaceResume.mockResolvedValue(snapshot("allocating", { operation: { id: "op-2", stage: "queued", state: "queued", cancelable: false } }));
+    await fill();
+    fireEvent.click(screen.getByRole("button", { name: /Create workspace/ }));
+    await screen.findByRole("button", { name: "Cancel" });
+    await act(async () => void (await vi.advanceTimersByTimeAsync(2100)));
+    expect(mocked.cloudWorkspaceOperation).toHaveBeenCalledWith("op-1", "org-1");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(mocked.cloudWorkspaceOperationCancel).toHaveBeenCalledWith("op-1", "org-1"));
+    fireEvent.click(await screen.findByRole("button", { name: /Retry/ }));
+    await waitFor(() => expect(mocked.cloudWorkspaceResume).toHaveBeenCalledWith("ws-1", "org-1"));
+    vi.useRealTimers();
   });
 
   it("retries a failed create by resuming the same workspace", async () => {
@@ -189,7 +216,7 @@ describe("CloudCreateWorkspace", () => {
     expect((await screen.findByText(/Provisioning failed/)).textContent).toMatch(/provider_retry_exhausted/);
     fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
     await waitFor(() => expect(screen.getByTestId("cloud-create-progress").dataset.phase).toBe("allocating"));
-    expect(mocked.cloudWorkspaceResume).toHaveBeenCalledWith("ws-1");
+    expect(mocked.cloudWorkspaceResume).toHaveBeenCalledWith("ws-1", null);
     expect(mocked.cloudWorkspaceCreate).toHaveBeenCalledTimes(1);
   });
 
@@ -245,9 +272,12 @@ describe("CloudCreateWorkspace repository list", () => {
   });
 
   it("forgets an unconfirmed create older than a day, prompt included", async () => {
-    const { loadPending } = await import("@/lib/cloudCreate");
-    localStorage.setItem("terminalx.cloudCreate.pending.org-1", JSON.stringify({ idempotencyKey: "k", createdAt: Date.now() - 25 * 3600 * 1000, request: { name: "old", launch: { prompt: "secret plan" } } }));
+    const { loadPending, setPendingCreateUser } = await import("@/lib/cloudCreate");
+    setPendingCreateUser("a@example.com");
+    const key = "terminalx.cloudCreate.pending.a%40example%2Ecom.org-1";
+    localStorage.setItem(key, JSON.stringify({ idempotencyKey: "k", createdAt: Date.now() - 25 * 3600 * 1000, request: { name: "old", launch: { prompt: "secret plan" } } }));
     expect(loadPending("org-1")).toBeNull();
-    expect(localStorage.getItem("terminalx.cloudCreate.pending.org-1")).toBeNull();
+    expect(localStorage.getItem(key)).toBeNull();
+    setPendingCreateUser(null);
   });
 });

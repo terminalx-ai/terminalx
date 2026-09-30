@@ -192,7 +192,7 @@ export const organizationCompute = {
     invoke<unknown>("organization_compute_provisioning_pause", { expectedVersion, paused, reason, contextRevision }).then(normalizePolicyView),
 };
 
-export const PROVIDER_LABEL: Record<string, string> = { machine0: "Machine0", box: "Box", hetzner: "Hetzner" };
+export const PROVIDER_LABEL: Record<string, string> = { machine0: "Machine0", box: "Box", hetzner: "Hetzner", "local-docker": "Local Docker" };
 export const providerLabel = (provider: string) => PROVIDER_LABEL[provider] ?? provider;
 
 /** Provider amounts are integer micros of the provider's billing currency. */

@@ -181,10 +181,12 @@ impl CloudScope {
     }
 
     /// The Organizations whose cloud data (keys, outbox, transcript cache)
-    /// this desktop keeps. With the capability, every member Organization, so
-    /// changing the default one drops nothing; without it, only the active one.
+    /// this desktop keeps: every member Organization, whether or not the
+    /// server authorizes by membership right now. Only a lost membership (or
+    /// another user) drops an Organization's data; an Organization that is not
+    /// reachable (no capability, not the default) keeps it, inactive.
     pub fn kept_orgs(&self) -> BTreeSet<String> {
-        let mut kept = if self.multi_org { self.members.clone() } else { BTreeSet::new() };
+        let mut kept = self.members.clone();
         if !self.active_org_id.is_empty() {
             kept.insert(self.active_org_id.clone());
         }
@@ -1354,14 +1356,16 @@ mod tests {
         manager.set_memberships_for_test(&["org-a", "org-b"], false);
         let scope = manager.current_scope().unwrap();
         assert!(scope.allows("org-a") && !scope.allows("org-b"));
-        assert_eq!(scope.kept_orgs(), BTreeSet::from(["org-a".to_string()]));
+        // Reachable is the active organization only; kept is every member one.
+        assert_eq!(scope.kept_orgs(), BTreeSet::from(["org-a".to_string(), "org-b".to_string()]));
         assert_eq!(manager.context_in("org-b").err(), Some("cloud_organization_unavailable"));
         let (context, access) = manager.context_in("org-a").unwrap();
         assert_eq!(access, OrgAccess::Active);
         // As before: a switch of the active organization fences the call.
         manager.set_active_org_for_test("org-b");
         assert!(!manager.is_current_in(&context, access));
-        assert_eq!(manager.current_scope().unwrap().kept_orgs(), BTreeSet::from(["org-b".to_string()]));
+        // Switching the active organization drops no member organization's data.
+        assert_eq!(manager.current_scope().unwrap().kept_orgs(), scope.kept_orgs());
         assert_eq!(serde_json::to_value(manager.snapshot()).unwrap()["multiOrg"], false);
     }
 
@@ -1393,6 +1397,17 @@ mod tests {
         assert!(manager.is_current_in(&context, access));
         assert!(manager.context_in("org-a").is_err());
         assert_eq!(manager.current_scope().unwrap().kept_orgs(), BTreeSet::from(["org-b".to_string()]));
+    }
+
+    #[test]
+    fn a_capability_flap_keeps_every_member_organizations_data() {
+        let manager = signed_in("org-a");
+        manager.set_memberships_for_test(&["org-a", "org-b"], true);
+        let with = manager.current_scope().unwrap().kept_orgs();
+        manager.set_memberships_for_test(&["org-a", "org-b"], false);
+        let scope = manager.current_scope().unwrap();
+        assert_eq!(scope.kept_orgs(), with, "nothing of a still-member organization is purged");
+        assert!(!scope.allows("org-b"), "but it is inactive: nothing reaches it");
     }
 
     #[test]

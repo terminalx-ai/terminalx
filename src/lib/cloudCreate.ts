@@ -192,10 +192,32 @@ export function isClientError(error: unknown): error is CloudWorkspaceClientErro
 
 const PENDING_KEY = "terminalx.cloudCreate.pending";
 
+/** Whose pending creates are read and written: the signed-in account, set by the account store. */
+let pendingUser: string | null = null;
+
+export function setPendingCreateUser(user: string | null): void {
+  pendingUser = user;
+}
+
+/**
+ * `terminalx.cloudCreate.pending.<user>.<org>`: a pending create holds the
+ * first prompt, so it is scoped by user as well as organization, and none is
+ * read or written while signed out.
+ */
+function pendingKey(organizationId: string): string | null {
+  return pendingUser ? `${PENDING_KEY}.${encodeUser(pendingUser)}.${organizationId}` : null;
+}
+
+/** The user part of a key: no `.` in it, so the organization after the next `.` is unambiguous. */
+function encodeUser(user: string): string {
+  return encodeURIComponent(user).replace(/\./g, "%2E");
+}
+
 /** The create in flight, kept across a reload so its retry reuses the key. */
 export function loadPending(organizationId: string): PendingCreate | null {
   try {
-    const key = `${PENDING_KEY}.${organizationId}`;
+    const key = pendingKey(organizationId);
+    if (!key) return null;
     const stored = JSON.parse(localStorage.getItem(key) ?? "null") as PendingCreate | null;
     // The server replays a create by its key for as long as the launch intent
     // lives (a day); an older one is not worth resending, and its prompt is
@@ -210,10 +232,35 @@ export function loadPending(organizationId: string): PendingCreate | null {
 
 export function savePending(organizationId: string, pending: PendingCreate | null): void {
   try {
-    if (pending) localStorage.setItem(`${PENDING_KEY}.${organizationId}`, JSON.stringify(pending));
-    else localStorage.removeItem(`${PENDING_KEY}.${organizationId}`);
+    const key = pendingKey(organizationId);
+    if (!key) return;
+    if (pending) localStorage.setItem(key, JSON.stringify(pending));
+    else localStorage.removeItem(key);
   } catch {
     /* private window: the retry works for this session only */
+  }
+}
+
+/**
+ * Remove pending creates, and their prompts, that `match` names by user and
+ * organization. Ones saved before they were scoped by user (no user in the
+ * key) are always removed: whose they were is unknown.
+ */
+export function forgetPendingCreates(match: (user: string, organizationId: string) => boolean): void {
+  try {
+    const prefix = `${PENDING_KEY}.`;
+    const keys: string[] = [];
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (key?.startsWith(prefix)) keys.push(key);
+    }
+    for (const key of keys) {
+      const rest = key.slice(prefix.length);
+      const dot = rest.indexOf(".");
+      if (dot < 0 || match(decodeURIComponent(rest.slice(0, dot)), rest.slice(dot + 1))) localStorage.removeItem(key);
+    }
+  } catch {
+    /* storage unavailable: nothing was kept */
   }
 }
 
