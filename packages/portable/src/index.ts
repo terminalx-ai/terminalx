@@ -1,5 +1,6 @@
 export * from "./dashboard";
 export * from "./events";
+export * from "./repositoryIdentity";
 export * from "./rpc";
 export * from "./transcript";
 export * from "./workspace";
