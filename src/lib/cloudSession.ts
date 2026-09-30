@@ -3,7 +3,8 @@ import type { RuntimeSession, WorkspaceConnectionState } from "@terminalx/portab
 import { RemoteGit, listRepositories, type RemoteRepository } from "@terminalx/portable/workspaceGit";
 import { createTerminal } from "@/components/terminal/TerminalView";
 import { useAccount } from "@/lib/account";
-import { workspaceConnection, type CloudWorkspaceConnection, type CloudWorkspaceListItem } from "@/lib/api";
+import type { CloudWorkspaceConnection, CloudWorkspaceListItem } from "@/lib/api";
+import { retainCloudConnection, setSelectedCloudConnection, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
 import {
   flushCloudAgentCache,
   loadCloudAgents,
@@ -148,20 +149,21 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   const client = connection?.client ?? null;
   const generation = connected ? `${state.runtimeGeneration}:${state.runtimeEpoch ?? ""}` : null;
 
-  // Connect without waking. TODO(PRO-23 CS-7): retain/release through
-  // cloudConnections once it lands, instead of opening and closing here.
+  // Connect without waking: a lease from the connection manager (CS-7), shared
+  // with the sidebar's session list and kept for a few idle minutes after the
+  // view goes, so switching between sessions of one workspace reuses it.
   useEffect(() => {
     if (!parsed) return;
     let cancelled = false;
-    let opened: CloudWorkspaceConnection | null = null;
+    let lease: CloudLease | null = null;
     let unsubscribe: (() => void) | null = null;
-    void workspaceConnection({ kind: "cloud", organizationId: orgId, workspaceId }, "connect")
+    setSelectedCloudConnection(workspaceKey);
+    void retainCloudConnection({ orgId, workspaceId }, "connect")
       .then((next) => {
-        if (!next) return;
-        if (cancelled) return;
-        opened = next;
-        setConnection(next);
-        unsubscribe = next.client.onState((changed) => {
+        if (cancelled) return next.release();
+        lease = next;
+        setConnection(next.connection);
+        unsubscribe = next.connection.client.onState((changed) => {
           setState(changed);
           if (changed.state === "connected") clearCloudWake(workspaceKey);
         });
@@ -170,11 +172,12 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     return () => {
       cancelled = true;
       unsubscribe?.();
-      if (opened) {
+      if (lease) {
         // The shells keep running in the workspace; their views stay for next time.
         detachCloudTerminals(workspaceKey);
-        opened.close();
+        lease.release();
       }
+      setSelectedCloudConnection(null);
       // A wake asked for from here is forgotten with the view: the next send may ask again.
       clearCloudWake(workspaceKey);
       setConnection(null);
@@ -287,10 +290,11 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   }, [fileSource]);
 
   const asleep = cloudAsleep(state, workspaceState);
+  // One wake however many surfaces ask (the composer, the header, a new terminal).
   const wake = useCallback(async () => {
-    if (connection) await connection.activate("wake");
-    else await workspaceConnection({ kind: "cloud", organizationId: orgId, workspaceId }, "wake");
-  }, [connection, orgId, workspaceId]);
+    const lease = await wakeCloudConnection({ orgId, workspaceId });
+    lease.release();
+  }, [orgId, workspaceId]);
 
   const followUps = useCallback(
     (tabId: string) => agents.tabs.find((tab) => tab.tabId === tabId)?.info.followUps ?? [],

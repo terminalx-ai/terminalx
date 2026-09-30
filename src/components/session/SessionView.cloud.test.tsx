@@ -17,7 +17,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (command: string, args?: Record<string, unknown>) => mocks.guard.invoke(command, args) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
-vi.mock("@/lib/api", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/api")>()), workspaceConnection: mocks.workspaceConnection }));
+// The connection manager (CS-7) holds the connection; the native side still has it while it does.
+vi.mock("@/lib/api", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/api")>()), workspaceConnection: mocks.workspaceConnection, hasWorkspaceConnection: () => true }));
 vi.mock("@/lib/cloudCatalog", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/cloudCatalog")>()), useCloudCatalog: () => mocks.catalog }));
 vi.mock("@/lib/account", () => ({
   useAccount: () => ({ status: { state: "signed-in", identity: { name: null, email: "a@b.c", organization: "Acme", organizationId: "org-1" }, expiresAt: null, lastError: null, organizations: [{ id: "org-1", name: "Acme", role: "member" }] } }),
@@ -67,6 +68,7 @@ import { CloudSessionHost } from "./CloudSessionHost";
 import { useCloudSession } from "@/lib/cloudSession";
 import { resetCloudAgents } from "@/lib/cloudAgents";
 import { resetCloudTerminals } from "@/lib/cloudTerminals";
+import { resetCloudConnections } from "@/lib/cloudConnections";
 import { selectSessionTab } from "@/lib/terminal";
 import { resetCloudWakes } from "@/lib/sessionBackend";
 import { getSessionStore, selectCloudSession, upsertSession } from "@/lib/sessions";
@@ -301,6 +303,7 @@ afterEach(() => {
   resetCloudAgents();
   resetCloudTerminals();
   resetCloudWakes();
+  resetCloudConnections();
   client.close();
 });
 
