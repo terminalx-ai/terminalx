@@ -127,3 +127,64 @@ describe("every organization live (CS-18): what a status change tears down", () 
     expect(mocks.teardown.closeWorkspaceConnections).not.toHaveBeenCalled();
   });
 });
+
+describe("leftovers of an organization left or another user (PRO-71 follow-ups)", () => {
+  const who = (email: string, orgs: string[], active = orgs[0]) => ({
+    state: "signed-in" as const,
+    identity: { name: "A", email, organization: active, organizationId: active },
+    expiresAt: null,
+    lastError: null,
+    context: { scope: `scope-${email}-${active}`, revision: "r:1", account: `acct-${email}` },
+    organizations: orgs.map((id) => ({ id, name: id, role: "member", cloud: { enabled: true, flags: {} } })),
+    multiOrg: true,
+  });
+  const pending = { idempotencyKey: "k", createdAt: Date.now(), request: { name: "n", launch: { prompt: "secret plan" } } } as never;
+  const announce = (payload: unknown) => mocks.listeners.get("account_status")!({ payload });
+
+  it("scopes pending creates by user, and leaving an organization clears its pending creates and sidebar prefs only", async () => {
+    mocks.invoke.mockResolvedValue(who("a@example.com", ["org-a", "org-b"]));
+    const account = await import("./account");
+    const create = await import("./cloudCreate");
+    const prefs = await import("./prefs");
+    localStorage.clear();
+    await account.bootAccount();
+    await account.refreshAccount();
+    announce(who("a@example.com", ["org-a", "org-b"]));
+    create.savePending("org-a", pending);
+    create.savePending("org-b", pending);
+    expect(localStorage.getItem("terminalx.cloudCreate.pending.a%40example%2Ecom.org-b")).toContain("secret plan");
+    prefs.setPrefs({ cloudPinned: { "org-a": ["x"], "org-b": ["y"] }, cloudProjects: { "org-b": ["z"] }, cloudBlankProjects: { "org-a": ["p"], "org-b": ["q"] } });
+
+    announce(who("a@example.com", ["org-a"]));
+    expect(create.loadPending("org-b")).toBeNull();
+    expect(localStorage.getItem("terminalx.cloudCreate.pending.a%40example%2Ecom.org-b")).toBeNull();
+    expect(create.loadPending("org-a")).not.toBeNull();
+    expect(prefs.getPrefs().cloudPinned).toEqual({ "org-a": ["x"] });
+    expect(prefs.getPrefs().cloudProjects).toEqual({});
+    expect(prefs.getPrefs().cloudBlankProjects).toEqual({ "org-a": ["p"] });
+  });
+
+  it("another user signing in removes the previous user's pending creates and other organizations' prefs; the same user again keeps them", async () => {
+    const account = await import("./account");
+    const create = await import("./cloudCreate");
+    const prefs = await import("./prefs");
+    announce(who("a@example.com", ["org-a"]));
+    create.savePending("org-a", pending);
+    // An unscoped one from before this change is removed on the next user change too.
+    localStorage.setItem("terminalx.cloudCreate.pending.org-a", "{}");
+    prefs.setPrefs({ cloudPinned: { "org-a": ["x"], "org-c": ["y"] }, cloudProjects: {}, cloudBlankProjects: {} });
+
+    // Sign-out and the same user again: nothing goes.
+    announce({ state: "signed-out", identity: null, expiresAt: null, lastError: null });
+    expect(create.loadPending("org-a")).toBeNull(); // nobody signed in: nothing is read
+    announce(who("a@example.com", ["org-a"]));
+    expect(create.loadPending("org-a")).not.toBeNull();
+
+    announce(who("b@example.com", ["org-c"]));
+    expect(create.loadPending("org-a")).toBeNull();
+    expect(localStorage.getItem("terminalx.cloudCreate.pending.a%40example%2Ecom.org-a")).toBeNull();
+    expect(localStorage.getItem("terminalx.cloudCreate.pending.org-a")).toBeNull();
+    expect(prefs.getPrefs().cloudPinned).toEqual({ "org-c": ["y"] });
+    expect(account.getAccount().status.identity?.email).toBe("b@example.com");
+  });
+});

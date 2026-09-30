@@ -9,8 +9,8 @@ import { CloudFilesView } from "./CloudFiles";
 import { CloudGitView } from "./CloudGit";
 import { CloudCreateWorkspace } from "./CloudCreateWorkspace";
 import { actionsFor, archiveLine, CloudWorkspaceLifecycleDialog, DeletionProgress, type LifecycleAction } from "./CloudWorkspaceLifecycle";
-import { useAccount } from "@/lib/account";
-import { applyCloudSnapshot, ingestCloudList, unarchiveCloudWorkspace } from "@/lib/cloudCatalog";
+import { getAccount, useAccount } from "@/lib/account";
+import { applyCloudSnapshot, cloudOrgArg, defaultOrgId, ingestCloudList, unarchiveCloudWorkspace } from "@/lib/cloudCatalog";
 import { failureMessage, PHASES, phaseOf, runtimeNotPickedUp, settled } from "@/lib/cloudCreate";
 import {
   archiving,
@@ -79,14 +79,24 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
   const scope = status.state === "signed-in" ? (status.context?.scope ?? "signed-in") : "signed-out";
 
   const reload = useCallback(() => {
+    // The page works in the default organization; the list is asked for it,
+    // and filed under it only, so a default change while it is in flight
+    // never files one organization's rows under another.
+    const asked = defaultOrgId(getAccount().status);
     api
-      .cloudWorkspaces()
+      .cloudWorkspaces(cloudOrgArg(asked))
       .then(async (list) => {
+        // Filed under one organization only: the one asked for, or (not known
+        // yet) the one every row and tombstone names. A list that mixes
+        // organizations, or answers for another, is shown but not filed.
+        const named = new Set([...list.workspaces.map((item) => item.workspace.orgId), ...(list.tombstones ?? []).map((tombstone) => tombstone.orgId)]);
+        const orgId = asked ?? (named.size === 1 ? [...named][0] : null);
+        const own = !!orgId && [...named].every((id) => id === orgId);
         // The catalog drops tombstoned rows, purges what this Mac kept of
         // them, and keeps the sidebar's copy of the list current.
-        const ingest = ingestCloudList(list);
+        const ingest = own ? ingestCloudList(list, orgId) : Promise.resolve({ notices: [] as PurgeNotice[] });
         const deleted = new Set((list.tombstones ?? []).map((tombstone) => tombstone.id));
-        setWorkspaces(list.workspaces.filter((item) => !deleted.has(item.workspace.id)));
+        setWorkspaces(list.workspaces.filter((item) => !deleted.has(item.workspace.id) && (!asked || item.workspace.orgId === asked)));
         setListError(null);
         const { notices: purged } = await ingest;
         if (purged.length) setNotices((current) => [...current, ...purged]);

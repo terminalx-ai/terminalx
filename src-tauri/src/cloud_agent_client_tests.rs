@@ -468,6 +468,53 @@ fn losing_a_membership_purges_only_that_organization() {
 }
 
 #[test]
+fn a_call_that_began_before_a_membership_loss_never_recreates_the_purged_directory() {
+    let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
+    fixture.account.1.lock().unwrap().push(ORG_2.into());
+    fixture.client.observe_identity(kept(&[ORG, ORG_2]));
+    fill(&fixture, ORG_2);
+    // The call resolved its directory while org_2 was still reachable...
+    let dir = fixture.client.dir(&fixture.account.context_in(ORG_2).unwrap(), WS).unwrap();
+    // ...then the membership went and the purge ran.
+    fixture.account.1.lock().unwrap().clear();
+    fixture.client.observe_identity(kept(&[ORG]));
+    assert!(!dir.exists());
+
+    // Its late writes are refused under the purge's lock and create nothing.
+    {
+        let _guard = fixture.client.lock.lock().unwrap();
+        assert!(fixture.client.save_outbox(&dir, &[]).is_err());
+    }
+    assert!(!dir.exists(), "the outbox write did not recreate the directory");
+    assert!(!fixture._dir.path().join("cloud-agent").join(USER).join(ORG_2).exists());
+    // A user change is refused the same way.
+    *fixture.account.0.lock().unwrap() = Some(("user_2".into(), ORG.into()));
+    let own = fixture._dir.path().join("cloud-agent").join(USER).join(ORG).join(WS);
+    {
+        let _guard = fixture.client.lock.lock().unwrap();
+        assert!(fixture.client.save_outbox(&own, &[]).is_err());
+    }
+}
+
+#[test]
+fn a_capability_flap_keeps_a_member_organizations_data_inactive() {
+    let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
+    fixture.account.1.lock().unwrap().push(ORG_2.into());
+    fixture.client.observe_identity(kept(&[ORG, ORG_2]));
+    fill(&fixture, ORG_2);
+    // The server stops authorizing by membership: org_2 is unreachable, but
+    // the user is still a member, so its data is kept (CloudScope::kept_orgs).
+    fixture.account.1.lock().unwrap().clear();
+    fixture.client.observe_identity(kept(&[ORG, ORG_2]));
+    assert!(fixture.keys.get(ORG_2, WS, KEY_ID).unwrap().is_some());
+    assert!(fixture._dir.path().join("cloud-agent").join(USER).join(ORG_2).join(WS).join("outbox.json").exists());
+    assert_eq!(fixture.client.outbox(ORG_2, WS, None).unwrap_err(), "cloud_remote_organization_mismatch");
+    // The capability returns: everything is there again.
+    fixture.account.1.lock().unwrap().push(ORG_2.into());
+    assert!(kept_everything(&fixture, ORG_2));
+}
+
+#[test]
 fn settled_entries_are_pruned_to_the_newest_per_tab() {
     let entry = |id: usize, state: &str| Stored {
         client_command_id: format!("c{id}"),
