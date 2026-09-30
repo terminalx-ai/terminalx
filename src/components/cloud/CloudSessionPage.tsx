@@ -9,6 +9,7 @@ import { CloudGitView } from "./CloudGit";
 import { CloudCreateWorkspace } from "./CloudCreateWorkspace";
 import { actionsFor, archiveLine, CloudWorkspaceLifecycleDialog, DeletionProgress, type LifecycleAction } from "./CloudWorkspaceLifecycle";
 import { useAccount } from "@/lib/account";
+import { applyCloudSnapshot, ingestCloudList, unarchiveCloudWorkspace } from "@/lib/cloudCatalog";
 import { failureMessage, PHASES, phaseOf, runtimeNotPickedUp, settled } from "@/lib/cloudCreate";
 import {
   archiving,
@@ -19,7 +20,6 @@ import {
   lifecycleErrorMessage,
   operationFailureText,
   purgeNoticeText,
-  purgeTombstones,
   type PurgeNotice,
 } from "@/lib/cloudLifecycle";
 import {
@@ -80,7 +80,6 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
   const [lifecycle, setLifecycle] = useState<{ item: CloudWorkspaceListItem; action: LifecycleAction } | null>(null);
   const [notices, setNotices] = useState<PurgeNotice[]>([]);
   const [rowError, setRowError] = useState<{ id: string; message: string } | null>(null);
-  const names = useRef(new Map<string, string>());
   const { status } = useAccount();
   const scope = status.state === "signed-in" ? (status.context?.scope ?? "signed-in") : "signed-out";
 
@@ -88,12 +87,13 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
     api
       .cloudWorkspaces()
       .then(async (list) => {
+        // The catalog drops tombstoned rows, purges what this Mac kept of
+        // them, and keeps the sidebar's copy of the list current.
+        const ingest = ingestCloudList(list);
         const deleted = new Set((list.tombstones ?? []).map((tombstone) => tombstone.id));
-        // A tombstoned workspace is gone, whatever else still lists it.
         setWorkspaces(list.workspaces.filter((item) => !deleted.has(item.workspace.id)));
         setListError(null);
-        for (const item of list.workspaces) names.current.set(item.workspace.id, item.workspace.name);
-        const purged = await purgeTombstones(list.tombstones ?? [], names.current);
+        const { notices: purged } = await ingest;
         if (purged.length) setNotices((current) => [...current, ...purged]);
       })
       .catch((e: unknown) => setListError(errorCode(e)));
@@ -104,6 +104,7 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
   // The create form polls the workspace it tracks; its snapshots keep that
   // row current while the list itself does not poll.
   const progress = useCallback((snapshot: CloudWorkspaceSnapshot) => {
+    applyCloudSnapshot(snapshot);
     setWorkspaces((current) =>
       current?.map((item) => (item.workspace.id === snapshot.workspace.id ? { workspace: snapshot.workspace, latestOperation: snapshot.operation } : item)) ??
       current,
@@ -172,7 +173,7 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
     async (item: CloudWorkspaceListItem) => {
       setRowError(null);
       try {
-        await api.cloudWorkspaceUnarchive(item.workspace.id);
+        await unarchiveCloudWorkspace(item);
         reload();
       } catch (e) {
         setRowError({ id: item.workspace.id, message: lifecycleErrorMessage(errorCode(e)) });

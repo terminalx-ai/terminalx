@@ -132,6 +132,8 @@ export async function createWorkspace(
     pending?: PendingCreate | null;
     onStep?: (step: CreateStep) => void;
     onPending?: (pending: PendingCreate | null) => void;
+    /** Told the workspace and the exact request it came from (the catalog's `createMemory`). */
+    onCreated?: (snapshot: CloudWorkspaceSnapshot, request: CloudWorkspaceCreateInput) => void;
     newKey?: () => string;
     now?: () => number;
   } = {},
@@ -172,6 +174,7 @@ export async function createWorkspace(
   try {
     const snapshot = await api.cloudWorkspaceCreate(pending.request);
     onPending?.(null);
+    options.onCreated?.(snapshot, pending.request);
     return snapshot;
   } catch (error) {
     // Only an outcome the server may still have applied keeps the key; a

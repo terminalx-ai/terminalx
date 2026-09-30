@@ -10,6 +10,8 @@ mod account;
 #[cfg(feature = "desktop")]
 mod automations;
 mod binpath;
+#[cfg(feature = "desktop")]
+mod cloud_catalog;
 mod cloud_activity;
 mod cloud_bootstrap;
 mod cloud_quiesce;
@@ -340,6 +342,8 @@ pub fn run() {
             cloud_agent_client::cloud_agent_cache_load,
             cloud_agent_client::cloud_agent_cache_save,
             cloud_agent_client::cloud_agent_purge_workspace,
+            cloud_catalog::cloud_catalog_load,
+            cloud_catalog::cloud_catalog_save,
             commands::pairing_status,
             commands::pairing_generate,
             commands::pairing_revoke,

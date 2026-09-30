@@ -167,6 +167,9 @@ export const api = {
   cloudWorkspaceDisposition: (workspaceId: string) =>
     invoke<CloudWorkspaceDisposition>("cloud_workspace_disposition", { workspaceId }),
   /** Drop the agent outbox, transcript cache and keys this Mac kept for a deleted workspace. */
+  /** The saved cloud catalog (PRO-57) of the signed-in user; refused once `revision` is not the current account. */
+  cloudCatalogLoad: (revision: string) => invoke<unknown>("cloud_catalog_load", { revision }),
+  cloudCatalogSave: (revision: string, catalog: unknown) => invoke<void>("cloud_catalog_save", { revision, catalog }),
   cloudAgentPurgeWorkspace: (organizationId: string, workspaceId: string) =>
     invoke<{ removed: boolean; unsentCommands: number; cachedTabs: number }>("cloud_agent_purge_workspace", { organizationId, workspaceId }),
   cloudWorkspaceOperation: (operationId: string) =>
@@ -265,12 +268,18 @@ export interface OrganizationSummary {
   id: string;
   name: string;
   role: string;
+  /** The user's personal organization (PRO-69); absent from older servers. */
+  isPersonal?: boolean;
+  /** What the cloud offers in this organization (PRO-69); absent from older servers. */
+  cloud?: { enabled: boolean; flags: Record<string, boolean> } | null;
 }
 
 export interface AccountIdentity {
   name: string | null;
   email: string;
   organization: string | null;
+  /** The active (default) organization's id. */
+  organizationId?: string | null;
 }
 
 export interface AccountStatus {
@@ -410,6 +419,31 @@ export interface CloudWorkspace {
   /** When an archived workspace is deleted for good. */
   deleteAfter?: number | null;
   deletedAt?: number | null;
+  /**
+   * S1 list enrichment (PRO-56), optional because older servers do not send it: the
+   * repositories it was built from (primary first), and when anything last
+   * happened in it.
+   */
+  repositories?: CloudWorkspaceRepository[] | null;
+  createdBy?: string | null;
+  lastActivityAt?: number | null;
+  /** The runtime's own activity report (S1; named so it is not the runtime build). */
+  runtimeActivity?: { online: boolean; reportedAt: number | null; activeTurns: number; pendingApprovals: number } | null;
+  /** Monotonic per workspace (S1). */
+  revision?: number | null;
+  /** What opening it would grant this caller (S1). */
+  authority?: "manage" | "participate" | (string & {}) | null;
+}
+
+/** One repository checkout of a workspace, as the enriched list reports it (S1). */
+export interface CloudWorkspaceRepository {
+  identity: string | null;
+  /** Null for a repository no longer selected for the organization. */
+  fullName: string | null;
+  cloneUrl: string | null;
+  ref?: string | null;
+  targetDirectory?: string | null;
+  primary?: boolean;
 }
 
 /** A delete's cleanup report, until the provider confirms (§10.4). Unknown kinds and states are shown as they come. */
@@ -522,6 +556,8 @@ export interface CloudWorkspaceListItem {
 export interface CloudWorkspaceList {
   workspaces: CloudWorkspaceListItem[];
   tombstones?: CloudWorkspaceTombstone[];
+  /** Non-archived workspaces against the organization's limit (S1); absent from older servers. */
+  quota?: { used: number; limit: number } | null;
 }
 
 /** Retain this exact key when reconciling an ambiguous create response. */

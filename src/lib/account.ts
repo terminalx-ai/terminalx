@@ -57,6 +57,16 @@ function scheduleRefresh(status: AccountStatus) {
   refreshTimer = window.setTimeout(() => void refreshAccount(), delay);
 }
 
+/** For stores outside React (the cloud catalog). */
+export function getAccount(): AccountState {
+  return state;
+}
+
+export function subscribeAccount(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
 export function useAccount(): AccountState {
   return useSyncExternalStore(
     (listener) => {
