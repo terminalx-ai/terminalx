@@ -142,10 +142,6 @@ impl Peer {
         self.notify_sized(event, params, 0);
     }
 
-    fn granted(&self, capability: &str) -> bool {
-        self.granted.lock().unwrap().as_ref().is_some_and(|granted| granted.contains(capability))
-    }
-
     fn notify_sized(&self, event: &str, params: Value, size: usize) {
         self.queued.fetch_add(size, Ordering::SeqCst);
         if self.outbound.send((json!({ "event": event, "params": params }), size)).is_err() {

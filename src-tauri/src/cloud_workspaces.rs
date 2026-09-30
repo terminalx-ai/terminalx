@@ -2647,6 +2647,8 @@ mod tests {
                     archived_at: None,
                     delete_after: None,
                     deleted_at: None,
+                    you: None,
+                    shared_with: None,
                 },
                 latest_operation: None,
             }],

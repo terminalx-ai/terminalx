@@ -1072,7 +1072,8 @@ async fn shared_people_see_every_session_but_only_managers_change_the_index() {
     let ids = |value: Value| value["sessions"].as_array().unwrap().iter().map(|entry| entry["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
     assert_eq!(ids(call(&f.rpc, &alice, "session.list", json!({})).await.unwrap()), vec![session.id.clone()]);
     assert_eq!(ids(call(&f.rpc, &demoted, "session.list", json!({})).await.unwrap()), vec![session.id.clone()]);
-    assert_eq!(call(&f.rpc, &carol, "session.list", json!({})).await.unwrap()["sessions"], json!([]));
+    // Listed with no role: reads are refused outright, not answered empty.
+    assert_eq!(code(call(&f.rpc, &carol, "session.list", json!({})).await), "forbidden");
     for (who, peer) in [("alice", &alice), ("carol", &carol), ("demoted", &demoted)] {
         let params = json!({ "sessionId": session.id, "title": "x", "clientRequestId": format!("request-{who}") });
         assert_eq!(code(call(&f.rpc, peer, "session.update", params).await), "forbidden", "{who}");
