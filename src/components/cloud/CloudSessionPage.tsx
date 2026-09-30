@@ -47,7 +47,7 @@ import { getInstance } from "@/lib/terminal";
 import { useTheme } from "@/lib/theme";
 
 /** Where an open session's commands run, as the page labels it. */
-interface OpenedWorkspace {
+export interface OpenedWorkspace {
   connection: CloudWorkspaceConnection;
   name: string;
   provider: string | null;
@@ -434,7 +434,7 @@ function LifecycleButtons({ item, onChoose }: { item: CloudWorkspaceListItem; on
   );
 }
 
-function archivingText(item: CloudWorkspaceListItem): string {
+export function archivingText(item: CloudWorkspaceListItem): string {
   return item.latestOperation?.errorCode === "runtime_checkpoint_pending"
     ? "Archiving: waiting for the runtime to save its conversations (up to a minute)…"
     : "Archiving…";
@@ -477,7 +477,7 @@ export function describeWorkspace(item: CloudWorkspaceListItem, now = Date.now()
 }
 
 /** Says, wherever a cloud shell is shown, that it runs in the cloud workspace and not on this Mac. */
-function ExecutionLocation({ provider, name }: { provider: string | null; name: string }) {
+export function ExecutionLocation({ provider, name }: { provider: string | null; name: string }) {
   return (
     <span
       className="inline-flex items-center gap-1 rounded-full border border-hairline px-2 py-0.5 text-[11px] text-muted-foreground"
@@ -491,7 +491,7 @@ function ExecutionLocation({ provider, name }: { provider: string | null; name: 
 
 type View = { kind: "terminal" } | { kind: "agent" } | { kind: "files" } | { kind: "git" };
 
-function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: WorkspaceConnectionState }) {
+export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: WorkspaceConnectionState }) {
   const { connection } = opened;
   const client = connection.client;
   const key = workspaceTargetKey(connection.target);
@@ -745,7 +745,7 @@ function inputErrorText(code: string): string {
   }
 }
 
-function describe(state: WorkspaceConnectionState): string {
+export function describe(state: WorkspaceConnectionState): string {
   switch (state.state) {
     case "connected":
       return `Connected · runtime ${state.runtimeVersion} · generation ${state.runtimeGeneration} · ${state.authority}`;

@@ -302,6 +302,17 @@ export async function unarchiveCloudWorkspace(item: CloudWorkspaceListItem): Pro
   if (snapshot?.workspace) applyCloudSnapshot(snapshot);
 }
 
+/** Resume, asked for explicitly from a workspace's menu. Nothing that only looks calls this. */
+export async function resumeCloudWorkspace(item: CloudWorkspaceListItem): Promise<void> {
+  const snapshot = await api.cloudWorkspaceResume(item.workspace.id);
+  if (snapshot?.workspace) applyCloudSnapshot(snapshot);
+}
+
+/** The workspace a `cloud:<orgId>:<workspaceId>` key names, from the catalog. */
+export function findCloudWorkspace(catalog: CloudCatalogState, orgId: string, workspaceId: string): CloudWorkspaceListItem | null {
+  return catalog.orgs[orgId]?.workspaces.find((item) => item.workspace.id === workspaceId) ?? null;
+}
+
 // ---- Refresh ---------------------------------------------------------------
 
 const REPOSITORIES_MAX_AGE_MS = 5 * 60 * 1000;

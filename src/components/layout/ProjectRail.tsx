@@ -30,6 +30,10 @@ import { useAutomationStore } from "@/lib/automations";
 import { AccountSidebarEntry } from "@/components/account/AccountSidebarEntry";
 import { ProjectNavigation } from "./SidebarTree";
 import { navigateTree } from "./treeKeyboard";
+import { refreshAccount } from "@/lib/account";
+import { refreshCloudCatalog } from "@/lib/cloudCatalog";
+import { TreeToggle } from "./SidebarRows";
+import { CloudSections, useCloudSections, useSectionCollapsed } from "./cloud/CloudSections";
 
 /**
  * The unified sidebar: global destinations followed by an expandable project
@@ -44,6 +48,7 @@ export function ProjectRail({
   onOpenAutomations,
   onOpenSkills,
   onSearch,
+  onOpenCloudPage,
 }: {
   onOpenSettings: () => void;
   onOpenAccount: () => void;
@@ -53,8 +58,16 @@ export function ProjectRail({
   onOpenAutomations: () => void;
   onOpenSkills: () => void;
   onSearch: () => void;
+  onOpenCloudPage?: () => void;
 }) {
   const store = useSessionStore();
+  // A destination looks active only while it is what the main slot shows: no session and no cloud workspace selected.
+  const onNavView = !store.selectedSessionId && !store.selectedCloudWorkspace;
+  // Section headers appear only when an organization section exists; otherwise the sidebar is as it was.
+  const cloud = useCloudSections();
+  const sectioned = cloud.orgs.length > 0;
+  const [localCollapsedPref, toggleLocal] = useSectionCollapsed("local");
+  const localCollapsed = sectioned && localCollapsedPref;
   const automationStore = useAutomationStore();
   const [error, setError] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
@@ -102,7 +115,8 @@ export function ProjectRail({
   const refreshAll = async () => {
     setSpinning(true);
     try {
-      await refreshEverything();
+      // The account too: a silent token refresh may have brought organizations or capabilities.
+      await Promise.all([refreshEverything(), refreshAccount().then(() => refreshCloudCatalog())]);
     } finally {
       setSpinning(false);
     }
@@ -119,7 +133,7 @@ export function ProjectRail({
         </Button>
         <Button
           variant="ghost"
-          className={cn("justify-start gap-2 px-2", store.view === "issues" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+          className={cn("justify-start gap-2 px-2", store.view === "issues" && onNavView ? "bg-selected text-foreground" : "")}
           onClick={onOpenIssues}
         >
           <CircleDot />
@@ -129,7 +143,7 @@ export function ProjectRail({
         <WithTooltip label="Agent dashboard" keys={keycaps("mod+shift+a")}>
           <Button
             variant="ghost"
-            className={cn("min-w-0 justify-start gap-2 px-2", store.view === "agents" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+            className={cn("min-w-0 justify-start gap-2 px-2", store.view === "agents" && onNavView ? "bg-selected text-foreground" : "")}
             onClick={onOpenAgents}
           >
             <LayoutGrid />
@@ -140,7 +154,7 @@ export function ProjectRail({
         <WithTooltip label="Stats & Usage" keys={keycaps("mod+shift+u")}>
           <Button
             variant="ghost"
-            className={cn("justify-start gap-2 px-2", store.view === "stats" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+            className={cn("justify-start gap-2 px-2", store.view === "stats" && onNavView ? "bg-selected text-foreground" : "")}
             onClick={onOpenStats}
           >
             <BarChart3 />
@@ -150,7 +164,7 @@ export function ProjectRail({
         <WithTooltip label="Automations" keys={keycaps("mod+shift+r")}>
           <Button
             variant="ghost"
-            className={cn("justify-start gap-2 px-2", store.view === "automations" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+            className={cn("justify-start gap-2 px-2", store.view === "automations" && onNavView ? "bg-selected text-foreground" : "")}
             onClick={onOpenAutomations}
           >
             <CalendarClock />
@@ -166,7 +180,7 @@ export function ProjectRail({
         <WithTooltip label="Skills" keys={keycaps("mod+shift+k")}>
           <Button
             variant="ghost"
-            className={cn("justify-start gap-2 px-2", store.view === "skills" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+            className={cn("justify-start gap-2 px-2", store.view === "skills" && onNavView ? "bg-selected text-foreground" : "")}
             onClick={onOpenSkills}
           >
             <Sparkles />
@@ -176,15 +190,29 @@ export function ProjectRail({
         </WithTooltip>
       </div>
 
-      <div className="mt-3 flex items-center justify-between pl-4 pr-2">
-        <button
-          type="button"
-          onClick={() => setShowArchived((v) => !v)}
-          className="text-[11px] font-medium uppercase tracking-wide text-faint hover:text-muted-foreground"
-          title={archivedCount ? `${archivedCount} archived` : undefined}
-        >
-          {showArchived ? "Archived" : "Projects"}
-        </button>
+      <div className={sectioned ? "mt-3 flex items-center justify-between pl-2 pr-2" : "mt-3 flex items-center justify-between pl-4 pr-2"}>
+        {sectioned ? (
+          <span className="flex min-w-0 items-center gap-1" data-testid="local-section-header">
+            <TreeToggle expanded={!localCollapsed} label="Local" onToggle={toggleLocal} />
+            <button
+              type="button"
+              onClick={() => setShowArchived((v) => !v)}
+              className="truncate text-[11px] font-medium uppercase tracking-wide text-faint hover:text-muted-foreground"
+              title={archivedCount ? `Projects on this computer · ${archivedCount} archived` : "Projects on this computer"}
+            >
+              {showArchived ? "Local · Archived" : "Local"}
+            </button>
+          </span>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setShowArchived((v) => !v)}
+            className="text-[11px] font-medium uppercase tracking-wide text-faint hover:text-muted-foreground"
+            title={archivedCount ? `${archivedCount} archived` : undefined}
+          >
+            {showArchived ? "Archived" : "Projects"}
+          </button>
+        )}
         <div className="flex items-center">
           <WithTooltip label={store.showArchived ? "Show active sessions" : "Show archived sessions"}>
             <Button
@@ -213,12 +241,12 @@ export function ProjectRail({
       {error && <div className="mx-2 mt-1 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
 
       <div className="mt-1 min-h-0 flex-1 overflow-y-auto scrollbar-thin px-2" role="tree" aria-label="Projects, workspaces, sessions, and tabs" onKeyDown={navigateTree}>
-        {projects.length === 0 && (
+        {!localCollapsed && projects.length === 0 && (
           <div className="px-2 py-6 text-center text-xs text-muted-foreground">
             {showArchived ? "Nothing archived." : "Add a project to start."}
           </div>
         )}
-        {projects.map((project) => {
+        {!localCollapsed && projects.map((project) => {
           const expanded = expandedProjects.has(project.path);
           return (
             <ProjectRow
@@ -240,6 +268,7 @@ export function ProjectRail({
             </ProjectRow>
           );
         })}
+        {sectioned && <CloudSections onOpenCloudPage={onOpenCloudPage} />}
       </div>
 
       <div className="border-t border-hairline p-2">
