@@ -224,16 +224,18 @@ The interactive CLI can open on a full-screen question before its composer, and
 each would take the first prompt while a reader watching the chat never saw it:
 onboarding's theme picker on a machine that never finished it (every fresh
 cloud VM), "is this a folder you trust?" the first time it runs anywhere new
-(a session's worktree always is), "Detected a custom API key" when
-`ANTHROPIC_API_KEY` is set, and the bypass-permissions disclaimer.
-`claude/trust.rs` answers the first three in the CLI's own config before each
-launch — `hasCompletedOnboarding`, `projects[<cwd>].hasTrustDialogAccepted`,
-and the key's fingerprint in `customApiKeyResponses.approved` (unless the
-reader refused it or is signed in with an account) — creating the config if
-the CLI has never run, and leaving every other key, the reader's `theme`
-included, alone. It only writes when something is missing. Bypass is accepted
-per launch: `skipDangerousModePermissionPrompt` rides in the `--settings`
-payload of a bypass tab, since the app's own bypass dialog already asked.
+(a session's worktree always is), and the bypass-permissions disclaimer.
+`claude/trust.rs` answers the first two in the CLI's own config before each
+launch — `hasCompletedOnboarding` and `projects[<cwd>].hasTrustDialogAccepted`
+— creating the config on a machine with neither a config nor a CLI backup of
+one (with a backup, the CLI's own restore offer is left to show), holding one
+lock across the read and write so parallel launches keep every entry, and
+leaving every other key,
+the reader's `theme` included, alone. It only writes when something is
+missing. Bypass is accepted per launch: `skipDangerousModePermissionPrompt`
+rides in the `--settings` payload of a bypass tab, since the app's own bypass
+dialog already asked. Other screens, such as "Detected a custom API key" when
+`ANTHROPIC_API_KEY` is set, are the reader's to answer.
 
 Anything still left is caught before the prompt is typed: a quiet Claude pane
 that never ran `SessionStart` has its screen read, and a known first-run screen
