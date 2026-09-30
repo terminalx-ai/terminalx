@@ -510,7 +510,7 @@ export async function markCloudAgentRead(scope: CloudAgentScope, tabId: string, 
 export async function createCloudAgentTab(
   scope: CloudAgentScope,
   client: WorkspaceRpcClient,
-  params: { agent: string; model?: string; effort?: string | null; mode?: string; title?: string },
+  params: { agent: string; model?: string; effort?: string | null; mode?: string; title?: string; prompt?: string; useWorktree?: boolean },
 ): Promise<string> {
   const created = await client.createAgentTab(params);
   const s = store(scope);

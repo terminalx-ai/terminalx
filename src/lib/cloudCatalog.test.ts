@@ -85,6 +85,7 @@ const org = (workspaces: CloudWorkspaceListItem[], repositories: CloudSelectedRe
   fetchedAt: 1,
   source: "live",
   error: null,
+  sessions: {},
 });
 
 function signIn(orgs = [{ id: ORG, name: "Acme", role: "admin", isPersonal: false, cloud: { enabled: true, flags: {} } }]) {
@@ -119,7 +120,7 @@ afterEach(() => {
 });
 
 describe("placement", () => {
-  it("places by the server's repositories first, then createMemory, then Other workspaces", () => {
+  it("places by the server's repositories first, then createMemory, then as a blank project", () => {
     const server = item("s1", { repositories: [{ identity: "github.com/acme/api", fullName: "acme/api", cloneUrl: null, primary: true }] });
     const remembered = item("m1");
     const image = item("i1", { repositories: [] });
@@ -132,12 +133,15 @@ describe("placement", () => {
       [`${ORG}:i1`]: { repositories: ["github.com/acme/api"], createdAt: 1 },
     };
     const placed = placeCloudProjects(org([server, remembered, image, unknown, both], [repo("acme/api"), repo("acme/web")]), memory);
-    expect(placed.projects.map((p) => [p.fullName, p.workspaces.map((w) => [w.item.workspace.id, w.placedBy])])).toEqual([
+    expect(placed.projects.filter((p) => !p.blank).map((p) => [p.fullName, p.workspaces.map((w) => [w.item.workspace.id, w.placedBy])])).toEqual([
       ["acme/api", [["s1", "server"], ["m1", "createMemory"]]],
       ["acme/web", [["b1", "server"]]],
     ]);
-    // An environment image (the server lists no repository) is not placed from memory.
-    expect(placed.other.map((w) => w.item.workspace.id).sort()).toEqual(["i1", "u1"]);
+    // No repository (the server lists none, or none is known): a blank project named after the workspace, never placed from memory.
+    expect(placed.projects.filter((p) => p.blank).map((p) => [p.key, p.fullName, p.workspaces.map((w) => w.item.workspace.id)])).toEqual([
+      [`cloud:${ORG}:blank/ws i1`, "ws i1", ["i1"]],
+      [`cloud:${ORG}:blank/ws u1`, "ws u1", ["u1"]],
+    ]);
     expect(placed.projects[0].key).toBe(`cloud:${ORG}:github.com/acme/api`);
     expect(placed.projects[0].workspaces[0].key).toBe(`cloud:${ORG}:s1`);
   });

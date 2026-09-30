@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import type { RuntimeSession } from "@terminalx/portable/workspace";
 import { normalizeRepositoryIdentity } from "@terminalx/portable/repositoryIdentity";
 import {
   api,
@@ -48,6 +49,16 @@ export interface OrgCatalog {
   source: "cache" | "live";
   /** Why the last refresh failed; the rows above are then last known. */
   error: string | null;
+  /** Per workspace id, the sessions last read from its runtime (CS-8), so a stopped workspace still lists them. */
+  sessions: Record<string, CachedWorkspaceSessions>;
+}
+
+/** A workspace's session list as its runtime last reported it. Paths in it are VM paths. */
+export interface CachedWorkspaceSessions {
+  sessions: RuntimeSession[];
+  /** The runtime's capabilities when it was read; decides which session actions show. */
+  capabilities: string[] | null;
+  at: number;
 }
 
 export interface CreateMemoryEntry {
@@ -113,18 +124,34 @@ export function defaultOrgId(status: AccountStatus): string | null {
 // ---- Placement -------------------------------------------------------------
 
 export interface CloudPlacement {
-  /** Shown: repositories with a non-archived workspace, and those the user pinned or added. */
+  /**
+   * Shown: repositories with a non-archived workspace, those the user pinned
+   * or added, and blank projects (workspaces with no repository, and blank
+   * projects added but not created yet).
+   */
   projects: CloudProject[];
-  /** Other selected repositories, behind "More repositories (N)". */
+  /** Other selected repositories: what "+ Add project" offers. */
   more: CloudProject[];
-  /** Workspaces with no repository (built from an environment image), or none known. */
-  other: CloudWorkspaceNode[];
   /** Archived workspaces, only ever under the organization's "Archived workspaces". */
   archived: CloudWorkspaceNode[];
 }
 
 function memoryKey(orgId: string, workspaceId: string): string {
   return `${orgId}:${workspaceId}`;
+}
+
+/**
+ * A blank project's identity: `blank/<name>`, lower case. It has a slash, so
+ * its key (`cloud:<orgId>:blank/<name>`) is a project key and never parses as
+ * a workspace key. A blank project is known by its workspace's name, which is
+ * what every device sees once it is created.
+ */
+export function blankIdentity(name: string): string {
+  return `blank/${name.trim().toLowerCase()}`;
+}
+
+export function isBlankIdentity(identity: string): boolean {
+  return identity.startsWith("blank/");
 }
 
 function selectedIdentity(repository: CloudSelectedRepository): string | null {
@@ -134,8 +161,8 @@ function selectedIdentity(repository: CloudSelectedRepository): string | null {
 /**
  * Where a workspace belongs: its primary repository from the server's list
  * (S1) when the server sends one, else from what this desktop recorded when
- * it created it, else nowhere ("Other workspaces"). A server that lists the
- * field with no repositories means an environment image: nowhere.
+ * it created it, else nowhere (a blank project named after it). A server that
+ * lists the field with no repositories means no repository: blank.
  */
 export function repositoryOf(
   item: CloudWorkspaceListItem,
@@ -167,7 +194,7 @@ function nameOfIdentity(identity: string): string {
 export function placeCloudProjects(
   org: Pick<OrgCatalog, "orgId" | "workspaces" | "repositories">,
   memory: Record<string, CreateMemoryEntry>,
-  options: { pinned?: readonly string[]; added?: readonly string[] } = {},
+  options: { pinned?: readonly string[]; added?: readonly string[]; blank?: readonly string[] } = {},
 ): CloudPlacement {
   const pinned = new Set(options.pinned ?? []);
   const added = new Set(options.added ?? []);
@@ -179,50 +206,52 @@ export function placeCloudProjects(
   // Until the organization's repositories are known, nothing reads "not accessible".
   const known = org.repositories !== null;
   const projects = new Map<string, CloudProject>();
-  const project = (identity: string, fullName: string | null): CloudProject => {
+  const project = (identity: string, fullName: string | null, blank = false): CloudProject => {
     let found = projects.get(identity);
     if (!found) {
       found = {
         key: cloudProjectKey(org.orgId, identity),
         orgId: org.orgId,
         identity,
-        fullName: selected.get(identity) ?? fullName ?? nameOfIdentity(identity),
-        selected: !known || selected.has(identity),
+        fullName: blank ? (fullName ?? identity.slice("blank/".length)) : (selected.get(identity) ?? fullName ?? nameOfIdentity(identity)),
+        selected: blank || !known || selected.has(identity),
         pinned: pinned.has(identity),
+        blank,
         workspaces: [],
       };
       projects.set(identity, found);
     }
     return found;
   };
-  const other: CloudWorkspaceNode[] = [];
   const archived: CloudWorkspaceNode[] = [];
   for (const item of org.workspaces) {
     const repository = repositoryOf(item, memory);
     const node: CloudWorkspaceNode = { key: cloudWorkspaceKey(org.orgId, item.workspace.id), item, placedBy: repository?.placedBy ?? null };
     if (isArchived(item.workspace)) archived.push(node);
     else if (repository) project(repository.identity, repository.fullName).workspaces.push(node);
-    else other.push(node);
+    // No repository: a blank project, known by the workspace's name.
+    else project(blankIdentity(item.workspace.name), item.workspace.name.trim(), true).workspaces.push(node);
   }
-  for (const identity of [...pinned, ...added]) if (selected.has(identity)) project(identity, null);
+  // Pinned and added projects show while their repository is selected (or before the selection is known).
+  for (const identity of [...pinned, ...added]) if (!isBlankIdentity(identity) && (selected.has(identity) || !known)) project(identity, null);
+  for (const name of options.blank ?? []) if (name.trim()) project(blankIdentity(name), name.trim(), true);
   const more: CloudProject[] = [];
   for (const [identity, fullName] of selected) {
     if (projects.has(identity)) continue;
-    more.push({ key: cloudProjectKey(org.orgId, identity), orgId: org.orgId, identity, fullName, selected: true, pinned: false, workspaces: [] });
+    more.push({ key: cloudProjectKey(org.orgId, identity), orgId: org.orgId, identity, fullName, selected: true, pinned: false, blank: false, workspaces: [] });
   }
   const shown = [...projects.values()];
   for (const item of shown) item.workspaces.sort(byActivity);
   shown.sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.fullName.localeCompare(b.fullName));
   more.sort((a, b) => a.fullName.localeCompare(b.fullName));
-  other.sort(byActivity);
   archived.sort(byActivity);
-  return { projects: shown, more, other, archived };
+  return { projects: shown, more, archived };
 }
 
 // ---- Merging lists ---------------------------------------------------------
 
 function emptyOrg(orgId: string): OrgCatalog {
-  return { orgId, workspaces: [], repositories: null, repositoriesAt: null, quota: null, fetchedAt: null, source: "cache", error: null };
+  return { orgId, workspaces: [], repositories: null, repositoriesAt: null, quota: null, fetchedAt: null, source: "cache", error: null, sessions: {} };
 }
 
 /** Names seen in earlier lists, so a tombstone's notice can say which workspace went. */
@@ -255,9 +284,11 @@ export async function ingestCloudList(
     const current = state.orgs[org] ?? emptyOrg(org);
     const createMemory = { ...state.createMemory };
     for (const tombstone of tombstones) delete createMemory[memoryKey(tombstone.orgId, tombstone.id)];
+    const sessions = { ...current.sessions };
+    for (const tombstone of tombstones) delete sessions[tombstone.id];
     set({
       ...state,
-      orgs: { ...state.orgs, [org]: { ...current, workspaces, quota: list.quota ?? current.quota, fetchedAt: now, source: "live", error: null } },
+      orgs: { ...state.orgs, [org]: { ...current, workspaces, quota: list.quota ?? current.quota, fetchedAt: now, source: "live", error: null, sessions } },
       createMemory,
     });
   }
@@ -276,6 +307,21 @@ export function applyCloudSnapshot(snapshot: CloudWorkspaceSnapshot) {
   const workspaces = known ? current.workspaces.map((row) => (row.workspace.id === item.workspace.id ? item : row)) : [item, ...current.workspaces];
   set({ ...state, orgs: { ...state.orgs, [orgId]: { ...current, workspaces } } });
   schedulePoll();
+}
+
+/** The organization's selected repositories, as a picker just read them. */
+export function setCloudRepositories(orgId: string, repositories: CloudSelectedRepository[], now = Date.now()) {
+  const current = state.orgs[orgId] ?? emptyOrg(orgId);
+  set({ ...state, orgs: { ...state.orgs, [orgId]: { ...current, repositories, repositoriesAt: now } } });
+}
+
+/** Keep a workspace's session list (CS-8) with the catalog, so it is on disk for the next launch. */
+export function cacheCloudSessions(orgId: string, workspaceId: string, sessions: RuntimeSession[], capabilities: string[] | null, now = Date.now()) {
+  const current = state.orgs[orgId];
+  if (!current) return;
+  const previous = current.sessions[workspaceId];
+  if (previous && JSON.stringify(previous.sessions) === JSON.stringify(sessions) && JSON.stringify(previous.capabilities) === JSON.stringify(capabilities)) return;
+  set({ ...state, orgs: { ...state.orgs, [orgId]: { ...current, sessions: { ...current.sessions, [workspaceId]: { sessions, capabilities, at: now } } } } });
 }
 
 /** The create flow records the repositories a new workspace was built from. */
@@ -444,7 +490,7 @@ function scheduleSave() {
 export function serializeCatalog(catalog: CloudCatalogState): unknown {
   const orgs: Record<string, unknown> = {};
   for (const [orgId, org] of Object.entries(catalog.orgs)) {
-    orgs[orgId] = { workspaces: org.workspaces, repositories: org.repositories, repositoriesAt: org.repositoriesAt, quota: org.quota, fetchedAt: org.fetchedAt };
+    orgs[orgId] = { workspaces: org.workspaces, repositories: org.repositories, repositoriesAt: org.repositoriesAt, quota: org.quota, fetchedAt: org.fetchedAt, sessions: org.sessions };
   }
   return { version: CATALOG_VERSION, orgs, createMemory: catalog.createMemory };
 }
@@ -457,6 +503,25 @@ function validItem(value: unknown): value is CloudWorkspaceListItem {
   if (!isObject(value) || !isObject(value.workspace)) return false;
   const workspace = value.workspace;
   return typeof workspace.id === "string" && typeof workspace.orgId === "string" && typeof workspace.name === "string" && typeof workspace.state === "string";
+}
+
+function validSession(value: unknown): value is RuntimeSession {
+  return isObject(value) && typeof value.id === "string" && typeof value.title === "string" && Array.isArray(value.tabs);
+}
+
+/** Saved session lists, for workspaces the saved catalog still lists. */
+function parseSessions(value: unknown, workspaces: ReadonlySet<string>): Record<string, CachedWorkspaceSessions> {
+  const out: Record<string, CachedWorkspaceSessions> = {};
+  if (!isObject(value)) return out;
+  for (const [workspaceId, raw] of Object.entries(value)) {
+    if (!workspaces.has(workspaceId) || !isObject(raw) || !Array.isArray(raw.sessions)) continue;
+    out[workspaceId] = {
+      sessions: raw.sessions.filter(validSession),
+      capabilities: Array.isArray(raw.capabilities) ? raw.capabilities.filter((c): c is string => typeof c === "string") : null,
+      at: typeof raw.at === "number" ? raw.at : 0,
+    };
+  }
+  return out;
 }
 
 /** A saved catalog, or null for anything this version cannot read. */
@@ -473,6 +538,7 @@ export function parseCatalog(value: unknown): Pick<CloudCatalogState, "orgs" | "
       repositoriesAt: typeof raw.repositoriesAt === "number" ? raw.repositoriesAt : null,
       quota: isObject(raw.quota) && typeof raw.quota.used === "number" && typeof raw.quota.limit === "number" ? { used: raw.quota.used, limit: raw.quota.limit } : null,
       fetchedAt: typeof raw.fetchedAt === "number" ? raw.fetchedAt : null,
+      sessions: parseSessions(raw.sessions, new Set(workspaces.map((item) => item.workspace.id))),
     };
   }
   const createMemory: Record<string, CreateMemoryEntry> = {};

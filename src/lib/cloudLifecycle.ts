@@ -13,6 +13,7 @@ import {
   type CloudWorkspaceOperation,
   type CloudWorkspaceTombstone,
 } from "@/lib/api";
+import { closeCloudConnection } from "@/lib/cloudConnections";
 import { dropCloudAgents } from "@/lib/cloudAgents";
 import { dropCloudTerminals } from "@/lib/cloudTerminals";
 import { dropEditors, getEditors } from "@/lib/editors";
@@ -304,6 +305,7 @@ export async function purgeTombstones(tombstones: CloudWorkspaceTombstone[], nam
     const scope = { organizationId: tombstone.orgId, workspaceId: tombstone.id };
     const target = { kind: "cloud" as const, ...scope };
     const key = workspaceTargetKey(target);
+    closeCloudConnection({ orgId: tombstone.orgId, workspaceId: tombstone.id });
     closeWorkspaceConnection(target);
     const editors = getEditors().editors.filter((entry) => entry.sessionId === key);
     const unsavedFiles = editors.filter((entry) => entry.dirty).length;

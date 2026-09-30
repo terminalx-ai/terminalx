@@ -41,6 +41,12 @@ interface State {
   selectedCloudWorkspace: string | null;
   /** A new-session form pre-filled from a workspace row. */
   newSessionPreset: { projectPath: string; cwd: string | null } | null;
+  /**
+   * A new-session form for a cloud project (`cloud:<orgId>:<identity>`),
+   * from the project row's `+`. Cleared by the same navigation that clears
+   * `newSessionPreset`, and by any local preset.
+   */
+  cloudSessionPreset: { projectKey: string } | null;
   /** Pre-normalized command-palette documents, rebuilt only when source data changes. */
   paletteIndex: PaletteIndex;
 }
@@ -62,6 +68,7 @@ let state: State = {
   workspacesLoading: {},
   selectedCloudWorkspace: null,
   newSessionPreset: null,
+  cloudSessionPreset: null,
   paletteIndex: buildPaletteIndex([], [], {}, []),
 };
 
@@ -71,6 +78,8 @@ function set(patch: Partial<State>) {
   // Clear the draft destination when navigating away, not in React cleanup
   // (Strict Mode also runs cleanup when a workspace first mounts).
   if ((patch.view && patch.view !== "new") || patch.selectedSessionId) next.newSessionPreset = null;
+  // A cloud draft goes the same way, and gives way to any local one.
+  if ((patch.view && patch.view !== "new") || patch.selectedSessionId || ("newSessionPreset" in patch && !("cloudSessionPreset" in patch))) next.cloudSessionPreset = null;
   // Selecting a session or another view leaves the cloud workspace.
   if (!("selectedCloudWorkspace" in patch) && ("selectedSessionId" in patch || "view" in patch)) next.selectedCloudWorkspace = null;
   if (
@@ -217,6 +226,18 @@ export function openSkills(filter: State["skillsFilter"] = null) {
  */
 export function selectCloudWorkspace(key: string | null) {
   set({ selectedCloudWorkspace: key, selectedSessionId: null, view: "new", newSessionPreset: null, selectedAutomationId: null });
+}
+
+/** Open the new-session form for a cloud project, as the project row's `+` does. */
+export function startCloudSessionIn(projectKey: string) {
+  set({
+    selectedSessionId: null,
+    view: "new",
+    newSessionPreset: null,
+    cloudSessionPreset: { projectKey },
+    navigationVersion: state.navigationVersion + 1,
+    selectedAutomationId: null,
+  });
 }
 
 export function selectProjectInSidebar(path: string | null) {

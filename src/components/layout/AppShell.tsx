@@ -224,7 +224,8 @@ function UnselectedWorkspace({
   const project = store.view === "new" ? newProject : store.view === "issues" ? issueProject : null;
   const cwd = store.view === "new" ? (preset?.cwd ?? project?.path ?? null) : project?.path ?? null;
   const workspace = cwd && project ? (store.workspaces[project.path] ?? []).find((item) => item.path === cwd) : null;
-  const panelAvailable = !!cwd && !!project;
+  // A cloud draft has no local checkout to show.
+  const panelAvailable = !!cwd && !!project && !(store.view === "new" && store.cloudSessionPreset);
   const checkoutEditorId = cwd ? `checkout:${cwd}` : null;
   const hasCheckoutEditors = !!checkoutEditorId && editors.editors.some((editor) => editor.sessionId === checkoutEditorId);
   const labelMode = preset?.cwd && store.view === "new" ? "branch" : useWorktree ? "base" : "branch";

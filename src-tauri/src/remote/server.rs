@@ -1193,6 +1193,12 @@ impl WorkspaceRpc {
         p.mode = index::requested_mode(p.mode.take());
         let manager = self.manager()?;
         self.check_new_tab(&p.agent, p.mode.as_deref())?;
+        if p.use_worktree {
+            // A blank project made before its folder was set up with Git: set it up now, so a worktree can be cut.
+            if let Err(error) = crate::cloud_agents::launch::init_blank_repository(&self.root, "main") {
+                log::warn!("prepare the blank project folder: {error:#}");
+            }
+        }
         let entry = crate::session_ops::create_session_blocking(
             &*self.sink,
             crate::session_ops::NewSession {

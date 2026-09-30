@@ -606,8 +606,20 @@ export class WorkspaceRpcClient {
     return result.tabs ?? [];
   }
 
-  /** A new agent tab: one session with one agent process. */
-  createAgentTab(params: { agent: string; model?: string; effort?: string | null; mode?: string; title?: string }): Promise<{ sessionId: string; tabId: string; tab?: AgentTabInfo }> {
+  /**
+   * A new agent tab: one session with one agent process. `useWorktree` gives
+   * the session its own worktree on the VM; `prompt` is sent as its first
+   * message (both from `session/1`, read by the runtime's `session_ops`).
+   */
+  createAgentTab(params: {
+    agent: string;
+    model?: string;
+    effort?: string | null;
+    mode?: string;
+    title?: string;
+    prompt?: string;
+    useWorktree?: boolean;
+  }): Promise<{ sessionId: string; tabId: string; tab?: AgentTabInfo; session?: RuntimeSession }> {
     const defined = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""));
     return this.mutate("session.create", defined);
   }

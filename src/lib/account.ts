@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, closeWorkspaceConnections, errorMessage, type AccountStatus } from "@/lib/api";
+import { resetCloudConnections } from "@/lib/cloudConnections";
 import { resetCloudTerminals } from "@/lib/cloudTerminals";
 import { dropEditors } from "@/lib/editors";
 import { resetCloudFiles } from "@/lib/workspaceFiles";
@@ -31,6 +32,7 @@ function applyStatus(status: AccountStatus) {
   // A new account or organization never reuses cloud connections, or what
   // they cached, from the previous one.
   if (scopeOf(state.status) !== scopeOf(status)) {
+    resetCloudConnections();
     closeWorkspaceConnections();
     resetCloudTerminals();
     resetCloudFiles();
