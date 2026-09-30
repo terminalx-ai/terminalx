@@ -1,11 +1,38 @@
-import { useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react";
-import { Archive, ArchiveRestore, ArrowLeftRight, Cloud, Ellipsis, FolderGit2, GitBranch, Pause, Play, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import {
+  Archive,
+  ArchiveRestore,
+  ArrowLeftRight,
+  Cloud,
+  Ellipsis,
+  Folder,
+  FolderGit2,
+  Pause,
+  Pencil,
+  Pin,
+  PinOff,
+  Play,
+  Plus,
+  RefreshCw,
+  Trash2,
+  X,
+} from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/menu";
 import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
-import { RowChip, TreeGroup, TreeNode, TreeRow, TreeToggle } from "@/components/layout/SidebarRows";
+import { AgentTabRow, ItemTitle, RowChip, RowTime, StatusStripe, TreeGroup, TreeNode, TreeRow, TreeToggle } from "@/components/layout/SidebarRows";
 import { CloudWorkspaceLifecycleDialog, actionsFor, archiveLine, type LifecycleAction } from "@/components/cloud/CloudWorkspaceLifecycle";
 import { describeWorkspace } from "@/components/cloud/CloudSessionPage";
 import { api, errorMessage, type CloudWorkspaceListItem, type OrganizationSummary } from "@/lib/api";
@@ -20,23 +47,36 @@ import {
   useCloudCatalog,
   type OrgCatalog,
 } from "@/lib/cloudCatalog";
+import { useCloudConnection } from "@/lib/cloudConnections";
 import { lifecycleErrorMessage } from "@/lib/cloudLifecycle";
+import { deriveCloudActivity, type CloudActivity, type RowTone } from "@/lib/cloudRowState";
+import {
+  bootCloudSessions,
+  closeCloudSessionTab,
+  cloudSessionStatus,
+  deleteCloudSession,
+  updateCloudSession,
+  useCloudWorkspaceSessions,
+  type CloudSessionRow,
+} from "@/lib/cloudSessions";
 import { errorCode } from "@/lib/cloudTerminals";
 import { cn } from "@/lib/cn";
-import { setPrefs, usePrefs } from "@/lib/prefs";
-import { selectCloudWorkspace, useSessionStore } from "@/lib/sessions";
-import { orgSectionKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
-import { workspaceRowState, type RowTone } from "./rowState";
+import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
+import { getSessionStore, selectCloudSession, selectCloudWorkspace, selectSession, startCloudSessionIn, useSessionStore } from "@/lib/sessions";
+import { orgSectionKey, parseCloudWorkspaceKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
+import { AddRepositoryDialog, NewBlankProjectDialog } from "./AddCloudProject";
 
 /**
- * Organization sections of the sidebar (PRO-23 CS-5): one per organization
- * with cloud workspaces enabled, the default organization first. The default
- * organization lists its cloud projects (repositories) and workspaces from
- * the cloud catalog; the others offer to switch until every organization can
- * be listed at once (CS-18).
+ * Organization sections of the sidebar (PRO-23), built like the Local
+ * section: an organization lists its projects (repositories, and blank
+ * projects with no repository), each project lists its sessions and their
+ * tabs, and `+` on a project starts a new session in it. The VM a session
+ * runs on is a detail: a small location chip and the hover card, and a group
+ * row only when a project has more than one workspace. Workspace lifecycle
+ * actions live in the project's "…" menu.
  *
- * Looking never costs money: rendering and expanding read the catalog only,
- * and selecting a workspace shows it without resuming it.
+ * Looking never costs money: rendering, expanding and selecting read the
+ * catalog and this desktop's caches only; nothing connects or resumes.
  */
 
 /** Organizations with a section, default first then by name; none while signed out, with no cloud-enabled organization, or with the kill switch off. */
@@ -52,7 +92,7 @@ export function useCloudSections(): { orgs: OrganizationSummary[]; defaultOrg: s
   }, [status, cloudSidebar]);
 }
 
-function sectionName(org: OrganizationSummary): string {
+export function sectionName(org: OrganizationSummary): string {
   return org.isPersonal ? "Personal" : org.name;
 }
 
@@ -73,7 +113,7 @@ export function useSectionCollapsed(key: string, byDefault = false): [boolean, (
  * own Enter, Space and ArrowDown handling. While it is open the row keeps its
  * actions shown, whatever the hover state.
  */
-function useRowMenu() {
+export function useRowMenu() {
   const [open, setOpen] = useState(false);
   const wasOpen = useRef(false);
   return {
@@ -94,10 +134,13 @@ function useRowMenu() {
 }
 
 type Dialog = { item: CloudWorkspaceListItem; action: LifecycleAction };
+type AddDialog = { orgId: string; orgName: string; kind: "repository" | "blank" };
 
-export function CloudSections({ onOpenCloudPage }: { onOpenCloudPage?: () => void }) {
+export function CloudSections({ onOpenCloudPage, onOpenAccount }: { onOpenCloudPage?: () => void; onOpenAccount?: () => void }) {
   const { orgs, defaultOrg } = useCloudSections();
   const [dialog, setDialog] = useState<Dialog | null>(null);
+  const [adding, setAdding] = useState<AddDialog | null>(null);
+  useEffect(() => bootCloudSessions(), []);
   if (!orgs.length) return null;
   return (
     <>
@@ -109,6 +152,7 @@ export function CloudSections({ onOpenCloudPage }: { onOpenCloudPage?: () => voi
           // The other organizations sit close together as compact lines under one gap.
           spaced={index === 0 || org.id === defaultOrg || orgs[index - 1].id === defaultOrg}
           onLifecycle={setDialog}
+          onAdd={(kind) => setAdding({ orgId: org.id, orgName: sectionName(org), kind })}
           onOpenCloudPage={onOpenCloudPage}
         />
       ))}
@@ -128,6 +172,10 @@ export function CloudSections({ onOpenCloudPage }: { onOpenCloudPage?: () => voi
           }}
         />
       )}
+      {adding?.kind === "repository" && (
+        <AddRepositoryDialog orgId={adding.orgId} orgName={adding.orgName} onClose={() => setAdding(null)} onOpenSettings={onOpenAccount} />
+      )}
+      {adding?.kind === "blank" && <NewBlankProjectDialog orgId={adding.orgId} orgName={adding.orgName} onClose={() => setAdding(null)} />}
     </>
   );
 }
@@ -141,12 +189,14 @@ function OrgSection({
   isDefault,
   spaced,
   onLifecycle,
+  onAdd,
   onOpenCloudPage,
 }: {
   org: OrganizationSummary;
   isDefault: boolean;
   spaced: boolean;
   onLifecycle: (dialog: Dialog) => void;
+  onAdd: (kind: AddDialog["kind"]) => void;
   onOpenCloudPage?: () => void;
 }) {
   const catalog = useCloudCatalog();
@@ -155,6 +205,7 @@ function OrgSection({
   const [collapsed, toggle] = useSectionCollapsed(orgSectionKey(org.id), !isDefault);
   const [switchError, setSwitchError] = useState<string | null>(null);
   const menu = useRowMenu();
+  const addMenu = useRowMenu();
   const cached = catalog.orgs[org.id];
   const name = sectionName(org);
   const offline = isDefault && !!cached?.error && cached.fetchedAt !== null;
@@ -192,13 +243,32 @@ function OrgSection({
         <span className={cn("shrink-0", yieldsToRowActions)} data-testid="cloud-org-role">
           <RowChip>{org.role}</RowChip>
         </span>
-        <RowActions className={menu.open ? "flex" : undefined}>
+        <RowActions className={menu.open || addMenu.open ? "flex" : undefined}>
           {!isDefault && (
             <WithTooltip label="Make this the default organization to show its cloud sessions">
               <Button variant="ghost" size="xs" className="h-5 px-1.5 text-[10px]" onClick={() => void switchOrg()} data-testid="cloud-org-switch">
                 Switch
               </Button>
             </WithTooltip>
+          )}
+          {isDefault && (
+            <DropdownMenu {...addMenu.root}>
+              <WithTooltip label="Add project">
+                <DropdownMenuTrigger asChild {...addMenu.trigger}>
+                  <Button variant="ghost" size="icon-xs" aria-label={`Add project to ${name}`} data-testid="cloud-add-project">
+                    <Plus />
+                  </Button>
+                </DropdownMenuTrigger>
+              </WithTooltip>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={() => onAdd("repository")}>
+                  <FolderGit2 /> From repository…
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => onAdd("blank")}>
+                  <Folder /> New project…
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           )}
           <DropdownMenu {...menu.root}>
             <DropdownMenuTrigger asChild {...menu.trigger}>
@@ -248,156 +318,85 @@ function OrgSection({
 
 function DefaultOrgTree({ org, orgId, onLifecycle }: { org: OrgCatalog | undefined; orgId: string; onLifecycle: (dialog: Dialog) => void }) {
   const catalog = useCloudCatalog();
+  const prefs = usePrefs();
   const placed = useMemo(
-    () => placeCloudProjects(org ?? { orgId, workspaces: [], repositories: null }, catalog.createMemory),
-    [org, orgId, catalog.createMemory],
+    () =>
+      placeCloudProjects(org ?? { orgId, workspaces: [], repositories: null }, catalog.createMemory, {
+        pinned: prefs.cloudPinned[orgId],
+        added: prefs.cloudProjects[orgId],
+        blank: prefs.cloudBlankProjects[orgId],
+      }),
+    [org, orgId, catalog.createMemory, prefs.cloudPinned, prefs.cloudProjects, prefs.cloudBlankProjects],
   );
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-  const isExpanded = (key: string, byDefault: boolean) => (expanded.has(key) ? !byDefault : byDefault);
-  const flip = (key: string) =>
-    setExpanded((current) => {
-      const next = new Set(current);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+  const [archivedOpen, setArchivedOpen] = useState(false);
 
-  if (!org || (org.fetchedAt === null && !org.workspaces.length)) {
+  if (!org || (org.fetchedAt === null && !org.workspaces.length && !placed.projects.length)) {
     return (
       <div className="pl-5 text-[11px] text-faint" data-testid="cloud-org-loading">
         {org?.error ? `Cloud workspaces are unavailable (${org.error}).` : "Loading cloud workspaces…"}
       </div>
     );
   }
-  const empty = !placed.projects.length && !placed.other.length && !placed.archived.length;
+  const empty = !placed.projects.length && !placed.archived.length;
   return (
     <>
-      {empty && <div className="pl-5 text-[11px] text-faint">No cloud workspaces yet.</div>}
+      {empty && <div className="pl-5 text-[11px] text-faint">No cloud projects yet. Add one with +.</div>}
       {placed.projects.map((project) => (
-        <CloudProjectNode
-          key={project.key}
-          project={project}
-          expanded={isExpanded(project.key, project.workspaces.length > 0)}
-          onToggle={() => flip(project.key)}
-          onLifecycle={onLifecycle}
-        />
+        <CloudProjectNode key={project.key} project={project} onLifecycle={onLifecycle} />
       ))}
-      {placed.more.length > 0 && (
-        <CloudGroupNode id={`${orgId}:more`} label={`More repositories (${placed.more.length})`} expanded={isExpanded(`${orgId}:more`, false)} onToggle={() => flip(`${orgId}:more`)}>
-          {placed.more.map((project) => (
-            <CloudProjectNode key={project.key} project={project} expanded={false} onToggle={() => undefined} onLifecycle={onLifecycle} />
-          ))}
-        </CloudGroupNode>
-      )}
-      {placed.other.length > 0 && (
-        <CloudGroupNode
-          id={`${orgId}:other`}
-          label={`Other workspaces (${placed.other.length})`}
-          hint="No repository, or not known yet"
-          expanded={isExpanded(`${orgId}:other`, false)}
-          onToggle={() => flip(`${orgId}:other`)}
-        >
-          {placed.other.map((node) => (
-            <CloudWorkspaceRow key={node.key} node={node} onLifecycle={onLifecycle} />
-          ))}
-        </CloudGroupNode>
-      )}
       {placed.archived.length > 0 && (
-        <CloudGroupNode
-          id={`${orgId}:archived`}
-          label={`Archived workspaces (${placed.archived.length})`}
-          hint="Stopped, and deleted after their deadline"
-          expanded={isExpanded(`${orgId}:archived`, false)}
-          onToggle={() => flip(`${orgId}:archived`)}
-        >
-          {placed.archived.map((node) => (
-            <CloudWorkspaceRow key={node.key} node={node} onLifecycle={onLifecycle} archived />
-          ))}
-        </CloudGroupNode>
+        <TreeNode label={`Archived workspaces (${placed.archived.length})`} expanded={archivedOpen}>
+          <div data-tree-row className="relative flex h-7 min-w-0 items-center gap-1 rounded-md px-1 text-muted-foreground hover:bg-selected/50" data-testid="cloud-node-archived" title="Stopped, and deleted after their deadline">
+            <TreeToggle expanded={archivedOpen} label={`Archived workspaces (${placed.archived.length})`} onToggle={() => setArchivedOpen((open) => !open)} />
+            <button type="button" onClick={() => setArchivedOpen((open) => !open)} className="min-w-0 flex-1 truncate rounded-sm text-left text-[12px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
+              Archived workspaces ({placed.archived.length})
+            </button>
+          </div>
+          <TreeGroup expanded={archivedOpen} className="pb-1 pl-2">
+            {placed.archived.map((node) => (
+              <ArchivedWorkspaceRow key={node.key} node={node} onLifecycle={onLifecycle} />
+            ))}
+          </TreeGroup>
+        </TreeNode>
       )}
     </>
   );
 }
 
-function CloudProjectNode({
-  project,
-  expanded,
-  onToggle,
-  onLifecycle,
-}: {
-  project: CloudProject;
-  expanded: boolean;
-  onToggle: () => void;
-  onLifecycle: (dialog: Dialog) => void;
-}) {
-  const hasWorkspaces = project.workspaces.length > 0;
-  return (
-    <TreeNode label={project.fullName} expanded={hasWorkspaces && expanded}>
-      <div data-tree-row className={cn(actionRow, "relative flex h-8 min-w-0 items-center gap-1 rounded-md px-1 hover:bg-selected/50")} title={project.identity} data-testid="cloud-project-row">
-        {hasWorkspaces ? (
-          <TreeToggle expanded={expanded} label={project.fullName} onToggle={onToggle} />
-        ) : (
-          <span aria-hidden className="w-4 shrink-0" />
-        )}
-        <button
-          type="button"
-          onClick={onToggle}
-          className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-        >
-          <FolderGit2 className="size-4 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 flex-1 truncate text-[13px]">{project.fullName}</span>
-          {!project.selected && <RowChip>not accessible</RowChip>}
-          {!hasWorkspaces && <span className="shrink-0 text-[10px] text-faint">no workspaces yet</span>}
-        </button>
-      </div>
-      {hasWorkspaces && (
-        <TreeGroup expanded={expanded} className="pb-1 pl-2">
-          {project.workspaces.map((node) => (
-            <CloudWorkspaceRow key={node.key} node={node} onLifecycle={onLifecycle} />
-          ))}
-        </TreeGroup>
-      )}
-    </TreeNode>
-  );
+// ---- projects --------------------------------------------------------------
+
+function updateOrgList(key: "cloudProjects" | "cloudPinned" | "cloudBlankProjects", orgId: string, change: (list: string[]) => string[]) {
+  const current = getPrefs()[key];
+  setPrefs({ [key]: { ...current, [orgId]: change(current[orgId] ?? []) } });
 }
 
-function CloudGroupNode({ id, label, hint, expanded, onToggle, children }: { id: string; label: string; hint?: string; expanded: boolean; onToggle: () => void; children: ReactNode }) {
-  return (
-    <TreeNode label={label} expanded={expanded}>
-      <div data-tree-row className="relative flex h-7 min-w-0 items-center gap-1 rounded-md px-1 text-muted-foreground hover:bg-selected/50" data-testid={`cloud-node-${id.split(":").pop()}`} title={hint}>
-        <TreeToggle expanded={expanded} label={label} onToggle={onToggle} />
-        <button type="button" onClick={onToggle} className="min-w-0 flex-1 truncate rounded-sm text-left text-[12px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
-          {label}
-        </button>
-      </div>
-      <TreeGroup expanded={expanded} className="pb-1 pl-2">
-        {children}
-      </TreeGroup>
-    </TreeNode>
-  );
-}
-
-const TONE: Record<RowTone, string> = {
-  ready: "bg-add",
-  stopped: "bg-faint",
-  changing: "bg-info animate-pulse-soft",
-  attention: "bg-destructive",
-  archived: "bg-faint/60",
-};
-
-function CloudWorkspaceRow({ node, onLifecycle, archived = false }: { node: CloudWorkspaceNode; onLifecycle: (dialog: Dialog) => void; archived?: boolean }) {
+function CloudProjectNode({ project, onLifecycle }: { project: CloudProject; onLifecycle: (dialog: Dialog) => void }) {
+  const prefs = usePrefs();
   const store = useSessionStore();
-  const { item, key } = node;
-  const { workspace } = item;
-  const [error, setError] = useState<string | null>(null);
   const menu = useRowMenu();
-  const state = workspaceRowState(item);
-  const selected = store.selectedCloudWorkspace === key;
-  const actions = actionsFor(item);
-  const busy = state.tone === "changing";
-  const branch = workspace.launch?.workBranch ?? null;
-  const extra = Math.max(0, (workspace.repositories?.length ?? 0) - 1);
+  const [error, setError] = useState<string | null>(null);
+  const expanded = !prefs.cloudCollapsed[project.key];
+  const selectedWorkspace = store.selectedSessionId ? parseCloudWorkspaceKey(store.selectedSessionId) : null;
+  const holdsSelection = !!selectedWorkspace && project.workspaces.some((node) => node.item.workspace.id === selectedWorkspace.workspaceId && node.item.workspace.orgId === selectedWorkspace.orgId);
+  const drafting = store.cloudSessionPreset?.projectKey === project.key;
+  const grouped = project.workspaces.length > 1;
+  const toggle = () => {
+    const next = { ...prefs.cloudCollapsed };
+    if (expanded) next[project.key] = true;
+    else delete next[project.key];
+    setPrefs({ cloudCollapsed: next });
+  };
+  // A selection inside reveals the project, like local navigation does.
+  useEffect(() => {
+    if (!holdsSelection || !prefs.cloudCollapsed[project.key]) return;
+    const next = { ...prefs.cloudCollapsed };
+    delete next[project.key];
+    setPrefs({ cloudCollapsed: next });
+  }, [holdsSelection, store.navigationVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const added = (prefs.cloudProjects[project.orgId] ?? []).includes(project.identity);
+  const pendingBlank = project.blank && !project.workspaces.length;
+  const removable = !project.workspaces.length && (added || pendingBlank);
   const run = async (work: () => Promise<void>) => {
     setError(null);
     try {
@@ -408,9 +407,434 @@ function CloudWorkspaceRow({ node, onLifecycle, archived = false }: { node: Clou
   };
 
   return (
+    <TreeNode label={project.fullName} expanded={expanded}>
+      <div
+        data-tree-row
+        className={cn(actionRow, "relative flex h-8 min-w-0 items-center gap-1 rounded-md px-1", drafting ? "bg-selected" : holdsSelection ? "bg-selected/50" : "hover:bg-selected/50")}
+        title={project.blank ? `${project.fullName} · no repository` : project.identity}
+        data-testid="cloud-project-row"
+        data-project={project.key}
+      >
+        <TreeToggle expanded={expanded} label={project.fullName} onToggle={toggle} />
+        <button type="button" onClick={toggle} className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
+          {project.blank ? <Folder className="size-4 shrink-0 text-muted-foreground" /> : <FolderGit2 className="size-4 shrink-0 text-muted-foreground" />}
+          <span className="min-w-0 flex-1 truncate text-[13px]">{project.fullName}</span>
+          {project.pinned && <Pin className="size-3 shrink-0 text-faint" />}
+          {project.blank && <RowChip>no repo</RowChip>}
+          {!project.selected && <RowChip>not accessible</RowChip>}
+        </button>
+        <RowActions className={menu.open ? "flex" : undefined}>
+          <WithTooltip label={`New session in ${project.fullName}`}>
+            <Button variant="ghost" size="icon-xs" aria-label={`New session in ${project.fullName}`} onClick={() => startCloudSessionIn(project.key)} disabled={!project.selected}>
+              <Plus />
+            </Button>
+          </WithTooltip>
+          <DropdownMenu {...menu.root}>
+            <DropdownMenuTrigger asChild {...menu.trigger}>
+              <Button variant="ghost" size="icon-xs" aria-label={`Project menu for ${project.fullName}`}>
+                <Ellipsis />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-[17rem]">
+              <DropdownMenuItem onSelect={() => startCloudSessionIn(project.key)} disabled={!project.selected}>
+                <Plus /> New session
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={() => updateOrgList("cloudPinned", project.orgId, (list) => (project.pinned ? list.filter((id) => id !== project.identity) : [...list, project.identity]))}
+              >
+                {project.pinned ? <PinOff /> : <Pin />} {project.pinned ? "Unpin project" : "Pin project"}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => void refreshCloudCatalog(project.orgId)}>
+                <RefreshCw /> Refresh
+              </DropdownMenuItem>
+              {project.workspaces.length === 1 && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel className="truncate">Workspace · {project.workspaces[0].item.workspace.name}</DropdownMenuLabel>
+                  <WorkspaceActionItems item={project.workspaces[0].item} onLifecycle={onLifecycle} run={run} />
+                </>
+              )}
+              {grouped && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel>Workspaces</DropdownMenuLabel>
+                  {project.workspaces.map((node) => (
+                    <DropdownMenuSub key={node.key}>
+                      <DropdownMenuSubTrigger>
+                        <Cloud /> <span className="truncate">{node.item.workspace.name}</span>
+                      </DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent className="w-[17rem]">
+                        <WorkspaceActionItems item={node.item} onLifecycle={onLifecycle} run={run} />
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
+                  ))}
+                </>
+              )}
+              {removable && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onSelect={() =>
+                      pendingBlank
+                        ? updateOrgList("cloudBlankProjects", project.orgId, (list) => list.filter((name) => name.trim().toLowerCase() !== project.fullName.toLowerCase()))
+                        : updateOrgList("cloudProjects", project.orgId, (list) => list.filter((id) => id !== project.identity))
+                    }
+                  >
+                    <X /> Remove from sidebar
+                  </DropdownMenuItem>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </RowActions>
+      </div>
+      {error && <p className="ml-6 text-[10px] text-destructive">{error}</p>}
+      <TreeGroup expanded={expanded} className="pb-1 pl-2">
+        {project.workspaces.length === 0 ? (
+          <div className="px-5 py-1 text-[11px] text-faint">{project.blank ? "No sessions yet. + starts one." : "No sessions yet."}</div>
+        ) : grouped ? (
+          project.workspaces.map((node) => <WorkspaceGroupNode key={node.key} node={node} expanded={expanded} onLifecycle={onLifecycle} />)
+        ) : (
+          <WorkspaceSessions node={project.workspaces[0]} shown={expanded} showLocation />
+        )}
+      </TreeGroup>
+    </TreeNode>
+  );
+}
+
+// ---- workspaces ------------------------------------------------------------
+
+const DOT: Record<RowTone, string> = {
+  ready: "bg-add",
+  idle: "bg-add",
+  done: "bg-add",
+  working: "bg-info animate-pulse-soft",
+  "needs-you": "bg-warning",
+  stopped: "bg-faint",
+  changing: "bg-info animate-pulse-soft",
+  attention: "bg-destructive",
+  archived: "bg-faint/60",
+};
+
+/** Stop, Resume, Archive and Delete of one workspace, as menu items. */
+function WorkspaceActionItems({ item, onLifecycle, run, archived = false }: { item: CloudWorkspaceListItem; onLifecycle: (dialog: Dialog) => void; run: (work: () => Promise<void>) => void; archived?: boolean }) {
+  const state = deriveCloudActivity(item);
+  const actions = actionsFor(item);
+  const busy = state.tone === "changing";
+  return (
+    <>
+      {item.workspace.state === "suspended" && !archived && (
+        <DropdownMenuItem disabled={busy} onSelect={() => void run(() => resumeCloudWorkspace(item))}>
+          <Play /> Resume
+        </DropdownMenuItem>
+      )}
+      {actions.includes("stop") && !archived && (
+        <DropdownMenuItem disabled={busy} onSelect={() => onLifecycle({ item, action: "stop" })}>
+          <Pause /> Stop
+        </DropdownMenuItem>
+      )}
+      {actions.includes("archive") && (
+        <DropdownMenuItem disabled={busy} onSelect={() => onLifecycle({ item, action: "archive" })}>
+          <Archive /> {archived ? "Retry archive" : "Archive… (stops compute, deleted after 30 days)"}
+        </DropdownMenuItem>
+      )}
+      {archived && (
+        <DropdownMenuItem disabled={busy} onSelect={() => void run(() => unarchiveCloudWorkspace(item).then(() => refreshCloudCatalog()))}>
+          <ArchiveRestore /> Unarchive
+        </DropdownMenuItem>
+      )}
+      {actions.includes("delete") && (
+        <>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem destructive disabled={state.label === "Deleting"} onSelect={() => onLifecycle({ item, action: "delete" })}>
+            <Trash2 /> Delete…
+          </DropdownMenuItem>
+        </>
+      )}
+    </>
+  );
+}
+
+/** The hover card of a workspace: where its sessions run. */
+function workspaceCard(item: CloudWorkspaceListItem, activity: CloudActivity): string {
+  const { workspace } = item;
+  const lines = [`Cloud workspace ${workspace.name}`, `Runs on ${workspace.provider}`, `State: ${activity.label}${activity.lastKnown ? " (last known)" : ""}`, describeWorkspace(item)];
+  const branch = workspace.launch?.workBranch;
+  if (branch) lines.push(`Branch: ${branch}`);
+  const repositories = (workspace.repositories ?? []).map((repository) => repository.fullName ?? repository.identity).filter(Boolean);
+  if (repositories.length) lines.push(`Repositories: ${repositories.join(", ")}`);
+  lines.push(`Access: ${workspace.accessMode === "organization" ? "organization" : "private"}`);
+  return [...new Set(lines)].join("\n");
+}
+
+/** The state a workspace shows: its lifecycle, then its connection, then the most urgent of its sessions. */
+function useWorkspaceActivity(node: CloudWorkspaceNode, sessions: readonly CloudSessionRow[], fromCache: boolean): CloudActivity {
+  const connection = useCloudConnection(node.key);
+  return deriveCloudActivity(node.item, {
+    connection: connection.refs > 0 || connection.state !== "idle" ? connection.state : null,
+    tabs: sessions.flatMap((row) => row.tabs),
+    fromCache,
+  });
+}
+
+/** One workspace as a group row, when its project has more than one. */
+function WorkspaceGroupNode({ node, expanded: projectExpanded, onLifecycle }: { node: CloudWorkspaceNode; expanded: boolean; onLifecycle: (dialog: Dialog) => void }) {
+  const store = useSessionStore();
+  const [expanded, setExpanded] = useState(true);
+  const menu = useRowMenu();
+  const [error, setError] = useState<string | null>(null);
+  const { workspace } = node.item;
+  const selected = store.selectedCloudWorkspace === node.key;
+  const shown = projectExpanded && expanded;
+  const { sessions, known } = useCloudWorkspaceSessions(node, { load: shown, showArchived: store.showArchived, selectedKey: store.selectedSessionId });
+  const activity = useWorkspaceActivity(node, sessions, !known || sessions.every((row) => row.source !== "live"));
+  const run = async (work: () => Promise<void>) => {
+    setError(null);
+    try {
+      await work();
+    } catch (e) {
+      setError(lifecycleErrorMessage(errorCode(e)));
+    }
+  };
+  const branch = workspace.launch?.workBranch ?? null;
+  return (
+    <div role="treeitem" aria-label={workspace.name} aria-expanded={expanded} aria-selected={selected} className="min-w-0" data-testid="cloud-workspace-node" data-workspace={workspace.id}>
+      <TreeRow level="group" selected={selected} title={workspaceCard(node.item, activity)}>
+        <TreeToggle expanded={expanded} label={workspace.name} onToggle={() => setExpanded((open) => !open)} className="ml-0.5" />
+        <Cloud className="size-3 shrink-0" aria-label="Cloud workspace" />
+        <button type="button" onClick={() => selectCloudWorkspace(node.key)} className="min-w-0 flex-1 truncate rounded-sm text-left font-mono text-foreground/90 outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
+          {workspace.name}
+        </button>
+        {branch && (
+          <span className={cn("min-w-0", yieldsToRowActions)} title="This workspace's own branch" data-testid="cloud-workspace-row-branch">
+            <RowChip mono>{branch}</RowChip>
+          </span>
+        )}
+        <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", DOT[activity.tone])} />
+        <span className={cn("shrink-0 text-[10px] text-faint", activity.tone === "attention" && "text-destructive", yieldsToRowActions)} data-testid="cloud-workspace-row-state">
+          {activity.label}
+        </span>
+        <RowActions className={menu.open ? "flex" : undefined}>
+          <DropdownMenu {...menu.root}>
+            <DropdownMenuTrigger asChild {...menu.trigger}>
+              <Button variant="ghost" size="icon-xs" aria-label={`Actions for ${workspace.name}`}>
+                <Ellipsis />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-[17rem]">
+              <WorkspaceActionItems item={node.item} onLifecycle={onLifecycle} run={run} />
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </RowActions>
+      </TreeRow>
+      {error && <p className="ml-6 text-[10px] text-destructive">{error}</p>}
+      <TreeGroup expanded={expanded} className="pl-2">
+        <WorkspaceSessions node={node} shown={shown} showLocation={false} />
+      </TreeGroup>
+    </div>
+  );
+}
+
+/** A workspace's sessions, straight under the project (or under its group row). */
+function WorkspaceSessions({ node, shown, showLocation }: { node: CloudWorkspaceNode; shown: boolean; showLocation: boolean }) {
+  const store = useSessionStore();
+  const { sessions, capabilities, known } = useCloudWorkspaceSessions(node, { load: shown, showArchived: store.showArchived, selectedKey: store.selectedSessionId });
+  const activity = useWorkspaceActivity(node, sessions, sessions.every((row) => row.source !== "live"));
+  const card = workspaceCard(node.item, activity);
+  const manage = !!capabilities?.includes("session/2");
+  const { state } = node.item.workspace;
+  if (!sessions.length) {
+    const openable = (state === "ready" || state === "suspended") && activity.tone !== "changing" && activity.tone !== "attention";
+    return (
+      <div className="flex min-w-0 items-center gap-1.5 px-5 py-1 text-[11px] text-faint" data-testid="cloud-workspace-empty" data-workspace={node.item.workspace.id} title={card}>
+        {showLocation && <LocationChip name={node.item.workspace.name} tone={activity.tone} card={card} />}
+        {known || !openable ? (
+          <span className="min-w-0 truncate">{known ? "No sessions yet." : activity.label}</span>
+        ) : (
+          <button type="button" className="min-w-0 truncate underline-offset-2 hover:text-muted-foreground hover:underline" onClick={() => selectCloudWorkspace(node.key)}>
+            Open to load sessions
+          </button>
+        )}
+      </div>
+    );
+  }
+  return (
+    <>
+      {sessions.map((row) => (
+        <CloudSessionNode key={row.key} row={row} node={node} manage={manage} location={showLocation ? { tone: activity.tone, card } : null} />
+      ))}
+    </>
+  );
+}
+
+/** Where a session runs: a small chip, with the workspace's hover card. */
+function LocationChip({ name, tone, card }: { name: string; tone: RowTone; card: string }) {
+  return (
+    <span className={cn("flex max-w-24 shrink-0 items-center gap-1 rounded-sm bg-veil-raised px-1 text-[9px] text-faint", yieldsToRowActions)} title={card} data-testid="cloud-location-chip">
+      <span aria-hidden className={cn("size-1 shrink-0 rounded-full", DOT[tone])} />
+      <Cloud className="size-2.5 shrink-0" aria-label="Runs in the cloud" />
+      <span className="min-w-0 truncate">{name}</span>
+    </span>
+  );
+}
+
+// ---- sessions --------------------------------------------------------------
+
+function CloudSessionNode({ row, node, manage, location }: { row: CloudSessionRow; node: CloudWorkspaceNode; manage: boolean; location: { tone: RowTone; card: string } | null }) {
+  const store = useSessionStore();
+  const selected = store.selectedSessionId === row.key;
+  const [expanded, setExpanded] = useState(selected);
+  const [renaming, setRenaming] = useState(false);
+  const [title, setTitle] = useState(row.title);
+  const [error, setError] = useState<string | null>(null);
+  const menu = useRowMenu();
+  const status = cloudSessionStatus(row);
+  useEffect(() => {
+    if (selected) setExpanded(true);
+  }, [selected, store.navigationVersion]);
+
+  const act = async (work: () => Promise<unknown>) => {
+    setError(null);
+    try {
+      await work();
+    } catch (e) {
+      const code = errorCode(e);
+      setError(code === "cloud_workspace_stopped" ? "The workspace is stopped. Resume it to change its sessions." : errorMessage(e));
+    }
+  };
+  const commitRename = () => {
+    setRenaming(false);
+    const next = title.trim();
+    if (next && next !== row.title) void act(() => updateCloudSession(row, { title: next }));
+  };
+  const remove = async () => {
+    const yes = await ask(`Delete "${row.title}"? Its transcript is removed from the cloud workspace${row.worktreeName ? ", with its worktree" : ""}.`, {
+      title: "Delete session",
+      kind: "warning",
+      okLabel: "Delete",
+      cancelLabel: "Cancel",
+    }).catch(() => false);
+    if (!yes) return;
+    await act(async () => {
+      await deleteCloudSession(row);
+      // Read at the time of the action, not of the render.
+      if (getSessionStore().selectedSessionId === row.key) selectSession(null);
+    });
+  };
+  const closeTab = async (tabId: string, label: string) => {
+    const yes = await ask(`Close ${label}? Its agent stops on the cloud workspace.`, { title: "Close tab", kind: "warning", okLabel: "Close", cancelLabel: "Cancel" }).catch(() => false);
+    if (yes) await act(() => closeCloudSessionTab(row, tabId));
+  };
+
+  return (
+    <div role="none" data-testid="cloud-session-node" data-session={row.key}>
+      <TreeNode label={row.title} expanded={expanded}>
+        <TreeRow level="item" selected={selected} title={location?.card}>
+          <StatusStripe status={status} size="row" />
+          <TreeToggle expanded={expanded} label={row.title} onToggle={() => setExpanded((open) => !open)} />
+          {renaming ? (
+            <input
+              autoFocus
+              value={title}
+              aria-label="Session name"
+              onChange={(event) => setTitle(event.target.value)}
+              onBlur={commitRename}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") commitRename();
+                if (event.key === "Escape") {
+                  setTitle(row.title);
+                  setRenaming(false);
+                }
+                event.stopPropagation();
+              }}
+              className="h-6 min-w-0 flex-1 rounded-sm bg-well px-1 text-[12px] outline-none focus:ring-2 focus:ring-ring/40"
+            />
+          ) : (
+            <ItemTitle title={row.title} pinned={row.pinned} archived={row.archived} onActivate={() => selectCloudSession(row.key)} />
+          )}
+          {location && <LocationChip name={node.item.workspace.name} tone={location.tone} card={location.card} />}
+          <RowTime at={row.modified} />
+          {manage && (
+            <RowActions className={menu.open ? "flex" : undefined}>
+              <DropdownMenu {...menu.root}>
+                <DropdownMenuTrigger asChild {...menu.trigger}>
+                  <Button variant="ghost" size="icon-xs" aria-label={`Session menu for ${row.title}`}>
+                    <Ellipsis />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem
+                    onSelect={() => {
+                      setTitle(row.title);
+                      setRenaming(true);
+                    }}
+                  >
+                    <Pencil /> Rename
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => void act(() => updateCloudSession(row, { pinned: !row.pinned }))}>
+                    <Pin /> {row.pinned ? "Unpin" : "Pin"}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => void act(() => updateCloudSession(row, { archived: !row.archived }))}>
+                    <Archive /> {row.archived ? "Unarchive" : "Archive"}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem destructive onSelect={() => void remove()}>
+                    <Trash2 /> Delete session…
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </RowActions>
+          )}
+        </TreeRow>
+        {error && <p className="ml-6 text-[10px] text-destructive">{error}</p>}
+        <TreeGroup expanded={expanded} className="pl-5">
+          {row.tabs.map((tab) => {
+            const label = tab.title?.trim() || (tab.harness === "codex" ? "Codex" : tab.harness === "claude" ? "Claude" : tab.harness);
+            return (
+              <AgentTabRow
+                key={tab.tabId}
+                nodeId={`cloud-tab-${row.workspaceId}-${tab.tabId}`}
+                panelId={`cloud-panel-${row.workspaceId}-${tab.tabId}`}
+                harness={tab.harness}
+                label={label}
+                status={tab.status}
+                mobileDriven={false}
+                terminalView={false}
+                selected={selected}
+                onOpen={() => selectCloudSession(row.key)}
+                onClose={() => void closeTab(tab.tabId, label)}
+              />
+            );
+          })}
+          {row.tabs.length === 0 ? <div className="px-3 py-1 text-[11px] text-faint">No tabs.</div> : null}
+        </TreeGroup>
+      </TreeNode>
+    </div>
+  );
+}
+
+// ---- archived workspaces --------------------------------------------------
+
+function ArchivedWorkspaceRow({ node, onLifecycle }: { node: CloudWorkspaceNode; onLifecycle: (dialog: Dialog) => void }) {
+  const store = useSessionStore();
+  const { item, key } = node;
+  const { workspace } = item;
+  const [error, setError] = useState<string | null>(null);
+  const menu = useRowMenu();
+  const state = deriveCloudActivity(item);
+  const selected = store.selectedCloudWorkspace === key;
+  const run = async (work: () => Promise<void>) => {
+    setError(null);
+    try {
+      await work();
+    } catch (e) {
+      setError(lifecycleErrorMessage(errorCode(e)));
+    }
+  };
+  return (
     <div role="treeitem" aria-label={workspace.name} aria-selected={selected} className="min-w-0" data-testid="cloud-workspace-node" data-workspace={workspace.id}>
       <TreeRow level="item" selected={selected} title={describeWorkspace(item)}>
-        <span aria-hidden className={cn("ml-1.5 size-1.5 shrink-0 rounded-full", TONE[state.tone])} />
+        <span aria-hidden className={cn("ml-1.5 size-1.5 shrink-0 rounded-full", DOT[state.tone])} />
         <button
           type="button"
           onClick={() => selectCloudWorkspace(key)}
@@ -419,21 +843,11 @@ function CloudWorkspaceRow({ node, onLifecycle, archived = false }: { node: Clou
           <span className="flex min-w-0 items-center gap-1">
             <Cloud className="size-3 shrink-0 text-faint" aria-label="Cloud workspace" />
             <span className="min-w-0 flex-1 truncate text-[12px]">{workspace.name}</span>
-            {extra > 0 && <RowChip>+{extra} repo</RowChip>}
-            <span className={cn("shrink-0 text-[10px] text-faint", state.tone === "attention" && "text-destructive", yieldsToRowActions)} data-testid="cloud-workspace-row-state">
+            <span className={cn("shrink-0 text-[10px] text-faint", yieldsToRowActions)} data-testid="cloud-workspace-row-state">
               {state.label}
             </span>
           </span>
-          {archived ? (
-            <span className="truncate pl-4 text-[10px] text-faint">{archiveLine(item)}</span>
-          ) : branch ? (
-            <span className="flex min-w-0 items-center gap-1 pl-4 font-mono text-[10px] text-faint" title="This workspace's own branch">
-              <GitBranch className="size-2.5 shrink-0" />
-              <span className="min-w-0 truncate" data-testid="cloud-workspace-row-branch">
-                {branch}
-              </span>
-            </span>
-          ) : null}
+          <span className="truncate pl-4 text-[10px] text-faint">{archiveLine(item)}</span>
         </button>
         <RowActions className={menu.open ? "flex" : undefined}>
           <DropdownMenu {...menu.root}>
@@ -445,34 +859,7 @@ function CloudWorkspaceRow({ node, onLifecycle, archived = false }: { node: Clou
               </DropdownMenuTrigger>
             </WithTooltip>
             <DropdownMenuContent align="end" className="w-[17rem]">
-              {workspace.state === "suspended" && !archived && (
-                <DropdownMenuItem disabled={busy} onSelect={() => void run(() => resumeCloudWorkspace(item))}>
-                  <Play /> Resume
-                </DropdownMenuItem>
-              )}
-              {actions.includes("stop") && !archived && (
-                <DropdownMenuItem disabled={busy} onSelect={() => onLifecycle({ item, action: "stop" })}>
-                  <Pause /> Stop
-                </DropdownMenuItem>
-              )}
-              {actions.includes("archive") && (
-                <DropdownMenuItem disabled={busy} onSelect={() => onLifecycle({ item, action: "archive" })}>
-                  <Archive /> {archived ? "Retry archive" : "Archive… (stops compute, deleted after 30 days)"}
-                </DropdownMenuItem>
-              )}
-              {archived && (
-                <DropdownMenuItem disabled={busy} onSelect={() => void run(() => unarchiveCloudWorkspace(item).then(() => refreshCloudCatalog()))}>
-                  <ArchiveRestore /> Unarchive
-                </DropdownMenuItem>
-              )}
-              {actions.includes("delete") && (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem destructive disabled={state.label === "Deleting"} onSelect={() => onLifecycle({ item, action: "delete" })}>
-                    <Trash2 /> Delete…
-                  </DropdownMenuItem>
-                </>
-              )}
+              <WorkspaceActionItems item={item} onLifecycle={onLifecycle} run={run} archived />
             </DropdownMenuContent>
           </DropdownMenu>
         </RowActions>
@@ -481,4 +868,3 @@ function CloudWorkspaceRow({ node, onLifecycle, archived = false }: { node: Clou
     </div>
   );
 }
-

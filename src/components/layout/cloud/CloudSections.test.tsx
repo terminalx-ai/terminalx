@@ -225,7 +225,11 @@ describe("organization sections", () => {
     expect(within(rows[0]).getByTestId("cloud-workspace-row-state").textContent).toBe("Ready");
     expect(within(rows[1]).getByTestId("cloud-workspace-row-state").textContent).toBe("Stopped");
     expect(within(rows[0]).getByTestId("cloud-workspace-row-branch").textContent).toBe("terminalx/fix-login-3f2a9c01d4e7");
-    expect(screen.getByTestId("cloud-node-other").textContent).toContain("Other workspaces (1)");
+    // No repository: a blank project named after the workspace, not a vague "Other" row.
+    const blank = screen.getAllByTestId("cloud-project-row").find((node) => node.getAttribute("data-project") === `cloud:${ORG}:blank/image-only`)!;
+    expect(blank.textContent).toContain("image-only");
+    expect(blank.textContent).toContain("no repo");
+    expect(screen.queryByTestId("cloud-node-other")).toBeNull();
     expect(screen.getByTestId("cloud-node-archived").textContent).toContain("Archived workspaces (1)");
   });
 
@@ -237,7 +241,10 @@ describe("organization sections", () => {
     catalog.rememberCreatedWorkspace({ workspace: created.workspace, operation: { id: "op" } as never }, [{ cloneUrl: "git@github.com:acme/web.git" }]);
     mount();
     const project = screen.getAllByTestId("cloud-project-row").find((node) => node.textContent?.includes("acme/web"))!;
-    expect(within(project.closest('[role="treeitem"]') as HTMLElement).getAllByTestId("cloud-workspace-node")[0].getAttribute("data-workspace")).toBe("remembered");
+    // One workspace: its sessions sit straight under the project, with no VM row.
+    const tree = project.closest('[role="treeitem"]') as HTMLElement;
+    expect(within(tree).queryByTestId("cloud-workspace-node")).toBeNull();
+    expect(within(tree).getByTestId("cloud-workspace-empty").getAttribute("data-workspace")).toBe("remembered");
   });
 
   it("rendering and expanding every node make 0 attach and 0 resume calls", () => {
@@ -245,8 +252,8 @@ describe("organization sections", () => {
     for (let pass = 0; pass < 2; pass++) {
       for (const toggle of document.querySelectorAll<HTMLButtonElement>("[data-tree-toggle]")) fireEvent.click(toggle);
     }
-    // Everything expanded is still drawn from the catalog.
-    expect(screen.getAllByTestId("cloud-workspace-node").length).toBe(4);
+    // Everything expanded is still drawn from the catalog: two VM rows (acme/api has two workspaces) and the archived one.
+    expect(screen.getAllByTestId("cloud-workspace-node").length).toBe(3);
     expect(mocks.api.cloudRemoteAttach).not.toHaveBeenCalled();
     expect(mocks.workspaceConnection).not.toHaveBeenCalled();
     expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();

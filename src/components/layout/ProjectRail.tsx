@@ -268,7 +268,7 @@ export function ProjectRail({
             </ProjectRow>
           );
         })}
-        {sectioned && <CloudSections onOpenCloudPage={onOpenCloudPage} />}
+        {sectioned && <CloudSections onOpenCloudPage={onOpenCloudPage} onOpenAccount={onOpenAccount} />}
       </div>
 
       <div className="border-t border-hairline p-2">

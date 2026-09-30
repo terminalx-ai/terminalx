@@ -98,6 +98,11 @@ export interface CloudProject {
   /** Selected for cloud workspaces by an admin. A deselected one still listed has workspaces here and reads "not accessible". */
   selected: boolean;
   pinned: boolean;
+  /**
+   * A project with no repository: workspaces built from nothing (a folder
+   * the runtime `git init`s), known by name. Identity `blank/<name>`.
+   */
+  blank: boolean;
   /** Non-archived workspaces placed here, most recent activity first. */
   workspaces: CloudWorkspaceNode[];
 }

@@ -8,13 +8,14 @@ import { workspaceRowState } from "@/components/layout/cloud/rowState";
 import { useCloudSections } from "@/components/layout/cloud/CloudSections";
 import { DeletionProgress } from "./CloudWorkspaceLifecycle";
 import { ExecutionLocation, WorkspaceView, describe, describeWorkspace, type OpenedWorkspace } from "./CloudSessionPage";
-import { workspaceConnection, workspaceTargetKey, type CloudWorkspaceConnection, type CloudWorkspaceListItem } from "@/lib/api";
+import { workspaceTargetKey, type CloudWorkspaceListItem } from "@/lib/api";
+import { retainCloudConnection, setSelectedCloudConnection, type CloudLease } from "@/lib/cloudConnections";
 import { findCloudWorkspace, refreshCloudCatalog, resumeCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { archiving, deletion, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
-import { detachCloudTerminals, errorCode } from "@/lib/cloudTerminals";
+import { errorCode } from "@/lib/cloudTerminals";
 import { keycaps } from "@/lib/hotkeys";
 import { selectSession } from "@/lib/sessions";
-import { parseCloudWorkspaceKey } from "@/types/target";
+import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 
 /** What selecting a workspace may do: connect to one that is running or stopped, never wake it; nothing while it starts, is deleted or needs attention. */
 function openable(item: CloudWorkspaceListItem): boolean {
@@ -22,7 +23,12 @@ function openable(item: CloudWorkspaceListItem): boolean {
 }
 
 /**
- * A cloud workspace in the main slot, with the sidebar kept (PRO-23 CS-5):
+ * A cloud workspace in the main slot, with the sidebar kept (PRO-23 CS-5).
+ * `workspaceKey` may also be a session key (`cloud:<org>:<workspace>:<session>`):
+ * until the shared SessionView renders cloud sessions, a selected session
+ * shows its workspace here. The connection is a lease from the connection
+ * manager, so the sidebar's session list follows it live.
+ *
  * the existing workspace view (terminals, agent, files, git) of the
  * full-window cloud page. Selecting only looks: it connects with `connect`,
  * never `wake`, so a stopped workspace shows its saved agent conversations
@@ -46,26 +52,23 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   useEffect(() => {
     if (!parsed || !item || !canOpen) return;
     let live = true;
-    let connection: CloudWorkspaceConnection | null = null;
-    const target = { kind: "cloud" as const, organizationId: parsed.orgId, workspaceId: parsed.workspaceId };
-    const done = (next: CloudWorkspaceConnection) => {
-      detachCloudTerminals(workspaceTargetKey(next.target));
-      next.close();
-    };
+    let lease: CloudLease | null = null;
+    const key = cloudWorkspaceKey(parsed.orgId, parsed.workspaceId);
+    setSelectedCloudConnection(key);
     setError(null);
-    workspaceConnection(target, "connect")
+    retainCloudConnection({ orgId: parsed.orgId, workspaceId: parsed.workspaceId }, "connect")
       .then((next) => {
-        if (!next) return;
-        if (!live) return done(next);
-        connection = next;
-        setOpened({ connection: next, name: item.workspace.name, provider: item.workspace.provider, workspaceState: item.workspace.state });
+        if (!live) return next.release();
+        lease = next;
+        setOpened({ connection: next.connection, name: item.workspace.name, provider: item.workspace.provider, workspaceState: item.workspace.state });
       })
       .catch((e: unknown) => live && setError(errorCode(e)));
     return () => {
       live = false;
       setOpened(null);
       setState({ state: "idle" });
-      if (connection) done(connection);
+      setSelectedCloudConnection(null);
+      lease?.release();
     };
     // The workspace's identity and whether it runs decide the connection; row refreshes do not.
   }, [workspaceKey, canOpen, running]); // eslint-disable-line react-hooks/exhaustive-deps

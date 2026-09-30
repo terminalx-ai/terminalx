@@ -146,6 +146,22 @@ describe("sidebar rail DOM", () => {
     expect(container.querySelector('[aria-label="Raccoon"]')).not.toBeNull();
   });
 
+  it("LOCAL is unchanged by cloud projects, their sessions and a selected cloud session (PRO-61)", async () => {
+    const html = (element: Element) => element.outerHTML.replace(/radix-_r_[a-z0-9]+_/g, "radix-id");
+    const localProjects = (container: HTMLElement) => [...container.querySelectorAll('[role="treeitem"][aria-label="Raccoon"], [role="treeitem"][aria-label="Notes"]')].map(html);
+    await setAccount(signedIn(withoutCloud));
+    const before = localProjects(mount().container);
+    cleanup();
+    await setAccount(signedIn(withCloud));
+    act(() => sessions.selectCloudSession("cloud:org-a:ws-1:s-1"));
+    try {
+      const { container } = mount();
+      expect(localProjects(container)).toEqual(before);
+    } finally {
+      act(() => sessions.selectSession(null));
+    }
+  });
+
   it("marks only the destination the main slot shows as active", async () => {
     await setAccount(signedIn(withCloud));
     const { getByRole } = mount();
