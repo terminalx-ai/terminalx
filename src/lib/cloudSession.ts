@@ -4,7 +4,7 @@ import { RemoteGit, listRepositories, type RemoteRepository } from "@terminalx/p
 import { createTerminal } from "@/components/terminal/TerminalView";
 import { useAccount } from "@/lib/account";
 import type { CloudWorkspaceConnection, CloudWorkspaceListItem } from "@/lib/api";
-import { retainCloudConnection, setSelectedCloudConnection, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
+import { retainCloudConnection, setSelectedCloudConnection, useCloudConnection, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
 import {
   flushCloudAgentCache,
   loadCloudAgents,
@@ -15,7 +15,7 @@ import {
   watchLiveTabs,
   type CloudAgentTab,
 } from "@/lib/cloudAgents";
-import { repositoryOf, useCloudCatalog } from "@/lib/cloudCatalog";
+import { refreshCloudCatalog, repositoryOf, useCloudCatalog } from "@/lib/cloudCatalog";
 import { createCloudTerminal, detachCloudTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
 import { cloudGitSource, desktopGitIdentity, type GitSource } from "@/lib/gitSource";
 import { clearCloudWake, cloudAsleep, cloudSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
@@ -33,8 +33,30 @@ export function cloudProviderName(provider: string | null | undefined): string {
   return PROVIDER_NAMES[provider] ?? provider;
 }
 
-/** The connection chip: a short label, and whether it is live, on its way, or not there. */
-export function cloudConnectionChip(state: WorkspaceConnectionState, workspaceState: string | null): { label: string; tone: "live" | "pending" | "offline" } {
+export type ConnectionChip = { label: string; tone: "live" | "pending" | "offline" };
+
+/** While waking, the chip only moves forward: Resuming, then Connecting, then Live. */
+export const WAKE_STEPS = ["Resuming", "Connecting"] as const;
+
+/**
+ * The connection chip: a short label, and whether it is live, on its way, or
+ * not there. A stopped workspace is never shown as live, even while an old
+ * connection still reads connected, unless this desktop woke it. `woke` is
+ * set once an interactive action asked for compute (CS-7's single wake).
+ */
+export function cloudConnectionChip(
+  state: WorkspaceConnectionState,
+  workspaceState: string | null,
+  options: { woke?: boolean; wakeFloor?: number } = {},
+): ConnectionChip {
+  if (workspaceState === "archived" && !options.woke) return { label: "Archived", tone: "offline" };
+  if (state.state === "updateRequired") return { label: "Update required", tone: "offline" };
+  if (options.woke && state.state !== "connected" && state.state !== "stopped") {
+    // Waking: never back from Connecting to Starting while the runtime retries.
+    const step = Math.max(options.wakeFloor ?? 0, state.state === "connecting" || state.state === "reconnecting" ? 1 : 0);
+    return { label: WAKE_STEPS[step], tone: "pending" };
+  }
+  if (state.state === "connected" && workspaceState === "suspended" && !options.woke) return { label: "Stopped", tone: "offline" };
   switch (state.state) {
     case "connected":
       return { label: state.authority === "manage" ? "Live" : "Live · view only", tone: "live" };
@@ -47,8 +69,6 @@ export function cloudConnectionChip(state: WorkspaceConnectionState, workspaceSt
       return { label: "Starting", tone: "pending" };
     case "suspended":
       return { label: workspaceState === "archived" ? "Archived" : "Stopped", tone: "offline" };
-    case "updateRequired":
-      return { label: "Update required", tone: "offline" };
     case "stopped":
       return { label: "Disconnected", tone: "offline" };
     default:
@@ -290,6 +310,17 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   }, [fileSource]);
 
   const asleep = cloudAsleep(state, workspaceState);
+  // The header chip: never Live for a stopped workspace, and monotonic while this desktop wakes it.
+  const managed = useCloudConnection(workspaceKey);
+  const wakeFloor = useRef(0);
+  if (!managed.woke || state.state === "connected") wakeFloor.current = 0;
+  const chip = cloudConnectionChip(state, workspaceState, { woke: managed.woke, wakeFloor: wakeFloor.current });
+  if (managed.woke && chip.label === "Connecting") wakeFloor.current = 1;
+  // Woken and back: the list still says stopped until it is read again.
+  const wokeLive = managed.woke && state.state === "connected";
+  useEffect(() => {
+    if (wokeLive && workspaceState === "suspended") void refreshCloudCatalog(orgId);
+  }, [wokeLive, workspaceState, orgId]);
   // One wake however many surfaces ask (the composer, the header, a new terminal).
   const wake = useCallback(async () => {
     const lease = await wakeCloudConnection({ orgId, workspaceId });
@@ -379,7 +410,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     projectName,
     workspaceName,
     location: { provider: cloudProviderName(item?.workspace.provider), org: orgName },
-    connection: cloudConnectionChip(state, workspaceState),
+    connection: chip,
     connected,
     manage,
     asleep,

@@ -123,9 +123,9 @@ export function ProjectRail({
   };
 
   return (
-    <div className="flex h-full w-full shrink-0 flex-col border-r border-hairline">
+    <div className="flex h-full min-h-0 w-full shrink-0 flex-col overflow-hidden border-r border-hairline" data-testid="sidebar-rail">
       <div data-tauri-drag-region="deep" className="h-(--titlebar-h) shrink-0" style={{ paddingLeft: TITLEBAR_INSET }} />
-      <div className="flex flex-col gap-0.5 px-2">
+      <div className="flex shrink-0 flex-col gap-0.5 px-2">
         <Button variant="ghost" className="justify-start gap-2 px-2" onClick={onSearch}>
           <Search />
           Search
@@ -190,7 +190,7 @@ export function ProjectRail({
         </WithTooltip>
       </div>
 
-      <div className={sectioned ? "mt-3 flex items-center justify-between pl-2 pr-2" : "mt-3 flex items-center justify-between pl-4 pr-2"}>
+      <div className={sectioned ? "mt-3 flex shrink-0 items-center justify-between pl-2 pr-2" : "mt-3 flex shrink-0 items-center justify-between pl-4 pr-2"}>
         {sectioned ? (
           <span className="flex min-w-0 items-center gap-1" data-testid="local-section-header">
             <TreeToggle expanded={!localCollapsed} label="Local" onToggle={toggleLocal} />
@@ -238,9 +238,14 @@ export function ProjectRail({
           </WithTooltip>
         </div>
       </div>
-      {error && <div className="mx-2 mt-1 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
+      {error && <div className="mx-2 mt-1 shrink-0 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
 
-      <div className="mt-1 min-h-0 flex-1 overflow-y-auto scrollbar-thin px-2" role="tree" aria-label="Projects, workspaces, sessions, and tabs" onKeyDown={navigateTree}>
+      {/*
+        The one scroll container between the fixed top and the fixed footer: Local and every
+        organization section. `basis-0` (not a 0% basis) so WebKit sizes it from the rail, not
+        from its content, in a short window.
+      */}
+      <div className="mt-1 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin px-2" role="tree" data-testid="sidebar-tree" aria-label="Projects, workspaces, sessions, and tabs" onKeyDown={navigateTree}>
         {!localCollapsed && projects.length === 0 && (
           <div className="px-2 py-6 text-center text-xs text-muted-foreground">
             {showArchived ? "Nothing archived." : "Add a project to start."}
@@ -271,7 +276,7 @@ export function ProjectRail({
         {sectioned && <CloudSections onOpenCloudPage={onOpenCloudPage} onOpenAccount={onOpenAccount} />}
       </div>
 
-      <div className="border-t border-hairline p-2">
+      <div className="shrink-0 border-t border-hairline p-2">
         <AccountSidebarEntry onOpenAccount={onOpenAccount} />
         <Button variant="ghost" className="w-full justify-start gap-2 px-2" onClick={onOpenSettings}>
           <Settings />

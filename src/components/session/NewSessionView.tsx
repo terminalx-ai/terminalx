@@ -6,6 +6,7 @@ import { Switch } from "@/components/ui/controls";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
@@ -18,7 +19,7 @@ import { DictationStatus, MicButton, NEW_SESSION_TARGET, useDictationInto } from
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "@/components/chat/useImageAttachments";
 import { RaccoonScene } from "@/components/raccoon/Raccoon";
 import { api, errorMessage, type ImageInput } from "@/lib/api";
-import { addProject, clearNewSessionPreset, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
+import { addProject, clearNewSessionPreset, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { EFFORT_LABEL, PERMISSION_MODES, refreshModels, upgradeHint, useModels } from "@/lib/models";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { chooseMode } from "@/lib/dialogs";
@@ -27,7 +28,8 @@ import { stopDictation } from "@/lib/dictation";
 import { cn } from "@/lib/cn";
 import type { WorkStatus } from "@/types/session";
 import { WorkspaceNameEditor } from "./WorkspaceNameEditor";
-import { CloudCreateConfirm, cloudStartError, useCloudDraft } from "./CloudNewSession";
+import { CloudCreateConfirm, cloudStartError, useCloudDraft, useCloudProjectChoices } from "./CloudNewSession";
+import { useRowMenu } from "@/components/ui/useRowMenu";
 import { confirmCloudCreate, planCloudStart, prepareCloudCreate, startInWorkspace, type CloudSessionRequest, type PreparedCreate } from "@/lib/cloudNewSession";
 
 /**
@@ -56,6 +58,9 @@ export function NewSessionView({
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
   // A cloud project's `+` (PRO-23): the same form, run in the organization's cloud.
   const cloud = useCloudDraft();
+  const cloudChoices = useCloudProjectChoices();
+  // Opens on a click (also one sent through the accessibility tree), not only on pointerdown or Enter.
+  const projectMenu = useRowMenu();
   const [confirm, setConfirm] = useState<PreparedCreate | null>(null);
   const [starting, setStarting] = useState<string | null>(null);
 
@@ -245,8 +250,8 @@ export function NewSessionView({
       <div className="shrink-0 px-6 pb-4">
         <div className="mx-auto w-full max-w-3xl">
           <div className="mb-2 flex flex-wrap items-center gap-1.5">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
+            <DropdownMenu {...projectMenu.root}>
+              <DropdownMenuTrigger asChild {...projectMenu.trigger}>
                 <Button variant="secondary" size="sm" className={pill}>
                   {cloud ? <Cloud /> : isGit ? <FolderGit2 /> : <FolderOpen />}
                   {cloud ? (cloud.project?.fullName ?? "Cloud project") : (project?.name ?? "Choose project")}
@@ -254,7 +259,7 @@ export function NewSessionView({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start">
-                <DropdownMenuLabel>Projects</DropdownMenuLabel>
+                <DropdownMenuLabel>{cloudChoices.length ? "Local" : "Projects"}</DropdownMenuLabel>
                 {store.projects.map((p) => (
                   <DropdownMenuItem
                     key={p.path}
@@ -269,7 +274,21 @@ export function NewSessionView({
                     <span className="truncate">{p.name}</span>
                   </DropdownMenuItem>
                 ))}
-                {store.projects.length > 0 && <DropdownMenuSeparator />}
+                {cloudChoices.map((section) => (
+                  <DropdownMenuGroup key={section.orgId} aria-label={`${section.orgName} cloud projects`}>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel>{section.orgName} cloud</DropdownMenuLabel>
+                    {section.projects.map((choice) => (
+                      <DropdownMenuItem key={choice.key} disabled={!choice.selected} onSelect={() => startCloudSessionIn(choice.key)}>
+                        <Cloud className={cn(choice.key === cloud?.project?.key && "text-foreground")} />
+                        <span className="truncate">{choice.fullName}</span>
+                        {choice.blank && <span className="ml-auto pl-3 text-[11px] text-faint">no repo</span>}
+                      </DropdownMenuItem>
+                    ))}
+                    {section.projects.length === 0 && <DropdownMenuItem disabled>No cloud projects yet</DropdownMenuItem>}
+                  </DropdownMenuGroup>
+                ))}
+                {(store.projects.length > 0 || cloudChoices.length > 0) && <DropdownMenuSeparator />}
                 <DropdownMenuItem onSelect={pickProject}>Add a project…</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -432,6 +451,7 @@ export function NewSessionView({
             <textarea
               ref={ref}
               autoFocus
+              data-new-session-prompt
               value={text}
               onChange={(e) => setText(e.target.value)}
               onKeyDown={(e) => {

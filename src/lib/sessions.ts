@@ -47,6 +47,8 @@ interface State {
    * `newSessionPreset`, and by any local preset.
    */
   cloudSessionPreset: { projectKey: string } | null;
+  /** The cloud project the reader last clicked (`cloud:<orgId>:<identity>`); any local project focus clears it. */
+  selectedCloudProject: string | null;
   /** Pre-normalized command-palette documents, rebuilt only when source data changes. */
   paletteIndex: PaletteIndex;
 }
@@ -69,6 +71,7 @@ let state: State = {
   selectedCloudWorkspace: null,
   newSessionPreset: null,
   cloudSessionPreset: null,
+  selectedCloudProject: null,
   paletteIndex: buildPaletteIndex([], [], {}, []),
 };
 
@@ -80,6 +83,7 @@ function set(patch: Partial<State>) {
   if ((patch.view && patch.view !== "new") || patch.selectedSessionId) next.newSessionPreset = null;
   // A cloud draft goes the same way, and gives way to any local one.
   if ((patch.view && patch.view !== "new") || patch.selectedSessionId || ("newSessionPreset" in patch && !("cloudSessionPreset" in patch))) next.cloudSessionPreset = null;
+  if ("selectedProject" in patch && !("selectedCloudProject" in patch)) next.selectedCloudProject = null;
   // Selecting a session or another view leaves the cloud workspace.
   if (!("selectedCloudWorkspace" in patch) && ("selectedSessionId" in patch || "view" in patch)) next.selectedCloudWorkspace = null;
   if (
@@ -228,9 +232,23 @@ export function selectCloudWorkspace(key: string | null) {
   set({ selectedCloudWorkspace: key, selectedSessionId: null, view: "new", newSessionPreset: null, selectedAutomationId: null });
 }
 
+/**
+ * Click on a cloud project row, as a click on a local one does: it becomes the
+ * focused project, and when no session is open the new-session form shows it.
+ */
+export function selectCloudProjectInSidebar(projectKey: string) {
+  const drafting = !state.selectedSessionId && state.view === "new";
+  set({
+    selectedCloudProject: projectKey,
+    navigationVersion: state.navigationVersion + 1,
+    ...(drafting ? { newSessionPreset: null, cloudSessionPreset: { projectKey } } : {}),
+  });
+}
+
 /** Open the new-session form for a cloud project, as the project row's `+` does. */
 export function startCloudSessionIn(projectKey: string) {
   set({
+    selectedCloudProject: projectKey,
     selectedSessionId: null,
     view: "new",
     newSessionPreset: null,

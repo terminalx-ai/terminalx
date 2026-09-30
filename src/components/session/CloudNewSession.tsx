@@ -3,7 +3,7 @@ import { Cloud, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
 import { useAccount } from "@/lib/account";
-import { placeCloudProjects, useCloudCatalog } from "@/lib/cloudCatalog";
+import { cloudOrganizations, defaultOrgId, placeCloudProjects, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CreateRefused, createErrorMessage, isClientError } from "@/lib/cloudCreate";
 import type { PreparedCreate } from "@/lib/cloudNewSession";
 import { formatMicros } from "@/lib/organizationCompute";
@@ -15,6 +15,29 @@ import type { CloudProject } from "@/types/target";
  * The cloud half of the new-session form (PRO-23): which cloud project the
  * form is for, and the one-time cost confirmation a new workspace needs.
  */
+
+/**
+ * Cloud projects the new-session picker offers, per organization section: the
+ * default organization's (the one the server lists), as its sidebar section
+ * shows them. None while signed out or with the kill switch off.
+ */
+export function useCloudProjectChoices(): { orgId: string; orgName: string; projects: CloudProject[] }[] {
+  const catalog = useCloudCatalog();
+  const prefs = usePrefs();
+  const { status } = useAccount();
+  return useMemo(() => {
+    if (!prefs.cloudSidebar) return [];
+    const orgId = defaultOrgId(status);
+    const org = cloudOrganizations(status).find((item) => item.id === orgId);
+    if (!org) return [];
+    const placed = placeCloudProjects(catalog.orgs[org.id] ?? { orgId: org.id, workspaces: [], repositories: null }, catalog.createMemory, {
+      pinned: prefs.cloudPinned[org.id],
+      added: prefs.cloudProjects[org.id],
+      blank: prefs.cloudBlankProjects[org.id],
+    });
+    return [{ orgId: org.id, orgName: org.isPersonal ? "Personal" : org.name, projects: placed.projects }];
+  }, [catalog, prefs.cloudSidebar, prefs.cloudPinned, prefs.cloudProjects, prefs.cloudBlankProjects, status]);
+}
 
 /** The cloud project the new-session form is preset with, and its organization's name; null for a local draft. */
 export function useCloudDraft(): { project: CloudProject | null; orgName: string } | null {

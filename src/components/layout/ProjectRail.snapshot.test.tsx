@@ -162,6 +162,25 @@ describe("sidebar rail DOM", () => {
     }
   });
 
+  it("scrolls Local and every organization section in one container between the fixed top and the fixed footer (PRO-61)", async () => {
+    for (const orgs of [withoutCloud, withCloud]) {
+      await setAccount(signedIn(orgs));
+      const { getByTestId } = mount();
+      const rail = getByTestId("sidebar-rail");
+      const tree = getByTestId("sidebar-tree");
+      const classes = (element: Element) => element.className.split(/\s+/);
+      // The rail is held to the window's height; only the tree scrolls.
+      expect(classes(rail)).toEqual(expect.arrayContaining(["flex-col", "h-full", "min-h-0", "overflow-hidden"]));
+      expect(classes(tree)).toEqual(expect.arrayContaining(["min-h-0", "flex-1", "basis-0", "overflow-y-auto"]));
+      // Everything else in the rail keeps its size.
+      for (const child of [...rail.children].filter((element) => element !== tree)) expect(classes(child)).toContain("shrink-0");
+      // Local and the organization sections are inside that one container.
+      expect(tree.querySelector('[aria-label="Raccoon"]')).not.toBeNull();
+      if (orgs === withCloud) expect(tree.querySelectorAll('[data-testid="cloud-org-section"]').length).toBe(2);
+      cleanup();
+    }
+  });
+
   it("marks only the destination the main slot shows as active", async () => {
     await setAccount(signedIn(withCloud));
     const { getByRole } = mount();
