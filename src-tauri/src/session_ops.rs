@@ -110,10 +110,7 @@ pub(crate) fn new_tab_entry(t: &NewTab) -> TabEntry {
         title: None,
         model: t.model.clone(),
         effort: t.effort.clone(),
-        permission_mode: t
-            .permission_mode
-            .clone()
-            .unwrap_or_else(|| index::DEFAULT_PERMISSION_MODE.into()),
+        permission_mode: index::permission_mode_or_default(t.permission_mode.as_deref()),
         provider_session_id: None,
         status: TabStatus::Idle,
         created: index::now(),

@@ -6,7 +6,7 @@ import { Composer } from "@/components/chat/Composer";
 import { Button } from "@/components/ui/button";
 import { useTabLog } from "@/lib/agentEvents";
 import { buildTranscript } from "@/lib/transcript";
-import { EFFORT_LABEL, PERMISSION_MODES, useModels } from "@/lib/models";
+import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, useModels } from "@/lib/models";
 import {
   attachCloudAgentTab,
   closeCloudAgentTab,
@@ -282,7 +282,7 @@ function NewAgentForm({
   const models = useModels(agent);
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
-  const [mode, setMode] = useState("manual");
+  const [mode, setMode] = useState(DEFAULT_PERMISSION_MODE);
   const [busy, setBusy] = useState(false);
   const chosen = models.find((m) => m.id === model) ?? models.find((m) => m.isDefault);
   const select = "rounded-md border border-hairline bg-transparent px-2 py-1 text-xs";

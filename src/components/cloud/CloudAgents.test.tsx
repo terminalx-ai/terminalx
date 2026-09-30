@@ -10,7 +10,11 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) })
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
 vi.mock("@/lib/models", () => ({
   EFFORT_LABEL: {},
-  PERMISSION_MODES: [{ id: "manual", label: "Ask every time", hint: "" }],
+  DEFAULT_PERMISSION_MODE: "bypassPermissions",
+  PERMISSION_MODES: [
+    { id: "manual", label: "Ask every time", hint: "" },
+    { id: "bypassPermissions", label: "Bypass permissions", hint: "" },
+  ],
   useModels: () => [],
 }));
 // The composer's own behaviour is covered by Composer.test; here it only needs to send and stop.
@@ -205,6 +209,17 @@ describe("cloud agent tabs", () => {
     expect(await screen.findByText("live answer")).toBeTruthy();
     expect(client.subscribeSession).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("cloud-agent-connection").textContent).toContain("Live");
+  });
+
+  it("starts a new agent tab in bypass unless another mode is picked", async () => {
+    client.createAgentTab.mockResolvedValue({ sessionId: "s-9", tabId: "t-9" });
+    render(view(connected()));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    const form = await screen.findByTestId("cloud-agent-new");
+    expect((within(form).getByLabelText("Permission mode") as HTMLSelectElement).value).toBe("bypassPermissions");
+    fireEvent.submit(form);
+    await waitFor(() => expect(client.createAgentTab).toHaveBeenCalledTimes(1));
+    expect(client.createAgentTab.mock.calls[0][0]).toMatchObject({ agent: "claude", mode: "bypassPermissions" });
   });
 
   it("keeps two agent tabs' conversations and states apart", async () => {

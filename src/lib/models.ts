@@ -71,6 +71,14 @@ export function modelLabel(harness: string, id: string): string {
 export const BYPASS_MODE = "bypassPermissions";
 
 /**
+ * The launch mode of every new session or agent tab, local or cloud, until
+ * the reader picks another. Mirrors `DEFAULT_PERMISSION_MODE` in
+ * src-tauri/src/store/index.rs, which also covers any request that names no
+ * mode. An explicit choice (including one saved in prefs) always wins.
+ */
+export const DEFAULT_PERMISSION_MODE = BYPASS_MODE;
+
+/**
  * Every new automation starts in "Bypass permissions". Automations run
  * unattended, so any mode that stops to ask would leave a run parked until
  * someone notices. The default is deliberately independent of the mode the
@@ -107,7 +115,7 @@ export function bypassEffect(harness: string): { flag: string; effect: string } 
   }
   if (harness === "claude") {
     return {
-      flag: "--permission-mode bypassPermissions",
+      flag: "--dangerously-skip-permissions",
       effect:
         "Claude Code stops asking about anything. File edits, shell commands and network calls all go through the moment it decides on them, inside this workspace and out.",
     };

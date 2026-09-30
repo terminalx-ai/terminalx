@@ -1067,7 +1067,9 @@ impl WorkspaceRpc {
             #[serde(default)]
             title: Option<String>,
         }
-        let p: Params = parse(params)?;
+        let mut p: Params = parse(params)?;
+        // A blank mode is no mode: the tab takes the default launch mode.
+        p.mode = index::requested_mode(p.mode.take());
         let manager = self.manager()?;
         if let Some(mode) = p.mode.as_deref() {
             if !matches!(mode, "plan" | "manual" | "auto" | "acceptEdits" | "bypassPermissions") {

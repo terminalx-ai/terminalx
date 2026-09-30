@@ -51,7 +51,7 @@ describe("choosing a permission mode", () => {
 
 describe("what bypassing means", () => {
   it("names the flag each agent is actually launched with", () => {
-    expect(bypassEffect("claude").flag).toBe("--permission-mode bypassPermissions");
+    expect(bypassEffect("claude").flag).toBe("--dangerously-skip-permissions");
     // Codex's flag drops the sandbox as well as the approvals, and what the
     // reader agrees to has to say both.
     expect(bypassEffect("codex").flag).toBe("--dangerously-bypass-approvals-and-sandbox");

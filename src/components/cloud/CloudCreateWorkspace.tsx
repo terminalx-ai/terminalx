@@ -32,7 +32,7 @@ import {
   type PhaseId,
 } from "@/lib/cloudCreate";
 import { errorCode } from "@/lib/cloudTerminals";
-import { EFFORT_LABEL, PERMISSION_MODES, useModels } from "@/lib/models";
+import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, useModels } from "@/lib/models";
 
 const AGENTS = [
   { id: "claude", label: "Claude Code" },
@@ -79,7 +79,7 @@ export function CloudCreateWorkspace({
     agent: "claude",
     model: "",
     effort: "",
-    mode: "acceptEdits",
+    mode: DEFAULT_PERMISSION_MODE,
     accessMode: "private",
   });
   const [step, setStep] = useState<CreateStep | null>(null);

@@ -14,6 +14,7 @@ import {
   type WakeResult,
 } from "@/lib/cloudAgentApi";
 import type { AgentEvent } from "@/types/events";
+import { DEFAULT_PERMISSION_MODE } from "@/lib/models";
 
 /**
  * Agent tabs of cloud workspaces (PRO-22), per organization and workspace.
@@ -188,7 +189,7 @@ function placeholderInfo(tabId: string): AgentTabInfo {
     harness: "claude",
     model: "",
     effort: null,
-    permissionMode: "manual",
+    permissionMode: DEFAULT_PERMISSION_MODE,
     status: "idle",
     process: "not-started",
     pendingPermissions: [],
@@ -520,7 +521,7 @@ export async function createCloudAgentTab(
     harness: params.agent,
     model: params.model ?? "",
     effort: params.effort ?? null,
-    permissionMode: params.mode ?? "manual",
+    permissionMode: params.mode || DEFAULT_PERMISSION_MODE,
     title: params.title ?? null,
     created: now,
     modified: now,
