@@ -80,6 +80,7 @@ export function CloudWorkspaceLifecycleDialog({
     let live = true;
     setServer(undefined);
     setServerError(null);
+    setRuntime(null);
     api
       .cloudWorkspaceDisposition(workspace.id)
       .then((facts) => {
@@ -96,7 +97,7 @@ export function CloudWorkspaceLifecycleDialog({
     return () => {
       live = false;
     };
-    // The workspace's identity is what matters; `again` re-reads after a refusal.
+    // The workspace's identity is what matters; `again` re-reads after a refusal or on "Check again".
   }, [workspace.id, again]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const risks = risksOf(server ?? null, runtime);
@@ -187,7 +188,15 @@ export function CloudWorkspaceLifecycleDialog({
             )}
             {runtime?.kind === "offline" && (
               <span className="text-muted-foreground">
-                The workspace is not running, so its uncommitted and unpushed work cannot be checked without waking it.
+                {offlineText(server?.state ?? workspace.state)}
+              </span>
+            )}
+            {runtime?.kind === "unreachable" && (
+              <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-muted-foreground">
+                Couldn't reach the workspace to check for uncommitted and unpushed work.
+                <Button size="xs" variant="ghost" onClick={() => setAgain((value) => value + 1)}>
+                  Check again
+                </Button>
               </span>
             )}
             {runtime?.kind === "unsupported" && <span className="text-muted-foreground">This workspace's runtime does not report unpublished work.</span>}
@@ -258,6 +267,12 @@ function ActionSummary({ action, retentionDays, removedOnDelete }: { action: Lif
       <dd>{action === "stop" ? "Resume at any time." : action === "archive" ? "Unarchive, then resume." : "Not possible."}</dd>
     </dl>
   );
+}
+
+/** Why a workspace that is not running cannot be asked about its work. */
+function offlineText(state: string): string {
+  if (state === "provisioning") return "The workspace is still starting, so its uncommitted and unpushed work cannot be checked yet.";
+  return `The workspace ${state === "archived" ? "is archived" : "is not running"}, so its uncommitted and unpushed work cannot be checked without waking it.`;
 }
 
 function Warn({ text }: { text: string }) {
