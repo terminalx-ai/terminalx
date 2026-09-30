@@ -311,3 +311,58 @@ describe("+ Add project", () => {
     expect(screen.queryByTestId("cloud-node-other")).toBeNull();
   });
 });
+
+// PRO-61 follow-ups from the live run.
+describe("rows behave like local rows", () => {
+  it("keeps a project's + and menu in the accessibility tree and the Tab order without hovering", async () => {
+    await load([item("fix-login", { repositories: [acmeApi] })]);
+    mount();
+    const row = projectRow(`cloud:${ORG}:github.com/acme/api`)!;
+    // Found without `hidden: true`: they are exposed, not display:none.
+    const plus = within(row).getByRole("button", { name: "New session in acme/api" });
+    const menu = within(row).getByRole("button", { name: "Project menu for acme/api" });
+    for (const button of [plus, menu]) {
+      expect(button.tabIndex).not.toBe(-1);
+      expect(button.closest("span")!.className).toContain("sr-only");
+      expect(button.closest("span")!.className).toContain("group-focus-within/row:not-sr-only");
+    }
+  });
+
+  it("a click on a project row does what a local one does, every time: focus it, and with no session open show its new-session form", async () => {
+    await load([item("fix-login", { repositories: [acmeApi] })], { "fix-login": { sessions: [session("s1", "Fix login redirect")], capabilities: null } });
+    mount();
+    const key = `cloud:${ORG}:github.com/acme/api`;
+    const name = within(projectRow(key)!).getByText("acme/api").closest("button")!;
+    for (let clicks = 0; clicks < 3; clicks++) {
+      fireEvent.click(name);
+      expect(sessions.getSessionStore().cloudSessionPreset).toEqual({ projectKey: key });
+      // Clicking the name never collapses it; the chevron does.
+      expect(projectTree(key).getAttribute("aria-expanded")).toBe("true");
+    }
+    // With a session open, the click only focuses the project, as locally.
+    act(() => sessions.selectCloudSession(`cloud:${ORG}:fix-login:s1`));
+    fireEvent.click(name);
+    expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${ORG}:fix-login:s1`);
+    expect(sessions.getSessionStore().selectedCloudProject).toBe(key);
+    expectNoAttachOrResume();
+  });
+
+  it("keeps keyboard focus on the clicked project or session row", async () => {
+    await load([item("fix-login", { repositories: [acmeApi] })], { "fix-login": { sessions: [session("s1", "Fix login redirect")], capabilities: null } });
+    const elsewhere = document.createElement("button");
+    elsewhere.textContent = "Issues";
+    document.body.appendChild(elsewhere);
+    mount();
+    elsewhere.focus();
+    const title = within(sessionNode(`cloud:${ORG}:fix-login:s1`)).getByText("Fix login redirect").closest("button")!;
+    fireEvent.click(title);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(document.activeElement).toBe(title);
+    elsewhere.focus();
+    const name = within(projectRow(`cloud:${ORG}:github.com/acme/api`)!).getByText("acme/api").closest("button")!;
+    fireEvent.click(name);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(document.activeElement).toBe(name);
+    elsewhere.remove();
+  });
+});

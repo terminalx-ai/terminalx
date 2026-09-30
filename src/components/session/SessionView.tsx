@@ -30,6 +30,10 @@ import { workspaceName } from "@/lib/dashboard";
 import { localSessionBackend } from "@/lib/sessionBackend";
 import type { CloudSessionModel } from "@/lib/cloudSession";
 import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
+import { WorkspaceActionItems, WorkspaceLifecycleDialog, useLifecycleRun, type LifecycleRequest } from "@/components/cloud/WorkspaceActions";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
+import { useRowMenu } from "@/components/ui/useRowMenu";
+import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 
 function managedWorkspaceFor(session: SessionEntry) {
   if (!session.worktreeName || session.worktreeRemoved) return undefined;
@@ -103,19 +107,41 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
   );
 }
 
-/** Where a cloud session runs, and whether this window is attached to it. */
+/** Where a cloud session runs, and whether this window is attached to it. The location chip holds the workspace's lifecycle actions. */
 function CloudLocation({ cloud }: { cloud: CloudSessionModel }) {
   const { location, connection } = cloud;
+  const catalog = useCloudCatalog();
+  const item = findCloudWorkspace(catalog, cloud.orgId, cloud.workspaceId);
+  const menu = useRowMenu();
+  const [request, setRequest] = useState<LifecycleRequest | null>(null);
+  const [error, run] = useLifecycleRun();
+  const title = `Runs in the cloud workspace ${cloud.workspaceName} (${location.provider}, ${location.org}), not on this computer.`;
   return (
     <>
-      <span
-        className="ml-1 flex min-w-0 max-w-[30%] items-center gap-1 overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground"
-        data-testid="session-location"
-        title={`Runs in the cloud workspace ${cloud.workspaceName} (${location.provider}, ${location.org}), not on this computer.`}
-      >
-        <Cloud className="size-3 shrink-0" />
-        <span className="truncate">Cloud · {location.provider} · {location.org}</span>
-      </span>
+      <DropdownMenu {...menu.root}>
+        <DropdownMenuTrigger asChild {...menu.trigger}>
+          <button
+            type="button"
+            className="ml-1 flex min-w-0 max-w-[30%] items-center gap-1 overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+            data-testid="session-location"
+            title={title}
+            aria-label={`Cloud workspace ${cloud.workspaceName}: actions`}
+          >
+            <Cloud className="size-3 shrink-0" />
+            <span className="truncate">Cloud · {location.provider} · {location.org}</span>
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-[17rem]">
+          <DropdownMenuLabel className="truncate">Workspace · {cloud.workspaceName}</DropdownMenuLabel>
+          {item ? <WorkspaceActionItems item={item} onLifecycle={setRequest} run={run} archived={item.workspace.state === "archived"} /> : <DropdownMenuItem disabled>Not in the workspace list</DropdownMenuItem>}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {error && (
+        <span className="ml-1 truncate text-[11px] text-destructive" role="alert">
+          {error}
+        </span>
+      )}
+      {request && <WorkspaceLifecycleDialog request={request} onClose={() => setRequest(null)} />}
       <span
         className={cn(
           "ml-1 flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] hairline",

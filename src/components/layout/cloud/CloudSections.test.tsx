@@ -150,23 +150,22 @@ describe("organization sections", () => {
     expect(within(sections[0]).queryByTestId("cloud-org-switch")).toBeNull();
   });
 
-  it("keeps the default organization expanded and the others to one compact line, remembered per organization", () => {
+  it("keeps the default organization expandable, remembered, and every other organization exactly one line", () => {
     mount();
     const [acme, beta] = screen.getAllByTestId("cloud-org-section");
     expect(acme.getAttribute("aria-expanded")).toBe("true");
-    expect(beta.getAttribute("aria-expanded")).toBe("false");
-    // Collapsed: its body is hidden, so the section is its header line only.
-    expect(within(beta).getByTestId("cloud-org-hint").closest("[hidden]")).not.toBeNull();
+    // Another organization: one line (name, role, Switch), nothing under it, the explanation in its tooltip.
+    expect(beta.hasAttribute("aria-expanded")).toBe(false);
+    expect(beta.children).toHaveLength(1);
+    expect(within(beta).queryByTestId("cloud-org-hint")).toBeNull();
+    expect(beta.textContent).not.toContain("Its cloud sessions show");
+    expect(within(beta).getByTestId("cloud-org-header").getAttribute("title")).toContain("Use Switch");
     expect(within(beta).getByTestId("cloud-org-role").textContent).toBe("member");
-    fireEvent.click(within(beta).getByRole("button", { name: "Expand Beta organization" }));
-    expect(prefs.getPrefs().sidebarSections["org:org-b"]).toBe("expanded");
     fireEvent.click(within(acme).getByRole("button", { name: "Collapse Acme organization" }));
     expect(prefs.getPrefs().sidebarSections["org:org-a"]).toBe("collapsed");
     cleanup();
     mount();
-    const [acmeAgain, betaAgain] = screen.getAllByTestId("cloud-org-section");
-    expect(acmeAgain.getAttribute("aria-expanded")).toBe("false");
-    expect(betaAgain.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getAllByTestId("cloud-org-section")[0].getAttribute("aria-expanded")).toBe("false");
     act(() => prefs.setPrefs({ sidebarSections: {} }));
   });
 
@@ -195,17 +194,21 @@ describe("organization sections", () => {
     expect(within(menu).getByRole("menuitem", { name: /Switch to show cloud sessions/ })).toBeTruthy();
   });
 
-  it("keeps Switch a real, focusable button in a collapsed organization's row", () => {
+  it("keeps Switch, Add project and the menu real focusable buttons, always in the accessibility tree", () => {
     mount();
-    const beta = screen.getAllByTestId("cloud-org-section")[1];
+    const [acme, beta] = screen.getAllByTestId("cloud-org-section");
     const header = within(beta).getByTestId("cloud-org-header");
-    const toggle = within(header).getByRole("button", { name: "Beta" });
     const switchButton = within(header).getByRole("button", { name: "Switch" });
-    // Shown on hover and on focus within the row, and reached with Tab from the row's name.
-    expect(switchButton.closest("span")!.className).toContain("group-focus-within/row:flex");
-    const order = [...header.querySelectorAll<HTMLElement>("button")];
-    expect(order.indexOf(switchButton)).toBeGreaterThan(order.indexOf(toggle));
+    // Visually hidden until hover or focus within the row, never display:none, so Tab and AX reach it.
+    const toolbar = switchButton.closest("span")!;
+    expect(toolbar.className).toContain("sr-only");
+    expect(toolbar.className).toContain("group-focus-within/row:not-sr-only");
+    expect(toolbar.className).not.toMatch(/(^| )hidden( |$)/);
     expect(switchButton.tabIndex).not.toBe(-1);
+    for (const name of ["Add project to Acme", "Menu for Acme"]) {
+      const button = within(within(acme).getByTestId("cloud-org-header")).getByRole("button", { name });
+      expect(button.closest("span")!.className).not.toMatch(/(^| )hidden( |$)/);
+    }
   });
 
   it("offers the switch in the organization's menu too", async () => {

@@ -20,9 +20,10 @@ vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 // The connection manager (CS-7) holds the connection; the native side still has it while it does.
 vi.mock("@/lib/api", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/api")>()), workspaceConnection: mocks.workspaceConnection, hasWorkspaceConnection: () => true }));
 vi.mock("@/lib/cloudCatalog", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/cloudCatalog")>()), useCloudCatalog: () => mocks.catalog }));
-vi.mock("@/lib/account", () => ({
-  useAccount: () => ({ status: { state: "signed-in", identity: { name: null, email: "a@b.c", organization: "Acme", organizationId: "org-1" }, expiresAt: null, lastError: null, organizations: [{ id: "org-1", name: "Acme", role: "member" }] } }),
-}));
+vi.mock("@/lib/account", () => {
+  const account = { status: { state: "signed-in", identity: { name: null, email: "a@b.c", organization: "Acme", organizationId: "org-1" }, expiresAt: null, lastError: null, organizations: [{ id: "org-1", name: "Acme", role: "member" }] } };
+  return { useAccount: () => account, getAccount: () => account, subscribeAccount: () => () => undefined, refreshAccount: vi.fn() };
+});
 vi.mock("@/lib/theme", () => ({ useTheme: () => ({ resolvedMode: "dark" }) }));
 vi.mock("@/lib/prefs", () => ({ usePrefs: () => mocks.prefs, getPrefs: () => mocks.prefs, setPrefs: vi.fn() }));
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
@@ -487,5 +488,66 @@ describe("local path guard", () => {
     await expect(api.workStatus("cloud://cloud:org-1:ws-1")).rejects.toBeInstanceOf(LocalPathLeakError);
     await expect(api.listSessions()).rejects.toThrow(/not a cloud API/);
     expect(guard.calls.map((call) => call.command)).toEqual(["list_sessions"]);
+  });
+});
+
+// PRO-61 follow-ups: the header's chips.
+describe("the session header's location and connection chips", () => {
+  const click = (element: HTMLElement) => {
+    fireEvent.pointerDown(element, { button: 0, pointerType: "mouse" });
+    fireEvent.pointerUp(element, { button: 0, pointerType: "mouse" });
+    fireEvent.click(element, { button: 0 });
+  };
+
+  it("the location chip holds the workspace's Stop, Archive and Delete", async () => {
+    await openConnected();
+    click(screen.getByTestId("session-location"));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…"]);
+  });
+
+  it("the location chip offers Resume on a stopped workspace", async () => {
+    setCatalog(workspaceItem("suspended"));
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.emit({ state: "suspended" }));
+    click(screen.getByTestId("session-location"));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem")[0].textContent?.trim()).toBe("Resume");
+  });
+
+  it("never reads Live for a stopped workspace, even over a connection that still reads connected", async () => {
+    setCatalog(workspaceItem("suspended"));
+    runtime.tabs = [tabInfo()];
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connect("manage"));
+    expect(screen.getByTestId("session-connection").textContent).toBe("Stopped");
+    expect(activate).not.toHaveBeenCalled();
+  });
+
+  it("goes Resuming, then Connecting, then Live while it wakes, never back", async () => {
+    setCatalog(workspaceItem("suspended"));
+    cache["t-1"] = { tab: tabInfo(), events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.emit({ state: "suspended" }));
+    expect(screen.getByTestId("session-connection").textContent).toBe("Stopped");
+    fireEvent.change(await screen.findByLabelText("Prompt"), { target: { value: "wake up" } });
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(activate).toHaveBeenCalledWith("wake"));
+    const seen: string[] = [];
+    const step = async (state: WorkspaceConnectionState) => {
+      await act(async () => runtime.emit(state));
+      seen.push(screen.getByTestId("session-connection").textContent ?? "");
+    };
+    await step({ state: "waitingForRuntime" });
+    await step({ state: "connecting", attempt: 1 });
+    await step({ state: "waitingForRuntime" });
+    await step({ state: "connecting", attempt: 2 });
+    runtime.tabs = [tabInfo()];
+    await act(async () => runtime.connect("manage"));
+    seen.push(screen.getByTestId("session-connection").textContent ?? "");
+    expect(seen).toEqual(["Resuming", "Connecting", "Connecting", "Connecting", "Live"]);
   });
 });

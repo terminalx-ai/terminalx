@@ -49,6 +49,8 @@ export interface CloudConnectionInfo {
   authority: "manage" | "participate" | null;
   refs: number;
   waking: boolean;
+  /** Raised to `wake` since it was opened: an interactive action asked for compute. */
+  woke: boolean;
 }
 
 interface Entry {
@@ -77,7 +79,7 @@ let selectedKey: string | null = null;
 let clock: () => number = () => Date.now();
 let version = 0;
 
-const IDLE_INFO: CloudConnectionInfo = { state: "idle", capabilities: null, authority: null, refs: 0, waking: false };
+const IDLE_INFO: CloudConnectionInfo = { state: "idle", capabilities: null, authority: null, refs: 0, waking: false, woke: false };
 
 function notify() {
   version++;
@@ -143,7 +145,9 @@ function watch(entry: Entry, connection: CloudWorkspaceConnection) {
       connectedCleanups.set(entry.key, cleanups);
       wasConnected = true;
     } else {
-      setInfo(entry, { state: state.state });
+      // Stopped again after running (idle suspend, or stopped elsewhere): the next action wakes it anew.
+      setInfo(entry, state.state === "suspended" && wasConnected ? { state: state.state, woke: false } : { state: state.state });
+      if (state.state === "suspended" && wasConnected) entry.activation = "connect";
       if (wasConnected && state.state !== "reconnecting") runDisconnected(entry.key);
       // Stopped for an identity change: the api layer closed it; forget it.
       if (state.state === "stopped") drop(entry);
@@ -202,6 +206,7 @@ async function open(entry: Entry, activation: LeaseActivation): Promise<CloudWor
   if (!entry.pending) {
     const target = { kind: "cloud" as const, organizationId: entry.target.orgId, workspaceId: entry.target.workspaceId };
     entry.activation = activation;
+    if (activation === "wake") setInfo(entry, { woke: true });
     const pending = workspaceConnection(target, activation).then((connection) => {
       if (!connection) throw new Error("cloud_workspace_not_connected");
       return connection;
@@ -231,6 +236,7 @@ async function open(entry: Entry, activation: LeaseActivation): Promise<CloudWor
   const connection = await entry.pending;
   if (stronger(entry.activation, activation)) {
     entry.activation = activation;
+    setInfo(entry, { woke: true });
     await connection.activate(activation);
   }
   return connection;

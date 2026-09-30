@@ -1,5 +1,5 @@
 import "@testing-library/dom";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HarnessInfo, Project } from "@/types/session";
 import type { CloudProject } from "@/types/target";
@@ -56,10 +56,12 @@ vi.mock("@/lib/sessions", () => ({
   selectProjectInSidebar: vi.fn(),
   selectSession: vi.fn(),
   upsertSession: vi.fn(),
+  startCloudSessionIn: vi.fn(),
 }));
 vi.mock("./CloudNewSession", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./CloudNewSession")>()),
   useCloudDraft: () => draft.value,
+  useCloudProjectChoices: () => [{ orgId: "org-a", orgName: "Acme", projects: [project, { ...project, key: "cloud:org-a:blank/scratch", identity: "blank/scratch", fullName: "scratch", blank: true }] }],
 }));
 vi.mock("@/lib/cloudNewSession", () => flow);
 
@@ -146,5 +148,35 @@ describe("new session in a cloud project", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
     expect(await screen.findByText(/at its cloud workspace limit/)).toBeTruthy();
     expect(flow.confirmCloudCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("keyboard", () => {
+  it("Return in the composer starts it, as it does locally", async () => {
+    flow.planCloudStart.mockReturnValue({ kind: "reuse", node });
+    flow.startInWorkspace.mockResolvedValue("cloud:org-a:ws-1:s1");
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    type("Fix the login redirect");
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    await waitFor(() => expect(flow.startInWorkspace).toHaveBeenCalledTimes(1));
+    // Shift+Return is a new line.
+    type("Line one");
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", shiftKey: true });
+    expect(flow.startInWorkspace).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the project picker", () => {
+  it("opens on a plain click (as an accessibility press sends) and lists Local, then the organization's cloud projects", async () => {
+    const sessions = await import("@/lib/sessions");
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    // A press through the accessibility tree is a click with no pointerdown.
+    fireEvent.click(screen.getByRole("button", { name: /acme\/api/ }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByText("Local")).toBeTruthy();
+    expect(within(menu).getByText("Acme cloud")).toBeTruthy();
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["raccoon", "acme/api", "scratchno repo", "Add a project…"]);
+    fireEvent.click(within(menu).getByRole("menuitem", { name: /scratch/ }));
+    expect(sessions.startCloudSessionIn).toHaveBeenCalledWith("cloud:org-a:blank/scratch");
   });
 });
