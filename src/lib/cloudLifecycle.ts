@@ -121,6 +121,7 @@ export function checkpointText(checkpoint: CloudWorkspaceOperation["checkpoint"]
 }
 
 const MESSAGES: Record<string, string> = {
+  cloud_workspace_concurrency_exceeded: "Your organization is running as many cloud workspaces as its limit allows. Stop one to start another.",
   cloud_workspace_active_work: "An agent is still working in this workspace.",
   cloud_workspace_archived: "This workspace is archived. Unarchive it first.",
   cloud_teardown_in_progress: "Your organization is shutting down its cloud workspaces; this cannot change now.",

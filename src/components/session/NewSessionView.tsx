@@ -30,6 +30,8 @@ import type { WorkStatus } from "@/types/session";
 import { WorkspaceNameEditor } from "./WorkspaceNameEditor";
 import { CloudCreateConfirm, cloudStartError, useCloudDraft, useCloudProjectChoices } from "./CloudNewSession";
 import { useRowMenu } from "@/components/ui/useRowMenu";
+import { RunningLimitNotice } from "@/components/cloud/RunningLimitNotice";
+import { RUNNING_LIMIT_CODE, runningLimitMessage, runningLimitReached } from "@/lib/runningLimit";
 import { confirmCloudCreate, planCloudStart, prepareCloudCreate, startInWorkspace, type CloudSessionRequest, type PreparedCreate } from "@/lib/cloudNewSession";
 
 /**
@@ -51,6 +53,8 @@ export function NewSessionView({
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The organization whose running limit refused the last cloud start, to offer stopping a workspace. */
+  const [limitOrg, setLimitOrg] = useState<string | null>(null);
   const [status, setStatus] = useState<WorkStatus | null>(null);
   const [workspaceName, setWorkspaceName] = useState<string | null>(null);
   const [localUseWorktree, setLocalUseWorktree] = useState(prefs.useWorktree);
@@ -145,12 +149,25 @@ export function NewSessionView({
     useWorktree,
   });
 
+  /**
+   * A cloud start's error. At the running limit (the server's code, or the
+   * quota pre-check while the list shows running slots full), say how many
+   * run and offer to stop one.
+   */
+  const showCloudError = (e: unknown, orgId: string) => {
+    const code = e && typeof e === "object" && "code" in e ? String((e as { code: unknown }).code) : null;
+    const atRunningLimit = code === RUNNING_LIMIT_CODE || (code === "cloud_workspace_quota_exceeded" && runningLimitReached(orgId));
+    setLimitOrg(atRunningLimit ? orgId : null);
+    setError(atRunningLimit ? runningLimitMessage(orgId) : cloudStartError(e));
+  };
+
   /** Start in the cloud: reuse or wake a workspace of the project, or prepare a new one for confirmation. */
   const createCloud = async () => {
     if (!cloud?.project || !harness || !canSend) return;
     if (dictation.dictating) await stopDictation();
     setBusy(true);
     setError(null);
+    setLimitOrg(null);
     const plan = planCloudStart(cloud.project);
     try {
       if (plan.kind === "create") {
@@ -162,7 +179,7 @@ export function NewSessionView({
         setText("");
       }
     } catch (e) {
-      setError(cloudStartError(e));
+      showCloudError(e, cloud.project.orgId);
     } finally {
       setStarting(null);
       setBusy(false);
@@ -173,6 +190,7 @@ export function NewSessionView({
     if (!confirm) return;
     setBusy(true);
     setError(null);
+    setLimitOrg(null);
     setStarting("Creating the workspace…");
     try {
       await confirmCloudCreate(confirm);
@@ -180,7 +198,7 @@ export function NewSessionView({
       setText("");
       setStarting("Starting the workspace. The session opens when its agent is running.");
     } catch (e) {
-      setError(cloudStartError(e));
+      showCloudError(e, confirm.orgId);
       setStarting(null);
     } finally {
       setBusy(false);
@@ -495,6 +513,7 @@ export function NewSessionView({
             </div>
           </div>
           {error && <div className="mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
+          {cloud && error && limitOrg && <RunningLimitNotice orgId={limitOrg} />}
         </div>
       </div>
     </div>

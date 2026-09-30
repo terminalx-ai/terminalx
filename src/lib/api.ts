@@ -677,6 +677,7 @@ export type CloudWorkspaceSafeErrorCode =
   | "cloud_workspace_archived"
   | "cloud_teardown_in_progress"
   | "cloud_workspace_quota_exceeded"
+  | "cloud_workspace_concurrency_exceeded"
   | "idempotency_key_reused"
   | "cloud_workspace_quote_expired"
   | "cloud_workspace_request_invalid"

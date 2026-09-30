@@ -4,6 +4,7 @@ import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/po
 import { Chat } from "@/components/chat/Chat";
 import { Composer } from "@/components/chat/Composer";
 import { Button } from "@/components/ui/button";
+import { runningLimitReached } from "@/lib/runningLimit";
 import { useTabLog } from "@/lib/agentEvents";
 import { buildTranscript } from "@/lib/transcript";
 import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, useModels } from "@/lib/models";
@@ -101,7 +102,7 @@ export function CloudAgentsView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="cloud-agents">
-      <StatusBar state={state} tab={active} snapshot={snapshot} workspaceState={workspaceState} />
+      <StatusBar state={state} tab={active} snapshot={snapshot} workspaceState={workspaceState} orgId={scope.organizationId} />
       <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-hairline px-3 py-1" role="tablist" aria-label="Agent tabs">
         {tabs.map((tab, index) => (
           <div key={tab.tabId} className="flex items-center" data-testid="cloud-agent-tab">
@@ -186,17 +187,19 @@ function StatusBar({
   tab,
   snapshot,
   workspaceState,
+  orgId,
 }: {
   state: WorkspaceConnectionState;
   tab: CloudAgentTab | null;
   snapshot: CloudAgentsSnapshot;
   workspaceState: string | null;
+  orgId: string;
 }) {
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline px-3 py-1 text-[11px] text-muted-foreground">
       <Chip label="Connection" value={connectionLabel(state)} testId="cloud-agent-connection" />
       <Chip label="Agent" value={tab ? turnLabel(tab) : "No tab"} testId="cloud-agent-turn" />
-      <Chip label="Workspace" value={provisioningLabel(workspaceState, snapshot.wake, state)} testId="cloud-agent-provisioning" />
+      <Chip label="Workspace" value={provisioningLabel(workspaceState, snapshot.wake, state, snapshot.wake === "unavailable" && runningLimitReached(orgId))} testId="cloud-agent-provisioning" />
     </div>
   );
 }
@@ -248,9 +251,15 @@ export function turnLabel(tab: CloudAgentTab): string {
   }
 }
 
-export function provisioningLabel(workspaceState: string | null, wake: WakeResult | null, state: WorkspaceConnectionState): string {
+/**
+ * `runningLimitReached`: the server does not say why a wake was unavailable,
+ * but when the organization's last list shows its running limit reached,
+ * that is the likely reason, and stopping a workspace is the way out.
+ */
+export function provisioningLabel(workspaceState: string | null, wake: WakeResult | null, state: WorkspaceConnectionState, runningLimitReached = false): string {
   if (wake === "queued") return "Waking";
   if (wake === "in-progress" && state.state !== "connected") return "Starting";
+  if (wake === "unavailable" && runningLimitReached) return "Cannot wake: the running limit is reached. Stop a workspace (commands stay queued)";
   if (wake === "unavailable") return "Cannot wake (commands stay queued)";
   if (state.state === "waitingForRuntime") return "Starting";
   if (state.state === "connected") return "Ready";

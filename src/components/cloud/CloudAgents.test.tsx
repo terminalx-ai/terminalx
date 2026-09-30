@@ -32,7 +32,7 @@ vi.mock("@/components/chat/Composer", () => ({
 // jsdom has no canvas for the chat's idle animation.
 vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonRunner: () => null, RaccoonScene: () => null }));
 
-import { CloudAgentsView } from "./CloudAgents";
+import { CloudAgentsView, provisioningLabel } from "./CloudAgents";
 import { resetCloudAgents } from "@/lib/cloudAgents";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
@@ -351,5 +351,15 @@ describe("cloud agent tabs", () => {
     expect(await screen.findByText(/Connect to this workspace once/)).toBeTruthy();
     expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe("hi");
     act(() => undefined);
+  });
+});
+
+
+describe("wake refused at the running limit (saas PRO-76)", () => {
+  const offline = { state: "idle" } as unknown as WorkspaceConnectionState;
+  it("says why when the organization's running limit is reached, and stays generic otherwise", () => {
+    expect(provisioningLabel("suspended", "unavailable", offline, true)).toBe("Cannot wake: the running limit is reached. Stop a workspace (commands stay queued)");
+    expect(provisioningLabel("suspended", "unavailable", offline)).toBe("Cannot wake (commands stay queued)");
+    expect(provisioningLabel("suspended", "queued", offline, true)).toBe("Waking");
   });
 });
