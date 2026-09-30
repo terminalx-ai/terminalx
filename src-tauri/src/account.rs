@@ -203,6 +203,10 @@ struct Inner {
 #[derive(Default)]
 pub struct AccountManager {
     service: OnceLock<String>,
+    /// Where status changes are announced. A token refresh can happen inside
+    /// any service call (`context()`), not only a status read, so the webview
+    /// is told from here whenever what it sees changed.
+    app: OnceLock<AppHandle>,
     inner: Mutex<Inner>,
     refresh_gate: Mutex<()>,
 }
@@ -266,12 +270,15 @@ impl AccountManager {
             .map_err(|_| anyhow!("account service was already configured"))
     }
 
-    pub fn status(&self, app: &AppHandle) -> AccountStatus {
-        self.ensure_loaded();
-        if self.refresh_if_needed() {
-            self.emit(app);
-        }
+    /// Announce status changes (a silent token refresh with new organizations) to this app.
+    pub fn attach_app(&self, app: &AppHandle) {
+        let _ = self.app.set(app.clone());
+    }
 
+    pub fn status(&self, app: &AppHandle) -> AccountStatus {
+        self.attach_app(app);
+        self.ensure_loaded();
+        self.refresh_if_needed();
         self.snapshot()
     }
 
@@ -582,7 +589,24 @@ impl AccountManager {
 
     fn refresh_session(&self, generation: u64, session: DesktopSession) {
         let result = refresh(&session);
+        if self.apply_refresh(generation, &session, result) {
+            if let Some(app) = self.app.get() {
+                self.emit(app);
+            }
+        }
+    }
+
+    /// Take a refresh's outcome; true when what the webview sees changed
+    /// (organizations and their cloud capabilities, identity, sign-out, the
+    /// error, or the expiry the webview schedules its own refresh from).
+    fn apply_refresh(&self, generation: u64, session: &DesktopSession, result: Result<DesktopSession, CloudError>) -> bool {
         let mut inner = self.inner.lock().unwrap();
+        let before = serde_json::to_value(snapshot(&inner)).ok();
+        self.apply_refresh_locked(&mut inner, generation, session, result);
+        serde_json::to_value(snapshot(&inner)).ok() != before
+    }
+
+    fn apply_refresh_locked(&self, inner: &mut Inner, generation: u64, session: &DesktopSession, result: Result<DesktopSession, CloudError>) {
         let unchanged = inner.generation == generation
             && inner
                 .session
@@ -1116,6 +1140,65 @@ mod tests {
         // An older server's organization says nothing about the cloud.
         assert_eq!(orgs[2]["isPersonal"], false);
         assert!(orgs[2].get("cloud").is_none());
+    }
+
+    #[test]
+    fn a_silent_refresh_that_brings_organization_capabilities_is_announced() {
+        let manager = AccountManager::default();
+        manager.set_context_for_test(Some(AccountContext {
+            access_token: "old-access".into(),
+            user_id: "user".into(),
+            email: "a@example.com".into(),
+            display_name: "A".into(),
+            profile_id: "profile".into(),
+            organization_id: "org-a".into(),
+            relay_entitled: false,
+            generation: 4,
+        }));
+        let stored = manager.inner.lock().unwrap().session.clone().unwrap();
+        assert!(snapshot(&manager.inner.lock().unwrap()).organizations.is_empty());
+        let refreshed: DesktopSession = serde_json::from_value(json!({
+            "accessToken": "new-access",
+            "refreshToken": "new-refresh",
+            "expiresAt": 4_000_000_000_000_i64,
+            "cloud": { "cloudProfileId": "profile", "userId": "user", "email": "a@example.com", "displayName": "A", "activeOrgId": "org-a", "activeOrgName": "Test Organization", "linkedAt": 1 },
+            "organizations": [{ "orgId": "org-a", "name": "Acme", "role": "owner", "isPersonal": false, "cloud": { "enabled": true, "flags": {} } }],
+            "capabilities": { "flags": {}, "refreshedAt": 1 }
+        }))
+        .unwrap();
+        assert!(manager.apply_refresh(4, &stored, Ok(refreshed.clone())));
+        let status = serde_json::to_value(snapshot(&manager.inner.lock().unwrap())).unwrap();
+        assert_eq!(status["organizations"][0]["cloud"]["enabled"], true);
+        // The same answer again changes nothing the webview sees, so nothing is announced.
+        assert!(!manager.apply_refresh(4, &refreshed, Ok(refreshed.clone())));
+        // A refresh for an older generation is dropped.
+        assert!(!manager.apply_refresh(3, &refreshed, Ok(stored)));
+    }
+
+    #[test]
+    fn the_webviews_default_organization_is_the_one_api_calls_use_even_after_a_silent_refresh() {
+        let manager = AccountManager::default();
+        manager.set_context_for_test(Some(AccountContext {
+            access_token: "a".into(),
+            user_id: "user".into(),
+            email: "a@example.com".into(),
+            display_name: "A".into(),
+            profile_id: "profile".into(),
+            organization_id: "org-demo".into(),
+            relay_entitled: false,
+            generation: 2,
+        }));
+        let stored = manager.inner.lock().unwrap().session.clone().unwrap();
+        let mut refreshed = stored.clone();
+        refreshed.refresh_token = "rotated".into();
+        // The server moved the active organization (another client switched it).
+        refreshed.cloud.active_org_id = Some("org-e2e-box".into());
+        refreshed.cloud.active_org_name = Some("E2E Box".into());
+        assert!(manager.apply_refresh(2, &stored, Ok(refreshed)));
+        let status = serde_json::to_value(snapshot(&manager.inner.lock().unwrap())).unwrap();
+        let context = manager.inner.lock().unwrap().session.as_ref().unwrap().cloud.active_org_id.clone();
+        assert_eq!(status["identity"]["organizationId"], "org-e2e-box");
+        assert_eq!(context.as_deref(), Some("org-e2e-box"));
     }
 
     #[test]

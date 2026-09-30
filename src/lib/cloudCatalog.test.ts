@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   closeWorkspaceConnection: vi.fn(),
   account: { status: { state: "signed-out", identity: null, expiresAt: null, lastError: null } as AccountStatus, ready: true, busy: false },
   listeners: new Set<() => void>(),
+  refreshAccount: vi.fn(),
 }));
 
 vi.mock("@/lib/api", async (importOriginal) => ({
@@ -26,6 +27,7 @@ vi.mock("@/lib/api", async (importOriginal) => ({
   closeWorkspaceConnection: mocks.closeWorkspaceConnection,
 }));
 vi.mock("@/lib/account", () => ({
+  refreshAccount: mocks.refreshAccount,
   getAccount: () => mocks.account,
   subscribeAccount: (listener: () => void) => {
     mocks.listeners.add(listener);
@@ -101,6 +103,7 @@ beforeEach(() => {
   for (const fn of Object.values(mocks.api)) fn.mockReset();
   mocks.workspaceConnection.mockReset();
   mocks.closeWorkspaceConnection.mockReset();
+  mocks.refreshAccount.mockReset().mockResolvedValue(undefined);
   mocks.api.cloudWorkspaceRepositories.mockResolvedValue({ configured: true, repositories: [] });
   mocks.api.cloudCatalogLoad.mockResolvedValue(null);
   mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [] });
@@ -171,6 +174,26 @@ describe("placement", () => {
 });
 
 describe("organizations", () => {
+  it("re-derives its organizations when a silent refresh brings cloud capabilities", async () => {
+    signIn([{ id: ORG, name: "Acme", role: "admin", isPersonal: false } as never]);
+    bootCloudCatalog();
+    await vi.waitFor(() => expect(getCloudCatalog().loaded).toBe(true));
+    expect(mocks.api.cloudWorkspaces).not.toHaveBeenCalled();
+    // The native side announces the refreshed status; the same user, now with cloud enabled.
+    signIn();
+    await vi.waitFor(() => expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(1));
+  });
+
+  it("follows the session's active organization when it changes", async () => {
+    signIn([
+      { id: ORG, name: "Acme", role: "admin", isPersonal: false, cloud: { enabled: true, flags: {} } },
+      { id: "org-box", name: "E2E Box", role: "owner", isPersonal: false, cloud: { enabled: true, flags: {} } },
+    ]);
+    expect(defaultOrgId(mocks.account.status)).toBe(ORG);
+    mocks.account.status = { ...mocks.account.status, identity: { ...mocks.account.status.identity!, organization: "E2E Box", organizationId: "org-box" } };
+    expect(defaultOrgId(mocks.account.status)).toBe("org-box");
+  });
+
   it("lists only organizations with cloud enabled, and none while signed out", () => {
     expect(cloudOrganizations(mocks.account.status)).toEqual([]);
     signIn([
@@ -236,6 +259,8 @@ describe("merging and tombstones", () => {
     mocks.api.cloudWorkspaces.mockResolvedValueOnce({ workspaces: [{ ...item("x"), workspace: { ...item("x").workspace, orgId: "org-b" } }] });
     await refreshCloudCatalog(ORG);
     expect(getCloudCatalog().orgs[ORG].workspaces.map((w) => w.workspace.id)).toEqual(["w1"]);
+    // The server lists another organization: the account status here is stale, so it is read again.
+    expect(mocks.refreshAccount).toHaveBeenCalledTimes(1);
   });
 
   it("records the repositories a created workspace came from", async () => {

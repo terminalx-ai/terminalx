@@ -190,6 +190,7 @@ pub fn run() {
             agent_keys.configure(&app.config().identifier);
             cloud_remote.watch_identity(app.handle().clone());
             account.configure(&app.config().identifier)?;
+            account.attach_app(app.handle());
             pairing.configure(Arc::new(app.handle().clone()), app.path().app_log_dir().ok(), &app.config().identifier)?;
             #[cfg(desktop)]
             {

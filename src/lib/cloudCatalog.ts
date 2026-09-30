@@ -11,7 +11,7 @@ import {
   type CloudWorkspaceSnapshot,
   type OrganizationSummary,
 } from "@/lib/api";
-import { getAccount, subscribeAccount } from "@/lib/account";
+import { getAccount, refreshAccount, subscribeAccount } from "@/lib/account";
 import { phaseOf, settled } from "@/lib/cloudCreate";
 import { isArchived, isOpen, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
 import { cloudProjectKey, cloudWorkspaceKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
@@ -343,8 +343,14 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
     if (list.status === "fulfilled" && !Array.isArray(list.value?.workspaces)) {
       patchOrg(orgId, { error: "cloud_workspace_invalid_response" });
     } else if (list.status === "fulfilled") {
-      // A list for another organization (the default changed mid-flight) is not this one's.
-      if (list.value.workspaces.some((item) => item.workspace.orgId !== orgId)) return;
+      // A list for another organization is not this one's: the server's
+      // active organization differs from the one shown as default, so the
+      // account status here is stale. Read it again rather than show the
+      // wrong organization's rows.
+      if (list.value.workspaces.some((item) => item.workspace.orgId !== orgId)) {
+        void refreshAccount();
+        return;
+      }
       await ingestCloudList(list.value, orgId, now(), requestedAt);
     } else {
       patchOrg(orgId, { error: errorText(list.reason) });
