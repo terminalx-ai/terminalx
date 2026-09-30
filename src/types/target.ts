@@ -19,6 +19,36 @@ export type SessionKey = string;
 /** A path on a cloud VM. Branded so it can never be handed to a local command. */
 export type RemotePath = string & { readonly __remotePath: unique symbol };
 
+/**
+ * The display root of a cloud workspace's files and the `cwd` a cloud
+ * session carries in the UI: `cloud://<orgId>:<workspaceId>`. It starts with
+ * `cloud:` like every cloud key, which is what `assertLocal` refuses.
+ */
+export function cloudWorkspaceRoot(orgId: string, workspaceId: string): RemotePath {
+  return `cloud://${orgId}:${workspaceId}` as RemotePath;
+}
+
+/** Whether a path or id belongs to a cloud workspace (a cloud key, a cloud root or a path under one). */
+export function isRemotePath(value: string): value is RemotePath {
+  return value.startsWith("cloud:");
+}
+
+export class LocalPathLeakError extends Error {
+  constructor(what: string, value: string) {
+    super(`A cloud path reached a local command (${what}: ${value})`);
+    this.name = "LocalPathLeakError";
+  }
+}
+
+/**
+ * Throw before a cloud path or key reaches a local command (Reveal in
+ * Finder, local git, fs, pty, browser). A local path passes unchanged.
+ */
+export function assertLocal<T extends string | null | undefined>(value: T, what = "path"): T {
+  if (typeof value === "string" && isRemotePath(value)) throw new LocalPathLeakError(what, value);
+  return value;
+}
+
 export function isCloudKey(key: string | null | undefined): key is CloudKey {
   return typeof key === "string" && key.startsWith("cloud:");
 }

@@ -32,6 +32,8 @@ export interface CloudTerminal {
   gone: "closed" | "runtime-restarted" | null;
   /** The last input refusal or failure, until the next accepted input. */
   inputError: string | null;
+  /** The runtime session it was opened for (`pty/2`); null for a workspace terminal or an older runtime. */
+  sessionId: string | null;
 }
 
 interface WorkspaceTerminals {
@@ -102,6 +104,7 @@ function fromInfo(workspace: string, info: PtyInfo): CloudTerminal {
     rows: info.rows,
     gone: null,
     inputError: null,
+    sessionId: info.sessionId ?? null,
   };
 }
 
@@ -223,8 +226,9 @@ export async function createCloudTerminal(
   client: WorkspaceRpcClient,
   size: { cols: number; rows: number },
   create: () => TerminalInstance,
+  options: { sessionId?: string } = {},
 ): Promise<CloudTerminal> {
-  const info = await client.createPty(size);
+  const info = await client.createPty(options.sessionId ? { ...size, sessionId: options.sessionId } : size);
   const terminal = fromInfo(workspace, info);
   update(workspace, (current) => ({
     terminals: current.terminals.some((item) => item.ptyId === info.ptyId) ? current.terminals : [...current.terminals, terminal],

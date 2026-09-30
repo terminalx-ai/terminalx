@@ -9,6 +9,8 @@ import { IssuesView } from "@/components/issues/IssuesView";
 import { AgentDashboard } from "@/components/dashboard/AgentDashboard";
 import { SkillsView } from "@/components/skills/SkillsView";
 import { SessionView } from "@/components/session/SessionView";
+import { CloudSessionHost } from "@/components/session/CloudSessionHost";
+import { isCloudKey } from "@/types/target";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
@@ -115,6 +117,8 @@ export function AppShell() {
   const selected = store.sessions.find((s) => s.id === store.selectedSessionId) ?? null;
   // A cloud workspace in the main slot (PRO-23), unless the kill switch hides cloud rows.
   const cloudWorkspace = prefs.cloudSidebar ? (store.selectedCloudWorkspace ?? null) : null;
+  // A cloud session (`cloud:…`) renders in the same slot, with the sidebar kept.
+  const cloudKey = prefs.cloudSidebar && isCloudKey(store.selectedSessionId) ? store.selectedSessionId : null;
 
   return (
     <div className="flex h-full w-full flex-col">
@@ -151,7 +155,13 @@ export function AppShell() {
               />
             )}
 
-            {selected ? (
+            {cloudKey ? (
+              <main className="flex h-full min-w-0 flex-1 flex-col">
+                <ErrorBoundary key={cloudKey} label="the session">
+                  <CloudSessionHost sessionKey={cloudKey} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                </ErrorBoundary>
+              </main>
+            ) : selected ? (
               <main className="flex h-full min-w-0 flex-1 flex-col">
                 <ErrorBoundary key={selected.id} label="the session">
                   <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
