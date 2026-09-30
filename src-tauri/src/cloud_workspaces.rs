@@ -388,6 +388,90 @@ pub struct CloudWorkspace {
     pub delete_after: Option<i64>,
     #[serde(default)]
     pub deleted_at: Option<i64>,
+    /// List enrichment (saas #137, PRO-56, contract §20.1). Every field is
+    /// optional: older servers omit them, and create, open and lifecycle
+    /// responses never carry them. A malformed value reads as absent rather
+    /// than failing the list, and an absent one is left out of what the
+    /// webview gets, so an old server's list reaches it as before.
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub repositories: Option<Vec<WorkspaceRepository>>,
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<i64>,
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub revision: Option<i64>,
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub runtime_activity: Option<WorkspaceRuntimeActivity>,
+    /// `manage` or `participate`; a string so a newer server's value reaches the page.
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub authority: Option<String>,
+}
+
+/// One repository a workspace was created from (§20.1), primary first.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRepository {
+    #[serde(default)]
+    pub identity: Option<String>,
+    #[serde(default)]
+    pub full_name: Option<String>,
+    #[serde(default)]
+    pub clone_url: Option<String>,
+    #[serde(default, rename = "ref")]
+    pub git_ref: Option<String>,
+    #[serde(default)]
+    pub target_directory: Option<String>,
+    #[serde(default)]
+    pub primary: bool,
+}
+
+/// The runtime's own activity report as the list carries it (§20.1, 9.3).
+/// Named apart from the runtime build; the counts read 0 unless `online`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRuntimeActivity {
+    pub online: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reporting: Option<bool>,
+    #[serde(default)]
+    pub reported_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale: Option<bool>,
+    #[serde(default)]
+    pub active_turns: u32,
+    #[serde(default)]
+    pub pending_approvals: u32,
+}
+
+/// The organization's workspace slots (§20.1, PRO-76). `used`/`limit` mirror
+/// `running` for desktops that predate it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWorkspaceQuota {
+    pub used: u32,
+    pub limit: u32,
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub running: Option<QuotaUsage>,
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub total: Option<QuotaUsage>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct QuotaUsage {
+    pub used: u32,
+    pub limit: u32,
+}
+
+/// An optional list field: a value that does not fit its type reads as
+/// absent, so one field a newer server reshapes cannot fail the whole list.
+fn lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 /// Contract §19.2. `phase` and `state` stay strings so a newer server's
@@ -591,6 +675,9 @@ pub struct CloudWorkspaceList {
     /// this desktop kept of them is purged.
     #[serde(default)]
     pub tombstones: Vec<CloudWorkspaceTombstone>,
+    /// The organization's workspace slots (§20.1); absent from older servers.
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub quota: Option<CloudWorkspaceQuota>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2468,10 +2555,17 @@ mod tests {
                     archived_at: None,
                     delete_after: None,
                     deleted_at: None,
+                    repositories: None,
+                    created_by: None,
+                    last_activity_at: None,
+                    revision: None,
+                    runtime_activity: None,
+                    authority: None,
                 },
                 latest_operation: None,
             }],
             tombstones: Vec::new(),
+            quota: None,
         };
         assert_eq!(
             ensure_list(list, "org-one", RequestRisk::Read)
@@ -2769,6 +2863,86 @@ mod tests {
         let (_, service) = test_service(&base);
         assert!(service.workspaces(None).is_err());
         request.join().unwrap();
+    }
+
+    /// A list as saas #137/#139 (PRO-56, PRO-76) sends it (§20.1), and what
+    /// the Tauri command hands the webview for it. The TypeScript catalog's
+    /// tests read the second file, so both sides test the same payload.
+    const ENRICHED_LIST: &str = include_str!("../../src/lib/fixtures/cloudWorkspaceList.server.json");
+    const ENRICHED_LIST_WEBVIEW: &str = include_str!("../../src/lib/fixtures/cloudWorkspaceList.webview.json");
+
+    fn enriched_list() -> Value {
+        serde_json::from_str(ENRICHED_LIST).unwrap()
+    }
+
+    #[test]
+    fn the_enriched_list_reaches_the_webview_with_every_field() {
+        let (base, _, request) = serve_once(response("200 OK", &enriched_list().to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let listed = service.workspaces(None).unwrap();
+        request.join().unwrap();
+        let workspace = &listed.workspaces[0].workspace;
+        assert_eq!(workspace.repositories.as_ref().unwrap()[0].identity.as_deref(), Some("github.com/acme/api"));
+        assert_eq!(workspace.runtime_activity.as_ref().unwrap().pending_approvals, 2);
+        assert_eq!(workspace.authority.as_deref(), Some("participate"));
+
+        // What the Tauri command hands the webview: every known field, camelCase, unchanged.
+        let sent = serde_json::to_value(&listed).unwrap();
+        let expected = enriched_list();
+        for (field, value) in expected["workspaces"][0]["workspace"].as_object().unwrap() {
+            if field == "aFutureField" {
+                assert!(sent["workspaces"][0]["workspace"].get(field).is_none());
+            } else {
+                assert_eq!(&sent["workspaces"][0]["workspace"][field], value, "{field}");
+            }
+        }
+        assert_eq!(sent["quota"], expected["quota"]);
+        assert_eq!(sent["tombstones"], expected["tombstones"]);
+        assert!(sent.get("aFutureListField").is_none());
+        assert_eq!(sent, serde_json::from_str::<Value>(ENRICHED_LIST_WEBVIEW).unwrap());
+    }
+
+    #[test]
+    fn an_old_servers_list_still_parses_and_is_passed_on_as_before() {
+        let (base, _, request) = serve_once(response("200 OK", &org_2_list_body().replace("org-2", "org-1"), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let listed = service.workspaces(None).unwrap();
+        request.join().unwrap();
+        let workspace = &listed.workspaces[0].workspace;
+        assert!(workspace.repositories.is_none() && workspace.runtime_activity.is_none() && workspace.authority.is_none());
+        assert!(listed.quota.is_none());
+        let sent = serde_json::to_value(&listed).unwrap();
+        for field in ["repositories", "createdBy", "lastActivityAt", "runtimeActivity", "revision", "authority"] {
+            assert!(sent["workspaces"][0]["workspace"].get(field).is_none(), "{field}");
+        }
+        assert!(sent.get("quota").is_none());
+        // A pre-PRO-76 quota has no running or total.
+        let quota: CloudWorkspaceQuota = serde_json::from_value(json!({ "used": 1, "limit": 2 })).unwrap();
+        assert_eq!(serde_json::to_value(quota).unwrap(), json!({ "used": 1, "limit": 2 }));
+    }
+
+    #[test]
+    fn a_malformed_new_field_reads_as_absent_but_the_old_fields_stay_strict() {
+        let mut list = enriched_list();
+        let workspace = &mut list["workspaces"][0]["workspace"];
+        workspace["repositories"] = json!("github.com/acme/api");
+        workspace["runtimeActivity"] = json!({ "activeTurns": -1 });
+        workspace["authority"] = json!(3);
+        list["quota"] = json!({ "used": "one" });
+        let parsed: CloudWorkspaceList = serde_json::from_value(list.clone()).unwrap();
+        let workspace = &parsed.workspaces[0].workspace;
+        assert!(workspace.repositories.is_none() && workspace.runtime_activity.is_none() && workspace.authority.is_none());
+        assert!(parsed.quota.is_none());
+        assert_eq!(workspace.created_by.as_deref(), Some("user_1"));
+
+        for (field, value) in [("id", json!(null)), ("orgId", json!(1)), ("state", json!("melting")), ("createdAt", json!("soon"))] {
+            let mut broken = enriched_list();
+            broken["workspaces"][0]["workspace"][field] = value;
+            assert!(serde_json::from_value::<CloudWorkspaceList>(broken).is_err(), "{field}");
+        }
+        let mut broken = enriched_list();
+        broken["workspaces"][0]["workspace"].as_object_mut().unwrap().remove("updatedAt");
+        assert!(serde_json::from_value::<CloudWorkspaceList>(broken).is_err());
     }
 
     #[test]
