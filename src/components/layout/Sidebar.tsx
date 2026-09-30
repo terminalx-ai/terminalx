@@ -33,7 +33,7 @@ export function Sidebar({
   onOpenCloudPage?: () => void;
 }) {
   return (
-    <aside className="relative flex h-full w-(--sidebar-w) shrink-0">
+    <aside className="relative flex h-full min-h-0 w-(--sidebar-w) shrink-0 overflow-hidden">
       <ProjectRail
         onOpenSettings={onOpenSettings}
         onOpenAccount={onOpenAccount}

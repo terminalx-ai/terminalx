@@ -3,7 +3,8 @@
 exports[`sidebar rail DOM > signed in, with no organization that has cloud workspaces enabled 1`] = `
 <div>
   <div
-    class="flex h-full w-full shrink-0 flex-col border-r border-hairline"
+    class="flex h-full min-h-0 w-full shrink-0 flex-col overflow-hidden border-r border-hairline"
+    data-testid="sidebar-rail"
   >
     <div
       class="h-(--titlebar-h) shrink-0"
@@ -11,7 +12,7 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
       style="padding-left: 78px;"
     />
     <div
-      class="flex flex-col gap-0.5 px-2"
+      class="flex shrink-0 flex-col gap-0.5 px-2"
     >
       <button
         class="inline-flex items-center whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground h-8 rounded-lg text-[13px] [&_svg]:size-4 justify-start gap-2 px-2"
@@ -330,7 +331,7 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
       </button>
     </div>
     <div
-      class="mt-3 flex items-center justify-between pl-4 pr-2"
+      class="mt-3 flex shrink-0 items-center justify-between pl-4 pr-2"
     >
       <button
         class="text-[11px] font-medium uppercase tracking-wide text-faint hover:text-muted-foreground"
@@ -443,7 +444,8 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
     </div>
     <div
       aria-label="Projects, workspaces, sessions, and tabs"
-      class="mt-1 min-h-0 flex-1 overflow-y-auto scrollbar-thin px-2"
+      class="mt-1 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin px-2"
+      data-testid="sidebar-tree"
       role="tree"
     >
       <div
@@ -1319,7 +1321,7 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
       </div>
     </div>
     <div
-      class="border-t border-hairline p-2"
+      class="shrink-0 border-t border-hairline p-2"
     >
       <button
         class="inline-flex items-center whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground rounded-lg text-[13px] [&_svg]:size-4 h-auto w-full justify-start gap-2 px-2 py-1.5"
@@ -1400,7 +1402,8 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
 exports[`sidebar rail DOM > signed out 1`] = `
 <div>
   <div
-    class="flex h-full w-full shrink-0 flex-col border-r border-hairline"
+    class="flex h-full min-h-0 w-full shrink-0 flex-col overflow-hidden border-r border-hairline"
+    data-testid="sidebar-rail"
   >
     <div
       class="h-(--titlebar-h) shrink-0"
@@ -1408,7 +1411,7 @@ exports[`sidebar rail DOM > signed out 1`] = `
       style="padding-left: 78px;"
     />
     <div
-      class="flex flex-col gap-0.5 px-2"
+      class="flex shrink-0 flex-col gap-0.5 px-2"
     >
       <button
         class="inline-flex items-center whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground h-8 rounded-lg text-[13px] [&_svg]:size-4 justify-start gap-2 px-2"
@@ -1727,7 +1730,7 @@ exports[`sidebar rail DOM > signed out 1`] = `
       </button>
     </div>
     <div
-      class="mt-3 flex items-center justify-between pl-4 pr-2"
+      class="mt-3 flex shrink-0 items-center justify-between pl-4 pr-2"
     >
       <button
         class="text-[11px] font-medium uppercase tracking-wide text-faint hover:text-muted-foreground"
@@ -1840,7 +1843,8 @@ exports[`sidebar rail DOM > signed out 1`] = `
     </div>
     <div
       aria-label="Projects, workspaces, sessions, and tabs"
-      class="mt-1 min-h-0 flex-1 overflow-y-auto scrollbar-thin px-2"
+      class="mt-1 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin px-2"
+      data-testid="sidebar-tree"
       role="tree"
     >
       <div
@@ -2716,7 +2720,7 @@ exports[`sidebar rail DOM > signed out 1`] = `
       </div>
     </div>
     <div
-      class="border-t border-hairline p-2"
+      class="shrink-0 border-t border-hairline p-2"
     >
       <button
         class="inline-flex items-center whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground h-8 rounded-lg text-[13px] [&_svg]:size-4 w-full justify-start gap-2 px-2"
