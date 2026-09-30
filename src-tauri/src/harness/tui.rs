@@ -133,6 +133,20 @@ impl Ready {
 /// another id, which the decoder recognises and drops.
 pub type Decoder = fn(&str, &HashSet<String>, &mut Vec<Payload>);
 
+/// What one transcript record says about the turn, when it says anything.
+///
+/// This is not a turn boundary: the hooks close turns (see [`TurnTail`]).
+/// It is evidence the session watcher reads when the hooks have been silent
+/// for too long, to tell a finished turn from a stalled one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnMark {
+    Opened,
+    Ended,
+}
+
+/// Reads one transcript record for a [`TurnMark`].
+pub type Marker = fn(&str) -> Option<TurnMark>;
+
 /// A cursor into one transcript file: how far it has been read, and the bytes
 /// after the last newline, which are a record still being written.
 ///
@@ -147,6 +161,9 @@ pub struct Streamer {
     /// conversation is copied into its new file record for record, and the
     /// copies keep their original uuids.
     skip: HashSet<String>,
+    marker: Option<Marker>,
+    /// The last mark read and not yet taken.
+    mark: Option<TurnMark>,
 }
 
 impl Streamer {
@@ -155,7 +172,18 @@ impl Streamer {
     /// names records already logged elsewhere, which is how a fork's copy of
     /// its parent is left out.
     pub fn skipping(offset: u64, decode: Decoder, skip: HashSet<String>) -> Self {
-        Self { offset, partial: Vec::new(), decode, skip }
+        Self { offset, partial: Vec::new(), decode, skip, marker: None, mark: None }
+    }
+
+    /// Also read each record for what it says about the turn.
+    pub fn marking(mut self, marker: Option<Marker>) -> Self {
+        self.marker = marker;
+        self
+    }
+
+    /// The last mark read since the previous call.
+    pub fn take_mark(&mut self) -> Option<TurnMark> {
+        self.mark.take()
     }
 
     pub fn at(offset: u64, decode: Decoder) -> Self {
@@ -183,6 +211,9 @@ impl Streamer {
                 let line = text.trim_end_matches(['\n', '\r']);
                 if !line.trim().is_empty() {
                     (self.decode)(line, &self.skip, &mut out);
+                    if let Some(mark) = self.marker.and_then(|m| m(line)) {
+                        self.mark = Some(mark);
+                    }
                 }
             }
         }
@@ -207,6 +238,7 @@ pub struct Tail {
     /// payloads are published in file order whichever gets there first.
     stream: Mutex<Streamer>,
     decode: Decoder,
+    marker: Option<Marker>,
 }
 
 impl Tail {
@@ -219,14 +251,27 @@ impl Tail {
     /// names records a fork will copy in later, which are history too.
     pub fn opening(path: PathBuf, decode: Decoder, carried: HashSet<String>) -> Self {
         let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        Self { path: Mutex::new(path), stream: Mutex::new(Streamer::skipping(len, decode, carried)), decode }
+        Self { path: Mutex::new(path), stream: Mutex::new(Streamer::skipping(len, decode, carried)), decode, marker: None }
     }
 
     /// Follow a file whose name is not known yet. A Codex tab is like this
     /// until its first `SessionStart` hook: Codex mints the conversation id
     /// itself, so there is nothing to derive the path from beforehand.
     pub fn unknown(decode: Decoder) -> Self {
-        Self { path: Mutex::new(PathBuf::new()), stream: Mutex::new(Streamer::at(0, decode)), decode }
+        Self { path: Mutex::new(PathBuf::new()), stream: Mutex::new(Streamer::at(0, decode)), decode, marker: None }
+    }
+
+    /// Also report what the records say about the turn; see [`Self::drain_marked`].
+    pub fn marking(mut self, marker: Marker) -> Self {
+        self.marker = Some(marker);
+        self.stream.get_mut().unwrap().marker = self.marker;
+        self
+    }
+
+    /// How far into the file the tail has read.
+    #[cfg(test)]
+    pub fn offset(&self) -> u64 {
+        self.stream.lock().unwrap().offset()
     }
 
 
@@ -245,47 +290,57 @@ impl Tail {
         *current = path.to_path_buf();
         let offset = if was_unknown { 0 } else { std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) };
         let mut stream = self.stream.lock().unwrap();
-        *stream = Streamer::skipping(offset, self.decode, stream.carried().clone());
+        *stream = Streamer::skipping(offset, self.decode, stream.carried().clone()).marking(self.marker);
     }
 
     /// Read whatever has been appended since the last call.
+    #[cfg(test)]
     pub fn drain(&self) -> Vec<Payload> {
+        self.drain_marked().0
+    }
+
+    /// Read whatever has been appended since the last call, with the last
+    /// [`TurnMark`] among it. The two come from one read, so a caller that
+    /// applies the payloads and then records the mark never records an end
+    /// ahead of the reply that came before it.
+    pub fn drain_marked(&self) -> (Vec<Payload>, Option<TurnMark>) {
         use std::io::{Read, Seek, SeekFrom};
 
         let path = self.path.lock().unwrap().clone();
         if path.as_os_str().is_empty() {
-            return Vec::new();
+            return (Vec::new(), None);
         }
         let mut stream = self.stream.lock().unwrap();
-        let Ok(meta) = std::fs::metadata(&path) else { return Vec::new() };
+        let Ok(meta) = std::fs::metadata(&path) else { return (Vec::new(), None) };
         let size = meta.len();
         let offset = stream.offset();
         if size == offset {
-            return Vec::new();
+            return (Vec::new(), None);
         }
         if size < offset {
             // A CLI only appends, so a shorter file means it was replaced.
             // Skipping to the new end loses a little; replaying from zero
             // would duplicate the whole conversation in the log.
             log::warn!("transcript {} shrank; skipping to its end", path.display());
-            *stream = Streamer::skipping(size, self.decode, stream.carried().clone());
-            return Vec::new();
+            *stream = Streamer::skipping(size, self.decode, stream.carried().clone()).marking(self.marker);
+            return (Vec::new(), None);
         }
         let mut file = match std::fs::File::open(&path) {
             Ok(f) => f,
             Err(e) => {
                 log::warn!("transcript {}: {e}", path.display());
-                return Vec::new();
+                return (Vec::new(), None);
             }
         };
         if file.seek(SeekFrom::Start(offset)).is_err() {
-            return Vec::new();
+            return (Vec::new(), None);
         }
         let mut buf = Vec::with_capacity((size - offset) as usize);
         if file.take(size - offset).read_to_end(&mut buf).is_err() {
-            return Vec::new();
+            return (Vec::new(), None);
         }
-        stream.push(&buf)
+        let payloads = stream.push(&buf);
+        (payloads, stream.take_mark())
     }
 }
 

@@ -26,6 +26,7 @@
 use serde_json::Value;
 
 use crate::events::{BlockRef, EditKind, FileEdit, Payload, ToolResult, ToolType, Usage};
+use crate::harness::tui::TurnMark;
 
 fn block(id: &str) -> BlockRef {
     BlockRef { message_id: id.to_string(), index: 0 }
@@ -84,6 +85,21 @@ fn first_line(s: &str) -> &str {
 fn plain_path(v: &Value) -> Option<String> {
     let s = v.as_str()?;
     Some(s.strip_prefix("file://").unwrap_or(s).to_string())
+}
+
+/// What a record says about the turn, for the session watcher. The same
+/// `task_complete` the decoder leaves to the hooks is, when the hooks have
+/// gone quiet, the evidence that the turn is over rather than stalled.
+pub fn turn_mark(line: &str) -> Option<TurnMark> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    if v["type"].as_str() != Some("event_msg") {
+        return None;
+    }
+    match v["payload"]["type"].as_str()? {
+        "task_started" => Some(TurnMark::Opened),
+        "task_complete" | "turn_aborted" => Some(TurnMark::Ended),
+        _ => None,
+    }
 }
 
 /// One rollout record as payloads. Unknown records yield nothing.
@@ -299,6 +315,16 @@ mod tests {
                 _ => "other",
             })
             .collect()
+    }
+
+    /// The rollout read for what it says about its turns: `task_started`
+    /// opens one and `task_complete` ends it, and nothing in between counts.
+    #[test]
+    fn marks_where_a_rollouts_turns_open_and_end() {
+        let marks: Vec<TurnMark> = FIXTURE.lines().filter_map(turn_mark).collect();
+        assert_eq!(marks, [TurnMark::Opened, TurnMark::Ended].repeat(3));
+        let aborted = r#"{"timestamp":"2026-09-04T10:52:02.106Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-1","reason":"interrupted"}}"#;
+        assert_eq!(turn_mark(aborted), Some(TurnMark::Ended));
     }
 
     #[test]
