@@ -490,3 +490,23 @@ describe("the list's state line", () => {
     expect(describeWorkspace(stuck, 1000 + 10 * 60_000)).toBe("Ready · the runtime has not picked up the first task");
   });
 });
+
+describe("the page's list is filed under its own organization (PRO-71)", () => {
+  it("files a one-organization list under that organization, and a list mixing organizations under none", async () => {
+    const catalog = await import("@/lib/cloudCatalog");
+    catalog.resetCloudCatalog();
+    const inOrg2 = { ...workspace("ws-2", "ready"), workspace: { ...workspace("ws-2", "ready").workspace, orgId: "org-2" } };
+    vi.mocked(api.cloudWorkspaces).mockResolvedValueOnce({ workspaces: [workspace("ws-ready", "ready"), inOrg2], tombstones: [] } as never);
+    render(<CloudSessionPage onBack={() => undefined} />);
+    await screen.findByText("Workspace ws-ready");
+    expect(catalog.getCloudCatalog().orgs["org-1"]).toBeUndefined();
+    expect(catalog.getCloudCatalog().orgs["org-2"]).toBeUndefined();
+    cleanup();
+
+    vi.mocked(api.cloudWorkspaces).mockResolvedValueOnce({ workspaces: [workspace("ws-ready", "ready")], tombstones: [] } as never);
+    render(<CloudSessionPage onBack={() => undefined} />);
+    await vi.waitFor(() => expect(catalog.getCloudCatalog().orgs["org-1"]?.workspaces.map((item) => item.workspace.id)).toEqual(["ws-ready"]));
+    expect(catalog.getCloudCatalog().orgs["org-2"]).toBeUndefined();
+    catalog.resetCloudCatalog();
+  });
+});

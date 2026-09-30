@@ -18,6 +18,7 @@ import {
 import { retainCloudConnection, waitCloudConnected, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
 import { archiving, deletion, isOpen } from "@/lib/cloudLifecycle";
 import { bootCloudSessions, refreshCloudSessions } from "@/lib/cloudSessions";
+import { providerLabel } from "@/lib/organizationCompute";
 import { getSessionStore, selectCloudSession } from "@/lib/sessions";
 import { cloudSessionKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
 
@@ -171,9 +172,12 @@ async function providerFor(orgId: string): Promise<{ id: CloudWorkspaceProviderI
   const flags = status.organizations?.find((org) => org.id === orgId)?.cloud?.flags ?? {};
   for (const id of PROVIDER_ORDER.filter((provider) => flags[`cloud.workspaces.provider.${provider}.v1`] === true)) {
     try {
-      return { id, label: id, setup: await api.cloudWorkspaceSetup(id, orgId) };
-    } catch {
-      /* not connected in this organization: try the next */
+      return { id, label: providerLabel(id), setup: await api.cloudWorkspaceSetup(id, orgId) };
+    } catch (error) {
+      // Only "not connected here" moves on to the next provider; anything else
+      // (not an admin, offline, rate-limited) is the real answer and is shown.
+      const code = error && typeof error === "object" && "code" in error ? (error as { code: unknown }).code : null;
+      if (code !== "cloud_provider_connection_required") throw error;
     }
   }
   throw new CreateRefused("cloud_provider_connection_required");

@@ -334,6 +334,30 @@ describe("every organization live (CS-18)", () => {
     expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
   });
 
+  it("moves past a provider only when it is not connected there, and names it for people", async () => {
+    mocks.status = {
+      ...mocks.status,
+      organizations: mocks.status.organizations!.map((org) =>
+        org.id === ORG_B ? { ...org, cloud: { enabled: true, flags: { "cloud.workspaces.provider.machine0.v1": true, "cloud.workspaces.provider.box.v1": true } } } : org,
+      ),
+    };
+    mocks.api.cloudWorkspaceSetup.mockImplementation(async (provider: string) => {
+      if (provider === "machine0") throw { code: "cloud_provider_connection_required" };
+      return { defaults: { sourceId: "s", locationId: "l", machineClassId: "m", idleSuspendMinutes: 30, retentionDays: 7, networkPolicy: "open" } };
+    });
+    const prepared = await flow.prepareCloudCreate(target, request);
+    expect(mocks.api.cloudWorkspaceSetup.mock.calls.map(([provider]) => provider)).toEqual(["machine0", "box"]);
+    expect(prepared.form.provider).toBe("box");
+    expect(prepared.providerLabel).toBe("Box");
+  });
+
+  it.each(["organization_admin_required", "cloud_workspace_network_unavailable", "cloud_workspace_rate_limited"])("shows the real setup error (%s) instead of trying the next provider", async (code) => {
+    mocks.api.cloudWorkspaceSetup.mockRejectedValue({ code, retryable: true });
+    await expect(flow.prepareCloudCreate(target, request)).rejects.toMatchObject({ code });
+    expect(mocks.api.cloudWorkspaceSetup).toHaveBeenCalledTimes(1);
+    expect(mocks.api.cloudWorkspaceQuote).not.toHaveBeenCalled();
+  });
+
   it("the default organization still reads its provider list, and names itself", async () => {
     await place([], { used: 0, limit: 2 });
     const own = { ...(target as object), key: `cloud:${ORG}:github.com/acme/web`, orgId: ORG, identity: "github.com/acme/web", fullName: "acme/web" } as never;
