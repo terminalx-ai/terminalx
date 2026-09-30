@@ -29,6 +29,7 @@ import { bootAutomations } from "@/lib/automations";
 import { RightPanel } from "@/components/layout/RightPanel";
 import { CommandPalette } from "@/components/command/CommandPalette";
 import { bootAccount } from "@/lib/account";
+import { bootCloudCatalog } from "@/lib/cloudCatalog";
 import { bootPairing } from "@/lib/pairing";
 import { useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
@@ -65,6 +66,7 @@ export function AppShell() {
     startNotifications();
     void bootStatus();
     void bootAccount();
+    bootCloudCatalog();
     void bootPairing();
   }, []);
 

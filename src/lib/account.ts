@@ -57,6 +57,16 @@ function scheduleRefresh(status: AccountStatus) {
   refreshTimer = window.setTimeout(() => void refreshAccount(), delay);
 }
 
+/** For stores outside React (the cloud catalog). */
+export function getAccount(): AccountState {
+  return state;
+}
+
+export function subscribeAccount(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
 export function useAccount(): AccountState {
   return useSyncExternalStore(
     (listener) => {
@@ -74,10 +84,23 @@ export function bootAccount(): Promise<void> {
     try {
       await listen<AccountStatus>("account_status", (event) => applyStatus(event.payload));
       applyStatus(await api.accountStatus());
+      // A silent token refresh can bring new organizations, capabilities or a
+      // new active organization; the native side announces it, and a focus
+      // re-reads it too, in case an announcement was missed.
+      if (typeof window !== "undefined") window.addEventListener("focus", refreshOnFocus);
     } catch (error) {
       set({ status: { ...signedOut, lastError: errorMessage(error) }, ready: true });
     }
   })());
+}
+
+const FOCUS_REFRESH_MS = 5_000;
+let lastFocusRefresh = 0;
+function refreshOnFocus() {
+  const now = Date.now();
+  if (now - lastFocusRefresh < FOCUS_REFRESH_MS) return;
+  lastFocusRefresh = now;
+  void refreshAccount();
 }
 
 let statusFlight: Promise<void> | null = null;

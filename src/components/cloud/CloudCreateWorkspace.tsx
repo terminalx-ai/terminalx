@@ -31,6 +31,7 @@ import {
   type PendingCreate,
   type PhaseId,
 } from "@/lib/cloudCreate";
+import { rememberCreatedWorkspace } from "@/lib/cloudCatalog";
 import { errorCode } from "@/lib/cloudTerminals";
 import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, useModels } from "@/lib/models";
 
@@ -135,6 +136,7 @@ export function CloudCreateWorkspace({
         pending: retry ? pending : null,
         onStep: setStep,
         onPending: keep,
+        onCreated: (created, request) => rememberCreatedWorkspace(created, request.repositories),
       });
       setTracked(snapshot);
       onChanged?.();
