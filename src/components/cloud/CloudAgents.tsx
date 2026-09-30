@@ -337,7 +337,7 @@ function NewAgentForm({
 
 const KEY_MISSING = "cloud_agent_key_missing";
 
-function commandError(e: unknown): string {
+export function commandError(e: unknown): string {
   const code = errorText(e);
   if (code === KEY_MISSING) return "Connect to this workspace once so this device can encrypt commands for it.";
   if (code === DEV_SCOPE_NOTICE) return DEV_SCOPE_NOTICE;
@@ -484,7 +484,7 @@ function CloudAgentPane({
           Agent process ended — the saved conversation resumes on your next message.
         </p>
       )}
-      <Outbox entries={entries} followUps={info.followUps} onSendAgain={(e) => void interactive(() => sendAgain(scope, e, connected ? client : null)).catch(() => undefined)} />
+      <CloudOutbox entries={entries} followUps={info.followUps} onSendAgain={(e) => void interactive(() => sendAgain(scope, e, connected ? client : null)).catch(() => undefined)} />
       <div className="min-h-0 flex-1">
         <Chat
           sessionId={info.sessionId}
@@ -538,7 +538,7 @@ const STATE_TEXT: Record<string, string> = {
 const KIND_TEXT: Record<string, string> = { send: "Message", steer: "Steer", stop: "Stop", "permission-decision": "Decision" };
 
 /** Commands on their way, and the ones whose fate needs the reader. */
-function Outbox({
+export function CloudOutbox({
   entries,
   followUps,
   onSendAgain,

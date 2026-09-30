@@ -172,6 +172,15 @@ export function selectSession(id: string | null) {
   else set(patch);
 }
 
+/**
+ * Select a cloud session by its key, `cloud:<orgId>:<workspaceId>:<sessionId>`
+ * (PRO-23). Selecting only renders it: nothing here attaches, resumes or
+ * wakes the workspace. Local project focus is left as it is.
+ */
+export function selectCloudSession(key: string) {
+  set({ selectedSessionId: key, view: "new", newSessionPreset: null, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
+}
+
 /** The issues browser takes the workspace; no session stays selected. */
 export function openIssues() {
   set({ selectedSessionId: null, view: "issues", selectedAutomationId: null });

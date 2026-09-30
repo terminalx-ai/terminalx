@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Archive, ArchiveRestore, ArrowLeft, Bot, Cloud, FolderTree, GitBranch, Loader2, Pause, Plug, Plus, TerminalSquare, Trash2, X } from "lucide-react";
-import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
-import { TerminalView, createTerminal } from "@/components/terminal/TerminalView";
+import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
+import { createTerminal } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
 import { CloudAgentsView } from "./CloudAgents";
+import { CloudTerminalPane } from "./CloudTerminalPane";
 import { CloudFilesView } from "./CloudFiles";
 import { CloudGitView } from "./CloudGit";
 import { CloudCreateWorkspace } from "./CloudCreateWorkspace";
@@ -33,18 +34,16 @@ import {
 } from "@/lib/api";
 import {
   closeCloudTerminal,
-  cloudTerminalFactory,
   createCloudTerminal,
   detachCloudTerminals,
   errorCode,
   selectCloudTerminal,
   syncCloudTerminals,
-  takeControl,
   useCloudTerminals,
   type CloudTerminal,
 } from "@/lib/cloudTerminals";
-import { getInstance } from "@/lib/terminal";
 import { useTheme } from "@/lib/theme";
+import { cloudProviderName } from "@/lib/cloudSession";
 
 /** Where an open session's commands run, as the page labels it. */
 export interface OpenedWorkspace {
@@ -55,12 +54,8 @@ export interface OpenedWorkspace {
   workspaceState: string | null;
 }
 
-const PROVIDER_NAMES: Record<string, string> = { box: "Boat", machine0: "Machine0", "local-docker": "Local Docker" };
-
-export function providerName(provider: string | null): string {
-  if (!provider) return "Development runtime";
-  return PROVIDER_NAMES[provider] ?? provider;
-}
+/** A cloud provider's display name. */
+export const providerName = cloudProviderName;
 
 /**
  * A session in a cloud workspace: the desktop attaches to the workspace's
@@ -661,88 +656,6 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
       )}
     </div>
   );
-}
-
-function CloudTerminalPane({
-  workspace,
-  terminal,
-  client,
-  connected,
-  manage,
-  base,
-}: {
-  workspace: string;
-  terminal: CloudTerminal;
-  client: WorkspaceRpcClient;
-  connected: boolean;
-  manage: boolean;
-  base: () => ReturnType<typeof createTerminal>;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const create = useCallback(() => cloudTerminalFactory(workspace, terminal, base)(), [workspace, terminal.id]);
-  const controlling = terminal.control === "you";
-
-  const control = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const instance = getInstance(terminal.id, create);
-      const size = instance.fit.proposeDimensions();
-      await takeControl(workspace, client, terminal.id, size && size.cols > 0 && size.rows > 0 ? { cols: size.cols, rows: size.rows } : null);
-    } catch (e) {
-      setError(errorCode(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  let notice: string | null = null;
-  if (terminal.gone === "runtime-restarted") notice = "This terminal ended when the workspace runtime restarted. Input is not sent anywhere.";
-  else if (terminal.gone === "closed") notice = "This terminal was closed.";
-  else if (terminal.exited) notice = `The shell exited${terminal.exitCode === null ? "" : ` with code ${terminal.exitCode}`}.`;
-  else if (terminal.inputError) notice = `Input was not delivered: ${inputErrorText(terminal.inputError)}`;
-
-  return (
-    <div className="flex min-h-0 flex-1 flex-col" data-testid="cloud-terminal">
-      {!terminal.gone && !terminal.exited && !controlling && (
-        <div className="flex items-center gap-2 border-b border-hairline px-3 py-1 text-xs text-muted-foreground" data-testid="cloud-terminal-viewer">
-          <span>
-            {manage ? "Another device controls this terminal's input and size; you are watching." : "View only: this attachment cannot type into or resize terminals."}
-          </span>
-          {manage && (
-            <Button size="sm" variant="outline" disabled={busy || !connected} onClick={() => void control()}>
-              Take control
-            </Button>
-          )}
-        </div>
-      )}
-      {notice && (
-        <p className="border-b border-hairline px-3 py-1 text-xs text-muted-foreground" data-testid="cloud-terminal-notice">
-          {notice}
-        </p>
-      )}
-      {error && <p className="px-3 py-1 text-xs text-red-500">{error}</p>}
-      <div className="min-h-0 flex-1">
-        <TerminalView id={terminal.id} visible create={create} fit={controlling && !terminal.gone} />
-      </div>
-    </div>
-  );
-}
-
-function inputErrorText(code: string): string {
-  switch (code) {
-    case "not_controller":
-      return "another device controls this terminal. Take control to type.";
-    case "unavailable":
-      return "the shell has exited.";
-    case "not_found":
-      return "the terminal no longer exists.";
-    case "not connected":
-      return "not connected to the workspace.";
-    default:
-      return code;
-  }
 }
 
 export function describe(state: WorkspaceConnectionState): string {

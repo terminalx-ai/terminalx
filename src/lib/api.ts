@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   WorkspaceRpcClient,
@@ -24,6 +24,30 @@ import type {
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
 import type { PairingConnectionMode, PairingStatus } from "@/types/pairing";
+import { assertLocal } from "@/types/target";
+
+/**
+ * Arguments that name a place on this computer, or a local session. A cloud
+ * key or root (`cloud:`…) in one of them is a bug: it would run a local
+ * command against a path that only exists on a VM (PRO-23 rule 3).
+ */
+const LOCAL_PATH_ARGS = ["cwd", "path", "root", "projectPath", "sessionId", "from", "to", "dir", "file"] as const;
+
+/** Every Tauri call made here goes through this: local paths pass unchanged, cloud ones throw. */
+function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
+  if (args && typeof args === "object" && !Array.isArray(args) && !(args instanceof ArrayBuffer) && !(args instanceof Uint8Array)) {
+    const record = args as Record<string, unknown>;
+    try {
+      for (const key of LOCAL_PATH_ARGS) {
+        const value = record[key];
+        if (typeof value === "string") assertLocal(value, `${command}.${key}`);
+      }
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+  return args === undefined ? tauriInvoke<T>(command) : tauriInvoke<T>(command, args);
+}
 
 export interface NewTab {
   harness: string;

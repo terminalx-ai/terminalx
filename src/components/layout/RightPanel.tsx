@@ -47,6 +47,8 @@ export function RightPanel({
   workspace,
   gitSource,
   fileSource,
+  repositories,
+  readOnlyReason,
 }: {
   cwd: string;
   isGit?: boolean;
@@ -69,6 +71,10 @@ export function RightPanel({
   gitSource?: GitSource;
   /** Where Files reads; the local checkout at `cwd` when absent. */
   fileSource?: FileSource;
+  /** A cloud workspace with several repositories: which one Changes, Repo and PR show. */
+  repositories?: { list: string[]; selected: string | null; onSelect: (repo: string | null) => void };
+  /** Shown above the panels when this attachment may read but not change the workspace. */
+  readOnlyReason?: string | null;
 }) {
   const prefs = usePrefs();
   const [selectedTab, setTab] = useState<PanelTab>("changes");
@@ -157,6 +163,28 @@ export function RightPanel({
           </Button>
         </WithTooltip>
       </div>
+      {repositories && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-hairline px-2 py-1">
+          <select
+            aria-label="Repository"
+            value={repositories.selected ?? ""}
+            onChange={(event) => repositories.onSelect(event.target.value || null)}
+            className="h-6 min-w-0 flex-1 rounded-md border border-hairline bg-transparent px-1 font-mono text-[11px] outline-none focus:border-ring"
+          >
+            {!repositories.selected && <option value="">Choose a repository…</option>}
+            {repositories.list.map((repo) => (
+              <option key={repo} value={repo}>
+                {repo}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      {readOnlyReason && (
+        <p className="shrink-0 border-b border-hairline px-3 py-1.5 text-[11px] text-muted-foreground" data-testid="panel-read-only">
+          {readOnlyReason}
+        </p>
+      )}
       <div className="min-h-0 flex-1">
         {isGit && (
           <>
