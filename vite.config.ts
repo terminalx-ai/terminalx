@@ -33,7 +33,7 @@ export default defineConfig(async () => ({
   },
   test: {
     environment: "jsdom",
-    include: ["src/**/*.test.{ts,tsx}", "mobile/src/**/*.test.ts", "packages/**/*.test.ts", "scripts/computer-use-*.test.mjs"],
+    include: ["src/**/*.test.{ts,tsx}", "mobile/src/**/*.test.ts", "packages/**/*.test.ts", "scripts/*.test.mjs"],
     setupFiles: ["./src/test/setup.ts"],
   },
 }));
