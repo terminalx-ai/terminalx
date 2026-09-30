@@ -21,7 +21,8 @@
     "interop:pairing": "node scripts/pairing-interop.mjs",
     "ensure:agent-browser": "node scripts/ensure-agent-browser.mjs",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev --config src-tauri/tauri.dev.conf.json"
+    "clean:build": "node scripts/clean-build.mjs",
+    "tauri:dev": "node scripts/clean-build.mjs --quiet && tauri dev --config src-tauri/tauri.dev.conf.json"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",
