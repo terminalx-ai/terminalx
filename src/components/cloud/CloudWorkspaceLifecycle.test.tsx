@@ -173,6 +173,37 @@ describe("CloudWorkspaceLifecycleDialog", () => {
     expect(screen.queryByRole("radio", { name: "Stop" })).toBeNull();
   });
 
+  it("never says a running workspace it could not reach is not running", async () => {
+    // Seen live: a ready workspace with an agent turn running, deleted from the list.
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(
+      disposition({ runtime: { reporting: true, reportedAt: 1, stale: false, activeTurns: 1, pendingApprovals: 0 }, blockers: ["active-turns"] }),
+    );
+    const { onExport } = renderDialog(item("ready"), "delete", { kind: "unreachable" });
+    await screen.findByText(/Couldn't reach the workspace to check for uncommitted and unpushed work/);
+    expect(screen.queryByText(/not running/)).toBeNull();
+    expect(screen.getByText("1 agent turn is running.")).toBeTruthy();
+    fireEvent.click(button(/Open workspace/));
+    expect(onExport).toHaveBeenCalled();
+  });
+
+  it("checks an unreachable workspace again on request", async () => {
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition());
+    const check = vi.fn<(...args: unknown[]) => Promise<RuntimeCheck>>().mockResolvedValueOnce({ kind: "unreachable" }).mockResolvedValueOnce(clean);
+    render(<CloudWorkspaceLifecycleDialog item={item("ready")} initial="archive" onClose={() => undefined} onDone={() => undefined} onExport={() => undefined} check={check} />);
+    await screen.findByText(/Couldn't reach the workspace/);
+    fireEvent.click(button(/Check again/));
+    await screen.findByText(/Everything is committed and pushed/);
+    expect(check).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(/Couldn't reach the workspace/)).toBeNull();
+  });
+
+  it("says a workspace is not running only when the server says so", async () => {
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition({ state: "suspended" }));
+    renderDialog(item("suspended"), "delete", { kind: "offline" });
+    await screen.findByText("The workspace is not running, so its uncommitted and unpushed work cannot be checked without waking it.");
+    expect(screen.queryByText(/Couldn't reach/)).toBeNull();
+  });
+
   it("refuses a permanent delete the provider connection cannot do", async () => {
     mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition({ providerCapabilities: { permanentDelete: false, releaseDisposition: "archived" } }));
     renderDialog(item("suspended"), "delete", { kind: "offline" });
@@ -203,7 +234,7 @@ describe("CloudWorkspaceLifecycleDialog", () => {
   it("an archived workspace offers only delete", async () => {
     mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition({ state: "archived" }));
     renderDialog(item("archived", { archivedAt: 1, deleteAfter: Date.now() + 5 * 86_400_000 }), "archive", { kind: "offline" });
-    await screen.findByText(/cannot be checked/);
+    await screen.findByText(/The workspace is archived, so .* cannot be checked/);
     expect(screen.queryByRole("radiogroup")).toBeNull();
     expect(screen.getByTestId("cloud-lifecycle-summary").dataset.action).toBe("delete");
   });
