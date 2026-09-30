@@ -1890,6 +1890,12 @@ mod command_tests {
             tab.permission_mode,
             crate::store::index::DEFAULT_PERMISSION_MODE
         );
+
+        // Blank is unset too; a named mode is the reader's and is kept.
+        let blank = new_tab_entry(&NewTab { harness: "codex".into(), model: String::new(), effort: None, permission_mode: Some(String::new()) });
+        assert_eq!(blank.permission_mode, "bypassPermissions");
+        let chosen = new_tab_entry(&NewTab { harness: "claude".into(), model: String::new(), effort: None, permission_mode: Some("manual".into()) });
+        assert_eq!(chosen.permission_mode, "manual");
     }
 
     #[test]

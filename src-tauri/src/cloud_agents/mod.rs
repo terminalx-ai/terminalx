@@ -125,7 +125,9 @@ impl Settings {
                 Some(_) => Err(anyhow!("{name} must be a short string")),
             }
         };
-        let settings = Self { model: text("model")?, effort: text("effort")?, mode: text("mode")? };
+        // A blank mode says nothing, like an absent one: the tab keeps its own.
+        let mode = index::requested_mode(text("mode")?);
+        let settings = Self { model: text("model")?, effort: text("effort")?, mode };
         if let Some(mode) = settings.mode.as_deref() {
             if !matches!(mode, "plan" | "manual" | "auto" | "acceptEdits" | "bypassPermissions" | "default") {
                 return Err(anyhow!("unknown permission mode {mode}"));

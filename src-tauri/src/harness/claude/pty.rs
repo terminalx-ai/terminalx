@@ -117,7 +117,14 @@ pub fn launch_command(opts: LaunchOptions<'_>) -> Option<String> {
         c.push_str(&format!(" --effort {}", quote(e)));
     }
     let mode = super::normalize_mode(opts.permission_mode);
-    c.push_str(&format!(" --permission-mode {mode}"));
+    // Bypass is said with the flag the CLI documents for it; the CLI reads it
+    // on a fresh start and on `--resume` alike (probed on 2.1.285), so a
+    // resumed or respawned tab stays in bypass.
+    if mode == "bypassPermissions" {
+        c.push_str(" --dangerously-skip-permissions");
+    } else {
+        c.push_str(&format!(" --permission-mode {mode}"));
+    }
     if let Some(t) = opts.title.filter(|t| !t.is_empty()) {
         c.push_str(&format!(" --name {}", quote(t)));
     }
@@ -325,17 +332,20 @@ mod tests {
         assert!(forked.contains("--resume 'parent' --fork-session --session-id 'new'"));
     }
 
+    /// Bypass — the default, and what an unset mode means — launches with
+    /// the CLI's documented flag and its disclaimer already accepted, on a
+    /// fresh start, a resume, and a fork alike.
     #[test]
-    fn bypass_mode_carries_its_acceptance_in_the_launch_settings_only() {
+    fn bypass_is_the_default_launch_and_survives_resume() {
         if crate::binpath::resolve("claude").is_none() {
             return;
         }
         let settings = json!({"hooks": {}});
-        let launch = |mode| {
+        let launch = |mode, resume, fork_from| {
             launch_command(LaunchOptions {
                 provider_session_id: "s",
-                resume: false,
-                fork_from: None,
+                resume,
+                fork_from,
                 model: "",
                 effort: None,
                 permission_mode: mode,
@@ -344,9 +354,22 @@ mod tests {
             })
             .unwrap()
         };
-        assert!(launch("bypass").contains(r#""skipDangerousModePermissionPrompt":true"#));
-        for mode in ["ask", "acceptEdits", "plan", "auto"] {
-            assert!(!launch(mode).contains("skipDangerousModePermissionPrompt"), "{mode}");
+        for mode in ["", crate::store::index::DEFAULT_PERMISSION_MODE, "bypass"] {
+            for (resume, fork_from) in [(false, None), (true, None), (false, Some("parent"))] {
+                let c = launch(mode, resume, fork_from);
+                assert!(c.contains(" --dangerously-skip-permissions"), "{mode:?} resume={resume}: {c}");
+                assert!(!c.contains("--permission-mode"), "{mode:?} resume={resume}: {c}");
+                assert!(c.contains(r#""skipDangerousModePermissionPrompt":true"#), "{mode:?} resume={resume}");
+            }
+        }
+        // An explicit other mode is kept, on resume too, and never bypasses.
+        for mode in ["manual", "acceptEdits", "plan", "auto"] {
+            for resume in [false, true] {
+                let c = launch(mode, resume, None);
+                assert!(c.contains(&format!("--permission-mode {mode}")), "{mode}");
+                assert!(!c.contains("dangerously-skip-permissions"), "{mode}");
+                assert!(!c.contains("skipDangerousModePermissionPrompt"), "{mode}");
+            }
         }
     }
 

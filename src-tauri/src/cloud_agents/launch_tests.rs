@@ -373,3 +373,24 @@ fn launch_json_keeps_its_on_disk_shape() {
     std::fs::write(dir.path().join(FILE), r#"{"stage":"done","launch_id":"launch_1","outcome":{"outcome":"started","sessionId":"s1","tabId":"t1","branches":[]}}"#).unwrap();
     assert_eq!(Store::open(dir.path()).get("launch_1"), Some(done));
 }
+
+/// A cloud launch that names no mode — the field absent from the claim, or
+/// blank — starts its tab in the default launch mode, bypass, exactly as a
+/// desktop session does. A named mode is kept.
+#[test]
+fn a_claimed_launch_without_a_mode_starts_in_bypass() {
+    let absent: Claim = serde_json::from_value(serde_json::json!({
+        "launchId": "launch_1", "state": "deliver", "workBranch": "terminalx/x", "agent": "claude"
+    }))
+    .unwrap();
+    assert_eq!(absent.mode, None);
+    let mut blank = claim(Vec::new());
+    blank.mode = Some("  ".into());
+    for c in [absent, blank] {
+        let tab = crate::session_ops::new_tab_entry(&new_tab(&c));
+        assert_eq!(tab.permission_mode, "bypassPermissions");
+        assert_eq!(crate::harness::claude::normalize_mode(&tab.permission_mode), "bypassPermissions");
+    }
+    let named = crate::session_ops::new_tab_entry(&new_tab(&claim(Vec::new())));
+    assert_eq!(named.permission_mode, "acceptEdits");
+}

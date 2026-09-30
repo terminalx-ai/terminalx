@@ -39,6 +39,17 @@ pub struct Repository {
     pub base_ref: Option<String>,
 }
 
+/// The tab a claimed launch starts. A launch that names no mode (or a blank
+/// one) starts in the default launch mode, bypass, like any other session.
+pub(crate) fn new_tab(claim: &Claim) -> crate::session_ops::NewTab {
+    crate::session_ops::NewTab {
+        harness: claim.agent.clone(),
+        model: claim.model.clone().unwrap_or_default(),
+        effort: claim.effort.clone(),
+        permission_mode: crate::store::index::requested_mode(claim.mode.clone()),
+    }
+}
+
 /// `launch` of a claim response.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -482,12 +493,7 @@ impl Starter for ManagerStarter {
                 issue: None,
                 automation: None,
                 cwd: (cwd != Path::new(&self.root)).then(|| cwd.to_string_lossy().into_owned()),
-                tab: Some(crate::session_ops::NewTab {
-                    harness: claim.agent.clone(),
-                    model: claim.model.clone().unwrap_or_default(),
-                    effort: claim.effort.clone(),
-                    permission_mode: claim.mode.clone(),
-                }),
+                tab: Some(new_tab(claim)),
             },
         )
         .map_err(|error| StartError::NotStarted(anyhow!("{error}")))?;

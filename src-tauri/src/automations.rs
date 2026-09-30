@@ -241,9 +241,6 @@ pub fn definition_from_input(
     if !matches!(input.harness.as_str(), "claude" | "codex") {
         bail!("Choose an offered agent.");
     }
-    if input.mode.trim().is_empty() {
-        bail!("Permission mode is required.");
-    }
     match input.workspace {
         AutomationWorkspace::NewWorktree if input.reuse_session => {
             bail!("Session reuse needs an existing session.")
@@ -291,7 +288,8 @@ pub fn definition_from_input(
         harness: input.harness,
         model: input.model,
         effort: input.effort,
-        mode: input.mode,
+        // No mode named is the default launch mode, as for every session.
+        mode: index::permission_mode_or_default(Some(&input.mode)),
         prompt: prompt.to_string(),
         workspace: input.workspace,
         session_id: input.session_id,
@@ -1804,6 +1802,10 @@ mod tests {
             let saved = definition_from_input(automation_input(None, issue_trigger), None, now).unwrap();
             assert_eq!(saved.mode, index::DEFAULT_PERMISSION_MODE);
             assert_eq!(saved.mode, "bypassPermissions");
+
+            // A blank mode is no mode, not an error.
+            let blank = definition_from_input(automation_input(Some("  "), issue_trigger), None, now).unwrap();
+            assert_eq!(blank.mode, "bypassPermissions");
         }
     }
 

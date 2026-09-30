@@ -100,7 +100,7 @@ describe("CloudCreateWorkspace", () => {
         { cloneUrl: "https://github.com/acme/app.git", ref: "feature/login" },
         { cloneUrl: "https://github.com/acme/lib.git", ref: null },
       ],
-      launch: { agent: "claude", model: "sonnet", effort: "high", mode: "acceptEdits", prompt: "Fix the login" },
+      launch: { agent: "claude", model: "sonnet", effort: "high", mode: "bypassPermissions", prompt: "Fix the login" },
     });
     expect(input.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
     expect(screen.getByText("terminalx/app-3f9a2c1b7d4e")).toBeTruthy();
