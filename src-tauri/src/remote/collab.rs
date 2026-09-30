@@ -133,6 +133,9 @@ pub enum Change {
 pub enum LeaseRefusal {
     Held(TabLease),
     Forbidden,
+    /// Fair use (review N2): this person's own idle lease on the tab lapsed
+    /// or was released moments ago; others get the first chance until then.
+    Cooldown { until: u64 },
 }
 
 /// People whose access changed in one refresh.
@@ -151,6 +154,8 @@ pub struct Collaboration {
     /// does): participate attachments then have no access, as before PRO-30.
     members: Mutex<Option<HashMap<String, Access>>>,
     leases: Mutex<HashMap<String, TabLease>>,
+    /// By tab: who last released their lease on it, and when (fair use).
+    released: Mutex<HashMap<String, (String, u64)>>,
     notes: Mutex<Notes>,
     listener: OnceLock<Box<dyn Fn(Change) + Send + Sync>>,
 }
@@ -163,7 +168,13 @@ impl Default for Collaboration {
 
 impl Collaboration {
     pub fn new() -> Self {
-        Self { members: Mutex::new(None), leases: Mutex::new(HashMap::new()), notes: Mutex::new(Notes::default()), listener: OnceLock::new() }
+        Self {
+            members: Mutex::new(None),
+            leases: Mutex::new(HashMap::new()),
+            released: Mutex::new(HashMap::new()),
+            notes: Mutex::new(Notes::default()),
+            listener: OnceLock::new(),
+        }
     }
 
     /// Keep notes under `dir` (0700) instead of only in memory.
@@ -231,13 +242,18 @@ impl Collaboration {
     /// role. A `manage` attachment (an organization admin's desktop) manages
     /// only while the list still says its person is a manager: an admin
     /// demoted since has the role the list gives them now. Before the API has
-    /// listed anyone, `manage` keeps its pre-PRO-30 meaning.
+    /// listed anyone, `manage` keeps its pre-PRO-30 meaning; after, a
+    /// `manage` attachment without a person has no access (review N1).
     pub fn access_for(&self, authority: Authority, user_id: Option<&str>) -> Access {
         match (authority, user_id) {
             (Authority::Manage, Some(user)) if self.known() => match self.access_of(Some(user)) {
                 access if access.role == Role::Manager => Access::MANAGER,
                 access => access,
             },
+            // A manage attachment saved before attachments named their person
+            // (an older device record): once the API has listed who has
+            // access, nobody can be matched to it, so it gets nothing.
+            (Authority::Manage, None) if self.known() => Access::NONE,
             (Authority::Manage, _) => Access::MANAGER,
             (Authority::Participate, user) => self.access_of(user),
         }
@@ -295,13 +311,45 @@ impl Collaboration {
         Ok(lease)
     }
 
+    /// `lease.acquire` (no input with it), with the fair-use rule (review
+    /// N2): taking the wheel only holds an idle tab for [`LEASE_IDLE_MS`].
+    /// Asking again while holding it does not extend it (only input the
+    /// agent receives does), and after one's own idle lease lapsed or was
+    /// released, the same person waits another [`LEASE_IDLE_MS`] before
+    /// taking that tab again, so a driver cannot keep every tab to
+    /// themselves by re-acquiring. A running turn is not idle.
+    pub fn acquire_idle(&self, tab_id: &str, user_id: &str, now: u64, busy: bool) -> Result<TabLease, LeaseRefusal> {
+        if !busy {
+            let leases = self.leases.lock().unwrap();
+            if let Some(lease) = leases.get(tab_id).filter(|lease| lease.holder_id == user_id) {
+                if lease.expires_at > now {
+                    return Ok(lease.clone());
+                }
+                let until = lease.expires_at + LEASE_IDLE_MS;
+                if now < until {
+                    return Err(LeaseRefusal::Cooldown { until });
+                }
+            }
+            drop(leases);
+            if let Some((holder, at)) = self.released.lock().unwrap().get(tab_id) {
+                let until = at + LEASE_IDLE_MS;
+                if holder == user_id && now < until {
+                    return Err(LeaseRefusal::Cooldown { until });
+                }
+            }
+        }
+        self.claim(tab_id, user_id, now, busy, false)
+    }
+
     /// Release the tab's lease if `user` holds it (or `force`).
     pub fn release(&self, tab_id: &str, user_id: &str, force: bool) -> bool {
         let mut leases = self.leases.lock().unwrap();
         if !leases.get(tab_id).is_some_and(|lease| force || lease.holder_id == user_id) {
             return false;
         }
-        leases.remove(tab_id);
+        if let Some(lease) = leases.remove(tab_id) {
+            self.released.lock().unwrap().insert(tab_id.to_string(), (lease.holder_id, crate::cloud_agents::now_ms()));
+        }
         drop(leases);
         self.emit(Change::Lease { tab_id: tab_id.to_string(), lease: None });
         true
@@ -562,5 +610,36 @@ mod tests {
         }
         reopened.forget_tab("t");
         assert!(reopened.notes("t", None, 10).0.is_empty());
+    }
+
+    /// Review N2: taking the wheel of idle tabs over and over is limited.
+    #[test]
+    fn an_idle_lease_is_not_kept_by_asking_again_and_lapses_to_others_first() {
+        let collab = Collaboration::new();
+        let first = collab.acquire_idle("t", "a", 1_000, false).unwrap();
+        // Asking again while holding it does not extend it.
+        assert_eq!(collab.acquire_idle("t", "a", 60_000, false).unwrap().expires_at, first.expires_at);
+        // It lapsed: for one more lease period the same person cannot take it
+        // back, and anyone else can.
+        let lapsed = first.expires_at + 1;
+        assert_eq!(collab.acquire_idle("t", "a", lapsed, false), Err(LeaseRefusal::Cooldown { until: first.expires_at + LEASE_IDLE_MS }));
+        assert_eq!(collab.acquire_idle("t", "b", lapsed, false).unwrap().holder_id, "b");
+        // After the cool-down, "a" may take a free tab again.
+        let other = collab.acquire_idle("u", "a", 1_000, false).unwrap();
+        assert!(collab.acquire_idle("u", "a", other.expires_at + LEASE_IDLE_MS, false).is_ok());
+        // A running turn is not idle: the holder keeps it while it runs.
+        assert!(collab.acquire_idle("u", "a", other.expires_at + 3 * LEASE_IDLE_MS, true).is_ok());
+    }
+
+    #[test]
+    fn releasing_and_taking_the_wheel_again_waits_one_lease_period() {
+        let collab = Collaboration::new();
+        let now = crate::cloud_agents::now_ms();
+        collab.acquire_idle("t", "a", now, false).unwrap();
+        assert!(collab.release("t", "a", false));
+        assert!(matches!(collab.acquire_idle("t", "a", now + 1, false), Err(LeaseRefusal::Cooldown { .. })));
+        assert_eq!(collab.acquire_idle("t", "b", now + 1, false).unwrap().holder_id, "b");
+        assert!(collab.release("t", "b", false));
+        assert!(collab.acquire_idle("t", "a", now + LEASE_IDLE_MS + 5_000, false).is_ok());
     }
 }

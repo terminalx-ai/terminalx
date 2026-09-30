@@ -159,7 +159,12 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
         log::error!("record applying {id}: {error:#}");
         return Receipt { outcome: "rejected".into(), category: Some("receipt-store-failed".into()), result_iv: None, result_ciphertext: None };
     }
-    let (outcome, category, extra) = apply(agents, lease, &tab.session_id, &plaintext);
+    // Model, effort and permission mode change what the agent may do on its
+    // own: only a manager or someone who may approve permissions sets them
+    // (the live `session.configure` needs manage). A driver's send still
+    // goes through, without them.
+    let may_configure = access.role == Role::Manager || access.can_approve;
+    let (outcome, category, extra) = apply(agents, lease, &tab.session_id, &plaintext, may_configure);
     // Only input that reached the agent (or its queue) claims the tab.
     if let (Some(collab), "applied", "send" | "steer") = (agents.collab(), outcome, lease.kind.as_str()) {
         let _ = collab.claim(&lease.tab_id, &lease.actor.user_id, now_ms(), busy_before, false);
@@ -187,7 +192,7 @@ fn decrypt(agents: &CloudAgents, lease: &Lease) -> Result<Value, &'static str> {
 
 type Applied = (&'static str, Option<&'static str>, Value);
 
-fn apply(agents: &CloudAgents, lease: &Lease, session_id: &str, plaintext: &Value) -> Applied {
+fn apply(agents: &CloudAgents, lease: &Lease, session_id: &str, plaintext: &Value, may_configure: bool) -> Applied {
     let tab_id = lease.tab_id.as_str();
     let ops = &agents.ops;
     let text = || -> Option<String> {
@@ -204,11 +209,20 @@ fn apply(agents: &CloudAgents, lease: &Lease, session_id: &str, plaintext: &Valu
                 Ok(settings) => settings,
                 Err(_) => return ("rejected", Some("payload-invalid"), json!({})),
             };
-            if !settings.is_empty() {
+            let settings_ignored = !settings.is_empty() && !may_configure;
+            if settings_ignored {
+                log::warn!("{} {}: settings ignored, the actor may not configure the tab", lease.kind, lease.client_command_id);
+            } else if !settings.is_empty() {
                 if let Err(error) = ops.configure(session_id, tab_id, &settings) {
                     return failed(error);
                 }
             }
+            let mark = |mut extra: Value| {
+                if settings_ignored {
+                    extra["settingsIgnored"] = json!(true);
+                }
+                extra
+            };
             let queue = lease.kind == "send" && (ops.busy(session_id, tab_id) || !agents.follow_ups.list(tab_id).is_empty());
             if queue {
                 let follow_up = FollowUp {
@@ -222,10 +236,10 @@ fn apply(agents: &CloudAgents, lease: &Lease, session_id: &str, plaintext: &Valu
                 }
                 // The turn may have ended between the check and the push.
                 agents.nudge_follow_ups(tab_id);
-                ("applied", None, json!({ "queued": true }))
+                ("applied", None, mark(json!({ "queued": true })))
             } else {
                 match ops.send(session_id, tab_id, &text) {
-                    Ok(()) => ("applied", None, json!({ "queued": false })),
+                    Ok(()) => ("applied", None, mark(json!({ "queued": false }))),
                     Err(error) => failed(error),
                 }
             }

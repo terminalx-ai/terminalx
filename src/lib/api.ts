@@ -478,7 +478,7 @@ export interface CloudWorkspace {
   /** What opening it would grant this caller (S1). */
   authority?: "manage" | "participate" | (string & {}) | null;
   /** This person's collaboration role (PRO-30, saas contract §21.2); absent from older servers. */
-  you?: { role: CloudCollaborationRole; canApprove: boolean } | null;
+  you?: { role: CloudCollaborationRole; canApprove: boolean; canManageShares?: boolean } | null;
   /** How many members it is shared with; only reported to someone with a role. */
   sharedWith?: number | null;
 }

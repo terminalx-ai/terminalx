@@ -10,7 +10,7 @@ import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { CLOUD_IMAGES_UNSUPPORTED, localSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
 import { CloudOutbox, commandError as cloudCommandError } from "@/components/cloud/CloudAgents";
 import { LeaseBar, NotesPanel, useNowUntil } from "@/components/cloud/CloudCollab";
-import { presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
+import { SETTINGS_LOCKED_REASON, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
 import { Chat } from "@/components/chat/Chat";
 import { Composer } from "@/components/chat/Composer";
@@ -270,14 +270,17 @@ export function TabView({
           onSend={send}
           onStop={stop}
           onSetModel={(m) => {
+            if (gate && !gate.mayConfigure) return;
             if (recovery) { void retry(m); return; }
             void backend.setModel(tab.id, m).then(() => backend.patchTab(tab.id, { model: m })).catch((e) => setError(local ? safeError(e) : commandError(e)));
           }}
           onSetEffort={(e) => {
+            if (gate && !gate.mayConfigure) return;
             backend.patchTab(tab.id, { effort: e });
             void backend.setEffort(tab.id, e).catch((err) => setError(local ? safeError(err) : commandError(err)));
           }}
           onSetMode={(m) => {
+            if (gate && !gate.mayConfigure) return;
             backend.patchTab(tab.id, { permissionMode: m });
             void backend.setPermissionMode(tab.id, m).catch((e) => setError(local ? safeError(e) : commandError(e)));
           }}
@@ -285,6 +288,8 @@ export function TabView({
           contextMax={transcript.contextMax ?? tab.contextMax ?? undefined}
           handoffs={handoffsFor(transcript, isGit && changes.files.length > 0)}
           disabled={!!gate?.blocked}
+          settingsLockedReason={gate && !gate.mayConfigure ? SETTINGS_LOCKED_REASON : null}
+          canStop={!gate || gate.mayStop}
           disabledReason={gate?.blocked ?? error ?? (viewError ? safeError(viewError) : null) ?? backend.readOnlyReason}
           autoFocus={active}
         />

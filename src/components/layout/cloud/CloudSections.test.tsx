@@ -415,6 +415,25 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
     const menu = await screen.findByRole("menu");
     expect(within(menu).getAllByRole("menuitem")[0]!.textContent?.trim()).toBe("Share…2");
     cleanup();
+    // The creator (a driver who manages the shares) reads Share… too; a viewer reads Sharing….
+    catalog.resetCloudCatalog();
+    await catalog.ingestCloudList(
+      {
+        workspaces: [
+          item("fix-login", { repositories, lastActivityAt: 50, you: { role: "driver", canApprove: true, canManageShares: true } }),
+          item("perf-sweep", { repositories, lastActivityAt: 40, you: { role: "viewer", canApprove: false, canManageShares: false } }),
+        ],
+      },
+      ORG,
+    );
+    mount();
+    openMenu("fix-login");
+    expect(within(await screen.findByRole("menu")).getAllByRole("menuitem")[0]!.textContent?.trim()).toBe("Share…");
+    cleanup();
+    mount();
+    openMenu("perf-sweep");
+    expect(within(await screen.findByRole("menu")).getAllByRole("menuitem")[0]!.textContent?.trim()).toBe("Sharing…");
+    cleanup();
     catalog.resetCloudCatalog();
     await catalog.ingestCloudList(list, ORG);
     mount();

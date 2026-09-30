@@ -50,6 +50,8 @@ export function Composer({
   handoffs,
   disabledReason,
   disabled = false,
+  settingsLockedReason = null,
+  canStop = true,
   autoFocus,
 }: {
   tab: TabEntry;
@@ -69,6 +71,10 @@ export function Composer({
   disabledReason?: string | null;
   /** Nothing can be typed or sent (shown with `disabledReason`); stopping stays with the owner. */
   disabled?: boolean;
+  /** Set when this reader may not change the model, effort or mode (a shared cloud workspace); the pickers are disabled with it. */
+  settingsLockedReason?: string | null;
+  /** False hides Stop (someone else drives this tab, or this reader may only watch). */
+  canStop?: boolean;
   autoFocus?: boolean;
 }) {
   const models = useModels(tab.harness);
@@ -351,7 +357,7 @@ export function Composer({
 
           <DropdownMenu {...modelMenu.root}>
             <DropdownMenuTrigger asChild {...modelMenu.trigger}>
-              <Button variant="ghost" size="sm" className="gap-1.5 px-2 text-muted-foreground">
+              <Button variant="ghost" size="sm" className="gap-1.5 px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? undefined} aria-label={settingsLockedReason ? `Model: ${settingsLockedReason}` : undefined}>
                 <AgentMark id={tab.harness} className="size-3.5" />
                 <span className="text-foreground">{model?.label ?? tab.model ?? "Model"}</span>
                 {tab.effort && model?.efforts.length ? <span className="text-faint">{EFFORT_LABEL[tab.effort] ?? tab.effort}</span> : null}
@@ -389,7 +395,7 @@ export function Composer({
 
           <DropdownMenu {...modeMenu.root}>
             <DropdownMenuTrigger asChild {...modeMenu.trigger}>
-              <Button variant="ghost" size="sm" className="gap-1.5 px-2 text-muted-foreground">
+              <Button variant="ghost" size="sm" className="gap-1.5 px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? undefined} aria-label={settingsLockedReason ? `Permission mode: ${settingsLockedReason}` : undefined}>
                 <span
                   className={cn(
                     "size-2 rounded-full",
@@ -433,7 +439,7 @@ export function Composer({
                 </div>
               </WithTooltip>
             )}
-            {busy ? (
+            {busy && canStop ? (
               <WithTooltip label="Stop" keys={["Esc"]}>
                 <Button size="icon-sm" variant="secondary" aria-label="Stop" onClick={onStop}>
                   <Square className="size-3 fill-current" />

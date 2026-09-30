@@ -134,6 +134,8 @@ export function dropCollabIn(orgId: string) {
 export const VIEWER_REASON = "You can view this workspace; ask an admin for driver access";
 /** What a composer says to a member the workspace is not shared with. */
 export const NOT_SHARED_REASON = "This workspace has not been shared with you. Ask an organization admin or its creator to share it.";
+/** Shown on the model, effort and mode pickers to someone who may not change them (review M1). */
+export const SETTINGS_LOCKED_REASON = "Only a workspace admin or someone who can approve permissions changes the model, effort or permission mode";
 /** Shown on permission requests to someone who may not answer them. */
 export const APPROVE_BLOCKED_REASON = "Waiting for someone who can approve";
 
@@ -166,6 +168,19 @@ export interface TabGate {
   mayStop: boolean;
   /** Why this person may not answer the tab's permission requests, or null. */
   approveBlocked: string | null;
+  /** May change the tab's model, effort and permission mode (a manager or an approver). */
+  mayConfigure: boolean;
+}
+
+/**
+ * Model, effort and permission mode decide what the agent may do without
+ * asking (bypassPermissions): only a manager or an approver changes them;
+ * the runtime ignores them from anyone else (review M1). Sharing unknown:
+ * the attachment rules apply as before.
+ */
+export function mayConfigure(you: WorkspaceYou | null | undefined): boolean {
+  if (!sharingKnown(you)) return true;
+  return you.role === "manager" || (canDrive(you) && you.canApprove);
 }
 
 /**
@@ -192,7 +207,7 @@ export function tabGate(
         : `${nameOf(liveLease!.holderId)} is driving this tab. You can send once they release it.`;
   const mayStop = !you || you.role === "manager" || (!!liveLease && liveLease.holderId === you.userId) || (!liveLease && canDrive(you));
   const approveBlocked = you && !canApprove(you) ? APPROVE_BLOCKED_REASON : null;
-  return { liveLease, blocked, mayStop, approveBlocked };
+  return { liveLease, blocked, mayStop, approveBlocked, mayConfigure: mayConfigure(you) };
 }
 
 /** Who this connection is: the runtime's latest word, else its `rpc.hello`. */

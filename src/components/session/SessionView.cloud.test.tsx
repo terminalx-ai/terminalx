@@ -50,13 +50,16 @@ vi.mock("@/components/chat/Composer", () => ({
     onSetEffort: (e: string | null) => void;
     onSetMode: (m: string) => void;
     disabledReason?: string | null;
+    settingsLockedReason?: string | null;
+    canStop?: boolean;
     cwd?: string;
   }) => (
     <div data-testid="composer" data-cwd={props.cwd ?? ""}>
       {props.disabledReason && <p role="note">{props.disabledReason}</p>}
+      {props.settingsLockedReason && <p data-testid="settings-locked">{props.settingsLockedReason}</p>}
       <textarea aria-label="Prompt" value={props.draft} onChange={(e) => props.onDraftChange(e.target.value)} />
       <button onClick={() => void Promise.resolve(props.onSend(props.draft, [])).then(() => props.onDraftChange(""), () => undefined)}>{props.busy ? "Queue" : "Send"}</button>
-      {props.busy && <button onClick={props.onStop}>Stop</button>}
+      {props.busy && props.canStop !== false && <button onClick={props.onStop}>Stop</button>}
       <button onClick={() => props.onSetModel("opus")}>Use opus</button>
       <button onClick={() => props.onSetEffort("high")}>Effort high</button>
       <button onClick={() => props.onSetMode("plan")}>Plan mode</button>
@@ -712,5 +715,57 @@ describe("a shared cloud workspace in SessionView (PRO-30)", () => {
     await act(async () => undefined);
     expect(enqueued).toEqual([]);
     expect(activate).not.toHaveBeenCalled();
+  });
+
+  it("locks the model, effort and mode for a driver who may not approve (review M1)", async () => {
+    names();
+    setCatalog(shared("driver"));
+    runtime.collab = { you: ME, participants: [], leases: [] };
+    await openShared(ME);
+    expect((await screen.findByTestId("settings-locked")).textContent).toMatch(/^Only a workspace admin or someone who can approve/);
+    fireEvent.click(screen.getByRole("button", { name: "Use opus" }));
+    fireEvent.click(screen.getByRole("button", { name: "Plan mode" }));
+    await act(async () => undefined);
+    expect(runtime.methods("session.configure")).toEqual([]);
+    expect(enqueued).toEqual([]);
+  });
+
+  it("hides Stop from a driver while someone else drives the running turn", async () => {
+    names();
+    setCatalog(shared("driver", true));
+    runtime.tabs = [tabInfo({ status: "in_progress" })];
+    runtime.collab = { you: { ...ME, canApprove: true }, participants: [], leases: [{ tabId: "t-1", holderId: "u-alice", acquiredAt: 1, expiresAt: Date.now() + 60_000 }] };
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connectShared({ ...ME, canApprove: true }));
+    await screen.findByText("Fix login redirect");
+    await waitFor(() => expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("Driving: Alice"));
+    expect(within(composer()).queryByRole("button", { name: "Stop" })).toBeNull();
+    // An approving driver may still change the settings.
+    expect(screen.queryByTestId("settings-locked")).toBeNull();
+  });
+
+  it("gives a demoted admin's manage attachment no writes, terminals or new tabs", async () => {
+    names();
+    setCatalog(shared("viewer"));
+    runtime.collab = { you: { ...ME, role: "viewer" }, participants: [], leases: [] };
+    runtime.tabs = [tabInfo()];
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connectShared({ ...ME, role: "viewer" }, "manage"));
+    await screen.findByText("Fix login redirect");
+    expect(screen.getByTestId("cloud-access-chip").textContent).toBe("View only");
+    // Git and files: read-only with the reason.
+    expect((await screen.findByTestId("panel-read-only")).textContent).toMatch(/View only|driver access/);
+    await waitFor(() => expect(runtime.methods("pty.list").length).toBeGreaterThan(0));
+    act(() => selectSessionTab(KEY, { kind: "terminal", id: `cloud:cloud:${ORG}:${WS}:p1` }));
+    await screen.findByTestId("xterm");
+    expect(screen.queryByRole("button", { name: "Take control" })).toBeNull();
+    // The New tab menu stays, with every item disabled and the reason.
+    mouseClick(screen.getByRole("button", { name: "New tab" }));
+    const menu = await screen.findByRole("menu");
+    const items = within(menu).getAllByRole("menuitem");
+    expect(items.length).toBeGreaterThan(0);
+    expect(items.every((item) => item.getAttribute("aria-disabled") === "true" || item.hasAttribute("data-disabled"))).toBe(true);
   });
 });

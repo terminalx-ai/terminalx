@@ -16,7 +16,7 @@ import {
   type CloudAgentTab,
 } from "@/lib/cloudAgents";
 import { refreshCloudCatalog, repositoryOf, useCloudCatalog } from "@/lib/cloudCatalog";
-import { canDrive, knownYou, listedYou, notShared, startCollab, useCollab } from "@/lib/cloudCollab";
+import { canDrive, knownYou, listedYou, notShared, sharingKnown, startCollab, useCollab } from "@/lib/cloudCollab";
 import { createCloudTerminal, detachCloudTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
 import { cloudGitSource, desktopGitIdentity, type GitSource } from "@/lib/gitSource";
 import { clearCloudWake, cloudAsleep, cloudSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
@@ -298,7 +298,9 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   }, [generation, client]);
 
   const authority = connected ? state.authority : (item?.workspace.authority ?? null);
-  const manage = connected && state.authority === "manage";
+  // A manage attachment manages only while this person is still a manager
+  // (a demoted admin's may linger until the runtime closes it).
+  const manage = connected && state.authority === "manage" && (!sharingKnown(you) || you.role === "manager");
 
   // Git: the workspace's repositories, one at a time.
   const [repositories, setRepositories] = useState<RemoteRepository[] | null>(null);
@@ -446,7 +448,8 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     terminals,
     openTerminal,
     addAgentTab,
-    canAddTabs: connected && !!client?.hasCapability("session/2"),
+    // session.addTab is a manager's (the runtime refuses anyone else).
+    canAddTabs: manage && !!client?.hasCapability("session/2"),
     agents: agentList,
     client,
     terminalBase,

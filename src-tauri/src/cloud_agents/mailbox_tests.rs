@@ -560,3 +560,38 @@ fn an_idle_lease_that_expired_does_not_block_the_next_driver() {
     let alice_stop = as_actor(lease(&h.agents, "c3", "stop", json!({ "v": 1 })), "alice", "driver", false);
     assert_eq!(handle(&h.agents, &alice_stop).category.as_deref(), Some("lease-held"));
 }
+
+/// Review M1: model, effort and permission mode reach the tab only from a
+/// manager or an approver; a plain driver's send is applied without them, so
+/// nobody without approval rights can switch a tab to bypassPermissions
+/// through the mailbox while the workspace sleeps.
+#[test]
+fn a_drivers_queued_settings_are_not_applied_but_an_approvers_are() {
+    let h = harness();
+    let collab = shared(
+        &h,
+        json!([
+            { "userId": "alice", "role": "driver", "canApprove": false },
+            { "userId": "bob", "role": "driver", "canApprove": true },
+        ]),
+    );
+    let body = json!({ "v": 1, "text": "go", "mode": "bypassPermissions", "model": "opus", "effort": "max" });
+    let alice = as_actor(lease(&h.agents, "c1", "send", body.clone()), "alice", "driver", false);
+    let receipt = handle(&h.agents, &alice);
+    assert_eq!(receipt.outcome, "applied", "the message itself still goes through");
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["go"]);
+    assert!(h.ops.settings.lock().unwrap().is_empty(), "no mode, model or effort from a plain driver");
+    assert_eq!(open_receipt(&h.agents, &alice, &receipt)["settingsIgnored"], true);
+    let steer = as_actor(lease(&h.agents, "c2", "steer", json!({ "v": 1, "text": "now", "mode": "bypassPermissions" })), "alice", "driver", false);
+    assert_eq!(handle(&h.agents, &steer).outcome, "applied");
+    assert!(h.ops.settings.lock().unwrap().is_empty());
+
+    // Bob may approve permissions: what he sets applies.
+    *h.ops.busy.lock().unwrap() = false;
+    assert!(collab.release("tab-1", "alice", false));
+    let bob = as_actor(lease(&h.agents, "c3", "send", body), "bob", "driver", true);
+    let receipt = handle(&h.agents, &bob);
+    assert_eq!(receipt.outcome, "applied");
+    assert_eq!(h.ops.settings.lock().unwrap()[0].mode.as_deref(), Some("bypassPermissions"));
+    assert!(open_receipt(&h.agents, &bob, &receipt).get("settingsIgnored").is_none());
+}

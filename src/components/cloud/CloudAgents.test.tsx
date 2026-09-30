@@ -19,12 +19,13 @@ vi.mock("@/lib/models", () => ({
 }));
 // The composer's own behaviour is covered by Composer.test; here it only needs to send and stop.
 vi.mock("@/components/chat/Composer", () => ({
-  Composer: (props: { draft: string; busy: boolean; onDraftChange: (v: string) => void; onSend: (t: string, i: unknown[]) => Promise<void>; onStop: () => void; disabledReason?: string | null; disabled?: boolean }) => (
+  Composer: (props: { draft: string; busy: boolean; onDraftChange: (v: string) => void; onSend: (t: string, i: unknown[]) => Promise<void>; onStop: () => void; onSetMode: (m: string) => void; disabledReason?: string | null; disabled?: boolean; settingsLockedReason?: string | null; canStop?: boolean }) => (
     <div>
       {props.disabledReason && <p data-testid="composer-reason">{props.disabledReason}</p>}
+      <button disabled={!!props.settingsLockedReason} title={props.settingsLockedReason ?? undefined} onClick={() => props.onSetMode("bypassPermissions")}>Bypass mode</button>
       <textarea aria-label="Prompt" disabled={props.disabled} value={props.draft} onChange={(e) => props.onDraftChange(e.target.value)} />
       <button disabled={props.disabled} onClick={() => void props.onSend(props.draft, []).then(() => props.onDraftChange(""), () => undefined)}>{props.busy ? "Queue" : "Send"}</button>
-      {props.busy && <button onClick={props.onStop}>Stop</button>}
+      {props.busy && props.canStop !== false && <button onClick={props.onStop}>Stop</button>}
     </div>
   ),
 }));
@@ -392,6 +393,19 @@ describe("shared cloud workspace agent tabs (PRO-30)", () => {
     return state;
   }
   const notify = (event: string, params: Record<string, unknown>) => act(() => notificationListeners.forEach((listener) => listener({ event, params })));
+
+  it("disables the mode, model and effort pickers for a driver who may not approve (review M1)", async () => {
+    cache["t-1"] = { tab: tabInfo(), events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    liveTabs = [tabInfo()];
+    render(view(share(me("driver"))));
+    const bypass = (await screen.findByRole("button", { name: "Bypass mode" })) as HTMLButtonElement;
+    await waitFor(() => expect(bypass.disabled).toBe(true));
+    expect(bypass.title).toMatch(/^Only a workspace admin or someone who can approve/);
+    cleanup();
+    resetCollab();
+    render(view(share(me("driver", true))));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Bypass mode" }) as HTMLButtonElement).disabled).toBe(false));
+  });
 
   it("keeps a viewer's controls disabled while the workspace sleeps or reconnects", async () => {
     cache["t-1"] = { tab: tabInfo(), events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };

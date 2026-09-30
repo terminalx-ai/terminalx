@@ -508,7 +508,18 @@ impl WorkspaceRpc {
             return;
         }
         for peer in &self.live_peers() {
-            let Some(user) = peer.user_id.as_deref() else { continue };
+            let Some(user) = peer.user_id.as_deref() else {
+                // A `manage` attachment that names no person (saved before
+                // attachments carried one) cannot be matched to the list, so
+                // it may be someone who lost access: it is closed (review N1).
+                if peer.authority == Authority::Manage {
+                    log::info!("closing a manage connection that names no person now that the member list is known");
+                    peer.closed.notify_one();
+                } else {
+                    self.drop_peer_subscriptions(peer);
+                }
+                continue;
+            };
             if diff.lost.iter().any(|lost| lost == user) {
                 // Whatever the attachment: a demoted admin's `manage`
                 // connection goes too.
@@ -796,13 +807,19 @@ impl WorkspaceRpc {
             }
             "keys.get" => {
                 let agents = self.agents()?;
-                let handout = agents.keys.handout(crate::cloud_agents::now_ms());
-                // Who holds the current key, durably: a person removed while
-                // the runtime was down still triggers a rotation (§21.5).
-                if let Some(user) = peer.user_id.as_deref() {
-                    agents.note_key_holder(user);
-                }
-                Ok(handout)
+                // Authorized before this blocking task ran; access may have
+                // changed since. Checked again under the rotation lock, so a
+                // rotation for a revocation cannot slip between the check
+                // and the handout (review N3).
+                let spec = protocol::find_method("keys.get").expect("keys.get is a method");
+                agents
+                    .hand_out_key(peer.user_id.as_deref(), || self.key_access(peer, spec))
+                    .map_err(|refusal| match refusal {
+                        crate::cloud_agents::HandoutRefusal::Forbidden(error) => error,
+                        crate::cloud_agents::HandoutRefusal::HolderNotRecorded => {
+                            RpcError::new("unavailable", "the key handout could not be recorded; try again")
+                        }
+                    })
             }
             "collab.state" => self.collab_state(peer),
             "presence.update" => self.presence_update(peer, params),
@@ -817,6 +834,19 @@ impl WorkspaceRpc {
             }
             other => Err(RpcError::new("method_not_found", format!("{other} is not a workspace method"))),
         }
+    }
+
+    /// Whether `peer` may be handed the content key now: the same checks as
+    /// the dispatcher's, read again.
+    fn key_access(&self, peer: &Peer, spec: &protocol::Method) -> Result<(), RpcError> {
+        let authority = self.authority(peer);
+        if authority < spec.authority {
+            return Err(RpcError::forbidden("keys.get needs the workspace to be shared with you"));
+        }
+        if authority == Authority::Participate {
+            self.authorize_participant(peer, spec)?;
+        }
+        Ok(())
     }
 
     /// End every stream a connection opened, keeping the connection.
@@ -954,7 +984,13 @@ impl WorkspaceRpc {
             return Err(lease_refusal(LeaseRefusal::Forbidden));
         }
         let busy = agents_busy(&self.agents, &session_id, &tab_id);
-        let lease = self.collab.claim(&tab_id, user, crate::cloud_agents::now_ms(), busy, take_over).map_err(lease_refusal)?;
+        let now = crate::cloud_agents::now_ms();
+        let lease = if take_over {
+            self.collab.claim(&tab_id, user, now, busy, true)
+        } else {
+            self.collab.acquire_idle(&tab_id, user, now, busy)
+        }
+        .map_err(lease_refusal)?;
         Ok(json!({ "lease": lease }))
     }
 
@@ -2026,6 +2062,8 @@ fn lease_refusal(refusal: LeaseRefusal) -> RpcError {
             RpcError::new("lease_held", "someone else is driving this tab").with_data(json!({ "lease": lease }))
         }
         LeaseRefusal::Forbidden => RpcError::forbidden("driving needs driver access to the workspace"),
+        LeaseRefusal::Cooldown { until } => RpcError::new("lease_cooldown", "you drove this tab moments ago; others get the first chance")
+            .with_data(json!({ "retryAt": until })),
     }
 }
 

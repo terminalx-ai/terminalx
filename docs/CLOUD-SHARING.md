@@ -105,6 +105,18 @@ role changed).
 - **Terminals.** Unchanged ownership (PRO-26): one controller per terminal.
   Drivers may now take control too. Terminals and `pty.control`
   notifications carry `controllerId`, so clients show who is typing.
+- **Taking the wheel (fair use).** `lease.acquire` without input holds an
+  idle tab for two minutes. Asking again while holding it does not extend it
+  (only input the agent receives does), and after one's own idle lease lapses
+  or is released, the same person waits another two minutes before taking
+  that tab again (`lease_cooldown` with `retryAt`), so one driver cannot keep
+  every tab to themselves by re-acquiring. A running turn is not idle.
+- **Settings.** Model, effort and permission mode change what the agent may do
+  on its own (`bypassPermissions`). A queued `send`/`steer` applies them only
+  from a manager or someone with `canApprove`; from a plain driver the message
+  is applied without them and the receipt says `settingsIgnored: true`. The
+  live `session.configure` needs manage. The desktop disables the pickers,
+  with the reason, for anyone else.
 - **Permission decisions** are not lease-bound; they need `canApprove`.
 
 ### Revocation
@@ -126,6 +138,17 @@ and re-applies the list:
    current key is recorded durably (`<data dir>/cloud-agent/key-holders.json`),
    so a person removed while the runtime was suspended also causes a rotation
    on the first list after it wakes.
+
+A `manage` attachment that names no person (a device saved before
+attachments carried one) cannot be matched to the list: once the runtime has
+one, it has no access and its connections are closed, and it is never a key
+holder. The API's migration 0082 also revokes live `manage` attachments of
+people who are not owners or admins.
+
+`keys.get` is authorized when the call arrives and again inside its handout,
+under the same lock as rotations, so a revocation's rotation cannot slip
+between the check and the handout; if the holder cannot be recorded, no key is
+handed out (`unavailable`).
 
 Live calls check the current list on every call, so a downgraded driver's next
 terminal write is refused even before step 2 runs. On the server, queued
@@ -283,6 +306,13 @@ organization is live in the sidebar. Sharing follows them there:
   same controls, so a sleeping workspace never shows a viewer an open
   composer.
 * **Terminals.** Drivers get "Take control" and see who is typing.
+* **What each person is offered.** Stop is hidden unless this person may stop
+  (the lease holder or a manager); the model, effort and mode pickers are
+  disabled with the reason for anyone who is neither a manager nor an
+  approver; a `manage` attachment whose person is no longer a manager (a
+  demoted admin) gets no terminal control, Git or file writes, or new tabs;
+  session row menus (rename, pin, archive, delete) show only to managers; the
+  workspace's creator reads "Share…", like a manager.
 * **Leaving an organization** drops its workspaces' presence, notes and
   leases with the rest of its cloud state.
 

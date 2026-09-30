@@ -404,6 +404,9 @@ pub struct CloudWorkspace {
 pub struct ListYou {
     pub role: CollaborationRole,
     pub can_approve: bool,
+    /// A manager or the workspace's creator; false from a server that does not say.
+    #[serde(default)]
+    pub can_manage_shares: bool,
 }
 
 fn lenient_list_you<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<ListYou>, D::Error> {
@@ -3064,10 +3067,13 @@ mod tests {
         workspace["you"] = json!({ "role": "driver", "canApprove": true });
         workspace["sharedWith"] = json!(3);
         let parsed: CloudWorkspace = serde_json::from_value(workspace.clone()).unwrap();
-        assert_eq!(parsed.you, Some(ListYou { role: CollaborationRole::Driver, can_approve: true }));
+        assert_eq!(parsed.you, Some(ListYou { role: CollaborationRole::Driver, can_approve: true, can_manage_shares: false }));
         assert_eq!(parsed.shared_with, Some(3));
         let value = serde_json::to_value(&parsed).unwrap();
-        assert_eq!((value["you"].clone(), value["sharedWith"].clone()), (json!({ "role": "driver", "canApprove": true }), json!(3)));
+        assert_eq!((value["you"].clone(), value["sharedWith"].clone()), (json!({ "role": "driver", "canApprove": true, "canManageShares": false }), json!(3)));
+        workspace["you"] = json!({ "role": "driver", "canApprove": true, "canManageShares": true });
+        let creator: CloudWorkspace = serde_json::from_value(workspace.clone()).unwrap();
+        assert!(creator.you.unwrap().can_manage_shares);
         // A role this build does not know, or a malformed count, drops the field, not the list.
         workspace["you"] = json!({ "role": "owner-of-everything", "canApprove": true });
         workspace["sharedWith"] = json!(-1);

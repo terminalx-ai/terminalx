@@ -618,10 +618,11 @@ function WorkspaceGroupNode({ node, expanded: projectExpanded, onLifecycle }: { 
 /** A workspace's sessions, straight under the project (or under its group row). */
 function WorkspaceSessions({ node, shown, showLocation }: { node: CloudWorkspaceNode; shown: boolean; showLocation: boolean }) {
   const store = useSessionStore();
-  const { sessions, capabilities, known } = useCloudWorkspaceSessions(node, { load: shown, showArchived: store.showArchived, selectedKey: store.selectedSessionId });
+  const { sessions, capabilities, manage: manages, known } = useCloudWorkspaceSessions(node, { load: shown, showArchived: store.showArchived, selectedKey: store.selectedSessionId });
   const activity = useWorkspaceActivity(node, sessions, sessions.every((row) => row.source !== "live"));
   const card = workspaceCard(node.item, activity);
-  const manage = !!capabilities?.includes("session/2");
+  // Renaming, pinning, archiving and deleting sessions is a manager's (session/2 refuses anyone else).
+  const manage = manages && !!capabilities?.includes("session/2");
   const { state } = node.item.workspace;
   if (!sessions.length) {
     const openable = (state === "ready" || state === "suspended") && activity.tone !== "changing" && activity.tone !== "attention";

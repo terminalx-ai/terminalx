@@ -228,3 +228,34 @@ describe("composer pickers", () => {
     }
   });
 });
+
+describe("a shared cloud tab's limits (PRO-30 review)", () => {
+  it("disables the model and mode pickers with the reason, and hides Stop when this reader may not stop", () => {
+    const onSetMode = vi.fn();
+    render(
+      <Composer
+        tab={tab}
+        busy
+        draft=""
+        onDraftChange={vi.fn()}
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        onSetModel={vi.fn()}
+        onSetEffort={vi.fn()}
+        onSetMode={onSetMode}
+        settingsLockedReason="Only a workspace admin or someone who can approve permissions changes the model, effort or permission mode"
+        canStop={false}
+      />,
+    );
+    const model = screen.getByRole("button", { name: /^Model: Only a workspace admin/ }) as HTMLButtonElement;
+    const mode = screen.getByRole("button", { name: /^Permission mode: Only a workspace admin/ }) as HTMLButtonElement;
+    expect(model.disabled && mode.disabled).toBe(true);
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  });
+
+  it("keeps the pickers and Stop by default", () => {
+    render(<Composer tab={tab} busy draft="" onDraftChange={vi.fn()} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Model: / })).toBeNull();
+  });
+});

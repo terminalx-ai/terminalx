@@ -886,6 +886,50 @@ async fn a_demoted_admins_manage_connection_loses_management_and_is_closed() {
     assert_eq!(code(call(&f.rpc, &creator, "pty.create", json!({ "clientRequestId": "request-demoted-3" })).await), "forbidden");
 }
 
+/// Review N1: a manage attachment saved before attachments named their
+/// person cannot be matched to the member list, so once there is one it has
+/// no access, is closed, and never becomes a key holder.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manage_attachment_that_names_no_person_loses_everything_once_members_are_listed() {
+    let f = fixture();
+    let agents = with_tab(&f);
+    let (legacy, _events) = Peer::for_user("d-legacy".into(), Authority::Manage, None);
+    let hello = call(&f.rpc, &legacy, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ALL })).await.unwrap();
+    // Before any list it keeps its pre-PRO-30 meaning.
+    assert_eq!(hello["authority"], "manage");
+    f.rpc.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }])));
+    tokio::time::timeout(Duration::from_secs(5), legacy.closed()).await.expect("the unnamed manage connection is closed");
+    assert_eq!(code(call(&f.rpc, &legacy, "keys.get", json!({})).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &legacy, "pty.create", json!({ "clientRequestId": "request-legacy-1" })).await), "forbidden");
+    assert!(agents.key_holders().is_empty());
+    // A new connection of the same kind gets nothing either.
+    let (again, _events) = Peer::for_user("d-legacy-2".into(), Authority::Manage, None);
+    let hello = call(&f.rpc, &again, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ALL })).await.unwrap();
+    assert_eq!((hello["authority"].as_str(), hello["you"]["role"].as_str()), (Some("participate"), Some("none")));
+}
+
+/// Review N3: the key is handed out only after the holder is recorded, and
+/// only if access still holds when the handout runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_key_is_handed_out_unless_the_holder_is_recorded_and_still_allowed() {
+    let f = fixture();
+    let agents = with_tab(&f);
+    f.rpc.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }, { "userId": "bob", "role": "viewer" }])));
+    let (bob, _events, _) = person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
+    // The record cannot be written: no key.
+    let holders = f._dir.path().join("agents").join("key-holders.json");
+    std::fs::create_dir_all(&holders).unwrap();
+    assert_eq!(code(call(&f.rpc, &bob, "keys.get", json!({})).await), "unavailable");
+    std::fs::remove_dir_all(&holders).unwrap();
+    let handed = call(&f.rpc, &bob, "keys.get", json!({})).await.unwrap();
+    assert!(handed["currentKeyId"].is_string());
+    assert_eq!(agents.key_holders(), vec!["bob".to_string()]);
+    // Access re-checked inside the handout: refused, nothing recorded.
+    let refused = agents.hand_out_key(Some("carol"), || Err::<(), _>("revoked"));
+    assert!(matches!(refused, Err(crate::cloud_agents::HandoutRefusal::Forbidden("revoked"))));
+    assert_eq!(agents.key_holders(), vec!["bob".to_string()]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_first_member_list_stops_streams_of_people_without_access() {
     let f = fixture();

@@ -195,7 +195,14 @@ export function LeaseBar({
       await action();
     } catch (e) {
       const held = leaseHeldBy(e);
-      setError(held ? `${nameOf(held.holderId)} is driving this tab.` : `Could not change who drives this tab (${codeOf(e)}).`);
+      const code = codeOf(e);
+      setError(
+        held
+          ? `${nameOf(held.holderId)} is driving this tab.`
+          : code === "lease_cooldown"
+            ? "You drove this tab moments ago; others get the first chance. Try again in two minutes."
+            : `Could not change who drives this tab (${code}).`,
+      );
     } finally {
       setBusy(false);
     }

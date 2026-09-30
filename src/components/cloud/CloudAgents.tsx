@@ -38,7 +38,7 @@ import { TERMINAL_OUTBOX_STATES, type CloudAgentScope, type OutboxEntry, type Wa
 import type { ImageInput } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
 import { cn } from "@/lib/cn";
-import { effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
+import { SETTINGS_LOCKED_REASON, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
 import { LeaseBar, NotesPanel, NotSharedNotice, useNowUntil } from "./CloudCollab";
 
@@ -74,11 +74,12 @@ export function CloudAgentsView({
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const connected = state.state === "connected";
-  const manage = connected && state.authority === "manage";
   const generation = connected ? `${state.runtimeGeneration}:${state.runtimeEpoch ?? ""}` : null;
   const key = collabKey ?? `cloud:${scope.organizationId}:${scope.workspaceId}`;
   const collab = useCollab(key);
   const you = effectiveYou(state, collab);
+  // New tabs are a manager's; a demoted admin's manage attachment is not.
+  const manage = connected && state.authority === "manage" && (!collab.available || !sharingKnown(you) || you.role === "manager");
   const hidden = notShared(state, you);
 
   useEffect(() => {
@@ -412,7 +413,7 @@ function CloudAgentPane({
   const lease = tab.tabId in collab.leases ? (collab.leases[tab.tabId] ?? null) : (info.lease ?? null);
   const now = useNowUntil(lease?.expiresAt);
   const turnRunning = (info.status === "in_progress" || info.status === "waiting") && info.process === "running";
-  const { blocked, mayStop, approveBlocked } = tabGate(you, lease, now, turnRunning, nameOf);
+  const { blocked, mayStop, approveBlocked, mayConfigure } = tabGate(you, lease, now, turnRunning, nameOf);
   // Presence, the lease bar and notes need the live runtime; `you` alone may
   // be the last known access of a sleeping workspace.
   const collabLive = connected && collab.available && !!you;
@@ -516,6 +517,7 @@ function CloudAgentPane({
   };
 
   const configure = (patch: { model?: string; effort?: string | null; mode?: string }) => {
+    if (!mayConfigure) return;
     setError(null);
     void configureCloudAgentTab(scope, tab.tabId, patch, connected ? client : null).catch((e: unknown) => setError(errorText(e)));
   };
@@ -604,6 +606,8 @@ function CloudAgentPane({
                   onSetEffort={(effort) => configure({ effort })}
                   onSetMode={(mode) => configure({ mode })}
                   disabled={!!blocked}
+                  settingsLockedReason={mayConfigure ? null : SETTINGS_LOCKED_REASON}
+                  canStop={mayStop}
                   disabledReason={blocked ?? error}
                 />
                 {blocked && error && <p className="mx-auto w-full max-w-3xl px-4 pb-2 text-xs text-destructive">{error}</p>}

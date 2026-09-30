@@ -126,6 +126,15 @@ pub struct SessionSummary {
     pub branch: Option<String>,
 }
 
+/// Why `keys.get` handed nothing out.
+#[derive(Debug)]
+pub enum HandoutRefusal<E> {
+    /// The person may not have the key (now).
+    Forbidden(E),
+    /// Their handout could not be recorded durably.
+    HolderNotRecorded,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Settings {
     pub model: Option<String>,
@@ -334,6 +343,8 @@ pub struct CloudAgents {
     collab: OnceLock<Arc<Collaboration>>,
     dir: PathBuf,
     holders_lock: Mutex<()>,
+    /// Held while the content key rotates or is handed out.
+    rotation_lock: Mutex<()>,
 }
 
 /// Who was handed the current workspace content key.
@@ -379,6 +390,7 @@ impl CloudAgents {
             collab: OnceLock::new(),
             dir: dir.to_path_buf(),
             holders_lock: Mutex::new(()),
+            rotation_lock: Mutex::new(()),
         }))
     }
 
@@ -393,29 +405,45 @@ impl CloudAgents {
         self.collab.get()
     }
 
-    /// Record that `user` was handed the current workspace content key
-    /// (`keys.get`), durably in `key-holders.json`. A new key starts a new
-    /// record.
-    pub fn note_key_holder(&self, user: &str) {
-        let Some((key_id, _)) = self.keys.current() else { return };
+    /// `keys.get`: check `allowed` and hand out the keys under the rotation
+    /// lock, after durably recording `user` as a holder of the current key
+    /// (`key-holders.json`), so a person removed while the runtime was down
+    /// still triggers a rotation (§21.5). No record, no key (review N3).
+    pub fn hand_out_key<E>(
+        &self,
+        user: Option<&str>,
+        allowed: impl FnOnce() -> Result<(), E>,
+    ) -> std::result::Result<Value, HandoutRefusal<E>> {
+        let _rotation = self.rotation_lock.lock().unwrap();
+        allowed().map_err(HandoutRefusal::Forbidden)?;
+        if let Some(user) = user {
+            self.note_key_holder(user).map_err(|error| {
+                log::error!("record who holds the workspace content key: {error:#}");
+                HandoutRefusal::HolderNotRecorded
+            })?;
+        }
+        Ok(self.keys.handout(now_ms()))
+    }
+
+    /// Record that `user` was handed the current workspace content key,
+    /// durably in `key-holders.json`. A new key starts a new record.
+    pub fn note_key_holder(&self, user: &str) -> Result<()> {
+        let Some((key_id, _)) = self.keys.current() else { return Ok(()) };
         let _guard = self.holders_lock.lock().unwrap();
         let mut record = self.holders_record();
         if record.key_id != key_id {
             record = KeyHolders { key_id, users: Vec::new() };
         }
         if record.users.iter().any(|known| known == user) {
-            return;
+            return Ok(());
         }
         record.users.push(user.to_string());
-        let path = self.dir.join("key-holders.json");
-        match serde_json::to_vec(&record) {
-            Ok(bytes) => {
-                if let Err(error) = crate::cloud_bootstrap::write_durable(&path, &bytes) {
-                    log::warn!("record who holds the workspace content key: {error:#}");
-                }
-            }
-            Err(error) => log::warn!("record who holds the workspace content key: {error}"),
-        }
+        let bytes = serde_json::to_vec(&record)?;
+        crate::cloud_bootstrap::write_durable(&self.holders_path(), &bytes)
+    }
+
+    fn holders_path(&self) -> PathBuf {
+        self.dir.join("key-holders.json")
     }
 
     /// The people the current key was handed to (across restarts).
@@ -548,6 +576,7 @@ impl CloudAgents {
     /// Retire the current key for a new one: new checkpoints are sealed
     /// with it and connected clients are told to fetch it.
     pub fn rotate_key(&self) -> Result<String> {
+        let _rotation = self.rotation_lock.lock().unwrap();
         let key_id = self.keys.rotate(now_ms())?;
         if let Some(sink) = &self.sink {
             sink.emit(KEYS_CHANGED, &serde_json::json!({ "currentKeyId": key_id }));

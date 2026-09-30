@@ -44,7 +44,7 @@ export function WorkspaceActionItems({
     <>
       {shareable && (
         <DropdownMenuItem onSelect={() => openShareDialog({ orgId: item.workspace.orgId, workspaceId: item.workspace.id, name: item.workspace.name })}>
-          <Users /> {item.workspace.you?.role === "manager" ? "Share…" : "Sharing…"}
+          <Users /> {item.workspace.you?.role === "manager" || item.workspace.you?.canManageShares ? "Share…" : "Sharing…"}
           {sharedWith > 0 && <span className="ml-auto text-[10px] text-faint">{sharedWith}</span>}
         </DropdownMenuItem>
       )}
