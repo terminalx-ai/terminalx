@@ -23,6 +23,7 @@ import {
   deadlineText,
   purgeNoticeText,
   purgeTombstones,
+  repositoryLabel,
   repositoryRiskLines,
   resetPurged,
   risksOf,
@@ -135,6 +136,16 @@ describe("risks and wording", () => {
     expect(
       repositoryRiskLines({ path: "r", branch: null, dirtyFiles: 0, untrackedFiles: 0, unpushedCommits: null, hasUpstream: false, localOnlyCommits: 4, openPullRequests: null }),
     ).toEqual(["4 commits on no remote branch"]);
+  });
+
+  it("names the workspace folder (a blank project's one repository) by the workspace, or Project folder", () => {
+    for (const path of [".", "./", "", " . "]) {
+      expect(repositoryLabel({ path }, "parity-test")).toBe("parity-test");
+      expect(repositoryLabel({ path }, null)).toBe("Project folder");
+      expect(repositoryLabel({ path }, "  ")).toBe("Project folder");
+    }
+    expect(repositoryLabel({ path: "site" }, "parity-test")).toBe("site");
+    expect(repositoryLabel({ path: "./packages/api/" }, "parity-test")).toBe("packages/api");
   });
 
   it("says when the deadline is and what a cleanup item waits for", () => {

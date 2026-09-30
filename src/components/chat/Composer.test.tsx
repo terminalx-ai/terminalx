@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TabEntry } from "@/types/session";
+import { accessibilityPress, mouseClick } from "@/test/press";
 
 const { dragDropListener, invoke, openDialog } = vi.hoisted(() => ({ dragDropListener: vi.fn(), invoke: vi.fn(), openDialog: vi.fn() }));
 
@@ -195,5 +196,35 @@ describe("composer attachments", () => {
     await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
     expect(screen.getByAltText("retry.png")).toBeTruthy();
     expect(URL.revokeObjectURL).not.toHaveBeenCalledWith("blob:preview");
+  });
+});
+
+describe("composer pickers", () => {
+  // hidden: an open modal menu hides the rest of the page from the accessibility tree.
+  const picker = (name: RegExp) => screen.getByRole("button", { name, hidden: true });
+
+  it("the model and permission pickers open on a real mouse click and close on a second one", async () => {
+    const models = await import("@/lib/models");
+    render(<TestComposer onSend={vi.fn()} />);
+    for (const [name, label] of [[/default/, "Model"], [/Auto/, "Permissions"]] as const) {
+      mouseClick(picker(name));
+      const menu = await screen.findByRole("menu");
+      expect(menu.textContent).toContain(label);
+      expect(picker(name).getAttribute("aria-expanded")).toBe("true");
+      mouseClick(picker(name));
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    }
+    // Opening the model picker re-reads the models.
+    expect(models.refreshModels).toHaveBeenCalled();
+  });
+
+  it("open on an accessibility press (a click with no pointerdown)", async () => {
+    render(<TestComposer onSend={vi.fn()} />);
+    for (const name of [/default/, /Auto/]) {
+      accessibilityPress(picker(name));
+      await screen.findByRole("menu");
+      fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    }
   });
 });

@@ -195,6 +195,18 @@ export function risksOf(server: CloudWorkspaceDisposition | null, runtime: Runti
   };
 }
 
+/**
+ * What to call a repository in a list of work at risk. The runtime reports
+ * paths relative to the workspace, so a blank project's one repository (the
+ * workspace folder itself) comes back as ".": that shows as the workspace's
+ * name, or "Project folder" without one.
+ */
+export function repositoryLabel(repo: Pick<RepositoryFacts, "path">, workspaceName?: string | null): string {
+  const path = repo.path.trim().replace(/^(\.\/)+/, "").replace(/\/+$/, "");
+  if (path === "" || path === ".") return workspaceName?.trim() || "Project folder";
+  return path;
+}
+
 /** One line per thing at risk in a repository. */
 export function repositoryRiskLines(repo: RepositoryFacts): string[] {
   const lines: string[] = [];

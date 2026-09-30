@@ -4,6 +4,7 @@ import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { WithTooltip } from "@/components/ui/tooltip";
+import { useRowMenu } from "@/components/ui/useRowMenu";
 import { closeEditor, useEditors } from "@/lib/editors";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { getPrefs } from "@/lib/prefs";
@@ -13,6 +14,23 @@ import { addTab, useSessionStore } from "@/lib/sessions";
 import { openTerminal, selectSessionTab, useTerminals, type SelectedSessionTab } from "@/lib/terminal";
 import type { CloudSessionModel } from "@/lib/cloudSession";
 import type { SessionEntry } from "@/types/session";
+
+/**
+ * The "+" that opens the new-tab menu. The menu's trigger is the button itself
+ * (not a wrapper), so a mouse click, an accessibility press and Return all
+ * open it, and the button reports the menu's expanded state.
+ */
+function NewTabTrigger({ trigger }: { trigger: ReturnType<typeof useRowMenu>["trigger"] }) {
+  return (
+    <WithTooltip label="New tab" keys={keycaps("mod+t")}>
+      <DropdownMenuTrigger asChild {...trigger}>
+        <Button variant="ghost" size="icon-sm" aria-label="New tab">
+          <Plus />
+        </Button>
+      </DropdownMenuTrigger>
+    </WithTooltip>
+  );
+}
 
 /** Creation and mixed-tab shortcuts; all destinations live in the sidebar. */
 export function TabActions({ session, selected, cloud }: { session: SessionEntry; selected: SelectedSessionTab | null; cloud?: CloudSessionModel }) {
@@ -28,7 +46,7 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
   const editors = useEditors();
   const hasEditors = editors.editors.some((editor) => editor.sessionId === session.id);
   const activeEditor = editors.active[session.id] ?? null;
-  const [pickerOpen, setPickerOpen] = useState(false);
+  const picker = useRowMenu();
   const step = useCallback((direction: 1 | -1) => {
     if (tabs.length < 2) return;
     const current = tabs.findIndex((tab) => tab.kind === selected?.kind && tab.id === selected.id);
@@ -47,16 +65,14 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
     const prefs = getPrefs();
     await addTab(session.id, harness, prefs.lastModel[harness] ?? "", prefs.lastEffort[harness] ?? null, prefs.lastMode);
   };
-  useHotkey("mod+t", () => setPickerOpen(true));
+  useHotkey("mod+t", () => picker.setOpen(true));
   useHotkey("mod+w", closeActive);
   useHotkey("mod+shift+]", () => step(1));
   useHotkey("mod+shift+[", () => step(-1));
 
   return (
-    <DropdownMenu open={pickerOpen} onOpenChange={setPickerOpen}>
-      <DropdownMenuTrigger asChild>
-        <span><WithTooltip label="New tab" keys={keycaps("mod+t")}><Button variant="ghost" size="icon-sm" aria-label="New tab"><Plus /></Button></WithTooltip></span>
-      </DropdownMenuTrigger>
+    <DropdownMenu {...picker.root}>
+      <NewTabTrigger trigger={picker.trigger} />
       <DropdownMenuContent align="end">
         <DropdownMenuLabel>New agent tab with</DropdownMenuLabel>
         {store.harnesses.map((harness) => <DropdownMenuItem key={harness.id} disabled={!harness.available} onSelect={() => void add(harness.id)}>
@@ -81,7 +97,7 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
  * menu says why when it is not there.
  */
 function CloudTabActions({ session, selected, cloud }: { session: SessionEntry; selected: SelectedSessionTab | null; cloud: CloudSessionModel }) {
-  const [pickerOpen, setPickerOpen] = useState(false);
+  const picker = useRowMenu();
   const [error, setError] = useState<string | null>(null);
   const tabs = useMemo<(SelectedSessionTab & { created: string })[]>(
     () =>
@@ -100,7 +116,7 @@ function CloudTabActions({ session, selected, cloud }: { session: SessionEntry; 
     },
     [selected, session.id, tabs],
   );
-  useHotkey("mod+t", () => setPickerOpen(true));
+  useHotkey("mod+t", () => picker.setOpen(true));
   useHotkey("mod+shift+]", () => step(1));
   useHotkey("mod+shift+[", () => step(-1));
   const blocked = cloud.backend.readOnlyReason ?? (!cloud.connected ? (cloud.asleep ? "Stopped: send a message to wake the workspace, then add tabs." : "Connecting to the workspace…") : !cloud.manage ? "View only: this attachment cannot add tabs." : null);
@@ -110,10 +126,8 @@ function CloudTabActions({ session, selected, cloud }: { session: SessionEntry; 
   };
   const prefs = getPrefs();
   return (
-    <DropdownMenu open={pickerOpen} onOpenChange={setPickerOpen}>
-      <DropdownMenuTrigger asChild>
-        <span><WithTooltip label="New tab" keys={keycaps("mod+t")}><Button variant="ghost" size="icon-sm" aria-label="New tab"><Plus /></Button></WithTooltip></span>
-      </DropdownMenuTrigger>
+    <DropdownMenu {...picker.root}>
+      <NewTabTrigger trigger={picker.trigger} />
       <DropdownMenuContent align="end">
         {(blocked || error) && <DropdownMenuLabel className="max-w-64 whitespace-normal text-[11px] font-normal text-muted-foreground">{error ?? blocked}</DropdownMenuLabel>}
         <DropdownMenuLabel>New agent tab with</DropdownMenuLabel>

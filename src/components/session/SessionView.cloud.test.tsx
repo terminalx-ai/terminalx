@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { accessibilityPress, mouseClick } from "@/test/press";
 import type { AgentEvent, Payload } from "@/types/events";
 import type { AgentTabInfo, RuntimeSession, WorkspaceConnectionState, WorkspaceTransport } from "@terminalx/portable/workspace";
 import type { RpcWireRequest } from "@terminalx/portable/rpc";
@@ -550,4 +551,35 @@ describe("the session header's location and connection chips", () => {
     seen.push(screen.getByTestId("session-connection").textContent ?? "");
     expect(seen).toEqual(["Resuming", "Connecting", "Connecting", "Connecting", "Live"]);
   });
+});
+
+// The header's "+" opened its menu with Return but not with a mouse click.
+describe("the session header's New tab menu", () => {
+  // hidden: an open modal menu hides the rest of the page from the accessibility tree.
+  const plus = () => screen.getByRole("button", { name: "New tab", hidden: true });
+
+  it("opens on a real mouse click, and a second click closes it", async () => {
+    await openConnected();
+    mouseClick(plus());
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByText("New agent tab with")).toBeTruthy();
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Claude Code", "Terminalon the VM"]);
+    expect(plus().getAttribute("aria-expanded")).toBe("true");
+    // The tooltip around it must not mark the open menu's trigger closed.
+    expect(plus().getAttribute("data-state")).toBe("open");
+    mouseClick(plus());
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(plus().getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("opens on an accessibility press (a click with no pointerdown) and with Return", async () => {
+    await openConnected();
+    accessibilityPress(plus());
+    expect(await screen.findByRole("menu")).toBeTruthy();
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    fireEvent.keyDown(plus(), { key: "Enter" });
+    expect(await screen.findByRole("menu")).toBeTruthy();
+  });
+
 });

@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HarnessInfo, Project } from "@/types/session";
 import type { CloudProject } from "@/types/target";
+import { accessibilityPress, mouseClick } from "@/test/press";
 
 // PRO-61 (CS-13 subset): the project row's `+` opens the same new-session
 // form, preset with "Runs in: <Org> cloud". Start reuses or wakes a
@@ -178,5 +179,32 @@ describe("the project picker", () => {
     expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["raccoon", "acme/api", "scratchno repo", "Add a project…"]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: /scratch/ }));
     expect(sessions.startCloudSessionIn).toHaveBeenCalledWith("cloud:org-a:blank/scratch");
+  });
+});
+
+describe("the composer's pickers", () => {
+  // hidden: an open modal menu hides the rest of the page from the accessibility tree.
+  const picker = (name: RegExp) => screen.getByRole("button", { name, hidden: true });
+
+  it("project, agent, model and permissions each open on a real mouse click, and a second click closes it", async () => {
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    for (const [name, label] of [[/acme\/api/, "Acme cloud"], [/^Claude/, "Agent"], [/^Opus/, "Model"], [/^Bypass/, "Permissions"]] as const) {
+      mouseClick(picker(name));
+      const menu = await screen.findByRole("menu");
+      expect(within(menu).getByText(label)).toBeTruthy();
+      expect(picker(name).getAttribute("aria-expanded")).toBe("true");
+      mouseClick(picker(name));
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    }
+  });
+
+  it("each opens on an accessibility press (a click with no pointerdown)", async () => {
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    for (const name of [/^Claude/, /^Opus/, /^Bypass/]) {
+      accessibilityPress(picker(name));
+      await screen.findByRole("menu");
+      fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    }
   });
 });
