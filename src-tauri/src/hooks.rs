@@ -114,8 +114,21 @@ pub fn mint_token() -> String {
 /// app and are used only to configure the listener and child environments.
 #[derive(Clone)]
 pub struct ControlEndpoint {
+    /// Where this launch listens, and what its tabs are told to dial.
     pub socket: PathBuf,
     pub token: String,
+    /// Held while this launch is the one a shell reaches through the home's
+    /// published socket and `run/control.token`. `None` when another live
+    /// launch already holds the home: this one then listens on a socket of
+    /// its own and publishes nothing, so it cannot cut that launch's tabs off.
+    claim: Option<std::sync::Arc<std::fs::File>>,
+}
+
+impl ControlEndpoint {
+    /// Whether this launch owns the home's published socket and token.
+    pub fn publishes(&self) -> bool {
+        self.claim.is_some()
+    }
 }
 
 /// Equality that takes the same time whatever the mismatch, so a token cannot
@@ -174,29 +187,93 @@ fn resolve_existing(path: &Path) -> Option<PathBuf> {
 pub struct HookReply {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
+    /// Why the app would not act on the frame. The hook still prints nothing
+    /// for the CLI to act on; it writes this to its stderr, which the CLI
+    /// keeps in its hook log, so a frame lost to the wrong app or a stale
+    /// launch is visible where it happened, not only in the app's log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
 }
 
-/// Where this app instance listens. One socket per Raccoon home, so a second
-/// instance on the same home takes the socket over rather than racing for it.
+impl HookReply {
+    pub fn refused(reason: impl Into<String>) -> Self {
+        Self { output: None, refused: Some(reason.into()) }
+    }
+}
+
+/// The home's published socket: where a shell with no app environment finds
+/// whichever launch holds the home. Agent tabs are told their own launch's
+/// socket instead (`ControlEndpoint::socket`), so they never depend on which
+/// launch that is.
 pub fn socket_path() -> anyhow::Result<PathBuf> {
     #[cfg(unix)]
-    { Ok(crate::store::ensure_dir(crate::store::root()?.join("run"))?.join("hooks.sock")) }
+    { Ok(run_dir()?.join("hooks.sock")) }
     #[cfg(windows)]
     { Ok(crate::pipe_transport::path_for_home(&crate::store::root()?)) }
 }
 
-pub fn control_token_path() -> anyhow::Result<PathBuf> {
-    Ok(crate::store::ensure_dir(crate::store::root()?.join("run"))?.join("control.token"))
+/// The socket a launch listens on while another launch holds the home.
+fn own_socket_path(pid: u32) -> anyhow::Result<PathBuf> {
+    #[cfg(unix)]
+    { Ok(run_dir()?.join(format!("hooks-{pid}.sock"))) }
+    #[cfg(windows)]
+    {
+        let shared = crate::pipe_transport::path_for_home(&crate::store::root()?);
+        Ok(PathBuf::from(format!("{}-{pid}", shared.display())))
+    }
 }
 
-/// Mint and persist the token before any agent process is launched. Atomic
-/// owner-only creation means a human shell never observes a partial secret.
+fn run_dir() -> anyhow::Result<PathBuf> {
+    crate::store::ensure_dir(crate::store::root()?.join("run"))
+}
+
+pub fn control_token_path() -> anyhow::Result<PathBuf> {
+    Ok(run_dir()?.join("control.token"))
+}
+
+/// Decide where this launch listens and mint its token, before any agent
+/// process is launched.
+///
+/// The installed app and a dev build both default to `~/.raccoon`, so two
+/// launches on one home is ordinary. The first to take `run/hooks.lock` owns
+/// the published socket and token; the lock is the OS's, so a crashed owner
+/// releases it without anyone deciding the owner is dead. A launch that finds
+/// it held gets a socket of its own. It used to delete the owner's socket and
+/// overwrite its token, and every hook from the owner's tabs then reached an
+/// app that did not know them: the Terminal view kept streaming while the
+/// Chat view never saw a reply (#202).
 pub fn prepare_control() -> anyhow::Result<ControlEndpoint> {
-    let socket = socket_path()?;
-    let token = mint_token();
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(run_dir()?.join("hooks.lock"))?;
+    let claim = match lock.try_lock() {
+        Ok(()) => Some(std::sync::Arc::new(lock)),
+        Err(std::fs::TryLockError::WouldBlock) => None,
+        Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+    };
+    let socket = if claim.is_some() { socket_path()? } else { own_socket_path(std::process::id())? };
     #[cfg(unix)]
-    crate::store::write_atomic(&control_token_path()?, token.as_bytes())?;
-    Ok(ControlEndpoint { socket, token })
+    sweep_stale_sockets(&socket);
+    Ok(ControlEndpoint { socket, token: mint_token(), claim })
+}
+
+/// Remove `hooks-<pid>.sock` files that no launch answers any more, so a
+/// crashed second launch does not leave its socket behind for good.
+#[cfg(unix)]
+fn sweep_stale_sockets(keep: &Path) {
+    let Ok(dir) = run_dir() else { return };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if path == keep || !(name.starts_with("hooks-") && name.ends_with(".sock")) {
+            continue;
+        }
+        if let Err(error) = std::os::unix::net::UnixStream::connect(&path) {
+            if error.kind() == std::io::ErrorKind::ConnectionRefused {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
 }
 
 /// The command a hook definition runs: this binary, quoted, plus the event.
@@ -224,7 +301,9 @@ where
     use std::os::unix::net::UnixListener;
 
     let path = endpoint.socket.clone();
-    // A socket file left by a crashed instance would refuse every bind.
+    // Whatever file is at this path belongs to no live launch: the published
+    // socket is ours while we hold the home's lock, and a per-launch one is
+    // named for this process. Left behind by a crash, it would refuse the bind.
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)?;
     #[cfg(unix)]
@@ -232,10 +311,25 @@ where
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
+    // Only once the socket answers, and only by the launch that holds the
+    // home: a shell that reads the token must find the app it belongs to.
+    if endpoint.publishes() {
+        crate::store::write_atomic(&control_token_path()?, endpoint.token.as_bytes())?;
+    } else {
+        log::warn!(
+            "another TerminalX already uses {}; this launch's tabs use {} and shells without an app environment reach the other launch",
+            crate::store::root()?.display(),
+            path.display()
+        );
+    }
     let hook_handler = std::sync::Arc::new(hook_handler);
     let control_handler = std::sync::Arc::new(control_handler);
     let control_token = endpoint.token;
+    // The listener keeps the home for as long as it listens, whatever the
+    // caller does with its own copies of the endpoint.
+    let claim = endpoint.claim;
     std::thread::Builder::new().name("hook-socket".into()).spawn(move || {
+        let _claim = claim;
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             let hook_handler = hook_handler.clone();
@@ -273,13 +367,19 @@ where
 {
     let path = endpoint.socket.clone();
     let token = endpoint.token.clone();
+    let publishes = endpoint.publishes();
     crate::pipe_transport::serve(path.clone(), move |line| {
         let reply = dispatch_line(&line, &endpoint.token, &hook_handler, &control_handler);
         format!("{reply}\n")
     })?;
-    // Publish only after successfully owning the pipe. A second app using the
-    // same home must not replace the running instance's discovery token.
-    crate::store::write_atomic(&control_token_path()?, token.as_bytes())?;
+    // Publish only after successfully owning the pipe, and only from the
+    // launch that holds the home: a second app using the same home must not
+    // replace the running instance's discovery token.
+    if publishes {
+        crate::store::write_atomic(&control_token_path()?, token.as_bytes())?;
+    } else {
+        log::warn!("another TerminalX already uses {}; this launch's tabs use {}", crate::store::root()?.display(), path.display());
+    }
     Ok(path)
 }
 
@@ -393,7 +493,7 @@ fn ask_app(event: &str, stdin: &str) -> Option<Value> {
     bytes.push(b'\n');
     #[cfg(unix)]
     let line = {
-        let mut stream = UnixStream::connect(path).ok()?;
+        let mut stream = UnixStream::connect(&path).ok()?;
         stream.set_read_timeout(Some(timeout)).ok()?;
         stream.set_write_timeout(Some(Duration::from_secs(5))).ok()?;
         stream.write_all(&bytes).ok()?;
@@ -404,7 +504,11 @@ fn ask_app(event: &str, stdin: &str) -> Option<Value> {
     };
     #[cfg(windows)]
     let line = crate::pipe_transport::exchange(Path::new(&path), bytes, timeout).ok()?;
-    serde_json::from_str::<HookReply>(&line).ok()?.output
+    let reply = serde_json::from_str::<HookReply>(&line).ok()?;
+    if let Some(reason) = &reply.refused {
+        let _ = writeln!(std::io::stderr(), "TerminalX at {path} refused hook {}: {reason}", frame.event);
+    }
+    reply.output
 }
 
 #[cfg(test)]
@@ -427,7 +531,7 @@ mod tests {
     fn named_pipe_serves_authenticated_control_and_hook_frames() {
         let _home = crate::store::temp_home();
         let endpoint = prepare_control().unwrap();
-        serve(endpoint.clone(), |frame| HookReply { output: Some(json!({"event": frame.event})) },
+        serve(endpoint.clone(), |frame| HookReply { output: Some(json!({"event": frame.event})), refused: None },
             |request| crate::control::ControlResponse::success(request.id, json!({"called": request.command}))).unwrap();
         let response = crate::control::call("status", json!({}), Duration::from_secs(2)).unwrap();
         assert!(response.ok);
@@ -463,7 +567,7 @@ mod tests {
 
         let empty = serde_json::to_string(&HookReply::default()).unwrap();
         assert_eq!(empty, "{}");
-        let r = HookReply { output: Some(json!({"decision": "approve"})) };
+        let r = HookReply { output: Some(json!({"decision": "approve"})), refused: None };
         assert_eq!(serde_json::from_str::<HookReply>(&serde_json::to_string(&r).unwrap()).unwrap(), r);
     }
 
@@ -495,10 +599,59 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let _home = crate::store::temp_home();
-        let endpoint = prepare_control().unwrap();
+        let (endpoint, _) = launch("only");
         let token_path = control_token_path().unwrap();
         assert_eq!(std::fs::read_to_string(token_path).unwrap(), endpoint.token);
         assert_eq!(std::fs::metadata(control_token_path().unwrap()).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_home_passes_to_the_next_launch_once_its_holder_is_gone() {
+        let _home = crate::store::temp_home();
+        let holder = prepare_control().unwrap();
+        assert!(holder.publishes());
+        assert_eq!(holder.socket, socket_path().unwrap());
+
+        let second = prepare_control().unwrap();
+        assert!(!second.publishes(), "the home is held");
+        assert_eq!(second.socket, own_socket_path(std::process::id()).unwrap());
+
+        // The lock is the OS's: when the holder goes, crash included, the
+        // home is free again without anyone judging the holder dead.
+        drop(holder);
+        let third = prepare_control().unwrap();
+        assert!(third.publishes());
+        assert_eq!(third.socket, socket_path().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_crashed_launch_s_own_socket_is_swept_and_a_live_one_is_kept() {
+        use std::os::unix::net::UnixListener;
+
+        let _home = crate::store::temp_home();
+        let dead = own_socket_path(1_000_001).unwrap();
+        drop(UnixListener::bind(&dead).unwrap());
+        assert!(dead.exists(), "a listener that goes away leaves its file");
+        let live_path = own_socket_path(1_000_002).unwrap();
+        let _live = UnixListener::bind(&live_path).unwrap();
+
+        let _endpoint = prepare_control().unwrap();
+        assert!(!dead.exists());
+        assert!(live_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_frame_says_why_and_still_leaves_the_cli_alone() {
+        let reply = HookReply::refused("this TerminalX has no such tab");
+        let line = serde_json::to_string(&reply).unwrap();
+        assert_eq!(serde_json::from_str::<HookReply>(&line).unwrap(), reply);
+        // Nothing for the CLI to act on: the hook prints `{}` as before.
+        assert_eq!(reply.output, None);
+        // A reply from an older app, with no reason, still parses.
+        assert_eq!(serde_json::from_str::<HookReply>("{}").unwrap(), HookReply::default());
     }
 
     #[cfg(unix)]
@@ -515,7 +668,7 @@ mod tests {
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
             let frame: HookFrame = serde_json::from_str(&line).unwrap();
-            let reply = HookReply { output: Some(json!({"saw": frame.event})) };
+            let reply = HookReply { output: Some(json!({"saw": frame.event})), refused: None };
             let mut stream = stream;
             stream.write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes()).unwrap();
         });
@@ -527,6 +680,60 @@ mod tests {
         BufReader::new(client).read_line(&mut line).unwrap();
         let reply: HookReply = serde_json::from_str(&line).unwrap();
         assert_eq!(reply.output.unwrap()["saw"], "Stop");
+    }
+
+    /// Launch one "instance" on the current home: its endpoint, listening,
+    /// with every hook frame it receives recorded by tab.
+    #[cfg(unix)]
+    fn launch(name: &'static str) -> (ControlEndpoint, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let endpoint = prepare_control().unwrap();
+        let recorded = seen.clone();
+        serve(
+            endpoint.clone(),
+            move |frame| {
+                recorded.lock().unwrap().push(frame.tab.clone());
+                HookReply { output: Some(json!({"instance": name})), refused: None }
+            },
+            move |request| crate::control::ControlResponse::success(request.id, json!({"instance": name})),
+        )
+        .unwrap();
+        (endpoint, seen)
+    }
+
+    #[cfg(unix)]
+    fn send(socket: &Path, line: &Value) -> Value {
+        use std::os::unix::net::UnixStream;
+        let mut stream = UnixStream::connect(socket).unwrap();
+        stream.write_all(format!("{line}\n").as_bytes()).unwrap();
+        let mut reply = String::new();
+        BufReader::new(stream).read_line(&mut reply).unwrap();
+        serde_json::from_str(&reply).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_second_instance_on_the_same_home_leaves_the_first_one_s_tabs_connected() {
+        // Issue #202: the installed app and a dev build on one home. The
+        // second launch used to delete the socket the first one's tabs were
+        // given and overwrite its control token, so every hook from the first
+        // instance's CLIs reached an app that had never heard of them.
+        let _home = crate::store::temp_home();
+        let (first, first_seen) = launch("first");
+        let (second, second_seen) = launch("second");
+
+        let hook = |tab: &str| json!({"tab": tab, "session": "s", "token": "t", "event": "Stop", "payload": {}});
+        assert_eq!(send(&first.socket, &hook("first-tab"))["output"]["instance"], "first");
+        assert_eq!(send(&second.socket, &hook("second-tab"))["output"]["instance"], "second");
+        assert_eq!(*first_seen.lock().unwrap(), ["first-tab"]);
+        assert_eq!(*second_seen.lock().unwrap(), ["second-tab"]);
+
+        // A shell with no app environment still reaches the first instance
+        // through the home's published socket and token.
+        let token = std::fs::read_to_string(control_token_path().unwrap()).unwrap();
+        assert_eq!(token, first.token);
+        let status = json!({"id": "r", "command": "status", "token": token, "params": {}});
+        assert_eq!(send(&socket_path().unwrap(), &status)["result"]["instance"], "first");
     }
 
     fn frame(token: &str, transcript: &str) -> HookFrame {

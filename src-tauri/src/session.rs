@@ -406,7 +406,7 @@ fn reply_for(kind: CliKind, event: &str, decision: Decision) -> HookReply {
         (CliKind::Codex, "PreToolUse") => codex::pty::pre_tool_decision(allow),
         (CliKind::Codex, _) => codex::pty::permission_decision(allow),
     };
-    HookReply { output: Some(output) }
+    HookReply { output: Some(output), refused: None }
 }
 
 /// Which CLI a harness runs as its tab, or `None` for the harnesses that are
@@ -1402,15 +1402,11 @@ impl SessionManager {
         // every process the agent starts, so what keeps one tab's hooks from
         // speaking for another is that only this CLI was given this token.
         let token = crate::hooks::mint_token();
-        match crate::hooks::socket_path() {
-            Ok(p) => {
-                env.push((crate::hooks::SOCKET_ENV.to_string(), p.to_string_lossy().into_owned()));
-                env.push((crate::hooks::TOKEN_ENV.to_string(), token.clone()));
-            }
-            // Without the socket the CLI still runs; the chat just loses the
-            // status and permission half until the app is restarted.
-            Err(e) => log::warn!("no hook socket: {e:#}"),
-        }
+        // This launch's own socket, not the home's published one: another
+        // TerminalX on the same home may hold that, and it does not know
+        // this tab (#202).
+        env.push((crate::hooks::SOCKET_ENV.to_string(), self.control.socket.to_string_lossy().into_owned()));
+        env.push((crate::hooks::TOKEN_ENV.to_string(), token.clone()));
         let launch = match kind {
             CliKind::Claude => self.claude_launch(entry, tab, &exe)?,
             CliKind::Codex => self.codex_launch(rt, entry, tab, &exe, &mut env)?,
@@ -1915,8 +1911,15 @@ impl SessionManager {
     /// asking (Codex has no such event), and a Codex `PreToolUse` is a gate
     /// rather than a report when the reader has asked to see every tool.
     pub fn on_hook(&self, frame: HookFrame) -> HookReply {
-        let Ok(rt_arc) = self.runtime(&frame.session, &frame.tab) else {
-            return HookReply::default();
+        // Every refusal says why, both here and back to the hook: a CLI whose
+        // frames go unheard is a chat that never shows its reply (#202).
+        let refuse = |reason: String| {
+            log::warn!("hook {} for {}/{} refused by pid {} at {}: {reason}", frame.event, frame.session, frame.tab, std::process::id(), self.control.socket.display());
+            HookReply::refused(reason)
+        };
+        let rt_arc = match self.runtime(&frame.session, &frame.tab) {
+            Ok(rt_arc) => rt_arc,
+            Err(error) => return refuse(format!("this TerminalX has no such tab ({error:#})")),
         };
         let (kind, tail, asks_every_tool, origin, usage_account) = {
             let rt = rt_arc.lock().unwrap();
@@ -1924,7 +1927,7 @@ impl SessionManager {
                 Engine::Cli(p) => (p.harness, p.tail.clone(), p.harness == CliKind::Codex && codex::asks_every_tool(&p.mode), p.origin.clone(), p.usage_account.clone()),
                 // A hook from a CLI this app did not start, or from one whose
                 // tab has moved on: nothing to say, and nothing to block.
-                _ => return HookReply::default(),
+                _ => return refuse("this TerminalX did not start the tab's CLI, or the tab has since moved on".into()),
             }
         };
         // The socket is owner-only, but so is everything else this user runs,
@@ -1932,8 +1935,7 @@ impl SessionManager {
         // show this launch's token did not come from this tab's CLI, and
         // answering it would let one tab decide another tab's permissions.
         if !origin.accepts(&frame) {
-            log::warn!("hook {} for {}/{} refused: not this tab's token", frame.event, frame.session, frame.tab);
-            return HookReply::default();
+            return refuse("the frame's token is not the one this tab's CLI launch was given".into());
         }
         if frame.event == "StatusLine" {
             if kind == CliKind::Claude && self.status.usage.ingest_claude(usage_account.as_deref(), &frame.payload) {
