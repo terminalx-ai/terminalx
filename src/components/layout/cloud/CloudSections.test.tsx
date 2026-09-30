@@ -128,9 +128,17 @@ const mount = () =>
 
 const row = (name: string) => screen.getAllByTestId("cloud-workspace-node").find((node) => node.getAttribute("data-workspace") === name)!;
 
+/** A real mouse click: pointerdown, mousedown, pointerup, mouseup, click. */
+function mouseClick(element: HTMLElement) {
+  fireEvent.pointerDown(element, { button: 0, ctrlKey: false, pointerType: "mouse" });
+  fireEvent.mouseDown(element, { button: 0 });
+  fireEvent.pointerUp(element, { button: 0, pointerType: "mouse" });
+  fireEvent.mouseUp(element, { button: 0 });
+  fireEvent.click(element, { button: 0 });
+}
+
 function openMenu(name: string) {
-  const trigger = within(row(name)).getByRole("button", { name: `Actions for ${name}` });
-  fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+  mouseClick(within(row(name)).getByRole("button", { name: `Actions for ${name}` }));
 }
 
 describe("organization sections", () => {
@@ -162,9 +170,47 @@ describe("organization sections", () => {
     act(() => prefs.setPrefs({ sidebarSections: {} }));
   });
 
+  it("opens an organization's menu with a mouse click, keeps it open, and closes it with a second click", async () => {
+    mount();
+    const trigger = screen.getByRole("button", { name: "Menu for Acme" });
+    mouseClick(trigger);
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Refresh cloud workspaces"]);
+    // Still open after the whole click sequence.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.getByRole("menu")).toBe(menu);
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    // The row keeps its actions shown while the menu is open, whatever the hover.
+    expect(trigger.closest("span")!.className).toMatch(/(^| )flex( |$)/);
+    mouseClick(trigger);
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  });
+
+  it("opens an organization's menu from the keyboard", async () => {
+    mount();
+    const trigger = screen.getByRole("button", { name: "Menu for Beta" });
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: /Switch to show cloud sessions/ })).toBeTruthy();
+  });
+
+  it("keeps Switch a real, focusable button in a collapsed organization's row", () => {
+    mount();
+    const beta = screen.getAllByTestId("cloud-org-section")[1];
+    const header = within(beta).getByTestId("cloud-org-header");
+    const toggle = within(header).getByRole("button", { name: "Beta" });
+    const switchButton = within(header).getByRole("button", { name: "Switch" });
+    // Shown on hover and on focus within the row, and reached with Tab from the row's name.
+    expect(switchButton.closest("span")!.className).toContain("group-focus-within/row:flex");
+    const order = [...header.querySelectorAll<HTMLElement>("button")];
+    expect(order.indexOf(switchButton)).toBeGreaterThan(order.indexOf(toggle));
+    expect(switchButton.tabIndex).not.toBe(-1);
+  });
+
   it("offers the switch in the organization's menu too", async () => {
     mount();
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for Beta" }), { button: 0, ctrlKey: false });
+    mouseClick(screen.getByRole("button", { name: "Menu for Beta" }));
     const menu = await screen.findByRole("menu");
     fireEvent.click(within(menu).getByRole("menuitem", { name: /Switch to show cloud sessions/ }));
     await waitFor(() => expect(mocks.api.organizationSelect).toHaveBeenCalledWith("org-b", "s:1"));

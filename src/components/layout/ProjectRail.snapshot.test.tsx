@@ -146,6 +146,22 @@ describe("sidebar rail DOM", () => {
     expect(container.querySelector('[aria-label="Raccoon"]')).not.toBeNull();
   });
 
+  it("marks only the destination the main slot shows as active", async () => {
+    await setAccount(signedIn(withCloud));
+    const { getByRole } = mount();
+    const active = () =>
+      ["Issues", "Agent Dashboard", "Stats & Usage", "Automations", "Skills"].filter((label) =>
+        getByRole("button", { name: new RegExp(`^${label.replace(/[&]/g, "\\$&")}`) }).className.split(" ").includes("bg-selected"),
+      );
+    act(() => sessions.openIssues());
+    expect(active()).toEqual(["Issues"]);
+    act(() => sessions.selectCloudWorkspace("cloud:org-a:ws-1"));
+    expect(active()).toEqual([]);
+    act(() => sessions.openIssues());
+    act(() => sessions.selectSession(null));
+    expect(active()).toEqual([]);
+  });
+
   it("Refresh all also re-reads the account, so organizations from a silent token refresh appear", async () => {
     const { getByRole } = mount();
     mocks.invoke.mockClear();

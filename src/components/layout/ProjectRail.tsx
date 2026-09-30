@@ -61,6 +61,8 @@ export function ProjectRail({
   onOpenCloudPage?: () => void;
 }) {
   const store = useSessionStore();
+  // A destination looks active only while it is what the main slot shows: no session and no cloud workspace selected.
+  const onNavView = !store.selectedSessionId && !store.selectedCloudWorkspace;
   // Section headers appear only when an organization section exists; otherwise the sidebar is as it was.
   const cloud = useCloudSections();
   const sectioned = cloud.orgs.length > 0;
@@ -131,7 +133,7 @@ export function ProjectRail({
         </Button>
         <Button
           variant="ghost"
-          className={cn("justify-start gap-2 px-2", store.view === "issues" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+          className={cn("justify-start gap-2 px-2", store.view === "issues" && onNavView ? "bg-selected text-foreground" : "")}
           onClick={onOpenIssues}
         >
           <CircleDot />
@@ -141,7 +143,7 @@ export function ProjectRail({
         <WithTooltip label="Agent dashboard" keys={keycaps("mod+shift+a")}>
           <Button
             variant="ghost"
-            className={cn("min-w-0 justify-start gap-2 px-2", store.view === "agents" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+            className={cn("min-w-0 justify-start gap-2 px-2", store.view === "agents" && onNavView ? "bg-selected text-foreground" : "")}
             onClick={onOpenAgents}
           >
             <LayoutGrid />
@@ -152,7 +154,7 @@ export function ProjectRail({
         <WithTooltip label="Stats & Usage" keys={keycaps("mod+shift+u")}>
           <Button
             variant="ghost"
-            className={cn("justify-start gap-2 px-2", store.view === "stats" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+            className={cn("justify-start gap-2 px-2", store.view === "stats" && onNavView ? "bg-selected text-foreground" : "")}
             onClick={onOpenStats}
           >
             <BarChart3 />
@@ -162,7 +164,7 @@ export function ProjectRail({
         <WithTooltip label="Automations" keys={keycaps("mod+shift+r")}>
           <Button
             variant="ghost"
-            className={cn("justify-start gap-2 px-2", store.view === "automations" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+            className={cn("justify-start gap-2 px-2", store.view === "automations" && onNavView ? "bg-selected text-foreground" : "")}
             onClick={onOpenAutomations}
           >
             <CalendarClock />
@@ -178,7 +180,7 @@ export function ProjectRail({
         <WithTooltip label="Skills" keys={keycaps("mod+shift+k")}>
           <Button
             variant="ghost"
-            className={cn("justify-start gap-2 px-2", store.view === "skills" && !store.selectedSessionId ? "bg-selected text-foreground" : "")}
+            className={cn("justify-start gap-2 px-2", store.view === "skills" && onNavView ? "bg-selected text-foreground" : "")}
             onClick={onOpenSkills}
           >
             <Sparkles />

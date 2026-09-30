@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react";
 import { Archive, ArchiveRestore, ArrowLeftRight, Cloud, Ellipsis, FolderGit2, GitBranch, Pause, Play, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
@@ -64,6 +64,35 @@ export function useSectionCollapsed(key: string, byDefault = false): [boolean, (
   return [collapsed, () => setPrefs({ sidebarSections: { ...sidebarSections, [key]: collapsed ? "expanded" : "collapsed" } })];
 }
 
+/**
+ * A row menu that opens on a mouse click as well as from the keyboard.
+ * Radix opens a menu on pointerdown; in a row whose actions are hidden until
+ * hover, the opening pointerdown was followed by the menu closing again, so
+ * mouse users never saw it. Here the menu is controlled: the pointerdown is
+ * left to the click, the click toggles it, and the keyboard keeps Radix's
+ * own Enter, Space and ArrowDown handling. While it is open the row keeps its
+ * actions shown, whatever the hover state.
+ */
+function useRowMenu() {
+  const [open, setOpen] = useState(false);
+  const wasOpen = useRef(false);
+  return {
+    open,
+    root: { open, onOpenChange: setOpen },
+    trigger: {
+      onPointerDown: (event: PointerEvent<HTMLButtonElement>) => {
+        // Remembered before the outside-press of an open menu closes it, so this click closes rather than reopens.
+        wasOpen.current = open;
+        event.preventDefault();
+      },
+      onClick: () => setOpen(!wasOpen.current),
+      onKeyDown: () => {
+        wasOpen.current = open;
+      },
+    },
+  };
+}
+
 type Dialog = { item: CloudWorkspaceListItem; action: LifecycleAction };
 
 export function CloudSections({ onOpenCloudPage }: { onOpenCloudPage?: () => void }) {
@@ -125,6 +154,7 @@ function OrgSection({
   // The default organization starts expanded; the others are one compact line until opened.
   const [collapsed, toggle] = useSectionCollapsed(orgSectionKey(org.id), !isDefault);
   const [switchError, setSwitchError] = useState<string | null>(null);
+  const menu = useRowMenu();
   const cached = catalog.orgs[org.id];
   const name = sectionName(org);
   const offline = isDefault && !!cached?.error && cached.fetchedAt !== null;
@@ -162,7 +192,7 @@ function OrgSection({
         <span className={cn("shrink-0", yieldsToRowActions)} data-testid="cloud-org-role">
           <RowChip>{org.role}</RowChip>
         </span>
-        <RowActions>
+        <RowActions className={menu.open ? "flex" : undefined}>
           {!isDefault && (
             <WithTooltip label="Make this the default organization to show its cloud sessions">
               <Button variant="ghost" size="xs" className="h-5 px-1.5 text-[10px]" onClick={() => void switchOrg()} data-testid="cloud-org-switch">
@@ -170,8 +200,8 @@ function OrgSection({
               </Button>
             </WithTooltip>
           )}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
+          <DropdownMenu {...menu.root}>
+            <DropdownMenuTrigger asChild {...menu.trigger}>
               <Button variant="ghost" size="icon-xs" aria-label={`Menu for ${name}`}>
                 <Ellipsis />
               </Button>
@@ -360,6 +390,7 @@ function CloudWorkspaceRow({ node, onLifecycle, archived = false }: { node: Clou
   const { item, key } = node;
   const { workspace } = item;
   const [error, setError] = useState<string | null>(null);
+  const menu = useRowMenu();
   const state = workspaceRowState(item);
   const selected = store.selectedCloudWorkspace === key;
   const actions = actionsFor(item);
@@ -404,10 +435,10 @@ function CloudWorkspaceRow({ node, onLifecycle, archived = false }: { node: Clou
             </span>
           ) : null}
         </button>
-        <RowActions>
-          <DropdownMenu>
+        <RowActions className={menu.open ? "flex" : undefined}>
+          <DropdownMenu {...menu.root}>
             <WithTooltip label="Workspace actions">
-              <DropdownMenuTrigger asChild>
+              <DropdownMenuTrigger asChild {...menu.trigger}>
                 <Button variant="ghost" size="icon-xs" aria-label={`Actions for ${workspace.name}`}>
                   <Ellipsis />
                 </Button>
