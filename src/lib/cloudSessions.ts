@@ -252,6 +252,16 @@ export function cloudSessionCapabilities(orgId: string, workspaceId: string, cac
   return live.get(cloudWorkspaceKey(orgId, workspaceId))?.capabilities ?? cached?.capabilities ?? null;
 }
 
+/** A workspace's live session list, while a connection follows it; null otherwise. */
+export function liveCloudSessionList(orgId: string, workspaceId: string): RuntimeSession[] | null {
+  return live.get(cloudWorkspaceKey(orgId, workspaceId))?.sessions ?? null;
+}
+
+/** Told whenever any workspace's live session list changes. */
+export function subscribeCloudSessionLists(listener: () => void): () => void {
+  return subscribe(listener);
+}
+
 /** Whether the workspace's rows come from a live runtime now. */
 export function hasLiveCloudSessions(orgId: string, workspaceId: string): boolean {
   return live.has(cloudWorkspaceKey(orgId, workspaceId));

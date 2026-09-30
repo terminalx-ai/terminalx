@@ -82,6 +82,14 @@ export const SAVE_DEBOUNCE_MS = 500;
 const CACHE_EVENTS = 2_000;
 
 const stores = new Map<string, Store>();
+/** Told when any workspace's tabs change (the dashboard, notifications and palette read every workspace). */
+const anyListeners = new Set<() => void>();
+
+/** Follow every workspace's tabs at once; the listener is told after any change. */
+export function subscribeAllCloudAgents(listener: () => void): () => void {
+  anyListeners.add(listener);
+  return () => anyListeners.delete(listener);
+}
 
 /**
  * A runtime attached by pairing code for development: no organization, so no
@@ -130,6 +138,7 @@ function publish(s: Store) {
   const tabs = [...s.tabs.values()].sort((a, b) => a.info.created.localeCompare(b.info.created) || a.tabId.localeCompare(b.tabId));
   s.snapshot = { tabs, outbox: s.outbox, loaded: s.loaded, wake: s.wake, error: s.error, version: s.snapshot.version + 1 };
   for (const listener of [...s.listeners]) listener();
+  for (const listener of [...anyListeners]) listener();
 }
 
 export function useCloudAgents(scope: CloudAgentScope): CloudAgentsSnapshot {

@@ -127,6 +127,11 @@ function applyFontScale() {
 
 applyFontScale();
 
+export function subscribePrefs(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
 export function usePrefs(): Prefs {
   return useSyncExternalStore(
     (cb) => {
