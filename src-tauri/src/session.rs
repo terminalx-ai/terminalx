@@ -420,6 +420,11 @@ pub fn pty_first(harness: &str) -> Option<CliKind> {
 }
 
 impl SessionManager {
+    /// The Codex model list this manager starts tabs against.
+    pub fn codex_models(&self) -> Arc<codex::models::Cache> {
+        self.codex_models.clone()
+    }
+
     pub fn new(
         sink: Arc<dyn EventSink>,
         observer: Arc<dyn SessionObserver>,

@@ -13,8 +13,8 @@ use crate::{git, harness, names, store};
 pub use crate::session_ops::{NewSession, NewTab};
 pub(crate) use crate::session_ops::create_session_blocking;
 use crate::session_ops::{
-    available_worktree_name, delete_workspace_entries, new_tab_entry, notify_sessions_deleted,
-    notify_workspace_deleted, notify_workspace_settled, remove_session_entries, sessions_in_workspace,
+    available_worktree_name, delete_workspace_entries, notify_workspace_deleted, notify_workspace_settled,
+    sessions_in_workspace,
 };
 
 type CmdResult<T> = Result<T, String>;
@@ -806,15 +806,7 @@ pub async fn create_session(app: AppHandle, req: NewSession) -> CmdResult<Sessio
 
 #[tauri::command]
 pub fn add_tab(session_id: String, tab: NewTab) -> CmdResult<TabEntry> {
-    let t = new_tab_entry(&tab);
-    let out = t.clone();
-    index::update_session(&session_id, |s| {
-        s.tabs.push(t);
-        s.active_tab = Some(out.id.clone());
-        Ok(())
-    })
-    .map_err(err)?;
-    Ok(out)
+    crate::session_ops::add_tab_entry(&session_id, &tab)
 }
 
 #[tauri::command]
@@ -837,29 +829,20 @@ pub fn remove_tab(app: AppHandle, session_id: String, tab_id: String) -> CmdResu
 
 #[tauri::command]
 pub fn rename_session(session_id: String, title: String) -> CmdResult<()> {
-    index::update_session(&session_id, |s| {
-        s.title = title;
-        Ok(())
-    })
-    .map_err(err)
+    let patch = crate::session_ops::SessionPatch { title: Some(title), ..Default::default() };
+    crate::session_ops::update_session_meta(&session_id, &patch).map(|_| ())
 }
 
 #[tauri::command]
 pub fn set_session_archived(session_id: String, archived: bool) -> CmdResult<()> {
-    index::update_session(&session_id, |s| {
-        s.archived = archived;
-        Ok(())
-    })
-    .map_err(err)
+    let patch = crate::session_ops::SessionPatch { archived: Some(archived), ..Default::default() };
+    crate::session_ops::update_session_meta(&session_id, &patch).map(|_| ())
 }
 
 #[tauri::command]
 pub fn set_session_pinned(session_id: String, pinned: bool) -> CmdResult<()> {
-    index::update_session(&session_id, |s| {
-        s.pinned = pinned;
-        Ok(())
-    })
-    .map_err(err)
+    let patch = crate::session_ops::SessionPatch { pinned: Some(pinned), ..Default::default() };
+    crate::session_ops::update_session_meta(&session_id, &patch).map(|_| ())
 }
 
 #[tauri::command]
@@ -880,37 +863,12 @@ pub fn set_active_tab(session_id: String, tab_id: String) -> CmdResult<()> {
 pub async fn delete_session(app: AppHandle, session_id: String, remove_worktree: bool) -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let entry = index::get(&session_id).map_err(err)?;
-        let worktree = remove_worktree.then(|| entry.worktree_name.clone()).flatten();
-        let attached = if worktree.is_some() {
-            sessions_in_workspace(Path::new(&entry.cwd))?
-        } else {
-            vec![entry.clone()]
-        };
-        for session in &attached {
+        let stop = |session: &SessionEntry| {
             for tab in &session.tabs {
                 kill_tab(&state, &session.id, &tab.id);
             }
-        }
-        let worktree_removed = match worktree.as_deref() {
-            Some(name) => match git::remove_worktree(Path::new(&entry.project_path), name) {
-                Ok(()) => true,
-                Err(e) => {
-                    log::warn!("worktree cleanup for {session_id} failed: {e:#}");
-                    false
-                }
-            },
-            None => false,
         };
-        // A worktree that survived keeps hosting its other sessions.
-        let doomed: Vec<SessionEntry> = if worktree_removed { attached } else { vec![entry.clone()] };
-        remove_session_entries(&doomed)?;
-        if worktree_removed {
-            notify_workspace_deleted(&app, &entry.project_path, &doomed);
-        } else {
-            notify_sessions_deleted(&app, &doomed);
-        }
-        Ok(())
+        crate::session_ops::delete_session_blocking(&app, &session_id, remove_worktree, &stop).map(|_| ())
     })
     .await
     .map_err(err)?
