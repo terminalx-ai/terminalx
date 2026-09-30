@@ -627,8 +627,19 @@ impl WorkspaceRpc {
 
     // ---- terminals -------------------------------------------------------
 
-    /// What a client needs to show and resume one terminal.
-    fn describe_pty(&self, pty_id: &str, pty: &PtyState, peer: &Peer) -> Value {
+    /// The sessions whose terminals `peer` may see tied to them: `None`
+    /// without `pty/2`, otherwise its `visible_sessions`. Read before the
+    /// terminals are locked.
+    fn pty_session_scope(&self, peer: &Peer) -> Option<HashSet<String>> {
+        if !peer.granted("pty/2") {
+            return None;
+        }
+        Some(self.visible_sessions(peer).map(|sessions| sessions.into_iter().map(|session| session.id).collect()).unwrap_or_default())
+    }
+
+    /// What a client needs to show and resume one terminal. `scope` is
+    /// [`Self::pty_session_scope`] for `peer`.
+    fn describe_pty(&self, pty_id: &str, pty: &PtyState, peer: &Peer, scope: Option<&HashSet<String>>) -> Value {
         let mut described = json!({
             "ptyId": pty_id,
             "number": pty.number,
@@ -643,8 +654,9 @@ impl WorkspaceRpc {
             "exitCode": pty.exit.flatten(),
             "control": pty.control_for(peer),
         });
-        // `pty/2`; absent for a terminal that belongs to no session.
-        if let Some(session_id) = &pty.session_id {
+        // `pty/2`, and only a session this peer may see; absent for a
+        // terminal that belongs to no session.
+        if let Some(session_id) = pty.session_id.as_ref().filter(|id| scope.is_some_and(|visible| visible.contains(*id))) {
             described["sessionId"] = json!(session_id);
         }
         described
@@ -721,6 +733,7 @@ impl WorkspaceRpc {
                 },
             );
         }
+        let scope = self.pty_session_scope(peer);
         let cwd = cwd.to_string_lossy().into_owned();
         let spec = PaneSpec { cwd: &cwd, cols: p.cols, rows: p.rows, command: None, env: &[] };
         if let Err(error) = self.terminals.spawn(self.sink.clone(), &pty_id, spec) {
@@ -748,14 +761,18 @@ impl WorkspaceRpc {
         let mut ptys = self.ptys.lock().unwrap();
         let pty = ptys.get_mut(&pty_id).ok_or_else(|| RpcError::internal("the terminal exited while starting"))?;
         pty.pid = self.terminals.pid(&pty_id);
-        Ok(self.describe_pty(&pty_id, pty, peer))
+        Ok(self.describe_pty(&pty_id, pty, peer, scope.as_ref()))
     }
 
     /// Terminals of this runtime, oldest first; closed ones are gone.
     fn pty_list(&self, peer: &Peer) -> Result<Value, RpcError> {
+        let scope = self.pty_session_scope(peer);
         let ptys = self.ptys.lock().unwrap();
-        let mut listed: Vec<(u64, Value)> =
-            ptys.iter().filter(|(_, pty)| !pty.closed).map(|(id, pty)| (pty.number, self.describe_pty(id, pty, peer))).collect();
+        let mut listed: Vec<(u64, Value)> = ptys
+            .iter()
+            .filter(|(_, pty)| !pty.closed)
+            .map(|(id, pty)| (pty.number, self.describe_pty(id, pty, peer, scope.as_ref())))
+            .collect();
         listed.sort_by_key(|(number, _)| *number);
         Ok(json!({
             "epoch": self.epoch,
@@ -872,6 +889,7 @@ impl WorkspaceRpc {
     /// Take over a terminal's input and size, optionally at this client's size.
     fn pty_control(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
         let size = Self::size_params(&params)?;
+        let scope = self.pty_session_scope(peer);
         let mut ptys = self.ptys.lock().unwrap();
         let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
         let changed = pty.controller.as_deref() != Some(peer.device_id.as_str());
@@ -889,7 +907,7 @@ impl WorkspaceRpc {
         if let (Some((cols, rows)), None) = (size, pty.exit) {
             self.apply_size(&pty_id, pty, cols, rows)?;
         }
-        Ok(self.describe_pty(&pty_id, pty, peer))
+        Ok(self.describe_pty(&pty_id, pty, peer, scope.as_ref()))
     }
 
     fn pty_kill(&self, params: Value) -> Result<Value, RpcError> {
@@ -938,6 +956,7 @@ impl WorkspaceRpc {
             }
         }
         let subscription_id = Self::subscription_id();
+        let scope = self.pty_session_scope(peer);
         let mut ptys = self.ptys.lock().unwrap();
         let pty_id = required_str(&params, "ptyId")?.to_string();
         let pty = ptys.get_mut(&pty_id).filter(|pty| !pty.closed).ok_or_else(|| RpcError::not_found("no such terminal"))?;
@@ -959,7 +978,7 @@ impl WorkspaceRpc {
             at += chunk.len() as u64;
         }
         pty.subscribers.insert(subscription_id.clone(), peer.clone());
-        let mut result = self.describe_pty(&pty_id, pty, peer);
+        let mut result = self.describe_pty(&pty_id, pty, peer, scope.as_ref());
         result["subscriptionId"] = json!(subscription_id);
         result["offset"] = json!(from);
         result["end"] = json!(from + first.len() as u64);
@@ -1403,7 +1422,6 @@ impl WorkspaceRpc {
     }
 
     fn session_close(&self, params: Value) -> Result<Value, RpcError> {
-        let manager = self.manager()?;
         let session = index::load()
             .map_err(RpcError::internal)?
             .into_iter()
@@ -1412,9 +1430,12 @@ impl WorkspaceRpc {
             .ok_or_else(|| RpcError::not_found("no such session"))?;
         let only = params.get("tabId").and_then(Value::as_str);
         let closing: Vec<String> = session.tabs.iter().filter(|tab| only.is_none_or(|id| id == tab.id)).map(|tab| tab.id.clone()).collect();
-        for tab_id in &closing {
-            if manager.is_running(&session.id, tab_id) {
-                manager.stop(&session.id, tab_id).map_err(RpcError::internal)?;
+        // Without agents (tests) nothing is running to stop.
+        if let Some(manager) = &self.sessions {
+            for tab_id in &closing {
+                if manager.is_running(&session.id, tab_id) {
+                    manager.stop(&session.id, tab_id).map_err(RpcError::internal)?;
+                }
             }
         }
         if params.get("remove").and_then(Value::as_bool) == Some(true) {
@@ -1434,7 +1455,11 @@ impl WorkspaceRpc {
             }
             match index::get(&session.id) {
                 Ok(remaining) => self.sink.emit("session_updated", &remaining),
-                Err(_) => crate::session_ops::notify_sessions_deleted(&*self.sink, std::slice::from_ref(&session)),
+                Err(_) => {
+                    // Its last tab went: the session is gone, and so are its terminals.
+                    crate::session_ops::notify_sessions_deleted(&*self.sink, std::slice::from_ref(&session));
+                    self.close_session_ptys(&HashSet::from([session.id.clone()]));
+                }
             }
         }
         if let Some(agents) = self.agents.get() {

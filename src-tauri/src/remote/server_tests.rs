@@ -884,3 +884,56 @@ async fn runtime_agents_lists_installed_agents_with_models_efforts_and_modes() {
     // A path on the VM never leaves it.
     assert!(!listed.to_string().contains("/home/vm"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_terminal_names_its_session_only_to_pty_2_peers_that_may_see_it() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let session = seed_session(&f.root, "Fix login", None);
+    let (manager, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+    let created = call(&f.rpc, &manager, "pty.create", json!({ "sessionId": session.id, "clientRequestId": "request-scope-1" })).await.unwrap();
+    let pty_id = created["ptyId"].as_str().unwrap().to_string();
+
+    // A pty/1 manager sees the terminal, not the session it belongs to.
+    let (old, _old_events) = hello_with(&f.rpc, "device-old", Authority::Manage, SESSION_1).await;
+    let listed = call(&f.rpc, &old, "pty.list", json!({})).await.unwrap();
+    assert_eq!(listed["terminals"][0]["ptyId"], pty_id.as_str());
+    assert!(listed["terminals"][0].get("sessionId").is_none());
+    let attached = call(&f.rpc, &old, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    assert!(attached.get("sessionId").is_none());
+    let controlled = call(&f.rpc, &old, "pty.control", json!({ "ptyId": pty_id })).await.unwrap();
+    assert!(controlled.get("sessionId").is_none());
+
+    // A participant with pty/2 is not shown a session that is not shared with it.
+    let (participant, _part_events) = hello_with(&f.rpc, "device-phone", Authority::Participate, &protocol::CAPABILITIES).await;
+    let listed = call(&f.rpc, &participant, "pty.list", json!({})).await.unwrap();
+    assert!(listed["terminals"][0].get("sessionId").is_none());
+    let attached = call(&f.rpc, &participant, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    assert!(attached.get("sessionId").is_none());
+
+    // The pty/2 manager, who may see the session, is told it.
+    let listed = call(&f.rpc, &manager, "pty.list", json!({})).await.unwrap();
+    assert_eq!(listed["terminals"][0]["sessionId"], session.id.as_str());
+    let attached = call(&f.rpc, &manager, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    assert_eq!(attached["sessionId"], session.id.as_str());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_a_sessions_last_tab_with_remove_closes_its_terminals() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let session = seed_session(&f.root, "Fix login", None);
+    let kept = seed_session(&f.root, "Keep me", None);
+    let (manager, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+    for (session_id, request) in [(&session.id, "request-close-1"), (&kept.id, "request-close-2")] {
+        call(&f.rpc, &manager, "pty.create", json!({ "sessionId": session_id, "clientRequestId": request })).await.unwrap();
+    }
+    let tab_id = session.tabs[0].id.clone();
+    call(&f.rpc, &manager, "session.close", json!({ "sessionId": session.id, "tabId": tab_id, "remove": true, "clientRequestId": "request-close-3" }))
+        .await
+        .unwrap();
+    assert!(index::get(&session.id).is_err(), "its last tab went, so the session did");
+    let listed = call(&f.rpc, &manager, "pty.list", json!({})).await.unwrap();
+    let ids: Vec<Option<&str>> = listed["terminals"].as_array().unwrap().iter().map(|t| t["sessionId"].as_str()).collect();
+    assert_eq!(ids, vec![Some(kept.id.as_str())], "the removed session's terminal is closed, others stay");
+}
