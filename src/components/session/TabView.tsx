@@ -6,6 +6,7 @@ import { getDraft, setDraft, useDraft } from "@/lib/drafts";
 import { patchTab, useSessionStore } from "@/lib/sessions";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { changeRange, useChanges } from "@/lib/changes";
+import { localGitSource } from "@/lib/gitSource";
 import { Chat } from "@/components/chat/Chat";
 import { Composer } from "@/components/chat/Composer";
 import { TerminalView } from "@/components/terminal/TerminalView";
@@ -83,7 +84,7 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
   // Whether the session's checkout differs from where the conversation
   // started, by tree diff, so a shell heredoc counts as much as an edit tool.
   const range = useMemo(() => changeRange(log.events, session.baseRef), [log.events, log.version, session.baseRef]);
-  const changes = useChanges(session.cwd, range, isGit && active && !live);
+  const changes = useChanges(session.cwd ? localGitSource(session.cwd) : undefined, range, isGit && active && !live);
 
   const send = useCallback(
     async (text: string, images: ImageInput[]) => {

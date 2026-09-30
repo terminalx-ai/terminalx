@@ -11,6 +11,8 @@ import { PrPanel } from "@/components/changes/PrPanel";
 import { FileTree } from "@/components/files/FileTree";
 import { openSettle, openWorkspaceDelete } from "@/lib/dialogs";
 import { api } from "@/lib/api";
+import type { GitSource } from "@/lib/gitSource";
+import type { FileSource } from "@/lib/workspaceFiles";
 import type { AgentEvent } from "@/types/events";
 import type { WorkStatus } from "@/types/session";
 
@@ -43,6 +45,8 @@ export function RightPanel({
   labelMode,
   settleSessionId,
   workspace,
+  gitSource,
+  fileSource,
 }: {
   cwd: string;
   isGit?: boolean;
@@ -61,6 +65,10 @@ export function RightPanel({
   settleSessionId?: string;
   /** Present only for a managed, non-main workspace. */
   workspace?: { projectPath: string; name: string };
+  /** Where Changes, Repo and PR read Git; the local checkout at `cwd` when absent. */
+  gitSource?: GitSource;
+  /** Where Files reads; the local checkout at `cwd` when absent. */
+  fileSource?: FileSource;
 }) {
   const prefs = usePrefs();
   const [selectedTab, setTab] = useState<PanelTab>("changes");
@@ -73,14 +81,13 @@ export function RightPanel({
   useEffect(() => {
     if (!isGit || (branch !== undefined && !labelMode)) return;
     let cancelled = false;
-    api
-      .workStatus(cwd)
+    (gitSource ? gitSource.workStatus() : api.workStatus(cwd))
       .then((next) => !cancelled && setStatus(next))
       .catch(() => !cancelled && setStatus(null));
     return () => {
       cancelled = true;
     };
-  }, [cwd, branch, labelMode, refreshTick, isGit]);
+  }, [cwd, gitSource, branch, labelMode, refreshTick, isGit]);
 
   const resolvedBranch = branch === undefined ? (status?.branch ?? null) : branch;
   const targetLabel = !isGit ? "Folder" : labelMode === "base" ? `base: ${status?.defaultBranch ?? "default"}` : labelMode === "branch" ? (resolvedBranch ?? "current branch") : null;
@@ -157,6 +164,7 @@ export function RightPanel({
               <ChangesPanel
                 key={refreshTick}
                 cwd={cwd}
+                source={gitSource}
                 events={events}
                 version={version}
                 baseRef={baseRef}
@@ -170,12 +178,13 @@ export function RightPanel({
               />
             </div>
             <div className={cn("h-full", tab !== "repo" && "hidden")}>
-              <RepoPanel key={refreshTick} cwd={cwd} active={tab === "repo"} view={repoView} onViewChange={setRepoView} />
+              <RepoPanel key={refreshTick} cwd={cwd} source={gitSource} active={tab === "repo"} view={repoView} onViewChange={setRepoView} />
             </div>
             <div className={cn("h-full", tab !== "pr" && "hidden")}>
               <PrPanel
                 key={refreshTick}
                 cwd={cwd}
+                source={gitSource}
                 branch={resolvedBranch}
                 active={tab === "pr"}
                 busy={live}
@@ -202,6 +211,7 @@ export function RightPanel({
             active={tab === "files"}
             mentionTabId={mentionTabId}
             statusKey={statusKey}
+            source={fileSource}
           />
         </div>
       </div>

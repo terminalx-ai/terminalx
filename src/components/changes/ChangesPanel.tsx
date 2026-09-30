@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Columns2, Rows2 } from "lucide-react";
-import { api } from "@/lib/api";
-import { changeRange, useChanges, useWorkingChanges, type ChangeRange } from "@/lib/changes";
+import { changeRange, useChanges, useGitWorkingChanges, type ChangeRange } from "@/lib/changes";
+import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -14,9 +14,13 @@ import { FileList, sumChanges } from "./FileList";
  * "What did this turn touch": the tree at send time against the tree when
  * the turn closed (or a live snapshot while it runs). Nothing opens by
  * default; the list is the answer and a diff above it would push it away.
+ *
+ * It reads through a GitSource: the local checkout at `cwd` unless `source`
+ * names another (a cloud repository).
  */
 export function ChangesPanel({
   cwd,
+  source: given,
   events,
   version,
   baseRef,
@@ -25,7 +29,10 @@ export function ChangesPanel({
   workingTree = false,
   onViewUncommitted,
 }: {
-  cwd: string;
+  /** The local checkout; ignored when `source` is given. */
+  cwd?: string;
+  /** Where to read Git; the local checkout at `cwd` when absent. */
+  source?: GitSource;
   events: AgentEvent[];
   /** Bumps when the log grows; the array itself is reused, so this drives the range. */
   version: number;
@@ -36,12 +43,13 @@ export function ChangesPanel({
   workingTree?: boolean;
   onViewUncommitted: () => void;
 }) {
-  if (workingTree) return <WorkingTreeChanges cwd={cwd} active={active} />;
-  return <TurnChanges cwd={cwd} events={events} version={version} baseRef={baseRef} active={active} live={live} onViewUncommitted={onViewUncommitted} />;
+  const source = useMemo(() => given ?? localGitSource(cwd ?? ""), [given, cwd]);
+  if (workingTree) return <WorkingTreeChanges source={source} active={active} />;
+  return <TurnChanges source={source} events={events} version={version} baseRef={baseRef} active={active} live={live} onViewUncommitted={onViewUncommitted} />;
 }
 
 function TurnChanges({
-  cwd,
+  source,
   events,
   version,
   baseRef,
@@ -49,7 +57,7 @@ function TurnChanges({
   live,
   onViewUncommitted,
 }: {
-  cwd: string;
+  source: GitSource;
   events: AgentEvent[];
   version: number;
   baseRef?: string | null;
@@ -64,12 +72,12 @@ function TurnChanges({
     const id = window.setInterval(() => setTick((t) => t + 1), 4000);
     return () => window.clearInterval(id);
   }, [live, active]);
-  const { files, loading, error } = useChanges(cwd, range, active, tick);
+  const { files, loading, error } = useChanges(source, range, active, tick);
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="min-h-0 flex-1">
         <ChangesBody
-          cwd={cwd}
+          source={source}
           files={files}
           loading={loading}
           error={error}
@@ -95,21 +103,21 @@ function TurnChanges({
   );
 }
 
-function WorkingTreeChanges({ cwd, active }: { cwd: string; active: boolean }) {
+function WorkingTreeChanges({ source, active }: { source: GitSource; active: boolean }) {
   const [tick, setTick] = useState(0);
   useEffect(() => {
     if (!active) return;
     const id = window.setInterval(() => setTick((value) => value + 1), 4000);
     return () => window.clearInterval(id);
   }, [active]);
-  const { head, files, loading } = useWorkingChanges(cwd, active, tick);
+  const { head, files, loading, error } = useGitWorkingChanges(source, active, tick);
   const range = head ? { base: head, head: null } : null;
   return (
     <ChangesBody
-      cwd={cwd}
+      source={source}
       files={files}
       loading={loading}
-      error={null}
+      error={source.cloud && error ? source.errorMessage(error) : null}
       range={range}
       label="Working tree"
       empty="Working tree is clean."
@@ -120,7 +128,7 @@ function WorkingTreeChanges({ cwd, active }: { cwd: string; active: boolean }) {
 }
 
 function ChangesBody({
-  cwd,
+  source,
   files,
   loading,
   error,
@@ -130,7 +138,7 @@ function ChangesBody({
   noRange,
   refreshKey,
 }: {
-  cwd: string;
+  source: GitSource;
   files: ChangedFile[];
   loading: boolean;
   error: string | null;
@@ -151,14 +159,14 @@ function ChangesBody({
       return;
     }
     let cancelled = false;
-    api
-      .fileContentsAt(cwd, current.path, range.base, range.head)
+    source
+      .fileContentsAt(current.path, range.base, range.head)
       .then((r) => !cancelled && setPair({ path: current.path, before: r.before ?? "", after: r.after ?? "" }))
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [cwd, current?.path, range?.base, range?.head, refreshKey]);
+  }, [source, current?.path, range?.base, range?.head, refreshKey]);
 
   const totals = sumChanges(files);
 
