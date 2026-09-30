@@ -18,6 +18,7 @@ export function Sidebar({
   onOpenAutomations,
   onOpenSkills,
   onSearch,
+  onOpenCloudPage,
 }: {
   onToggle: () => void;
   onOpenSettings: () => void;
@@ -28,6 +29,8 @@ export function Sidebar({
   onOpenAutomations: () => void;
   onOpenSkills: () => void;
   onSearch: () => void;
+  /** The full-window cloud page, for creating a workspace until the sidebar can (CS-13). */
+  onOpenCloudPage?: () => void;
 }) {
   return (
     <aside className="relative flex h-full w-(--sidebar-w) shrink-0">
@@ -40,6 +43,7 @@ export function Sidebar({
         onOpenAutomations={onOpenAutomations}
         onOpenSkills={onOpenSkills}
         onSearch={onSearch}
+        onOpenCloudPage={onOpenCloudPage}
       />
       <div className="absolute right-2 top-1.5 z-10">
         <WithTooltip label="Hide sidebar" keys={keycaps("mod+b")}>

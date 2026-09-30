@@ -34,6 +34,11 @@ interface State {
   /** Workspaces per project path, refreshed on demand. */
   workspaces: Record<string, Workspace[]>;
   workspacesLoading: Record<string, boolean>;
+  /**
+   * A cloud workspace shown in the main slot (`cloud:<orgId>:<workspaceId>`),
+   * with the sidebar kept. Any other navigation clears it.
+   */
+  selectedCloudWorkspace: string | null;
   /** A new-session form pre-filled from a workspace row. */
   newSessionPreset: { projectPath: string; cwd: string | null } | null;
   /** Pre-normalized command-palette documents, rebuilt only when source data changes. */
@@ -55,6 +60,7 @@ let state: State = {
   selectedProject: null,
   workspaces: {},
   workspacesLoading: {},
+  selectedCloudWorkspace: null,
   newSessionPreset: null,
   paletteIndex: buildPaletteIndex([], [], {}, []),
 };
@@ -65,6 +71,8 @@ function set(patch: Partial<State>) {
   // Clear the draft destination when navigating away, not in React cleanup
   // (Strict Mode also runs cleanup when a workspace first mounts).
   if ((patch.view && patch.view !== "new") || patch.selectedSessionId) next.newSessionPreset = null;
+  // Selecting a session or another view leaves the cloud workspace.
+  if (!("selectedCloudWorkspace" in patch) && ("selectedSessionId" in patch || "view" in patch)) next.selectedCloudWorkspace = null;
   if (
     next.projects !== state.projects ||
     next.sessions !== state.sessions ||
@@ -192,6 +200,14 @@ export function openAutomation(id: string) {
 /** The filesystem-backed skills reader, optionally scoped to one agent tab. */
 export function openSkills(filter: State["skillsFilter"] = null) {
   set({ selectedSessionId: null, view: "skills", skillsFilter: filter, selectedAutomationId: null });
+}
+
+/**
+ * Show a cloud workspace in the main slot. Selecting only looks: it never
+ * resumes the workspace (the view connects with `connect`, never `wake`).
+ */
+export function selectCloudWorkspace(key: string | null) {
+  set({ selectedCloudWorkspace: key, selectedSessionId: null, view: "new", newSessionPreset: null, selectedAutomationId: null });
 }
 
 export function selectProjectInSidebar(path: string | null) {

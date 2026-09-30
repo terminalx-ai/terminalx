@@ -22,6 +22,7 @@ vi.mock("@/lib/mobileDriver", () => ({ useMobileDrivenTabs: () => new Set() }));
 vi.mock("@/lib/tabViews", () => ({ useTabViews: () => ({ views: {} }) }));
 
 const { ProjectRail } = await import("./ProjectRail");
+const prefs = await import("@/lib/prefs");
 const sessions = await import("@/lib/sessions");
 const account = await import("@/lib/account");
 
@@ -109,5 +110,39 @@ describe("sidebar rail DOM", () => {
       ]),
     );
     expect(mount().container).toMatchSnapshot();
+  });
+
+  // Added with the organization sections (PRO-58): the snapshots above are unchanged, and these compare against them.
+  const withoutCloud = [
+    { id: "org-a", name: "Acme", role: "admin", isPersonal: false, cloud: { enabled: false, flags: {} } },
+    { id: "org-old", name: "Old", role: "member" },
+  ];
+  const withCloud = [
+    { id: "org-a", name: "Acme", role: "admin", isPersonal: false, cloud: { enabled: true, flags: {} } },
+    { id: "org-b", name: "Beta", role: "member", isPersonal: false, cloud: { enabled: true, flags: {} } },
+  ];
+
+  it("with the kill switch off, a cloud organization draws the same sidebar as none", async () => {
+    // React's generated ids differ between two mounts; nothing else may.
+    const html = (element: HTMLElement) => element.innerHTML.replace(/radix-_r_[a-z0-9]+_/g, "radix-id");
+    await setAccount(signedIn(withoutCloud));
+    const before = html(mount().container);
+    cleanup();
+    act(() => prefs.setPrefs({ cloudSidebar: false }));
+    try {
+      await setAccount(signedIn(withCloud));
+      expect(html(mount().container)).toBe(before);
+    } finally {
+      act(() => prefs.setPrefs({ cloudSidebar: true }));
+    }
+  });
+
+  it("with a cloud organization, adds the Local header and one section per organization", async () => {
+    await setAccount(signedIn(withCloud));
+    const { container, getByTestId, getAllByTestId } = mount();
+    expect(getByTestId("local-section-header").textContent).toBe("Local");
+    expect(getAllByTestId("cloud-org-section").map((section) => section.getAttribute("data-org"))).toEqual(["org-a", "org-b"]);
+    // The local projects are still drawn, above the organizations.
+    expect(container.querySelector('[aria-label="Raccoon"]')).not.toBeNull();
   });
 });

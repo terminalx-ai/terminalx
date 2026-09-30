@@ -36,6 +36,7 @@ import { EditorSplit } from "@/components/editor/EditorSplit";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
+const CloudWorkspaceMain = lazy(() => import("@/components/cloud/CloudWorkspaceMain").then((module) => ({ default: module.CloudWorkspaceMain })));
 const CloudSessionPage = lazy(() => import("@/components/cloud/CloudSessionPage").then((module) => ({ default: module.CloudSessionPage })));
 const SettingsPage = lazy(() => import("@/components/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const statusBarFallback = <div aria-hidden className="h-[22px] shrink-0 border-t border-hairline bg-background/70" />;
@@ -112,6 +113,8 @@ export function AppShell() {
 
   const sidebarOpen = prefs.sidebarOpen;
   const selected = store.sessions.find((s) => s.id === store.selectedSessionId) ?? null;
+  // A cloud workspace in the main slot (PRO-23), unless the kill switch hides cloud rows.
+  const cloudWorkspace = prefs.cloudSidebar ? (store.selectedCloudWorkspace ?? null) : null;
 
   return (
     <div className="flex h-full w-full flex-col">
@@ -144,6 +147,7 @@ export function AppShell() {
                 onOpenAutomations={showAutomations}
                 onOpenSkills={showSkills}
                 onSearch={() => setPaletteOpen(true)}
+                onOpenCloudPage={() => setCloudSessionOpen(true)}
               />
             )}
 
@@ -153,6 +157,12 @@ export function AppShell() {
                   <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
                 </ErrorBoundary>
               </main>
+            ) : cloudWorkspace ? (
+              <ErrorBoundary key={cloudWorkspace} label="the cloud workspace">
+                <Suspense fallback={viewFallback}>
+                  <CloudWorkspaceMain workspaceKey={cloudWorkspace} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                </Suspense>
+              </ErrorBoundary>
             ) : (
               <UnselectedWorkspace
                 key={store.view}

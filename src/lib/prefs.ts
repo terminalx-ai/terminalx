@@ -28,6 +28,13 @@ export interface Prefs {
   useWorktree: boolean;
   /** The reader ticked "don't ask again" on the bypass warning. */
   bypassConfirmed: boolean;
+  /**
+   * Organization sections with cloud projects and workspaces in the sidebar
+   * (PRO-23). The kill switch until the full-window cloud page is removed.
+   */
+  cloudSidebar: boolean;
+  /** Sidebar sections the reader collapsed: `local`, or `org:<orgId>`. */
+  collapsedSidebarSections: string[];
 }
 
 const DEFAULTS: Prefs = {
@@ -52,6 +59,8 @@ const DEFAULTS: Prefs = {
   issueProvider: "github",
   useWorktree: true,
   bypassConfirmed: false,
+  cloudSidebar: true,
+  collapsedSidebarSections: [],
 };
 
 const KEY = "raccoon.prefs";
