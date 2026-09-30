@@ -303,6 +303,7 @@ export function launchLatency(item: CloudWorkspaceListItem | CloudWorkspaceSnaps
 
 const MESSAGES: Record<string, string> = {
   cloud_workspace_quota_exceeded: "Your organization is at its cloud workspace limit. Suspend or delete a workspace, or ask an admin to raise the limit.",
+  cloud_workspace_concurrency_exceeded: "Your organization is running as many cloud workspaces as its limit allows. Stop one to start another.",
   cloud_workspace_policy_denied: "Your organization's compute policy does not allow this provider, location or machine size.",
   cloud_provisioning_paused: "An admin has paused new cloud workspaces for this organization.",
   organization_admin_required: "Only organization owners and admins can create cloud workspaces.",

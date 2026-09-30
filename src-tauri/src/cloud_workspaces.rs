@@ -1550,6 +1550,7 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_archived"
             | "cloud_teardown_in_progress"
             | "cloud_workspace_quota_exceeded"
+            | "cloud_workspace_concurrency_exceeded"
             | "idempotency_key_reused"
             | "cloud_workspace_quote_expired"
             | "cloud_workspace_request_invalid"
@@ -2795,5 +2796,23 @@ mod tests {
         let (_, service) = test_service(&base);
         assert_eq!(service.disposition(None, "workspace-2").unwrap_err().code, "cloud_workspace_invalid_response");
         request.join().unwrap();
+    }
+
+    #[test]
+    fn the_running_limit_refuses_create_and_resume_definitely() {
+        let body = r#"{"error":"cloud_workspace_concurrency_exceeded"}"#;
+        let (base, _, request) = serve_once(response("409 Conflict", body, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.create(launch_input(vec![repo("app", None)], None)).unwrap_err();
+        request.join().unwrap();
+        assert_eq!((error.code.as_str(), error.status), ("cloud_workspace_concurrency_exceeded", Some(409)));
+        assert!(!error.retry_with_same_idempotency_key, "a refusal at the running limit is not outcome unknown");
+
+        let (base, _, request) = serve_once(response("409 Conflict", body, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.lifecycle("workspace-1", OperationAction::Resume).unwrap_err();
+        request.join().unwrap();
+        assert_eq!((error.code.as_str(), error.status), ("cloud_workspace_concurrency_exceeded", Some(409)));
+        assert!(!error.requires_original_account_context);
     }
 }

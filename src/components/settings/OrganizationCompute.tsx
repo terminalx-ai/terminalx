@@ -6,6 +6,7 @@ import {
   IDLE_CAP_OPTIONS,
   alertMessage,
   computeErrorMessage,
+  effectiveRunningLimit,
   formatHours,
   formatMicros,
   organizationCompute,
@@ -169,7 +170,11 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
   const ceiling = view.workspaceCeiling;
   const maxWorkspaces = limitValue(draft.maxWorkspaces, ceiling);
   const runningText = draft.maxRunningWorkspaces.trim();
-  const maxRunning = runningText ? limitValue(runningText, ceiling) : null;
+  const maxRunning = runningText ? limitValue(runningText, view.runningWorkspaceCeiling ?? ceiling) : null;
+  // The running limit in force, and what a blank field would mean: never
+  // "no limit", since the server always applies one (PRO-76).
+  const runningLimit = effectiveRunningLimit(view);
+  const blankRunningLimit = effectiveRunningLimit({ ...view, policy: { ...policy, maxWorkspaces: maxWorkspaces ?? policy.maxWorkspaces, maxRunningWorkspaces: null } });
   const runningInvalid = Boolean(runningText) && (maxRunning === null || (maxWorkspaces !== null && maxRunning > maxWorkspaces));
   const limitsInvalid = maxWorkspaces === null || runningInvalid;
   // The paused banner already says this.
@@ -226,8 +231,7 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
           Workspaces {counts.workspaces} of {Math.min(policy.maxWorkspaces, ceiling)}
         </span>
         <span>
-          Running {counts.running}
-          {policy.maxRunningWorkspaces === null ? " (no running limit)" : ` of ${policy.maxRunningWorkspaces}`}
+          Running {counts.running} of {runningLimit}
         </span>
       </div>
       {policy.provisioningPaused && (
@@ -297,7 +301,7 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
                 <input
                   aria-label="Maximum running workspaces"
                   inputMode="numeric"
-                  placeholder="No limit"
+                  placeholder={`${blankRunningLimit} (default)`}
                   className={inputClass}
                   value={draft.maxRunningWorkspaces}
                   disabled={Boolean(busy)}
@@ -323,7 +327,12 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
               </label>
             </div>
             {maxWorkspaces === null && <p className="text-[11px] text-destructive">Workspaces must be a whole number from 1 to {ceiling}, the most this TerminalX service allows.</p>}
-            {runningInvalid && <p className="text-[11px] text-destructive">Running at once must be blank or a whole number no larger than the workspace limit.</p>}
+            {runningInvalid && (
+              <p className="text-[11px] text-destructive">
+                Running at once must be blank or a whole number no larger than the workspace limit
+                {view.runningWorkspaceCeiling === null ? "" : ` or ${view.runningWorkspaceCeiling}, the most this TerminalX service allows`}.
+              </p>
+            )}
             <div className="text-[11px] text-muted-foreground">Allowed sizes and regions (comma-separated IDs; blank allows any)</div>
             {COMPUTE_PROVIDERS.map((provider) => (
               <div key={provider} className="grid grid-cols-[5rem_1fr_1fr] items-center gap-2">

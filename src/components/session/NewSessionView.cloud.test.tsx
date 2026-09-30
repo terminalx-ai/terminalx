@@ -65,6 +65,9 @@ vi.mock("./CloudNewSession", async (importOriginal) => ({
   useCloudProjectChoices: () => [{ orgId: "org-a", orgName: "Acme", projects: [project, { ...project, key: "cloud:org-a:blank/scratch", identity: "blank/scratch", fullName: "scratch", blank: true }] }],
 }));
 vi.mock("@/lib/cloudNewSession", () => flow);
+vi.mock("@/components/cloud/RunningLimitNotice", () => ({
+  RunningLimitNotice: ({ orgId }: { orgId: string }) => <div data-testid="running-limit-notice">{orgId}</div>,
+}));
 
 const { NewSessionView } = await import("./NewSessionView");
 
@@ -149,6 +152,42 @@ describe("new session in a cloud project", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
     expect(await screen.findByText(/at its cloud workspace limit/)).toBeTruthy();
     expect(flow.confirmCloudCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("the running limit (saas PRO-76)", () => {
+  it("explains a resume refused at the running limit and offers to stop a running workspace", async () => {
+    flow.planCloudStart.mockReturnValue({ kind: "wake", node });
+    flow.startInWorkspace.mockRejectedValue({ code: "cloud_workspace_concurrency_exceeded", status: 409 });
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    type("Fix the login redirect");
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    expect(await screen.findByText(/running as many cloud workspaces as its limit allows\. Stop one to start another\./)).toBeTruthy();
+    expect(screen.getByTestId("running-limit-notice").textContent).toBe("org-a");
+    expect(screen.queryByText(/outcome|may have created/i)).toBeNull();
+  });
+
+  it("explains a create refused at the running limit as a definite refusal", async () => {
+    flow.planCloudStart.mockReturnValue({ kind: "create" });
+    flow.prepareCloudCreate.mockResolvedValue(prepared);
+    flow.confirmCloudCreate.mockRejectedValue({ code: "cloud_workspace_concurrency_exceeded", status: 409, retryWithSameIdempotencyKey: false });
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    type("One more");
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(await screen.findByTestId("cloud-create-confirm-button"));
+    expect(await screen.findByText(/Stop one to start another\./)).toBeTruthy();
+    expect(screen.getByTestId("running-limit-notice")).toBeTruthy();
+  });
+
+  it("offers nothing to stop for other refusals", async () => {
+    const { CreateRefused } = await import("@/lib/cloudCreate");
+    flow.planCloudStart.mockReturnValue({ kind: "create" });
+    flow.prepareCloudCreate.mockRejectedValue(new CreateRefused("cloud_provisioning_paused"));
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    type("One more");
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    expect(await screen.findByText(/paused new cloud workspaces/)).toBeTruthy();
+    expect(screen.queryByTestId("running-limit-notice")).toBeNull();
   });
 });
 
