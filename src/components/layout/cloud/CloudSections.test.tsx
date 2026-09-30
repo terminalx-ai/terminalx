@@ -59,6 +59,7 @@ const { CloudSections } = await import("./CloudSections");
 const { CloudWorkspaceMain } = await import("@/components/cloud/CloudWorkspaceMain");
 const catalog = await import("@/lib/cloudCatalog");
 const sessions = await import("@/lib/sessions");
+const prefs = await import("@/lib/prefs");
 
 const ORG = "org-a";
 const repositories = [{ identity: "github.com/acme/api", fullName: "acme/api", cloneUrl: "https://github.com/acme/api.git", primary: true }];
@@ -137,8 +138,36 @@ describe("organization sections", () => {
     mount();
     const sections = screen.getAllByTestId("cloud-org-section");
     expect(sections.map((section) => section.getAttribute("data-org"))).toEqual([ORG, "org-b"]);
-    expect(within(sections[1]).getByTestId("cloud-org-switch").textContent).toBe("Switch to show cloud sessions");
+    expect(within(sections[1]).getByTestId("cloud-org-switch").textContent).toBe("Switch");
     expect(within(sections[0]).queryByTestId("cloud-org-switch")).toBeNull();
+  });
+
+  it("keeps the default organization expanded and the others to one compact line, remembered per organization", () => {
+    mount();
+    const [acme, beta] = screen.getAllByTestId("cloud-org-section");
+    expect(acme.getAttribute("aria-expanded")).toBe("true");
+    expect(beta.getAttribute("aria-expanded")).toBe("false");
+    // Collapsed: its body is hidden, so the section is its header line only.
+    expect(within(beta).getByTestId("cloud-org-hint").closest("[hidden]")).not.toBeNull();
+    expect(within(beta).getByTestId("cloud-org-role").textContent).toBe("member");
+    fireEvent.click(within(beta).getByRole("button", { name: "Expand Beta organization" }));
+    expect(prefs.getPrefs().sidebarSections["org:org-b"]).toBe("expanded");
+    fireEvent.click(within(acme).getByRole("button", { name: "Collapse Acme organization" }));
+    expect(prefs.getPrefs().sidebarSections["org:org-a"]).toBe("collapsed");
+    cleanup();
+    mount();
+    const [acmeAgain, betaAgain] = screen.getAllByTestId("cloud-org-section");
+    expect(acmeAgain.getAttribute("aria-expanded")).toBe("false");
+    expect(betaAgain.getAttribute("aria-expanded")).toBe("true");
+    act(() => prefs.setPrefs({ sidebarSections: {} }));
+  });
+
+  it("offers the switch in the organization's menu too", async () => {
+    mount();
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for Beta" }), { button: 0, ctrlKey: false });
+    const menu = await screen.findByRole("menu");
+    fireEvent.click(within(menu).getByRole("menuitem", { name: /Switch to show cloud sessions/ }));
+    await waitFor(() => expect(mocks.api.organizationSelect).toHaveBeenCalledWith("org-b", "s:1"));
   });
 
   it("shows a Ready and a Stopped workspace under their repository, with branch and state", () => {

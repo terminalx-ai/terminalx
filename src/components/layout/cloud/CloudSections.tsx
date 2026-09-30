@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { Archive, ArchiveRestore, Cloud, Ellipsis, FolderGit2, GitBranch, Pause, Play, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowLeftRight, Cloud, Ellipsis, FolderGit2, GitBranch, Pause, Play, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -56,13 +56,12 @@ function sectionName(org: OrganizationSummary): string {
   return org.isPersonal ? "Personal" : org.name;
 }
 
-export function useSectionCollapsed(key: string): [boolean, () => void] {
-  const { collapsedSidebarSections } = usePrefs();
-  const collapsed = collapsedSidebarSections.includes(key);
-  return [
-    collapsed,
-    () => setPrefs({ collapsedSidebarSections: collapsed ? collapsedSidebarSections.filter((item) => item !== key) : [...collapsedSidebarSections, key] }),
-  ];
+/** Whether a section is collapsed, remembered per section in prefs; `byDefault` when never toggled. */
+export function useSectionCollapsed(key: string, byDefault = false): [boolean, () => void] {
+  const { sidebarSections } = usePrefs();
+  const stored = sidebarSections[key];
+  const collapsed = stored ? stored === "collapsed" : byDefault;
+  return [collapsed, () => setPrefs({ sidebarSections: { ...sidebarSections, [key]: collapsed ? "expanded" : "collapsed" } })];
 }
 
 type Dialog = { item: CloudWorkspaceListItem; action: LifecycleAction };
@@ -73,8 +72,16 @@ export function CloudSections({ onOpenCloudPage }: { onOpenCloudPage?: () => voi
   if (!orgs.length) return null;
   return (
     <>
-      {orgs.map((org) => (
-        <OrgSection key={org.id} org={org} isDefault={org.id === defaultOrg} onLifecycle={setDialog} onOpenCloudPage={onOpenCloudPage} />
+      {orgs.map((org, index) => (
+        <OrgSection
+          key={org.id}
+          org={org}
+          isDefault={org.id === defaultOrg}
+          // The other organizations sit close together as compact lines under one gap.
+          spaced={index === 0 || org.id === defaultOrg || orgs[index - 1].id === defaultOrg}
+          onLifecycle={setDialog}
+          onOpenCloudPage={onOpenCloudPage}
+        />
       ))}
       {dialog && (
         <CloudWorkspaceLifecycleDialog
@@ -103,17 +110,20 @@ function timeText(at: number): string {
 function OrgSection({
   org,
   isDefault,
+  spaced,
   onLifecycle,
   onOpenCloudPage,
 }: {
   org: OrganizationSummary;
   isDefault: boolean;
+  spaced: boolean;
   onLifecycle: (dialog: Dialog) => void;
   onOpenCloudPage?: () => void;
 }) {
   const catalog = useCloudCatalog();
   const { status } = useAccount();
-  const [collapsed, toggle] = useSectionCollapsed(orgSectionKey(org.id));
+  // The default organization starts expanded; the others are one compact line until opened.
+  const [collapsed, toggle] = useSectionCollapsed(orgSectionKey(org.id), !isDefault);
   const [switchError, setSwitchError] = useState<string | null>(null);
   const cached = catalog.orgs[org.id];
   const name = sectionName(org);
@@ -138,40 +148,56 @@ function OrgSection({
   };
 
   return (
-    <div role="treeitem" aria-label={`${name} organization`} aria-expanded={!collapsed} className="mt-3 min-w-0" data-testid="cloud-org-section" data-org={org.id}>
-      <div data-tree-row className={cn(actionRow, "relative flex h-7 min-w-0 items-center gap-1 rounded-md pr-1")}>
+    <div role="treeitem" aria-label={`${name} organization`} aria-expanded={!collapsed} className={cn("min-w-0", spaced ? "mt-3" : "mt-0.5")} data-testid="cloud-org-section" data-org={org.id}>
+      <div data-tree-row className={cn(actionRow, "relative flex h-7 min-w-0 items-center gap-1 rounded-md pr-1 hover:bg-selected/40")} data-testid="cloud-org-header">
         <TreeToggle expanded={!collapsed} label={`${name} organization`} onToggle={toggle} />
         <button
           type="button"
           onClick={toggle}
-          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          className="min-w-0 flex-1 truncate rounded-sm text-left text-[11px] font-medium uppercase tracking-wide text-faint outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           title={org.isPersonal ? `${org.name} (personal)` : org.name}
         >
-          <span className="min-w-0 truncate text-[11px] font-medium uppercase tracking-wide text-faint">{name}</span>
-          <span className={cn("shrink-0 text-[10px] text-faint/80", yieldsToRowActions)}>{org.role}</span>
+          {name}
         </button>
-        {isDefault && (
-          <RowActions>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon-xs" aria-label={`Menu for ${name}`}>
-                  <Ellipsis />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem onSelect={() => void refreshCloudCatalog(org.id)}>
-                  <RefreshCw /> Refresh cloud workspaces
-                </DropdownMenuItem>
-                {onOpenCloudPage && (
-                  <DropdownMenuItem onSelect={onOpenCloudPage}>
-                    <Plus /> New cloud workspace…
+        <span className={cn("shrink-0", yieldsToRowActions)} data-testid="cloud-org-role">
+          <RowChip>{org.role}</RowChip>
+        </span>
+        <RowActions>
+          {!isDefault && (
+            <WithTooltip label="Make this the default organization to show its cloud sessions">
+              <Button variant="ghost" size="xs" className="h-5 px-1.5 text-[10px]" onClick={() => void switchOrg()} data-testid="cloud-org-switch">
+                Switch
+              </Button>
+            </WithTooltip>
+          )}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon-xs" aria-label={`Menu for ${name}`}>
+                <Ellipsis />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {isDefault ? (
+                <>
+                  <DropdownMenuItem onSelect={() => void refreshCloudCatalog(org.id)}>
+                    <RefreshCw /> Refresh cloud workspaces
                   </DropdownMenuItem>
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </RowActions>
-        )}
+                  {onOpenCloudPage && (
+                    <DropdownMenuItem onSelect={onOpenCloudPage}>
+                      <Plus /> New cloud workspace…
+                    </DropdownMenuItem>
+                  )}
+                </>
+              ) : (
+                <DropdownMenuItem onSelect={() => void switchOrg()}>
+                  <ArrowLeftRight /> Switch to show cloud sessions
+                </DropdownMenuItem>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </RowActions>
       </div>
+      {switchError && <div className="pl-5 text-[10px] text-destructive">{switchError}</div>}
       {offline && (
         <div className="pl-5 text-[10px] text-faint" data-testid="cloud-org-offline" title={cached!.error ?? undefined}>
           Offline · last known {timeText(cached!.fetchedAt!)}
@@ -181,16 +207,8 @@ function OrgSection({
         {isDefault ? (
           <DefaultOrgTree org={cached} orgId={org.id} onLifecycle={onLifecycle} />
         ) : (
-          <div className="flex flex-col gap-0.5 pl-5 pr-1">
-            <button
-              type="button"
-              onClick={() => void switchOrg()}
-              className="w-full truncate rounded-md px-1 py-1 text-left text-[11px] text-muted-foreground outline-none hover:bg-selected/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
-              data-testid="cloud-org-switch"
-            >
-              Switch to show cloud sessions
-            </button>
-            {switchError && <span className="px-1 text-[10px] text-destructive">{switchError}</span>}
+          <div className="pl-5 pr-1 text-[10px] leading-4 text-faint" data-testid="cloud-org-hint">
+            Its cloud sessions show when it is the default organization. Use Switch.
           </div>
         )}
       </TreeGroup>

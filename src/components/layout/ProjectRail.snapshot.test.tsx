@@ -1,4 +1,4 @@
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { AccountStatus } from "@/lib/api";
@@ -144,5 +144,14 @@ describe("sidebar rail DOM", () => {
     expect(getAllByTestId("cloud-org-section").map((section) => section.getAttribute("data-org"))).toEqual(["org-a", "org-b"]);
     // The local projects are still drawn, above the organizations.
     expect(container.querySelector('[aria-label="Raccoon"]')).not.toBeNull();
+  });
+
+  it("Refresh all also re-reads the account, so organizations from a silent token refresh appear", async () => {
+    const { getByRole } = mount();
+    mocks.invoke.mockClear();
+    await act(async () => {
+      fireEvent.click(getByRole("button", { name: "Refresh all" }));
+    });
+    expect(mocks.invoke.mock.calls.map(([command]) => command)).toContain("account_status");
   });
 });

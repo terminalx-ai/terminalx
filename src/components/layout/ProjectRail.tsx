@@ -30,6 +30,8 @@ import { useAutomationStore } from "@/lib/automations";
 import { AccountSidebarEntry } from "@/components/account/AccountSidebarEntry";
 import { ProjectNavigation } from "./SidebarTree";
 import { navigateTree } from "./treeKeyboard";
+import { refreshAccount } from "@/lib/account";
+import { refreshCloudCatalog } from "@/lib/cloudCatalog";
 import { TreeToggle } from "./SidebarRows";
 import { CloudSections, useCloudSections, useSectionCollapsed } from "./cloud/CloudSections";
 
@@ -111,7 +113,8 @@ export function ProjectRail({
   const refreshAll = async () => {
     setSpinning(true);
     try {
-      await refreshEverything();
+      // The account too: a silent token refresh may have brought organizations or capabilities.
+      await Promise.all([refreshEverything(), refreshAccount().then(() => refreshCloudCatalog())]);
     } finally {
       setSpinning(false);
     }

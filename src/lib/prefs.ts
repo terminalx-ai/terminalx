@@ -33,8 +33,12 @@ export interface Prefs {
    * (PRO-23). The kill switch until the full-window cloud page is removed.
    */
   cloudSidebar: boolean;
-  /** Sidebar sections the reader collapsed: `local`, or `org:<orgId>`. */
-  collapsedSidebarSections: string[];
+  /**
+   * Sidebar sections the reader expanded or collapsed, by key (`local`, or
+   * `org:<orgId>`). A section not listed uses its default: Local and the
+   * default organization expanded, other organizations collapsed.
+   */
+  sidebarSections: Record<string, "expanded" | "collapsed">;
 }
 
 const DEFAULTS: Prefs = {
@@ -60,7 +64,7 @@ const DEFAULTS: Prefs = {
   useWorktree: true,
   bypassConfirmed: false,
   cloudSidebar: true,
-  collapsedSidebarSections: [],
+  sidebarSections: {},
 };
 
 const KEY = "raccoon.prefs";
