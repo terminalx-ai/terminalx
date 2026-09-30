@@ -13,6 +13,7 @@ import {
   type OrganizationSummary,
 } from "@/lib/api";
 import { getAccount, refreshAccount, subscribeAccount } from "@/lib/account";
+import { isMultiOrg } from "@/lib/multiOrg";
 import { phaseOf, settled } from "@/lib/cloudCreate";
 import { isArchived, isOpen, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
 import { cloudProjectKey, cloudWorkspaceKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
@@ -28,9 +29,10 @@ import { cloudProjectKey, cloudWorkspaceKey, type CloudProject, type CloudWorksp
  *   desktop kept.
  * - An error never replaces valid cached data: a failed refresh keeps the
  *   rows and says when they were last known.
- * - Only the default (active) organization is listed until the server lets a
- *   desktop list every member organization (CS-17); the others keep what was
- *   saved for them.
+ * - Every cloud-enabled member organization is listed and polled on a server
+ *   that authorizes desktop cloud routes by membership (CS-18,
+ *   `cloud.desktop.multi-org.v1`). On an older server only the default
+ *   (active) organization is, and the others keep what was saved for them.
  * - `createMemory` is what this desktop recorded when it created a workspace:
  *   the repositories it was built from, so it is placed under its project on a
  *   server that does not list them yet (S1).
@@ -111,6 +113,27 @@ export function useCloudCatalog(): CloudCatalogState {
 export function cloudOrganizations(status: AccountStatus): OrganizationSummary[] {
   if (status.state !== "signed-in") return [];
   return (status.organizations ?? []).filter((org) => org.cloud?.enabled === true);
+}
+
+/**
+ * The organizations whose sections are live: listed, polled and able to open
+ * sessions. Every cloud-enabled one on a server with the capability (CS-18);
+ * otherwise the default organization only, as before.
+ */
+export function liveCloudOrgIds(status: AccountStatus): string[] {
+  const enabled = cloudOrganizations(status).map((org) => org.id);
+  if (isMultiOrg(status)) return enabled;
+  const orgId = defaultOrgId(status);
+  return orgId && enabled.includes(orgId) ? [orgId] : [];
+}
+
+/**
+ * The organization to name in a cloud call: the given one on a server that
+ * authorizes by membership (the native side checks it against the membership
+ * list), and none (the active organization, exactly as before) otherwise.
+ */
+export function cloudOrgArg(orgId: string | null | undefined): string | null {
+  return orgId && isMultiOrg(getAccount().status) ? orgId : null;
 }
 
 /** Today's active organization: the one the server lists workspaces for. */
@@ -306,7 +329,7 @@ export function applyCloudSnapshot(snapshot: CloudWorkspaceSnapshot) {
   const known = current.workspaces.some((row) => row.workspace.id === item.workspace.id);
   const workspaces = known ? current.workspaces.map((row) => (row.workspace.id === item.workspace.id ? item : row)) : [item, ...current.workspaces];
   set({ ...state, orgs: { ...state.orgs, [orgId]: { ...current, workspaces } } });
-  schedulePoll();
+  schedulePoll(orgId);
 }
 
 /** The organization's selected repositories, as a picker just read them. */
@@ -344,13 +367,13 @@ export function dismissCloudNotice(notice: PurgeNotice) {
  * which reports its snapshot to `applyCloudSnapshot`. None of these resume.
  */
 export async function unarchiveCloudWorkspace(item: CloudWorkspaceListItem): Promise<void> {
-  const snapshot = await api.cloudWorkspaceUnarchive(item.workspace.id);
+  const snapshot = await api.cloudWorkspaceUnarchive(item.workspace.id, cloudOrgArg(item.workspace.orgId));
   if (snapshot?.workspace) applyCloudSnapshot(snapshot);
 }
 
 /** Resume, asked for explicitly from a workspace's menu. Nothing that only looks calls this. */
 export async function resumeCloudWorkspace(item: CloudWorkspaceListItem): Promise<void> {
-  const snapshot = await api.cloudWorkspaceResume(item.workspace.id);
+  const snapshot = await api.cloudWorkspaceResume(item.workspace.id, cloudOrgArg(item.workspace.orgId));
   if (snapshot?.workspace) applyCloudSnapshot(snapshot);
 }
 
@@ -375,12 +398,12 @@ function errorText(error: unknown): string {
 }
 
 /**
- * List the default organization's workspaces (and, every few minutes, its
- * selected repositories). Another organization is not listed: the server
- * answers for the active organization only until CS-17.
+ * List an organization's workspaces (and, every few minutes, its selected
+ * repositories). Only a live organization is listed: every cloud-enabled one
+ * on a server with the capability, else the default one alone.
  */
 export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccount().status), now: () => number = Date.now): Promise<void> {
-  if (!orgId || orgId !== defaultOrgId(getAccount().status)) return Promise.resolve();
+  if (!orgId || !liveCloudOrgIds(getAccount().status).includes(orgId)) return Promise.resolve();
   const running = flights.get(orgId);
   if (running) return running;
   const owner = state.owner;
@@ -389,11 +412,12 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
     const requestedAt = now();
     const wantRepositories = !current?.repositoriesAt || now() - current.repositoriesAt > REPOSITORIES_MAX_AGE_MS;
     const [list, repositories] = await Promise.allSettled([
-      api.cloudWorkspaces(),
-      wantRepositories ? api.cloudWorkspaceRepositories() : Promise.resolve(null),
+      api.cloudWorkspaces(cloudOrgArg(orgId)),
+      wantRepositories ? api.cloudWorkspaceRepositories(cloudOrgArg(orgId)) : Promise.resolve(null),
     ]);
-    // Signed out or another user while it ran: nothing lands.
+    // Signed out or another user while it ran, or (CS-18) the user left the organization: nothing lands.
     if (state.owner !== owner) return;
+    if (isMultiOrg(getAccount().status) && !liveCloudOrgIds(getAccount().status).includes(orgId)) return;
     if (repositories.status === "fulfilled" && repositories.value) {
       patchOrg(orgId, { repositories: repositories.value.repositories, repositoriesAt: now() });
     }
@@ -405,7 +429,9 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
       // account status here is stale. Read it again rather than show the
       // wrong organization's rows.
       if (list.value.workspaces.some((item) => item.workspace.orgId !== orgId)) {
-        void refreshAccount();
+        // A list named by its organization (CS-18) that answers for another is simply invalid.
+        if (isMultiOrg(getAccount().status)) patchOrg(orgId, { error: "cloud_workspace_invalid_response" });
+        else void refreshAccount();
         return;
       }
       await ingestCloudList(list.value, orgId, now(), requestedAt);
@@ -414,7 +440,7 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
     }
   })().finally(() => {
     flights.delete(orgId);
-    schedulePoll();
+    schedulePoll(orgId);
   });
   flights.set(orgId, flight);
   return flight;
@@ -431,10 +457,12 @@ export function isChanging(item: CloudWorkspaceListItem): boolean {
 }
 
 /**
- * How long until the next list: every 3 s while anything is changing state,
- * every 30 s while the window is focused, and never while it is hidden (or
- * visible but in the background with nothing changing; focusing it lists at
- * once when the rows are stale).
+ * How long until an organization's next list: every 3 s while anything in it
+ * is changing state, every 30 s while the window is focused, and never while
+ * it is hidden (or visible but in the background with nothing changing;
+ * focusing it lists at once when the rows are stale). Each live organization
+ * follows this on its own timer, so an idle desktop sends one list per
+ * organization per 30 s (until the cross-organization feed, CS-21).
  */
 export function pollDelay(org: OrgCatalog | undefined, window: { visible: boolean; focused: boolean }): number | null {
   if (!window.visible) return null;
@@ -442,33 +470,51 @@ export function pollDelay(org: OrgCatalog | undefined, window: { visible: boolea
   return window.focused ? POLL_FOCUSED_MS : null;
 }
 
-let timer: ReturnType<typeof setTimeout> | null = null;
+/** Per live organization, its next list. */
+const timers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function windowState(): { visible: boolean; focused: boolean } {
   if (typeof document === "undefined") return { visible: false, focused: false };
   return { visible: document.visibilityState !== "hidden", focused: typeof document.hasFocus === "function" ? document.hasFocus() : true };
 }
 
-function schedulePoll() {
-  if (timer !== null) clearTimeout(timer);
-  timer = null;
-  const orgId = defaultOrgId(getAccount().status);
-  if (!booted || !orgId || !cloudOrganizations(getAccount().status).some((org) => org.id === orgId)) return;
-  const delay = pollDelay(state.orgs[orgId], windowState());
-  if (delay === null) return;
-  timer = setTimeout(() => {
-    timer = null;
-    void refreshCloudCatalog(orgId);
-  }, delay);
+function clearTimers(keep: ReadonlySet<string> = new Set()) {
+  for (const [orgId, timer] of timers) {
+    if (keep.has(orgId)) continue;
+    clearTimeout(timer);
+    timers.delete(orgId);
+  }
+}
+
+/** Schedule the next list of one organization, or (none named) of every live one; an organization no longer live stops. */
+function schedulePoll(only?: string) {
+  const live = booted ? liveCloudOrgIds(getAccount().status) : [];
+  clearTimers(new Set(live));
+  for (const orgId of live) {
+    if (only && orgId !== only) continue;
+    const existing = timers.get(orgId);
+    if (existing) clearTimeout(existing);
+    timers.delete(orgId);
+    const delay = pollDelay(state.orgs[orgId], windowState());
+    if (delay === null) continue;
+    timers.set(
+      orgId,
+      setTimeout(() => {
+        timers.delete(orgId);
+        void refreshCloudCatalog(orgId);
+      }, delay),
+    );
+  }
 }
 
 function onWindowChange() {
-  const orgId = defaultOrgId(getAccount().status);
-  const org = orgId ? state.orgs[orgId] : undefined;
   const { visible, focused } = windowState();
-  const stale = !org?.fetchedAt || Date.now() - org.fetchedAt >= POLL_FOCUSED_MS;
-  if (visible && focused && stale && orgId && cloudOrganizations(getAccount().status).some((item) => item.id === orgId)) void refreshCloudCatalog(orgId);
-  else schedulePoll();
+  for (const orgId of liveCloudOrgIds(getAccount().status)) {
+    const org = state.orgs[orgId];
+    const stale = !org?.fetchedAt || Date.now() - org.fetchedAt >= POLL_FOCUSED_MS;
+    if (visible && focused && stale) void refreshCloudCatalog(orgId);
+    else schedulePoll(orgId);
+  }
 }
 
 // ---- Saved cache -----------------------------------------------------------
@@ -576,6 +622,8 @@ async function loadSaved(owner: string, revision: string) {
   const orgs = { ...(saved?.orgs ?? {}) };
   for (const [orgId, org] of Object.entries(state.orgs)) if (org.source === "live" || !orgs[orgId]) orgs[orgId] = org;
   set({ ...state, loaded: true, orgs, createMemory: { ...(saved?.createMemory ?? {}), ...state.createMemory } });
+  // What was saved for an organization the user has since left is not shown again.
+  if (isMultiOrg(getAccount().status)) dropLeftOrganizations(getAccount().status);
 }
 
 // ---- Account ---------------------------------------------------------------
@@ -601,9 +649,40 @@ function syncAccount() {
   } else if (revision !== state.revision) {
     set({ ...state, revision }, false);
   }
-  const orgId = defaultOrgId(status);
-  if (owner && orgId && cloudOrganizations(status).some((org) => org.id === orgId)) void refreshCloudCatalog(orgId);
-  else schedulePoll();
+  if (owner && isMultiOrg(status)) dropLeftOrganizations(status);
+  const live = owner ? liveCloudOrgIds(status) : [];
+  // Listing never wakes compute. With several live organizations, one listed
+  // moments ago keeps its timer rather than listing again on every status
+  // read; the default organization alone (no capability) lists as before.
+  const multi = isMultiOrg(status);
+  for (const orgId of live) {
+    const org = state.orgs[orgId];
+    if (multi && org?.source === "live" && org.fetchedAt !== null && Date.now() - org.fetchedAt < POLL_CHANGING_MS) continue;
+    void refreshCloudCatalog(orgId);
+  }
+  schedulePoll();
+}
+
+/**
+ * The user left an organization (CS-18): its saved rows, session lists and
+ * create memory go. Other organizations are untouched, and nothing goes on a
+ * change of the default organization.
+ */
+function dropLeftOrganizations(status: AccountStatus) {
+  const members = new Set((status.organizations ?? []).map((org) => org.id));
+  if (status.identity?.organizationId) members.add(status.identity.organizationId);
+  const left = Object.keys(state.orgs).filter((orgId) => !members.has(orgId));
+  const leftMemory = Object.keys(state.createMemory).filter((key) => !members.has(key.split(":")[0]));
+  if (!left.length && !leftMemory.length) return;
+  const orgs = { ...state.orgs };
+  for (const orgId of left) {
+    delete orgs[orgId];
+    listedAt.delete(orgId);
+    flights.delete(orgId);
+  }
+  const createMemory = { ...state.createMemory };
+  for (const key of leftMemory) delete createMemory[key];
+  set({ ...state, orgs, createMemory });
 }
 
 export function bootCloudCatalog() {
@@ -627,9 +706,8 @@ export function resetCloudCatalog() {
     window.removeEventListener("blur", onWindowChange);
     document.removeEventListener("visibilitychange", onWindowChange);
   }
-  if (timer !== null) clearTimeout(timer);
+  clearTimers();
   if (saveTimer !== null) clearTimeout(saveTimer);
-  timer = null;
   saveTimer = null;
   booted = false;
   flights.clear();

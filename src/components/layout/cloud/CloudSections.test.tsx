@@ -309,7 +309,7 @@ describe("lifecycle menu", () => {
     expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
     fireEvent.click(within(menu).getByRole("menuitem", { name: "Resume" }));
     await waitFor(() => expect(mocks.api.cloudWorkspaceResume).toHaveBeenCalledTimes(1));
-    expect(mocks.api.cloudWorkspaceResume).toHaveBeenCalledWith("perf-sweep");
+    expect(mocks.api.cloudWorkspaceResume).toHaveBeenCalledWith("perf-sweep", null);
     // The row follows the operation at once.
     await waitFor(() => expect(within(row("perf-sweep")).getByTestId("cloud-workspace-row-state").textContent).toBe("Resuming"));
   });
@@ -324,7 +324,7 @@ describe("lifecycle menu", () => {
     const menu = await screen.findByRole("menu");
     expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Unarchive", "Delete…"]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: "Unarchive" }));
-    await waitFor(() => expect(mocks.api.cloudWorkspaceUnarchive).toHaveBeenCalledWith("old"));
+    await waitFor(() => expect(mocks.api.cloudWorkspaceUnarchive).toHaveBeenCalledWith("old", null));
     expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
   });
 });
@@ -344,5 +344,44 @@ describe("another organization", () => {
     fireEvent.click(screen.getByTestId("cloud-org-switch"));
     await waitFor(() => expect(mocks.ask).toHaveBeenCalled());
     expect(mocks.api.organizationSelect).not.toHaveBeenCalled();
+  });
+});
+
+describe("every organization live (CS-18)", () => {
+  const inB = (id: string, fields: Record<string, unknown>): CloudWorkspaceListItem => {
+    const made = item(id, fields);
+    return { ...made, workspace: { ...made.workspace, orgId: "org-b" } };
+  };
+  const betaRepositories = [{ identity: "github.com/beta/web", fullName: "beta/web", cloneUrl: "https://github.com/beta/web.git", primary: true }];
+
+  beforeEach(async () => {
+    mocks.status = { ...mocks.status, multiOrg: true };
+    await catalog.ingestCloudList({ workspaces: [inB("beta-ws", { repositories: betaRepositories, launch: launch("terminalx/beta-1"), lastActivityAt: 30 })] }, "org-b");
+  });
+
+  it("shows every cloud-enabled organization's projects live, with no Switch and no one-line fallback", () => {
+    mount();
+    const sections = screen.getAllByTestId("cloud-org-section");
+    expect(sections.map((section) => section.getAttribute("data-org"))).toEqual([ORG, "org-b"]);
+    const beta = sections[1];
+    expect(within(beta).queryByTestId("cloud-org-switch")).toBeNull();
+    expect(within(beta).getByTestId("cloud-org-header").getAttribute("title")).toBeNull();
+    expect(beta.getAttribute("aria-expanded")).toBe("true");
+    expect(within(beta).getByRole("button", { name: "Add project to Beta" })).toBeTruthy();
+    const project = within(beta).getAllByTestId("cloud-project-row").find((node) => node.textContent?.includes("beta/web"));
+    expect(project?.getAttribute("data-project")).toBe("cloud:org-b:github.com/beta/web");
+    // Looking never wakes compute, in either organization.
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+  });
+
+  it("keeps each organization's collapse in prefs", () => {
+    mount();
+    const beta = screen.getAllByTestId("cloud-org-section")[1];
+    fireEvent.click(within(beta).getByRole("button", { name: "Beta" }));
+    expect(prefs.getPrefs().sidebarSections["org:org-b"]).toBe("collapsed");
+    expect(screen.getAllByTestId("cloud-org-section")[1].getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getAllByTestId("cloud-org-section")[0].getAttribute("aria-expanded")).toBe("true");
+    act(() => prefs.setPrefs({ sidebarSections: {} }));
   });
 });

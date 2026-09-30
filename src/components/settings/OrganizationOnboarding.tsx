@@ -12,13 +12,18 @@ export function OrganizationOnboarding({
   accountEmail,
   contextRevision,
   organizations,
+  multiOrg = false,
 }: {
   organizationName: string | null;
   accountEmail: string;
   contextRevision: string;
   organizations: OrganizationSummary[];
+  /** Every organization is live in the sidebar (CS-18): the selection only picks the default for new cloud work. */
+  multiOrg?: boolean;
 }) {
   const storageKey = `terminalx.organization-setup.v1.${accountEmail}`;
+  // With every organization live (CS-18) the selection only picks where new cloud work starts by default.
+  const organizationLabel = multiOrg ? "Default organization for new cloud work" : "Organization";
   const [attempt, setAttempt] = useState<Attempt | null>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(storageKey) ?? "null");
@@ -149,9 +154,9 @@ export function OrganizationOnboarding({
       </p>
       {organizations.length > 1 && (
         <label className="mt-2 block text-xs text-muted-foreground">
-          Organization
+          {organizationLabel}
           <select
-            aria-label="Organization"
+            aria-label={organizationLabel}
             className="mt-1 h-8 w-full rounded-md border border-hairline bg-background px-2 text-xs"
             disabled={busy}
             value={

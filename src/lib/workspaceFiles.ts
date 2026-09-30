@@ -342,6 +342,20 @@ export function discardStashedBuffers(editorIds: string[]): void {
   for (const id of editorIds) stashed.delete(id);
 }
 
+/** The user left an organization (CS-18): its workspaces' file sources go; unsaved text goes with their editors. */
+export function resetCloudFilesIn(orgId: string): void {
+  const prefix = `cloud:${orgId}:`;
+  let changed = false;
+  for (const [key, source] of sources) {
+    if (source.kind === "cloud" && key.startsWith(prefix)) {
+      (source as CloudFileSource).dispose();
+      sources.delete(key);
+      changed = true;
+    }
+  }
+  if (changed) for (const listener of sourceListeners) listener();
+}
+
 /** On an account or organization change: nothing of the old identity's workspaces stays. */
 export function resetCloudFiles(): void {
   stashed.clear();

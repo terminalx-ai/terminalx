@@ -175,6 +175,15 @@ export function dropCloudAgents(scope: CloudAgentScope): number {
   return count;
 }
 
+/** Forget one organization's tabs and polling: the user left it (CS-18). */
+export function dropCloudAgentsIn(orgId: string): void {
+  for (const key of [...stores.keys()]) {
+    if (!key.startsWith(`${orgId}:`)) continue;
+    const [organizationId, ...rest] = key.split(":");
+    dropCloudAgents({ organizationId, workspaceId: rest.join(":") });
+  }
+}
+
 export function errorText(error: unknown): string {
   if (error && typeof error === "object" && "code" in error && typeof (error as { code: unknown }).code === "string") return (error as { code: string }).code;
   if (error instanceof Error) return error.message;

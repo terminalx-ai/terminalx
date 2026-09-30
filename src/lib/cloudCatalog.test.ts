@@ -38,11 +38,13 @@ vi.mock("@/lib/account", () => ({
 import {
   applyCloudSnapshot,
   bootCloudCatalog,
+  cloudOrgArg,
   cloudOrganizations,
   defaultOrgId,
   flushCloudCatalogSave,
   getCloudCatalog,
   ingestCloudList,
+  liveCloudOrgIds,
   parseCatalog,
   placeCloudProjects,
   pollDelay,
@@ -407,5 +409,94 @@ describe("looking never costs money", () => {
     expect(mocks.api.cloudRemoteActivate).not.toHaveBeenCalled();
     expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
     expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+  });
+});
+
+describe("every organization live (CS-18)", () => {
+  const ORG_B = "org-b";
+  const orgs = [
+    { id: ORG, name: "Acme", role: "admin", isPersonal: false, cloud: { enabled: true, flags: {} } },
+    { id: ORG_B, name: "Beta", role: "member", isPersonal: false, cloud: { enabled: true, flags: {} } },
+    { id: "org-off", name: "Off", role: "member", isPersonal: false, cloud: { enabled: false, flags: {} } },
+  ];
+  const inB = (id: string): CloudWorkspaceListItem => ({ ...item(id), workspace: { ...item(id).workspace, orgId: ORG_B } });
+  const multi = (patch: Partial<AccountStatus> = {}) => {
+    signIn(orgs);
+    mocks.account.status = { ...mocks.account.status, multiOrg: true, context: { scope: "s", revision: "s:1", account: "acct" }, ...patch };
+    for (const listener of mocks.listeners) listener();
+  };
+  const listFor = (orgId: string | null) => (orgId === ORG_B ? { workspaces: [inB("b1")] } : { workspaces: [item("a1")] });
+
+  it("without the capability, only the default organization is live, listed with no organization named", async () => {
+    signIn(orgs);
+    expect(liveCloudOrgIds(mocks.account.status)).toEqual([ORG]);
+    expect(cloudOrgArg(ORG_B)).toBeNull();
+    bootCloudCatalog();
+    await vi.waitFor(() => expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(1));
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledWith(null);
+    await refreshCloudCatalog(ORG_B);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(1);
+  });
+
+  it("with it, lists every cloud-enabled organization by name, and each keeps its own rows", async () => {
+    mocks.api.cloudWorkspaces.mockImplementation(async (orgId: string | null) => listFor(orgId));
+    multi();
+    expect(liveCloudOrgIds(mocks.account.status)).toEqual([ORG, ORG_B]);
+    bootCloudCatalog();
+    await vi.waitFor(() => expect(getCloudCatalog().orgs[ORG_B]?.workspaces.map((w) => w.workspace.id)).toEqual(["b1"]));
+    expect(getCloudCatalog().orgs[ORG].workspaces.map((w) => w.workspace.id)).toEqual(["a1"]);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledWith(ORG);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledWith(ORG_B);
+    expect(mocks.api.cloudWorkspaces).not.toHaveBeenCalledWith("org-off");
+    expect(mocks.api.cloudWorkspaceRepositories).toHaveBeenCalledWith(ORG_B);
+  });
+
+  it("polls each live organization on its own 30 s timer, never attaching to or resuming anything", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    mocks.api.cloudWorkspaces.mockImplementation(async (orgId: string | null) => listFor(orgId));
+    multi();
+    bootCloudCatalog();
+    await vi.advanceTimersByTimeAsync(0);
+    const calls = (orgId: string) => mocks.api.cloudWorkspaces.mock.calls.filter(([id]) => id === orgId).length;
+    expect([calls(ORG), calls(ORG_B)]).toEqual([1, 1]);
+    await vi.advanceTimersByTimeAsync(POLL_FOCUSED_MS);
+    // The budget: one list per organization per interval while idle and focused.
+    expect([calls(ORG), calls(ORG_B)]).toEqual([2, 2]);
+    expect(mocks.api.cloudRemoteAttach).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+  });
+
+  it("a change of the default organization keeps both organizations' rows", async () => {
+    mocks.api.cloudWorkspaces.mockImplementation(async (orgId: string | null) => listFor(orgId));
+    multi();
+    bootCloudCatalog();
+    await vi.waitFor(() => expect(getCloudCatalog().orgs[ORG_B]).toBeDefined());
+    multi({ identity: { name: "A", email: "a@example.com", organization: "Beta", organizationId: ORG_B } });
+    expect(getCloudCatalog().orgs[ORG].workspaces).toHaveLength(1);
+    expect(getCloudCatalog().orgs[ORG_B].workspaces).toHaveLength(1);
+  });
+
+  it("losing a membership purges only that organization's cache", async () => {
+    mocks.api.cloudWorkspaces.mockImplementation(async (orgId: string | null) => listFor(orgId));
+    multi();
+    bootCloudCatalog();
+    await vi.waitFor(() => expect(getCloudCatalog().orgs[ORG_B]).toBeDefined());
+    rememberCreatedWorkspace({ workspace: inB("b2").workspace, operation: {} as never }, [{ cloneUrl: "https://github.com/beta/api" }]);
+    rememberCreatedWorkspace({ workspace: item("a2").workspace, operation: {} as never }, [{ cloneUrl: "https://github.com/acme/api" }]);
+    multi({ organizations: orgs.filter((org) => org.id !== ORG_B) });
+    expect(getCloudCatalog().orgs[ORG_B]).toBeUndefined();
+    expect(getCloudCatalog().createMemory[`${ORG_B}:b2`]).toBeUndefined();
+    expect(getCloudCatalog().orgs[ORG].workspaces.map((w) => w.workspace.id)).toContain("a1");
+    expect(getCloudCatalog().createMemory[`${ORG}:a2`]).toBeDefined();
+  });
+
+  it("a list named by its organization that answers for another is invalid, not a stale account", async () => {
+    mocks.api.cloudWorkspaces.mockImplementation(async (orgId: string | null) => (orgId === ORG_B ? { workspaces: [item("wrong")] } : { workspaces: [] }));
+    multi();
+    bootCloudCatalog();
+    await vi.waitFor(() => expect(getCloudCatalog().orgs[ORG_B]?.error).toBe("cloud_workspace_invalid_response"));
+    expect(mocks.refreshAccount).not.toHaveBeenCalled();
   });
 });

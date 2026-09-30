@@ -163,43 +163,47 @@ export const api = {
     invoke<CloudProviderConnection>("cloud_provider_disconnect", { provider, contextRevision, disposition }),
   cloudProviderConnect: (provider: CloudWorkspaceProviderId, input: CloudProviderConnectInput) =>
     invoke<CloudProviderConnection>("cloud_provider_connect", { provider, input }),
-  cloudWorkspaceSetup: (provider: CloudWorkspaceProviderId) =>
-    invoke<CloudWorkspaceSetup>("cloud_workspace_setup", { provider }),
-  cloudWorkspaceQuote: (input: CloudWorkspaceQuoteInput) =>
-    invoke<CloudWorkspaceQuote>("cloud_workspace_quote", { input }),
-  cloudWorkspaceCreate: (input: CloudWorkspaceCreateInput) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_create", { input }),
-  cloudWorkspacePreflight: (repositories: CloudWorkspaceRepositoryInput[]) =>
-    invoke<CloudWorkspacePreflight>("cloud_workspace_preflight", { repositories }),
-  cloudWorkspaceRepositories: () => invoke<CloudSelectedRepositories>("cloud_workspace_repositories"),
-  cloudWorkspaces: () => invoke<CloudWorkspaceList>("cloud_workspaces"),
-  cloudWorkspaceSuspend: (workspaceId: string) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_suspend", { workspaceId }),
-  cloudWorkspaceResume: (workspaceId: string) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_resume", { workspaceId }),
-  cloudWorkspaceRelease: (workspaceId: string) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_release", { workspaceId }),
+  // Cloud workspace routes take the Organization they act in (CS-18). None
+  // (or null) means the active Organization, as before; a named one must be
+  // the active one or, on a server that authorizes by membership, a member
+  // Organization. The native side checks it against the membership list.
+  cloudWorkspaceSetup: (provider: CloudWorkspaceProviderId, orgId?: string | null) =>
+    invoke<CloudWorkspaceSetup>("cloud_workspace_setup", { provider, orgId: orgId ?? null }),
+  cloudWorkspaceQuote: (input: CloudWorkspaceQuoteInput, orgId?: string | null) =>
+    invoke<CloudWorkspaceQuote>("cloud_workspace_quote", { input, orgId: orgId ?? null }),
+  cloudWorkspaceCreate: (input: CloudWorkspaceCreateInput, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_create", { input, orgId: orgId ?? null }),
+  cloudWorkspacePreflight: (repositories: CloudWorkspaceRepositoryInput[], orgId?: string | null) =>
+    invoke<CloudWorkspacePreflight>("cloud_workspace_preflight", { repositories, orgId: orgId ?? null }),
+  cloudWorkspaceRepositories: (orgId?: string | null) => invoke<CloudSelectedRepositories>("cloud_workspace_repositories", { orgId: orgId ?? null }),
+  cloudWorkspaces: (orgId?: string | null) => invoke<CloudWorkspaceList>("cloud_workspaces", { orgId: orgId ?? null }),
+  cloudWorkspaceSuspend: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_suspend", { workspaceId, orgId: orgId ?? null }),
+  cloudWorkspaceResume: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_resume", { workspaceId, orgId: orgId ?? null }),
+  cloudWorkspaceRelease: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_release", { workspaceId, orgId: orgId ?? null }),
   /** Archive (30-day trash). `force` only after the person confirmed stopping running agent work. */
-  cloudWorkspaceArchive: (workspaceId: string, force: boolean) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_archive", { workspaceId, force }),
+  cloudWorkspaceArchive: (workspaceId: string, force: boolean, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_archive", { workspaceId, force, orgId: orgId ?? null }),
   /** Permanent delete, a resumable cleanup job; retrying resumes the same operation. */
-  cloudWorkspaceDelete: (workspaceId: string, force: boolean) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_delete", { workspaceId, force }),
+  cloudWorkspaceDelete: (workspaceId: string, force: boolean, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_delete", { workspaceId, force, orgId: orgId ?? null }),
   /** Out of the archive; it stays suspended until the next interactive action. */
-  cloudWorkspaceUnarchive: (workspaceId: string) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_unarchive", { workspaceId }),
-  cloudWorkspaceDisposition: (workspaceId: string) =>
-    invoke<CloudWorkspaceDisposition>("cloud_workspace_disposition", { workspaceId }),
+  cloudWorkspaceUnarchive: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_unarchive", { workspaceId, orgId: orgId ?? null }),
+  cloudWorkspaceDisposition: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceDisposition>("cloud_workspace_disposition", { workspaceId, orgId: orgId ?? null }),
   /** Drop the agent outbox, transcript cache and keys this Mac kept for a deleted workspace. */
   /** The saved cloud catalog (PRO-57) of the signed-in user; refused once `revision` is not the current account. */
   cloudCatalogLoad: (revision: string) => invoke<unknown>("cloud_catalog_load", { revision }),
   cloudCatalogSave: (revision: string, catalog: unknown) => invoke<void>("cloud_catalog_save", { revision, catalog }),
   cloudAgentPurgeWorkspace: (organizationId: string, workspaceId: string) =>
     invoke<{ removed: boolean; unsentCommands: number; cachedTabs: number }>("cloud_agent_purge_workspace", { organizationId, workspaceId }),
-  cloudWorkspaceOperation: (operationId: string) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_operation", { operationId }),
-  cloudWorkspaceOperationCancel: (operationId: string) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_operation_cancel", { operationId }),
+  cloudWorkspaceOperation: (operationId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_operation", { operationId, orgId: orgId ?? null }),
+  cloudWorkspaceOperationCancel: (operationId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_operation_cancel", { operationId, orgId: orgId ?? null }),
   // Remote runtime connections (PRO-13); relay credentials and E2EE keys stay native.
   cloudRemoteAttach: (target: CloudWorkspaceTarget, activation: Activation) =>
     invoke<string>("cloud_remote_attach", { target, activation }),
@@ -311,8 +315,15 @@ export interface AccountStatus {
   identity: AccountIdentity | null;
   expiresAt: number | null;
   lastError: string | null;
-  context?: { scope: string; revision: string } | null;
+  /**
+   * `scope` and `revision` include the active Organization; `account` is the
+   * user and profile alone (CS-18), what cloud state belongs to when every
+   * member Organization is live.
+   */
+  context?: { scope: string; revision: string; account?: string } | null;
   organizations?: OrganizationSummary[];
+  /** The server authorizes desktop cloud routes by membership (`cloud.desktop.multi-org.v1`, CS-18). */
+  multiOrg?: boolean;
 }
 
 /** `local-docker` is offered by debug builds only (terminalx-saas `cloud:e2e:local --serve`). */
@@ -1474,4 +1485,14 @@ export function closeWorkspaceConnections(): void {
   const all = [...connections.values()];
   connections.clear();
   for (const pending of all) void pending.then((connection) => connection.close()).catch(() => undefined);
+}
+
+/** Drop one Organization's cloud connections only: the user left it (CS-18). */
+export function closeWorkspaceConnectionsIn(orgId: string): void {
+  const prefix = `cloud:${orgId}:`;
+  for (const [key, pending] of [...connections]) {
+    if (!key.startsWith(prefix)) continue;
+    connections.delete(key);
+    void pending.then((connection) => connection.close()).catch(() => undefined);
+  }
 }

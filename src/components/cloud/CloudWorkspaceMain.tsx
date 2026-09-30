@@ -39,7 +39,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   const sections = useCloudSections();
   const parsed = parseCloudWorkspaceKey(workspaceKey);
   // Signed out, or no longer a member: nothing of the organization is shown or connected.
-  const member = !!parsed && sections.orgs.some((org) => org.id === parsed.orgId && org.id === sections.defaultOrg);
+  const member = !!parsed && sections.live.has(parsed.orgId);
   const item = parsed && member ? findCloudWorkspace(catalog, parsed.orgId, parsed.workspaceId) : null;
   const canOpen = !!item && openable(item);
   // A stopped workspace that was resumed is reconnected, so the view follows it to running.

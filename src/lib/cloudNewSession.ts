@@ -1,6 +1,8 @@
-import { api, type CloudWorkspaceQuote, type CloudWorkspaceSnapshot } from "@/lib/api";
+import { api, type CloudWorkspaceProviderId, type CloudWorkspaceQuote, type CloudWorkspaceSetup, type CloudWorkspaceSnapshot } from "@/lib/api";
+import { getAccount } from "@/lib/account";
+import { isMultiOrg } from "@/lib/multiOrg";
 import { createCloudAgentTab, getCloudAgents } from "@/lib/cloudAgents";
-import { findCloudWorkspace, getCloudCatalog, isChanging, rememberCreatedWorkspace, subscribeCloudCatalog } from "@/lib/cloudCatalog";
+import { cloudOrgArg, defaultOrgId, findCloudWorkspace, getCloudCatalog, isChanging, rememberCreatedWorkspace, subscribeCloudCatalog } from "@/lib/cloudCatalog";
 import {
   CreateRefused,
   createWorkspace,
@@ -148,6 +150,35 @@ function cloneUrlOf(project: CloudProject): string | null {
   return `https://${project.identity}.git`;
 }
 
+/** Providers in the order the desktop prefers them when the organization's provider list cannot be read. */
+const PROVIDER_ORDER: readonly CloudWorkspaceProviderId[] = ["machine0", "box", "local-docker"];
+
+/**
+ * The provider a new workspace in this organization uses. In the default
+ * organization, the first available one of its provider list, as before.
+ * Another organization's provider list is answered only while it is the
+ * default one, so its per-organization capability flags (PRO-69) name the
+ * providers it offers and setup, which is reachable by membership (CS-18),
+ * picks the first that is connected. Nothing here creates anything.
+ */
+async function providerFor(orgId: string): Promise<{ id: CloudWorkspaceProviderId; label: string; setup: CloudWorkspaceSetup | null }> {
+  const status = getAccount().status;
+  if (!isMultiOrg(status) || orgId === defaultOrgId(status)) {
+    const provider = usableProviders((await api.cloudProviders()).providers)[0];
+    if (!provider) throw new CreateRefused("cloud_provider_connection_required");
+    return { id: provider.id, label: provider.displayName || provider.id, setup: null };
+  }
+  const flags = status.organizations?.find((org) => org.id === orgId)?.cloud?.flags ?? {};
+  for (const id of PROVIDER_ORDER.filter((provider) => flags[`cloud.workspaces.provider.${provider}.v1`] === true)) {
+    try {
+      return { id, label: id, setup: await api.cloudWorkspaceSetup(id, orgId) };
+    } catch {
+      /* not connected in this organization: try the next */
+    }
+  }
+  throw new CreateRefused("cloud_provider_connection_required");
+}
+
 /**
  * Everything a new workspace needs before the person confirms the cost: the
  * quota (refused at the limit, sending nothing), the provider, the checks and
@@ -157,9 +188,8 @@ export async function prepareCloudCreate(project: CloudProject, request: CloudSe
   const orgId = project.orgId;
   const quota = getCloudCatalog().orgs[orgId]?.quota ?? null;
   if (quota && quota.used >= quota.limit) throw new CreateRefused("cloud_workspace_quota_exceeded");
-  const providers = usableProviders((await api.cloudProviders()).providers);
-  const provider = providers[0];
-  if (!provider) throw new CreateRefused("cloud_provider_connection_required");
+  const provider = await providerFor(orgId);
+  const org = cloudOrgArg(orgId);
   const name = project.blank ? project.fullName : titleOf(request.prompt) || project.fullName.split("/").pop() || project.fullName;
   const form: CreateForm = {
     name: [...name].slice(0, 80).join(""),
@@ -176,12 +206,12 @@ export async function prepareCloudCreate(project: CloudProject, request: CloudSe
   if (errors[0]) throw new CreateRefused("cloud_workspace_form_invalid", errors[0]);
   const repositories = repositoriesInput(form);
   if (repositories.length) {
-    const preflight = await api.cloudWorkspacePreflight(repositories);
+    const preflight = await api.cloudWorkspacePreflight(repositories, org);
     const failed = preflight.checks.find((check) => check.status === "failed" && check.kind !== "agent-credential");
     if (failed) throw new CreateRefused(failed.errorCode ?? "cloud_workspace_request_invalid", failed.cloneUrl);
   }
-  const setup = await api.cloudWorkspaceSetup(provider.id);
-  const quote = await api.cloudWorkspaceQuote({ provider: provider.id, ...setup.defaults });
+  const setup = provider.setup ?? (await api.cloudWorkspaceSetup(provider.id, org));
+  const quote = await api.cloudWorkspaceQuote({ provider: provider.id, ...setup.defaults }, org);
   const idempotencyKey = crypto.randomUUID();
   const pending: PendingCreate = {
     idempotencyKey,
@@ -196,7 +226,7 @@ export async function prepareCloudCreate(project: CloudProject, request: CloudSe
       launch: launchInput(form),
     },
   };
-  return { orgId, project, form, pending, quote, quota, providerLabel: provider.displayName || provider.id };
+  return { orgId, project, form, pending, quote, quota, providerLabel: provider.label };
 }
 
 /**
@@ -205,6 +235,7 @@ export async function prepareCloudCreate(project: CloudProject, request: CloudSe
  */
 export async function confirmCloudCreate(prepared: PreparedCreate): Promise<CloudWorkspaceSnapshot> {
   const snapshot = await createWorkspace(api, prepared.form, {
+    orgId: cloudOrgArg(prepared.orgId),
     pending: prepared.pending,
     onPending: (pending) => savePending(prepared.orgId, pending),
     onCreated: (created, request) => rememberCreatedWorkspace(created, request.repositories),

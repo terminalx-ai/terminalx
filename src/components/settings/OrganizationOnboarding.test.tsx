@@ -149,3 +149,14 @@ it("keeps a second organization's recovery separate from the existing provider c
       .disabled,
   ).toBe(false);
 });
+
+it("names the selector for what it decides once every organization is live (CS-18)", () => {
+  const organizations = [
+    { id: "org-a", name: "Acme", role: "owner" },
+    { id: "org-b", name: "Beta", role: "member" },
+  ];
+  const view = render(<OrganizationOnboarding {...props} organizationName="Acme" organizations={organizations} />);
+  expect(screen.getByRole("combobox", { name: "Organization" })).toBeTruthy();
+  view.rerender(<OrganizationOnboarding {...props} organizationName="Acme" organizations={organizations} multiOrg />);
+  expect(screen.getByRole("combobox", { name: "Default organization for new cloud work" })).toBeTruthy();
+});

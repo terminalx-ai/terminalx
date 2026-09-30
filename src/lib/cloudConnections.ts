@@ -391,6 +391,15 @@ export function closeCloudConnection(target: CloudTarget) {
   if (entry) drop(entry);
 }
 
+/** Close one organization's connections and forget them: the user left it (CS-18). */
+export function closeCloudConnectionsIn(orgId: string) {
+  const gone = [...entries.values()].filter((entry) => entry.target.orgId === orgId);
+  if (!gone.length) return;
+  for (const entry of gone) drop(entry);
+  if (selectedKey && !entries.has(selectedKey)) selectedKey = null;
+  notify();
+}
+
 /** Close every connection (sign-out, another user) and forget them. */
 export function resetCloudConnections() {
   for (const entry of [...entries.values()]) drop(entry);

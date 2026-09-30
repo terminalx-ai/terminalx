@@ -343,7 +343,7 @@ describe("cloud workspace session page", () => {
     // Reading an archived workspace never starts it.
     expect(row.textContent).not.toMatch(/Resume/);
     fireEvent.click(screen.getByRole("button", { name: /Unarchive/ }));
-    await waitFor(() => expect(api.cloudWorkspaceUnarchive).toHaveBeenCalledWith("ws-old"));
+    await waitFor(() => expect(api.cloudWorkspaceUnarchive).toHaveBeenCalledWith("ws-old", null));
     await waitFor(() => expect(api.cloudWorkspaces).toHaveBeenCalledTimes(2));
     expect(workspaceConnection).not.toHaveBeenCalled();
   });
