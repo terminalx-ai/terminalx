@@ -92,10 +92,10 @@ export function launchInput(form: CreateForm): CloudWorkspaceLaunchInput {
 
 /** What the API calls look like to the flow; the page passes `api`. */
 export interface CreateApi {
-  cloudWorkspacePreflight: (repositories: CloudWorkspaceRepositoryInput[]) => Promise<CloudWorkspacePreflight>;
-  cloudWorkspaceSetup: (provider: CloudWorkspaceProviderId) => Promise<CloudWorkspaceSetup>;
-  cloudWorkspaceQuote: (input: CloudWorkspaceQuoteInput) => Promise<CloudWorkspaceQuote>;
-  cloudWorkspaceCreate: (input: CloudWorkspaceCreateInput) => Promise<CloudWorkspaceSnapshot>;
+  cloudWorkspacePreflight: (repositories: CloudWorkspaceRepositoryInput[], orgId?: string | null) => Promise<CloudWorkspacePreflight>;
+  cloudWorkspaceSetup: (provider: CloudWorkspaceProviderId, orgId?: string | null) => Promise<CloudWorkspaceSetup>;
+  cloudWorkspaceQuote: (input: CloudWorkspaceQuoteInput, orgId?: string | null) => Promise<CloudWorkspaceQuote>;
+  cloudWorkspaceCreate: (input: CloudWorkspaceCreateInput, orgId?: string | null) => Promise<CloudWorkspaceSnapshot>;
 }
 
 /**
@@ -136,6 +136,8 @@ export async function createWorkspace(
     onCreated?: (snapshot: CloudWorkspaceSnapshot, request: CloudWorkspaceCreateInput) => void;
     newKey?: () => string;
     now?: () => number;
+    /** The organization to create in (CS-18); none for the active organization, as before. */
+    orgId?: string | null;
   } = {},
 ): Promise<CloudWorkspaceSnapshot> {
   const { onStep, onPending } = options;
@@ -147,13 +149,13 @@ export async function createWorkspace(
     const repositories = repositoriesInput(form);
     if (repositories.length) {
       onStep?.("checking");
-      const preflight = await api.cloudWorkspacePreflight(repositories);
+      const preflight = await api.cloudWorkspacePreflight(repositories, options.orgId ?? null);
       const failed = preflight.checks.find((check) => check.status === "failed" && check.kind !== "agent-credential");
       if (failed) throw new CreateRefused(failed.errorCode ?? "cloud_workspace_request_invalid", failed.cloneUrl);
     }
     onStep?.("quoting");
-    const setup = await api.cloudWorkspaceSetup(form.provider!);
-    const quote = await api.cloudWorkspaceQuote({ provider: form.provider!, ...setup.defaults });
+    const setup = await api.cloudWorkspaceSetup(form.provider!, options.orgId ?? null);
+    const quote = await api.cloudWorkspaceQuote({ provider: form.provider!, ...setup.defaults }, options.orgId ?? null);
     pending = {
       idempotencyKey: options.newKey?.() ?? crypto.randomUUID(),
       createdAt: options.now?.() ?? Date.now(),
@@ -172,7 +174,7 @@ export async function createWorkspace(
   onPending?.(pending);
   onStep?.("creating");
   try {
-    const snapshot = await api.cloudWorkspaceCreate(pending.request);
+    const snapshot = await api.cloudWorkspaceCreate(pending.request, options.orgId ?? null);
     onPending?.(null);
     options.onCreated?.(snapshot, pending.request);
     return snapshot;

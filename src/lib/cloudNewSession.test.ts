@@ -295,3 +295,50 @@ describe("blank projects", () => {
     expect(calls.at(-1)).toBe(false);
   });
 });
+
+describe("every organization live (CS-18)", () => {
+  const ORG_B = "org-b";
+  const target = { key: `cloud:${ORG_B}:github.com/beta/web`, orgId: ORG_B, identity: "github.com/beta/web", fullName: "beta/web", selected: true, pinned: false, blank: false, workspaces: [] } as never;
+
+  beforeEach(async () => {
+    mocks.status = {
+      ...mocks.status,
+      multiOrg: true,
+      organizations: [
+        { id: ORG, name: "Acme", role: "admin", isPersonal: false, cloud: { enabled: true, flags: {} } },
+        { id: ORG_B, name: "Beta", role: "member", isPersonal: false, cloud: { enabled: true, flags: { "cloud.workspaces.provider.machine0.v1": false, "cloud.workspaces.provider.box.v1": true } } },
+      ],
+    };
+    await catalog.ingestCloudList({ workspaces: [], quota: { used: 0, limit: 2 } }, ORG_B);
+  });
+
+  it("creates in another organization without switching: every call names it, and its provider comes from its flags", async () => {
+    const prepared = await flow.prepareCloudCreate(target, request);
+    // That organization's provider list is answered only while it is the default one.
+    expect(mocks.api.cloudProviders).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceSetup).toHaveBeenCalledTimes(1);
+    expect(mocks.api.cloudWorkspaceSetup).toHaveBeenCalledWith("box", ORG_B);
+    expect(mocks.api.cloudWorkspacePreflight).toHaveBeenCalledWith(expect.any(Array), ORG_B);
+    expect(mocks.api.cloudWorkspaceQuote).toHaveBeenCalledWith(expect.objectContaining({ provider: "box" }), ORG_B);
+    expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
+
+    const created = { ...item("fresh-b", { state: "provisioning" }), workspace: { ...item("fresh-b", { state: "provisioning" }).workspace, orgId: ORG_B } };
+    mocks.api.cloudWorkspaceCreate.mockResolvedValue({ workspace: created.workspace, operation: { id: "op", state: "running", type: "create", stage: "queued" } });
+    await flow.confirmCloudCreate(prepared);
+    expect(mocks.api.cloudWorkspaceCreate).toHaveBeenCalledWith(expect.objectContaining({ confirmProviderSpend: true }), ORG_B);
+  });
+
+  it("says a provider is needed when none offered by the organization is connected in it", async () => {
+    mocks.api.cloudWorkspaceSetup.mockRejectedValue({ code: "cloud_provider_connection_required" });
+    await expect(flow.prepareCloudCreate(target, request)).rejects.toMatchObject({ code: "cloud_provider_connection_required" });
+    expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
+  });
+
+  it("the default organization still reads its provider list, and names itself", async () => {
+    await place([], { used: 0, limit: 2 });
+    const own = { ...(target as object), key: `cloud:${ORG}:github.com/acme/web`, orgId: ORG, identity: "github.com/acme/web", fullName: "acme/web" } as never;
+    await flow.prepareCloudCreate(own, request);
+    expect(mocks.api.cloudProviders).toHaveBeenCalledTimes(1);
+    expect(mocks.api.cloudWorkspaceSetup).toHaveBeenCalledWith("box", ORG);
+  });
+});

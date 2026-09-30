@@ -21,6 +21,7 @@ import {
   type RuntimeCheck,
 } from "@/lib/cloudLifecycle";
 import { errorCode } from "@/lib/cloudTerminals";
+import { cloudOrgArg } from "@/lib/cloudCatalog";
 
 export type LifecycleAction = "stop" | "archive" | "delete";
 
@@ -83,7 +84,7 @@ export function CloudWorkspaceLifecycleDialog({
     setServerError(null);
     setRuntime(null);
     api
-      .cloudWorkspaceDisposition(workspace.id)
+      .cloudWorkspaceDisposition(workspace.id, cloudOrgArg(workspace.orgId))
       .then((facts) => {
         if (!live) return;
         setServer(facts);
@@ -120,10 +121,10 @@ export function CloudWorkspaceLifecycleDialog({
     try {
       const snapshot =
         action === "stop"
-          ? await api.cloudWorkspaceSuspend(workspace.id)
+          ? await api.cloudWorkspaceSuspend(workspace.id, cloudOrgArg(workspace.orgId))
           : action === "archive"
-            ? await api.cloudWorkspaceArchive(workspace.id, needsForce && force)
-            : await api.cloudWorkspaceDelete(workspace.id, needsForce && force);
+            ? await api.cloudWorkspaceArchive(workspace.id, needsForce && force, cloudOrgArg(workspace.orgId))
+            : await api.cloudWorkspaceDelete(workspace.id, needsForce && force, cloudOrgArg(workspace.orgId));
       onDone(snapshot);
     } catch (e) {
       const code = errorCode(e);
@@ -328,7 +329,7 @@ export function DeletionProgress({
     let live = true;
     const read = () =>
       api
-        .cloudWorkspaceOperation(operation.id)
+        .cloudWorkspaceOperation(operation.id, cloudOrgArg(item.workspace.orgId))
         .then((snapshot) => {
           if (!live) return;
           setOperation(snapshot.operation);
@@ -351,7 +352,7 @@ export function DeletionProgress({
     setBusy(true);
     setError(null);
     try {
-      const snapshot = await api.cloudWorkspaceDelete(item.workspace.id, false);
+      const snapshot = await api.cloudWorkspaceDelete(item.workspace.id, false, cloudOrgArg(item.workspace.orgId));
       setOperation(snapshot.operation);
       changed.current();
     } catch (e) {

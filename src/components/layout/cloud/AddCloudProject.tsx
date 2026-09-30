@@ -4,7 +4,7 @@ import { normalizeRepositoryIdentity } from "@terminalx/portable/repositoryIdent
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api, type CloudSelectedRepositories } from "@/lib/api";
-import { blankIdentity, getCloudCatalog, placeCloudProjects, setCloudRepositories } from "@/lib/cloudCatalog";
+import { blankIdentity, cloudOrgArg, getCloudCatalog, placeCloudProjects, setCloudRepositories } from "@/lib/cloudCatalog";
 import { errorCode } from "@/lib/cloudTerminals";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { startCloudSessionIn } from "@/lib/sessions";
@@ -29,7 +29,7 @@ export function AddRepositoryDialog({ orgId, orgName, onClose, onOpenSettings }:
   useEffect(() => {
     let live = true;
     api
-      .cloudWorkspaceRepositories()
+      .cloudWorkspaceRepositories(cloudOrgArg(orgId))
       .then((value) => {
         if (!live) return;
         setResult(value);

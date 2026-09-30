@@ -105,7 +105,7 @@ describe("CloudWorkspaceLifecycleDialog", () => {
     fireEvent.click(screen.getByLabelText("Stop the running agent work"));
     fireEvent.click(button(/Archive workspace/));
     await waitFor(() => expect(onDone).toHaveBeenCalled());
-    expect(mocked.cloudWorkspaceArchive).toHaveBeenCalledWith("ws-1", true);
+    expect(mocked.cloudWorkspaceArchive).toHaveBeenCalledWith("ws-1", true, null);
   });
 
   it("names a blank project's workspace folder, never \".\"", async () => {
@@ -133,7 +133,7 @@ describe("CloudWorkspaceLifecycleDialog", () => {
     await screen.findByText(/Everything is committed and pushed/);
     expect(screen.queryByLabelText("Stop the running agent work")).toBeNull();
     fireEvent.click(button(/Archive workspace/));
-    await waitFor(() => expect(mocked.cloudWorkspaceArchive).toHaveBeenCalledWith("ws-1", false));
+    await waitFor(() => expect(mocked.cloudWorkspaceArchive).toHaveBeenCalledWith("ws-1", false, null));
   });
 
   it("stops a workspace without asking the runtime anything destructive", async () => {
@@ -144,7 +144,7 @@ describe("CloudWorkspaceLifecycleDialog", () => {
     expect(screen.queryByTestId("cloud-lifecycle-facts")).toBeNull();
     fireEvent.click(button(/Stop workspace/));
     await waitFor(() => expect(onDone).toHaveBeenCalled());
-    expect(mocked.cloudWorkspaceSuspend).toHaveBeenCalledWith("ws-1");
+    expect(mocked.cloudWorkspaceSuspend).toHaveBeenCalledWith("ws-1", null);
   });
 
   it("switching to delete says it cannot be undone and needs an explicit acknowledgement", async () => {
@@ -160,7 +160,7 @@ describe("CloudWorkspaceLifecycleDialog", () => {
     expect(button(/Delete permanently/).disabled).toBe(true);
     fireEvent.click(screen.getByLabelText("I understand this cannot be undone"));
     fireEvent.click(button(/Delete permanently/));
-    await waitFor(() => expect(mocked.cloudWorkspaceDelete).toHaveBeenCalledWith("ws-1", false));
+    await waitFor(() => expect(mocked.cloudWorkspaceDelete).toHaveBeenCalledWith("ws-1", false, null));
   });
 
   it("asks for force when the server refuses for work that started after the facts were read", async () => {
@@ -178,7 +178,7 @@ describe("CloudWorkspaceLifecycleDialog", () => {
     fireEvent.click(screen.getByLabelText("Stop the running agent work"));
     fireEvent.click(button(/Delete permanently/));
     await waitFor(() => expect(onDone).toHaveBeenCalled());
-    expect(mocked.cloudWorkspaceDelete).toHaveBeenLastCalledWith("ws-1", true);
+    expect(mocked.cloudWorkspaceDelete).toHaveBeenLastCalledWith("ws-1", true, null);
   });
 
   it("says an offline workspace cannot be checked and offers to open it to push first", async () => {
@@ -237,7 +237,7 @@ describe("CloudWorkspaceLifecycleDialog", () => {
     await screen.findByText(/cannot be checked/);
     expect(screen.getByTestId("cloud-lifecycle-summary").dataset.action).toBe("archive");
     fireEvent.click(button(/Archive workspace/));
-    await waitFor(() => expect(mocked.cloudWorkspaceArchive).toHaveBeenCalledWith("ws-1", false));
+    await waitFor(() => expect(mocked.cloudWorkspaceArchive).toHaveBeenCalledWith("ws-1", false, null));
   });
 
   it("waits for the runtime's answer before an archive can be confirmed", async () => {
@@ -321,7 +321,7 @@ describe("DeletionProgress", () => {
     // After the credential is repaired the same operation runs again.
     mocked.cloudWorkspaceOperation.mockResolvedValue({ workspace: item("attention-required").workspace, operation: operation({}) } as never);
     fireEvent.click(screen.getByRole("button", { name: /Retry delete/ }));
-    await waitFor(() => expect(mocked.cloudWorkspaceDelete).toHaveBeenCalledWith("ws-1", false));
+    await waitFor(() => expect(mocked.cloudWorkspaceDelete).toHaveBeenCalledWith("ws-1", false, null));
     await waitFor(() => expect(screen.getByTestId("cloud-deletion-progress").dataset.state).toBe("running"));
   });
 

@@ -17,7 +17,7 @@
 //! Everything lives under `<store root>/cloud-agent/<user>/<organization>/<workspace>/`
 //! and is dropped when the signed-in identity changes.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -42,6 +42,9 @@ const STATUS_BATCH: usize = 100;
 const KINDS: [&str; 4] = ["send", "steer", "stop", "permission-decision"];
 const TERMINAL_STATES: [&str; 4] = ["applied", "rejected", "cancelled", "outcome-unknown"];
 
+/// The signed-in user and the Organizations whose cloud agent data is kept.
+pub type KeptIdentity = (String, BTreeSet<String>);
+
 /// The account a call is made for.
 #[derive(Clone)]
 pub struct Ctx {
@@ -51,13 +54,19 @@ pub struct Ctx {
 }
 
 pub trait AccountSource: Send + Sync {
-    fn context(&self) -> Option<Ctx>;
+    /// The account for a call in `organization_id`: the active Organization,
+    /// or (CS-18) any member Organization on a server that authorizes desktop
+    /// cloud routes by membership. Errors are `account_signed_out` or
+    /// `cloud_remote_organization_mismatch`.
+    fn context_in(&self, organization_id: &str) -> Result<Ctx, String>;
 }
 
 impl AccountSource for crate::account::AccountManager {
-    fn context(&self) -> Option<Ctx> {
-        let context = crate::account::AccountManager::context(self)?;
-        Some(Ctx { user_id: context.user_id, organization_id: context.organization_id, access_token: Zeroizing::new(context.access_token) })
+    fn context_in(&self, organization_id: &str) -> Result<Ctx, String> {
+        let (context, _) = crate::account::AccountManager::context_in(self, organization_id).map_err(|code| {
+            if code == "account_signed_out" { code.to_string() } else { "cloud_remote_organization_mismatch".to_string() }
+        })?;
+        Ok(Ctx { user_id: context.user_id, organization_id: context.organization_id, access_token: Zeroizing::new(context.access_token) })
     }
 }
 
@@ -352,8 +361,9 @@ pub struct CloudAgentClient {
     /// POST, and across a cancel, so a cancelled command is never posted.
     send_locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
     agent: ureq::Agent,
-    /// The identity last observed, so a change drops the old one's data.
-    observed: Mutex<Option<(String, String)>>,
+    /// The identity last observed (the user and the Organizations whose data
+    /// is kept), so a change drops what no longer belongs to it.
+    observed: Mutex<Option<KeptIdentity>>,
 }
 
 impl CloudAgentClient {
@@ -367,10 +377,14 @@ impl CloudAgentClient {
         Self { accounts, keys, base, root, lock: Mutex::new(()), send_locks: Mutex::new(HashMap::new()), agent, observed: Mutex::new(None) }
     }
 
-    /// The current account, which must be in `organization_id`.
+    /// The current account, allowed in `organization_id` (CS-18: by
+    /// membership when the server supports it, else the active Organization).
     fn ctx(&self, organization_id: &str) -> Result<Ctx, String> {
-        let ctx = self.accounts.context().ok_or("account_signed_out")?;
-        if ctx.organization_id.is_empty() || ctx.organization_id != organization_id {
+        if organization_id.is_empty() {
+            return Err("cloud_remote_organization_mismatch".into());
+        }
+        let ctx = self.accounts.context_in(organization_id)?;
+        if ctx.organization_id != organization_id {
             return Err("cloud_remote_organization_mismatch".into());
         }
         Ok(ctx)
@@ -392,7 +406,7 @@ impl CloudAgentClient {
     /// Store what `keys.get` answered for a workspace. Called by
     /// `cloud_remote` for the identity the connection was made for.
     pub fn store_keys(&self, user_id: &str, organization_id: &str, workspace_id: &str, result: &Value) -> Result<()> {
-        let current = self.accounts.context().ok_or_else(|| anyhow!("signed out"))?;
+        let current = self.accounts.context_in(organization_id).map_err(|_| anyhow!("the identity changed before the keys arrived"))?;
         if current.user_id != user_id || current.organization_id != organization_id {
             return Err(anyhow!("the identity changed before the keys arrived"));
         }
@@ -828,9 +842,15 @@ impl CloudAgentClient {
 
     // ------------------------------------------------------------ identity
 
-    /// Called with the signed-in `(user, organization)` whenever it is read.
-    /// Everything stored for another identity is dropped, keys included.
-    pub fn observe_identity(&self, current: Option<(String, String)>) {
+    /// Called with the signed-in user and the Organizations whose data is
+    /// kept whenever it is read. Everything stored for another user, or for an
+    /// Organization that is no longer kept, is dropped, keys included.
+    ///
+    /// With every member Organization live (CS-18) the kept set is the
+    /// membership list, so a change of the default Organization drops nothing
+    /// and only a membership loss (or another user) prunes. Without it the set
+    /// is the active Organization alone, as before.
+    pub fn observe_identity(&self, current: Option<KeptIdentity>) {
         let changed = {
             let mut observed = self.observed.lock().unwrap();
             let changed = *observed != current;
@@ -845,7 +865,7 @@ impl CloudAgentClient {
         }
     }
 
-    fn retain_only(&self, keep: Option<&(String, String)>) {
+    fn retain_only(&self, keep: Option<&KeptIdentity>) {
         let _guard = self.lock.lock().unwrap();
         let Ok(users) = std::fs::read_dir(&self.root) else { return };
         for user in users.flatten() {
@@ -853,7 +873,7 @@ impl CloudAgentClient {
             let Ok(orgs) = std::fs::read_dir(user.path()) else { continue };
             for org in orgs.flatten() {
                 let organization_id = org.file_name().to_string_lossy().into_owned();
-                if keep.is_some_and(|(u, o)| *u == user_id && *o == organization_id) {
+                if keep.is_some_and(|(u, orgs)| *u == user_id && orgs.contains(&organization_id)) {
                     continue;
                 }
                 for workspace in std::fs::read_dir(org.path()).into_iter().flatten().flatten() {

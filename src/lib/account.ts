@@ -1,10 +1,12 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { api, closeWorkspaceConnections, errorMessage, type AccountStatus } from "@/lib/api";
-import { resetCloudConnections } from "@/lib/cloudConnections";
-import { resetCloudTerminals } from "@/lib/cloudTerminals";
+import { api, closeWorkspaceConnections, closeWorkspaceConnectionsIn, errorMessage, type AccountStatus } from "@/lib/api";
+import { isMultiOrg, keptCloudOrgs } from "@/lib/multiOrg";
+import { dropCloudAgentsIn } from "@/lib/cloudAgents";
+import { closeCloudConnectionsIn, resetCloudConnections } from "@/lib/cloudConnections";
+import { dropCloudTerminalsIn, resetCloudTerminals } from "@/lib/cloudTerminals";
 import { dropEditors } from "@/lib/editors";
-import { resetCloudFiles } from "@/lib/workspaceFiles";
+import { resetCloudFiles, resetCloudFilesIn } from "@/lib/workspaceFiles";
 
 interface AccountState {
   status: AccountStatus;
@@ -29,21 +31,57 @@ function set(patch: Partial<AccountState>) {
 }
 
 function applyStatus(status: AccountStatus) {
-  // A new account or organization never reuses cloud connections, or what
-  // they cached, from the previous one.
-  if (scopeOf(state.status) !== scopeOf(status)) {
+  const change = cloudChange(state.status, status);
+  if (change.kind === "all") {
+    // A new account (or, without every organization live, a new default
+    // organization) never reuses cloud connections, or what they cached,
+    // from the previous one.
     resetCloudConnections();
     closeWorkspaceConnections();
     resetCloudTerminals();
     resetCloudFiles();
     dropEditors((entry) => !!entry.source);
+  } else {
+    // Every member organization is live (CS-18): a change of the default
+    // organization closes nothing; only an organization the user left loses
+    // its connections and what they cached.
+    for (const orgId of change.left) dropCloudOrg(orgId);
   }
   set({ status, ready: true });
   scheduleRefresh(status);
 }
 
+/** Close one organization's cloud connections and drop what they cached in memory. */
+function dropCloudOrg(orgId: string) {
+  closeCloudConnectionsIn(orgId);
+  closeWorkspaceConnectionsIn(orgId);
+  dropCloudTerminalsIn(orgId);
+  resetCloudFilesIn(orgId);
+  dropCloudAgentsIn(orgId);
+  const prefix = `cloud:${orgId}:`;
+  dropEditors((entry) => !!entry.source && (entry.source.startsWith(prefix) || entry.sessionId.startsWith(prefix)));
+}
+
 function scopeOf(status: AccountStatus): string | null {
   return status.state === "signed-in" ? (status.context?.scope ?? null) : null;
+}
+
+/**
+ * What a status change means for cloud state. Without the capability on
+ * either side, today's rule: any change of the scope (user, profile or
+ * default organization) drops everything. With it on both sides, only a new
+ * user or profile drops everything, and an organization that left the
+ * membership list is dropped alone.
+ */
+export function cloudChange(before: AccountStatus, after: AccountStatus): { kind: "all" } | { kind: "orgs"; left: string[] } {
+  const account = (status: AccountStatus) => status.context?.account ?? status.context?.scope ?? null;
+  const both = isMultiOrg(before) && isMultiOrg(after);
+  if (both ? account(before) !== account(after) : scopeOf(before) !== scopeOf(after)) return { kind: "all" };
+  // Organizations no longer kept: one the user left, or (the server dropped
+  // the capability) every one but the default. Without the capability on
+  // either side and the same scope, nothing is left.
+  const kept = keptCloudOrgs(after);
+  return { kind: "orgs", left: [...keptCloudOrgs(before)].filter((orgId) => !kept.has(orgId)) };
 }
 
 function scheduleRefresh(status: AccountStatus) {

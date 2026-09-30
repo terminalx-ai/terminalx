@@ -9,12 +9,22 @@ const WS: &str = "ws_1";
 const USER: &str = "user_1";
 const KEY_ID: &str = "key-aaaaaaaaaaaaaaaaaaaaaa";
 
-struct Fixed(Mutex<Option<(String, String)>>);
+/// The signed-in `(user, active organization)`, and the other member
+/// Organizations reachable by membership (CS-18; empty on an older server).
+struct Fixed(Mutex<Option<(String, String)>>, Mutex<Vec<String>>);
 
 impl AccountSource for Fixed {
-    fn context(&self) -> Option<Ctx> {
-        self.0.lock().unwrap().clone().map(|(user_id, organization_id)| Ctx { user_id, organization_id, access_token: Zeroizing::new("token".into()) })
+    fn context_in(&self, organization_id: &str) -> Result<Ctx, String> {
+        let (user_id, active) = self.0.lock().unwrap().clone().ok_or("account_signed_out")?;
+        if active != organization_id && !self.1.lock().unwrap().iter().any(|org| org == organization_id) {
+            return Err("cloud_remote_organization_mismatch".into());
+        }
+        Ok(Ctx { user_id, organization_id: organization_id.into(), access_token: Zeroizing::new("token".into()) })
     }
+}
+
+fn kept(orgs: &[&str]) -> Option<KeptIdentity> {
+    Some((USER.into(), orgs.iter().map(|org| org.to_string()).collect()))
 }
 
 type Handler = dyn Fn(&str, &str, Value) -> Option<(u16, Value)> + Send + Sync;
@@ -67,7 +77,7 @@ struct Fixture {
 fn fixture(base: &str) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let keys = Arc::new(MemoryKeys::default());
-    let account = Arc::new(Fixed(Mutex::new(Some((USER.into(), ORG.into())))));
+    let account = Arc::new(Fixed(Mutex::new(Some((USER.into(), ORG.into()))), Mutex::new(Vec::new())));
     let client = CloudAgentClient::with(account.clone(), keys.clone(), Url::parse(base).unwrap(), dir.path().join("cloud-agent"));
     Fixture { client, keys, account, _dir: dir }
 }
@@ -220,8 +230,8 @@ fn a_command_cancelled_before_the_api_has_it_is_never_posted_afterwards() {
     assert_eq!(entry.state, "unsent");
     assert_eq!(fixture.client.cancel(ORG, WS, &entry.client_command_id).unwrap().state, "cancelled");
     // A resend that took its snapshot before the cancel re-checks under the send lock.
-    let dir = fixture.client.dir(&fixture.account.context().unwrap(), WS).unwrap();
-    assert!(fixture.client.post_envelope(&fixture.account.context().unwrap(), WS, &dir, &entry.client_command_id).unwrap().is_none());
+    let dir = fixture.client.dir(&fixture.account.context_in(ORG).unwrap(), WS).unwrap();
+    assert!(fixture.client.post_envelope(&fixture.account.context_in(ORG).unwrap(), WS, &dir, &entry.client_command_id).unwrap().is_none());
     fixture.client.outbox_sync(ORG, WS).unwrap();
     assert_eq!(posts.load(Ordering::SeqCst), 1, "only the original POST, never one after the cancel");
 }
@@ -378,18 +388,83 @@ fn keys_are_replaced_by_what_the_runtime_lists_and_must_name_the_current_one() {
 #[test]
 fn an_identity_change_drops_the_previous_identitys_keys_outbox_and_cache() {
     let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
-    fixture.client.observe_identity(Some((USER.into(), ORG.into())));
+    fixture.client.observe_identity(kept(&[ORG]));
     give_key(&fixture);
     fixture.client.enqueue(ORG, WS, "tab-1", "stop", json!({})).unwrap();
     fixture.client.cache_save(ORG, WS, "tab-1", Some(json!({}))).unwrap();
     // Unchanged or not yet loaded: nothing is dropped.
-    fixture.client.observe_identity(Some((USER.into(), ORG.into())));
+    fixture.client.observe_identity(kept(&[ORG]));
     assert!(fixture.keys.get(ORG, WS, KEY_ID).unwrap().is_some());
 
-    fixture.client.observe_identity(Some((USER.into(), "org_2".into())));
+    fixture.client.observe_identity(kept(&["org_2"]));
     assert!(fixture.keys.get(ORG, WS, KEY_ID).unwrap().is_none());
     assert!(!fixture._dir.path().join("cloud-agent").join(USER).join(ORG).exists());
     assert!(fixture.client.outbox(ORG, WS, None).unwrap().is_empty());
+}
+
+const ORG_2: &str = "org_2";
+
+/// Keys, one unsent command and a cached transcript in `org`.
+fn fill(fixture: &Fixture, org: &str) {
+    fixture
+        .client
+        .store_keys(USER, org, WS, &json!({ "currentKeyId": KEY_ID, "keys": [{ "keyId": KEY_ID, "key": crypto::b64(&key()), "createdAt": 1 }] }))
+        .unwrap();
+    fixture.client.enqueue(org, WS, "tab-1", "stop", json!({})).unwrap();
+    fixture.client.cache_save(org, WS, "tab-1", Some(json!({ "seen": org }))).unwrap();
+}
+
+fn kept_everything(fixture: &Fixture, org: &str) -> bool {
+    fixture.keys.get(org, WS, KEY_ID).unwrap().is_some()
+        && fixture.client.outbox(org, WS, None).unwrap().iter().filter(|entry| !TERMINAL_STATES.contains(&entry.state.as_str())).count() == 1
+        && fixture.client.cache_load(org, WS).unwrap()["tabs"].get("tab-1").is_some()
+}
+
+#[test]
+fn a_member_organization_is_reachable_without_being_the_active_one() {
+    let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
+    // An older server: only the active Organization.
+    assert_eq!(fixture.client.outbox(ORG_2, WS, None).unwrap_err(), "cloud_remote_organization_mismatch");
+    // CS-18: by membership.
+    fixture.account.1.lock().unwrap().push(ORG_2.into());
+    assert!(fixture.client.outbox(ORG_2, WS, None).unwrap().is_empty());
+    assert_eq!(fixture.client.outbox("org_other", WS, None).unwrap_err(), "cloud_remote_organization_mismatch");
+}
+
+#[test]
+fn changing_the_default_organization_keeps_both_organizations_cache_keys_and_unsent_outbox() {
+    let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
+    fixture.account.1.lock().unwrap().push(ORG_2.into());
+    fixture.client.observe_identity(kept(&[ORG, ORG_2]));
+    fill(&fixture, ORG);
+    fill(&fixture, ORG_2);
+
+    // Another client makes org_2 the default. Every member Organization is
+    // still kept, so the observed identity is unchanged and nothing is pruned.
+    *fixture.account.0.lock().unwrap() = Some((USER.into(), ORG_2.into()));
+    *fixture.account.1.lock().unwrap() = vec![ORG.into()];
+    fixture.client.observe_identity(kept(&[ORG, ORG_2]));
+
+    assert!(kept_everything(&fixture, ORG), "the previous default organization keeps its keys, outbox and cache");
+    assert!(kept_everything(&fixture, ORG_2), "the new default organization keeps its keys, outbox and cache");
+}
+
+#[test]
+fn losing_a_membership_purges_only_that_organization() {
+    let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
+    fixture.account.1.lock().unwrap().push(ORG_2.into());
+    fixture.client.observe_identity(kept(&[ORG, ORG_2]));
+    fill(&fixture, ORG);
+    fill(&fixture, ORG_2);
+
+    fixture.account.1.lock().unwrap().clear();
+    fixture.client.observe_identity(kept(&[ORG]));
+
+    assert!(kept_everything(&fixture, ORG), "the organization still a member is untouched");
+    assert!(fixture.keys.get(ORG_2, WS, KEY_ID).unwrap().is_none(), "the left organization's keys are deleted");
+    assert!(!fixture._dir.path().join("cloud-agent").join(USER).join(ORG_2).exists(), "its outbox and cache are deleted");
+    // And it can no longer be reached.
+    assert_eq!(fixture.client.outbox(ORG_2, WS, None).unwrap_err(), "cloud_remote_organization_mismatch");
 }
 
 #[test]

@@ -11,7 +11,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use url::Url;
 
-use crate::account::{AccountContext, AccountManager};
+use crate::account::{AccountContext, AccountManager, OrgAccess};
 
 const CONTRACT: &str = "providers-v1";
 /// Archive, tombstones and cleanup reports (terminalx-saas contract §10.6).
@@ -973,6 +973,22 @@ impl CloudWorkspaceService {
         }
     }
 
+    /// The context for a call in `organization` (CS-18): the active
+    /// Organization when none is named, as before; a named one must be the
+    /// active one or, on a server that authorizes by membership, a member
+    /// Organization. Never decided by the active Organization alone.
+    fn context_in(&self, organization: Option<&str>) -> Result<(AccountContext, OrgAccess), CloudWorkspaceClientError> {
+        match organization {
+            None => Ok((self.context()?, OrgAccess::Active)),
+            Some(organization) => {
+                if !valid_resource_id(organization) {
+                    return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+                }
+                self.account.context_in(organization).map_err(|code| CloudWorkspaceClientError::local(code, false))
+            }
+        }
+    }
+
     fn context(&self) -> Result<AccountContext, CloudWorkspaceClientError> {
         let context = self
             .account
@@ -992,9 +1008,21 @@ impl CloudWorkspaceService {
         risk: RequestRisk,
         operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>,
     ) -> Result<T, CloudWorkspaceClientError> {
-        let context = self.context()?;
+        self.run_in(None, risk, operation)
+    }
+
+    /// Run a call in `organization` (the active one when none), fenced by
+    /// what authorized it: an answer for an Organization the user left, or
+    /// for another account, never reaches the webview.
+    fn run_in<T>(
+        &self,
+        organization: Option<&str>,
+        risk: RequestRisk,
+        operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>,
+    ) -> Result<T, CloudWorkspaceClientError> {
+        let (context, access) = self.context_in(organization)?;
         let result = operation(&self.client, &context);
-        if !self.account.is_current(&context) {
+        if !self.account.is_current_in(&context, access) {
             return Err(context_changed_error(risk));
         }
         result
@@ -1111,9 +1139,10 @@ impl CloudWorkspaceService {
 
     pub fn setup(
         &self,
+        org: Option<&str>,
         provider: CloudWorkspaceProviderId,
     ) -> Result<CloudWorkspaceSetup, CloudWorkspaceClientError> {
-        self.run(RequestRisk::Read, |client, context| {
+        self.run_in(org, RequestRisk::Read, |client, context| {
             let result = client.request(
                 context,
                 &["cloud-workspaces", "setup"],
@@ -1128,9 +1157,10 @@ impl CloudWorkspaceService {
 
     pub fn quote(
         &self,
+        org: Option<&str>,
         input: CloudWorkspaceQuoteInput,
     ) -> Result<CloudWorkspaceQuote, CloudWorkspaceClientError> {
-        self.run(RequestRisk::Mutation, |client, context| {
+        self.run_in(org, RequestRisk::Mutation, |client, context| {
             let provider = input.provider;
             let result = client.request(
                 context,
@@ -1146,6 +1176,7 @@ impl CloudWorkspaceService {
 
     pub fn create(
         &self,
+        org: Option<&str>,
         input: CloudWorkspaceCreateInput,
     ) -> Result<CloudWorkspaceSnapshot, CloudWorkspaceClientError> {
         if !input.confirm_provider_spend || !valid_idempotency_key(&input.idempotency_key) {
@@ -1155,7 +1186,7 @@ impl CloudWorkspaceService {
             ));
         }
         validate_create(&input.name, &input.repositories, input.launch.as_ref())?;
-        self.run(RequestRisk::Create, |client, context| {
+        self.run_in(org, RequestRisk::Create, |client, context| {
             let idempotency_key = input.idempotency_key.clone();
             let mut body = json!({
                 "name": input.name.trim(),
@@ -1181,8 +1212,8 @@ impl CloudWorkspaceService {
         })
     }
 
-    pub fn workspaces(&self) -> Result<CloudWorkspaceList, CloudWorkspaceClientError> {
-        self.run(RequestRisk::Read, |client, context| {
+    pub fn workspaces(&self, org: Option<&str>) -> Result<CloudWorkspaceList, CloudWorkspaceClientError> {
+        self.run_in(org, RequestRisk::Read, |client, context| {
             let result = client.request(
                 context,
                 &["cloud-workspaces"],
@@ -1196,14 +1227,14 @@ impl CloudWorkspaceService {
     }
 
     /// Check the repositories and refs before quoting (contract §16).
-    pub fn preflight(&self, repositories: Vec<CreateRepository>) -> Result<CloudWorkspacePreflight, CloudWorkspaceClientError> {
+    pub fn preflight(&self, org: Option<&str>, repositories: Vec<CreateRepository>) -> Result<CloudWorkspacePreflight, CloudWorkspaceClientError> {
         if repositories.is_empty() {
             return Ok(CloudWorkspacePreflight { ready: true, checks: Vec::new() });
         }
         validate_create("preflight", &repositories, None)?;
         // A POST, but it changes nothing: a failed call is simply retryable,
         // never an unknown outcome.
-        self.run(RequestRisk::Mutation, |client, context| {
+        self.run_in(org, RequestRisk::Mutation, |client, context| {
             client.request(
                 context,
                 &["cloud-workspaces", "preflight"],
@@ -1227,18 +1258,19 @@ impl CloudWorkspaceService {
 
     /// The organization's selected GitHub repositories (PRO-14), the ones a
     /// workspace can be created from.
-    pub fn selected_repositories(&self) -> Result<SelectedRepositories, CloudWorkspaceClientError> {
-        self.run(RequestRisk::Read, |client, context| {
+    pub fn selected_repositories(&self, org: Option<&str>) -> Result<SelectedRepositories, CloudWorkspaceClientError> {
+        self.run_in(org, RequestRisk::Read, |client, context| {
             client.request(context, &["github-app"], None, None, None, RequestRisk::Read)
         })
     }
 
     pub fn lifecycle(
         &self,
+        org: Option<&str>,
         workspace_id: &str,
         action: OperationAction,
     ) -> Result<CloudWorkspaceSnapshot, CloudWorkspaceClientError> {
-        self.lifecycle_with(workspace_id, action, false)
+        self.lifecycle_with(org, workspace_id, action, false)
     }
 
     /// Archive and delete refuse while agent work runs
@@ -1246,6 +1278,7 @@ impl CloudWorkspaceService {
     /// the page does only after the person confirmed it.
     pub fn lifecycle_with(
         &self,
+        org: Option<&str>,
         workspace_id: &str,
         action: OperationAction,
         force: bool,
@@ -1267,7 +1300,7 @@ impl CloudWorkspaceService {
         } else {
             json!({})
         };
-        self.run(RequestRisk::Mutation, |client, context| {
+        self.run_in(org, RequestRisk::Mutation, |client, context| {
             let result = client.request(
                 context,
                 &["cloud-workspaces", workspace_id, action_path],
@@ -1287,11 +1320,11 @@ impl CloudWorkspaceService {
 
     /// Take a workspace out of the archive (§10.1). It stays suspended: the
     /// first interactive action resumes it.
-    pub fn unarchive(&self, workspace_id: &str) -> Result<CloudWorkspaceSnapshot, CloudWorkspaceClientError> {
+    pub fn unarchive(&self, org: Option<&str>, workspace_id: &str) -> Result<CloudWorkspaceSnapshot, CloudWorkspaceClientError> {
         if !valid_resource_id(workspace_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        self.run(RequestRisk::Mutation, |client, context| {
+        self.run_in(org, RequestRisk::Mutation, |client, context| {
             let result = client.request(
                 context,
                 &["cloud-workspaces", workspace_id, "unarchive"],
@@ -1305,11 +1338,11 @@ impl CloudWorkspaceService {
     }
 
     /// What the server knows before an archive or delete (§10.2).
-    pub fn disposition(&self, workspace_id: &str) -> Result<CloudWorkspaceDisposition, CloudWorkspaceClientError> {
+    pub fn disposition(&self, org: Option<&str>, workspace_id: &str) -> Result<CloudWorkspaceDisposition, CloudWorkspaceClientError> {
         if !valid_resource_id(workspace_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        self.run(RequestRisk::Read, |client, context| {
+        self.run_in(org, RequestRisk::Read, |client, context| {
             let result: CloudWorkspaceDisposition = client.request(
                 context,
                 &["cloud-workspaces", workspace_id, "disposition"],
@@ -1331,6 +1364,7 @@ impl CloudWorkspaceService {
     /// made for, so the caller can refuse a response from a switched account.
     pub fn open_attachment(
         &self,
+        org: Option<&str>,
         workspace_id: &str,
         client_installation_id: &str,
         refresh_pairing: bool,
@@ -1338,7 +1372,7 @@ impl CloudWorkspaceService {
         if !valid_resource_id(workspace_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        self.run(RequestRisk::Mutation, |client, context| {
+        self.run_in(org, RequestRisk::Mutation, |client, context| {
             let mut body = json!({ "clientInstallationId": client_installation_id });
             if refresh_pairing {
                 body["refreshPairing"] = json!(true);
@@ -1357,20 +1391,23 @@ impl CloudWorkspaceService {
 
     pub fn operation(
         &self,
+        org: Option<&str>,
         operation_id: &str,
     ) -> Result<CloudWorkspaceSnapshot, CloudWorkspaceClientError> {
-        self.operation_request(operation_id, RequestRisk::Read)
+        self.operation_request(org, operation_id, RequestRisk::Read)
     }
 
     pub fn cancel_operation(
         &self,
+        org: Option<&str>,
         operation_id: &str,
     ) -> Result<CloudWorkspaceSnapshot, CloudWorkspaceClientError> {
-        self.operation_request(operation_id, RequestRisk::Mutation)
+        self.operation_request(org, operation_id, RequestRisk::Mutation)
     }
 
     fn operation_request(
         &self,
+        org: Option<&str>,
         operation_id: &str,
         risk: RequestRisk,
     ) -> Result<CloudWorkspaceSnapshot, CloudWorkspaceClientError> {
@@ -1380,7 +1417,7 @@ impl CloudWorkspaceService {
                 false,
             ));
         }
-        self.run(risk, |client, context| {
+        self.run_in(org, risk, |client, context| {
             let tail = [
                 "cloud-workspace-operations",
                 operation_id,
@@ -1892,6 +1929,54 @@ mod tests {
         value.to_string()
     }
 
+    fn org_2_list_body() -> String {
+        let mut snapshot: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
+        snapshot["workspace"]["orgId"] = json!("org-2");
+        json!({ "workspaces": [{ "workspace": snapshot["workspace"], "latestOperation": snapshot["operation"] }] }).to_string()
+    }
+
+    #[test]
+    fn a_member_organization_is_listed_by_its_own_path_only_with_the_capability() {
+        // An older server: another Organization is refused before any request.
+        let (_, service) = test_service("http://127.0.0.1:9");
+        assert_eq!(service.workspaces(Some("org-2")).unwrap_err().code, "cloud_organization_unavailable");
+
+        // CS-18: a member Organization, by its own path; the active one is not consulted.
+        let (base, _, request) = serve_once(response("200 OK", &org_2_list_body(), ""), Duration::ZERO);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        assert_eq!(service.workspaces(Some("org-2")).unwrap().workspaces[0].workspace.org_id, "org-2");
+        assert!(request.join().unwrap().text.starts_with("GET /v1/desktop/orgs/org-2/cloud-workspaces HTTP/1.1"));
+
+        // Never an Organization the user is not a member of.
+        assert_eq!(service.workspaces(Some("org-3")).unwrap_err().code, "cloud_organization_unavailable");
+    }
+
+    #[test]
+    fn a_default_organization_change_does_not_fence_a_member_organizations_answer() {
+        let (base, accepted, request) = serve_once(response("200 OK", &org_2_list_body(), ""), Duration::from_millis(150));
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        let service = Arc::new(service);
+        let listing = { let service = service.clone(); thread::spawn(move || service.workspaces(Some("org-2"))) };
+        accepted.recv_timeout(Duration::from_secs(2)).unwrap();
+        // Another client makes org-2 the default while the list is in flight.
+        account.set_active_org_for_test("org-2");
+        assert!(listing.join().unwrap().is_ok(), "the answer is still for a member organization");
+        request.join().unwrap();
+
+        // Losing the membership mid-flight fences it.
+        let (base, accepted, request) = serve_once(response("200 OK", &org_2_list_body(), ""), Duration::from_millis(150));
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        let service = Arc::new(service);
+        let listing = { let service = service.clone(); thread::spawn(move || service.workspaces(Some("org-2"))) };
+        accepted.recv_timeout(Duration::from_secs(2)).unwrap();
+        account.set_memberships_for_test(&["org-1"], true);
+        assert!(listing.join().unwrap().is_err(), "an answer for an organization the user left never lands");
+        request.join().unwrap();
+    }
+
     #[test]
     fn provider_error_code_passes_only_as_a_safe_token() {
         let parse = |code: Value| {
@@ -2010,7 +2095,7 @@ mod tests {
         }).to_string();
         let (base, _, request) = serve_once(response("200 OK", &body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let setup = service.setup(CloudWorkspaceProviderId::Box).unwrap();
+        let setup = service.setup(None, CloudWorkspaceProviderId::Box).unwrap();
         let captured = request.join().unwrap();
         assert!(matches!(
             setup.locations[0].placement,
@@ -2027,7 +2112,7 @@ mod tests {
         let (base, _, request) = serve_once(response("202 Accepted", &body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
         let result = service
-            .create(CloudWorkspaceCreateInput {
+            .create(None, CloudWorkspaceCreateInput {
                 name: "Product website".into(),
                 quote_id: "quote-1".into(),
                 access_mode: WorkspaceAccessMode::Private,
@@ -2053,7 +2138,7 @@ mod tests {
         let body = snapshot_body(Some("syntactically_valid_canary"));
         let (base, _, request) = serve_once(response("200 OK", &body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let result = service.operation("operation-1").unwrap();
+        let result = service.operation(None, "operation-1").unwrap();
         let captured = request.join().unwrap();
         assert_eq!(
             result.operation.error_code.as_deref(),
@@ -2081,7 +2166,7 @@ mod tests {
         let (base, _, request) = serve_once(response("200 OK", &quote_body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
         let quote = service
-            .quote(CloudWorkspaceQuoteInput {
+            .quote(None, CloudWorkspaceQuoteInput {
                 provider: CloudWorkspaceProviderId::Machine0,
                 source_id: "ubuntu".into(),
                 location_id: "us".into(),
@@ -2100,7 +2185,7 @@ mod tests {
         let list_body = json!({"workspaces":[{"workspace":serde_json::from_str::<Value>(&snapshot_body(None)).unwrap()["workspace"],"latestOperation":serde_json::from_str::<Value>(&snapshot_body(None)).unwrap()["operation"]}]}).to_string();
         let (base, _, request) = serve_once(response("200 OK", &list_body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        assert_eq!(service.workspaces().unwrap().workspaces.len(), 1);
+        assert_eq!(service.workspaces(None).unwrap().workspaces.len(), 1);
         assert!(request
             .join()
             .unwrap()
@@ -2115,7 +2200,7 @@ mod tests {
         );
         let (_, service) = test_service(&base);
         service
-            .lifecycle("workspace-1", OperationAction::Suspend)
+            .lifecycle(None, "workspace-1", OperationAction::Suspend)
             .unwrap();
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with(
@@ -2129,7 +2214,7 @@ mod tests {
             Duration::ZERO,
         );
         let (_, service) = test_service(&base);
-        service.cancel_operation("operation-1").unwrap();
+        service.cancel_operation(None, "operation-1").unwrap();
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with(
             "POST /v1/desktop/orgs/org-1/cloud-workspace-operations/operation-1/cancel HTTP/1.1"
@@ -2242,7 +2327,7 @@ mod tests {
         drop(listener);
         let (_, service) = test_service(&base);
         let error = service
-            .lifecycle("workspace-1", OperationAction::Suspend)
+            .lifecycle(None, "workspace-1", OperationAction::Suspend)
             .unwrap_err();
         assert_eq!(error.code, "cloud_workspace_request_outcome_unknown");
         assert!(!error.retryable);
@@ -2257,7 +2342,7 @@ mod tests {
         let (base, _, request) = serve_once(unavailable.clone(), Duration::ZERO);
         let (_, service) = test_service(&base);
         let error = service
-            .lifecycle("workspace-1", OperationAction::Delete)
+            .lifecycle(None, "workspace-1", OperationAction::Delete)
             .unwrap_err();
         let captured = request.join().unwrap();
         assert!(!captured.extra_request);
@@ -2268,7 +2353,7 @@ mod tests {
 
         let (base, _, request) = serve_once(unavailable, Duration::ZERO);
         let (_, service) = test_service(&base);
-        let error = service.cancel_operation("operation-1").unwrap_err();
+        let error = service.cancel_operation(None, "operation-1").unwrap_err();
         let captured = request.join().unwrap();
         assert!(!captured.extra_request);
         assert_eq!(error.code, "cloud_provider_unavailable");
@@ -2330,7 +2415,7 @@ mod tests {
             let (base, _, request) = serve_once(response(status, &body, ""), Duration::ZERO);
             let (_, service) = test_service(&base);
             let error = service
-                .create(CloudWorkspaceCreateInput {
+                .create(None, CloudWorkspaceCreateInput {
                     name: "Product website".into(),
                     quote_id: "quote-1".into(),
                     access_mode: WorkspaceAccessMode::Private,
@@ -2418,7 +2503,7 @@ mod tests {
             let handle = thread::spawn(move || match risk {
                 RequestRisk::Read => service.providers().map(|_| ()),
                 RequestRisk::Create => service
-                    .create(CloudWorkspaceCreateInput {
+                    .create(None, CloudWorkspaceCreateInput {
                         name: "Product website".into(),
                         quote_id: "quote-1".into(),
                         access_mode: WorkspaceAccessMode::Private,
@@ -2514,7 +2599,7 @@ mod tests {
             mode: None,
             prompt: Some("Fix the login".into()),
         };
-        let result = service.create(launch_input(vec![repo("app", Some("main")), repo("lib", None)], Some(launch))).unwrap();
+        let result = service.create(None, launch_input(vec![repo("app", Some("main")), repo("lib", None)], Some(launch))).unwrap();
         let captured = request.join().unwrap();
         let sent: Value = serde_json::from_str(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
         assert_eq!(
@@ -2551,11 +2636,11 @@ mod tests {
             (launch_input(Vec::new(), launch("claude", Some("x".repeat(MAX_PROMPT_BYTES + 1)))), "cloud_workspace_prompt_too_long"),
         ];
         for (input, code) in cases {
-            assert_eq!(service.create(input).unwrap_err().code, code);
+            assert_eq!(service.create(None, input).unwrap_err().code, code);
         }
         let mut unnamed = launch_input(Vec::new(), None);
         unnamed.name = "   ".into();
-        assert_eq!(service.create(unnamed).unwrap_err().code, "cloud_workspace_name_invalid");
+        assert_eq!(service.create(None, unnamed).unwrap_err().code, "cloud_workspace_name_invalid");
     }
 
     #[test]
@@ -2564,7 +2649,7 @@ mod tests {
             let body = format!(r#"{{"error":"{code}"}}"#);
             let (base, _, request) = serve_once(response("409 Conflict", &body, ""), Duration::ZERO);
             let (_, service) = test_service(&base);
-            let error = service.create(launch_input(vec![repo("app", None)], None)).unwrap_err();
+            let error = service.create(None, launch_input(vec![repo("app", None)], None)).unwrap_err();
             request.join().unwrap();
             assert_eq!(error.code, code);
             assert!(!error.retry_with_same_idempotency_key, "{code} is a definite answer");
@@ -2576,7 +2661,7 @@ mod tests {
         let body = r#"{"version":1,"ready":false,"checks":[{"kind":"repository","cloneUrl":"https://github.com/acme/app.git","status":"failed","errorCode":"cloud_workspace_repository_ref_not_found","retryable":false}]}"#;
         let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let result = service.preflight(vec![repo("app", Some("nope"))]).unwrap();
+        let result = service.preflight(None, vec![repo("app", Some("nope"))]).unwrap();
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/preflight "));
         assert!(captured.text.contains(r#""ref":"nope""#));
@@ -2586,7 +2671,7 @@ mod tests {
         let body = r#"{"configured":true,"canManage":false,"installations":[],"repositories":[{"id":"r1","installationId":"i1","githubRepositoryId":7,"fullName":"acme/app","cloneUrl":"https://github.com/acme/app.git","defaultBranch":"main","private":true,"state":"accessible","reason":null,"lastVerifiedAt":1}]}"#;
         let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let selected = service.selected_repositories().unwrap();
+        let selected = service.selected_repositories(None).unwrap();
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/github-app "));
         assert_eq!(selected.repositories[0].full_name, "acme/app");
@@ -2597,7 +2682,7 @@ mod tests {
     fn a_failed_preflight_call_is_retryable_not_an_unknown_outcome() {
         let (base, _, request) = serve_once(response("503 Service Unavailable", "oops", ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let error = service.preflight(vec![repo("app", None)]).unwrap_err();
+        let error = service.preflight(None, vec![repo("app", None)]).unwrap_err();
         request.join().unwrap();
         assert_eq!((error.code.as_str(), error.retryable), ("cloud_workspace_unavailable", true));
     }
@@ -2613,7 +2698,7 @@ mod tests {
         archived["operation"]["checkpoint"] = json!("committed");
         let (base, _, request) = serve_once(response("202 Accepted", &archived.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let snapshot = service.lifecycle_with("workspace-1", OperationAction::Archive, true).unwrap();
+        let snapshot = service.lifecycle_with(None, "workspace-1", OperationAction::Archive, true).unwrap();
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/archive HTTP/1.1"));
         assert!(captured.text.contains("X-TerminalX-Cloud-Workspace-Lifecycle: archive-v1"), "{}", captured.text);
@@ -2634,7 +2719,7 @@ mod tests {
         ] });
         let (base, _, request) = serve_once(response("202 Accepted", &deleting.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let snapshot = service.lifecycle_with("workspace-1", OperationAction::Delete, false).unwrap();
+        let snapshot = service.lifecycle_with(None, "workspace-1", OperationAction::Delete, false).unwrap();
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/delete HTTP/1.1"));
         assert!(captured.text.ends_with("{}"), "no force unless the person confirmed it");
@@ -2646,7 +2731,7 @@ mod tests {
         // Force is never sent for suspend.
         let (base, _, request) = serve_once(response("202 Accepted", &snapshot_body(None), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        service.lifecycle_with("workspace-1", OperationAction::Suspend, true).unwrap();
+        service.lifecycle_with(None, "workspace-1", OperationAction::Suspend, true).unwrap();
         assert!(request.join().unwrap().text.ends_with("{}"));
     }
 
@@ -2655,7 +2740,7 @@ mod tests {
         for code in ["cloud_workspace_active_work", "cloud_workspace_archived", "cloud_teardown_in_progress"] {
             let (base, _, request) = serve_once(response("409 Conflict", &json!({ "error": code }).to_string(), ""), Duration::ZERO);
             let (_, service) = test_service(&base);
-            let error = service.lifecycle_with("workspace-1", OperationAction::Archive, false).unwrap_err();
+            let error = service.lifecycle_with(None, "workspace-1", OperationAction::Archive, false).unwrap_err();
             request.join().unwrap();
             assert_eq!((error.code.as_str(), error.status), (code, Some(409)));
         }
@@ -2665,14 +2750,14 @@ mod tests {
     fn unarchive_and_the_list_tombstones() {
         let (base, _, request) = serve_once(response("200 OK", &snapshot_body(None), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        service.unarchive("workspace-1").unwrap();
+        service.unarchive(None, "workspace-1").unwrap();
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/unarchive HTTP/1.1"));
 
         let list = json!({ "workspaces": [], "tombstones": [{ "id": "workspace-9", "orgId": "org-1", "deletedAt": 5, "expiresAt": 6 }] });
         let (base, _, request) = serve_once(response("200 OK", &list.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let listed = service.workspaces().unwrap();
+        let listed = service.workspaces(None).unwrap();
         request.join().unwrap();
         assert_eq!(listed.tombstones.len(), 1);
         assert_eq!(listed.tombstones[0].id, "workspace-9");
@@ -2681,7 +2766,7 @@ mod tests {
         let list = json!({ "workspaces": [], "tombstones": [{ "id": "workspace-9", "orgId": "org-2", "deletedAt": 5, "expiresAt": 6 }] });
         let (base, _, request) = serve_once(response("200 OK", &list.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        assert!(service.workspaces().is_err());
+        assert!(service.workspaces(None).is_err());
         request.join().unwrap();
     }
 
@@ -2700,7 +2785,7 @@ mod tests {
         });
         let (base, _, request) = serve_once(response("200 OK", &facts.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let disposition = service.disposition("workspace-1").unwrap();
+        let disposition = service.disposition(None, "workspace-1").unwrap();
         assert!(request.join().unwrap().text.starts_with("GET /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/disposition HTTP/1.1"));
         assert_eq!(disposition.runtime.active_turns, 1);
         assert_eq!(disposition.blockers, ["active-turns", "pending-approvals"]);
@@ -2708,7 +2793,7 @@ mod tests {
 
         let (base, _, request) = serve_once(response("200 OK", &facts.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        assert_eq!(service.disposition("workspace-2").unwrap_err().code, "cloud_workspace_invalid_response");
+        assert_eq!(service.disposition(None, "workspace-2").unwrap_err().code, "cloud_workspace_invalid_response");
         request.join().unwrap();
     }
 }

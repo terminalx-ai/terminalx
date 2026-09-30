@@ -306,6 +306,17 @@ export function dropCloudTerminals(workspace: string) {
   publish(next);
 }
 
+/** Forget one organization's terminals and views: the user left it (CS-18). */
+export function dropCloudTerminalsIn(orgId: string) {
+  // Workspaces are keyed `cloud:<orgId>:<workspaceId>`, and their terminals `cloud:<workspace>:<ptyId>`.
+  const prefix = `cloud:${orgId}:`;
+  const workspaces = new Set(Object.keys(state).filter((workspace) => workspace.startsWith(prefix)));
+  for (const id of [...bindings.keys(), ...cursors.keys()]) {
+    if (id.startsWith(`cloud:${prefix}`)) workspaces.add(id.split(":").slice(1, 4).join(":"));
+  }
+  for (const workspace of workspaces) dropCloudTerminals(workspace);
+}
+
 /** Forget every workspace's terminals and views (sign-out, organization switch). */
 export function resetCloudTerminals() {
   for (const binding of bindings.values()) binding.attachment?.detach();

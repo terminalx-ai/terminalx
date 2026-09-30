@@ -3,7 +3,7 @@ import { Cloud, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
 import { useAccount } from "@/lib/account";
-import { cloudOrganizations, defaultOrgId, placeCloudProjects, useCloudCatalog } from "@/lib/cloudCatalog";
+import { cloudOrganizations, defaultOrgId, liveCloudOrgIds, placeCloudProjects, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CreateRefused, createErrorMessage, isClientError } from "@/lib/cloudCreate";
 import type { PreparedCreate } from "@/lib/cloudNewSession";
 import { formatMicros } from "@/lib/organizationCompute";
@@ -17,9 +17,11 @@ import type { CloudProject } from "@/types/target";
  */
 
 /**
- * Cloud projects the new-session picker offers, per organization section: the
- * default organization's (the one the server lists), as its sidebar section
- * shows them. None while signed out or with the kill switch off.
+ * Cloud projects the new-session picker offers, per organization section:
+ * every live organization's (all cloud-enabled ones on a server that
+ * authorizes by membership, CS-18; else the default one), as their sidebar
+ * sections show them, default first. None while signed out or with the kill
+ * switch off.
  */
 export function useCloudProjectChoices(): { orgId: string; orgName: string; projects: CloudProject[] }[] {
   const catalog = useCloudCatalog();
@@ -27,16 +29,24 @@ export function useCloudProjectChoices(): { orgId: string; orgName: string; proj
   const { status } = useAccount();
   return useMemo(() => {
     if (!prefs.cloudSidebar) return [];
-    const orgId = defaultOrgId(status);
-    const org = cloudOrganizations(status).find((item) => item.id === orgId);
-    if (!org) return [];
-    const placed = placeCloudProjects(catalog.orgs[org.id] ?? { orgId: org.id, workspaces: [], repositories: null }, catalog.createMemory, {
-      pinned: prefs.cloudPinned[org.id],
-      added: prefs.cloudProjects[org.id],
-      blank: prefs.cloudBlankProjects[org.id],
+    const live = new Set(liveCloudOrgIds(status));
+    const defaultOrg = defaultOrgId(status);
+    const orgs = cloudOrganizations(status)
+      .filter((org) => live.has(org.id))
+      .sort((a, b) => Number(b.id === defaultOrg) - Number(a.id === defaultOrg) || sectionName(a).localeCompare(sectionName(b)));
+    return orgs.map((org) => {
+      const placed = placeCloudProjects(catalog.orgs[org.id] ?? { orgId: org.id, workspaces: [], repositories: null }, catalog.createMemory, {
+        pinned: prefs.cloudPinned[org.id],
+        added: prefs.cloudProjects[org.id],
+        blank: prefs.cloudBlankProjects[org.id],
+      });
+      return { orgId: org.id, orgName: sectionName(org), projects: placed.projects };
     });
-    return [{ orgId: org.id, orgName: org.isPersonal ? "Personal" : org.name, projects: placed.projects }];
   }, [catalog, prefs.cloudSidebar, prefs.cloudPinned, prefs.cloudProjects, prefs.cloudBlankProjects, status]);
+}
+
+function sectionName(org: { isPersonal?: boolean; name: string }): string {
+  return org.isPersonal ? "Personal" : org.name;
 }
 
 /** The cloud project the new-session form is preset with, and its organization's name; null for a local draft. */

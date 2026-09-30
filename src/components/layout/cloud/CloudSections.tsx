@@ -37,6 +37,7 @@ import { refreshAccount, useAccount } from "@/lib/account";
 import {
   cloudOrganizations,
   defaultOrgId,
+  liveCloudOrgIds,
   placeCloudProjects,
   refreshCloudCatalog,
   useCloudCatalog,
@@ -74,20 +75,30 @@ export { useRowMenu };
  * row only when a project has more than one workspace. Workspace lifecycle
  * actions live in the project's "…" menu.
  *
+ * Every cloud-enabled organization's section is live at once on a server
+ * that authorizes desktop cloud routes by membership (CS-18): its projects,
+ * sessions, `+` and new session work with no switch of the default
+ * organization. On an older server only the default organization's section
+ * is live, and the others are one line with Switch, as before.
+ *
  * Looking never costs money: rendering, expanding and selecting read the
  * catalog and this desktop's caches only; nothing connects or resumes.
  */
 
-/** Organizations with a section, default first then by name; none while signed out, with no cloud-enabled organization, or with the kill switch off. */
-export function useCloudSections(): { orgs: OrganizationSummary[]; defaultOrg: string | null } {
+/**
+ * Organizations with a section, default first then by name, and which of them
+ * are live; none while signed out, with no cloud-enabled organization, or
+ * with the kill switch off.
+ */
+export function useCloudSections(): { orgs: OrganizationSummary[]; defaultOrg: string | null; live: ReadonlySet<string> } {
   const { status } = useAccount();
   const { cloudSidebar } = usePrefs();
   return useMemo(() => {
-    if (!cloudSidebar) return { orgs: [], defaultOrg: null };
+    if (!cloudSidebar) return { orgs: [], defaultOrg: null, live: new Set<string>() };
     const orgs = cloudOrganizations(status);
     const defaultOrg = defaultOrgId(status);
     const sorted = [...orgs].sort((a, b) => Number(b.id === defaultOrg) - Number(a.id === defaultOrg) || sectionName(a).localeCompare(sectionName(b)));
-    return { orgs: sorted, defaultOrg };
+    return { orgs: sorted, defaultOrg, live: new Set(liveCloudOrgIds(status)) };
   }, [status, cloudSidebar]);
 }
 
@@ -106,7 +117,7 @@ export function useSectionCollapsed(key: string, byDefault = false): [boolean, (
 type AddDialog = { orgId: string; orgName: string; kind: "repository" | "blank" };
 
 export function CloudSections({ onOpenCloudPage, onOpenAccount }: { onOpenCloudPage?: () => void; onOpenAccount?: () => void }) {
-  const { orgs, defaultOrg } = useCloudSections();
+  const { orgs, defaultOrg, live } = useCloudSections();
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [adding, setAdding] = useState<AddDialog | null>(null);
   useEffect(() => bootCloudSessions(), []);
@@ -118,8 +129,9 @@ export function CloudSections({ onOpenCloudPage, onOpenAccount }: { onOpenCloudP
           key={org.id}
           org={org}
           isDefault={org.id === defaultOrg}
-          // The other organizations sit close together as compact lines under one gap.
-          spaced={index === 0 || org.id === defaultOrg || orgs[index - 1].id === defaultOrg}
+          live={live.has(org.id)}
+          // Live sections are spaced like Local; organizations that are not live sit close together as compact lines under one gap.
+          spaced={index === 0 || live.has(org.id) || live.has(orgs[index - 1].id)}
           onLifecycle={setDialog}
           onAdd={(kind) => setAdding({ orgId: org.id, orgName: sectionName(org), kind })}
           onOpenCloudPage={onOpenCloudPage}
@@ -143,6 +155,7 @@ function timeText(at: number): string {
 function OrgSection({
   org,
   isDefault,
+  live,
   spaced,
   onLifecycle,
   onAdd,
@@ -150,6 +163,8 @@ function OrgSection({
 }: {
   org: OrganizationSummary;
   isDefault: boolean;
+  /** Its projects and sessions show and work (CS-18: every cloud-enabled organization; before it, the default one). */
+  live: boolean;
   spaced: boolean;
   onLifecycle: (dialog: Dialog) => void;
   onAdd: (kind: AddDialog["kind"]) => void;
@@ -157,14 +172,14 @@ function OrgSection({
 }) {
   const catalog = useCloudCatalog();
   const { status } = useAccount();
-  // The default organization starts expanded; the others are one compact line until opened.
-  const [collapsed, toggle] = useSectionCollapsed(orgSectionKey(org.id), !isDefault);
+  // A live section starts expanded; one that is not live is a compact line. The collapse is remembered per organization.
+  const [collapsed, toggle] = useSectionCollapsed(orgSectionKey(org.id), !live);
   const [switchError, setSwitchError] = useState<string | null>(null);
   const menu = useRowMenu();
   const addMenu = useRowMenu();
   const cached = catalog.orgs[org.id];
   const name = sectionName(org);
-  const offline = isDefault && !!cached?.error && cached.fetchedAt !== null;
+  const offline = live && !!cached?.error && cached.fetchedAt !== null;
 
   const switchOrg = async () => {
     setSwitchError(null);
@@ -188,14 +203,14 @@ function OrgSection({
     <div
       role="treeitem"
       aria-label={`${name} organization`}
-      aria-expanded={isDefault ? !collapsed : undefined}
-      aria-description={isDefault ? undefined : HINT}
+      aria-expanded={live ? !collapsed : undefined}
+      aria-description={live ? undefined : HINT}
       className={cn("min-w-0", spaced ? "mt-3" : "mt-0.5")}
       data-testid="cloud-org-section"
       data-org={org.id}
     >
-      <div data-tree-row className={cn(actionRow, "relative flex h-7 min-w-0 items-center gap-1 rounded-md pr-1 hover:bg-selected/40")} data-testid="cloud-org-header" title={isDefault ? undefined : HINT}>
-        {isDefault ? (
+      <div data-tree-row className={cn(actionRow, "relative flex h-7 min-w-0 items-center gap-1 rounded-md pr-1 hover:bg-selected/40")} data-testid="cloud-org-header" title={live ? undefined : HINT}>
+        {live ? (
           <>
             <TreeToggle expanded={!collapsed} label={`${name} organization`} onToggle={toggle} />
             <button
@@ -217,14 +232,14 @@ function OrgSection({
           <RowChip>{org.role}</RowChip>
         </span>
         <RowActions persistent className={menu.open || addMenu.open ? "not-sr-only" : undefined}>
-          {!isDefault && (
+          {!live && (
             <WithTooltip label="Make this the default organization to show its cloud sessions">
               <Button variant="ghost" size="xs" className="h-5 px-1.5 text-[10px]" onClick={() => void switchOrg()} data-testid="cloud-org-switch">
                 Switch
               </Button>
             </WithTooltip>
           )}
-          {isDefault && (
+          {live && (
             <DropdownMenu {...addMenu.root}>
               <WithTooltip label="Add project">
                 <DropdownMenuTrigger asChild {...addMenu.trigger}>
@@ -250,12 +265,13 @@ function OrgSection({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              {isDefault ? (
+              {live ? (
                 <>
                   <DropdownMenuItem onSelect={() => void refreshCloudCatalog(org.id)}>
                     <RefreshCw /> Refresh cloud workspaces
                   </DropdownMenuItem>
-                  {onOpenCloudPage && (
+                  {/* The full-window page works in the default organization. */}
+                  {isDefault && onOpenCloudPage && (
                     <DropdownMenuItem onSelect={onOpenCloudPage}>
                       <Plus /> New cloud workspace…
                     </DropdownMenuItem>
@@ -276,16 +292,16 @@ function OrgSection({
           Offline · last known {timeText(cached!.fetchedAt!)}
         </div>
       )}
-      {isDefault && (
+      {live && (
         <TreeGroup expanded={!collapsed} className={cn("min-w-0", offline && "opacity-70")}>
-          <DefaultOrgTree org={cached} orgId={org.id} onLifecycle={onLifecycle} />
+          <OrgTree org={cached} orgId={org.id} onLifecycle={onLifecycle} />
         </TreeGroup>
       )}
     </div>
   );
 }
 
-function DefaultOrgTree({ org, orgId, onLifecycle }: { org: OrgCatalog | undefined; orgId: string; onLifecycle: (dialog: Dialog) => void }) {
+function OrgTree({ org, orgId, onLifecycle }: { org: OrgCatalog | undefined; orgId: string; onLifecycle: (dialog: Dialog) => void }) {
   const catalog = useCloudCatalog();
   const prefs = usePrefs();
   const placed = useMemo(

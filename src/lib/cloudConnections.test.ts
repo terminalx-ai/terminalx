@@ -179,3 +179,28 @@ describe("connected listeners", () => {
     await expect(waiting).resolves.toBeUndefined();
   });
 });
+
+describe("every organization live (CS-18)", () => {
+  it("holds sessions from two organizations open at the same time", async () => {
+    const a = await manager.retainCloudConnection({ orgId: "org-a", workspaceId: "wa" });
+    const b = await manager.retainCloudConnection({ orgId: "org-b", workspaceId: "wb" });
+    opened.get("wa")!.emit(connected);
+    opened.get("wb")!.emit(connected);
+    expect(mocks.workspaceConnection).toHaveBeenCalledWith({ kind: "cloud", organizationId: "org-a", workspaceId: "wa" }, "connect");
+    expect(mocks.workspaceConnection).toHaveBeenCalledWith({ kind: "cloud", organizationId: "org-b", workspaceId: "wb" }, "connect");
+    expect(manager.liveCloudConnections().sort()).toEqual(["cloud:org-a:wa", "cloud:org-b:wb"]);
+    expect(manager.cloudConnectionInfo("cloud:org-a:wa").state).toBe("connected");
+    expect(manager.cloudConnectionInfo("cloud:org-b:wb").state).toBe("connected");
+    a.release();
+    b.release();
+  });
+
+  it("leaving an organization closes only its connections", async () => {
+    await manager.retainCloudConnection({ orgId: "org-a", workspaceId: "wa" });
+    await manager.retainCloudConnection({ orgId: "org-b", workspaceId: "wb" });
+    manager.closeCloudConnectionsIn("org-b");
+    expect(opened.get("wb")!.close).toHaveBeenCalled();
+    expect(opened.get("wa")!.close).not.toHaveBeenCalled();
+    expect(manager.liveCloudConnections()).toEqual(["cloud:org-a:wa"]);
+  });
+});
