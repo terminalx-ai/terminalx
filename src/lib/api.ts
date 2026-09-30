@@ -463,7 +463,7 @@ export interface CloudWorkspace {
   createdBy?: string | null;
   lastActivityAt?: number | null;
   /** The runtime's own activity report (S1; named so it is not the runtime build). */
-  runtimeActivity?: { online: boolean; reportedAt: number | null; activeTurns: number; pendingApprovals: number } | null;
+  runtimeActivity?: { online: boolean; reporting?: boolean; reportedAt: number | null; stale?: boolean; activeTurns: number; pendingApprovals: number } | null;
   /** Monotonic per workspace (S1). */
   revision?: number | null;
   /** What opening it would grant this caller (S1). */
@@ -592,7 +592,15 @@ export interface CloudWorkspaceList {
   workspaces: CloudWorkspaceListItem[];
   tombstones?: CloudWorkspaceTombstone[];
   /** Non-archived workspaces against the organization's limit (S1); absent from older servers. */
-  quota?: { used: number; limit: number } | null;
+  quota?: CloudWorkspaceQuota | null;
+}
+
+/** The organization's workspace slots (§20.1); `used`/`limit` mirror `running` since PRO-76. */
+export interface CloudWorkspaceQuota {
+  used: number;
+  limit: number;
+  running?: { used: number; limit: number };
+  total?: { used: number; limit: number };
 }
 
 /** Retain this exact key when reconciling an ambiguous create response. */
