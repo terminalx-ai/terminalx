@@ -1,14 +1,20 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { FileText, Search } from "lucide-react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { files, type FileHit } from "@/lib/api";
+import type { FileHit } from "@/lib/api";
 import { openFile } from "@/lib/editors";
 import { useHotkey } from "@/lib/hotkeys";
 import { cn } from "@/lib/cn";
 import { dirName } from "@/lib/paths";
+import { localFileSource, type FileSource } from "@/lib/workspaceFiles";
 
-/** ⌘P: fuzzy file search over the session's checkout; Enter opens a tab. */
-export function QuickOpen({ sessionId, root }: { sessionId: string; root: string }) {
+/**
+ * ⌘P: fuzzy file search over the session's checkout (or `source`, a cloud
+ * workspace's files); Enter opens a tab.
+ */
+export function QuickOpen({ sessionId, root, source }: { sessionId: string; root: string; source?: FileSource }) {
+  const reader = useMemo(() => source ?? localFileSource(root), [source, root]);
+  const cloudKey = reader.kind === "cloud" ? reader.key : undefined;
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const [hits, setHits] = useState<FileHit[]>([]);
@@ -21,7 +27,7 @@ export function QuickOpen({ sessionId, root }: { sessionId: string; root: string
     if (!open) return;
     let live = true;
     const t = window.setTimeout(async () => {
-      const r = await files.search(root, q, 40).catch(() => []);
+      const r = reader.findFiles ? await reader.findFiles(q, 40).catch(() => []) : [];
       if (live) {
         setHits(r);
         setSel(0);
@@ -31,7 +37,7 @@ export function QuickOpen({ sessionId, root }: { sessionId: string; root: string
       live = false;
       window.clearTimeout(t);
     };
-  }, [open, q, root]);
+  }, [open, q, reader]);
 
   useEffect(() => {
     if (open) {
@@ -42,7 +48,7 @@ export function QuickOpen({ sessionId, root }: { sessionId: string; root: string
 
   const choose = (h: FileHit | undefined) => {
     if (!h) return;
-    openFile(sessionId, root, h.path);
+    openFile(sessionId, root, h.path, undefined, root, cloudKey);
     setOpen(false);
   };
 
@@ -91,7 +97,7 @@ export function QuickOpen({ sessionId, root }: { sessionId: string; root: string
               </button>
             </li>
           ))}
-          {!hits.length && <li className="px-3 py-6 text-center text-xs text-faint">No files match.</li>}
+          {!hits.length && <li className="px-3 py-6 text-center text-xs text-faint">{reader.findFiles ? "No files match." : "Finding files by name is not available in this workspace."}</li>}
         </ul>
       </DialogContent>
     </Dialog>

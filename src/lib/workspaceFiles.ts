@@ -10,7 +10,7 @@ import {
   statRemote,
   writeRemoteFile,
 } from "@terminalx/portable/workspaceFiles";
-import { fs, type DirEntry, type TextSearch } from "@/lib/api";
+import { files, fs, type DirEntry, type FileHit, type ReplaceReport, type ReplaceTarget, type TextSearch } from "@/lib/api";
 import type { ChangeStatus } from "@/types/session";
 
 /**
@@ -43,9 +43,37 @@ export interface FileSource {
   watch?(listener: (paths: string[] | null) => void): () => void;
   /** Git status of changed files, for the tree's badges. */
   changes?(): Promise<{ path: string; status: ChangeStatus }[]>;
-  search?(query: { query: string; regex: boolean; caseSensitive: boolean }, signal: AbortSignal): Promise<TextSearch>;
+  /**
+   * Grep the files. `replacement` asks each hit to carry what its matches
+   * would become (a preview; nothing is written). `limit` caps the hits.
+   */
+  search?(query: SearchQuery, signal: AbortSignal): Promise<TextSearch>;
+  /** Fuzzy file-name search, best first (Quick Open). */
+  findFiles?(query: string, limit: number): Promise<FileHit[]>;
+  /**
+   * Rewrite matches in files. Null `targets` walks every searchable file,
+   * skipping the paths in `skip`. Local only for now.
+   */
+  replaceText?(input: ReplaceInput): Promise<ReplaceReport>;
   /** A media file as an object URL; release it when done. */
   readMedia?(rel: string): Promise<{ url: string; state: FileState; release(): void }>;
+}
+
+export interface SearchQuery {
+  query: string;
+  regex: boolean;
+  caseSensitive: boolean;
+  replacement?: string;
+  limit?: number;
+}
+
+export interface ReplaceInput {
+  query: string;
+  replacement: string;
+  regex: boolean;
+  caseSensitive: boolean;
+  targets: ReplaceTarget[] | null;
+  skip: string[];
 }
 
 export interface SourceEntry extends DirEntry {
@@ -97,6 +125,9 @@ export function localFileSource(root: string): FileSource {
       const mtime = await fs.mtime(abs(rel));
       return mtime == null ? null : { version: String(mtime) };
     },
+    search: ({ query, regex, caseSensitive, limit, replacement }) => fs.searchText(root, query, regex, caseSensitive, limit, replacement),
+    findFiles: (query, limit) => files.search(root, query, limit),
+    replaceText: ({ query, replacement, regex, caseSensitive, targets, skip }) => fs.replaceText(root, query, replacement, regex, caseSensitive, targets, skip),
   };
 }
 
@@ -230,7 +261,7 @@ export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnl
       const forward = () => controller.abort();
       signal.addEventListener("abort", forward, { once: true });
       try {
-        const result = await live(searchRemote(client, { ...query, maxResults: 500 }, controller.signal));
+        const result = await live(searchRemote(client, { query: query.query, regex: query.regex, caseSensitive: query.caseSensitive, maxResults: query.limit ?? 500 }, controller.signal));
         return { hits: result.hits, files: result.files, capped: result.capped || result.cancelled };
       } finally {
         signal.removeEventListener("abort", forward);

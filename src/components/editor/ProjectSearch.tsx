@@ -5,12 +5,13 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { SearchCheck, SearchToggle } from "@/components/editor/SearchControls";
-import { fs, type ReplaceTarget, type TextHit, type TextSearch } from "@/lib/api";
+import type { ReplaceTarget, TextHit, TextSearch } from "@/lib/api";
 import { liveEditorPathsUnder, liveEditorsFor } from "@/lib/editorViews";
 import { openFile } from "@/lib/editors";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { hitKey, planReplace, replaceInOpenBuffers, splitTargets, type ReplacePlan, type ReplaceSpec } from "@/lib/replace";
 import { cn } from "@/lib/cn";
+import { fileErrorText, localFileSource, StaleRequestError, type FileSource } from "@/lib/workspaceFiles";
 
 const LIMIT = 500;
 
@@ -19,12 +20,20 @@ const LIMIT = 500;
  * line. ⌘⇧H adds a replacement: every row previews what its matches become,
  * any line or file can be left out, and a replace goes through open buffers
  * where there are any and to disk everywhere else.
+ *
+ * It searches through a FileSource: the local checkout at `root` unless
+ * `source` names another. Replace is offered only where the source can
+ * rewrite files.
  */
-export function ProjectSearch({ sessionId, root }: { sessionId: string; root: string }) {
+export function ProjectSearch({ sessionId, root, source }: { sessionId: string; root: string; source?: FileSource }) {
+  const reader = useMemo(() => source ?? localFileSource(root), [source, root]);
+  const cloudKey = reader.kind === "cloud" ? reader.key : undefined;
+  const canRewrite = !!reader.replaceText && !reader.readOnly;
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const [replacement, setReplacement] = useState("");
-  const [replaceOpen, setReplaceOpen] = useState(false);
+  const [replaceShown, setReplaceOpen] = useState(false);
+  const replaceOpen = replaceShown && canRewrite;
   const [regex, setRegex] = useState(false);
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [result, setResult] = useState<TextSearch | null>(null);
@@ -44,6 +53,7 @@ export function ProjectSearch({ sessionId, root }: { sessionId: string; root: st
     setOpen(true);
   });
   useHotkey("mod+shift+h", () => {
+    if (!canRewrite) return;
     focusNext.current = "replace";
     setReplaceOpen(true);
     setOpen(true);
@@ -60,25 +70,28 @@ export function ProjectSearch({ sessionId, root }: { sessionId: string; root: st
       return;
     }
     let live = true;
+    const controller = new AbortController();
     const t = window.setTimeout(async () => {
       setBusy(true);
       try {
-        const r = await fs.searchText(root, q, regex, caseSensitive, LIMIT, preview);
+        if (!reader.search) throw new Error("Searching is not available in this workspace.");
+        const r = await reader.search({ query: q, regex, caseSensitive, limit: LIMIT, replacement: preview }, controller.signal);
         if (live) {
           setResult(r);
           setError(null);
         }
       } catch (e) {
-        if (live) setError(String(e));
+        if (live && !(e instanceof StaleRequestError)) setError(cloudKey ? fileErrorText(e) : String(e));
       } finally {
         if (live) setBusy(false);
       }
     }, 180);
     return () => {
       live = false;
+      controller.abort();
       window.clearTimeout(t);
     };
-  }, [open, q, regex, caseSensitive, root, preview, generation]);
+  }, [open, q, regex, caseSensitive, reader, preview, generation]);
 
   // A new question starts with everything selected again.
   useEffect(() => {
@@ -107,7 +120,7 @@ export function ProjectSearch({ sessionId, root }: { sessionId: string; root: st
   const plus = result?.capped && nothingExcluded ? "+" : "";
 
   const choose = (h: TextHit) => {
-    openFile(sessionId, root, h.path, { line: h.line, col: h.col });
+    openFile(sessionId, root, h.path, { line: h.line, col: h.col }, root, cloudKey);
     setOpen(false);
   };
 
@@ -170,7 +183,8 @@ export function ProjectSearch({ sessionId, root }: { sessionId: string; root: st
           if (r.unsaved) leftUnsaved++;
         }
         if (opts.everything || disk.length) {
-          const r = await fs.replaceText(root, q, replacement, regex, caseSensitive, opts.everything ? null : disk, opts.everything ? openRel : []);
+          if (!reader.replaceText) throw new Error("Replacing is not available in this workspace.");
+          const r = await reader.replaceText({ query: q, replacement, regex, caseSensitive, targets: opts.everything ? null : disk, skip: opts.everything ? openRel : [] });
           files += r.files;
           count += r.replacements;
         }
@@ -184,7 +198,7 @@ export function ProjectSearch({ sessionId, root }: { sessionId: string; root: st
         setReplacing(false);
       }
     },
-    [q, replacement, regex, caseSensitive, root],
+    [q, replacement, regex, caseSensitive, root, reader],
   );
 
   const replaceSelected = () => {
@@ -202,20 +216,22 @@ export function ProjectSearch({ sessionId, root }: { sessionId: string; root: st
         <DialogTitle className="sr-only">Search in project</DialogTitle>
         <div className="border-b border-hairline">
           <div className="flex items-center gap-2 px-3">
-            <WithTooltip label={replaceOpen ? "Hide replace" : "Replace"} keys={keycaps("mod+shift+h")}>
-              <button
-                type="button"
-                aria-label={replaceOpen ? "Hide replace" : "Show replace"}
-                aria-expanded={replaceOpen}
-                onClick={() => {
-                  focusNext.current = replaceOpen ? "find" : "replace";
-                  setReplaceOpen((v) => !v);
-                }}
-                className="-ml-1 rounded-md p-0.5 text-faint outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
-              >
-                {replaceOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
-              </button>
-            </WithTooltip>
+            {canRewrite && (
+              <WithTooltip label={replaceOpen ? "Hide replace" : "Replace"} keys={keycaps("mod+shift+h")}>
+                <button
+                  type="button"
+                  aria-label={replaceOpen ? "Hide replace" : "Show replace"}
+                  aria-expanded={replaceOpen}
+                  onClick={() => {
+                    focusNext.current = replaceOpen ? "find" : "replace";
+                    setReplaceOpen((v) => !v);
+                  }}
+                  className="-ml-1 rounded-md p-0.5 text-faint outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+                >
+                  {replaceOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+                </button>
+              </WithTooltip>
+            )}
             <Search className="size-4 text-faint" />
             <input
               ref={input}
