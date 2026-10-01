@@ -36,14 +36,15 @@ State lives under `<data dir>/cloud-agent/` (0700 directory, 0600 files):
 ### Keys (`keys/1`, §13)
 
 - A WCK is 32 random bytes; `keyId` is 16 random bytes base64url.
-- `keys.get` (manage) → `{ currentKeyId, keys: [{ keyId, key, createdAt, retiredAt? }] }`
-  (`key` base64url). The contract allows `participate`, but the key opens
-  every tab's checkpoint and nothing is shared with participants yet, so the
-  runtime fails closed. Retired keys stay listed for 7 days so queued commands and
+- `keys.get` → `{ currentKeyId, keys: [{ keyId, key, createdAt, retiredAt? }] }`
+  (`key` base64url). `manage`, and since PRO-30 a `participate` connection
+  whose person the workspace is shared with (`docs/CLOUD-SHARING.md`); anyone
+  else is refused. Retired keys stay listed for 7 days so queued commands and
   old checkpoints still decrypt.
 - `keys.rotate` (manage, idempotent) → `{ currentKeyId }`.
 - The runtime rotates by itself when the bootstrap session's `accessMode`
-  narrows to `private` or a new revocation arrives. After any rotation,
+  narrows to `private`, a new revocation arrives, or someone loses access to
+  a shared workspace (PRO-30). After any rotation,
   connections with `keys/1` get a `keys.changed` notification and fetch the
   keys again.
 - A command whose `keyId` is unknown, or was retired more than 24 h before the
