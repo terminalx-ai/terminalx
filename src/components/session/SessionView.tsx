@@ -33,9 +33,11 @@ import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
 import { AccessChip, NotSharedNotice, PresenceAvatars } from "@/components/cloud/CloudCollab";
 import { presenceTab } from "@/lib/cloudCollab";
 import { WorkspaceActionItems, WorkspaceLifecycleDialog, useLifecycleRun, type LifecycleRequest } from "@/components/cloud/WorkspaceActions";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
+import { CloudDiagnosticsDialog, CloudDiagnosticsMenuItem, offersCloudDiagnostics } from "@/components/cloud/CloudDiagnosticsDialog";
+import { useAccount } from "@/lib/account";
 
 function managedWorkspaceFor(session: SessionEntry) {
   if (!session.worktreeName || session.worktreeRemoved) return undefined;
@@ -124,6 +126,8 @@ function CloudLocation({ cloud }: { cloud: CloudSessionModel }) {
   const item = findCloudWorkspace(catalog, cloud.orgId, cloud.workspaceId);
   const menu = useRowMenu();
   const [request, setRequest] = useState<LifecycleRequest | null>(null);
+  const [diagnostics, setDiagnostics] = useState(false);
+  const { status } = useAccount();
   const [error, run] = useLifecycleRun();
   const title = `Runs in the cloud workspace ${cloud.workspaceName} (${location.provider}, ${location.org}), not on this computer.`;
   return (
@@ -144,6 +148,12 @@ function CloudLocation({ cloud }: { cloud: CloudSessionModel }) {
         <DropdownMenuContent align="start" className="w-[17rem]">
           <DropdownMenuLabel className="truncate">Workspace · {cloud.workspaceName}</DropdownMenuLabel>
           {item ? <WorkspaceActionItems item={item} onLifecycle={setRequest} run={run} archived={item.workspace.state === "archived"} /> : <DropdownMenuItem disabled>Not in the workspace list</DropdownMenuItem>}
+          {offersCloudDiagnostics(status, cloud.orgId) && (
+            <>
+              <DropdownMenuSeparator />
+              <CloudDiagnosticsMenuItem onSelect={() => setDiagnostics(true)} />
+            </>
+          )}
         </DropdownMenuContent>
       </DropdownMenu>
       {error && (
@@ -152,6 +162,7 @@ function CloudLocation({ cloud }: { cloud: CloudSessionModel }) {
         </span>
       )}
       {request && <WorkspaceLifecycleDialog request={request} onClose={() => setRequest(null)} />}
+      {diagnostics && <CloudDiagnosticsDialog request={{ orgId: cloud.orgId, workspaceId: cloud.workspaceId }} onClose={() => setDiagnostics(false)} />}
       <span
         className={cn(
           "ml-1 flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] hairline",
