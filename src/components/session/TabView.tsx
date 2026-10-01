@@ -9,6 +9,9 @@ import { changeRange, useChanges } from "@/lib/changes";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { CLOUD_IMAGES_UNSUPPORTED, localSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
 import { CloudOutbox, commandError as cloudCommandError } from "@/components/cloud/CloudAgents";
+import { LeaseBar, NotesPanel, useNowUntil } from "@/components/cloud/CloudCollab";
+import { SETTINGS_LOCKED_REASON, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
+import { usePeople } from "@/lib/cloudPeople";
 import { Chat } from "@/components/chat/Chat";
 import { Composer } from "@/components/chat/Composer";
 import { TerminalView } from "@/components/terminal/TerminalView";
@@ -78,6 +81,17 @@ export function TabView({
   const [continueOpen, setContinueOpen] = useState(false);
   const models = useModels(tab.harness);
   const eventRecovery = useMemo(() => recoveryFromEvents(log.events), [log.events, log.version]);
+  // PRO-30: on a shared cloud workspace, who may send, stop and answer here.
+  const shared = backend.collab ?? null;
+  const collab = useCollab(shared?.key ?? `local:${session.id}`);
+  const collabLive = !!shared?.client && collab.available && !!shared.you;
+  // The roster gives names to presence, leases and follow-ups; only a live shared workspace shows them.
+  const nameOf = usePeople(collabLive);
+  const lease = shared ? (collab.leases[tab.id] ?? null) : null;
+  const now = useNowUntil(lease?.expiresAt);
+  const tabLive = tab.status === "in_progress" || tab.status === "waiting";
+  const gate = shared ? tabGate(shared.you, lease, now, tabLive, nameOf) : null;
+  const [notesOpen, setNotesOpen] = useState(false);
   // The retry and resume flows restart a local agent process; a cloud tab's runtime recovers itself.
   const recovery = !backend.caps.recovery ? null : eventRecovery ?? (error || viewError ? classifyRecovery(error ?? viewError!) : null);
   const safeError = (e: unknown) => RECOVERY_MESSAGES[classifyRecovery(String(e))];
@@ -113,8 +127,12 @@ export function TabView({
   const range = useMemo(() => changeRange(log.events, session.baseRef), [log.events, log.version, session.baseRef]);
   const changes = useChanges(local ? (session.cwd ? localGitSource(session.cwd) : undefined) : gitSource, range, isGit && active && !live);
 
+  const blockedRef = useRef<string | null>(null);
+  blockedRef.current = gate?.blocked ?? null;
   const send = useCallback(
     async (text: string, images: ImageInput[]) => {
+      // A viewer, or someone else holds this tab's lease (PRO-30): nothing is queued.
+      if (blockedRef.current) throw new Error(blockedRef.current);
       setError(null);
       setStopped(false);
       try {
@@ -132,6 +150,10 @@ export function TabView({
   );
 
   const stop = useCallback(() => {
+    if (gate && !gate.mayStop) {
+      setError("Only the person driving this tab or an admin can stop the agent.");
+      return;
+    }
     if (recoveryLock.current) return;
     recoveryLock.current = true;
     setRecovering(true);
@@ -145,7 +167,7 @@ export function TabView({
       recoveryLock.current = false;
       setRecovering(false);
     });
-  }, [backend, local, tab.id]);
+  }, [backend, local, tab.id, gate?.mayStop]);
 
   const retry = async (model?: string) => {
     if (recoveryLock.current) return;
@@ -227,7 +249,7 @@ export function TabView({
       onAnswerQuestions={answerQuestions}
       footer={
         <>
-        {backend.caps.steer && backend.caps.write && live && draft.trim() && (
+        {backend.caps.steer && backend.caps.write && !gate?.blocked && live && draft.trim() && (
           <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-4 text-xs text-muted-foreground">
             <span>Send queues it for when the agent pauses.</span>
             <Button size="xs" variant="outline" onClick={() => void steer()}>
@@ -243,25 +265,32 @@ export function TabView({
           onDraftChange={(v) => {
             if (viewError) clearTabViewError(tab.id);
             setDraft(tab.id, v);
+            if (collabLive && v) presenceTyping(shared!.key);
           }}
           onSend={send}
           onStop={stop}
           onSetModel={(m) => {
+            if (gate && !gate.mayConfigure) return;
             if (recovery) { void retry(m); return; }
             void backend.setModel(tab.id, m).then(() => backend.patchTab(tab.id, { model: m })).catch((e) => setError(local ? safeError(e) : commandError(e)));
           }}
           onSetEffort={(e) => {
+            if (gate && !gate.mayConfigure) return;
             backend.patchTab(tab.id, { effort: e });
             void backend.setEffort(tab.id, e).catch((err) => setError(local ? safeError(err) : commandError(err)));
           }}
           onSetMode={(m) => {
+            if (gate && !gate.mayConfigure) return;
             backend.patchTab(tab.id, { permissionMode: m });
             void backend.setPermissionMode(tab.id, m).catch((e) => setError(local ? safeError(e) : commandError(e)));
           }}
           contextUsed={transcript.contextUsed ?? tab.contextUsed ?? undefined}
           contextMax={transcript.contextMax ?? tab.contextMax ?? undefined}
           handoffs={handoffsFor(transcript, isGit && changes.files.length > 0)}
-          disabledReason={error ?? (viewError ? safeError(viewError) : null) ?? backend.readOnlyReason}
+          disabled={!!gate?.blocked}
+          settingsLockedReason={gate && !gate.mayConfigure ? SETTINGS_LOCKED_REASON : null}
+          canStop={!gate || gate.mayStop}
+          disabledReason={gate?.blocked ?? error ?? (viewError ? safeError(viewError) : null) ?? backend.readOnlyReason}
           autoFocus={active}
         />
         </>
@@ -300,12 +329,25 @@ export function TabView({
   );
 
   const wrap = (body: React.ReactNode) => <div className="flex h-full min-h-0 flex-col">
-    {outbox && <CloudOutbox entries={outbox.entries(tab.id)} followUps={outbox.followUps(tab.id)} onSendAgain={(entry) => void outbox.sendAgain(entry).catch((e) => setError(commandError(e)))} />}
+    {collabLive && shared?.client && (
+      <LeaseBar
+        collabKey={shared.key}
+        client={shared.client}
+        tabId={tab.id}
+        lease={lease}
+        turnRunning={tabLive}
+        you={shared.you}
+        notesOpen={notesOpen}
+        onToggleNotes={() => setNotesOpen((open) => !open)}
+        noteCount={collab.notes[tab.id]?.notes.length ?? 0}
+      />
+    )}
+    {outbox && <CloudOutbox entries={outbox.entries(tab.id)} followUps={outbox.followUps(tab.id)} nameOf={nameOf} onSendAgain={(entry) => void outbox.sendAgain(entry).catch((e) => setError(commandError(e)))} />}
     {stopped && <div role="status" className="flex items-center gap-2 border-b border-hairline p-3 text-xs">
       Session closed. Untracked or remote commands may still be running; verify their outcome before continuing.
       <Button size="sm" disabled={recovering} onClick={() => void retry()}>Resume safely</Button>
     </div>}
-    <RecoveryBanner kind={recovery} waiting={tab.status === "waiting"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding}
+    <RecoveryBanner kind={recovery} waiting={tab.status === "waiting"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding} answerBlockedReason={backend.approveBlockedReason ?? null}
       models={models.filter(m => m.id !== tab.model && !m.upgrade)} onPermission={answerPermission} onQuestions={answerQuestions}
       onRetry={retry} onStop={stop} onContinue={() => {
         if (recoveryLock.current) return;
@@ -317,7 +359,14 @@ export function TabView({
         });
       }} />
     {continueOpen && <ContinuationDialog session={session} source={tab} onClose={() => setContinueOpen(false)} />}
-    <div className="min-h-0 flex-1">{body}</div>
+    {collabLive && notesOpen && shared?.client ? (
+      <div className="flex min-h-0 flex-1">
+        <div className="min-h-0 min-w-0 flex-1">{body}</div>
+        <NotesPanel collabKey={shared.key} client={shared.client} tabId={tab.id} onClose={() => setNotesOpen(false)} />
+      </div>
+    ) : (
+      <div className="min-h-0 flex-1">{body}</div>
+    )}
   </div>;
 
   // A PTY-first tab keeps its terminal mounted under the chat: the pane holds

@@ -36,6 +36,9 @@ pub struct Command {
     pub iv: String,
     pub ciphertext: String,
     pub authority: String,
+    /// The lease's `actor` as the API stamps it (PRO-30); `user_test` with
+    /// `authority` alone when unset.
+    pub actor: Option<Value>,
     pub state: String,
     pub lease_token: Option<String>,
     pub lease_expires: Option<Instant>,
@@ -155,6 +158,13 @@ impl FakeMailbox {
 
     /// Encrypt and queue a command as a client would. Returns its client id.
     pub fn enqueue(&self, key_id: &str, key: &[u8; 32], tab_id: &str, kind: &str, plaintext: Value, authority: &str) -> String {
+        self.enqueue_as(key_id, key, tab_id, kind, plaintext, authority, None)
+    }
+
+    /// Queue a command whose lease carries `actor` (userId, authority, role,
+    /// canApprove) as the API stamps it at lease time.
+    #[allow(clippy::too_many_arguments)]
+    pub fn enqueue_as(&self, key_id: &str, key: &[u8; 32], tab_id: &str, kind: &str, plaintext: Value, authority: &str, actor: Option<Value>) -> String {
         let client_command_id = uuid::Uuid::new_v4().to_string();
         let aad = crypto::command_aad(ORG, WORKSPACE, tab_id, &client_command_id, kind, key_id);
         let (iv, ciphertext) = crypto::seal(key, plaintext.to_string().as_bytes(), &aad).unwrap();
@@ -171,6 +181,7 @@ impl FakeMailbox {
             iv,
             ciphertext,
             authority: authority.into(),
+            actor,
             state: "queued".into(),
             lease_token: None,
             lease_expires: None,
@@ -434,7 +445,8 @@ fn lease(body: &Value, state: &mut State) -> (u16, Value) {
         leases.push(json!({
             "commandId": command.command_id, "clientCommandId": command.client_command_id, "tabId": command.tab_id,
             "kind": command.kind, "sequence": command.sequence, "keyId": command.key_id, "iv": command.iv,
-            "ciphertext": command.ciphertext, "actor": { "userId": "user_test", "authority": command.authority },
+            "ciphertext": command.ciphertext,
+            "actor": command.actor.clone().unwrap_or_else(|| json!({ "userId": "user_test", "authority": command.authority })),
             "createdAt": 0, "leaseCount": command.lease_count, "redelivery": redelivery,
             "leaseToken": command.lease_token, "leaseExpiresAt": 0, "runtimeGeneration": generation,
         }));

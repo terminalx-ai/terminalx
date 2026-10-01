@@ -107,13 +107,15 @@ The token is kept in every failure case.
 
 Requests carry `x-terminalx-cloud-workspace-runtime-version` and, on refresh,
 `x-terminalx-cloud-workspace-runtime-capabilities` (`organization-access-v1`,
-`agent-grants-v1`, `github-broker-v1`, `quiesce-v1`, `environment-template-v1`; see
-`CAPABILITIES` in `src/cloud_bootstrap.rs`). With `quiesce-v1` the refresh answer carries
-an archive's final-checkpoint request, which `src/cloud_quiesce.rs` answers (see
-[CLOUD-LIFECYCLE.md](CLOUD-LIFECYCLE.md)). The `ready` line reports `cloudWorkspace`
+`agent-grants-v1`, `github-broker-v1`, `quiesce-v1`, `environment-template-v1`,
+`collaboration-v1`; see `CAPABILITIES` in `src/cloud_bootstrap.rs`). With `quiesce-v1` the
+refresh answer carries an archive's final-checkpoint request, which `src/cloud_quiesce.rs`
+answers (see [CLOUD-LIFECYCLE.md](CLOUD-LIFECYCLE.md)). With `collaboration-v1` it carries
+who the workspace is shared with ([CLOUD-SHARING.md](CLOUD-SHARING.md)). The `ready` line reports `cloudWorkspace`
 (`workspaceId`, `relayHostId`, `capabilities`), or `null` without a bootstrap. The session
 is refreshed every 5 seconds in the background, as the legacy runtime did: a new
-attachment waits for the next refresh before the relay host can answer it.
+attachment waits for the next refresh before the relay host can answer it, and a revoked
+share stops access that promptly.
 
 ## Environment templates (PRO-15)
 
@@ -156,10 +158,11 @@ only, using the bootstrap's Relay Token and host key (`src/remote/host.rs`):
   may install a resume credential (`pairing.provisionRelay`) and then speaks
   `terminalx-workspace-rpc/1` (`src/remote/server.rs`): `rpc.hello` capability
   negotiation and the versioned `pty.*`, `fs.*`, `git.*`, `session.*`, `keys.*`,
-  `lifecycle.*` and `runtime.agents` methods (`CAPABILITIES` and `METHODS` in
-  `src/remote/protocol.rs`), each authorized against the attachment's authority, with
-  idempotent mutations. `session/2`, `pty/2` and `agents/1` are additive: a client that
-  asks only for `session/1` and `pty/1` is served as before.
+  `lifecycle.*` and `runtime.agents` methods, plus sharing (`collab/1`,
+  [CLOUD-SHARING.md](CLOUD-SHARING.md)); see `CAPABILITIES` and `METHODS` in
+  `src/remote/protocol.rs`. Each is authorized against the attachment's authority, with
+  idempotent mutations. `session/2`, `pty/2`, `agents/1` and `collab/1` are additive: a
+  client that asks only for `session/1` and `pty/1` is served as before.
 - A rejected runtime credential disconnects every client and stops serving until the
   API accepts one again.
 
@@ -198,10 +201,6 @@ resend), `session.update`, a session's terminal (`pty.create` with `sessionId`) 
   repository on its work branch. Organization credentials need no setup: agent
   logins arrive as sealed grants (`cloud_grants`) and GitHub access through the broker
   (`cloud_github`).
-- **Organization sessions.** A `participate` attachment on an organization workspace sees
-  no sessions (`shared_sessions` stays empty, failing closed); the legacy runtime shared
-  them with organization members. The server's sharing contract (`collaboration-v1` on
-  refresh, the `collab/1` namespace; terminalx-saas PRO-30) is not implemented here.
 - **The `terminalx` agent CLI inside the runtime.** The CLI module links the desktop's
   computer-use and browser parsers, so it is still desktop-only.
 - **A signed artifact, and arm64 in the cloud.** `release-serve.yml` publishes

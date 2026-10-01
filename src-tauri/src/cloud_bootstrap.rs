@@ -57,14 +57,15 @@ pub const TOKEN_PATH_ENV: &str = "TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_TOKEN_PATH
 /// `environment-template-v1` asks for the checkout plan of a workspace pinned
 /// to an Environment version (`cloud_environment`); on its own it never
 /// brings stored credentials.
-pub const CAPABILITIES: &str = "organization-access-v1,agent-grants-v1,github-broker-v1,quiesce-v1,environment-template-v1";
+pub const CAPABILITIES: &str = "organization-access-v1,agent-grants-v1,github-broker-v1,quiesce-v1,environment-template-v1,collaboration-v1";
 const CAPABILITIES_HEADER: &str = "x-terminalx-cloud-workspace-runtime-capabilities";
 pub(crate) const VERSION_HEADER: &str = "x-terminalx-cloud-workspace-runtime-version";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// As often as the legacy runtime refreshed: a new attachment waits for the
-/// next refresh before the relay host can answer it.
+/// next refresh before the relay host can answer it, and a revoked share
+/// stops access this promptly (contract §21.5).
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const STATE_DIR: &str = "cloud-workspace";
 const HOST_KEY_FILE: &str = "host-key.json";
@@ -228,6 +229,9 @@ pub struct Session {
     /// The checkout plan of a workspace pinned to an Environment version,
     /// parsed only when it is applied (`cloud_environment`).
     pub environment: Option<serde_json::Value>,
+    /// Who the workspace is shared with (contract §21.3), kept raw and read
+    /// by the relay host; absent from an API before PRO-30.
+    pub collaboration: Option<serde_json::Value>,
 }
 
 /// Read leniently: a field the server adds later must not fail the whole
@@ -277,6 +281,9 @@ pub struct Refreshed {
     // instead of failing the refresh.
     #[serde(default)]
     quiesce: Option<serde_json::Value>,
+    // Sent because this runtime advertises `collaboration-v1`.
+    #[serde(default)]
+    collaboration: Option<serde_json::Value>,
 }
 
 impl Drop for Redeemed {
@@ -561,6 +568,7 @@ fn redeem(config: &Config, api: &dyn Api, key: &HostKey, stored: Option<(&str, &
                 revocations: Vec::new(),
                 quiesce: None,
                 environment: None,
+                collaboration: None,
             }
         }
     };
@@ -737,6 +745,7 @@ fn session_from_refresh(mut refreshed: Refreshed, relay_host_id: &str) -> Result
         access_mode: refreshed.access_mode.unwrap_or(AccessMode::Private),
         attachments: std::mem::take(&mut refreshed.attachments),
         revocations: std::mem::take(&mut refreshed.revocations),
+        collaboration: refreshed.collaboration.take().filter(|value| !value.is_null()),
         quiesce: refreshed.quiesce.take().filter(|value| !value.is_null()).and_then(|value| {
             match serde_json::from_value::<QuiesceRequest>(value) {
                 Ok(request) if opaque_id(&request.operation_id) => Some(request),
@@ -1066,6 +1075,7 @@ mod tests {
                 setup: None,
                 access_mode: Some(AccessMode::Organization),
                 quiesce: None,
+                collaboration: None,
             })
         }
     }

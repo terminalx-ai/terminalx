@@ -6,6 +6,8 @@ import { dropCloudAgentsIn } from "@/lib/cloudAgents";
 import { closeCloudConnectionsIn, resetCloudConnections } from "@/lib/cloudConnections";
 import { dropCloudTerminalsIn, resetCloudTerminals } from "@/lib/cloudTerminals";
 import { forgetPendingCreates, setPendingCreateUser } from "@/lib/cloudCreate";
+import { dropCollabIn, resetCollab } from "@/lib/cloudCollab";
+import { resetPeople } from "@/lib/cloudPeople";
 import { dropEditors } from "@/lib/editors";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { resetCloudFiles, resetCloudFilesIn } from "@/lib/workspaceFiles";
@@ -41,6 +43,8 @@ function applyStatus(status: AccountStatus) {
     resetCloudConnections();
     closeWorkspaceConnections();
     resetCloudTerminals();
+    resetCollab();
+    resetPeople();
     resetCloudFiles();
     dropEditors((entry) => !!entry.source);
   } else {
@@ -62,6 +66,7 @@ function dropCloudOrg(orgId: string) {
   dropCloudTerminalsIn(orgId);
   resetCloudFilesIn(orgId);
   dropCloudAgentsIn(orgId);
+  dropCollabIn(orgId);
   const prefix = `cloud:${orgId}:`;
   dropEditors((entry) => !!entry.source && (entry.source.startsWith(prefix) || entry.sessionId.startsWith(prefix)));
 }

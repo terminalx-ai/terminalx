@@ -30,6 +30,8 @@ import { workspaceName } from "@/lib/dashboard";
 import { localSessionBackend } from "@/lib/sessionBackend";
 import type { CloudSessionModel } from "@/lib/cloudSession";
 import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
+import { AccessChip, NotSharedNotice, PresenceAvatars } from "@/components/cloud/CloudCollab";
+import { presenceTab } from "@/lib/cloudCollab";
 import { WorkspaceActionItems, WorkspaceLifecycleDialog, useLifecycleRun, type LifecycleRequest } from "@/components/cloud/WorkspaceActions";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -107,6 +109,14 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
   );
 }
 
+/** What a presence tab id names in this session: an agent tab's title or a terminal. */
+function tabLabelOf(cloud: CloudSessionModel, tabId: string): string | null {
+  const tab = cloud.session.tabs.find((candidate) => candidate.id === tabId);
+  if (tab) return tab.title?.trim() || tab.harness;
+  const terminal = cloud.terminals.find((candidate) => candidate.ptyId === tabId || candidate.id === tabId);
+  return terminal ? `Terminal ${terminal.number}` : null;
+}
+
 /** Where a cloud session runs, and whether this window is attached to it. The location chip holds the workspace's lifecycle actions. */
 function CloudLocation({ cloud }: { cloud: CloudSessionModel }) {
   const { location, connection } = cloud;
@@ -153,6 +163,8 @@ function CloudLocation({ cloud }: { cloud: CloudSessionModel }) {
         <span className={cn("size-1.5 rounded-full", connection.tone === "live" ? "bg-success" : connection.tone === "pending" ? "bg-warning" : "bg-faint")} aria-hidden />
         {connection.label}
       </span>
+      <AccessChip you={cloud.collab.you} className="ml-1" />
+      {cloud.collab.live && <PresenceAvatars collabKey={cloud.collab.key} you={cloud.collab.you} tabLabel={(tabId) => tabLabelOf(cloud, tabId)} />}
     </>
   );
 }
@@ -227,6 +239,14 @@ export function SessionView({
     if (!getPrefs().panelOpen) setPrefs({ panelOpen: true });
     void activateLatestTerminal(session.id, session.cwd).catch((e) => console.error("terminal open failed", e));
   }, [local, session.id, session.cwd, session.tabs.length]);
+
+  // PRO-30 presence: what this person looks at in a shared workspace.
+  const presenceKey = cloud?.collab.live ? cloud.collab.key : null;
+  const presenceTarget = selected?.kind === "agent" ? selected.id : selected?.kind === "terminal" ? (cloudTerminals.find((terminal) => terminal.id === selected.id)?.ptyId ?? null) : null;
+  useEffect(() => {
+    if (!presenceKey) return;
+    presenceTab(presenceKey, presenceTarget);
+  }, [presenceKey, presenceTarget]);
 
   useHotkey("mod+j", () => {
     if (local) void activateLatestTerminal(session.id, session.cwd);
@@ -402,6 +422,8 @@ export function SessionView({
                       client={cloud.client!}
                       connected={cloud.connected}
                       manage={cloud.manage}
+                      mayControl={cloud.mayControlTerminals}
+                      you={cloud.collab.live ? cloud.collab.you : null}
                       base={cloud.terminalBase}
                     />
                   )}
@@ -421,7 +443,9 @@ export function SessionView({
               ))}
               {!session.tabs.length && !shellPanes.length && !browserPages.length && !cloudTerminals.length && (
                 <div className="flex flex-1 flex-col items-center justify-center gap-1 text-sm text-muted-foreground">
-                  {cloud ? (
+                  {cloud?.collab.notShared ? (
+                    <NotSharedNotice />
+                  ) : cloud ? (
                     <>
                       <span>{cloud.asleep ? "Workspace stopped" : cloud.connected ? "No tabs in this session" : "Loading the session…"}</span>
                       <span className="text-xs text-faint">
