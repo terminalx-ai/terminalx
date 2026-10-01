@@ -316,6 +316,11 @@ export async function ingestCloudList(
     for (const tombstone of tombstones) delete createMemory[memoryKey(tombstone.orgId, tombstone.id)];
     const sessions = { ...current.sessions };
     for (const tombstone of tombstones) delete sessions[tombstone.id];
+    // Session lists kept for a workspace this person can no longer open (not
+    // shared with them now, or no longer listed for them at all) go too: no
+    // title, tab or terminal of it is shown, or saved for the next launch.
+    const readable = new Set(workspaces.filter((item) => item.workspace.you?.role !== "none").map((item) => item.workspace.id));
+    for (const id of Object.keys(sessions)) if (!readable.has(id)) delete sessions[id];
     set({
       ...state,
       orgs: { ...state.orgs, [org]: { ...current, workspaces, quota: list.quota ?? current.quota, fetchedAt: now, requestedAt, source: "live", error: null, sessions } },
@@ -352,6 +357,15 @@ export function cacheCloudSessions(orgId: string, workspaceId: string, sessions:
   const previous = current.sessions[workspaceId];
   if (previous && JSON.stringify(previous.sessions) === JSON.stringify(sessions) && JSON.stringify(previous.capabilities) === JSON.stringify(capabilities)) return;
   set({ ...state, orgs: { ...state.orgs, [orgId]: { ...current, sessions: { ...current.sessions, [workspaceId]: { sessions, capabilities, at: now } } } } });
+}
+
+/** Forget a workspace's saved session list: this person lost access to it. */
+export function dropCachedCloudSessions(orgId: string, workspaceId: string) {
+  const current = state.orgs[orgId];
+  if (!current?.sessions[workspaceId]) return;
+  const sessions = { ...current.sessions };
+  delete sessions[workspaceId];
+  set({ ...state, orgs: { ...state.orgs, [orgId]: { ...current, sessions } } });
 }
 
 /** The create flow records the repositories a new workspace was built from. */
@@ -455,12 +469,15 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
 
 // ---- Poll policy -----------------------------------------------------------
 
+/** While the window can be seen or has the focus. */
 export const POLL_FOCUSED_MS = 30_000;
 export const POLL_CHANGING_MS = 3_000;
-/** While the window is visible but another app has the focus: slow, so a share or a revocation still shows. */
+/** While the window is hidden: minimized, on another space, or wholly covered by other windows. */
 export const POLL_BACKGROUND_MS = 120_000;
 /** A burst of access changes (a share dialog, several role notifications) lists once. */
 export const ACCESS_REFRESH_DELAY_MS = 400;
+/** Coming back to the window lists at once, unless a list was asked for this recently (focus and visibility often change together). */
+export const REFRESH_ON_RETURN_FLOOR_MS = 2_000;
 
 /** Starting, or a stop, resume, archive or delete still running. */
 export function isChanging(item: CloudWorkspaceListItem): boolean {
@@ -468,19 +485,26 @@ export function isChanging(item: CloudWorkspaceListItem): boolean {
 }
 
 /**
- * How long until an organization's next list: every 3 s while anything in it
- * is changing state, every 30 s while the window is focused, every 2 min
- * while it is visible in the background (so a share or a revocation made by
- * someone else shows without a manual refresh), and never while it is hidden.
- * Focusing the window lists at once when the rows are stale. Each live
- * organization follows this on its own timer, so an idle focused desktop
- * sends one list per organization per 30 s (until the cross-organization
- * feed, CS-21). Listing never wakes compute.
+ * How long until an organization's next list.
+ *
+ * - Seen or focused: every 30 s, and every 3 s while anything in it is
+ *   changing state. A window another app has the focus over is still seen, so
+ *   a workspace someone just shared with this person shows within 30 s.
+ * - Hidden and not focused: every 2 min, never paused. WKWebView reports
+ *   `visibilityState` "hidden" for a window that is minimized, on another
+ *   space, or wholly covered by other windows (its occlusion detection), and
+ *   WebKit throttles a hidden page's timers, so this is a floor, not a
+ *   promise. That is why coming back (focus, or visible again) lists at once.
+ *
+ * "Seen" is never taken from visibility alone: a window with the focus polls
+ * fast whatever `visibilityState` says. Each live organization follows this
+ * on its own timer (until the cross-organization feed, CS-21). Listing never
+ * wakes compute.
  */
-export function pollDelay(org: OrgCatalog | undefined, window: { visible: boolean; focused: boolean }): number | null {
-  if (!window.visible) return null;
+export function pollDelay(org: OrgCatalog | undefined, window: { visible: boolean; focused: boolean }): number {
+  if (!window.visible && !window.focused) return POLL_BACKGROUND_MS;
   if (org?.workspaces.some(isChanging)) return POLL_CHANGING_MS;
-  return window.focused ? POLL_FOCUSED_MS : POLL_BACKGROUND_MS;
+  return POLL_FOCUSED_MS;
 }
 
 /** Per live organization, its next list. */
@@ -508,24 +532,29 @@ function schedulePoll(only?: string) {
     const existing = timers.get(orgId);
     if (existing) clearTimeout(existing);
     timers.delete(orgId);
-    const delay = pollDelay(state.orgs[orgId], windowState());
-    if (delay === null) continue;
     timers.set(
       orgId,
       setTimeout(() => {
         timers.delete(orgId);
         void refreshCloudCatalog(orgId);
-      }, delay),
+      }, pollDelay(state.orgs[orgId], windowState())),
     );
   }
 }
 
-function onWindowChange() {
+/**
+ * The window got the focus, lost it, or its visibility changed. Coming back
+ * (focused, or visible again) lists every live organization at once, so
+ * nobody waits out a timer that ran slow, or not at all, while the window
+ * was hidden. Going away only moves the timers to the slower pace.
+ */
+function onWindowChange(event?: Event) {
   const { visible, focused } = windowState();
+  const returned = event?.type === "focus" || (event?.type === "visibilitychange" && visible);
   for (const orgId of liveCloudOrgIds(getAccount().status)) {
-    const org = state.orgs[orgId];
-    const stale = !org?.fetchedAt || Date.now() - org.fetchedAt >= POLL_FOCUSED_MS;
-    if (visible && focused && stale) void refreshCloudCatalog(orgId);
+    const asked = state.orgs[orgId]?.requestedAt ?? null;
+    const justAsked = asked !== null && Date.now() - asked < REFRESH_ON_RETURN_FLOOR_MS;
+    if (returned && (visible || focused) && !justAsked) void refreshCloudCatalog(orgId);
     else schedulePoll(orgId);
   }
 }

@@ -16,7 +16,7 @@
   const now = Date.now();
   const at = new Date(now).toISOString();
   const role = f.role ?? "manager";
-  const you = { userId: "u-you", role, canApprove: role === "manager" };
+  const you = { userId: "u-you", role, canApprove: role === "manager" || !!f.canApprove };
   const authority = role === "manager" ? "manage" : "participate";
   const title = f.title ?? "echo:hello from Alice";
 
@@ -43,7 +43,8 @@
   turn(`slow:${lines}:1500`, Array.from({ length: lines }, (_, i) => `chunk ${i + 1} of ${lines}`));
 
   let status = "idle";
-  const tabInfo = () => ({ sessionId: SESSION, tabId: TAB, title: tab.title, harness: "claude", model: "", effort: null, permissionMode: "default", status, process: "running", pendingPermissions: [], followUps: [], lastSeq: seq, created: at, modified: at });
+  // `model` and `permissionMode`: what the composer's pickers read (their labels decide how wide its toolbar wants to be).
+  const tabInfo = () => ({ sessionId: SESSION, tabId: TAB, title: tab.title, harness: "claude", model: f.model ?? "", effort: null, permissionMode: f.permissionMode ?? "default", status, process: "running", pendingPermissions: [], followUps: [], lastSeq: seq, created: at, modified: at });
   const terminals = [];
   const terminal = (sessionId) => ({ ptyId: `p${terminals.length + 1}`, number: terminals.length + 1, epoch: "e1", pid: 100 + terminals.length, cwd: "/w", cols: 80, rows: 24, createdAt: now, offset: 0, exited: false, exitCode: null, control: "none", controllerId: null, ...(sessionId ? { sessionId } : {}) });
   const notes = [];

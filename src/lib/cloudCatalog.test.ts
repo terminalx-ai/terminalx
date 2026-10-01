@@ -52,6 +52,7 @@ import {
   POLL_BACKGROUND_MS,
   POLL_CHANGING_MS,
   POLL_FOCUSED_MS,
+  REFRESH_ON_RETURN_FLOOR_MS,
   refreshCloudCatalog,
   rememberCreatedWorkspace,
   resetCloudCatalog,
@@ -397,14 +398,18 @@ describe("saved cache", () => {
 
 describe("poll policy", () => {
   const changing = item("c", { state: "provisioning" }, { state: "running", action: null });
-  it("polls every 30 s while focused, every 2 min in the background, every 3 s while something changes, and pauses while hidden", () => {
-    expect(pollDelay(org([item("w")]), { visible: true, focused: true })).toBe(POLL_FOCUSED_MS);
-    // Visible but another app has the focus: slow, so a share or revocation still shows without a manual refresh.
-    expect(pollDelay(org([item("w")]), { visible: true, focused: false })).toBe(POLL_BACKGROUND_MS);
+  it("polls every 30 s while seen or focused, every 3 s while something changes, and every 2 min while hidden", () => {
+    expect(POLL_FOCUSED_MS).toBe(30_000);
     expect(POLL_BACKGROUND_MS).toBe(120_000);
-    expect(pollDelay(org([item("w")]), { visible: false, focused: false })).toBeNull();
+    expect(pollDelay(org([item("w")]), { visible: true, focused: true })).toBe(POLL_FOCUSED_MS);
+    // Seen, but another app has the focus (the other person's window in a two-person test): still 30 s.
+    expect(pollDelay(org([item("w")]), { visible: true, focused: false })).toBe(POLL_FOCUSED_MS);
+    // Focused whatever visibility says: the fast poll never depends on visibility alone.
+    expect(pollDelay(org([item("w")]), { visible: false, focused: true })).toBe(POLL_FOCUSED_MS);
+    // Hidden (minimized, or wholly covered by other windows): slow, never paused.
+    expect(pollDelay(org([item("w")]), { visible: false, focused: false })).toBe(POLL_BACKGROUND_MS);
     expect(pollDelay(org([changing]), { visible: true, focused: false })).toBe(POLL_CHANGING_MS);
-    expect(pollDelay(org([changing]), { visible: false, focused: false })).toBeNull();
+    expect(pollDelay(org([changing]), { visible: false, focused: false })).toBe(POLL_BACKGROUND_MS);
     const stopping = item("s", {}, { state: "running", action: "suspend" });
     expect(pollDelay(org([stopping]), { visible: true, focused: true })).toBe(POLL_CHANGING_MS);
   });
@@ -423,7 +428,7 @@ describe("poll policy", () => {
 });
 
 describe("share state without a focused window", () => {
-  it("lists every 2 min while visible in the background, and not while hidden", async () => {
+  it("lists every 30 s while seen in the background, and every 2 min while hidden or covered", async () => {
     vi.useFakeTimers();
     vi.spyOn(document, "hasFocus").mockReturnValue(false);
     const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
@@ -432,16 +437,64 @@ describe("share state without a focused window", () => {
     bootCloudCatalog();
     await vi.advanceTimersByTimeAsync(0);
     expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(1);
+    // A workspace shared with this person a moment ago is listed within 30 s, with no focus and no manual refresh.
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w"), item("shared-just-now", { you: { role: "viewer", canApprove: false } })] });
     await vi.advanceTimersByTimeAsync(POLL_FOCUSED_MS);
-    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(POLL_BACKGROUND_MS - POLL_FOCUSED_MS);
     expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(2);
-    // Hidden: nothing is listed, however long it stays hidden.
+    expect(getCloudCatalog().orgs[ORG].workspaces.map((row) => row.workspace.id)).toContain("shared-just-now");
+    // Hidden (WKWebView says so for a window wholly covered by others, not only a minimized one): every 2 min, never paused.
     visibility.mockReturnValue("hidden");
-    await vi.advanceTimersByTimeAsync(POLL_BACKGROUND_MS);
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(POLL_FOCUSED_MS * 3);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(POLL_BACKGROUND_MS - POLL_FOCUSED_MS * 3);
     expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(3);
     await vi.advanceTimersByTimeAsync(POLL_BACKGROUND_MS * 3);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(6);
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    expect(mocks.api.cloudRemoteAttach).not.toHaveBeenCalled();
+    visibility.mockRestore();
+  });
+
+  it("lists at once when the window is seen again or gets the focus, however fresh its rows are", async () => {
+    vi.useFakeTimers();
+    const focus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w")] });
+    signIn();
+    bootCloudCatalog();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(1);
+    // Rows 5 s old: uncovered, it lists now rather than at the next timer.
+    await vi.advanceTimersByTimeAsync(5_000);
+    visibility.mockReturnValue("visible");
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(2);
+    // The focus that comes with it a moment later is the same return: one list, not two.
+    focus.mockReturnValue(true);
+    window.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(2);
+    // Focus on its own, later: at once again.
+    await vi.advanceTimersByTimeAsync(REFRESH_ON_RETURN_FLOOR_MS);
+    focus.mockReturnValue(false);
+    window.dispatchEvent(new Event("blur"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(2);
+    focus.mockReturnValue(true);
+    window.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(0);
     expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(3);
+    // Hiding it lists nothing by itself.
+    await vi.advanceTimersByTimeAsync(REFRESH_ON_RETURN_FLOOR_MS);
+    focus.mockReturnValue(false);
+    visibility.mockReturnValue("hidden");
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(3);
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    expect(mocks.api.cloudRemoteAttach).not.toHaveBeenCalled();
     visibility.mockRestore();
   });
 

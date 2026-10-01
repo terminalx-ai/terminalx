@@ -83,6 +83,48 @@ describe("session recovery UI smoke", () => {
     expect(screen.queryByTestId("permission-detail")).toBeNull();
   });
 
+  it("shows every option as off, with the reason, to someone who may not approve", () => {
+    const p = props();
+    const reason = "Waiting for someone who can approve";
+    const { rerender } = render(<RecoveryBanner {...p} waiting asks={[ask]} askDetail answerBlockedReason={reason} />);
+    const allow = screen.getByRole("button", { name: /^Allow/ }) as HTMLButtonElement;
+    const deny = screen.getByRole("button", { name: "Deny" }) as HTMLButtonElement;
+    for (const button of [allow, deny]) {
+      expect(button.disabled).toBe(true);
+      expect(button.title).toBe(reason);
+      // The same quiet outline: neither keeps the accent fill that reads as "press me".
+      expect(button.className).not.toMatch(/\bbg-accent\b/);
+      expect(button.className).toMatch(/\bborder-border\b/);
+      expect(button.className).toMatch(/\btext-muted-foreground\b/);
+    }
+    // No Return hint on a button Return cannot press.
+    expect(allow.textContent).toBe("Allow");
+    // The reason is written once, inside the card, under its buttons.
+    const blocked = screen.getAllByTestId("answer-blocked");
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0].textContent).toBe(reason);
+    expect(allow.closest("div.rounded-xl")?.contains(blocked[0])).toBe(true);
+    fireEvent.click(allow);
+    expect(p.onPermission).not.toHaveBeenCalled();
+
+    // An approver: Allow is the accent button again, enabled, with its Return hint and no reason.
+    rerender(<RecoveryBanner {...p} waiting asks={[ask]} askDetail />);
+    const enabled = screen.getByRole("button", { name: /^Allow/ }) as HTMLButtonElement;
+    expect(enabled.disabled).toBe(false);
+    expect(enabled.className).toMatch(/\bbg-accent\b/);
+    expect(enabled.textContent).toContain("⏎");
+    expect(screen.queryByTestId("answer-blocked")).toBeNull();
+
+    // A question card for a non-approver: Answer and Skip are off the same way.
+    const question: PendingAsk = { requestId: "q-1", kind: "question", questions: [{ question: "Which one?", header: "Pick", options: [{ label: "A", description: "" }], multiSelect: false, freeText: false }] } as unknown as PendingAsk;
+    rerender(<RecoveryBanner {...p} waiting asks={[question]} answerBlockedReason={reason} />);
+    const answer = screen.getByRole("button", { name: "Answer" }) as HTMLButtonElement;
+    expect(answer.disabled).toBe(true);
+    expect(answer.className).not.toMatch(/\bbg-accent\b/);
+    expect((screen.getByRole("button", { name: "Skip" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("answer-blocked").textContent).toBe(reason);
+  });
+
   it("describes what a request is about by its tool: a command, a file, a URL, or the tool itself", () => {
     expect(askDetail({ toolName: "Bash", input: { command: "ls  -la\n/tmp" } })).toBe("ls -la /tmp");
     expect(askDetail({ toolName: "Edit", input: { file_path: "/workspace/api/src/login.ts", old_string: "a" } })).toBe("/workspace/api/src/login.ts");

@@ -234,6 +234,15 @@ export function selectSessionTab(sessionId: string, tab: SelectedSessionTab) {
   set({ selected: { ...state.selected, [sessionId]: tab } });
 }
 
+/** Forget the tab asked for in every session whose id starts with `prefix` (a cloud workspace whose content is gone for this person). */
+export function clearSessionTabsUnder(prefix: string) {
+  const stale = Object.keys(state.selected).filter((sessionId) => sessionId.startsWith(prefix));
+  if (!stale.length) return;
+  const selected = { ...state.selected };
+  for (const sessionId of stale) delete selected[sessionId];
+  set({ selected });
+}
+
 export function setSelectedAgent(sessionId: string, id: string) {
   set({ selected: { ...state.selected, [sessionId]: { kind: "agent", id } } });
 }

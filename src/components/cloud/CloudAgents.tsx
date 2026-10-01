@@ -293,7 +293,8 @@ export function provisioningLabel(workspaceState: string | null, wake: WakeResul
   if (wake === "in-progress" && state.state !== "connected") return "Starting";
   if (wake === "unavailable" && runningLimitReached) return "Cannot wake: the running limit is reached. Stop a workspace (commands stay queued)";
   if (wake === "unavailable") return "Cannot wake (commands stay queued)";
-  if (state.state === "waitingForRuntime") return "Starting";
+  // A running workspace this window is still attaching to is Ready, not starting.
+  if (state.state === "waitingForRuntime" && workspaceState !== "ready") return "Starting";
   if (state.state === "connected") return "Ready";
   switch (workspaceState) {
     case "suspended":

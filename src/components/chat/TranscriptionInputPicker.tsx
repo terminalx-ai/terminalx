@@ -44,8 +44,9 @@ export function TranscriptionInputPicker({ compact = false }: { compact?: boolea
           disabled={busy}
           aria-label={`Transcription audio input: ${label}`}
           title={busy ? `${detail} Device changes are disabled until recording and saving finish.` : detail}
-          className={`min-w-0 gap-1 ${compact ? "max-w-36 shrink px-1.5 text-xs" : "max-w-64"}`}>
-          <span className="truncate">{label}</span>
+          // Compact: it shrinks to its chevron and stops there (`min-w-7`), clipping its label inside its own box so nothing is drawn over the control next to it.
+          className={`gap-1 ${compact ? "min-w-7 max-w-36 shrink overflow-hidden px-1.5 text-xs" : "min-w-0 max-w-64"}`}>
+          <span className="min-w-0 truncate">{label}</span>
           <ChevronDown className="size-3 shrink-0 text-faint" />
         </Button>
       </DropdownMenuTrigger>

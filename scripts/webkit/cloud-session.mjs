@@ -9,7 +9,12 @@
 // - the transcript follows the bottom through a turn someone else drives;
 // - a terminal someone else opens gets a sidebar row under its session
 //   without reopening it, and the selected row is the tab that shows;
-// - a session row's title keeps its first 12 characters next to its chips.
+// - a session row's title keeps its first 12 characters next to its chips;
+// - the composer's toolbar at 1000x520 and 1280x760, with the Notes drawer
+//   open and a turn running: no control overlaps another or leaves the
+//   composer, and each keeps its icons;
+// - a modal dialog (the bypass-permissions confirmation) dims the whole
+//   window, the Notes drawer included.
 //
 //   pnpm build && npx playwright install webkit && pnpm test:webkit-layout
 import { launch, open, report, serve } from "./harness.mjs";
@@ -208,6 +213,142 @@ for (const role of ["manager", "viewer"]) {
   failed += report(`${name}, selected row`, rowChecks(rowMeasured), rowMeasured);
   if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/cloud-session-${role}.png` });
   await page.close();
+}
+
+// The composer's toolbar at the two window sizes of the live test, with the
+// Notes drawer open and a permission request up (Stop next to Send): the worst
+// case for room. At 1000x520 the audio input picker used to collapse to a
+// chevron drawn over the model picker's icon. No control may overlap another,
+// leave the toolbar, or lose an icon; and a modal dialog dims the drawer too.
+const toolbarLayout = (page) =>
+  page.evaluate(() => {
+    const toolbar = document.querySelector("main [data-composer-toolbar]");
+    if (!toolbar) return null;
+    const round = (rect) => ({ left: Math.round(rect.left * 10) / 10, right: Math.round(rect.right * 10) / 10, top: Math.round(rect.top * 10) / 10, bottom: Math.round(rect.bottom * 10) / 10 });
+    const box = toolbar.closest(".rounded-2xl");
+    const controls = [...toolbar.querySelectorAll("button")]
+      .filter((button) => button.getClientRects().length > 0)
+      .map((button) => {
+        const rect = button.getBoundingClientRect();
+        // What the control paints: its own box, and any child that is not clipped by it.
+        const clips = getComputedStyle(button).overflow !== "visible";
+        const parts = [...button.querySelectorAll("svg, span")].map((part) => part.getBoundingClientRect()).filter((part) => part.width > 0 && part.height > 0);
+        const painted = clips ? rect : parts.reduce((all, part) => ({ left: Math.min(all.left, part.left), right: Math.max(all.right, part.right), top: all.top, bottom: all.bottom }), rect);
+        const icons = [...button.querySelectorAll("svg")].map((icon) => icon.getBoundingClientRect());
+        return {
+          name: (button.getAttribute("aria-label") || button.textContent || "").trim().slice(0, 40),
+          ...round(painted),
+          width: Math.round(rect.width * 10) / 10,
+          iconsInside: icons.every((icon) => icon.width > 0 && icon.left >= rect.left - 0.5 && icon.right <= rect.right + 0.5),
+        };
+      });
+    return { toolbar: round(toolbar.getBoundingClientRect()), box: box ? round(box.getBoundingClientRect()) : null, controls, viewport: { width: innerWidth, height: innerHeight } };
+  });
+
+function toolbarChecks(measured) {
+  if (!measured) return { "the composer toolbar is there": false };
+  const { controls, toolbar, box, viewport } = measured;
+  const overlapping = [];
+  for (let i = 0; i < controls.length; i++) {
+    for (let j = i + 1; j < controls.length; j++) {
+      const [a, b] = [controls[i], controls[j]];
+      if (Math.min(a.right, b.right) - Math.max(a.left, b.left) > 0.5 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 0.5) overlapping.push(`${a.name} / ${b.name}`);
+    }
+  }
+  measured.overlapping = overlapping;
+  const names = controls.map((control) => control.name);
+  return {
+    "the toolbar has its controls: attach, dictate, audio input, model, permission mode, stop and send": ["Attach", "Dictate", "Transcription audio input", "Stop", "Send"].every((name) => names.some((found) => found.startsWith(name))) && controls.length >= 7,
+    "no two controls of the composer toolbar overlap": overlapping.length === 0,
+    "every control is inside the toolbar, and the toolbar inside the composer and the window": controls.every((control) => control.left >= toolbar.left - SLACK && control.right <= toolbar.right + SLACK) && !!box && toolbar.left >= box.left - SLACK && toolbar.right <= box.right + SLACK && box.right <= viewport.width + SLACK && toolbar.bottom <= viewport.height + SLACK,
+    "every control keeps its icons inside its own box, and is wide enough to press": controls.every((control) => control.iconsInside && control.width >= 20),
+  };
+}
+
+for (const viewport of [{ width: 1000, height: 520 }, { width: 1280, height: 760 }]) {
+  for (const session of [
+    // A driver who may approve, as in the live test: long picker labels, and the pickers enabled.
+    { role: "driver", canApprove: true, lines: 12, model: "Opus 5 Medium", permissionMode: "acceptEdits" },
+    { role: "manager", lines: 12, model: "claude-opus-5-thinking", permissionMode: "bypassPermissions" },
+  ]) {
+    const name = `composer toolbar (${viewport.width}x${viewport.height}, ${session.role})`;
+    const page = await open(browser, server.url, { cloud: true, localProjects: 0, session }, viewport);
+    const title = await page.evaluate(() => window.__PW_RUNTIME__.sessionTitle);
+    const row = page.locator('[data-testid="cloud-session-node"]');
+    await row.waitFor();
+    await row.getByRole("button", { name: title, exact: true }).click();
+    await page.locator('[data-testid="cloud-agent-lease"]').waitFor();
+    await page.locator("main [data-composer-toolbar]").waitFor();
+    await page.getByRole("button", { name: /^Transcription audio input: System default/ }).waitFor();
+    await page.waitForTimeout(300);
+    let measured = await toolbarLayout(page);
+    const wide = toolbarChecks(measured);
+    delete wide["the toolbar has its controls: attach, dictate, audio input, model, permission mode, stop and send"];
+    failed += report(`${name}, idle`, wide, measured);
+
+    // The tightest it gets: the Notes drawer takes 18rem, and a running turn adds Stop.
+    await page.getByRole("button", { name: "Notes" }).click();
+    await page.getByLabel("Note for teammates").waitFor();
+    await page.evaluate(() => window.__PW_RUNTIME__.prompt("ask:rm -rf /tmp/build-cache"));
+    await page.evaluate(() => window.__PW_RUNTIME__.ask());
+    await page.locator('[aria-label="Session recovery"]').waitFor();
+    await page.locator("main [data-composer-toolbar]").getByRole("button", { name: "Stop" }).waitFor();
+    await page.waitForTimeout(300);
+    measured = await toolbarLayout(page);
+    failed += report(`${name}, notes open and a turn running`, toolbarChecks(measured), measured);
+    if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/composer-toolbar-${viewport.width}-${session.role}.png` });
+
+    // The bypass confirmation is modal: its overlay covers the whole window, the Notes drawer included.
+    if (session.permissionMode !== "bypassPermissions") {
+      await page.locator("main [data-composer-toolbar]").getByRole("button", { name: /Accept edits/ }).click();
+      await page.getByRole("menuitemradio", { name: /Bypass permissions/ }).click();
+      const dialog = page.getByRole("dialog");
+      const opened = await dialog.waitFor({ timeout: 5_000 }).then(() => true, () => false);
+      await page.waitForTimeout(300);
+      const modal = opened
+        ? await page.evaluate(() => {
+            const overlay = document.querySelector("[data-dialog-overlay]");
+            const content = document.querySelector('[role="dialog"]');
+            const drawer = document.querySelector('[data-testid="cloud-agent-notes"]');
+            if (!overlay || !content || !drawer) return null;
+            const rect = overlay.getBoundingClientRect();
+            const style = getComputedStyle(overlay);
+            const inside = (element) => {
+              const box = element.getBoundingClientRect();
+              return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+            };
+            // The drawer's own middle, its input and its button: whatever is topmost there must be the overlay (or the dialog), never the drawer.
+            const probes = [drawer, drawer.querySelector("textarea"), [...drawer.querySelectorAll("button")].pop()].filter(Boolean).map(inside);
+            const hits = probes.map(({ x, y }) => {
+              const hit = document.elementFromPoint(x, y);
+              return hit === overlay ? "overlay" : content.contains(hit) ? "dialog" : drawer.contains(hit) ? "drawer" : (hit?.tagName ?? "nothing");
+            });
+            const alpha = Number((style.backgroundColor.match(/rgba?\(([^)]+)\)/)?.[1] ?? "").split(/[,/ ]+/).filter(Boolean)[3] ?? 1);
+            const drawerRect = drawer.getBoundingClientRect();
+            return {
+              overlay: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, position: style.position, zIndex: Number(style.zIndex), alpha, opacity: Number(style.opacity) },
+              drawer: { left: drawerRect.left, right: drawerRect.right, top: drawerRect.top, bottom: drawerRect.bottom },
+              // Nothing of the drawer is lifted above the overlay: no ancestor or part of it makes a higher layer.
+              raised: [drawer, ...drawer.querySelectorAll("*")].filter((node) => Number(getComputedStyle(node).zIndex) >= Number(style.zIndex)).length,
+              hits,
+              viewport: { width: innerWidth, height: innerHeight },
+            };
+          })
+        : null;
+      failed += report(
+        `${name}, bypass confirmation`,
+        {
+          "choosing Bypass permissions asks first, in a dialog": opened && !!modal,
+          "the dialog's overlay covers the whole window": !!modal && modal.overlay.position === "fixed" && modal.overlay.left <= 0 && modal.overlay.top <= 0 && modal.overlay.right >= modal.viewport.width && modal.overlay.bottom >= modal.viewport.height,
+          "the overlay dims what is under it": !!modal && modal.overlay.alpha >= 0.3 && modal.overlay.opacity === 1,
+          "the Notes drawer is under the overlay: its middle, its input and its button are all covered": !!modal && modal.hits.length === 3 && modal.hits.every((hit) => hit === "overlay" || hit === "dialog") && modal.raised === 0,
+        },
+        modal,
+      );
+      if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/bypass-confirm-${viewport.width}.png` });
+    }
+    await page.close();
+  }
 }
 
 // A row with less room (a pin before its title, a narrower sidebar): the lock chip gives up its label, not the title its characters.

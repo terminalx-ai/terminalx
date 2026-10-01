@@ -299,6 +299,10 @@ export function Composer({
   };
 
   const placeholder = busy ? "Send a follow-up (it queues until the agent pauses)" : "Ask, build, or describe the next step";
+  // The model picker's label, and its tooltip: the whole of it when the button has to truncate.
+  const modelName = model?.label ?? tab.model ?? "Model";
+  const effortName = tab.effort && model?.efforts.length ? (EFFORT_LABEL[tab.effort] ?? tab.effort) : null;
+  const modelTitle = `Model: ${modelName}${effortName ? ` · ${effortName}` : ""}`;
   const pct = contextUsed && contextMax ? Math.min(100, Math.round((contextUsed / contextMax) * 100)) : null;
 
   return (
@@ -357,7 +361,7 @@ export function Composer({
           placeholder={placeholder}
           className="max-h-60 w-full resize-none bg-transparent px-1.5 py-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
         />
-        <div className="mt-1 flex items-center gap-1">
+        <div className="mt-1 flex items-center gap-1" data-composer-toolbar>
           {/* Nothing can be sent: attaching and dictating into it are off too. */}
           <AttachButton attach={attach} disabled={disabled} />
           <MicButton dictation={dictation} disabled={disabled} />
@@ -366,6 +370,7 @@ export function Composer({
               <Button
                 variant="ghost"
                 size="icon-sm"
+                className="shrink-0"
                 aria-label="Mention a file"
                 onClick={() => {
                   const sep = draft && !/\s$/.test(draft) ? " " : "";
@@ -386,10 +391,11 @@ export function Composer({
 
           <DropdownMenu {...modelMenu.root}>
             <DropdownMenuTrigger asChild {...modelMenu.trigger}>
-              <Button variant="ghost" size="sm" className="gap-1.5 px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? undefined} aria-label={settingsLockedReason ? `Model: ${settingsLockedReason}` : undefined}>
-                <AgentMark id={tab.harness} className="size-3.5" />
-                <span className="text-foreground">{model?.label ?? tab.model ?? "Model"}</span>
-                {tab.effort && model?.efforts.length ? <span className="text-faint">{EFFORT_LABEL[tab.effort] ?? tab.effort}</span> : null}
+              {/* In a narrow composer the label truncates inside the button; its icon and chevron stay (`min-w-12`). */}
+              <Button variant="ghost" size="sm" className="min-w-12 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? modelTitle} aria-label={settingsLockedReason ? `Model: ${settingsLockedReason}` : undefined}>
+                <AgentMark id={tab.harness} className="size-3.5 shrink-0" />
+                <span className="min-w-0 truncate text-foreground">{modelName}</span>
+                {effortName ? <span className="min-w-0 truncate text-faint">{effortName}</span> : null}
                 <ChevronDown className="size-3 text-faint" />
               </Button>
             </DropdownMenuTrigger>
@@ -424,14 +430,14 @@ export function Composer({
 
           <DropdownMenu {...modeMenu.root}>
             <DropdownMenuTrigger asChild {...modeMenu.trigger}>
-              <Button variant="ghost" size="sm" className="gap-1.5 px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? undefined} aria-label={settingsLockedReason ? `Permission mode: ${settingsLockedReason}` : undefined}>
+              <Button variant="ghost" size="sm" className="min-w-11 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? `Permission mode: ${modeLabel(tab.permissionMode)}`} aria-label={settingsLockedReason ? `Permission mode: ${settingsLockedReason}` : undefined}>
                 <span
                   className={cn(
-                    "size-2 rounded-full",
+                    "size-2 shrink-0 rounded-full",
                     tab.permissionMode === "bypassPermissions" ? "bg-destructive" : tab.permissionMode === "plan" ? "bg-info" : "bg-add",
                   )}
                 />
-                {modeLabel(tab.permissionMode)}
+                <span className="min-w-0 truncate">{modeLabel(tab.permissionMode)}</span>
                 <ChevronDown className="size-3 text-faint" />
               </Button>
             </DropdownMenuTrigger>
@@ -448,7 +454,7 @@ export function Composer({
             </DropdownMenuContent>
           </DropdownMenu>
 
-          <div className="ml-auto flex items-center gap-1.5">
+          <div className="ml-auto flex shrink-0 items-center gap-1.5">
             {pct != null && (
               <WithTooltip label={`Context ${pct}% used (${Math.round((contextUsed ?? 0) / 1000)}k of ${Math.round((contextMax ?? 0) / 1000)}k)`}>
                 <div className="relative size-4" aria-label={`Context ${pct}%`}>

@@ -264,7 +264,7 @@ export function AttachButton({ attach, disabled = false }: { attach: ImageAttach
         }}
       />
       <WithTooltip label="Attach files">
-        <Button variant="ghost" size="icon-sm" aria-label="Attach files" disabled={disabled} onClick={() => void attach.chooseFiles()}>
+        <Button variant="ghost" size="icon-sm" aria-label="Attach files" className="shrink-0" disabled={disabled} onClick={() => void attach.chooseFiles()}>
           <Paperclip />
         </Button>
       </WithTooltip>

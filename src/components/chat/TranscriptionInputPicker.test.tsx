@@ -145,6 +145,12 @@ describe("transcription input picker", () => {
     render(<TranscriptionInputPicker compact />);
     await waitFor(() => expect(screen.getByRole("button", { name: `Transcription audio input: ${selected}` })).toBeTruthy());
     expect(screen.getByText(selected).className).toContain("truncate");
+    // In a narrow composer it shrinks to its chevron and no further, clipping the label inside its own box
+    // rather than drawing over the model picker (pnpm test:webkit-layout measures it at 1000x520).
+    const button = screen.getByRole("button", { name: `Transcription audio input: ${selected}` });
+    expect(button.className).toMatch(/\bmin-w-7\b/);
+    expect(button.className).toMatch(/\boverflow-hidden\b/);
+    expect(button.className).not.toMatch(/\bmin-w-0\b/);
   });
 });
 

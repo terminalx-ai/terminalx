@@ -57,6 +57,7 @@ const { resetCloudSessions } = await import("@/lib/cloudSessions");
 const cloudTerminals = await import("@/lib/cloudTerminals");
 const terminalStore = await import("@/lib/terminal");
 const { setVisibleSessionTab } = await import("@/lib/visibleTab");
+const { applyCollabEvent, resetCollab } = await import("@/lib/cloudCollab");
 
 const ORG = "org-a";
 const acmeApi = { identity: "github.com/acme/api", fullName: "acme/api", cloneUrl: "https://github.com/acme/api.git", primary: true };
@@ -152,6 +153,7 @@ afterEach(() => {
   catalog.resetCloudCatalog();
   resetCloudAgents();
   resetCloudSessions();
+  resetCollab();
 });
 
 describe("sessions under the project", () => {
@@ -558,6 +560,60 @@ describe("terminals under the session", () => {
     act(() => cloudTerminals.setCloudTerminalShown(WORKSPACE, true));
     expect(rows[1].getAttribute("aria-selected")).toBe("true");
     expect(rows[0].getAttribute("aria-selected")).toBe("false");
+    expectNoAttachOrResume();
+  });
+
+  // The live re-test: after a share was revoked, a selected "Terminal 1" row stayed under the "Not shared" workspace.
+  it("leaves no terminal, tab or session row behind when access is removed, and keeps the selection on the session's lock row", async () => {
+    const shared = (role: string) => [item("fix-login", { repositories: [acmeApi], launch: { launchId: "l", phase: "running", state: "started", workBranch: "terminalx/fix-login-3f2a", agent: "claude", sessionId: "s1", tabId: "s1-tab", timings: {} }, you: { role, canApprove: false, canManageShares: false } })];
+    await load(shared("driver"), { "fix-login": { sessions: [session("s1", "Fix login redirect"), session("s2", "Add tests")], capabilities: ["session/2"] } });
+    await listed([pty("p1", 1, "s1"), pty("p9", 9)]);
+    act(() => sessions.selectCloudSession(KEY));
+    mount();
+    fireEvent.click(within(sessionNode(KEY)).getByRole("treeitem", { name: "Terminal 1" }));
+    expect(selectedRows()).toEqual(["Terminal 1"]);
+    expect(screen.getByTestId("cloud-workspace-terminals")).toBeTruthy();
+
+    // The runtime says role none (the share was revoked), then the list says so too.
+    act(() => applyCollabEvent(WORKSPACE, { type: "you", you: { userId: "u-bob", role: "none", canApprove: false } }));
+    expect(cloudTerminals.cloudTerminalsOf(WORKSPACE).terminals).toEqual([]);
+    expect(screen.queryByRole("treeitem", { name: /^Terminal/ })).toBeNull();
+    expect(screen.queryByTestId("cloud-workspace-terminals")).toBeNull();
+    await act(async () => void (await catalog.ingestCloudList({ workspaces: shared("none"), quota: { used: 1, limit: 3 } }, ORG)));
+
+    // One row, named after the workspace, for the session that is open: it shows the lock pane.
+    const rows = screen.getAllByTestId("cloud-session-node");
+    expect(rows.map((row) => row.getAttribute("data-session"))).toEqual([KEY]);
+    expect(within(rows[0]).getByTestId("cloud-access-chip").textContent).toBe("Not shared");
+    expect(within(rows[0]).queryByText("Fix login redirect")).toBeNull();
+    expect(screen.queryByText("Add tests")).toBeNull();
+    // No tab or terminal row at all, so none is selected; the session row itself is.
+    expect(screen.getAllByRole("treeitem").filter((row) => row.hasAttribute("aria-controls"))).toEqual([]);
+    expect(within(rows[0]).getByText("Not shared with you.")).toBeTruthy();
+    expect(sessions.getSessionStore().selectedSessionId).toBe(KEY);
+    expect(rows[0].querySelector("[data-tree-row]")!.className).toMatch(/\bbg-selected\b/);
+    expect(terminalStore.getTerminalState().selected[KEY]).toBeUndefined();
+    expect(catalog.getCloudCatalog().orgs[ORG].sessions["fix-login"]).toBeUndefined();
+
+    // Whatever a window still holds of an unshared workspace (a read that landed late) is not listed either.
+    await listed([pty("p1", 1, "s1"), pty("p9", 9)]);
+    expect(screen.queryByRole("treeitem", { name: /^Terminal/ })).toBeNull();
+    expect(screen.queryByTestId("cloud-workspace-terminals")).toBeNull();
+    expectNoAttachOrResume();
+  });
+
+  it("shows a member a workspace that was never shared with them with no tab or terminal row", async () => {
+    await catalog.ingestCloudList(
+      { workspaces: [item("fix-login", { repositories: [acmeApi], launch: { launchId: "l", phase: "running", state: "started", workBranch: "terminalx/fix-login-3f2a", agent: "claude", sessionId: "s1", tabId: "s1-tab", timings: {} }, you: { role: "none", canApprove: false, canManageShares: false } })] },
+      ORG,
+    );
+    await listed([pty("p1", 1, "s1"), pty("p9", 9)]);
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "Expand fix-login" }));
+    expect(screen.getAllByTestId("cloud-session-node")).toHaveLength(1);
+    expect(screen.getAllByRole("treeitem").filter((row) => row.hasAttribute("aria-controls"))).toEqual([]);
+    expect(screen.queryByTestId("cloud-workspace-terminals")).toBeNull();
+    expect(within(sessionNode(KEY)).getByText("Not shared with you.")).toBeTruthy();
     expectNoAttachOrResume();
   });
 
