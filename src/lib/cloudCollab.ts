@@ -163,6 +163,8 @@ export const LIFECYCLE_ADMIN_REASON = "Only an organization owner or admin can s
  * is shared on; that is sending, not starting a session.)
  */
 export const NEW_SESSION_ADMIN_REASON = "Only an organization owner or admin can start a new cloud session";
+/** Why a member is not offered "New cloud workspace…": the same rule as a new session, which is what creates one. */
+export const NEW_WORKSPACE_ADMIN_REASON = "Only an organization owner or admin can create a cloud workspace";
 
 /**
  * What the API lets this person do to a workspace as a whole, from the
@@ -268,6 +270,31 @@ export function notifyAccessChanged(orgId: string | null | undefined) {
   for (const listener of [...accessListeners]) {
     try {
       listener(orgId);
+    } catch {
+      /* one listener never stops the others */
+    }
+  }
+}
+
+type WorkspaceAccessListener = (key: string, access: "lost" | "regained") => void;
+const workspaceAccessListeners = new Set<WorkspaceAccessListener>();
+
+/**
+ * Told when this person's access to one workspace (`cloud:<orgId>:<workspaceId>`)
+ * ended as its runtime or the API sees it (role none, or a reconnect refused
+ * for access), and when a role came back on the same connection. On a loss
+ * the sidebar forgets the workspace's sessions, tabs and terminals at once,
+ * without waiting for the next list.
+ */
+export function onWorkspaceAccess(listener: WorkspaceAccessListener): () => void {
+  workspaceAccessListeners.add(listener);
+  return () => workspaceAccessListeners.delete(listener);
+}
+
+function notifyWorkspaceAccess(key: string, access: "lost" | "regained") {
+  for (const listener of [...workspaceAccessListeners]) {
+    try {
+      listener(key, access);
     } catch {
       /* one listener never stops the others */
     }
@@ -388,6 +415,7 @@ export function notShared(state: WorkspaceConnectionState, you: WorkspaceYou | n
  */
 export function clearCollabAccess(key: string) {
   const s = store(key);
+  notifyWorkspaceAccess(key, "lost");
   if (s.presence.idle) clearTimeout(s.presence.idle);
   s.presence.idle = null;
   s.notesOpen.clear();
@@ -464,11 +492,13 @@ export function applyCollabEvent(key: string, event: CollabEvent) {
         s.presence.idle = null;
         s.notesOpen.clear();
         set(s, { you: event.you, lastYou: event.you, participants: [], leases: {}, notes: {}, unreadNotes: {}, error: null });
+        notifyWorkspaceAccess(key, "lost");
       } else {
         set(s, { you: event.you, lastYou: event.you });
       }
       // Shared again (or for the first time): what was hidden can be read now.
       if (before?.role === "none" && event.you.role !== "none" && s.client) void refreshCollab(key, s.client);
+      if (before?.role === "none" && event.you.role !== "none") notifyWorkspaceAccess(key, "regained");
       if (before?.role !== event.you.role || before?.canApprove !== event.you.canApprove) notifyAccessChanged(orgOf(key));
       break;
     }
@@ -510,6 +540,7 @@ export function startCollab(key: string, client: WorkspaceRpcClient): () => void
     // Reconnected without access (the share was revoked): leases, people and notes of before are not shown.
     s.notesOpen.clear();
     set(s, { available: true, you, lastYou: you, participants: [], leases: {}, notes: {}, unreadNotes: {}, error: null });
+    notifyWorkspaceAccess(key, "lost");
   } else {
     set(s, { available: true, you, lastYou: you ?? s.snapshot.lastYou, error: null });
   }

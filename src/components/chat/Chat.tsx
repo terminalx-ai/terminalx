@@ -232,14 +232,9 @@ export function Chat({
           {transcript.pendingAsks.map((ask) => (
             <div key={ask.requestId} className="mb-3">
               {ask.kind === "permission" ? (
-                <PermissionCard ask={ask} busy={answering || !!answerBlockedReason} showDetail={askDetail} onAnswer={(o) => onAnswerPermission(ask.requestId, o)} />
+                <PermissionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={(o) => onAnswerPermission(ask.requestId, o)} />
               ) : (
-                <QuestionCard ask={ask} busy={answering || !!answerBlockedReason} onAnswer={(a) => onAnswerQuestions(ask.requestId, a)} />
-              )}
-              {answerBlockedReason && (
-                <div className="mt-1 px-1.5 text-xs text-muted-foreground" data-testid="answer-blocked">
-                  {answerBlockedReason}
-                </div>
+                <QuestionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} onAnswer={(a) => onAnswerQuestions(ask.requestId, a)} />
               )}
             </div>
           ))}

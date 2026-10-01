@@ -215,7 +215,8 @@ export function MicButton({ dictation, disabled = false }: { dictation: Dictatio
   const input = useTranscriptionInput();
   if (available === false) return null;
   return (
-    <div className="flex min-w-0 items-center">
+    // In a narrow composer the input picker gives way first, down to its chevron (`min-w-14`: the mic and that chevron), and never past it.
+    <div className="flex min-w-14 shrink-[8] items-center">
       <WithTooltip label={dictating ? "Stop dictating" : `Dictate · ${state.engine}`} keys={keycaps("mod+shift+d")}>
         <Button
           variant="ghost"

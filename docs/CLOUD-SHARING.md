@@ -305,8 +305,9 @@ granted:
   `holderId`); `access-revoked` reads "Not sent: your access changed". Queued
   follow-ups show who queued them (`actorId`).
 * Permission and question cards can be answered only by a manager or someone
-  with `canApprove`; for everyone else their buttons are disabled with
-  "Waiting for someone who can approve".
+  with `canApprove`; for everyone else every button is off and looks it (the
+  same quiet outline for Allow as for Deny, no accent fill, no Return hint),
+  with "Waiting for someone who can approve" under them, inside the card.
 * Notes: a separate "Notes" drawer per agent tab, apart from the chat and
   its composer, with each note's author and time and its own input ("Add a
   note for teammates (not sent to the agent)"). Notes go only through
@@ -334,6 +335,12 @@ organization is live in the sidebar. Sharing follows them there:
   shows on a workspace group row, and on session rows next to their location
   chip when the project has one workspace. An older server sends neither
   field and nothing is drawn.
+* **Your access.** The share dialog names this person's real role: "Owner"
+  or "Admin" for the API's `manager` (told apart by their role in the
+  organization, from the account or the roster; "Owner or admin" when
+  neither says), "Creator" for the member who created the workspace (a driver
+  who manages its shares), else "Driver" or "Viewer", with ", can approve
+  permissions" where that is separate.
 * **Share dialog.** "Share…" (managers) or "Sharing…" is the first item of
   the workspace menu wherever it shows: a project or workspace row's "…" menu
   and the session header's location chip. One dialog host is mounted in
@@ -341,8 +348,10 @@ organization is live in the sidebar. Sharing follows them there:
   the share routes are authorized by membership in it. For a workspace in an
   organization other than the default, the dialog lists and changes shares
   but does not offer the default organization's roster for adding people.
-* **Session header.** One connection chip ("Live", "Stopped", "Connecting",
-  …: whether the workspace runs, never what this person may do) and one role
+* **Session header.** One connection chip ("Live", "Stopped", "Connecting…",
+  …: whether the workspace runs, never what this person may do; "Starting"
+  only while the list says the machine is being provisioned or resumed, so a
+  member attaching to a running workspace reads "Connecting…") and one role
   chip ("View only", "Driver" or "Not shared"; none for a manager; "View
   only" too for a read-only attachment whose sharing is unknown). Then the
   other people in the workspace as initials (ringed while typing; name, role,
@@ -371,8 +380,13 @@ organization is live in the sidebar. Sharing follows them there:
   admin's, so a member is not offered one anywhere: no "+" on a project, the
   project menu's and the new-session picker's items disabled with the reason,
   and `startCloudSessionIn` (which every way into the form passes) only
-  focuses the project. While the account's role in the organization is not
-  known yet nothing is offered either. (A driver's message to an existing
+  focuses the project. The organization header follows the same rule
+  (`mayStartCloudSessions`): its "+" keeps "From repository…" for a member
+  (it only pins a repository to this sidebar) and shows "New project…"
+  disabled with the reason, and its "…" menu shows "New cloud workspace…"
+  disabled with the reason; "Refresh cloud workspaces" is everyone's. While
+  the account's role in the organization is not known yet nothing is offered
+  either: no "+" on the header, and no "New cloud workspace…". (A driver's message to an existing
   session still wakes a stopped workspace it is shared on: that is sending,
   not starting a session.) Closing a tab from the sidebar is a manager's,
   like the session menu.
@@ -401,7 +415,18 @@ organization is live in the sidebar. Sharing follows them there:
   lock pane shows, the list is read again after 5, 10, 20 and then every
   30 s, so a share made meanwhile is seen where no connection can tell. In
   the sidebar an unshared workspace lists one row named after it, with no
-  cached session title, tab or status.
+  cached session title, tab, terminal or status.
+
+  When access ends (`onWorkspaceAccess` in `cloudCollab.ts`: the runtime's
+  role `none`, or the refused reconnect) `cloudSessions.ts` forgets what the
+  sidebar shows of the workspace at once: its live and saved session lists,
+  its terminals with their views and the pty list they came from, and the tab
+  asked for in each of its sessions. The session stays selected, as the one
+  row that opens the lock pane; no tab or terminal row is left under it. The
+  catalog also drops the saved session list of any workspace a list reports
+  as role `none` or no longer reports at all. A role given back on the same
+  connection reads the session list again; terminals return with the session
+  view's next read.
 * **Loading.** Until the runtime answers, a member's session shows the one
   line "Loading the session…" and is named after its workspace.
 * **Permission requests** quote the command, file, URL or tool they are
@@ -420,8 +445,16 @@ organization is live in the sidebar. Sharing follows them there:
   leases with the rest of its cloud state.
 
 **Share state without a manual refresh.** The catalog lists an organization
-every 30 s while the window is focused and every 2 min while it is visible in
-the background, and at once (debounced) when access changes: this person's
+every 30 s while the window can be seen **or** has the focus, and every 2 min
+while it is hidden and unfocused; it is never paused. WKWebView reports
+`visibilityState` "hidden" not only for a minimized window but for one wholly
+covered by other windows (its window occlusion detection), and WebKit
+throttles a hidden page's timers, so the 2 min is a floor rather than a
+promise. For that reason the fast poll never depends on visibility alone (a
+focused window polls fast whatever it reports), and coming back lists at
+once: on window focus, and on a visibility change to visible, whatever the
+age of the rows (two such events within 2 s are one list). It also lists at
+once (debounced) when access changes: this person's
 role (`collab.you`, or a hello that differs from the last one seen), the
 people the runtime lists (`collab.presence` with a different set of people,
 roles or approval rights), or a share or visibility change made in the
@@ -440,7 +473,12 @@ the "live two-user test" blocks of `SessionView.cloud.test.tsx`,
 `packages/portable/src/workspaceCollab.test.ts`,
 `src/components/cloud/CloudShareDialog.test.tsx`, the PRO-30 blocks of
 `CloudAgents.test.tsx` and `CloudSessionPage.test.tsx`, and the
-`cloud_workspaces::tests::share*` Rust tests.
+`cloud_workspaces::tests::share*` Rust tests. `src/lib/cloudSessions.access.test.ts`
+covers what is forgotten when access ends and read again when it returns.
+`pnpm test:webkit-layout` (after `pnpm build`) measures in WebKit what jsdom
+cannot: the composer's toolbar at 1000x520 and 1280x760 with the Notes drawer
+open (no control overlaps another), and a modal dialog's overlay covering the
+Notes drawer.
 
 ## Development and tests
 

@@ -81,7 +81,7 @@ vi.mock("@/components/chat/Composer", () => ({
 import { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { SessionView } from "./SessionView";
 import { CloudSessionHost } from "./CloudSessionHost";
-import { useCloudSession } from "@/lib/cloudSession";
+import { cloudConnectionChip, useCloudSession, workspaceStarting } from "@/lib/cloudSession";
 import { resetCloudAgents } from "@/lib/cloudAgents";
 import { TERMINAL_POLL_MS, cloudTerminalsOf, resetCloudTerminals, sessionTerminals } from "@/lib/cloudTerminals";
 import { resetCloudConnections } from "@/lib/cloudConnections";
@@ -674,7 +674,43 @@ describe("the session header's location and connection chips", () => {
     runtime.tabs = [tabInfo()];
     await act(async () => runtime.connect("manage"));
     seen.push(screen.getByTestId("session-connection").textContent ?? "");
-    expect(seen).toEqual(["Resuming", "Connecting", "Connecting", "Connecting", "Live"]);
+    expect(seen).toEqual(["Resuming", "Connecting…", "Connecting…", "Connecting…", "Live"]);
+  });
+
+  it("says Connecting…, not Starting, while it attaches to a workspace that is already running", async () => {
+    // A member opens a session someone else has live: nothing is starting.
+    setCatalog(workspaceItem("ready", "participate"));
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    const chip = () => screen.getByTestId("session-connection").textContent;
+    await act(async () => runtime.emit({ state: "opening" }));
+    expect(chip()).toBe("Connecting…");
+    await act(async () => runtime.emit({ state: "waitingForRuntime" }));
+    expect(chip()).toBe("Connecting…");
+    await act(async () => runtime.emit({ state: "connecting", attempt: 1 }));
+    expect(chip()).toBe("Connecting…");
+    runtime.tabs = [tabInfo()];
+    await act(async () => runtime.connect("participate"));
+    expect(chip()).toBe("Live");
+    expect(activate).not.toHaveBeenCalled();
+  });
+
+  it("says Starting only while the workspace is being provisioned or resumed", async () => {
+    setCatalog(workspaceItem("provisioning"));
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.emit({ state: "waitingForRuntime" }));
+    expect(screen.getByTestId("session-connection").textContent).toBe("Starting");
+    expect(cloudConnectionChip({ state: "waitingForRuntime" }, "ready").label).toBe("Connecting…");
+    expect(cloudConnectionChip({ state: "waitingForRuntime" }, null).label).toBe("Connecting…");
+    expect(cloudConnectionChip({ state: "waitingForRuntime" }, "suspended").label).toBe("Starting");
+    expect(cloudConnectionChip({ state: "waitingForRuntime" }, "ready", { starting: true }).label).toBe("Starting");
+    const resuming = { ...workspaceItem("suspended"), latestOperation: { state: "running", action: "resume" } } as CloudWorkspaceListItem;
+    const stopping = { ...workspaceItem("ready"), latestOperation: { state: "running", action: "suspend" } } as CloudWorkspaceListItem;
+    expect(workspaceStarting(resuming)).toBe(true);
+    expect(workspaceStarting(stopping)).toBe(false);
+    expect(workspaceStarting(workspaceItem("ready"))).toBe(false);
+    expect(workspaceStarting(null)).toBe(false);
   });
 });
 

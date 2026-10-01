@@ -47,15 +47,23 @@ export function PermissionCard({
   ask,
   onAnswer,
   busy,
+  blockedReason = null,
   showDetail = false,
 }: {
   ask: PendingAsk;
   onAnswer: (optionId: string) => void;
   busy?: boolean;
+  /**
+   * Why this reader may not answer at all (a shared workspace's non-approver).
+   * Every option is then plainly off: none keeps the accent that says "press
+   * me", and the reason is written under them.
+   */
+  blockedReason?: string | null;
   /** Quote what is asked for (the command, file or tool) under the heading. */
   showDetail?: boolean;
 }) {
   const detail = showDetail ? askDetail(ask) : null;
+  const blocked = !!blockedReason;
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     // The card is shown by its own scroller; focus alone would scroll every box above it too, the window included.
@@ -85,16 +93,24 @@ export function PermissionCard({
               <Button
                 key={o.id}
                 size="sm"
-                variant={o.kind === "deny" ? "outline" : i === 0 ? "accent" : "secondary"}
-                disabled={busy}
+                // Blocked: the same quiet outline for every option, so Allow reads as off as Deny does.
+                variant={blocked || o.kind === "deny" ? "outline" : i === 0 ? "accent" : "secondary"}
+                disabled={busy || blocked}
+                title={blockedReason ?? undefined}
                 onClick={() => onAnswer(o.id)}
-                className={cn(o.kind === "deny" && "ml-auto text-muted-foreground")}
+                className={cn((blocked || o.kind === "deny") && "text-muted-foreground", o.kind === "deny" && "ml-auto")}
               >
                 {o.kind === "deny" ? "Deny" : o.kind === "allow_once" ? "Allow" : o.kind === "allow_always" ? "Always allow" : o.kind === "allow_session" ? "Allow for session" : "Change permission mode"}
-                {i === 0 && <Kbd className="ml-1 bg-black/10">⏎</Kbd>}
+                {/* Return answers nothing for someone who may not answer. */}
+                {i === 0 && !blocked && <Kbd className="ml-1 bg-black/10">⏎</Kbd>}
               </Button>
             ))}
           </div>
+          {blocked && (
+            <p className="mt-2 text-xs text-muted-foreground" data-testid="answer-blocked">
+              {blockedReason}
+            </p>
+          )}
         </div>
       </div>
     </div>
@@ -128,7 +144,19 @@ function verbFor(tool: string): string {
  * AskUserQuestion as a form. Item names are the question text, so the
  * answers map is already keyed the way the harness matches.
  */
-export function QuestionCard({ ask, onAnswer, busy }: { ask: PendingAsk; onAnswer: (answers: Record<string, string>) => void; busy?: boolean }) {
+export function QuestionCard({
+  ask,
+  onAnswer,
+  busy,
+  blockedReason = null,
+}: {
+  ask: PendingAsk;
+  onAnswer: (answers: Record<string, string>) => void;
+  busy?: boolean;
+  /** Why this reader may not answer (see PermissionCard): Answer and Skip are plainly off, with the reason. */
+  blockedReason?: string | null;
+}) {
+  const blocked = !!blockedReason;
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [free, setFree] = useState<Record<string, string>>({});
   const ref = useRef<HTMLFormElement>(null);
@@ -212,13 +240,18 @@ export function QuestionCard({ ask, onAnswer, busy }: { ask: PendingAsk; onAnswe
             );
           })}
           <div className="flex items-center gap-2">
-            <Button size="sm" variant="accent" type="submit" disabled={busy}>
-              Answer <Kbd className="ml-1 bg-black/10">⏎</Kbd>
+            <Button size="sm" variant={blocked ? "outline" : "accent"} type="submit" disabled={busy || blocked} title={blockedReason ?? undefined} className={cn(blocked && "text-muted-foreground")}>
+              Answer {!blocked && <Kbd className="ml-1 bg-black/10">⏎</Kbd>}
             </Button>
-            <Button size="sm" variant="ghost" type="button" disabled={busy} onClick={() => onAnswer({})}>
+            <Button size="sm" variant="ghost" type="button" disabled={busy || blocked} title={blockedReason ?? undefined} onClick={() => onAnswer({})}>
               Skip
             </Button>
           </div>
+          {blocked && (
+            <p className="text-xs text-muted-foreground" data-testid="answer-blocked">
+              {blockedReason}
+            </p>
+          )}
         </div>
       </div>
     </form>

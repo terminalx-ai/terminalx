@@ -27,9 +27,8 @@ export function RecoveryBanner({ kind, waiting, asks, busy, answering = false, a
     <p className="font-medium">{asks.length ? "Waiting for input" : kind ? "Needs attention" : "Waiting for input"}</p>
     <p className="mt-1">{kind ? RECOVERY_MESSAGES[kind] : asks.length ? "Review the pending request to continue." : "Check the terminal for a pending decision, or stop the session."}</p>
     {asks.map(ask => <div key={ask.requestId} className="mt-2">{ask.kind === "permission"
-      ? <PermissionCard ask={ask} busy={busy || answering || !!answerBlockedReason} showDetail={askDetail} onAnswer={option => onPermission(ask.requestId, option)} />
-      : <QuestionCard ask={ask} busy={busy || answering || !!answerBlockedReason} onAnswer={answers => onQuestions(ask.requestId, answers)} />}</div>)}
-    {asks.length > 0 && answerBlockedReason && <p className="mt-1 text-muted-foreground" data-testid="answer-blocked">{answerBlockedReason}</p>}
+      ? <PermissionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={option => onPermission(ask.requestId, option)} />
+      : <QuestionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} onAnswer={answers => onQuestions(ask.requestId, answers)} />}</div>)}
     <div className="mt-2 flex flex-wrap gap-2">
       {kind && kind !== "permission_expired" && !asks.length && <Button size="sm" disabled={busy} onClick={() => onRetry()}>Retry safely</Button>}
       {kind === "capacity" && !asks.length && <select aria-label="Choose another model" disabled={busy} value="" onChange={e => onRetry(e.target.value)} className="rounded border border-hairline bg-background px-2">

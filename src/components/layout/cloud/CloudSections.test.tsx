@@ -548,6 +548,79 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
     expect(screen.getByRole("button", { name: "New session in acme/api" })).toBeTruthy();
   });
 
+  it("offers a member no way to create a workspace from the organization header, and says who can", async () => {
+    const asRole = (role: string | undefined) => {
+      mocks.status = { ...mocks.status, organizations: mocks.status.organizations!.map((org) => (org.id === ORG ? ({ ...org, role } as typeof org) : org)) };
+    };
+    const openCloudPage = vi.fn();
+    const mountWithPage = () =>
+      render(
+        <TooltipProvider>
+          <div role="tree">
+            <CloudSections onOpenCloudPage={openCloudPage} />
+          </div>
+        </TooltipProvider>,
+      );
+    const entries = async (trigger: string) => {
+      mouseClick(screen.getByRole("button", { name: trigger }));
+      return within(await screen.findByRole("menu")).getAllByRole("menuitem");
+    };
+    const closeMenu = async () => {
+      fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    };
+
+    // A member: pinning a repository creates nothing, so it stays; "New project…" and "New cloud workspace…" are off, with the reason.
+    asRole("member");
+    mountWithPage();
+    let [fromRepository, newProject] = await entries("Add project to Acme");
+    expect(fromRepository.textContent).toContain("From repository…");
+    expect(fromRepository.getAttribute("aria-disabled")).toBeNull();
+    expect(newProject.textContent).toContain("New project…");
+    expect(newProject.textContent).toContain("admins only");
+    expect(newProject.getAttribute("aria-disabled")).toBe("true");
+    expect(newProject.getAttribute("title")).toBe("Only an organization owner or admin can start a new cloud session");
+    fireEvent.click(newProject);
+    expect(screen.queryByTestId("cloud-new-blank-project")).toBeNull();
+    await closeMenu();
+    let [refresh, newWorkspace] = await entries("Menu for Acme");
+    expect(refresh.textContent).toContain("Refresh cloud workspaces");
+    expect(refresh.getAttribute("aria-disabled")).toBeNull();
+    expect(newWorkspace.textContent).toContain("New cloud workspace…");
+    expect(newWorkspace.getAttribute("aria-disabled")).toBe("true");
+    expect(newWorkspace.getAttribute("title")).toBe("Only an organization owner or admin can create a cloud workspace");
+    fireEvent.click(newWorkspace);
+    expect(openCloudPage).not.toHaveBeenCalled();
+    // Refresh still works for a member: it only lists.
+    fireEvent.click(refresh);
+    await waitFor(() => expect(mocks.api.cloudWorkspaces).toHaveBeenCalled());
+    cleanup();
+
+    // The role is not known yet: no "+", and the menu has Refresh alone.
+    asRole(undefined);
+    mountWithPage();
+    expect(screen.queryByRole("button", { name: "Add project to Acme" })).toBeNull();
+    expect((await entries("Menu for Acme")).map((entry) => entry.textContent?.trim())).toEqual(["Refresh cloud workspaces"]);
+    cleanup();
+
+    // An owner or admin keeps all of it.
+    for (const role of ["owner", "admin"]) {
+      asRole(role);
+      mountWithPage();
+      [fromRepository, newProject] = await entries("Add project to Acme");
+      expect(fromRepository.getAttribute("aria-disabled")).toBeNull();
+      expect(newProject.getAttribute("aria-disabled")).toBeNull();
+      expect(newProject.textContent).not.toContain("admins only");
+      await closeMenu();
+      [refresh, newWorkspace] = await entries("Menu for Acme");
+      expect(newWorkspace.getAttribute("aria-disabled")).toBeNull();
+      expect(newWorkspace.getAttribute("title")).toBeNull();
+      cleanup();
+    }
+    expect(mocks.api.cloudRemoteAttach).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+  });
+
   it("never opens the cloud new-session form for a member, or before the role is known, whichever way it is asked for", async () => {
     const key = `cloud:${ORG}:github.com/acme/api`;
     const asRole = (role: string | undefined) => {

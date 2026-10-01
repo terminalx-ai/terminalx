@@ -9,12 +9,36 @@ import { VISIBILITY_ADMIN_REASON, notifyAccessChanged } from "@/lib/cloudCollab"
 import { loadRoster, loadRosterIn, rememberPeople } from "@/lib/cloudPeople";
 import type { OrganizationMember } from "@/lib/organizationMembers";
 
-const ROLE_TEXT: Record<string, string> = {
-  manager: "Admin (manages the workspace)",
-  driver: "Driver (can send to agents and type in terminals)",
-  viewer: "Viewer (can read everything, not send)",
-  none: "No access to this workspace's content",
-};
+/**
+ * This person's access in words: Owner, Admin, Creator, Driver or Viewer.
+ * The API's `manager` role is an organization owner's or admin's, so the
+ * organization role says which of the two it is; the one person who manages
+ * the shares without being a manager is the workspace's creator.
+ */
+export function yourAccessText(
+  you: CloudWorkspaceShares["you"],
+  /** This person's role in the workspace's organization (`owner`, `admin`, `member`); null when not known. */
+  orgRole: string | null,
+  /** Whether they created the workspace; null when not known. */
+  creator: boolean | null = null,
+): string {
+  const approves = you.canApprove ? ", can approve permissions" : "";
+  switch (you.role) {
+    case "manager":
+      if (orgRole === "owner") return "Owner (the organization's owner: manages this workspace and who it is shared with)";
+      if (orgRole === "admin") return "Admin (an organization admin: manages this workspace and who it is shared with)";
+      return "Owner or admin of the organization (manages this workspace and who it is shared with)";
+    case "driver":
+      if (you.canManageShares || creator) return "Creator (you created this workspace: can send to agents, type in terminals, approve permissions and manage who it is shared with)";
+      return `Driver (can send to agents and type in terminals)${approves}`;
+    case "viewer":
+      return `Viewer (can read everything, not send)${approves}`;
+    case "none":
+      return "No access to this workspace's content";
+    default:
+      return String(you.role);
+  }
+}
 
 function codeOf(error: unknown): string {
   if (error && typeof error === "object" && "code" in error) return String((error as { code: unknown }).code);
@@ -145,6 +169,8 @@ export function CloudShareDialog({
   // Private means its creator alone: an admin who did not create it stops seeing it too.
   const me = members.find((member) => member.email === status.identity?.email)?.userId ?? null;
   const creator = createdBy && me ? createdBy === me : null;
+  // Owner or admin: the account's own word for this organization, else the roster's.
+  const orgRole = status.organizations?.find((candidate) => candidate.id === org)?.role ?? members.find((member) => member.email === status.identity?.email)?.role ?? null;
 
   /** What the server says the workspace's visibility is now; null when that cannot be read. */
   const readAccess = async (): Promise<AccessMode | null> => {
@@ -305,8 +331,7 @@ export function CloudShareDialog({
         {listed && (
           <div className="flex flex-col gap-3 text-xs">
             <p className="text-muted-foreground" data-testid="cloud-share-you">
-              Your access: {ROLE_TEXT[listed.you.role] ?? listed.you.role}
-              {listed.you.canApprove && listed.you.role !== "manager" ? ", can approve permissions" : ""}.
+              Your access: {yourAccessText(listed.you, orgRole, creator)}.
             </p>
             {manage && isPrivate && (
               <p className="flex items-start gap-2 rounded-md border border-hairline bg-well/40 px-3 py-2 text-muted-foreground" data-testid="cloud-share-private">

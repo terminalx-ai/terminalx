@@ -597,4 +597,11 @@ describe("wake refused at the running limit (saas PRO-76)", () => {
     expect(provisioningLabel("suspended", "unavailable", offline)).toBe("Cannot wake (commands stay queued)");
     expect(provisioningLabel("suspended", "queued", offline, true)).toBe("Waking");
   });
+
+  it("does not call a running workspace Starting while this window attaches to it", () => {
+    const waiting = { state: "waitingForRuntime" } as WorkspaceConnectionState;
+    expect(provisioningLabel("ready", null, waiting)).toBe("Ready");
+    expect(provisioningLabel("provisioning", null, waiting)).toBe("Starting");
+    expect(provisioningLabel("suspended", null, waiting)).toBe("Starting");
+  });
 });

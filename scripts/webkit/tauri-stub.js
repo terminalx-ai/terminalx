@@ -31,6 +31,9 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
     list_models: [],
     mobile_terminal_drivers: [],
     transcription_models: [],
+    // Dictation is there, with the saved input left at the system default: the composer shows the mic and its input picker.
+    dictation_available: true,
+    transcription_preferences: { model: "", inputDevice: null, muteWhileRecording: false },
     status_bar_settings: { visible: false },
   };
   // `localSession`: one local session with a long transcript and a pending

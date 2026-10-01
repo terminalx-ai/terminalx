@@ -44,7 +44,7 @@ import {
   useCloudCatalog,
   type OrgCatalog,
 } from "@/lib/cloudCatalog";
-import { NEW_SESSION_ADMIN_REASON } from "@/lib/cloudCollab";
+import { NEW_SESSION_ADMIN_REASON, NEW_WORKSPACE_ADMIN_REASON } from "@/lib/cloudCollab";
 import { useCloudConnection } from "@/lib/cloudConnections";
 import { lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
@@ -189,6 +189,10 @@ function OrgSection({
   const cached = catalog.orgs[org.id];
   const name = sectionName(org);
   const offline = live && !!cached?.error && cached.fetchedAt !== null;
+  // Creating a workspace is the API's owner-or-admin action, the same rule as
+  // a project's "+": true for them, false for a member, null while this
+  // account's role here is not known yet (nothing is offered until it is).
+  const mayCreate = mayStartCloudSessions(status, org.id);
 
   const switchOrg = async () => {
     setSwitchError(null);
@@ -248,7 +252,8 @@ function OrgSection({
               </Button>
             </WithTooltip>
           )}
-          {live && (
+          {/* Adding a repository only pins it to this sidebar, so a member may; a new project is created with its first session, so it says who can. */}
+          {live && mayCreate !== null && (
             <DropdownMenu {...addMenu.root}>
               <WithTooltip label="Add project">
                 <DropdownMenuTrigger asChild {...addMenu.trigger}>
@@ -261,8 +266,9 @@ function OrgSection({
                 <DropdownMenuItem onSelect={() => onAdd("repository")}>
                   <FolderGit2 /> From repository…
                 </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => onAdd("blank")}>
+                <DropdownMenuItem onSelect={() => onAdd("blank")} disabled={!mayCreate} title={mayCreate ? undefined : NEW_SESSION_ADMIN_REASON} data-testid="cloud-add-blank-project">
                   <Folder /> New project…
+                  {!mayCreate && <span className="ml-auto pl-3 text-[10px] text-faint">admins only</span>}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -280,9 +286,10 @@ function OrgSection({
                     <RefreshCw /> Refresh cloud workspaces
                   </DropdownMenuItem>
                   {/* The full-window page works in the default organization. */}
-                  {isDefault && onOpenCloudPage && (
-                    <DropdownMenuItem onSelect={onOpenCloudPage}>
+                  {isDefault && onOpenCloudPage && mayCreate !== null && (
+                    <DropdownMenuItem onSelect={onOpenCloudPage} disabled={!mayCreate} title={mayCreate ? undefined : NEW_WORKSPACE_ADMIN_REASON} data-testid="cloud-new-workspace">
                       <Plus /> New cloud workspace…
+                      {!mayCreate && <span className="ml-auto pl-3 text-[10px] text-faint">admins only</span>}
                     </DropdownMenuItem>
                   )}
                 </>
@@ -709,7 +716,8 @@ function WorkspaceTerminals({ node, sessionIds }: { node: CloudWorkspaceNode; se
   const [expanded, setExpanded] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const terminals = workspaceTerminals(state.terminals, sessionIds);
-  if (!terminals.length) return null;
+  // Not shared with this person: no terminal of it is listed, whatever this window still holds.
+  if (!terminals.length || node.item.workspace.you?.role === "none") return null;
   const showing = store.selectedCloudWorkspace === node.key && !!state.shown;
   return (
     <div role="treeitem" aria-label="Workspace terminals" aria-expanded={expanded} className="min-w-0" data-testid="cloud-workspace-terminals" data-workspace={node.item.workspace.id} onClickCapture={focusClicked}>
@@ -875,7 +883,9 @@ function CloudSessionNode({ row, node, manage, location }: { row: CloudSessionRo
   };
   // Its terminals, as this window knows them: listed once it has connected to
   // the workspace, and kept current while it stays connected.
-  const terminals = sessionTerminals(useCloudTerminals(node.key).terminals, row.sessionId);
+  // None under a workspace that is not shared with this person (the row then opens the lock pane).
+  const known = useCloudTerminals(node.key).terminals;
+  const terminals = you?.role === "none" ? [] : sessionTerminals(known, row.sessionId);
   // The row that is marked is the tab the open session shows; before its view
   // has said, the same rule the view uses.
   const requested = useTerminals().selected[row.key];

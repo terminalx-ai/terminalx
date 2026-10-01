@@ -2,10 +2,12 @@ import { useEffect, useMemo, useSyncExternalStore } from "react";
 import type { RuntimeSession, RuntimeSessionPatch, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import type { CloudWorkspaceListItem } from "@/lib/api";
 import { applyLiveTabs, closeCloudAgentTab, loadCloudAgents, useCloudAgents, watchLiveTabs, type CloudAgentTab } from "@/lib/cloudAgents";
-import { cacheCloudSessions, useCloudCatalog, type CachedWorkspaceSessions } from "@/lib/cloudCatalog";
+import { cacheCloudSessions, dropCachedCloudSessions, useCloudCatalog, type CachedWorkspaceSessions } from "@/lib/cloudCatalog";
+import { onWorkspaceAccess } from "@/lib/cloudCollab";
 import { onCloudConnected, retainCloudConnection, waitCloudConnected, type CloudTarget } from "@/lib/cloudConnections";
-import { closeCloudTerminal, cloudTerminalsOf } from "@/lib/cloudTerminals";
-import { cloudSessionKey, cloudWorkspaceKey, type CloudKey, type CloudWorkspaceNode } from "@/types/target";
+import { closeCloudTerminal, cloudTerminalsOf, dropCloudTerminals } from "@/lib/cloudTerminals";
+import { clearSessionTabsUnder } from "@/lib/terminal";
+import { cloudSessionKey, cloudWorkspaceKey, parseCloudWorkspaceKey, type CloudKey, type CloudWorkspaceNode } from "@/types/target";
 import type { TabStatus } from "@/types/session";
 
 /**
@@ -76,7 +78,13 @@ function subscribe(listener: () => void) {
   return () => listeners.delete(listener);
 }
 
+/** Workspaces whose runtime says this person has no access: nothing of theirs is listed or cached until it says otherwise. */
+const locked = new Set<string>();
+/** The connection of each connected workspace, to read its list again when access comes back. */
+const connected = new Map<string, { target: CloudTarget; client: WorkspaceRpcClient }>();
+
 function takeLive(target: CloudTarget, sessions: RuntimeSession[], capabilities: string[], manage: boolean) {
+  if (locked.has(cloudWorkspaceKey(target.orgId, target.workspaceId))) return;
   live.set(cloudWorkspaceKey(target.orgId, target.workspaceId), { sessions, capabilities, manage });
   cacheCloudSessions(target.orgId, target.workspaceId, sessions, capabilities);
   publish();
@@ -93,12 +101,50 @@ function managesOf(client: WorkspaceRpcClient): boolean {
   return state.state === "connected" && state.authority === "manage" && (!state.you || state.you.listed === false || state.you.role === "manager");
 }
 
+/** The connection's hello says this person has no role on a workspace that has a member list. */
+function noAccess(client: WorkspaceRpcClient): boolean {
+  const state = client.connection;
+  return state.state === "connected" && state.authority !== "manage" && state.you?.role === "none" && state.you.listed !== false;
+}
+
+/**
+ * This person's access to a workspace ended (its runtime says role none, or
+ * the API refused the reconnect). Everything the sidebar shows of it goes at
+ * once: its live and saved session lists (session and tab rows), its
+ * terminals with their views and the pty list they came from, and the tab
+ * asked for in each of its sessions, so no row stays selected under a
+ * workspace that now reads "Not shared". The session itself stays selected:
+ * its view is the lock pane. Nothing here connects, attaches or resumes.
+ */
+function forgetWorkspaceContent(key: string) {
+  const parsed = parseCloudWorkspaceKey(key);
+  if (!parsed) return;
+  locked.add(key);
+  dropCloudTerminals(key);
+  clearSessionTabsUnder(`${key}:`);
+  dropCachedCloudSessions(parsed.orgId, parsed.workspaceId);
+  if (live.delete(key)) publish();
+}
+
+function onAccess(key: string, access: "lost" | "regained") {
+  if (access === "lost") return forgetWorkspaceContent(key);
+  if (!locked.delete(key)) return;
+  // Shared again on the same connection: its sessions can be read now.
+  const held = connected.get(key);
+  if (held) void refreshCloudSessions(held.target, held.client).catch(() => undefined);
+}
+
 /** Read the lists on every connect and follow them while connected. */
 function onConnected(target: CloudTarget, client: WorkspaceRpcClient): () => void {
   const scope = { organizationId: target.orgId, workspaceId: target.workspaceId };
+  const key = cloudWorkspaceKey(target.orgId, target.workspaceId);
   const capabilities = capabilitiesOf(client);
   const manage = managesOf(client);
   let open = true;
+  connected.set(key, { target, client });
+  // This connection's own word on access decides afresh.
+  if (noAccess(client)) forgetWorkspaceContent(key);
+  else locked.delete(key);
   void client
     .listSessions()
     .then((sessions) => open && takeLive(target, sessions, capabilities, manage))
@@ -113,16 +159,23 @@ function onConnected(target: CloudTarget, client: WorkspaceRpcClient): () => voi
     open = false;
     stopTabs();
     stopSessions();
+    if (connected.get(key)?.client === client) connected.delete(key);
     // The cached copy (the same list) takes over.
-    if (live.delete(cloudWorkspaceKey(target.orgId, target.workspaceId))) publish();
+    if (live.delete(key)) publish();
   };
 }
 
 let booted: (() => void) | null = null;
 
-/** Start following every connection's session lists. Idempotent. */
+/** Start following every connection's session lists, and each workspace's access. Idempotent. */
 export function bootCloudSessions() {
-  if (!booted) booted = onCloudConnected(onConnected);
+  if (booted) return;
+  const stopConnections = onCloudConnected(onConnected);
+  const stopAccess = onWorkspaceAccess(onAccess);
+  booted = () => {
+    stopConnections();
+    stopAccess();
+  };
 }
 
 /** For tests. */
@@ -130,6 +183,8 @@ export function resetCloudSessions() {
   booted?.();
   booted = null;
   live.clear();
+  locked.clear();
+  connected.clear();
   publish();
 }
 

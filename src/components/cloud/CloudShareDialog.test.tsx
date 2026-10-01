@@ -25,7 +25,7 @@ vi.mock("@/lib/organizationMembers", () => ({ organizationMembers: { list: mocks
 const account = vi.hoisted(() => ({ status: { identity: { organizationId: "org-1", email: "me@example.com" } } as unknown }));
 vi.mock("@/lib/account", () => ({ useAccount: () => account }));
 
-import { CloudShareDialog, CloudShareDialogHost, openShareDialog, shareErrorMessage } from "./CloudShareDialog";
+import { CloudShareDialog, CloudShareDialogHost, openShareDialog, shareErrorMessage, yourAccessText } from "./CloudShareDialog";
 import { personName, resetPeople } from "@/lib/cloudPeople";
 import { onAccessChanged } from "@/lib/cloudCollab";
 
@@ -145,6 +145,35 @@ describe("share dialog", () => {
     expect(shareErrorMessage({ code: "cloud_workspace_share_forbidden" })).toBe(
       "Only organization admins and the workspace's creator can change who it is shared with.",
     );
+  });
+
+  it("tells the organization's owner they are the Owner, and an admin that they are an Admin", async () => {
+    // The API's role for both is `manager`; the roster (or the account) says which.
+    dialog();
+    await waitFor(() => expect(screen.getByTestId("cloud-share-you").textContent).toBe("Your access: Owner (the organization's owner: manages this workspace and who it is shared with)."));
+    expect(screen.getByTestId("cloud-share-you").textContent).not.toContain("Admin");
+    cleanup();
+
+    // The account's own organization list wins over the roster, and is there before the roster loads.
+    const before = account.status;
+    account.status = { identity: { organizationId: "org-1", email: "me@example.com" }, organizations: [{ id: "org-1", name: "Acme", role: "admin" }] };
+    dialog();
+    expect((await screen.findByTestId("cloud-share-you")).textContent).toBe("Your access: Admin (an organization admin: manages this workspace and who it is shared with).");
+    account.status = before;
+  });
+
+  it("names every role it can tell apart, and guesses none it cannot", () => {
+    const manager = { role: "manager", canApprove: true, canManageShares: true } as const;
+    expect(yourAccessText(manager, "owner")).toMatch(/^Owner \(/);
+    expect(yourAccessText(manager, "admin")).toMatch(/^Admin \(/);
+    // Not known which: neither is claimed.
+    expect(yourAccessText(manager, null)).toBe("Owner or admin of the organization (manages this workspace and who it is shared with)");
+    // A plain member who created the workspace drives it and manages its shares.
+    expect(yourAccessText({ role: "driver", canApprove: true, canManageShares: true }, "member")).toMatch(/^Creator \(you created this workspace/);
+    expect(yourAccessText({ role: "driver", canApprove: false, canManageShares: false }, "member")).toBe("Driver (can send to agents and type in terminals)");
+    expect(yourAccessText({ role: "driver", canApprove: true, canManageShares: false }, "member")).toBe("Driver (can send to agents and type in terminals), can approve permissions");
+    expect(yourAccessText({ role: "viewer", canApprove: false, canManageShares: false }, "member")).toBe("Viewer (can read everything, not send)");
+    expect(yourAccessText({ role: "none", canApprove: false, canManageShares: false }, "member")).toBe("No access to this workspace's content");
   });
 
   it("shows a read-only list and their own role to someone who cannot manage shares", async () => {

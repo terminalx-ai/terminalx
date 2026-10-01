@@ -25,6 +25,8 @@ import {
   type CloudAgentTab,
 } from "@/lib/cloudAgents";
 import { refreshCloudCatalog, repositoryOf, useCloudCatalog } from "@/lib/cloudCatalog";
+import { phaseOf, settled } from "@/lib/cloudCreate";
+import { isOpen } from "@/lib/cloudLifecycle";
 import {
   accessLoss,
   accessLostReason,
@@ -60,19 +62,38 @@ export function cloudProviderName(provider: string | null | undefined): string {
 
 export type ConnectionChip = { label: string; tone: "live" | "pending" | "offline" };
 
+/** The workspace list says the machine is coming up: provisioning, its first launch still running, or a resume in flight. */
+export function workspaceStarting(item: CloudWorkspaceListItem | null | undefined): boolean {
+  if (!item) return false;
+  if (item.workspace.state === "provisioning") return true;
+  if (item.workspace.launch && !settled(phaseOf(item))) return true;
+  return isOpen(item.latestOperation) && item.latestOperation?.action === "resume";
+}
+
+/** This window attaching to a workspace that is already running. */
+export const CONNECTING_LABEL = "Connecting…";
+/** The workspace's machine coming up: being provisioned, or resumed from a stop. */
+export const STARTING_LABEL = "Starting";
+
 /** While waking, the chip only moves forward: Resuming, then Connecting, then Live. */
-export const WAKE_STEPS = ["Resuming", "Connecting"] as const;
+export const WAKE_STEPS = ["Resuming", CONNECTING_LABEL] as const;
 
 /**
  * The connection chip: a short label, and whether it is live, on its way, or
  * not there. A stopped workspace is never shown as live, even while an old
  * connection still reads connected, unless this desktop woke it. `woke` is
  * set once an interactive action asked for compute (CS-7's single wake).
+ *
+ * "Starting" is the machine's: a workspace that is being provisioned or
+ * resumed (`starting`, from the workspace list). A workspace that is running
+ * and that this window is only attaching to (a member opening a session
+ * someone else has live) reads "Connecting…", also while the relay waits for
+ * its runtime: nothing is starting there.
  */
 export function cloudConnectionChip(
   state: WorkspaceConnectionState,
   workspaceState: string | null,
-  options: { woke?: boolean; wakeFloor?: number } = {},
+  options: { woke?: boolean; wakeFloor?: number; starting?: boolean } = {},
 ): ConnectionChip {
   if (workspaceState === "archived" && !options.woke) return { label: "Archived", tone: "offline" };
   if (state.state === "updateRequired") return { label: "Update required", tone: "offline" };
@@ -88,11 +109,11 @@ export function cloudConnectionChip(
       return { label: "Live", tone: "live" };
     case "connecting":
     case "opening":
-      return { label: "Connecting", tone: "pending" };
+      return { label: CONNECTING_LABEL, tone: "pending" };
     case "reconnecting":
       return { label: "Reconnecting", tone: "pending" };
     case "waitingForRuntime":
-      return { label: "Starting", tone: "pending" };
+      return { label: workspaceState === "provisioning" || workspaceState === "suspended" || options.starting ? STARTING_LABEL : CONNECTING_LABEL, tone: "pending" };
     case "suspended":
       return { label: workspaceState === "archived" ? "Archived" : "Stopped", tone: "offline" };
     case "stopped":
@@ -386,11 +407,12 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   const allTerminals = useCloudTerminals(workspaceKey).terminals;
   const terminals = useMemo(() => sessionTerminals(allTerminals, runtimeSessionId), [allTerminals, runtimeSessionId]);
   useEffect(() => {
-    if (!generation || !client) return;
+    // Without access there is no terminal to list: what this window held was dropped with it, and is not read back.
+    if (!generation || !client || noAccess) return;
     void syncCloudTerminals(workspaceKey, client, terminalBase).catch(() => undefined);
     // A terminal someone else opens or closes shows here without reopening the session.
     return followCloudTerminals(workspaceKey, client, terminalBase);
-  }, [generation, client, workspaceKey, terminalBase]);
+  }, [generation, client, workspaceKey, terminalBase, noAccess]);
 
   // Presence, notes and leases of a shared workspace (PRO-30), per connection.
   // A live runtime without collab/1 has no sharing: the attachment's
@@ -458,8 +480,9 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   const managed = useCloudConnection(workspaceKey);
   const wakeFloor = useRef(0);
   if (!managed.woke || state.state === "connected") wakeFloor.current = 0;
-  const chip = cloudConnectionChip(state, workspaceState, { woke: managed.woke, wakeFloor: wakeFloor.current });
-  if (managed.woke && chip.label === "Connecting") wakeFloor.current = 1;
+  // Starting only while the list says the machine is coming up (a launch, a resume); else this window is just attaching.
+  const chip = cloudConnectionChip(state, workspaceState, { woke: managed.woke, wakeFloor: wakeFloor.current, starting: workspaceStarting(item) });
+  if (managed.woke && chip.label === WAKE_STEPS[1]) wakeFloor.current = 1;
   // Woken and back: the list still says stopped until it is read again.
   const wokeLive = managed.woke && state.state === "connected";
   useEffect(() => {
