@@ -1022,6 +1022,27 @@ mod tests {
         Policy { backoff_start: Duration::ZERO, backoff_cap: Duration::ZERO, rejected_window: Duration::ZERO, give_up_after: Some(Duration::ZERO) }
     }
 
+    /// `establish`, for a state directory nothing in this test still holds.
+    ///
+    /// The directory's lock is released when its last descriptor closes, and
+    /// this test process is not the only holder of its descriptors: other
+    /// tests start child processes, and a child carries a copy of every
+    /// descriptor that was open when it was forked until it execs. So the
+    /// lock of a runtime just dropped here can read as held until some other
+    /// test's child gets as far as its `exec`. A refusal for the lock comes
+    /// before `establish` has touched anything, so asking again is the same
+    /// call made a moment later. Nothing is slept through, and the deadline
+    /// is one only a hung machine reaches.
+    fn establish(config: &Config, api: &dyn Api, policy: &Policy) -> Result<Bootstrapped> {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            match super::establish(config, api, policy) {
+                Err(error) if format!("{error:#}").contains("another terminalx-serve") && Instant::now() < deadline => std::thread::yield_now(),
+                other => return other,
+            }
+        }
+    }
+
     fn setup(token: &str) -> (tempfile::TempDir, Config) {
         let dir = tempfile::tempdir().unwrap();
         let token_path = dir.path().join("bootstrap-token");
@@ -1256,7 +1277,8 @@ mod tests {
         let server = FakeServer::with_token(&token);
         let (_dir, config) = setup(&token);
         let running = establish(&config, &server, &quick()).unwrap();
-        let error = establish(&config, &server, &quick()).err().unwrap();
+        // The bare one: this refusal is the answer, not something to outwait.
+        let error = super::establish(&config, &server, &quick()).err().unwrap();
         assert!(format!("{error:#}").contains("another terminalx-serve"), "{error:#}");
         drop(running);
         establish(&config, &server, &quick()).unwrap();

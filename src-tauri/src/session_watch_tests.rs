@@ -1,11 +1,17 @@
-//! The session watcher against real panes and a real transcript (#203).
+//! The session watcher against a real transcript (#203).
 //!
-//! Each tab here is a PTY-first Claude tab as the app runs one, less the CLI:
-//! the pane runs a shell command that is busy, quiet or hung on cue, and the
-//! transcript is the recorded `interactive_session.jsonl` written into the
-//! file the tab tails, record by record. The poll thread that follows it is
-//! the production one. Only the watcher's patience is shortened, so a
-//! five-minute silence takes under a second.
+//! Each tab here is a PTY-first Claude tab as the app runs one, less the CLI.
+//! The transcript is the recorded `interactive_session.jsonl`, written into
+//! the file the tab tails record by record.
+//!
+//! Nothing in these tests waits. The watcher takes the moment it judges from
+//! and the time each pane last drew as arguments, so the rig keeps a clock of
+//! its own that only moves when a test moves it, and reads the transcript on
+//! the test's thread instead of leaving it to the poll thread. A five-minute
+//! silence is `advance(PATIENCE.stall)`, and a machine too busy to schedule a
+//! thread for a second changes nothing. The one test that runs a real pane
+//! waits only for the pane to draw, never for an amount of time to pass.
+use std::cell::Cell;
 use std::time::Duration;
 
 use serde_json::json;
@@ -13,8 +19,9 @@ use serde_json::json;
 use super::*;
 use crate::recovery::Patience;
 
-const STALL: Duration = Duration::from_millis(800);
-const PATIENCE: Patience = Patience { stall: STALL, settle: Duration::from_millis(200) };
+const PATIENCE: Patience = Patience::DEFAULT;
+/// The smallest step the rig's clock is moved by.
+const MOMENT: Duration = Duration::from_millis(1);
 const SESSION: &str = "watched-session";
 const TAB: &str = "watched-tab";
 const FIXTURE: &str = include_str!("harness/claude/fixtures/interactive_session.jsonl");
@@ -31,16 +38,23 @@ fn first_turn() -> (String, String) {
 struct Rig {
     manager: SessionManager,
     rt: Arc<Mutex<TabRuntime>>,
+    tail: Arc<tui::Tail>,
     pane: String,
     token: String,
-    dir: tempfile::TempDir,
     transcript: PathBuf,
+    /// The rig's clock. Every event the rig causes is stamped with it, and
+    /// every pass of the watcher judges from it.
+    now: Cell<Instant>,
+    /// When the pane last drew, by the rig's clock.
+    drew: Cell<Option<Instant>>,
+    _dir: tempfile::TempDir,
     _home: store::TempHome,
 }
 
 impl Rig {
-    /// A tab whose pane runs `script` (one command; the pane `exec`s it).
-    fn new(script: &str) -> Self {
+    /// A tab with no pane process behind it: what its pane draws, and when,
+    /// is the test's to say.
+    fn new() -> Self {
         let home = store::temp_home();
         let dir = tempfile::tempdir().unwrap();
         let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(256));
@@ -48,7 +62,7 @@ impl Rig {
         // module's business. Nothing here listens on it.
         let control = crate::hooks::prepare_control().unwrap();
         let manager = SessionManager::new(
-            sink.clone(),
+            sink,
             Arc::new(crate::sink::NoObserver),
             Arc::new(Host::new()),
             Arc::new(pty::Terminals::new()),
@@ -57,12 +71,11 @@ impl Rig {
             control,
         );
         let pane = format!("{SESSION}-{TAB}");
-        let cwd = dir.path().to_str().unwrap().to_string();
-        manager.terminals.spawn(sink, &pane, pty::PaneSpec { cwd: &cwd, cols: 80, rows: 24, command: Some(script), env: &[] }).unwrap();
         let transcript = dir.path().join("transcript.jsonl");
         std::fs::write(&transcript, "").unwrap();
-        let tail = Arc::new(Self::tail(transcript.clone()));
+        let tail = Arc::new(tui::Tail::opening(transcript.clone(), claude::transcript::decode_line, Default::default()).marking(claude::transcript::decode_marked));
         let token = crate::hooks::mint_token();
+        let now = Instant::now();
         let rt = Arc::new(Mutex::new(TabRuntime {
             session_id: SESSION.into(),
             tab_id: TAB.into(),
@@ -86,14 +99,14 @@ impl Rig {
                 transcript_turn: None,
                 transcript_end_owed: false,
                 answered: HashMap::new(),
-                command: script.into(),
+                command: "claude".into(),
                 origin: Origin { token: token.clone(), transcript_root: dir.path().to_path_buf() },
             }),
             pending: HashMap::new(),
             queued: Vec::new(),
             turn_open: false,
             turn_started_at: None,
-            last_activity: Instant::now(),
+            last_activity: now,
             recovery: None,
             stalled_at: None,
             stopping: false,
@@ -104,76 +117,58 @@ impl Rig {
         }));
         rt.lock().unwrap().me = Arc::downgrade(&rt);
         manager.tabs.lock().unwrap().insert(key_of(SESSION, TAB), rt.clone());
-        manager.follow_transcript(&rt, tail, pane.clone(), 0);
-        Rig { manager, rt, pane, token, dir, transcript, _home: home }
+        // No `follow_transcript`: the poll thread would read the file
+        // whenever it was next scheduled. `pump` is what it runs, and the rig
+        // runs it itself, so a record is read exactly when a test appends it.
+        Rig { manager, rt, tail, pane, token, transcript, now: Cell::new(now), drew: Cell::new(None), _dir: dir, _home: home }
     }
 
-    fn tail(path: PathBuf) -> tui::Tail {
-        tui::Tail::opening(path, claude::transcript::decode_line, Default::default()).marking(claude::transcript::decode_marked)
+    /// Time passes, and nothing else happens.
+    fn advance(&self, by: Duration) {
+        self.now.set(self.now.get() + by);
     }
 
+    /// The app stamps what it hears with the machine's clock. Put the rig's
+    /// clock on it instead, so the test alone decides how long ago it was.
+    fn stamp(&self) {
+        self.rt.lock().unwrap().last_activity = self.now.get();
+    }
+
+    /// Records land in the transcript and the tab reads them, now.
     fn append(&self, records: &str) {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new().append(true).open(&self.transcript).unwrap();
         file.write_all(records.as_bytes()).unwrap();
-    }
-
-    /// Wait for `done`, polling; the transcript is read on its own thread.
-    fn until(&self, what: &str, done: impl Fn(&Rig) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while !done(self) {
-            assert!(Instant::now() < deadline, "timed out waiting for {what}");
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        drop(file);
+        self.manager.pump(&self.rt, &self.tail);
+        assert_eq!(self.tail.offset(), std::fs::metadata(&self.transcript).unwrap().len(), "the tab has read all of it");
+        self.stamp();
     }
 
     /// The prompt and the reply land in the transcript; the tab is working.
     fn start_turn(&self) {
         self.append(&first_turn().0);
-        self.until("the turn to open", |r| {
-            // Reading the log takes the tab's lock, so it is let go of first.
-            let working = {
-                let rt = r.rt.lock().unwrap();
-                rt.turn_open && rt.status == TabStatus::InProgress
-            };
-            working && r.kinds().iter().any(|k| k == "assistant_text")
-        });
+        assert!(self.rt.lock().unwrap().turn_open);
+        assert_eq!(self.status(), TabStatus::InProgress);
+        assert!(self.kinds().iter().any(|k| k == "assistant_text"));
     }
 
     /// The transcript records that the turn ended; no hook says so.
     fn end_turn_in_transcript(&self) {
-        let before = std::fs::metadata(&self.transcript).unwrap().len();
         self.append(&first_turn().1);
-        // The poll thread has consumed the record once the tail's cursor has
-        // moved past it; nothing is published for it on its own.
-        let size = before + first_turn().1.len() as u64;
-        self.until("the tail to read the end record", |r| match &r.rt.lock().unwrap().engine {
-            Engine::Cli(p) => p.tail.offset() >= size,
-            _ => false,
-        });
     }
 
-    /// No hook, transcript or engine event for longer than the stall limit.
-    fn events_go_quiet(&self) {
-        let since = self.rt.lock().unwrap().last_activity;
-        let wait = (STALL + Duration::from_millis(50)).saturating_sub(since.elapsed());
-        std::thread::sleep(wait);
+    /// The pane draws something, now.
+    fn pane_draws(&self) {
+        self.drew.set(Some(self.now.get()));
     }
 
-    /// The pane's command is up and drawing. The pane starts it through a
-    /// login shell, which on a busy machine can take longer than the whole
-    /// shortened stall limit to get there.
-    fn pane_is_drawing(&self) {
-        self.until("the pane to draw", |r| r.manager.terminals.quiet_for(&r.pane).is_some_and(|q| q < Duration::from_millis(300)));
-    }
-
-    /// The pane has drawn nothing for longer than the stall limit.
-    fn pane_goes_quiet(&self) {
-        self.until("the pane to go quiet", |r| r.manager.terminals.quiet_for(&r.pane).is_none_or(|q| q >= STALL));
-    }
-
+    /// One pass of the watcher, at the rig's present moment.
     fn tick(&self) {
-        self.manager.watch_tabs(PATIENCE);
+        self.manager.watch_tabs(PATIENCE, self.now.get(), |pane| {
+            assert_eq!(pane, self.pane);
+            self.drew.get()
+        });
     }
 
     fn status(&self) -> TabStatus {
@@ -184,12 +179,28 @@ impl Rig {
         self.rt.lock().unwrap().recovery
     }
 
+    fn turn_open(&self) -> bool {
+        self.rt.lock().unwrap().turn_open
+    }
+
+    fn transcript_turn(&self) -> Option<tui::TurnMark> {
+        match &self.rt.lock().unwrap().engine {
+            Engine::Cli(p) => p.transcript_turn,
+            _ => None,
+        }
+    }
+
     fn events(&self) -> Vec<AgentEvent> {
-        store::read_lines(&self.rt.lock().unwrap().log_path).unwrap()
+        let path = self.rt.lock().unwrap().log_path.clone();
+        store::read_lines(&path).unwrap()
     }
 
     fn kinds(&self) -> Vec<String> {
         self.events().iter().map(|e| serde_json::to_value(&e.payload).unwrap()["type"].as_str().unwrap_or("").to_string()).collect()
+    }
+
+    fn completed_turns(&self) -> usize {
+        self.kinds().iter().filter(|k| *k == "turn_completed").count()
     }
 
     /// What the log says the banner is now, as a reload would restore it.
@@ -197,14 +208,10 @@ impl Rig {
         self.events().iter().filter_map(|e| match &e.payload { Payload::Recovery { kind } => Some(*kind), _ => None }).next_back().flatten()
     }
 
+    /// A hook frame from the tab's CLI, now.
     fn hook(&self, event: &str, payload: serde_json::Value) {
         self.manager.on_hook(HookFrame { tab: TAB.into(), session: SESSION.into(), token: self.token.clone(), event: event.into(), payload });
-    }
-}
-
-impl Drop for Rig {
-    fn drop(&mut self) {
-        self.manager.terminals.kill(&self.pane);
+        self.stamp();
     }
 }
 
@@ -212,76 +219,125 @@ impl Drop for Rig {
 /// with the terminal drawing throughout is work, not a stall.
 #[test]
 fn a_long_step_with_live_terminal_output_is_not_a_stall() {
-    let rig = Rig::new("sh -c 'while :; do echo working; sleep 0.1; done'");
+    let rig = Rig::new();
     rig.start_turn();
-    rig.pane_is_drawing();
-    rig.events_go_quiet();
-    rig.tick();
+    // No event for three times the limit, and the pane drawing all the while.
+    for _ in 0..6 {
+        rig.advance(PATIENCE.stall / 2);
+        rig.pane_draws();
+        rig.tick();
+    }
     assert_eq!(rig.recovery(), None);
     assert_eq!(rig.status(), TabStatus::InProgress);
     assert!(!rig.kinds().iter().any(|k| k == "recovery"), "no banner was ever raised: {:?}", rig.kinds());
+
+    // The pane stops too, and the limit is counted from when it did.
+    rig.advance(PATIENCE.stall - MOMENT);
+    rig.tick();
+    assert_eq!(rig.recovery(), None);
+    rig.advance(MOMENT);
+    rig.tick();
+    assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
 }
 
-/// Nothing from the agent on any channel: the warning is still raised.
+/// Nothing from the agent on any channel: the warning is still raised, at
+/// the limit and not before it.
 #[test]
 fn a_hung_agent_with_no_output_and_no_events_still_raises_the_warning() {
-    let rig = Rig::new("sleep 120");
+    let rig = Rig::new();
+    rig.pane_draws();
     rig.start_turn();
-    rig.pane_goes_quiet();
-    rig.events_go_quiet();
+    rig.advance(PATIENCE.stall - MOMENT);
+    rig.tick();
+    assert_eq!(rig.recovery(), None, "a moment short of the limit");
+    assert_eq!(rig.status(), TabStatus::InProgress);
+
+    rig.advance(MOMENT);
     rig.tick();
     assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
     assert_eq!(rig.status(), TabStatus::Waiting);
     assert_eq!(rig.banner(), Some(RecoveryKind::Timeout));
 }
 
+/// A pane that has never drawn is judged on the events alone.
+#[test]
+fn a_pane_that_never_drew_does_not_hold_the_warning_back() {
+    let rig = Rig::new();
+    rig.start_turn();
+    rig.advance(PATIENCE.stall);
+    rig.tick();
+    assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
+}
+
 /// The hooks never arrived (#202), but the transcript recorded the end of
 /// the turn: the turn is closed, and no warning is raised.
 #[test]
 fn a_turn_the_transcript_completed_is_closed_instead_of_warned_about() {
-    let rig = Rig::new("sleep 120");
+    let rig = Rig::new();
     rig.start_turn();
     rig.end_turn_in_transcript();
-    rig.pane_goes_quiet();
-    rig.events_go_quiet();
+    rig.advance(PATIENCE.stall);
     rig.tick();
     assert_eq!(rig.recovery(), None);
     assert_eq!(rig.status(), TabStatus::Completed);
     assert_eq!(rig.banner(), None);
-    assert_eq!(rig.kinds().iter().filter(|k| *k == "turn_completed").count(), 1);
-    assert!(!rig.rt.lock().unwrap().turn_open);
+    assert_eq!(rig.completed_turns(), 1);
+    assert!(!rig.turn_open());
 }
 
 /// A turn that ended in the transcript is still the hooks' to close while
 /// they may be on their way: the watcher does not race a `Stop` hook.
 #[test]
 fn a_transcript_end_waits_out_the_hooks_before_the_watcher_closes_it() {
-    let rig = Rig::new("sleep 120");
+    let rig = Rig::new();
     rig.start_turn();
     rig.end_turn_in_transcript();
-    rig.rt.lock().unwrap().last_activity = Instant::now();
+    rig.advance(PATIENCE.settle - MOMENT);
     rig.tick();
     assert_eq!(rig.status(), TabStatus::InProgress, "closed before the Stop hook had its chance");
     rig.hook("Stop", json!({ "last_assistant_message": "pong" }));
     assert_eq!(rig.status(), TabStatus::Completed);
-    std::thread::sleep(PATIENCE.settle + Duration::from_millis(50));
+    rig.advance(PATIENCE.settle);
     rig.tick();
-    assert_eq!(rig.kinds().iter().filter(|k| *k == "turn_completed").count(), 1, "one turn, closed once");
+    assert_eq!(rig.completed_turns(), 1, "one turn, closed once");
+}
+
+/// With no `Stop` hook at all, the watcher closes the turn once the hooks
+/// have had their time, and not a moment sooner.
+#[test]
+fn a_transcript_end_is_acted_on_exactly_when_the_hooks_time_is_up() {
+    let rig = Rig::new();
+    rig.start_turn();
+    rig.end_turn_in_transcript();
+    rig.advance(PATIENCE.settle - MOMENT);
+    rig.tick();
+    assert!(rig.turn_open());
+    rig.advance(MOMENT);
+    rig.tick();
+    assert!(!rig.turn_open());
+    assert_eq!(rig.status(), TabStatus::Completed);
+    assert_eq!(rig.completed_turns(), 1);
 }
 
 /// The warning was raised on a quiet pane; then the pane drew again. The
 /// banner goes away and the tab is working again, without any hook.
 #[test]
 fn a_raised_warning_clears_itself_when_the_terminal_shows_progress() {
-    let rig = Rig::new("sh -c 'while [ ! -f go ]; do sleep 0.05; done; while :; do echo working; sleep 0.1; done'");
+    let rig = Rig::new();
+    rig.pane_draws();
     rig.start_turn();
-    rig.pane_goes_quiet();
-    rig.events_go_quiet();
+    rig.advance(PATIENCE.stall);
     rig.tick();
     assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
 
-    std::fs::write(rig.dir.path().join("go"), "").unwrap();
-    rig.pane_is_drawing();
+    // Time alone does not take it back: what the pane drew before the
+    // warning is not progress since.
+    rig.advance(PATIENCE.stall);
+    rig.tick();
+    assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
+
+    rig.advance(MOMENT);
+    rig.pane_draws();
     rig.tick();
     assert_eq!(rig.recovery(), None);
     assert_eq!(rig.status(), TabStatus::InProgress);
@@ -292,15 +348,14 @@ fn a_raised_warning_clears_itself_when_the_terminal_shows_progress() {
 /// and no hook ever came. The turn closes and the banner goes.
 #[test]
 fn a_raised_warning_clears_itself_when_the_transcript_completes_the_turn() {
-    let rig = Rig::new("sleep 120");
+    let rig = Rig::new();
     rig.start_turn();
-    rig.pane_goes_quiet();
-    rig.events_go_quiet();
+    rig.advance(PATIENCE.stall);
     rig.tick();
     assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
 
     rig.end_turn_in_transcript();
-    std::thread::sleep(PATIENCE.settle + Duration::from_millis(50));
+    rig.advance(PATIENCE.settle);
     rig.tick();
     assert_eq!(rig.recovery(), None);
     assert_eq!(rig.status(), TabStatus::Completed);
@@ -312,10 +367,9 @@ fn a_raised_warning_clears_itself_when_the_transcript_completes_the_turn() {
 /// attention.
 #[test]
 fn a_raised_warning_does_not_outlive_a_completed_turn() {
-    let rig = Rig::new("sleep 120");
+    let rig = Rig::new();
     rig.start_turn();
-    rig.pane_goes_quiet();
-    rig.events_go_quiet();
+    rig.advance(PATIENCE.stall);
     rig.tick();
     assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
 
@@ -329,29 +383,21 @@ fn a_raised_warning_does_not_outlive_a_completed_turn() {
 /// guess: the terminal redrawing does not clear it.
 #[test]
 fn terminal_output_does_not_clear_a_timeout_the_provider_reported() {
-    let rig = Rig::new("sh -c 'while :; do echo working; sleep 0.1; done'");
+    let rig = Rig::new();
     rig.start_turn();
-    rig.pane_is_drawing();
+    rig.pane_draws();
     {
         let mut rt = rig.rt.lock().unwrap();
         rig.manager.apply(&mut rt, Payload::Error { message: "request timed out".into(), fatal: false }, None);
     }
     assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
-    rig.events_go_quiet();
-    rig.tick();
+    for _ in 0..3 {
+        rig.advance(PATIENCE.stall);
+        rig.pane_draws();
+        rig.tick();
+    }
     assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
     assert_eq!(rig.status(), TabStatus::Waiting);
-}
-
-fn completed_turns(rig: &Rig) -> usize {
-    rig.kinds().iter().filter(|k| *k == "turn_completed").count()
-}
-
-fn transcript_turn(rig: &Rig) -> Option<tui::TurnMark> {
-    match &rig.rt.lock().unwrap().engine {
-        Engine::Cli(p) => p.transcript_turn,
-        _ => None,
-    }
 }
 
 /// A hook opens a turn without resetting the latch that keeps two closers
@@ -360,21 +406,20 @@ fn transcript_turn(rig: &Rig) -> Option<tui::TurnMark> {
 /// and skip the tab on every pass: "Working" for good, and never a warning.
 #[test]
 fn a_turn_a_hook_opened_is_closed_by_the_transcript_s_end_whatever_the_latch_says() {
-    let rig = Rig::new("sleep 120");
+    let rig = Rig::new();
     rig.hook("PreToolUse", json!({ "tool_name": "Bash", "tool_input": { "command": "ls" } }));
-    assert!(rig.rt.lock().unwrap().turn_open);
+    assert!(rig.turn_open());
     assert_eq!(rig.status(), TabStatus::InProgress);
 
     rig.end_turn_in_transcript();
-    rig.pane_goes_quiet();
-    rig.events_go_quiet();
+    rig.advance(PATIENCE.stall);
     for _ in 0..3 {
         rig.tick();
     }
-    assert!(!rig.rt.lock().unwrap().turn_open, "the turn is not left open with nothing to close it");
+    assert!(!rig.turn_open(), "the turn is not left open with nothing to close it");
     assert_eq!(rig.status(), TabStatus::Completed);
     assert_eq!(rig.recovery(), None);
-    assert_eq!(completed_turns(&rig), 1, "closed once, however many passes see it");
+    assert_eq!(rig.completed_turns(), 1, "closed once, however many passes see it");
 }
 
 /// The `Stop` hook closes a turn before the CLI writes that turn's
@@ -382,7 +427,7 @@ fn a_turn_a_hook_opened_is_closed_by_the_transcript_s_end_whatever_the_latch_say
 /// is read, and the record is not that prompt's end.
 #[test]
 fn the_last_turn_s_late_end_record_does_not_close_the_turn_after_it() {
-    let rig = Rig::new("sleep 120");
+    let rig = Rig::new();
     rig.start_turn();
     rig.hook("Stop", json!({ "last_assistant_message": "pong" }));
     assert_eq!(rig.status(), TabStatus::Completed);
@@ -391,20 +436,20 @@ fn the_last_turn_s_late_end_record_does_not_close_the_turn_after_it() {
 
     // The first turn's end, late.
     rig.end_turn_in_transcript();
-    assert_eq!(transcript_turn(&rig), None, "not recorded against the turn that is open now");
-    std::thread::sleep(PATIENCE.settle + Duration::from_millis(50));
+    assert_eq!(rig.transcript_turn(), None, "not recorded against the turn that is open now");
+    rig.advance(PATIENCE.settle);
     rig.tick();
-    assert!(rig.rt.lock().unwrap().turn_open);
+    assert!(rig.turn_open());
     assert_eq!(rig.status(), TabStatus::InProgress);
-    assert_eq!(completed_turns(&rig), 1);
+    assert_eq!(rig.completed_turns(), 1);
 
     // The second turn's own end still closes it when no hook does.
     rig.end_turn_in_transcript();
-    assert_eq!(transcript_turn(&rig), Some(tui::TurnMark::Ended));
-    std::thread::sleep(PATIENCE.settle + Duration::from_millis(50));
+    assert_eq!(rig.transcript_turn(), Some(tui::TurnMark::Ended));
+    rig.advance(PATIENCE.settle);
     rig.tick();
     assert_eq!(rig.status(), TabStatus::Completed);
-    assert_eq!(completed_turns(&rig), 2);
+    assert_eq!(rig.completed_turns(), 2);
 }
 
 /// A turn can stop being open without a boundary: a prompt that never
@@ -412,15 +457,65 @@ fn the_last_turn_s_late_end_record_does_not_close_the_turn_after_it() {
 /// not the next turn's.
 #[test]
 fn opening_a_turn_forgets_what_the_transcript_said_about_the_one_before() {
-    let rig = Rig::new("sleep 120");
+    let rig = Rig::new();
     if let Engine::Cli(p) = &mut rig.rt.lock().unwrap().engine {
         p.transcript_turn = Some(tui::TurnMark::Ended);
     }
     rig.hook("PreToolUse", json!({ "tool_name": "Bash", "tool_input": { "command": "ls" } }));
-    assert_eq!(transcript_turn(&rig), None);
-    std::thread::sleep(PATIENCE.settle + Duration::from_millis(50));
+    assert_eq!(rig.transcript_turn(), None);
+    rig.advance(PATIENCE.settle);
     rig.tick();
-    assert!(rig.rt.lock().unwrap().turn_open);
+    assert!(rig.turn_open());
     assert_eq!(rig.status(), TabStatus::InProgress);
-    assert_eq!(completed_turns(&rig), 0);
+    assert_eq!(rig.completed_turns(), 0);
+}
+
+/// The one thing the rig's own pane cannot show: that what the watcher is
+/// told about a pane in the app is what a real pane does. A pane that draws
+/// reports when, and the watcher, judging from that moment, sees a tab at
+/// work however long its events have been silent.
+///
+/// This waits for the pane to draw and for nothing else: it blocks on the
+/// pane's own output event. The moment the watcher judges from is taken from
+/// what the pane reported, so how long the machine took to get there does
+/// not enter into it.
+#[test]
+fn what_a_real_pane_draws_is_what_holds_the_warning_back() {
+    let rig = Rig::new();
+    rig.start_turn();
+    let silent_since = rig.rt.lock().unwrap().last_activity;
+
+    let dir = tempfile::tempdir().unwrap();
+    let sink = Arc::new(crate::sink::BroadcastSink::new(256));
+    let (sent, drawn) = std::sync::mpsc::channel::<()>();
+    let sent = Mutex::new(sent);
+    sink.listen("pty_data", Box::new(move |_| { let _ = sent.lock().unwrap().send(()); }));
+    assert_eq!(rig.manager.terminals.last_output(&rig.pane), None, "no pane yet");
+    let spec = pty::PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sh -c 'while :; do echo working; sleep 0.1; done'"), env: &[] };
+    rig.manager.terminals.spawn(sink, &rig.pane, spec).unwrap();
+    drawn.recv_timeout(Duration::from_secs(300)).expect("the pane never drew");
+    // Stamped before the event was sent, and after the turn's last event:
+    // the pane did not exist until then.
+    let drew = rig.manager.terminals.last_output(&rig.pane).expect("a pane that has drawn says when");
+    assert!(drew > silent_since);
+
+    // Events silent for the whole limit at least, and the pane's last
+    // drawing at or after `drew`, which is after the silence began: so less
+    // than the limit ago, whenever the pane next draws.
+    let now = drew.max(silent_since + PATIENCE.stall);
+    rig.manager.watch_tabs(PATIENCE, now, |pane| rig.manager.terminals.last_output(pane));
+    assert_eq!(rig.recovery(), None);
+    assert_eq!(rig.status(), TabStatus::InProgress);
+
+    // The same moment with the pane left out of it is a stall.
+    rig.manager.watch_tabs(PATIENCE, now, |_| None);
+    assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
+}
+
+impl Drop for Rig {
+    fn drop(&mut self) {
+        // Only one test gives the tab a real pane; for the rest this is a
+        // pane that was never there.
+        self.manager.terminals.kill(&self.pane);
+    }
 }

@@ -355,10 +355,23 @@ where
     F: Fn(HookFrame) -> HookReply + Send + Sync + 'static,
     C: Fn(crate::control::ControlRequest) -> crate::control::ControlResponse + Send + Sync + 'static,
 {
-    serve_every(endpoint, hook_handler, control_handler, PUBLISH_RETRY)
+    let socket = endpoint.socket.clone();
+    let mut publisher = listen(endpoint, hook_handler, control_handler)?;
+    // Once before returning, so a launch alone on its home is reachable by a
+    // shell as soon as it says it is up.
+    publisher.tick();
+    std::thread::Builder::new().name("hook-socket-publish".into()).spawn(move || loop {
+        std::thread::sleep(PUBLISH_RETRY);
+        publisher.tick();
+    })?;
+    Ok(socket)
 }
 
-fn serve_every<F, C>(endpoint: ControlEndpoint, hook_handler: F, control_handler: C, retry: Duration) -> anyhow::Result<PathBuf>
+/// Listen on the launch's own socket, and hand back what keeps the published
+/// one. Nothing is published until the publisher is asked to look: `serve`
+/// asks once and then on a timer, and that timer is the only clock in any of
+/// this, so everything a look does can be had by asking for one.
+fn listen<F, C>(endpoint: ControlEndpoint, hook_handler: F, control_handler: C) -> anyhow::Result<Publisher>
 where
     F: Fn(HookFrame) -> HookReply + Send + Sync + 'static,
     C: Fn(crate::control::ControlRequest) -> crate::control::ControlResponse + Send + Sync + 'static,
@@ -379,7 +392,7 @@ where
     }
     // Resolved once: the publisher outlives whatever the caller does to the
     // environment that names the home.
-    let mut publisher = Publisher {
+    Ok(Publisher {
         socket: socket_path()?,
         lock: run_dir()?.join("hooks.lock"),
         token_file: control_token_path()?,
@@ -391,15 +404,7 @@ where
         waiting_on: None,
         #[cfg(windows)]
         pipe_up: false,
-    };
-    // Once before returning, so a launch alone on its home is reachable by a
-    // shell as soon as it says it is up.
-    publisher.tick();
-    std::thread::Builder::new().name("hook-socket-publish".into()).spawn(move || loop {
-        std::thread::sleep(retry);
-        publisher.tick();
-    })?;
-    Ok(endpoint.socket)
+    })
 }
 
 #[cfg(unix)]
@@ -821,7 +826,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let _home = crate::store::temp_home();
-        let (endpoint, _) = launch("only");
+        let (endpoint, _, _publisher) = launch("only");
         let token_path = control_token_path().unwrap();
         assert_eq!(std::fs::read_to_string(token_path).unwrap(), endpoint.token);
         assert_eq!(std::fs::metadata(control_token_path().unwrap()).unwrap().permissions().mode() & 0o777, 0o600);
@@ -865,8 +870,7 @@ mod tests {
         drop(UnixListener::bind(&starting).unwrap());
 
         let _endpoint = prepare_control().unwrap();
-        assert!(!dead.exists());
-        assert!(!numbered.exists());
+        until("the dead launches' sockets are swept", sweep_stale_sockets, || !dead.exists() && !numbered.exists());
         assert!(live_path.exists());
         assert!(starting.exists(), "a refused connection is not enough while the process lives");
     }
@@ -881,12 +885,14 @@ mod tests {
         std::env::set_var("TERMINALX_HOME", &long);
         assert!(!fits_socket_address(&run_dir().unwrap().join(format!("hooks-{}.sock", std::process::id()))));
 
-        let (endpoint, _) = launch("long");
+        let (endpoint, _, mut publisher) = launch("long");
         assert!(fits_socket_address(&endpoint.socket), "{}", endpoint.socket.display());
         let hook = json!({"tab": "t", "session": "s", "token": "t", "event": "Stop", "payload": {}});
         assert_eq!(send(&endpoint.socket, &hook)["output"]["instance"], "long");
         // The published socket does not fit either, and that costs the launch
         // nothing but the shell's way in.
+        assert!(!endpoint.publishes());
+        publisher.tick();
         assert!(!endpoint.publishes());
         let _ = std::fs::remove_dir_all(long.parent().unwrap());
         let _ = std::fs::remove_dir_all(endpoint.socket.parent().unwrap());
@@ -932,36 +938,51 @@ mod tests {
         assert_eq!(reply.output.unwrap()["saw"], "Stop");
     }
 
-    /// How often a test launch looks at the published socket.
+    /// Launch one "instance" on the current home, as `serve` does less its
+    /// timer: the endpoint, listening on its own socket, with every hook
+    /// frame it receives recorded by tab, and the publisher after its first
+    /// look at the published socket. Every later look is the test's to ask
+    /// for, so nothing here depends on when a thread gets to run.
     #[cfg(unix)]
-    const TICK: Duration = Duration::from_millis(25);
-
-    /// Launch one "instance" on the current home: its endpoint, listening,
-    /// with every hook frame it receives recorded by tab.
-    #[cfg(unix)]
-    fn launch(name: &'static str) -> (ControlEndpoint, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    fn launch(name: &'static str) -> (ControlEndpoint, std::sync::Arc<std::sync::Mutex<Vec<String>>>, Publisher) {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let endpoint = prepare_control().unwrap();
         let recorded = seen.clone();
-        serve_every(
+        let mut publisher = listen(
             endpoint.clone(),
             move |frame| {
                 recorded.lock().unwrap().push(frame.tab.clone());
                 HookReply { output: Some(json!({"instance": name})), refused: None }
             },
             move |request| crate::control::ControlResponse::success(request.id, json!({"instance": name})),
-            TICK,
         )
         .unwrap();
-        (endpoint, seen)
+        publisher.tick();
+        (endpoint, seen, publisher)
     }
 
+    /// Do `step` until `done`, for something that is free a moment after the
+    /// line that freed it.
+    ///
+    /// A lock or a listener is released when its last descriptor closes, and
+    /// this test process is not the only holder of its descriptors: other
+    /// tests start child processes, and a child carries a copy of every
+    /// descriptor that was open when it was forked until it execs. So a lock
+    /// just dropped here can stay held, and a socket just closed can go on
+    /// answering, until some other test's child gets as far as its `exec`.
+    /// Nothing is slept through and no amount of time is expected: each step
+    /// is asked for outright, and the deadline is one only a hung machine
+    /// reaches.
     #[cfg(unix)]
-    fn eventually(what: &str, done: impl Fn() -> bool) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !done() {
-            assert!(std::time::Instant::now() < deadline, "timed out waiting until {what}");
-            std::thread::sleep(Duration::from_millis(10));
+    fn until(what: &str, mut step: impl FnMut(), done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            step();
+            if done() {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "never came true: {what}");
+            std::thread::yield_now();
         }
     }
 
@@ -997,8 +1018,8 @@ mod tests {
         // given and overwrite its control token, so every hook from the first
         // instance's CLIs reached an app that had never heard of them.
         let _home = crate::store::temp_home();
-        let (first, first_seen) = launch("first");
-        let (second, second_seen) = launch("second");
+        let (first, first_seen, mut first_publisher) = launch("first");
+        let (second, second_seen, mut second_publisher) = launch("second");
 
         let hook = |tab: &str| json!({"tab": tab, "session": "s", "token": "t", "event": "Stop", "payload": {}});
         assert_eq!(send(&first.socket, &hook("first-tab"))["output"]["instance"], "first");
@@ -1008,6 +1029,11 @@ mod tests {
 
         // A shell with no app environment still reaches the first instance
         // through the home's published socket and token.
+        // However often either looks again, and in whichever order.
+        for _ in 0..3 {
+            second_publisher.tick();
+            first_publisher.tick();
+        }
         assert!(first.publishes());
         assert!(!second.publishes());
         assert_eq!(std::fs::read_to_string(control_token_path().unwrap()).unwrap(), first.token);
@@ -1032,25 +1058,39 @@ mod tests {
         std::fs::write(control_token_path().unwrap(), "the-older-build-s-token").unwrap();
         let before = file_identity(&published).unwrap();
 
-        let (newer, _) = launch("newer");
+        let (newer, _, mut publisher) = launch("newer");
         assert!(!newer.publishes());
         assert_ne!(newer.socket, published);
         // Several more looks at it change nothing while it lives.
-        std::thread::sleep(TICK * 6);
+        for _ in 0..6 {
+            publisher.tick();
+        }
         assert!(!newer.publishes());
         assert_eq!(file_identity(&published).unwrap(), before, "the older build's socket file is the one still there");
         assert_eq!(std::fs::read_to_string(control_token_path().unwrap()).unwrap(), "the-older-build-s-token");
         // It is still the one that hears whoever dials the published path.
+        // A connection is in the listener's queue by the time `connect`
+        // returns, so the caller's is there, behind the looks taken above;
+        // those were closed without a word and read as empty.
+        let mut caller = UnixStream::connect(&published).unwrap();
+        caller.write_all(b"is anyone there\n").unwrap();
+        caller.shutdown(std::net::Shutdown::Write).unwrap();
         older.set_nonblocking(true).unwrap();
-        while older.accept().is_ok() {}
-        let _caller = UnixStream::connect(&published).unwrap();
-        eventually("the older build hears its caller", || older.accept().is_ok());
+        let mut heard = Vec::new();
+        while let Ok((mut stream, _)) = older.accept() {
+            stream.set_nonblocking(false).unwrap();
+            let mut said = String::new();
+            stream.read_to_string(&mut said).unwrap();
+            heard.push(said);
+        }
+        assert_eq!(heard.last().map(String::as_str), Some("is anyone there\n"));
+        assert!(heard[..heard.len() - 1].iter().all(String::is_empty), "{heard:?}");
         // The newer launch serves its own tabs on its own socket meanwhile.
         assert_eq!(send(&newer.socket, &stop_hook("newer-tab"))["output"]["instance"], "newer");
 
         // Once the older app has gone, the newer one takes the home over.
         drop(older);
-        eventually("the newer launch publishes", || newer.publishes());
+        until("the newer launch publishes", || publisher.tick(), || newer.publishes());
         assert_eq!(shell_reaches(), "newer");
     }
 
@@ -1067,15 +1107,17 @@ mod tests {
         let owner = UnixListener::bind(socket_path().unwrap()).unwrap();
         std::fs::write(control_token_path().unwrap(), "the-owner-s-token").unwrap();
 
-        let (second, _) = launch("second");
-        std::thread::sleep(TICK * 4);
+        let (second, _, mut publisher) = launch("second");
+        for _ in 0..4 {
+            publisher.tick();
+        }
         assert!(!second.publishes(), "the home is held");
         assert_eq!(std::fs::read_to_string(control_token_path().unwrap()).unwrap(), "the-owner-s-token");
 
         // The owner exits, or crashes: either way the OS closes both.
         drop(owner);
         drop(lock);
-        eventually("the second launch takes the home", || second.publishes());
+        until("the second launch takes the home", || publisher.tick(), || second.publishes());
         assert_eq!(std::fs::read_to_string(control_token_path().unwrap()).unwrap(), second.token);
         assert_eq!(shell_reaches(), "second");
         // Its tabs never noticed: they were on its own socket throughout.
@@ -1092,8 +1134,8 @@ mod tests {
         drop(UnixListener::bind(socket_path().unwrap()).unwrap());
         std::fs::write(control_token_path().unwrap(), "a-dead-launch-s-token").unwrap();
 
-        let (next, _) = launch("next");
-        assert!(next.publishes(), "published before `serve` returns");
+        let (next, _, mut publisher) = launch("next");
+        until("the next launch publishes", || publisher.tick(), || next.publishes());
         assert_eq!(shell_reaches(), "next");
     }
 
@@ -1105,19 +1147,20 @@ mod tests {
         // An older build started after this one: it deletes the published
         // socket and binds its own, as every build before the lock did.
         let _home = crate::store::temp_home();
-        let (owner, _) = launch("owner");
+        let (owner, _, mut publisher) = launch("owner");
         assert!(owner.publishes());
         std::fs::remove_file(socket_path().unwrap()).unwrap();
         let older = UnixListener::bind(socket_path().unwrap()).unwrap();
         std::fs::write(control_token_path().unwrap(), "the-older-build-s-token").unwrap();
 
-        eventually("the owner sees it no longer publishes", || !owner.publishes());
+        publisher.tick();
+        assert!(!owner.publishes(), "the owner sees it no longer publishes");
         // Its tabs are untouched: nothing replaced the socket they dial.
         assert_eq!(send(&owner.socket, &stop_hook("owner-tab"))["output"]["instance"], "owner");
         assert_eq!(std::fs::read_to_string(control_token_path().unwrap()).unwrap(), "the-older-build-s-token");
 
         drop(older);
-        eventually("the owner publishes again", || owner.publishes());
+        until("the owner publishes again", || publisher.tick(), || owner.publishes());
         assert_eq!(shell_reaches(), "owner");
     }
 
@@ -1129,18 +1172,19 @@ mod tests {
         std::fs::create_dir(control_token_path().unwrap()).unwrap();
         std::fs::write(control_token_path().unwrap().join("in-the-way"), "").unwrap();
 
-        let (endpoint, _) = launch("unpublished");
+        let (endpoint, _, mut publisher) = launch("unpublished");
         assert!(!endpoint.publishes());
         assert!(!socket_path().unwrap().exists(), "no published socket without a token a shell can read");
         let lock = std::fs::OpenOptions::new().write(true).open(run_dir().unwrap().join("hooks.lock")).unwrap();
-        lock.try_lock().expect("the lock is not left held");
+        let held = std::cell::Cell::new(true);
+        until("the lock is not left held", || held.set(lock.try_lock().is_err()), || !held.get());
         drop(lock);
         // The launch itself is fine.
         assert_eq!(send(&endpoint.socket, &stop_hook("tab"))["output"]["instance"], "unpublished");
 
         // And it publishes as soon as it can.
         std::fs::remove_dir_all(control_token_path().unwrap()).unwrap();
-        eventually("the launch publishes", || endpoint.publishes());
+        until("the launch publishes", || publisher.tick(), || endpoint.publishes());
         assert_eq!(shell_reaches(), "unpublished");
     }
 
@@ -1151,7 +1195,8 @@ mod tests {
         // Not "held by another launch", but an error of its own.
         std::fs::create_dir(run_dir().unwrap().join("hooks.lock")).unwrap();
 
-        let (endpoint, seen) = launch("lockless");
+        let (endpoint, seen, mut publisher) = launch("lockless");
+        publisher.tick();
         assert!(!endpoint.publishes());
         assert!(!socket_path().unwrap().exists());
         assert_eq!(send(&endpoint.socket, &stop_hook("tab"))["output"]["instance"], "lockless");
