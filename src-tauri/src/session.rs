@@ -470,7 +470,7 @@ impl SessionManager {
         let watcher = manager.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(30));
-            watcher.watch_tabs(recovery::Patience::DEFAULT);
+            watcher.watch_tabs(recovery::Patience::DEFAULT, Instant::now(), |pane| watcher.terminals.last_output(pane));
         });
         manager
     }
@@ -485,7 +485,12 @@ impl SessionManager {
     /// hooks have had their chance to; a pane that is still drawing is an
     /// agent still working. Only silence on every channel raises the warning,
     /// and a warning raised here is taken back when the pane draws again.
-    fn watch_tabs(&self, patience: recovery::Patience) {
+    ///
+    /// The pass reads no clock of its own: `now` is the moment it judges
+    /// from, and `drawn_at` says when a pane last drew. Everything it decides
+    /// follows from those two and the tabs, so it can be checked at any
+    /// moment one cares to name, without waiting for it.
+    fn watch_tabs(&self, patience: recovery::Patience, now: Instant, drawn_at: impl Fn(&str) -> Option<Instant>) {
         let tabs: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
         for rt in tabs {
             let mut rt = rt.lock().unwrap();
@@ -493,7 +498,7 @@ impl SessionManager {
                 Engine::Cli(p) => (Some(p.pane_id.clone()), p.transcript_turn == Some(tui::TurnMark::Ended)),
                 _ => (None, false),
             };
-            let silent = rt.last_activity.elapsed();
+            let silent = now.saturating_duration_since(rt.last_activity);
             if rt.turn_open && ended && silent >= patience.settle {
                 // Not `close_open_turn`: that one defers to the latch that
                 // keeps two closers from racing, and a turn a hook opened
@@ -505,17 +510,17 @@ impl SessionManager {
             }
             // Only a PTY-first tab has a pane; the other engines are judged
             // on their events alone, as before.
-            let drawn = pane.and_then(|pane| self.terminals.quiet_for(&pane));
+            let drawn = pane.and_then(|pane| drawn_at(&pane));
             if let Some(at) = rt.stalled_at {
-                if drawn.is_some_and(|quiet| quiet < at.elapsed()) {
+                if drawn.is_some_and(|drawn| drawn > at) {
                     self.stall_disproved(&mut rt);
                 }
                 continue;
             }
-            let quiet = drawn.map_or(silent, |drawn| drawn.min(silent));
+            let quiet = drawn.map_or(silent, |drawn| now.saturating_duration_since(drawn).min(silent));
             if recovery::is_stale(rt.status == TabStatus::InProgress, quiet, patience) {
                 self.needs_recovery(&mut rt, RecoveryKind::Timeout);
-                rt.stalled_at = Some(Instant::now());
+                rt.stalled_at = Some(now);
             }
         }
     }

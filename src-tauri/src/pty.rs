@@ -325,9 +325,15 @@ impl Terminals {
     /// How long the pane has been quiet, once it has said anything at all.
     /// `None` means it has not drawn yet, or there is no such pane.
     pub fn quiet_for(&self, id: &str) -> Option<Duration> {
+        Some(self.last_output(id)?.elapsed())
+    }
+
+    /// When the pane last drew anything. `None` means it has not drawn yet,
+    /// or there is no such pane.
+    pub fn last_output(&self, id: &str) -> Option<Instant> {
         let panes = self.panes.lock().unwrap();
         let at = *panes.get(id)?.last_output.lock().unwrap();
-        Some(at?.elapsed())
+        at
     }
 
     /// Whether the pane's own process is still there. `is_live` only says the
