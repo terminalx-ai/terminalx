@@ -353,6 +353,110 @@ reconciles a hashed resume credential through `pairing.getEndpoints`. The newly
 authenticated device then appears in Settings → Devices; use Revoke to remove
 the row, close its live connection, and let the script finish.
 
+## Cloud diagnostics and export
+
+**Contract:** `GET /v1/desktop/orgs/:orgId/cloud-diagnostics?windowDays=1..30`
+(terminalx-saas, PRO-38), with the same desktop bearer and cloud-workspace
+contract headers as `/v1/desktop/orgs/:orgId/cloud-workspaces`. Owners and
+administrators of `:orgId` only: the server checks the caller's role in that
+organization, whichever organization is the default here, so a member gets
+`403 organization_admin_required` even when they own the default one, and
+someone who is not a member gets `404 cloud_workspace_not_found`. A server
+without the endpoint answers 404, which the view shows as "not available on
+this server".
+
+**Where it opens.** A cloud project's "…" menu in the sidebar and a cloud
+session's location chip in the session header both offer **Cloud
+diagnostics…**, which opens the report of that project's or session's
+organization in a dialog and marks the workspace it was opened from. The entry
+is hidden from someone the account already reports as a member of that
+organization. Settings → Account keeps the same view for the default
+organization. With a server that authorizes by membership
+(`cloud.desktop.multi-org.v1`) the request and the export name the
+organization; otherwise they use the default one, as before.
+
+**Network.** One new request, to the TerminalX cloud API the app already signs
+in against (`login.terminalx.ai`, or the debug-only
+`TERMINALX_DEV_API_BASE_URL`). No new third-party host. It is made only while
+signed in with an organization, when the diagnostics view is open (the dialog
+or Settings → Account) or an export is requested; opening it never attaches to
+a workspace or resumes one. Signed out, nothing is fetched and every local
+workflow is unchanged. The desktop skips the request when the role in that
+organization is `member`; in Settings a member still sees this Mac's own relay
+closes and can export them.
+
+**What the server leaves out.** A private workspace is visible to its creator
+only, also in this report: an owner or administrator who did not create it
+gets none of its operations, history or connections, only a count
+("3 private workspaces are not shown"). Each read is rate limited (10 a
+minute; the view then says to wait) and recorded in the organization's
+activity feed as "viewed cloud diagnostics".
+
+**What the server sends.** Operation and workspace identifiers, operation type,
+state, stage, error and detail codes, retry actions, attempt counts, timestamps
+and durations, restart decisions (warm reconnect or fenced restart), connection
+counts, activity, turn, approval and out-of-memory relaunch counts, stage
+timing percentiles and the close-reason legend. Never workspace
+or repository names, credentials, tokens, provider resource ids or log
+contents. The desktop decodes a typed subset and drops unknown fields.
+
+**Local connection diagnostics.** The desktop cloud client records each typed
+relay close (4100 `runtime_unavailable`, 4101 `stale_generation`, 4102
+`auth_expired`, 4103 `update_required`, 4104 `backpressure`; a 4101 may also be
+the client's own generation check of the runtime's hello) as
+`{ workspaceId, code, name, at }` in a ring buffer of 50 entries in memory,
+together with the organization the connection was made in. That organization
+decides who sees an entry: the view and the export get only the closes met in
+the organization they are for, there is no call that returns the whole log,
+and a close with no organization recorded (a debug-build attach by pairing
+code) is never shown or exported. The organization itself is not sent to the
+web view. The log is never written to disk except inside an export the user
+asks for.
+
+**Export.** **Export diagnostics…**, at the bottom of the view wherever it is
+open, opens a save dialog and writes one JSON file to the chosen path; it is never
+uploaded. `src-tauri/src/cloud_diagnostics.rs` builds it from an allowlist
+(never by serializing app state), then redacts every string that is not an
+identifier or a machine code: lowercase letters, digits and separators, no
+known credential prefix, and no run of more than 20 letters or digits (the
+shape of random tokens, hashes and keys). Relative paths are refused and a
+missing `.json` extension is added. It contains:
+
+- `app`: version, OS and architecture; `exportedAt`; `windowDays`;
+- `server`: the diagnostics above (without the organization id), or, when
+  they could not be fetched, only the error code and HTTP status;
+- `connections.closes`: this Mac's closes in the export's organization;
+- `excluded`: the list of categories below.
+
+It excludes API keys and provider credentials, access and refresh tokens,
+desktop auth, device and pairing codes, relay and attach tickets, runtime
+credentials, workspace and repository names or paths, file contents, terminal
+output, transcripts and prompts. The builder has no input that carries them,
+and `default_export_contains_no_canary` seeds canary values for each category
+into every input and unexpected field and asserts none reaches the file;
+`lowercase_credentials_in_code_fields_are_redacted` covers lowercase hex,
+base32 and prefixed tokens placed in identifier and code fields; and
+`secret_shaped_values_in_every_exported_field_are_redacted` writes 30
+secret shapes (provider and GitHub tokens, JWTs, bearer headers, `ENV=value`
+assignments, clone URLs with and without credentials, email addresses, hashes,
+tickets, relay tokens, encrypted payloads, key headers, paths, sentences) into
+every string of the server answer, a stage name, the refusal code, the app
+details and the close log, and asserts that every string left in the file is
+`[redacted]` or one of this module's fixed labels. The server applies the same
+shape rule to its answer before the desktop sees it. Shape cannot tell a
+short, lowercase, word-like secret from a code; the control for that is that
+neither the server's query nor the builder reads a field that holds one.
+**One organization per export.** Everything in the file is of the organization
+the export is for. The command passes the builder only that organization's
+closes, and the builder checks again: it drops any close recorded in another
+organization or in none, and it refuses a server answer whose organization is
+not the export's (the file then holds `cloud_workspace_invalid_response`
+instead). Signed out, no organization can be determined and the file holds no
+closes. The builder reads nothing else: no connection history, cache or outbox.
+`an_export_holds_nothing_of_another_organization` seeds closes for two
+organizations and for none, hands the builder all of them, and asserts that
+none of the other organization's ids appears.
+
 ## Would require a server change (out of scope)
 
 **Contract:** `docs/reference/cloud-endpoints.md` § “User-scoped

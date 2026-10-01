@@ -64,6 +64,7 @@ import { AddRepositoryDialog, NewBlankProjectDialog } from "./AddCloudProject";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { ShareBadge } from "@/components/cloud/CloudCollab";
 import { WorkspaceActionItems, WorkspaceLifecycleDialog, type LifecycleRequest as Dialog } from "@/components/cloud/WorkspaceActions";
+import { CloudDiagnosticsDialog, CloudDiagnosticsMenuItem, offersCloudDiagnostics } from "@/components/cloud/CloudDiagnosticsDialog";
 
 export { useRowMenu };
 
@@ -384,7 +385,9 @@ function CloudProjectNode({ project, onLifecycle }: { project: CloudProject; onL
   const prefs = usePrefs();
   const store = useSessionStore();
   const menu = useRowMenu();
+  const { status } = useAccount();
   const [error, setError] = useState<string | null>(null);
+  const [diagnostics, setDiagnostics] = useState(false);
   const expanded = !prefs.cloudCollapsed[project.key];
   const selectedWorkspace = store.selectedSessionId ? parseCloudWorkspaceKey(store.selectedSessionId) : null;
   const holdsSelection = !!selectedWorkspace && project.workspaces.some((node) => node.item.workspace.id === selectedWorkspace.workspaceId && node.item.workspace.orgId === selectedWorkspace.orgId);
@@ -465,6 +468,8 @@ function CloudProjectNode({ project, onLifecycle }: { project: CloudProject; onL
               <DropdownMenuItem onSelect={() => void refreshCloudCatalog(project.orgId)}>
                 <RefreshCw /> Refresh
               </DropdownMenuItem>
+              {/* The organization's report, for its owners and admins; one workspace is marked when the project has just one. */}
+              {offersCloudDiagnostics(status, project.orgId) && <CloudDiagnosticsMenuItem onSelect={() => setDiagnostics(true)} />}
               {project.workspaces.length === 1 && (
                 <>
                   <DropdownMenuSeparator />
@@ -507,6 +512,12 @@ function CloudProjectNode({ project, onLifecycle }: { project: CloudProject; onL
         </RowActions>
       </div>
       {error && <p className="ml-6 text-[10px] text-destructive">{error}</p>}
+      {diagnostics && (
+        <CloudDiagnosticsDialog
+          request={{ orgId: project.orgId, workspaceId: project.workspaces.length === 1 ? project.workspaces[0].item.workspace.id : null }}
+          onClose={() => setDiagnostics(false)}
+        />
+      )}
       <TreeGroup expanded={expanded} className="pb-1 pl-2">
         {project.workspaces.length === 0 ? (
           <div className="px-5 py-1 text-[11px] text-faint">{project.blank ? "No sessions yet. + starts one." : "No sessions yet."}</div>

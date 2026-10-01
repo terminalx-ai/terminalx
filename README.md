@@ -64,13 +64,14 @@ is optional: signed out, TerminalX makes no account, directory or relay request
 and everything that worked locally before accounts still works. Once you choose
 Sign in, the app keeps this Mac discoverable to your own devices with a metadata
 heartbeat and a persistent relay connection. It never uploads how you use the
-app. The outbound connections are these eight:
+app. The outbound connections are these nine:
 
 | To | When | Carrying |
 | --- | --- | --- |
 | TerminalX account | You press Sign in, a session is refreshed, or you sign out | PKCE authorization values and the account session credentials issued by `login.terminalx.ai`; no prompts, transcripts, files or workspace metadata |
 | TerminalX machine directory | While you remain signed in: once when binding this Mac, then a liveness heartbeat every 30 seconds | Host id, public key, binding generation, the editable machine name, platform, environment kind and pairing capability — no workspace, session, path, transcript, scrollback or device credential |
-| TerminalX relay | While you remain signed in, and whenever a paired device connects | Account and host identifiers, public keys, routing ids, connection metadata and plaintext handshake keys; device credentials, RPC and terminal traffic are end-to-end encrypted |
+| TerminalX relay | While you remain signed in, and whenever a paired device connects or you open a cloud workspace | Account and host identifiers, public keys, routing ids, connection metadata and plaintext handshake keys; device credentials, RPC and terminal traffic are end-to-end encrypted |
+| TerminalX cloud API | Signed in with an organization, when you open organization settings or cloud workspaces, or act on them | Organization, member, compute, provider-connection, GitHub App, workspace and diagnostics requests to `login.terminalx.ai` under `/v1/desktop/orgs/…`, authorized with your account session |
 | GitHub | You open the Issues view or a PR panel, or become eligible for the local star reminder | Uses your existing `gh` credentials; the reminder checks only whether you starred `terminalx-ai/raccoon`. It stars only when you press **Star on GitHub**; **Open GitHub** opens that repository in your system browser |
 | Linear | You open the Issues view with a Linear key configured | A GraphQL query to `api.linear.app`, authorized with the key you pasted |
 | Anthropic usage | The focused status bar lacks a Claude model limit, no more than once every 15 minutes | A GET to `api.anthropic.com/api/oauth/usage`, authorized with the OAuth token Claude Code already stores; no prompts, transcripts or files |
@@ -99,6 +100,26 @@ Some detail on each:
   require no account. Traffic after the pinned-key handshake uses end-to-end
   authenticated encryption on either path. Revoking a device removes its local
   authority and drops its live socket immediately.
+- **Cloud workspaces and organizations.** Every organization and cloud
+  workspace request goes to the same `login.terminalx.ai` API that signs you in
+  (a debug build may point `TERMINALX_DEV_API_BASE_URL` at a loopback or HTTPS
+  origin). Opening a cloud workspace attaches through the TerminalX relay:
+  `relay.terminalx.ai` and the relay cell the API names in its attach answer.
+  Connecting the organization's GitHub App opens its install page in your
+  system browser; the app opens only `https://github.com` links from that flow.
+- **Cloud diagnostics.** Organization owners and administrators see recent
+  cloud operations, create/resume stage timings, connection counts and relay
+  close reasons from a cloud project's "…" menu, a cloud session's location
+  chip, or Settings → Account → Cloud diagnostics, fetched from
+  `/v1/desktop/orgs/:orgId/cloud-diagnostics` on the same API — no other host.
+  The server checks the role in the organization the report is for.
+  The server sends identifiers, states, codes and timings only. The last 50
+  relay closes (4100–4104) this Mac met are kept in memory, never on disk;
+  members see those but make no diagnostics request. The view and the export
+  hold only the closes met in the organization they are for.
+  **Export diagnostics…** writes a JSON file only where you choose and never
+  uploads it; see [docs/ACCOUNTS.md](docs/ACCOUNTS.md#cloud-diagnostics-and-export)
+  for exactly what it holds.
 - **The agents themselves.** `claude` and `codex` talk to Anthropic and OpenAI
   the same way they do in your terminal, under your own login. TerminalX
   does not proxy, inspect or re-send any of it; it reads the transcript files

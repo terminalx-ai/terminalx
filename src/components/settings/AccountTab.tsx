@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Check, Loader2, Pencil } from "lucide-react";
 import { OrganizationCompute } from "./OrganizationCompute";
+import { OrganizationDiagnostics } from "./OrganizationDiagnostics";
 import { OrganizationGithubApp } from "./OrganizationGithubApp";
 import { OrganizationMembers } from "./OrganizationMembers";
 import { OrganizationWorkspaceConfig } from "./OrganizationWorkspaceConfig";
@@ -33,6 +34,11 @@ export function AccountTab() {
 
   if (status.state === "signed-in" && status.identity) {
     const identity = status.identity;
+    // Organization diagnostics are for owners and administrators. The server
+    // decides; a role the account already reports only skips a request it
+    // would refuse. Names are not unique, so an ambiguous match decides nothing.
+    const named = (status.organizations ?? []).filter((organization) => organization.name === identity.organization);
+    const activeRole = named.length === 1 ? named[0].role : null;
     return (
       <div className="flex flex-col gap-4">
         <div className="flex items-center gap-3 rounded-lg bg-well px-3 py-3">
@@ -51,6 +57,7 @@ export function AccountTab() {
         {identity.organization && <OrganizationCompute contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationGithubApp contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationWorkspaceConfig contextRevision={status.context?.revision ?? ""} />}
+        {identity.organization && <OrganizationDiagnostics contextRevision={status.context?.revision ?? ""} member={activeRole === "member"} />}
         {pairing.status.host && (
           <div className="rounded-lg border border-hairline px-3 py-3">
             <div className="text-xs font-medium">What this Mac shares</div>
