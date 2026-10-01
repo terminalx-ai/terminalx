@@ -119,9 +119,20 @@ function CloudTabActions({ session, selected, cloud }: { session: SessionEntry; 
   useHotkey("mod+t", () => picker.setOpen(true));
   useHotkey("mod+shift+]", () => step(1));
   useHotkey("mod+shift+[", () => step(-1));
-  const blocked = cloud.backend.readOnlyReason ?? (!cloud.connected ? (cloud.asleep ? "Stopped: sending a message or choosing Terminal wakes the workspace. Agent tabs are added once it runs." : "Connecting to the workspace…") : !cloud.manage ? "View only: this attachment cannot add tabs." : null);
+  const blocked =
+    cloud.backend.readOnlyReason ??
+    (!cloud.connected
+      ? cloud.asleep
+        ? cloud.canWakeForTerminal
+          ? "Stopped: sending a message or choosing Terminal wakes the workspace. Agent tabs are added once it runs."
+          : "Stopped: sending a message wakes the workspace. Terminals and new tabs need a workspace admin."
+        : "Connecting to the workspace…"
+      : !cloud.manage
+        ? "View only: this attachment cannot add tabs."
+        : null);
   // A stopped workspace this attachment may manage: Terminal is the one item that wakes it, and only when chosen.
-  const wakesForTerminal = !cloud.connected && cloud.asleep && !cloud.backend.readOnlyReason;
+  // Not for a viewer or a driver (PRO-30): terminals are a manager's, so their wake would end in a refusal.
+  const wakesForTerminal = cloud.canWakeForTerminal;
   const run = (action: () => Promise<void>) => {
     setError(null);
     void action().catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));

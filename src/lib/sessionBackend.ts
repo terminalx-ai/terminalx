@@ -1,4 +1,4 @@
-import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import type { WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { agent, type ImageInput } from "@/lib/api";
 import { loadTab, setTabStatus } from "@/lib/agentEvents";
 import { patchTab } from "@/lib/sessions";
@@ -16,6 +16,7 @@ import {
   stopCloudAgent,
 } from "@/lib/cloudAgents";
 import type { CloudAgentScope, OutboxEntry } from "@/lib/cloudAgentApi";
+import { APPROVE_BLOCKED_REASON, canApprove, roleBlockReason } from "@/lib/cloudCollab";
 import type { AgentEvent } from "@/types/events";
 import type { TabEntry, TabStatus } from "@/types/session";
 
@@ -72,6 +73,14 @@ export interface SessionBackend {
   /** The UI's copy of a tab. A cloud tab's store updates itself, so this is local only. */
   patchTab(tabId: string, patch: Partial<TabEntry>): void;
   setTabStatus(tabId: string, status: TabStatus): void;
+  /** Why this person may not answer permission requests (a shared workspace's non-approver), or null. */
+  approveBlockedReason?: string | null;
+  /**
+   * Cloud only, PRO-30: where the workspace's presence, notes and tab leases
+   * live, who this person is there (null when sharing does not apply, as on
+   * an older runtime), and the connection while it is live with `collab/1`.
+   */
+  collab?: { key: string; you: WorkspaceYou | null; client: WorkspaceRpcClient | null };
   /** Cloud only: commands on their way for a tab, the runtime's queued follow-ups, and resending an unconfirmed one. */
   outbox?: {
     entries(tabId: string): OutboxEntry[];
@@ -120,10 +129,21 @@ export function localSessionBackend(sessionId: string): SessionBackend {
 
 export const CLOUD_IMAGES_UNSUPPORTED = "Images cannot be sent to cloud agent tabs yet.";
 
-/** Why a cloud session is view-only, or null when this person may drive it. */
-export function cloudReadOnlyReason(authority: string | null | undefined, workspaceState: string | null | undefined): string | null {
+/**
+ * Why a cloud session is view-only, or null when this person may drive it.
+ * On a shared workspace (PRO-30) the collaboration role decides: a driver's
+ * participate attachment may send to agents, a viewer's may not. `you` null
+ * (an older server or runtime, or no member list yet) keeps the attachment
+ * rule: only `manage` drives.
+ */
+export function cloudReadOnlyReason(
+  authority: string | null | undefined,
+  workspaceState: string | null | undefined,
+  you: WorkspaceYou | null = null,
+): string | null {
   if (workspaceState === "archived") return "Archived: unarchive the workspace to send messages or run anything in it.";
   if (workspaceState === "destroyed") return "This workspace was deleted.";
+  if (you && you.listed !== false) return roleBlockReason(you);
   if (authority === "participate") return "View only: you can read this workspace, but only someone with manage access can send, stop, answer or change anything in it.";
   return null;
 }
@@ -175,6 +195,10 @@ export interface CloudSessionContext {
   followUps: (tabId: string) => { clientCommandId: string; text: string }[];
   /** Raise the connection to `wake`: only called for an interactive command on a stopped workspace. */
   wake: () => Promise<void>;
+  /** PRO-30: this person's access (live, last known or from the list); null when sharing does not apply. */
+  you?: WorkspaceYou | null;
+  /** The connection, when it was granted `collab/1`. */
+  collabClient?: WorkspaceRpcClient | null;
 }
 
 /** Whether a cloud workspace's compute is asleep as far as this client knows. */
@@ -194,7 +218,9 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
   const live = ctx.state.state === "connected" ? ctx.state : null;
   const connected = !!live;
   const client = connected ? ctx.client : null;
-  const readOnlyReason = cloudReadOnlyReason(ctx.authority, ctx.workspaceState);
+  const you = ctx.you ?? null;
+  const readOnlyReason = cloudReadOnlyReason(ctx.authority, ctx.workspaceState, you);
+  const approveBlockedReason = you && !canApprove(you) ? APPROVE_BLOCKED_REASON : null;
   const write = readOnlyReason === null;
   const guard = () => {
     if (readOnlyReason) throw new Error(readOnlyReason);
@@ -214,6 +240,8 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     generation: live ? `${live.runtimeGeneration}:${live.runtimeEpoch ?? ""}` : `offline:${ctx.client ? "client" : "none"}`,
     caps: { local: false, write, steer: true, images: false, recovery: false },
     readOnlyReason,
+    approveBlockedReason,
+    collab: { key: ctx.workspaceKey, you, client: ctx.collabClient ?? null },
     logSessionId: ctx.sessionId,
     openTab: (tabId, onError) => {
       setViewing(scope, tabId, true);
@@ -244,8 +272,14 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
       guard();
       await stopCloudAgent(scope, tabId, client);
     },
-    respondPermission: (tabId, requestId, optionId) => interactive(() => decideCloudAgent(scope, tabId, { requestId, optionId }, client)),
-    answerQuestions: (tabId, requestId, answers) => interactive(() => decideCloudAgent(scope, tabId, { requestId, answers }, client)),
+    respondPermission: (tabId, requestId, optionId) => {
+      if (approveBlockedReason) return Promise.reject(new Error(approveBlockedReason));
+      return interactive(() => decideCloudAgent(scope, tabId, { requestId, optionId }, client));
+    },
+    answerQuestions: (tabId, requestId, answers) => {
+      if (approveBlockedReason) return Promise.reject(new Error(approveBlockedReason));
+      return interactive(() => decideCloudAgent(scope, tabId, { requestId, answers }, client));
+    },
     setModel: async (tabId, model) => {
       guard();
       await configureCloudAgentTab(scope, tabId, { model }, client);

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Archive, ArchiveRestore, ArrowLeft, Bot, Cloud, FolderTree, GitBranch, Loader2, Pause, Plug, Plus, TerminalSquare, Trash2, X } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowLeft, Bot, Cloud, FolderTree, GitBranch, Loader2, Pause, Plug, Plus, TerminalSquare, Trash2, UserPlus, X } from "lucide-react";
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { createTerminal } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,8 @@ import { CloudTerminalPane } from "./CloudTerminalPane";
 import { CloudFilesView } from "./CloudFiles";
 import { CloudGitView } from "./CloudGit";
 import { CloudCreateWorkspace } from "./CloudCreateWorkspace";
+import { NotSharedNotice, ParticipantsBar } from "./CloudCollab";
+import { CloudShareDialog } from "./CloudShareDialog";
 import { actionsFor, archiveLine, CloudWorkspaceLifecycleDialog, DeletionProgress, type LifecycleAction } from "./CloudWorkspaceLifecycle";
 import { getAccount, useAccount } from "@/lib/account";
 import { applyCloudSnapshot, cloudOrgArg, defaultOrgId, ingestCloudList, unarchiveCloudWorkspace } from "@/lib/cloudCatalog";
@@ -42,6 +44,9 @@ import {
   useCloudTerminals,
   type CloudTerminal,
 } from "@/lib/cloudTerminals";
+import { canDrive, sharingKnown, effectiveYou, notShared, presenceTab, rememberYou, startCollab, useCollab } from "@/lib/cloudCollab";
+import { rememberPeople } from "@/lib/cloudPeople";
+import { getCloudAgents } from "@/lib/cloudAgents";
 import { useTheme } from "@/lib/theme";
 import { cloudProviderName } from "@/lib/cloudSession";
 
@@ -513,16 +518,52 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
   mode.current = resolvedMode;
   const autoCreated = useRef(false);
   const connected = state.state === "connected";
-  const manage = connected && state.authority === "manage";
   const base = useCallback(() => createTerminal(mode.current), []);
+  const collab = useCollab(key);
+  const you = effectiveYou(state, collab);
+  const shared = connected && collab.available ? you : null;
+  // A demoted admin's manage attachment is not a manager's any more.
+  const manage = connected && state.authority === "manage" && (!sharingKnown(shared) || shared.role === "manager");
+  // Drivers and managers of a shared workspace may take a terminal over; viewers never.
+  const mayControl = manage || canDrive(shared);
+  const [sharing, setSharing] = useState(false);
+  const cloudTarget = connection.target.kind === "cloud" ? connection.target : null;
 
   const generation = connected ? `${state.runtimeGeneration}:${state.runtimeEpoch ?? ""}` : null;
+
+  // Presence, notes and leases, once per connection (only with collab/1).
   useEffect(() => {
     if (!generation) return;
+    return startCollab(key, client);
+  }, [generation, key, client]);
+
+  // Names for the people the runtime reports, from the share list.
+  useEffect(() => {
+    if (!cloudTarget) return;
+    let cancelled = false;
+    void api
+      .cloudWorkspaceShares(cloudTarget.workspaceId, cloudTarget.organizationId)
+      .then((listed) => {
+        if (cancelled) return;
+        rememberPeople(listed.shares);
+        rememberYou(key, listed.you);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [cloudTarget?.workspaceId, cloudTarget?.organizationId]);
+  // Terminals are listed again when this person's access changes: a
+  // participant shared with mid-connection sees them without reconnecting.
+  const hidden = notShared(state, you);
+  const role = shared?.role ?? null;
+  useEffect(() => {
+    if (!generation || hidden) return;
     let cancelled = false;
     void (async () => {
       try {
         const live = await syncCloudTerminals(key, client, base);
+        if (!cancelled) setError(null);
         // A workspace with no shell gets one on the first connect only; after
         // that tabs are the user's, and a restarted runtime's ended tabs are
         // never quietly replaced by new shells.
@@ -539,7 +580,7 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
     return () => {
       cancelled = true;
     };
-  }, [generation, key, client, base, manage]);
+  }, [generation, key, client, base, manage, hidden, role]);
 
   const newTerminal = async () => {
     setError(null);
@@ -562,8 +603,51 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
 
   const active = terminals.find((terminal) => terminal.id === selected) ?? null;
 
+  // Others see which terminal this person is on; the agent view reports its own tab.
+  const presenceTerminal = view.kind === "terminal" ? (active?.ptyId ?? null) : null;
+  useEffect(() => {
+    if (view.kind === "terminal" && collab.available) presenceTab(key, presenceTerminal);
+  }, [view.kind, presenceTerminal, collab.available, key]);
+
+  const tabLabel = useCallback(
+    (tabId: string) => {
+      const terminal = terminals.find((item) => item.ptyId === tabId);
+      if (terminal) return terminal.title;
+      const agent = getCloudAgents({ organizationId: agentScope.organizationId, workspaceId: agentScope.workspaceId }).tabs.find((tab) => tab.tabId === tabId);
+      return agent ? (agent.info.title ?? "an agent tab") : null;
+    },
+    [terminals, agentScope.organizationId, agentScope.workspaceId],
+  );
+
+  if (hidden) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col">
+        {cloudTarget && (
+          <div className="flex shrink-0 items-center justify-end border-b border-hairline px-3 py-1">
+            <Button size="sm" variant="ghost" onClick={() => setSharing(true)}>
+              <UserPlus className="size-3.5" /> People
+            </Button>
+          </div>
+        )}
+        <NotSharedNotice />
+        {sharing && cloudTarget && <CloudShareDialog orgId={cloudTarget.organizationId} workspaceId={cloudTarget.workspaceId} name={opened.name} onClose={() => setSharing(false)} />}
+      </div>
+    );
+  }
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {(cloudTarget || collab.available) && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-hairline px-3 py-1" data-testid="cloud-collab-bar">
+          <ParticipantsBar collabKey={key} you={shared} tabLabel={tabLabel} />
+          {cloudTarget && (
+            <Button size="sm" variant="ghost" className="ml-auto" onClick={() => setSharing(true)}>
+              <UserPlus className="size-3.5" /> Share
+            </Button>
+          )}
+        </div>
+      )}
+      {sharing && cloudTarget && <CloudShareDialog orgId={cloudTarget.organizationId} workspaceId={cloudTarget.workspaceId} name={opened.name} onClose={() => setSharing(false)} />}
       <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-hairline px-3 py-1" role="tablist">
         {terminals.map((terminal) => (
           <div key={terminal.id} className="flex items-center" data-testid="cloud-terminal-tab">
@@ -635,6 +719,8 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
             client={client}
             connected={connected}
             manage={manage}
+            mayControl={mayControl}
+            you={shared}
             base={base}
           />
         ) : (
@@ -651,6 +737,8 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
           state={state}
           workspaceState={opened.workspaceState}
           wakeWorkspace={() => void connection.activate("wake").catch(() => undefined)}
+          collabKey={key}
+          active={view.kind === "agent"}
         />
       </div>
       {/* Mounted once first shown, then kept: open files and unsaved text stay. */}

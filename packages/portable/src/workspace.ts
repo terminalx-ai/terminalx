@@ -26,7 +26,7 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 
 /**
@@ -38,6 +38,14 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "session.addTab": "session/2",
   "session.delete": "session/2",
   "runtime.agents": "agents/1",
+  // `collab/1` (PRO-30, docs/CLOUD-SHARING.md) also grants presence, notes
+  // and tab leases, which are not named after it.
+  "presence.update": "collab/1",
+  "notes.list": "collab/1",
+  "notes.post": "collab/1",
+  "lease.acquire": "collab/1",
+  "lease.release": "collab/1",
+  "lease.takeOver": "collab/1",
 };
 
 /** How much a caller may cost: only an interactive action may wake compute. */
@@ -67,7 +75,20 @@ export const MUTATING_METHODS = new Set([
   "git.prCreate",
   "git.prReady",
   "git.prMerge",
+  "notes.post",
 ]);
+
+/** A person's collaboration role on a shared workspace (saas contract §21.1). */
+export type CollaborationRole = "manager" | "driver" | "viewer" | "none";
+
+/** Who this connection is, from `rpc.hello` when `collab/1` is granted. */
+export interface WorkspaceYou {
+  userId: string;
+  role: CollaborationRole;
+  canApprove: boolean;
+  /** False while the runtime has no member list yet (then `role` says nothing about sharing). */
+  listed?: boolean;
+}
 
 export type WorkspaceConnectionState =
   | { state: "idle" | "opening" | "waitingForRuntime" | "suspended" | "updateRequired" | "stopped" }
@@ -81,6 +102,8 @@ export type WorkspaceConnectionState =
       runtimeVersion: string;
       capabilities: string[];
       authority: "manage" | "participate";
+      /** The person behind this connection; only from a runtime that granted `collab/1`. */
+      you?: WorkspaceYou | null;
     };
 
 /** Who drives a terminal's input and size: this client, another device, or nobody. */
@@ -102,7 +125,10 @@ export interface AgentTabInfo {
   status: AgentTabStatus;
   process: AgentProcessState;
   pendingPermissions: { requestId: string; toolName: string; input: unknown; options: unknown[] }[];
-  followUps: { clientCommandId: string; text: string }[];
+  /** `actorId`: who queued it, on a runtime with `collab/1`. */
+  followUps: { clientCommandId: string; text: string; actorId?: string | null }[];
+  /** Who holds the tab's input lease, on a runtime with `collab/1`. */
+  lease?: { tabId: string; holderId: string; acquiredAt: number; expiresAt: number } | null;
   lastSeq: number;
   created: string;
   modified: string;
@@ -203,6 +229,8 @@ export interface PtyInfo {
   exited: boolean;
   exitCode: number | null;
   control: PtyControl;
+  /** The person controlling the terminal (PRO-30); null when nobody does, absent from older runtimes. */
+  controllerId?: string | null;
   /** The session the terminal was opened for (`pty/2`); absent otherwise and from older runtimes. */
   sessionId?: string;
 }
@@ -216,7 +244,7 @@ export interface PtyCursor {
 export interface PtyHandlers {
   onData(bytes: Uint8Array, offset: number): void;
   onExit?(code: number | null): void;
-  onControl?(control: PtyControl): void;
+  onControl?(control: PtyControl, controllerId?: string | null): void;
   /** The controller resized the terminal; a viewer should match it. */
   onResize?(cols: number, rows: number): void;
   /** Output older than the runtime's ring was lost while away. */
@@ -251,7 +279,7 @@ export interface WorkspaceNotification {
 }
 
 export class WorkspaceRpcError extends Error {
-  constructor(readonly code: string, message: string, readonly method: string) {
+  constructor(readonly code: string, message: string, readonly method: string, readonly data?: unknown) {
     super(message);
   }
 }
@@ -536,7 +564,7 @@ export class WorkspaceRpcClient {
         if (typeof info.epoch === "string") this.ptyEpochs.set(ptyId, info.epoch);
         if (info.truncated === true) handlers.onTruncated?.();
         emit(String(info.data ?? ""), Number(info.offset ?? 0));
-        if (info.control) handlers.onControl?.(info.control);
+        if (info.control) handlers.onControl?.(info.control, info.controllerId);
         if (info.cols && info.rows) handlers.onResize?.(info.cols, info.rows);
         if (info.exited === true) handlers.onExit?.(info.exitCode ?? null);
       },
@@ -550,7 +578,7 @@ export class WorkspaceRpcClient {
             handlers.onExit?.((params.code as number | null | undefined) ?? null);
             break;
           case "pty.control":
-            handlers.onControl?.(params.control as PtyControl);
+            handlers.onControl?.(params.control as PtyControl, params.controllerId as string | null | undefined);
             break;
           case "pty.resized":
             handlers.onResize?.(Number(params.cols), Number(params.rows));
@@ -916,7 +944,7 @@ export class WorkspaceRpcClient {
 function unwrap<T>(method: string, result: RpcCallResult<T>): T {
   if (result.ok) return result.value;
   const refusal: RpcErrorData = result.refusal;
-  throw new WorkspaceRpcError(refusal.code, refusal.message, method);
+  throw new WorkspaceRpcError(refusal.code, refusal.message, method, refusal.data);
 }
 
 function randomRequestId(): string {

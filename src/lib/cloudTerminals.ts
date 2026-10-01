@@ -25,6 +25,8 @@ export interface CloudTerminal {
   exited: boolean;
   exitCode: number | null;
   control: PtyControl;
+  /** The person controlling it on a shared workspace (PRO-30); null when nobody or unknown. */
+  controllerId: string | null;
   /** The controller's size, which a viewer shows. */
   cols: number;
   rows: number;
@@ -100,6 +102,7 @@ function fromInfo(workspace: string, info: PtyInfo): CloudTerminal {
     exited: info.exited,
     exitCode: info.exitCode,
     control: info.control,
+    controllerId: info.controllerId ?? null,
     cols: info.cols,
     rows: info.rows,
     gone: null,
@@ -167,8 +170,8 @@ async function attach(workspace: string, client: WorkspaceRpcClient, terminal: C
       const current = cloudTerminalsOf(workspace).terminals.find((item) => item.id === terminal.id);
       if (current && !current.exited) patch(workspace, terminal.id, { exited: true, exitCode: code });
     },
-    onControl: (control) => {
-      patch(workspace, terminal.id, { control });
+    onControl: (control, controllerId) => {
+      patch(workspace, terminal.id, { control, ...(controllerId !== undefined ? { controllerId } : {}) });
       // A viewer shows the program at the controller's size.
       const current = cloudTerminalsOf(workspace).terminals.find((item) => item.id === terminal.id);
       if (control !== "you" && current && (instance.term.cols !== current.cols || instance.term.rows !== current.rows)) {
@@ -272,7 +275,7 @@ export async function takeControl(workspace: string, client: WorkspaceRpcClient,
   const terminal = cloudTerminalsOf(workspace).terminals.find((item) => item.id === id);
   if (!terminal) return;
   const info = await client.controlPty(terminal.ptyId, size?.cols, size?.rows);
-  patch(workspace, id, { control: info.control, cols: info.cols, rows: info.rows, inputError: null });
+  patch(workspace, id, { control: info.control, controllerId: info.controllerId ?? null, cols: info.cols, rows: info.rows, inputError: null });
 }
 
 /**

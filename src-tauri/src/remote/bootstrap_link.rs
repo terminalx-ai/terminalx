@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 
+use super::collab::Members;
 use super::host::{Attachment, RelaySession, Revocation, Revoked, RuntimeLink};
 use crate::cloud_bootstrap::{Bootstrapped, CallError, HttpApi};
 
@@ -37,11 +38,20 @@ impl RuntimeLink for BootstrapLink {
             .filter_map(|value| serde_json::from_value::<Attachment>(value.clone()).map_err(|error| log::warn!("skipping an attachment: {error}")).ok())
             .collect();
         let revocations = session.revocations.iter().filter_map(|value| serde_json::from_value::<Revocation>(value.clone()).ok()).collect();
+        // An unreadable list fails closed: participants have no access
+        // until a readable one arrives.
+        let collaboration = session.collaboration.as_ref().map(|value| {
+            serde_json::from_value::<Members>(value.clone()).unwrap_or_else(|error| {
+                log::warn!("an unreadable collaboration list gives participants no access: {error}");
+                Members { v: 0, members: Vec::new() }
+            })
+        });
         Ok(RelaySession {
             relay_token: session.relay_token.clone(),
             director_url: session.director_url.clone(),
             attachments,
             revocations,
+            collaboration,
         })
     }
 
