@@ -385,6 +385,13 @@ workflow is unchanged. The desktop skips the request when the role in that
 organization is `member`; in Settings a member still sees this Mac's own relay
 closes and can export them.
 
+**What the server leaves out.** A private workspace is visible to its creator
+only, also in this report: an owner or administrator who did not create it
+gets none of its operations, history or connections, only a count
+("3 private workspaces are not shown"). Each read is rate limited (10 a
+minute; the view then says to wait) and recorded in the organization's
+activity feed as "viewed cloud diagnostics".
+
 **What the server sends.** Operation and workspace identifiers, operation type,
 state, stage, error and detail codes, retry actions, attempt counts, timestamps
 and durations, restart decisions (warm reconnect or fenced restart), connection

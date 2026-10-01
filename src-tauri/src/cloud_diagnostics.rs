@@ -45,6 +45,10 @@ pub struct CloudDiagnostics {
     pub organization_id: String,
     pub generated_at: i64,
     pub window: DiagnosticsWindow,
+    /// Other people's private workspaces, which the server leaves out of the
+    /// report whole; a count only.
+    #[serde(default)]
+    pub private_workspaces_not_shown: Option<u32>,
     #[serde(default)]
     pub retention: Option<DiagnosticsRetention>,
     #[serde(default)]
@@ -458,6 +462,7 @@ fn server_section(diagnostics: &CloudDiagnostics) -> Value {
             "maxOperations": diagnostics.window.max_operations,
             "truncated": diagnostics.window.truncated,
         },
+        "privateWorkspacesNotShown": diagnostics.private_workspaces_not_shown,
         "retention": diagnostics.retention.as_ref().map(|retention| json!({
             "operationHistoryDays": retention.operation_history_days,
             "operationLogDays": retention.operation_log_days,
@@ -660,6 +665,7 @@ mod tests {
             "organizationId": "org_1",
             "generatedAt": 1_790_000_000_000_i64,
             "window": { "from": 1_789_400_000_000_i64, "to": 1_790_000_000_000_i64, "maxOperations": 200, "truncated": false },
+            "privateWorkspacesNotShown": 2,
             "retention": { "operationHistoryDays": 90, "operationLogDays": 14 },
             "stageTimings": {
                 "create": { "samples": 12, "totalMs": { "p50": 41000, "p95": 88000 },
@@ -725,6 +731,8 @@ mod tests {
         assert_eq!(server["stageTimings"]["create"]["stages"]["creating-machine"]["p95"], 50000.0);
         assert_eq!(server["workspaces"][0]["connections"]["expired"], 2);
         assert_eq!(server["workspaces"][0]["oomRelaunchCount"], 3);
+        // A count only: the report holds nothing else of a private workspace.
+        assert_eq!(server["privateWorkspacesNotShown"], 2);
         assert_eq!(server["operations"][0]["restartDecision"]["decidedAt"], 2);
         assert_eq!(export["connections"]["closes"][0]["name"], "stale_generation");
         assert!(server.get("organizationId").is_none());

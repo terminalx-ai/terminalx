@@ -86,6 +86,8 @@ export interface CloudDiagnostics {
   organizationId: string;
   generatedAt: number;
   window: { from: number; to: number; maxOperations: number | null; truncated: boolean };
+  /** Other people's private workspaces, left out of the report whole by the server. Absent from an older server. */
+  privateWorkspacesNotShown?: number | null;
   retention: { operationHistoryDays: number | null; operationLogDays: number | null } | null;
   stageTimings: { create: DiagnosticsOperationTimings | null; resume: DiagnosticsOperationTimings | null };
   operations: DiagnosticsOperation[];
@@ -149,6 +151,8 @@ export function diagnosticsErrorMessage(error: unknown): string {
     case "account_signed_out":
     case "account_organization_unavailable":
       return "Sign in and choose an organization to view cloud diagnostics.";
+    case "cloud_workspace_rate_limited":
+      return "Too many diagnostics requests. Wait a minute, then refresh.";
     case "account_context_changed":
       return "The account or organization changed. Refresh before trying again.";
     default:

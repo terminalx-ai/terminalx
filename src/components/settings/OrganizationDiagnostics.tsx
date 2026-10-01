@@ -185,6 +185,13 @@ export function OrganizationDiagnostics({
             {diagnostics.window.truncated ? ` · showing the latest ${diagnostics.window.maxOperations ?? operations.length} operations` : ""}
             {diagnostics.retention?.operationHistoryDays ? ` · history kept ${diagnostics.retention.operationHistoryDays} days` : ""}
           </p>
+          {diagnostics.privateWorkspacesNotShown ? (
+            <p role="note" className="mt-1 text-[11px] text-muted-foreground" data-testid="diagnostics-private-note">
+              {diagnostics.privateWorkspacesNotShown === 1
+                ? "1 private workspace is not shown. A private workspace is visible to its creator only."
+                : `${diagnostics.privateWorkspacesNotShown} private workspaces are not shown. A private workspace is visible to its creator only.`}
+            </p>
+          ) : null}
           <div className="mt-2 grid grid-cols-2 gap-2">
             <Timings label="Create" timings={diagnostics.stageTimings.create} />
             <Timings label="Resume" timings={diagnostics.stageTimings.resume} />

@@ -87,6 +87,8 @@ it("shows timings, operations with retry hints, restart decisions, connections a
   expect(operation.textContent).toContain("Validate or replace the provider key");
   expect(operation.textContent).toContain("Restart: fenced-restart (warm-grace-expired) · fence rotate · replaced generation 3");
   expect(operation.textContent).toContain("2 attempts");
+  // Nothing is said about private workspaces when none was left out.
+  expect(screen.queryByTestId("diagnostics-private-note")).toBeNull();
   expect(operation.textContent).toContain("Stopped by TerminalX while the workspace needed attention (cloud_provider_credential_invalid).");
   // The closes asked for are the default organization's, like the report.
   expect(api.cloudConnectionDiagnostics).toHaveBeenCalledWith(null);
@@ -175,6 +177,22 @@ it("reports on and exports the organization it was opened for, marking the works
 
   fireEvent.click(screen.getByRole("button", { name: /Export diagnostics/ }));
   await waitFor(() => expect(api.cloudDiagnosticsExport).toHaveBeenCalledWith("/tmp/org-2.json", 7, "org_2"));
+});
+
+it("says how many private workspaces the report leaves out, and explains a rate limit", async () => {
+  vi.mocked(api.cloudDiagnostics).mockResolvedValue({ ...diagnostics(), privateWorkspacesNotShown: 3 });
+  const view = render(<OrganizationDiagnostics contextRevision="rev-1" />);
+  expect((await screen.findByTestId("diagnostics-private-note")).textContent).toContain("3 private workspaces are not shown");
+  view.unmount();
+
+  vi.mocked(api.cloudDiagnostics).mockResolvedValue({ ...diagnostics(), privateWorkspacesNotShown: 1 });
+  const one = render(<OrganizationDiagnostics contextRevision="rev-1" />);
+  expect((await screen.findByTestId("diagnostics-private-note")).textContent).toContain("1 private workspace is not shown");
+  one.unmount();
+
+  vi.mocked(api.cloudDiagnostics).mockRejectedValue({ code: "cloud_workspace_rate_limited", status: 429 });
+  render(<OrganizationDiagnostics contextRevision="rev-1" />);
+  expect((await screen.findByRole("alert")).textContent).toContain("Too many diagnostics requests");
 });
 
 it("explains an organization this account cannot reach", async () => {
