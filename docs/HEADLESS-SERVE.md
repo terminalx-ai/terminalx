@@ -48,8 +48,12 @@ terminalx-serve --project-root /workspace --data-dir /var/lib/terminalx --runtim
   and flushing activity.
 - **Hooks:** the agent CLIs' hooks call back into the same binary as
   `terminalx-serve hook <Event>` and `terminalx-serve statusline`.
-- **Control socket:** `run/hooks.sock` in the data dir, authenticated by `run/control.token`.
-  It speaks the desktop's JSON-lines protocol:
+- **Control socket:** the runtime listens on `run/hooks-<pid>.sock` in the data dir, which is
+  the socket path in its ready line and what its agent tabs are given. It also answers on the
+  published `run/hooks.sock`, authenticated by `run/control.token`, unless another runtime or
+  desktop app already holds that data dir; it then leaves both alone, and takes them over once
+  the holder exits. `status` reports which as `publishesHome`.
+  Both sockets speak the desktop's JSON-lines protocol:
   - `status`, `projects`, `sessions`, `tabs`, `send`, `read`, `wait`, `permissions`,
     `worktrees` and `issues` work as on the desktop.
   - `browser.*` and `computer.*` return `unsupported`.

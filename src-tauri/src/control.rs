@@ -329,6 +329,9 @@ impl ControlService {
                     "appVersion": env!("CARGO_PKG_VERSION"),
                     "pid": std::process::id(),
                     "socket": self.endpoint.socket,
+                    // Whether a shell with no app environment reaches this
+                    // launch: false while another TerminalX holds the home.
+                    "publishesHome": self.endpoint.publishes(),
                     "projects": projects,
                     "runningTabs": self.manager.running_tabs(),
                 });

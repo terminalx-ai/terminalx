@@ -41,9 +41,12 @@ In scope, roughly in the order that matters:
   GitHub or Linear issue **run code or escalate permissions** it was not
   granted — for example content that escapes the permission mode a tab is in,
   or that reaches the hook socket.
-- **The hook bridge**: `$TERMINALX_HOME/run/hooks.sock` and everything that
-  speaks over it. It is created `0600` inside a `0700` directory and is meant
-  to be reachable only by the user running the app.
+- **The hook bridge**: the sockets under `$TERMINALX_HOME/run/` (each running
+  app's own `hooks-<pid>.sock`, and the published `hooks.sock` that one of
+  them also answers on) and everything that speaks over them. Each is created
+  `0600` inside a `0700` directory and is meant to be reachable only by the
+  user running the app. One running app replacing or impersonating another's
+  socket or `control.token` is in scope too.
 - **Credential handling**: the Linear API key in `$TERMINALX_HOME/settings.json`,
   and the symlinks in the managed Codex home that point at your real
   `~/.codex/auth.json`.
