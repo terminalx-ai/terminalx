@@ -1,0 +1,91 @@
+{
+  "quota": {
+    "limit": 2,
+    "running": {
+      "limit": 2,
+      "used": 1
+    },
+    "total": {
+      "limit": 20,
+      "used": 5
+    },
+    "used": 1
+  },
+  "tombstones": [
+    {
+      "deletedAt": 1790000001000,
+      "expiresAt": 1792592001000,
+      "id": "workspace-9",
+      "orgId": "org-1"
+    }
+  ],
+  "workspaces": [
+    {
+      "latestOperation": {
+        "action": null,
+        "cancelable": false,
+        "checkpoint": null,
+        "cleanup": null,
+        "createdAt": 1790000000000,
+        "errorCode": null,
+        "events": null,
+        "id": "operation-1",
+        "lastProviderContactAt": null,
+        "nextAttemptAt": null,
+        "progress": null,
+        "providerErrorCode": null,
+        "retryReason": null,
+        "stage": "ready",
+        "state": "succeeded",
+        "type": "create",
+        "updatedAt": 1790000004000,
+        "workspaceId": "workspace-1"
+      },
+      "workspace": {
+        "accessMode": "organization",
+        "archivedAt": null,
+        "authority": "participate",
+        "createdAt": 1790000000000,
+        "createdBy": "user_1",
+        "deleteAfter": null,
+        "deletedAt": null,
+        "id": "workspace-1",
+        "lastActivityAt": 1790000006000,
+        "launch": null,
+        "name": "api",
+        "orgId": "org-1",
+        "provider": "box",
+        "releaseDisposition": null,
+        "repositories": [
+          {
+            "cloneUrl": "https://github.com/acme/api.git",
+            "fullName": "acme/api",
+            "identity": "github.com/acme/api",
+            "primary": true,
+            "ref": "main",
+            "targetDirectory": "api"
+          },
+          {
+            "cloneUrl": "https://github.com/acme/web.git",
+            "fullName": null,
+            "identity": "github.com/acme/web",
+            "primary": false,
+            "ref": null,
+            "targetDirectory": null
+          }
+        ],
+        "revision": 1790000007000,
+        "runtimeActivity": {
+          "activeTurns": 1,
+          "online": true,
+          "pendingApprovals": 2,
+          "reportedAt": 1790000005000,
+          "reporting": true,
+          "stale": false
+        },
+        "state": "ready",
+        "updatedAt": 1790000007000
+      }
+    }
+  ]
+}

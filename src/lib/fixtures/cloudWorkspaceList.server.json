@@ -1,0 +1,61 @@
+{
+  "workspaces": [
+    {
+      "workspace": {
+        "id": "workspace-1",
+        "orgId": "org-1",
+        "name": "api",
+        "provider": "box",
+        "state": "ready",
+        "accessMode": "organization",
+        "createdAt": 1790000000000,
+        "updatedAt": 1790000007000,
+        "releaseDisposition": null,
+        "repositories": [
+          {
+            "identity": "github.com/acme/api",
+            "fullName": "acme/api",
+            "cloneUrl": "https://github.com/acme/api.git",
+            "ref": "main",
+            "targetDirectory": "api",
+            "primary": true
+          },
+          {
+            "identity": "github.com/acme/web",
+            "fullName": null,
+            "cloneUrl": "https://github.com/acme/web.git",
+            "ref": null,
+            "targetDirectory": null,
+            "primary": false
+          }
+        ],
+        "createdBy": "user_1",
+        "lastActivityAt": 1790000006000,
+        "runtimeActivity": {
+          "reporting": true,
+          "reportedAt": 1790000005000,
+          "stale": false,
+          "activeTurns": 1,
+          "pendingApprovals": 2,
+          "online": true
+        },
+        "revision": 1790000007000,
+        "authority": "participate",
+        "aFutureField": { "raw": "not passed on" }
+      },
+      "latestOperation": {
+        "id": "operation-1",
+        "workspaceId": "workspace-1",
+        "type": "create",
+        "state": "succeeded",
+        "stage": "ready",
+        "cancelable": false,
+        "createdAt": 1790000000000,
+        "updatedAt": 1790000004000
+      }
+    }
+  ],
+  "tombstones": [{ "id": "workspace-9", "orgId": "org-1", "deletedAt": 1790000001000, "expiresAt": 1792592001000 }],
+  "quota": { "used": 1, "limit": 2, "running": { "used": 1, "limit": 2 }, "total": { "used": 5, "limit": 20 } },
+  "aFutureListField": true
+}
