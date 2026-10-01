@@ -112,9 +112,22 @@ stdin, connects to `$RACCOON_HOOK_SOCKET`, sends one framed
 prints `{}` rather than nothing on purpose: an empty stdout from a permission
 hook is read as a refusal.
 
-On the app side, `hooks.rs` listens on one unix socket per instance at
-`$TERMINALX_HOME/run/hooks.sock` (stale file removed at start, mode 0600), one
-thread per frame so a parked permission cannot queue the next hook behind it.
+On the app side, `hooks.rs` listens on a unix socket per running app,
+`$TERMINALX_HOME/run/hooks-<pid>.sock` (mode 0600), which is the path its tabs
+get in `RACCOON_HOOK_SOCKET`. One thread per frame, so a parked permission
+cannot queue the next hook behind it. No other app binds, replaces or removes
+that socket while its process lives, so two apps on one home cannot take each
+other's hooks; a socket left by a crash is swept by the next launch once its
+pid is dead.
+
+The home's published socket, `run/hooks.sock`, is a second listener over the
+same handlers, for shells that have no app environment. One app holds it at a
+time: the one that holds `run/hooks.lock` (an OS lock, so a crash releases
+it), and only after finding that nothing live answers on the socket already,
+which is what protects an app from a build that takes no lock. An app that
+does not hold it asks again every couple of seconds, so the socket passes on
+when its holder exits, and `control.token` is written only by the holder.
+
 `SessionManager::on_hook` routes by event:
 
 | Event | What it does |
