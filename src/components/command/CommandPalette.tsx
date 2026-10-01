@@ -200,7 +200,7 @@ function dispatchShortcut(chord: string, previousFocus: HTMLElement | null): voi
   const target = document.activeElement instanceof HTMLElement ? document.activeElement : window;
   target.dispatchEvent(
     new KeyboardEvent("keydown", {
-      key: key === "escape" ? "Escape" : key === "enter" ? "Enter" : key,
+      key: key === "escape" ? "Escape" : key === "enter" ? "Enter" : key === "up" ? "ArrowUp" : key === "down" ? "ArrowDown" : key,
       code: key === "[" ? "BracketLeft" : key === "]" ? "BracketRight" : undefined,
       metaKey: parts.includes("mod"),
       altKey: parts.includes("alt"),

@@ -37,6 +37,8 @@ export const SHORTCUTS: Shortcut[] = [
   { chord: "mod+shift+d", label: "Start or stop dictation", group: "Composer" },
   { chord: "enter", label: "Send", group: "Composer" },
   { chord: "shift+enter", label: "New line", group: "Composer" },
+  { chord: "up", label: "Recall the previous message", group: "Composer" },
+  { chord: "down", label: "Recall the next message, then the draft", group: "Composer" },
   { chord: "@", label: "Mention a file", group: "Composer" },
   { chord: "/", label: "Slash command", group: "Composer" },
 ];
