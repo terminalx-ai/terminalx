@@ -534,7 +534,14 @@ impl CloudAgents {
     }
 
     pub fn client_detached(&self) {
-        let _ = self.attached.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| count.checked_sub(1));
+        // Never below zero: a detach that arrives twice must not wrap the count.
+        let mut current = self.attached.load(Ordering::SeqCst);
+        while current > 0 {
+            match self.attached.compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => break,
+                Err(now) => current = now,
+            }
+        }
     }
 
     pub fn attached(&self) -> usize {
