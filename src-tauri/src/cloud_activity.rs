@@ -79,11 +79,6 @@ pub fn attached() -> Attached {
 
 pub struct Attached(());
 
-/// Clients attached right now.
-pub fn attached_count() -> usize {
-    ATTACHED.load(Ordering::Relaxed)
-}
-
 impl Drop for Attached {
     fn drop(&mut self) {
         ATTACHED.fetch_sub(1, Ordering::Relaxed);

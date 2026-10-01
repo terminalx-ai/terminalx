@@ -285,10 +285,15 @@ impl Client {
 }
 
 fn write_link(path: &Path, secret: &[u8; 32], relay_token: &str, director: &str, attachments: Value) {
+    write_link_revoking(path, secret, relay_token, director, attachments, json!([]));
+}
+
+fn write_link_revoking(path: &Path, secret: &[u8; 32], relay_token: &str, director: &str, attachments: Value, revocations: Value) {
     let temporary = path.with_extension("new");
     std::fs::write(
         &temporary,
-        json!({ "v": 1, "hostSecretB64": STANDARD.encode(secret), "relayToken": relay_token, "directorUrl": director, "attachments": attachments }).to_string(),
+        json!({ "v": 1, "hostSecretB64": STANDARD.encode(secret), "relayToken": relay_token, "directorUrl": director, "attachments": attachments, "revocations": revocations })
+            .to_string(),
     )
     .unwrap();
     std::fs::rename(temporary, path).unwrap();
@@ -406,7 +411,34 @@ async fn desktop_drives_a_remote_runtime_through_the_relay() {
     assert_eq!(second.refused("pty.write", json!({ "ptyId": pty_id, "data": "whoami\n", "seq": 1 })).await, "forbidden");
     client.ok("pty.write", json!({ "ptyId": pty_id, "data": "echo shared-$((2+3))\n", "seq": 2 })).await;
     second.output_until(&pty_id, "shared-5").await;
+
+    // The second device is revoked: its connection closes, it cannot come
+    // back, the revocation is confirmed to the API so it is not listed
+    // forever, and the first device is untouched.
+    write_link_revoking(
+        &link,
+        &secret,
+        &token(7),
+        &harness.director,
+        json!([attachment("att-manage", "desktop-manage", &manage_token, "runtime")]),
+        json!([{ "id": "att-participate", "deviceId": "desktop-participate" }]),
+    );
+    second.state(|state| matches!(state, ClientState::Reconnecting { .. })).await;
+    let revoked = pairing_dir.join("att-participate.revoked");
+    let deadline = Instant::now() + WAIT;
+    while !revoked.exists() {
+        assert!(Instant::now() < deadline, "the revocation was never completed");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let quiet = tokio::time::Instant::now() + Duration::from_secs(3);
+    while let Ok(Some(event)) = tokio::time::timeout_at(quiet, second.events.recv()).await {
+        if let ClientEvent::State(state) = event {
+            assert!(!matches!(state, ClientState::Connected { .. }), "a revoked device reconnected");
+        }
+    }
     second.supervisor.stop();
+    assert_eq!(client.ok("pty.write", json!({ "ptyId": pty_id, "data": "echo still-$((3+4))\n", "seq": 3 })).await["applied"], true);
+    client.output_until(&pty_id, "still-7").await;
 
     // A ticket for an older generation is refused by the relay's fence.
     let stale = Arc::new(TestSource {
@@ -1065,6 +1097,201 @@ async fn cloud_agent_tabs_run_through_the_mailbox_and_survive_disconnects_and_re
     assert_ne!(receipt["queued"], true, "the tab is idle after the restart, so the prompt goes now: {receipt}; before: {a_info}; now: {a_now}");
     desk.subscribe_tab(&mut feeds, &a_session, &a_tab).await;
     desk.until_tab(&mut feeds, &a_tab, "the resumed reply", |f| has(f, "after the restart")).await;
+    desk.supervisor.stop();
+    drop(runtime);
+}
+
+// ---------------------------------------------------------------- PRO-12
+
+/// PRO-12: the check the legacy runtime was held to, on terminalx-serve.
+/// Two agent tabs and a shell run in one workspace. The client goes away,
+/// and a new connection (a new attachment, as a reopened desktop gets)
+/// finds the same tabs, transcripts, shell process and terminal output.
+/// Then the API reboots the runtime on a new generation (a fenced resume):
+/// the old generation is refused, the transcripts are still there, and the
+/// old process's shell is gone rather than silently replaced.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs terminalx-saas, bun and Redis: scripts/remote-runtime/e2e.sh"]
+async fn two_agent_tabs_and_a_shell_survive_a_reattach_and_a_fenced_restart() {
+    use common::agent::{AgentWorld, Serve};
+    use common::mailbox::FakeMailbox;
+
+    assert!(std::process::Command::new("python3").arg("--version").output().is_ok(), "the fake agent needs python3");
+    let harness = Harness::start();
+    let world = AgentWorld::new();
+    let mailbox = FakeMailbox::start(7);
+    let mut secret = [0u8; 32];
+    secret[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    secret[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    let relay_host_id = relay_host_id_for_secret(secret);
+    let token = |generation: u64| {
+        harness.post("/runtime-token", json!({ "relayHostId": relay_host_id, "runtimeGeneration": generation }))["relayToken"].as_str().unwrap().to_string()
+    };
+    let link_dir = tempfile::tempdir().unwrap();
+    let link = link_dir.path().join("link.json");
+    let pairing_dir = link_dir.path().join("link.json.attachments");
+    let relay_token = Mutex::new(token(7));
+    let attachments = Mutex::new(Vec::<Value>::new());
+    let write_agent_link = || {
+        let temporary = link.with_extension("new");
+        let contents = json!({
+            "v": 1, "hostSecretB64": STANDARD.encode(secret), "relayToken": *relay_token.lock().unwrap(), "directorUrl": harness.director,
+            "attachments": *attachments.lock().unwrap(), "mailbox": mailbox.link_section(),
+        });
+        std::fs::write(&temporary, contents.to_string()).unwrap();
+        std::fs::rename(temporary, &link).unwrap();
+    };
+    write_agent_link();
+    let start = |generation: u64| {
+        let mut command = world.command();
+        command.args(["--runtime-kind", "cloud-workspace", "--relay-link"]).arg(&link);
+        let serve = Serve::start(command, &world.data);
+        common::agent::wait_until("relay registration", || {
+            serve
+                .lines
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|l| l["type"] == "relay" && l["status"]["state"] == "registered" && l["status"]["runtimeGeneration"] == generation)
+                .cloned()
+        });
+        serve
+    };
+    let open = |generation: u64| {
+        let id = {
+            let mut attachments = attachments.lock().unwrap();
+            let id = format!("att-pro12-{}", attachments.len() + 1);
+            attachments.push(attachment(&id, "desktop-pro12", &uuid::Uuid::new_v4().simple().to_string(), "runtime"));
+            id
+        };
+        write_agent_link();
+        let source = source(&harness, &pairing_dir, &id, "desktop-pro12", &relay_host_id);
+        *source.generation.lock().unwrap() = generation;
+        source
+    };
+    let mut runtime = start(7);
+    let mut desk = Client::start(open(7));
+    let ClientState::Connected { runtime_epoch: epoch, runtime_generation, .. } = desk.connected().await else { unreachable!() };
+    assert_eq!(runtime_generation, 7);
+    let (key_id, keys) = workspace_keys(&mut desk).await;
+    let key = keys[&key_id];
+    let send = |tab: &str, plaintext: Value| mailbox.enqueue(&key_id, &key, tab, "send", plaintext, "manage");
+    let mut feeds = Feeds::new();
+
+    // Two agent tabs and a shell, all busy at once.
+    let a = desk.ok("session.create", json!({ "agent": "claude", "mode": "manual", "clientRequestId": "pro12-create-a" })).await;
+    let b = desk.ok("session.create", json!({ "agent": "claude", "mode": "manual", "clientRequestId": "pro12-create-b" })).await;
+    let (a_session, a_tab) = (a["sessionId"].as_str().unwrap().to_string(), a["tabId"].as_str().unwrap().to_string());
+    let (b_session, b_tab) = (b["sessionId"].as_str().unwrap().to_string(), b["tabId"].as_str().unwrap().to_string());
+    assert_ne!(a_tab, b_tab);
+    desk.subscribe_tab(&mut feeds, &a_session, &a_tab).await;
+    desk.subscribe_tab(&mut feeds, &b_session, &b_tab).await;
+    let shell = desk.ok("pty.create", json!({ "cols": 100, "rows": 30, "clientRequestId": "pro12-shell" })).await;
+    let pty_id = shell["ptyId"].as_str().unwrap().to_string();
+    let pid = shell["pid"].as_u64().expect("the shell's pid");
+    desk.ok("pty.attach", json!({ "ptyId": pty_id })).await;
+    let a_turn = send(&a_tab, json!({ "v": 1, "text": "slow:6:300" }));
+    let b_turn = send(&b_tab, json!({ "v": 1, "text": "echo:tab B is here" }));
+    desk.ok("session.nudge", json!({})).await;
+    desk.ok("pty.write", json!({ "ptyId": pty_id, "data": "echo shell-$((20+1))-$$\n", "seq": 1, "writerId": "pro12-1", "epoch": epoch })).await;
+    let (_, offset, _) = desk.follow(&pty_id, &epoch, 0, &format!("shell-21-{pid}")).await;
+    desk.until_tab(&mut feeds, &b_tab, "B's reply", |f| has(f, "tab B is here")).await;
+    desk.until_tab(&mut feeds, &a_tab, "A mid-turn", |f| has(f, "chunk 2 of 6")).await;
+
+    // The client goes away mid-turn and a new connection attaches.
+    desk.supervisor.stop();
+    let mut desk = Client::start(open(7));
+    let ClientState::Connected { runtime_epoch: same_epoch, .. } = desk.connected().await else { unreachable!() };
+    assert_eq!(same_epoch, epoch, "the same runtime process");
+    let tabs = desk.ok("session.tabs", json!({})).await;
+    let mut listed: Vec<String> = tabs["tabs"].as_array().unwrap().iter().map(|t| t["tabId"].as_str().unwrap().to_string()).collect();
+    listed.sort();
+    let mut expected = vec![a_tab.clone(), b_tab.clone()];
+    expected.sort();
+    assert_eq!(listed, expected, "the same two tabs: {tabs}");
+    desk.subscribe_tab(&mut feeds, &a_session, &a_tab).await;
+    desk.subscribe_tab(&mut feeds, &b_session, &b_tab).await;
+    desk.until_tab(&mut feeds, &a_tab, "A's turn, finished across the reattach", |f| f.count("turn_completed") >= 1).await;
+    assert_eq!(settled(&mailbox, &a_turn).state, "applied");
+    assert_eq!(settled(&mailbox, &b_turn).state, "applied");
+    assert_eq!(feeds[&a_tab].texts("assistant_text"), (1..=6).map(|i| format!("chunk {i} of 6")).collect::<Vec<_>>(), "every chunk once, in order");
+    assert!(!feeds[&b_tab].texts("assistant_text").iter().any(|t| t.starts_with("chunk")), "the conversations stay apart");
+    let terminals = desk.ok("pty.list", json!({})).await;
+    assert_eq!(
+        (terminals["terminals"][0]["ptyId"].as_str(), terminals["terminals"][0]["pid"].as_u64()),
+        (Some(pty_id.as_str()), Some(pid)),
+        "the same shell process: {terminals}"
+    );
+    let replay = desk.ok("pty.attach", json!({ "ptyId": pty_id, "sinceOffset": 0, "runtimeGeneration": 7, "epoch": epoch })).await;
+    let replayed = String::from_utf8_lossy(&STANDARD.decode(replay["data"].as_str().unwrap()).unwrap()).into_owned();
+    assert_eq!(replayed.matches(&format!("shell-21-{pid}")).count(), 1, "the terminal's output, once: {replayed}");
+    desk.ok("pty.control", json!({ "ptyId": pty_id })).await;
+    desk.ok("pty.write", json!({ "ptyId": pty_id, "data": "echo again-$((1+1))-$$\n", "seq": 1, "writerId": "pro12-2", "epoch": epoch })).await;
+    desk.follow(&pty_id, &epoch, offset, &format!("again-2-{pid}")).await;
+
+    // The API reboots the runtime on a new generation (a fenced resume).
+    desk.supervisor.stop();
+    runtime.kill();
+    *relay_token.lock().unwrap() = token(8);
+    mailbox.state.lock().unwrap().generation = 8;
+    mailbox.expire_leases();
+    write_agent_link();
+    runtime = start(8);
+    let mut stale = Client::start(open(7));
+    stale.state(|state| matches!(state, ClientState::Reconnecting { reason, .. } if reason.starts_with("4101"))).await;
+    stale.supervisor.stop();
+    let mut desk = Client::start(open(8));
+    let ClientState::Connected { runtime_epoch: rebooted, runtime_generation, .. } = desk.connected().await else { unreachable!() };
+    assert_eq!(runtime_generation, 8);
+    assert_ne!(rebooted, epoch, "a new runtime process");
+    let (key_after, keys_after) = workspace_keys(&mut desk).await;
+    assert_eq!(key_after, key_id, "the workspace key survived the reboot");
+    assert_eq!(desk.ok("pty.list", json!({})).await["terminals"], json!([]), "the old process's shell is gone");
+    assert_eq!(
+        desk.refused("pty.write", json!({ "ptyId": pty_id, "data": "x", "seq": 2, "writerId": "pro12-2", "epoch": epoch })).await,
+        "not_found"
+    );
+    feeds.clear();
+    desk.subscribe_tab(&mut feeds, &a_session, &a_tab).await;
+    desk.subscribe_tab(&mut feeds, &b_session, &b_tab).await;
+    assert_eq!(feeds[&a_tab].texts("assistant_text").iter().filter(|t| t.starts_with("chunk ")).count(), 6, "A's transcript");
+    assert!(has(&feeds[&b_tab], "tab B is here"), "B's transcript");
+    let after = mailbox.enqueue(&key_after, &keys_after[&key_after], &b_tab, "send", json!({ "v": 1, "text": "echo:after the reboot" }), "manage");
+    desk.ok("session.nudge", json!({})).await;
+    assert_eq!(settled(&mailbox, &after).state, "applied");
+    desk.until_tab(&mut feeds, &b_tab, "B resumes its conversation", |f| has(f, "after the reboot")).await;
+    let shell = desk.ok("pty.create", json!({ "cols": 100, "rows": 30, "clientRequestId": "pro12-shell-after" })).await;
+    assert_ne!(shell["ptyId"], pty_id.as_str());
+
+    // The additive namespaces (`agents/1`, `session/2`, `pty/2`) on the same
+    // Linux runtime: what can run, the session index, and a session's terminal.
+    let agents = desk.ok("runtime.agents", json!({})).await;
+    let claude = agents["agents"].as_array().unwrap().iter().find(|a| a["id"] == "claude").unwrap_or_else(|| panic!("claude is installed: {agents}"));
+    assert!(!claude["models"].as_array().unwrap().is_empty() && claude["modes"].as_array().unwrap().iter().any(|m| m == "manual"), "{claude}");
+    let added = desk.ok("session.addTab", json!({ "sessionId": a_session, "agent": "claude", "mode": "manual", "clientRequestId": "pro12-add-tab" })).await;
+    let added_tab = added["tabId"].as_str().unwrap().to_string();
+    assert!(added_tab != a_tab && added_tab != b_tab, "a third tab: {added}");
+    let resent = desk.ok("session.addTab", json!({ "sessionId": a_session, "agent": "claude", "mode": "manual", "clientRequestId": "pro12-add-tab" })).await;
+    assert_eq!(resent["tabId"], added_tab.as_str(), "a resend adds nothing");
+    assert_eq!(desk.ok("session.tabs", json!({})).await["tabs"].as_array().unwrap().len(), 3);
+    let renamed = desk.ok("session.update", json!({ "sessionId": a_session, "title": "PRO-12 on Linux", "pinned": true, "clientRequestId": "pro12-update" })).await;
+    assert_eq!((renamed["session"]["title"].as_str(), renamed["session"]["pinned"].as_bool()), (Some("PRO-12 on Linux"), Some(true)));
+    let owned = desk.ok("pty.create", json!({ "sessionId": b_session, "cols": 100, "rows": 30, "clientRequestId": "pro12-session-shell" })).await;
+    let owned_id = owned["ptyId"].as_str().unwrap().to_string();
+    let of = |terminals: &Value, id: &str| terminals["terminals"].as_array().unwrap().iter().find(|t| t["ptyId"] == id).cloned();
+    let terminals = desk.ok("pty.list", json!({})).await;
+    assert_eq!(of(&terminals, &owned_id).expect("the session's terminal")["sessionId"], b_session.as_str(), "{terminals}");
+    assert!(of(&terminals, shell["ptyId"].as_str().unwrap()).expect("the plain shell").get("sessionId").is_none(), "{terminals}");
+    let deleted = desk.ok("session.delete", json!({ "sessionId": b_session, "clientRequestId": "pro12-delete" })).await;
+    assert_eq!(deleted["deleted"], json!([b_session]));
+    let sessions = desk.ok("session.list", json!({})).await;
+    let listed: Vec<&str> = sessions["sessions"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap()).collect();
+    assert_eq!(listed, vec![a_session.as_str()], "only A is left, renamed: {sessions}");
+    assert_eq!(sessions["sessions"][0]["title"], "PRO-12 on Linux");
+    let terminals = desk.ok("pty.list", json!({})).await;
+    assert!(of(&terminals, &owned_id).is_none(), "deleting a session closes its terminal: {terminals}");
+    assert!(of(&terminals, shell["ptyId"].as_str().unwrap()).is_some(), "and leaves the others: {terminals}");
     desk.supervisor.stop();
     drop(runtime);
 }

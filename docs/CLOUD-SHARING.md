@@ -121,8 +121,8 @@ role changed).
 
 ### Revocation
 
-While anyone is attached, the runtime refreshes every 5 s (15-30 s when idle)
-and re-applies the list:
+The runtime refreshes every 5 s, attached or not (PRO-12), and re-applies the
+list:
 
 1. Connections of a person who lost access are closed, `manage` ones included;
    attachments the API revoked are closed as before. Streams (terminals,

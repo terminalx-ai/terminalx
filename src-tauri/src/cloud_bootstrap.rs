@@ -54,20 +54,27 @@ pub const TOKEN_PATH_ENV: &str = "TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_TOKEN_PATH
 /// `/v1/cloud-workspace-bootstrap/github-token`, never in first-run setup.
 /// `quiesce-v1` asks for an archive's final-checkpoint request in the
 /// refresh answer (`cloud_quiesce`, contract §10.3).
-pub const CAPABILITIES: &str = "organization-access-v1,agent-grants-v1,github-broker-v1,quiesce-v1,collaboration-v1";
+/// `environment-template-v1` asks for the checkout plan of a workspace pinned
+/// to an Environment version (`cloud_environment`); on its own it never
+/// brings stored credentials.
+pub const CAPABILITIES: &str = "organization-access-v1,agent-grants-v1,github-broker-v1,quiesce-v1,environment-template-v1,collaboration-v1";
 const CAPABILITIES_HEADER: &str = "x-terminalx-cloud-workspace-runtime-capabilities";
 pub(crate) const VERSION_HEADER: &str = "x-terminalx-cloud-workspace-runtime-version";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-pub const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
-pub const ATTACHED_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+/// As often as the legacy runtime refreshed: a new attachment waits for the
+/// next refresh before the relay host can answer it, and a revoked share
+/// stops access this promptly (contract §21.5).
+pub const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const STATE_DIR: &str = "cloud-workspace";
 const HOST_KEY_FILE: &str = "host-key.json";
 const STATE_FILE: &str = "runtime.json";
 /// Next to the bootstrap token, in the runtime's state root
 /// (`/var/lib/terminalx`), where the worker's memory probe reads it.
 const BASELINE_FILE: &str = "memory-baseline.json";
+/// Also in the state root, where the worker and the local e2e read it.
+const CHECKOUT_FILE: &str = "environment-checkout.json";
 const MAX_LIST: usize = 256;
 
 /// The server refused the token or the credential. Retrying cannot help:
@@ -219,6 +226,9 @@ pub struct Session {
     /// An archive waiting for this runtime's final checkpoint
     /// (terminalx-saas contract §10.3); `cloud_quiesce` answers it.
     pub quiesce: Option<QuiesceRequest>,
+    /// The checkout plan of a workspace pinned to an Environment version,
+    /// parsed only when it is applied (`cloud_environment`).
+    pub environment: Option<serde_json::Value>,
     /// Who the workspace is shared with (contract §21.3), kept raw and read
     /// by the relay host; absent from an API before PRO-30.
     pub collaboration: Option<serde_json::Value>,
@@ -356,6 +366,8 @@ pub struct Bootstrapped {
     baseline_path: PathBuf,
     /// The generation the baseline was last recorded for.
     baseline_generation: std::sync::atomic::AtomicU64,
+    /// The environment setup last applied in this process.
+    environment_attempted: Mutex<Option<serde_json::Value>>,
     // Held for the life of the process: one runtime per state directory.
     _lock: StateLock,
 }
@@ -427,6 +439,7 @@ pub fn establish(config: &Config, api: &dyn Api, policy: &Policy) -> Result<Boot
                     rejected: std::sync::atomic::AtomicBool::new(false),
                     baseline_path: config.baseline_path(),
                     baseline_generation: std::sync::atomic::AtomicU64::new(u64::MAX),
+                    environment_attempted: Mutex::new(None),
                     _lock: lock,
                 })
             }
@@ -554,6 +567,7 @@ fn redeem(config: &Config, api: &dyn Api, key: &HostKey, stored: Option<(&str, &
                 attachments: Vec::new(),
                 revocations: Vec::new(),
                 quiesce: None,
+                environment: None,
                 collaboration: None,
             }
         }
@@ -618,6 +632,18 @@ impl Bootstrapped {
         Ok(())
     }
 
+    /// Confirm a device's revocation was applied, so the API forgets it
+    /// (`POST /v1/cloud-workspace-bootstrap/revocations/:id/complete`).
+    /// Until then every refresh lists it again.
+    pub fn complete_revocation(&self, api: &HttpApi, attachment_id: &str) -> Result<(), CallError> {
+        if attachment_id.is_empty() || attachment_id.len() > 256 || !attachment_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')) {
+            return Err(CallError::Transient(anyhow!("invalid revocation id")));
+        }
+        let _: serde_json::Value =
+            api.post(&format!("/v1/cloud-workspace-bootstrap/revocations/{attachment_id}/complete"), &self.credential, serde_json::json!({}), None)?;
+        Ok(())
+    }
+
     /// Tell the API what the runtime has been doing
     /// (`POST /v1/cloud-workspace-bootstrap/activity`, see `cloud_activity`).
     pub fn report_activity(&self, api: &HttpApi, report: &serde_json::Value) -> Result<(), CallError> {
@@ -644,12 +670,40 @@ impl Bootstrapped {
         }
     }
 
+    /// Switch the pinned Environment's checkouts and report the outcome
+    /// (`cloud_environment`, PRO-15). Each version is tried once per process.
+    /// The outcome is recorded whether or not the API takes the report (it
+    /// refuses one once the operation has settled), so a successful checkout
+    /// is never switched again; a failed one is tried again on the next boot.
+    /// Returns at once when there is nothing to do, so it can run on every
+    /// refresh.
+    pub fn apply_environment(&self, api: &HttpApi) {
+        let raw = self.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).environment.clone();
+        let Some(raw) = raw else { return };
+        {
+            let mut attempted = self.environment_attempted.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if attempted.as_ref() == Some(&raw) {
+                return;
+            }
+            *attempted = Some(raw.clone());
+        }
+        let Some(environment) = crate::cloud_environment::parse(&raw) else { return };
+        let record = self.baseline_path.with_file_name(CHECKOUT_FILE);
+        if !crate::cloud_environment::pending(&environment, &record) {
+            return;
+        }
+        let applied = crate::cloud_environment::apply(&environment);
+        applied.settle(&record, |code| {
+            let reported: Result<serde_json::Value, CallError> =
+                api.post("/v1/cloud-workspace-bootstrap/progress", &self.credential, serde_json::json!({ "v": 1, "code": code }), None);
+            reported.map(|_| ()).map_err(|error| describe(&error))
+        });
+    }
+
     /// Keep the relay token fresh in the background until the process ends.
     pub fn spawn_refresh_loop(self: Arc<Self>, api: Arc<dyn Api + Send + Sync>) {
         let spawned = std::thread::Builder::new().name("cloud-refresh".into()).spawn(move || loop {
-            // Faster while a client is attached, so a revoked share or
-            // membership stops access promptly (contract §21.5).
-            std::thread::sleep(if crate::cloud_activity::attached_count() > 0 { ATTACHED_REFRESH_INTERVAL } else { REFRESH_INTERVAL });
+            std::thread::sleep(REFRESH_INTERVAL);
             match self.refresh(api.as_ref()) {
                 // A rotated session may carry a new runtime generation.
                 Ok(()) => self.record_memory_baseline(),
@@ -678,7 +732,8 @@ fn session_from_refresh(mut refreshed: Refreshed, relay_host_id: &str) -> Result
     if refreshed.attachments.len() > MAX_LIST || refreshed.revocations.len() > MAX_LIST {
         bail!("refresh listed too many attachments or revocations");
     }
-    if refreshed.setup.is_some() {
+    let environment = refreshed.setup.as_ref().and_then(crate::cloud_environment::raw);
+    if refreshed.setup.as_ref().is_some_and(|setup| !environment_only(setup)) {
         log::warn!("the server sent first-run setup, which this runtime does not apply yet");
     }
     Ok(Session {
@@ -701,6 +756,19 @@ fn session_from_refresh(mut refreshed: Refreshed, relay_host_id: &str) -> Result
                 }
             }
         }),
+        environment,
+    })
+}
+
+/// A setup with nothing but the checkout plan: what `environment-template-v1`
+/// alone brings.
+fn environment_only(setup: &serde_json::Value) -> bool {
+    setup.as_object().is_some_and(|fields| {
+        fields.iter().all(|(name, value)| match name.as_str() {
+            "version" | "environment" => true,
+            "credentials" => value.as_array().is_some_and(Vec::is_empty),
+            _ => false,
+        })
     })
 }
 

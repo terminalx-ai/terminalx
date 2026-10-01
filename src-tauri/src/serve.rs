@@ -216,6 +216,20 @@ fn run(options: Options) -> Result<()> {
         // shim first.
         let workspace_id = cloud.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).workspace_id.clone();
         crate::cloud_github::install_at_boot(&data_dir.join(crate::cloud_bootstrap::STATE_DIR), origin, &workspace_id);
+        // After the Git credential helper, which a fetch of a private ref
+        // needs, and before any agent starts in a checkout.
+        let environment_api = crate::cloud_bootstrap::HttpApi::new(origin);
+        cloud.apply_environment(&environment_api);
+        // A plan that arrives only on a later refresh (the first one after
+        // the redeem failed, or the workspace was re-pinned) is applied then.
+        let watched = cloud.clone();
+        let spawned = std::thread::Builder::new().name("cloud-environment".into()).spawn(move || loop {
+            std::thread::sleep(crate::cloud_bootstrap::REFRESH_INTERVAL);
+            watched.apply_environment(&environment_api);
+        });
+        if let Err(error) = spawned {
+            log::error!("start the environment checkout watcher: {error}");
+        }
     }
     let runtime = start(&options)?;
     if let (Some((cloud, origin)), false) = (&cloud, options.self_test) {
