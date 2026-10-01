@@ -4,7 +4,7 @@ import { RemoteGit, listRepositories, type RemoteRepository } from "@terminalx/p
 import { createTerminal } from "@/components/terminal/TerminalView";
 import { useAccount } from "@/lib/account";
 import type { CloudWorkspaceConnection, CloudWorkspaceListItem } from "@/lib/api";
-import { retainCloudConnection, setSelectedCloudConnection, useCloudConnection, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
+import { retainCloudConnection, setSelectedCloudConnection, useCloudConnection, waitCloudConnected, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
 import {
   flushCloudAgentCache,
   loadCloudAgents,
@@ -98,7 +98,12 @@ export interface CloudSessionModel {
   /** Stopped as far as this client knows: nothing here attaches or wakes until an interactive command. */
   asleep: boolean;
   terminals: CloudTerminal[];
-  openTerminal(): Promise<void>;
+  /**
+   * A new terminal on the VM. On a stopped workspace it opens only with
+   * `wake: true`, the reader's explicit choice: one wake, then the terminal
+   * once the runtime is back. Without it a stopped workspace stays stopped.
+   */
+  openTerminal(options?: { wake?: boolean }): Promise<void>;
   addAgentTab(params: { agent: string; model?: string; effort?: string | null; mode?: string }): Promise<void>;
   /** The runtime supports adding tabs to an existing session (`session/2`). */
   canAddTabs: boolean;
@@ -379,13 +384,28 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     [key, repo?.identity, orgId, workspaceKey, root, runtimeSession, item?.workspace.launch?.workBranch, firstTitle, ownTabs, asleep],
   );
 
-  const openTerminal = useCallback(async () => {
-    if (backend.readOnlyReason) throw new Error(backend.readOnlyReason);
-    if (!client || !connected) throw new Error("Terminals open once the workspace is connected.");
-    if (!manage) throw new Error("View only: this attachment cannot open terminals.");
-    const terminal = await createCloudTerminal(workspaceKey, client, { cols: 100, rows: 30 }, terminalBase, { sessionId: runtimeSessionId });
-    selectSessionTab(key, { kind: "terminal", id: terminal.id });
-  }, [backend.readOnlyReason, client, connected, manage, workspaceKey, terminalBase, runtimeSessionId, key]);
+  const openTerminal = useCallback(
+    async (options: { wake?: boolean } = {}) => {
+      if (backend.readOnlyReason) throw new Error(backend.readOnlyReason);
+      let target = client && connected ? client : null;
+      if (!target) {
+        if (!options.wake || !asleep) throw new Error("Terminals open once the workspace is connected.");
+        // Chosen explicitly on a stopped workspace: one wake, then the terminal once it runs.
+        const lease = await wakeCloudConnection({ orgId, workspaceId });
+        try {
+          await waitCloudConnected(lease.client);
+          target = lease.client;
+        } finally {
+          lease.release();
+        }
+      }
+      const live = target.connection;
+      if (live.state !== "connected" || live.authority !== "manage") throw new Error("View only: this attachment cannot open terminals.");
+      const terminal = await createCloudTerminal(workspaceKey, target, { cols: 100, rows: 30 }, terminalBase, { sessionId: runtimeSessionId });
+      selectSessionTab(key, { kind: "terminal", id: terminal.id });
+    },
+    [backend.readOnlyReason, client, connected, asleep, orgId, workspaceId, workspaceKey, terminalBase, runtimeSessionId, key],
+  );
 
   const addAgentTab = useCallback(
     async (params: { agent: string; model?: string; effort?: string | null; mode?: string }) => {

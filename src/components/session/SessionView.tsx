@@ -305,7 +305,8 @@ export function SessionView({
           </div>
 
           <div className="ml-auto flex max-w-[70%] shrink-0 items-center gap-0.5">
-            <TabActions session={session} selected={selected} cloud={cloud} />
+            {/* Keyed by session: a menu left open never carries over to another session. */}
+            <TabActions key={session.id} session={session} selected={selected} cloud={cloud} />
             {activeTab && local && (
               <WithTooltip label="Continue in New Session…">
                 <Button variant="ghost" size="icon-sm" aria-label="Continue in New Session…" onClick={() => setContinuationSource(activeTab)}>
