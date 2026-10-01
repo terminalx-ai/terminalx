@@ -3,6 +3,7 @@ import { Bot, Loader2, Plus, X } from "lucide-react";
 import type { WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { Chat } from "@/components/chat/Chat";
 import { Composer } from "@/components/chat/Composer";
+import { sentMessages } from "@/components/chat/useComposerHistory";
 import { Button } from "@/components/ui/button";
 import { runningLimitReached } from "@/lib/runningLimit";
 import { useTabLog } from "@/lib/agentEvents";
@@ -601,6 +602,7 @@ function CloudAgentPane({
                   draft={draft}
                   onDraftChange={changeDraft}
                   onSend={send}
+                  history={sentMessages(transcript, { entries, followUps: info.followUps })}
                   onStop={stop}
                   onSetModel={(model) => configure({ model })}
                   onSetEffort={(effort) => configure({ effort })}

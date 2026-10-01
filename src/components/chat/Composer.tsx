@@ -22,17 +22,20 @@ import type { TabEntry } from "@/types/session";
 import { DictationStatus, MicButton, useDictationInto } from "./Dictation";
 import { PickerMenu, type PickerItem } from "./PickerMenu";
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "./useImageAttachments";
+import { useComposerHistory } from "./useComposerHistory";
 import { tokenAtCaret } from "@/lib/pickers";
 
 const commandCache = new Map<string, SlashCommand[]>();
 // Matches the textarea's max-h-60: about ten lines before it scrolls.
 const MAX_HEIGHT = 240;
+const NO_HISTORY: string[] = [];
 
 /**
  * The composer inside a session. Enter sends, Shift+Enter breaks a line.
  * While a turn runs the send button becomes Stop and a new prompt queues.
  * `/` at the start opens the command list; `@` anywhere opens the file list.
  * Images attach as blocks; any other dropped file becomes an `@path` mention.
+ * Up and Down recall the tab's earlier and later messages, as a shell does.
  */
 export function Composer({
   tab,
@@ -41,6 +44,7 @@ export function Composer({
   draft,
   onDraftChange,
   onSend,
+  history = NO_HISTORY,
   onStop,
   onSetModel,
   onSetEffort,
@@ -60,6 +64,8 @@ export function Composer({
   draft: string;
   onDraftChange: (v: string) => void;
   onSend: (text: string, images: ImageInput[]) => Promise<void> | void;
+  /** The messages already sent in this tab, oldest first, for Up and Down to recall (`sentMessages`). */
+  history?: string[];
   onStop: () => void;
   onSetModel: (id: string) => void;
   onSetEffort: (e: string | null) => void;
@@ -170,6 +176,19 @@ export function Composer({
 
   const token = useMemo(() => tokenAtCaret(draft, caret), [draft, caret]);
   const tokenKey = token ? `${token.kind}:${token.start}` : null;
+  const recall = useComposerHistory({
+    id: tab.id,
+    history,
+    draft,
+    onDraftChange,
+    field: ref,
+    // A recalled `/command` or `@file` is a message, not a search: its menu stays shut until the reader types.
+    onRecall: (text) => {
+      const recalled = tokenAtCaret(text, text.length);
+      setCaret(text.length);
+      setDismissedToken(recalled ? `${recalled.kind}:${recalled.start}` : null);
+    },
+  });
   const pickerOpen = !!token && dismissedToken !== tokenKey && (token.kind === "mention" ? !!cwd : commands.length > 0);
 
   // File hits follow the query, lightly debounced.
@@ -236,10 +255,11 @@ export function Composer({
     } finally {
       setSending(false);
     }
-    onDraftChange("");
+    // Sending a recalled message gives back the draft that was set aside for it.
+    onDraftChange(recall.sent());
     attach.clear();
     ref.current?.focus();
-  }, [draft, attachments, attach, sending, disabled, onSend, onDraftChange]);
+  }, [draft, attachments, attach, sending, disabled, onSend, onDraftChange, recall.sent]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (pickerOpen && items.length) {
@@ -264,6 +284,8 @@ export function Composer({
         return;
       }
     }
+    // An open menu owns the arrows (the pickers above, the model and permission menus); dictation owns the draft.
+    if (!pickerOpen && !modelMenu.open && !modeMenu.open && !dictation.dictating && recall.onKeyDown(e)) return;
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       void send();

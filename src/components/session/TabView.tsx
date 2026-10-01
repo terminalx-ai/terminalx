@@ -14,6 +14,7 @@ import { SETTINGS_LOCKED_REASON, presenceTyping, tabGate, useCollab } from "@/li
 import { usePeople } from "@/lib/cloudPeople";
 import { Chat } from "@/components/chat/Chat";
 import { Composer } from "@/components/chat/Composer";
+import { sentMessages } from "@/components/chat/useComposerHistory";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
 import { MessageSquare } from "lucide-react";
@@ -234,6 +235,11 @@ export function TabView({
     }
   }, [backend, draft, tab.id]);
   const outbox = backend.outbox;
+  // What Up and Down recall in the composer: this tab's own messages, plus a cloud tab's commands still on their way.
+  const history = useMemo(
+    () => sentMessages(transcript, outbox && { entries: outbox.entries(tab.id), followUps: outbox.followUps(tab.id) }),
+    [transcript, outbox, tab.id],
+  );
   const deciding = !!outbox && transcript.pendingAsks.some((ask) => outbox.deciding(ask.requestId));
 
   const chat = (
@@ -268,6 +274,7 @@ export function TabView({
             if (collabLive && v) presenceTyping(shared!.key);
           }}
           onSend={send}
+          history={history}
           onStop={stop}
           onSetModel={(m) => {
             if (gate && !gate.mayConfigure) return;
