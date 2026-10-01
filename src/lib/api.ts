@@ -217,7 +217,7 @@ export const api = {
   // Cloud diagnostics (PRO-38): owners and administrators only, decided by the server.
   cloudDiagnostics: (windowDays: number, orgId?: string | null) => invoke<CloudDiagnostics>("cloud_diagnostics", { windowDays, orgId: orgId ?? null }),
   /** Local and in memory only: no account, no network. */
-  cloudConnectionDiagnostics: () => invoke<ConnectionClose[]>("cloud_connection_diagnostics"),
+  cloudConnectionDiagnostics: (orgId?: string | null) => invoke<ConnectionClose[]>("cloud_connection_diagnostics", { orgId: orgId ?? null }),
   /** Writes the redacted export to a path the user chose. */
   cloudDiagnosticsExport: (path: string, windowDays: number, orgId?: string | null) =>
     invoke<void>("cloud_diagnostics_export", { path, windowDays, orgId: orgId ?? null }),

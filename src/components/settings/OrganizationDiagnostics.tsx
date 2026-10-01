@@ -11,6 +11,7 @@ import {
   diagnosticsErrorMessage,
   exportErrorMessage,
   formatDuration,
+  reasonText,
   retryHint,
   type CloudDiagnostics,
   type ConnectionClose,
@@ -82,7 +83,7 @@ export function OrganizationDiagnostics({
     // The account already says this is a member: skip a request the server refuses.
     const refused = Promise.reject({ code: "organization_admin_required" });
     refused.catch(() => {});
-    const [server, local] = await Promise.allSettled([member ? refused : api.cloudDiagnostics(days, cloudOrgArg(orgId)), api.cloudConnectionDiagnostics()]);
+    const [server, local] = await Promise.allSettled([member ? refused : api.cloudDiagnostics(days, cloudOrgArg(orgId)), api.cloudConnectionDiagnostics(cloudOrgArg(orgId))]);
     if (current !== loadSeq.current) return;
     if (server.status === "fulfilled") {
       setDiagnostics(server.value);
@@ -205,6 +206,7 @@ export function OrganizationDiagnostics({
                     {operation.workspaceId} · {operation.provider ?? "—"} · {formatDuration(operation.durationMs)}
                     {operation.attemptCount && operation.attemptCount > 1 ? ` · ${operation.attemptCount} attempts` : ""}
                   </div>
+                  {operation.reason && <div className="text-muted-foreground">{reasonText(operation.reason, operation.reasonDetail)}</div>}
                   {operation.retryAction && operation.retryAction !== "none" && <div className="text-muted-foreground">{retryHint(operation.retryAction)}</div>}
                   {operation.restartDecision && (
                     <div className="text-muted-foreground">
@@ -261,7 +263,7 @@ export function OrganizationDiagnostics({
         </>
       )}
 
-      <div className="mt-3 text-xs font-medium text-muted-foreground">Connection closes on this Mac</div>
+      <div className="mt-3 text-xs font-medium text-muted-foreground">Connection closes on this Mac, in this organization</div>
       {closes.length ? (
         <ul aria-label="Connection closes on this Mac" className="mt-1 flex flex-col gap-0.5 text-[11px]">
           {[...closes].reverse().map((close, index) => (
@@ -274,13 +276,13 @@ export function OrganizationDiagnostics({
           ))}
         </ul>
       ) : (
-        <p className="mt-1 text-[11px] text-muted-foreground">No relay closes recorded since TerminalX started. The last 50 are kept in memory only.</p>
+        <p className="mt-1 text-[11px] text-muted-foreground">No relay closes recorded in this organization since TerminalX started. The last 50 across organizations are kept in memory only.</p>
       )}
 
       <div className="mt-3 flex flex-col gap-1.5 rounded-md border border-hairline p-2">
         <p className="text-[11px] leading-relaxed text-muted-foreground">
           The export is written only to a file you choose and is never uploaded. It holds the app version, OS and architecture, the diagnostics above and
-          this Mac's connection closes. It leaves out API keys and provider credentials, access and refresh tokens, sign-in, device and pairing codes, relay
+          this Mac's connection closes in this organization, and nothing of any other organization. It leaves out API keys and provider credentials, access and refresh tokens, sign-in, device and pairing codes, relay
           tickets, runtime credentials, workspace and repository names, file contents, terminal output and prompts.
         </p>
         <div className="flex items-center gap-2">

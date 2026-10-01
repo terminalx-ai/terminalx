@@ -397,8 +397,14 @@ contents. The desktop decodes a typed subset and drops unknown fields.
 relay close (4100 `runtime_unavailable`, 4101 `stale_generation`, 4102
 `auth_expired`, 4103 `update_required`, 4104 `backpressure`; a 4101 may also be
 the client's own generation check of the runtime's hello) as
-`{ workspaceId, code, name, at }` in a ring buffer of 50 entries in memory. It
-is never written to disk except inside an export the user asks for.
+`{ workspaceId, code, name, at }` in a ring buffer of 50 entries in memory,
+together with the organization the connection was made in. That organization
+decides who sees an entry: the view and the export get only the closes met in
+the organization they are for, there is no call that returns the whole log,
+and a close with no organization recorded (a debug-build attach by pairing
+code) is never shown or exported. The organization itself is not sent to the
+web view. The log is never written to disk except inside an export the user
+asks for.
 
 **Export.** **Export diagnostics…**, at the bottom of the view wherever it is
 open, opens a save dialog and writes one JSON file to the chosen path; it is never
@@ -412,7 +418,7 @@ missing `.json` extension is added. It contains:
 - `app`: version, OS and architecture; `exportedAt`; `windowDays`;
 - `server`: the diagnostics above (without the organization id), or, when
   they could not be fetched, only the error code and HTTP status;
-- `connections.closes`: the local close log;
+- `connections.closes`: this Mac's closes in the export's organization;
 - `excluded`: the list of categories below.
 
 It excludes API keys and provider credentials, access and refresh tokens,
@@ -433,9 +439,16 @@ details and the close log, and asserts that every string left in the file is
 shape rule to its answer before the desktop sees it. Shape cannot tell a
 short, lowercase, word-like secret from a code; the control for that is that
 neither the server's query nor the builder reads a field that holds one.
-The close log is this Mac's, not the organization's: an export lists the
-workspace ids of every typed close this Mac met, whichever organization the
-report is for.
+**One organization per export.** Everything in the file is of the organization
+the export is for. The command passes the builder only that organization's
+closes, and the builder checks again: it drops any close recorded in another
+organization or in none, and it refuses a server answer whose organization is
+not the export's (the file then holds `cloud_workspace_invalid_response`
+instead). Signed out, no organization can be determined and the file holds no
+closes. The builder reads nothing else: no connection history, cache or outbox.
+`an_export_holds_nothing_of_another_organization` seeds closes for two
+organizations and for none, hands the builder all of them, and asserts that
+none of the other organization's ids appears.
 
 ## Would require a server change (out of scope)
 

@@ -151,7 +151,8 @@ impl CloudRemote {
                 let payload = match event {
                     ClientEvent::State(state) => {
                         if let Some(code) = close_code(&state) {
-                            closes.record(workspace_id.as_deref(), code, chrono::Utc::now().timestamp_millis());
+                            // A dev attach has no identity: its close is recorded without an Organization and never exported.
+                            closes.record(identity.as_ref().map(|identity| identity.organization_id.as_str()), workspace_id.as_deref(), code, chrono::Utc::now().timestamp_millis());
                         }
                         keys_granted = matches!(&state, ClientState::Connected { capabilities, .. } if capabilities.iter().any(|capability| capability == "keys/1"))
                             && identity.is_some()

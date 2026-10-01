@@ -49,6 +49,10 @@ export interface DiagnosticsOperation {
   stage: string | null;
   errorCode: string | null;
   retryAction: string | null;
+  /** Why TerminalX queued it itself: `idle`, `provider-stopped`, `attention-stopped`. Absent or null for one a person asked for. */
+  reason?: string | null;
+  /** For `attention-stopped`: the error code that left the workspace needing attention. */
+  reasonDetail?: string | null;
   attemptCount: number | null;
   createdAt: number;
   updatedAt: number;
@@ -89,7 +93,7 @@ export interface CloudDiagnostics {
   closeReasons: DiagnosticsCloseReason[];
 }
 
-/** A typed relay close (4100-4104) this desktop met; memory only. */
+/** A typed relay close (4100-4104) this desktop met in the organization asked for; memory only. */
 export interface ConnectionClose {
   workspaceId: string | null;
   code: number;
@@ -113,6 +117,19 @@ const RETRY_HINTS: Record<string, string> = {
   "fetch-new-ticket": "The app fetches a new ticket and reconnects on its own.",
   "reconnect-with-resume-credential": "The app reconnects with its resume credential on its own.",
 };
+
+const REASONS: Record<string, string> = {
+  idle: "Stopped by TerminalX after sitting idle",
+  "provider-stopped": "The provider stopped the compute on its own",
+  "attention-stopped": "Stopped by TerminalX while the workspace needed attention",
+};
+
+/** Why TerminalX queued an operation itself, in words; empty for one a person asked for. */
+export function reasonText(reason: string | null | undefined, detail: string | null | undefined): string {
+  if (!reason) return "";
+  const text = REASONS[reason] ?? `Queued by TerminalX: ${reason}`;
+  return detail ? `${text} (${detail}).` : `${text}.`;
+}
 
 export function retryHint(action: string | null | undefined): string {
   if (!action) return "";

@@ -6,13 +6,16 @@
 //!   unknown fields are dropped on decode, so a newer server never widens
 //!   what the app holds;
 //! - a bounded in-memory log of the typed relay close reasons (4100-4104)
-//!   the desktop cloud client met, never written to disk;
+//!   the desktop cloud client met, never written to disk, each with the
+//!   Organization its connection was made in;
 //! - the opt-in export: an allowlist builder that copies chosen fields
 //!   (identifiers, codes, counts, timings) and nothing else, then a final
 //!   redaction pass over every string. Credentials, tokens, auth and pairing
 //!   codes, tickets, repository or workspace names and any terminal or file
 //!   content never reach it, because no input carries them and anything
-//!   shaped unlike an identifier or a code is replaced.
+//!   shaped unlike an identifier or a code is replaced. An export is for one
+//!   Organization: closes met in another, or with none recorded, and a server
+//!   answer for another are left out.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -129,6 +132,13 @@ pub struct DiagnosticsOperation {
     pub error_code: Option<String>,
     #[serde(default)]
     pub retry_action: Option<String>,
+    /// Why TerminalX queued the operation itself (`idle`, `provider-stopped`,
+    /// `attention-stopped`); none for one a person asked for.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// For `attention-stopped`: the error code that left the workspace needing attention.
+    #[serde(default)]
+    pub reason_detail: Option<String>,
     #[serde(default)]
     pub attempt_count: Option<u32>,
     pub created_at: i64,
@@ -232,6 +242,11 @@ pub fn close_reason_name(code: u16) -> Option<&'static str> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionClose {
+    /// The Organization the connection was made in; none for a debug-build
+    /// attach by pairing code. Decides who may see the entry and is itself
+    /// never sent to the web view or written to an export.
+    #[serde(skip)]
+    pub organization_id: Option<String>,
     /// None for a debug-build attach by pairing code.
     pub workspace_id: Option<String>,
     pub code: u16,
@@ -254,17 +269,25 @@ impl ConnectionCloseLog {
     }
 
     /// Codes outside 4100-4104 are not recorded.
-    pub fn record(&self, workspace_id: Option<&str>, code: u16, at: i64) {
+    pub fn record(&self, organization_id: Option<&str>, workspace_id: Option<&str>, code: u16, at: i64) {
         let Some(name) = close_reason_name(code) else { return };
         let mut entries = self.entries.lock().unwrap();
         while entries.len() >= CLOSE_LOG_CAPACITY {
             entries.pop_front();
         }
-        entries.push_back(ConnectionClose { workspace_id: workspace_id.map(str::to_string), code, name, at });
+        entries.push_back(ConnectionClose { organization_id: organization_id.map(str::to_string), workspace_id: workspace_id.map(str::to_string), code, name, at });
     }
 
-    pub fn snapshot(&self) -> Vec<ConnectionClose> {
-        self.entries.lock().unwrap().iter().cloned().collect()
+    /// The closes met in `organization_id`, oldest first. There is no way to
+    /// read the whole log: an entry of another Organization, or with none
+    /// recorded, is never shown or exported.
+    pub fn snapshot_for(&self, organization_id: &str) -> Vec<ConnectionClose> {
+        self.entries.lock().unwrap().iter().filter(|close| close.organization_id.as_deref() == Some(organization_id)).cloned().collect()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.lock().unwrap().len()
     }
 }
 
@@ -282,6 +305,9 @@ pub struct ExportInputs<'a> {
     pub app: AppInfo,
     pub exported_at: i64,
     pub window_days: u8,
+    /// The one Organization the export is for; none when it could not be
+    /// determined (signed out), and then no close is exported.
+    pub organization_id: Option<&'a str>,
     pub server: Result<&'a CloudDiagnostics, &'a CloudWorkspaceClientError>,
     pub closes: &'a [ConnectionClose],
 }
@@ -301,6 +327,12 @@ pub const EXCLUDED: &[&str] = &[
 
 pub fn build_export(inputs: &ExportInputs<'_>) -> Value {
     let server = match inputs.server {
+        // An answer for another Organization is not this export's to hold.
+        Ok(diagnostics) if inputs.organization_id != Some(diagnostics.organization_id.as_str()) => json!({
+            "available": false,
+            "errorCode": "cloud_workspace_invalid_response",
+            "status": Value::Null,
+        }),
         Ok(diagnostics) => json!({ "available": true, "diagnostics": server_section(diagnostics) }),
         Err(error) => json!({
             "available": false,
@@ -308,10 +340,13 @@ pub fn build_export(inputs: &ExportInputs<'_>) -> Value {
             "status": error.status,
         }),
     };
+    // Checked again here, whatever the caller passed: only closes recorded
+    // in the export's Organization.
     let closes: Vec<Value> = inputs
         .closes
         .iter()
         .rev()
+        .filter(|close| inputs.organization_id.is_some() && close.organization_id.as_deref() == inputs.organization_id)
         .take(CLOSE_LOG_CAPACITY)
         .map(|close| {
             json!({
@@ -354,6 +389,8 @@ fn server_section(diagnostics: &CloudDiagnostics) -> Value {
                 "stage": operation.stage.as_deref().map(code),
                 "errorCode": operation.error_code.as_deref().map(code),
                 "retryAction": operation.retry_action.as_deref().map(code),
+                "reason": operation.reason.as_deref().map(code),
+                "reasonDetail": operation.reason_detail.as_deref().map(code),
                 "attemptCount": operation.attempt_count,
                 "createdAt": operation.created_at,
                 "updatedAt": operation.updated_at,
@@ -527,6 +564,13 @@ pub mod commands {
             .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Read))?
     }
 
+    /// The Organization `org_id` names (the active one when none), if the
+    /// account is a member of it. Off the async runtime: it may load the account.
+    async fn organization(state: &tauri::State<'_, crate::AppState>, org_id: Option<String>) -> Option<String> {
+        let service = state.cloud_workspaces.clone();
+        tauri::async_runtime::spawn_blocking(move || service.organization_in(org_id.as_deref()).ok()).await.ok().flatten()
+    }
+
     /// Owners and administrators of `org_id` (the active Organization when
     /// none) only; the server decides by the role in that Organization.
     #[tauri::command]
@@ -538,16 +582,26 @@ pub mod commands {
         fetch(&state, org_id, window(window_days)).await
     }
 
-    /// Local only: needs no account and touches no network.
+    /// The closes this Mac met in `org_id` (the active Organization when
+    /// none). No network; signed out, or for an Organization the account is
+    /// not a member of, there is nothing to show.
     #[tauri::command]
-    pub fn cloud_connection_diagnostics(remote: tauri::State<'_, Arc<CloudRemote>>) -> Vec<ConnectionClose> {
-        remote.close_log().snapshot()
+    pub async fn cloud_connection_diagnostics(
+        state: tauri::State<'_, crate::AppState>,
+        remote: tauri::State<'_, Arc<CloudRemote>>,
+        org_id: Option<String>,
+    ) -> Result<Vec<ConnectionClose>, String> {
+        Ok(match organization(&state, org_id).await {
+            Some(organization_id) => remote.close_log().snapshot_for(&organization_id),
+            None => Vec::new(),
+        })
     }
 
     /// Write the export to `path`, which the user chose in a save dialog.
-    /// Signed out, or for a member, the file holds the local part and the
-    /// server's refusal code; nothing is sent anywhere but the diagnostics
-    /// request itself.
+    /// For a member, the file holds this Mac's closes in that Organization
+    /// and the server's refusal code; signed out, only the refusal code.
+    /// Everything in it is of the one Organization the export is for.
+    /// Nothing is sent anywhere but the diagnostics request itself.
     #[tauri::command]
     pub async fn cloud_diagnostics_export(
         path: String,
@@ -566,9 +620,10 @@ pub mod commands {
             target.as_mut_os_string().push(".json");
         }
         let window_days = window(window_days);
+        let organization_id = organization(&state, org_id.clone()).await;
         // Signed out, the service answers `account_signed_out` without a request.
         let server = fetch(&state, org_id, window_days).await;
-        let closes = remote.close_log().snapshot();
+        let closes = organization_id.as_deref().map(|organization_id| remote.close_log().snapshot_for(organization_id)).unwrap_or_default();
         let export = build_export(&ExportInputs {
             app: AppInfo {
                 version: app.package_info().version.to_string(),
@@ -577,6 +632,7 @@ pub mod commands {
             },
             exported_at: chrono::Utc::now().timestamp_millis(),
             window_days,
+            organization_id: organization_id.as_deref(),
             server: server.as_ref(),
             closes: &closes,
         });
@@ -614,6 +670,7 @@ mod tests {
                 "operationId": "op_7d2c9a4e-1b1f-4c55-9e0a-3f1c2b3a4d5e", "workspaceId": "cw_1", "provider": "local-docker",
                 "type": "resume", "state": "failed", "stage": "connecting-relay",
                 "errorCode": "cloud_provider_credential_invalid", "retryAction": "fix-provider-credentials",
+                "reason": "attention-stopped", "reasonDetail": "cloud_provider_credential_invalid",
                 "attemptCount": 2, "createdAt": 1, "updatedAt": 2, "durationMs": 1,
                 "restartDecision": { "path": "fenced-restart", "reason": "warm-grace-expired", "decidedAt": 2, "fencedAt": 2, "replacedRuntimeGeneration": 3, "fence": "rotate" },
                 "history": [{ "state": "running", "stage": "preflight", "errorCode": null, "detailCode": null, "at": 1 }]
@@ -640,13 +697,13 @@ mod tests {
     #[test]
     fn close_log_keeps_only_typed_reasons_and_is_bounded() {
         let log = ConnectionCloseLog::default();
-        log.record(Some("cw_1"), 1006, 1);
-        log.record(Some("cw_1"), 4401, 1);
-        assert!(log.snapshot().is_empty());
+        log.record(Some("org_1"), Some("cw_1"), 1006, 1);
+        log.record(Some("org_1"), Some("cw_1"), 4401, 1);
+        assert_eq!(log.len(), 0);
         for index in 0..(CLOSE_LOG_CAPACITY as i64 + 7) {
-            log.record(Some("cw_1"), 4100 + (index % 5) as u16, index);
+            log.record(Some("org_1"), Some("cw_1"), 4100 + (index % 5) as u16, index);
         }
-        let entries = log.snapshot();
+        let entries = log.snapshot_for("org_1");
         assert_eq!(entries.len(), CLOSE_LOG_CAPACITY);
         assert_eq!(entries.first().unwrap().at, 7);
         assert_eq!(entries.last().unwrap().at, CLOSE_LOG_CAPACITY as i64 + 6);
@@ -656,13 +713,15 @@ mod tests {
     #[test]
     fn export_keeps_the_diagnostic_fields() {
         let diagnostics: CloudDiagnostics = serde_json::from_value(fixture()).unwrap();
-        let closes = [ConnectionClose { workspace_id: Some("cw_1".into()), code: 4101, name: "stale_generation", at: 9 }];
-        let export = build_export(&ExportInputs { app: app(), exported_at: 10, window_days: 7, server: Ok(&diagnostics), closes: &closes });
+        let closes = [ConnectionClose { organization_id: Some("org_1".into()), workspace_id: Some("cw_1".into()), code: 4101, name: "stale_generation", at: 9 }];
+        let export = build_export(&ExportInputs { app: app(), exported_at: 10, window_days: 7, organization_id: Some("org_1"), server: Ok(&diagnostics), closes: &closes });
         let server = &export["server"]["diagnostics"];
         assert_eq!(export["app"]["version"], "0.2.2");
         assert_eq!(server["operations"][0]["operationId"], "op_7d2c9a4e-1b1f-4c55-9e0a-3f1c2b3a4d5e");
         assert_eq!(server["operations"][0]["errorCode"], "cloud_provider_credential_invalid");
         assert_eq!(server["operations"][0]["restartDecision"]["reason"], "warm-grace-expired");
+        assert_eq!(server["operations"][0]["reason"], "attention-stopped");
+        assert_eq!(server["operations"][0]["reasonDetail"], "cloud_provider_credential_invalid");
         assert_eq!(server["stageTimings"]["create"]["stages"]["creating-machine"]["p95"], 50000.0);
         assert_eq!(server["workspaces"][0]["connections"]["expired"], 2);
         assert_eq!(server["workspaces"][0]["oomRelaunchCount"], 3);
@@ -674,7 +733,7 @@ mod tests {
     #[test]
     fn a_refused_server_request_exports_only_its_code() {
         let error = CloudWorkspaceClientError::local("organization_admin_required", false);
-        let export = build_export(&ExportInputs { app: app(), exported_at: 1, window_days: 99, server: Err(&error), closes: &[] });
+        let export = build_export(&ExportInputs { app: app(), exported_at: 1, window_days: 99, organization_id: Some("org_1"), server: Err(&error), closes: &[] });
         assert_eq!(export["server"], json!({ "available": false, "errorCode": "organization_admin_required", "status": null }));
         assert_eq!(export["windowDays"], 30);
     }
@@ -690,7 +749,7 @@ mod tests {
         value["operations"][0]["operationId"] = json!("op_mfrggzdfmztwq2lknnwg23tpobyxe43u");
         value["workspaces"][0]["state"] = json!("canary-refresh-token-4e9f8a7b6c5d4e3f2a1b0c9d");
         let diagnostics: CloudDiagnostics = serde_json::from_value(value).unwrap();
-        let export = build_export(&ExportInputs { app: app(), exported_at: 1, window_days: 7, server: Ok(&diagnostics), closes: &[] });
+        let export = build_export(&ExportInputs { app: app(), exported_at: 1, window_days: 7, organization_id: Some("org_1"), server: Ok(&diagnostics), closes: &[] });
         let operation = &export["server"]["diagnostics"]["operations"][0];
         assert_eq!(operation["errorCode"], REDACTED);
         assert_eq!(operation["history"][0]["detailCode"], REDACTED);
@@ -703,6 +762,70 @@ mod tests {
         assert_eq!(export["server"]["diagnostics"]["workspaces"][0]["workspaceId"], "cw_1");
         assert!(is_id("op_7d2c9a4e-1b1f-4c55-9e0a-3f1c2b3a4d5e"));
         assert!(is_code("cloud_workspace_credential_verification_unavailable"));
+    }
+
+    /// An export is for one Organization. Closes this Mac met in another, or
+    /// with none recorded, and a server answer for another never reach it:
+    /// neither their ids nor anything else of theirs.
+    #[test]
+    fn an_export_holds_nothing_of_another_organization() {
+        const FOREIGN: &[&str] = &["org_b", "cw_b_1", "cw_b_2", "op_b_1", "beta-corp", "beta-secret-project", "cw_dev_1"];
+        let log = ConnectionCloseLog::default();
+        log.record(Some("org_a"), Some("cw_a_1"), 4101, 1);
+        log.record(Some("org_b"), Some("cw_b_1"), 4102, 2);
+        log.record(Some("org_b"), Some("beta-secret-project"), 4100, 3);
+        log.record(Some("beta-corp"), Some("cw_b_2"), 4104, 4);
+        // A dev attach: no Organization recorded, so it belongs to no export.
+        log.record(None, Some("cw_dev_1"), 4101, 5);
+        log.record(None, None, 4103, 6);
+        log.record(Some("org_a"), Some("cw_a_2"), 4104, 7);
+
+        // The log hands out one Organization's entries only.
+        let own: Vec<_> = log.snapshot_for("org_a").into_iter().map(|close| close.workspace_id.unwrap()).collect();
+        assert_eq!(own, ["cw_a_1", "cw_a_2"]);
+        assert!(log.snapshot_for("org_c").is_empty());
+        assert!(log.snapshot_for("").is_empty());
+        // The Organization is never sent to the web view with an entry.
+        assert!(serde_json::to_value(log.snapshot_for("org_b")).unwrap().to_string().find("org_b").is_none());
+
+        // The builder checks again: handed every entry, it keeps org A's.
+        let everything: Vec<ConnectionClose> = log.entries.lock().unwrap().iter().cloned().collect();
+        assert_eq!(everything.len(), 7);
+        let mut answer = fixture();
+        answer["organizationId"] = json!("org_a");
+        answer["operations"][0]["workspaceId"] = json!("cw_a_1");
+        answer["workspaces"][0]["workspaceId"] = json!("cw_a_1");
+        let own_answer: CloudDiagnostics = serde_json::from_value(answer).unwrap();
+        let export = build_export(&ExportInputs { app: app(), exported_at: 1, window_days: 7, organization_id: Some("org_a"), server: Ok(&own_answer), closes: &everything });
+        let text = serde_json::to_string(&export).unwrap();
+        assert_eq!(export["server"]["available"], true);
+        let closes: Vec<&str> = export["connections"]["closes"].as_array().unwrap().iter().map(|close| close["workspaceId"].as_str().unwrap()).collect();
+        assert_eq!(closes, ["cw_a_2", "cw_a_1"]);
+        for foreign in FOREIGN {
+            assert!(!text.contains(foreign), "{foreign} of another organization leaked: {text}");
+        }
+        // Nor the export's own organization id: it is not a field of the file.
+        assert!(!text.contains("org_a"));
+
+        // A server answer for organization B, in an export for A, is refused whole.
+        let mut answer = fixture();
+        answer["organizationId"] = json!("org_b");
+        answer["operations"][0]["operationId"] = json!("op_b_1");
+        answer["operations"][0]["workspaceId"] = json!("cw_b_1");
+        answer["workspaces"][0]["workspaceId"] = json!("cw_b_2");
+        answer["workspaces"][0]["lastOperationId"] = json!("op_b_1");
+        let foreign_answer: CloudDiagnostics = serde_json::from_value(answer).unwrap();
+        let export = build_export(&ExportInputs { app: app(), exported_at: 1, window_days: 7, organization_id: Some("org_a"), server: Ok(&foreign_answer), closes: &everything });
+        assert_eq!(export["server"], json!({ "available": false, "errorCode": "cloud_workspace_invalid_response", "status": null }));
+        let text = serde_json::to_string(&export).unwrap();
+        for foreign in FOREIGN {
+            assert!(!text.contains(foreign), "{foreign} of another organization leaked: {text}");
+        }
+
+        // No Organization determined (signed out): no close and no answer at all.
+        let export = build_export(&ExportInputs { app: app(), exported_at: 1, window_days: 7, organization_id: None, server: Ok(&own_answer), closes: &everything });
+        assert_eq!(export["server"]["available"], false);
+        assert!(export["connections"]["closes"].as_array().unwrap().is_empty());
     }
 
     /// Secret-shaped values, the lowercase ones included (they fit the code
@@ -783,8 +906,8 @@ mod tests {
             let diagnostics: CloudDiagnostics = serde_json::from_value(fixture()).unwrap();
             let refusal = CloudWorkspaceClientError::local("organization_admin_required", false);
             let mut out = Vec::new();
-            keys(&build_export(&ExportInputs { app: app(), exported_at: 1, window_days: 7, server: Ok(&diagnostics), closes: &[] }), &mut out);
-            keys(&build_export(&ExportInputs { app: app(), exported_at: 1, window_days: 7, server: Err(&refusal), closes: &[] }), &mut out);
+            keys(&build_export(&ExportInputs { app: app(), exported_at: 1, window_days: 7, organization_id: Some("org_1"), server: Ok(&diagnostics), closes: &[] }), &mut out);
+            keys(&build_export(&ExportInputs { app: app(), exported_at: 1, window_days: 7, organization_id: Some("org_1"), server: Err(&refusal), closes: &[] }), &mut out);
             out
         };
 
@@ -795,25 +918,27 @@ mod tests {
             value["operations"][0]["history"][0]["detailCode"] = json!("set");
             let mut replaced = 0;
             poison(&mut value, secret, &mut replaced);
-            // Every string the answer type holds: 1 organization id, 8 on the
+            // Every string the answer type holds: 1 organization id, 10 on the
             // operation, 3 on its restart decision, 4 on its history entry,
             // 4 on the workspace and 2 on the close reason.
-            assert_eq!(replaced, 22, "{name}: the fixture no longer covers every string field");
+            assert_eq!(replaced, 24, "{name}: the fixture no longer covers every string field");
             value["stageTimings"]["create"]["stages"][*secret] = json!({ "samples": 1, "p50": 1, "p95": 1 });
             value["stageTimings"]["resume"]["stages"][*secret] = json!({ "samples": 1, "p50": 1, "p95": 1 });
             let diagnostics: CloudDiagnostics = serde_json::from_value(value).unwrap();
             let closes = [
-                ConnectionClose { workspace_id: Some(secret.to_string()), code: 4101, name: "stale_generation", at: 1 },
-                ConnectionClose { workspace_id: None, code: 4104, name: "backpressure", at: 2 },
+                ConnectionClose { organization_id: Some(secret.to_string()), workspace_id: Some(secret.to_string()), code: 4101, name: "stale_generation", at: 1 },
+                ConnectionClose { organization_id: Some(secret.to_string()), workspace_id: None, code: 4104, name: "backpressure", at: 2 },
             ];
             let hostile_app = || AppInfo { version: secret.to_string(), os: secret.to_string(), arch: secret.to_string() };
             let mut refusal = CloudWorkspaceClientError::local("organization_admin_required", false);
             refusal.code = secret.to_string();
 
             for export in [
-                build_export(&ExportInputs { app: hostile_app(), exported_at: 1, window_days: 7, server: Ok(&diagnostics), closes: &closes }),
-                build_export(&ExportInputs { app: hostile_app(), exported_at: 1, window_days: 7, server: Err(&refusal), closes: &closes }),
+                // For the organization the poisoned answer names, so nothing is dropped as foreign.
+                build_export(&ExportInputs { app: hostile_app(), exported_at: 1, window_days: 7, organization_id: Some(secret), server: Ok(&diagnostics), closes: &closes }),
+                build_export(&ExportInputs { app: hostile_app(), exported_at: 1, window_days: 7, organization_id: Some(secret), server: Err(&refusal), closes: &closes }),
             ] {
+                assert_eq!(export["connections"]["closes"].as_array().unwrap().len(), 2, "{name}: the closes were exercised");
                 let text = serde_json::to_string_pretty(&export).unwrap();
                 assert!(!text.contains(secret), "{name} leaked: {text}");
                 // Not a piece of it either: every string left is `[redacted]`
@@ -884,6 +1009,8 @@ mod tests {
         value["operations"][0]["stage"] = json!(canary(4));
         value["operations"][0]["errorCode"] = json!(canary(5));
         value["operations"][0]["retryAction"] = json!(canary(6));
+        value["operations"][0]["reason"] = json!(canary(7));
+        value["operations"][0]["reasonDetail"] = json!(canary(8));
         value["operations"][0]["restartDecision"]["path"] = json!(canary(7));
         value["operations"][0]["restartDecision"]["reason"] = json!(canary(8));
         value["operations"][0]["restartDecision"]["fence"] = json!(canary(9));
@@ -902,10 +1029,14 @@ mod tests {
         let closes: Vec<ConnectionClose> = CANARIES
             .iter()
             .enumerate()
-            .map(|(index, canary)| ConnectionClose { workspace_id: Some(canary.to_string()), code: 4100 + (index % 5) as u16, name: "runtime_unavailable", at: index as i64 })
+            .map(|(index, canary)| ConnectionClose { organization_id: Some(CANARIES[0].to_string()), workspace_id: Some(canary.to_string()), code: 4100 + (index % 5) as u16, name: "runtime_unavailable", at: index as i64 })
             .collect();
         let hostile_app = AppInfo { version: canary(0).into(), os: canary(3).into(), arch: canary(4).into() };
-        let export = build_export(&ExportInputs { app: hostile_app, exported_at: 1, window_days: 7, server: Ok(&diagnostics), closes: &closes });
+        // The export is for the organization the hostile answer names, so its
+        // fields and the closes are all exercised, not dropped as foreign.
+        let export = build_export(&ExportInputs { app: hostile_app, exported_at: 1, window_days: 7, organization_id: Some(CANARIES[0]), server: Ok(&diagnostics), closes: &closes });
+        assert_eq!(export["server"]["available"], true);
+        assert_eq!(export["connections"]["closes"].as_array().unwrap().len(), CANARIES.len());
         let text = serde_json::to_string(&export).unwrap();
         assert!(!text.contains("CANARY"), "a canary leaked: {text}");
         assert!(!text.to_ascii_lowercase().contains("canary"), "a canary leaked: {text}");
@@ -913,7 +1044,7 @@ mod tests {
         // A refusal whose code was tampered with is redacted the same way.
         let mut error = CloudWorkspaceClientError::local("organization_admin_required", false);
         error.code = canary(6).into();
-        let export = build_export(&ExportInputs { app: app(), exported_at: 1, window_days: 7, server: Err(&error), closes: &closes });
+        let export = build_export(&ExportInputs { app: app(), exported_at: 1, window_days: 7, organization_id: Some(CANARIES[0]), server: Err(&error), closes: &closes });
         assert!(!serde_json::to_string(&export).unwrap().contains("CANARY"));
     }
 }

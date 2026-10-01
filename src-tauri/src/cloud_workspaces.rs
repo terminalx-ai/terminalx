@@ -1092,6 +1092,12 @@ impl CloudWorkspaceService {
         }
     }
 
+    /// The Organization a call for `organization` (the active one when none)
+    /// is made in: a member Organization, or an error. No request is made.
+    pub fn organization_in(&self, organization: Option<&str>) -> Result<String, CloudWorkspaceClientError> {
+        self.context_in(organization).map(|(context, _)| context.organization_id)
+    }
+
     fn context(&self) -> Result<AccountContext, CloudWorkspaceClientError> {
         let context = self
             .account
@@ -2896,6 +2902,10 @@ mod tests {
 
         // Never an Organization the user is not a member of.
         assert_eq!(service.diagnostics(Some("org-3"), 7).unwrap_err().code, "cloud_organization_unavailable");
+        // What the export and the close log are scoped to.
+        assert_eq!(service.organization_in(None).unwrap(), "org-1");
+        assert_eq!(service.organization_in(Some("org-2")).unwrap(), "org-2");
+        assert_eq!(service.organization_in(Some("org-3")).unwrap_err().code, "cloud_organization_unavailable");
     }
 
     #[test]

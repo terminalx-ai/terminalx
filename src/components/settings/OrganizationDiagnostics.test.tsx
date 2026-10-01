@@ -37,6 +37,8 @@ const diagnostics = (): CloudDiagnostics => ({
       stage: "connecting-relay",
       errorCode: "cloud_provider_credential_invalid",
       retryAction: "fix-provider-credentials",
+      reason: "attention-stopped",
+      reasonDetail: "cloud_provider_credential_invalid",
       attemptCount: 2,
       createdAt: Date.UTC(2026, 8, 27),
       updatedAt: Date.UTC(2026, 8, 27),
@@ -85,6 +87,9 @@ it("shows timings, operations with retry hints, restart decisions, connections a
   expect(operation.textContent).toContain("Validate or replace the provider key");
   expect(operation.textContent).toContain("Restart: fenced-restart (warm-grace-expired) · fence rotate · replaced generation 3");
   expect(operation.textContent).toContain("2 attempts");
+  expect(operation.textContent).toContain("Stopped by TerminalX while the workspace needed attention (cloud_provider_credential_invalid).");
+  // The closes asked for are the default organization's, like the report.
+  expect(api.cloudConnectionDiagnostics).toHaveBeenCalledWith(null);
 
   expect(screen.getByLabelText("Workspace connections").textContent).toContain("1 ready · 2 waiting · 3 expired");
   const legend = screen.getByLabelText("Relay close reasons");
@@ -159,6 +164,9 @@ it("reports on and exports the organization it was opened for, marking the works
 
   const operations = within(await screen.findByLabelText("Recent operations")).getAllByRole("listitem");
   expect(api.cloudDiagnostics).toHaveBeenCalledWith(7, "org_2");
+  // This Mac's closes are asked for in that organization only, never the whole log.
+  expect(api.cloudConnectionDiagnostics).toHaveBeenCalledWith("org_2");
+  expect(api.cloudConnectionDiagnostics).toHaveBeenCalledTimes(1);
   expect(operations.map((row) => row.hasAttribute("data-current"))).toEqual([false, true]);
   const workspaces = within(screen.getByLabelText("Workspace connections")).getAllByRole("listitem");
   expect(workspaces.map((row) => row.hasAttribute("data-current"))).toEqual([false, true]);

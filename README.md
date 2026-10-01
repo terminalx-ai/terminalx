@@ -115,7 +115,8 @@ Some detail on each:
   The server checks the role in the organization the report is for.
   The server sends identifiers, states, codes and timings only. The last 50
   relay closes (4100–4104) this Mac met are kept in memory, never on disk;
-  members see those but make no diagnostics request.
+  members see those but make no diagnostics request. The view and the export
+  hold only the closes met in the organization they are for.
   **Export diagnostics…** writes a JSON file only where you choose and never
   uploads it; see [docs/ACCOUNTS.md](docs/ACCOUNTS.md#cloud-diagnostics-and-export)
   for exactly what it holds.
