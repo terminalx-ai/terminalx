@@ -87,32 +87,40 @@ fn plain_path(v: &Value) -> Option<String> {
     Some(s.strip_prefix("file://").unwrap_or(s).to_string())
 }
 
-/// What a record says about the turn, for the session watcher. The same
-/// `task_complete` the decoder leaves to the hooks is, when the hooks have
-/// gone quiet, the evidence that the turn is over rather than stalled.
-pub fn turn_mark(line: &str) -> Option<TurnMark> {
-    let v: Value = serde_json::from_str(line).ok()?;
+/// One rollout record as payloads. Unknown records yield nothing.
+///
+/// `skip` is the tail's list of records already logged under another id; it
+/// is a Claude fork's problem and Codex has no equivalent, since a Codex
+/// conversation is only ever appended to.
+pub fn decode_line(line: &str, skip: &std::collections::HashSet<String>, out: &mut Vec<Payload>) {
+    decode_marked(line, skip, out);
+}
+
+/// [`decode_line`], and what the record says about the turn, for the session
+/// watcher, from the one parse of the record. The same `task_complete` the
+/// decoder leaves to the hooks is, when the hooks have gone quiet, the
+/// evidence that the turn is over rather than stalled.
+pub fn decode_marked(line: &str, _skip: &std::collections::HashSet<String>, out: &mut Vec<Payload>) -> Option<TurnMark> {
+    let v = serde_json::from_str::<Value>(line).ok()?;
     if v["type"].as_str() != Some("event_msg") {
         return None;
     }
-    match v["payload"]["type"].as_str()? {
+    let mark = match v["payload"]["type"].as_str().unwrap_or("") {
         "task_started" => Some(TurnMark::Opened),
         "task_complete" | "turn_aborted" => Some(TurnMark::Ended),
         _ => None,
-    }
+    };
+    decode_event(&v["payload"], out);
+    mark
 }
 
-/// One rollout record as payloads. Unknown records yield nothing.
-///
-/// `_skip` is the tail's list of records already logged under another id; it
-/// is a Claude fork's problem and Codex has no equivalent, since a Codex
-/// conversation is only ever appended to.
-pub fn decode_line(line: &str, _skip: &std::collections::HashSet<String>, out: &mut Vec<Payload>) {
-    let Ok(v) = serde_json::from_str::<Value>(line) else { return };
-    if v["type"].as_str() != Some("event_msg") {
-        return;
-    }
-    let p = &v["payload"];
+/// The mark alone.
+#[cfg(test)]
+fn turn_mark(line: &str) -> Option<TurnMark> {
+    decode_marked(line, &Default::default(), &mut Vec::new())
+}
+
+fn decode_event(p: &Value, out: &mut Vec<Payload>) {
     match p["type"].as_str().unwrap_or("") {
         "task_started" => out.push(Payload::ModelRequestStarted),
         // `task_complete` and `turn_aborted` say the turn ended, and so do the

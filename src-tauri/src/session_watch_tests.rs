@@ -44,7 +44,9 @@ impl Rig {
         let home = store::temp_home();
         let dir = tempfile::tempdir().unwrap();
         let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(256));
-        let control = crate::hooks::ControlEndpoint { socket: dir.path().join("control.sock"), token: crate::hooks::mint_token() };
+        // Through the constructor: the endpoint's fields are the hooks
+        // module's business. Nothing here listens on it.
+        let control = crate::hooks::prepare_control().unwrap();
         let manager = SessionManager::new(
             sink.clone(),
             Arc::new(crate::sink::NoObserver),
@@ -82,6 +84,7 @@ impl Rig {
                 decisions: HashMap::new(),
                 turn_tail: Default::default(),
                 transcript_turn: None,
+                transcript_end_owed: false,
                 answered: HashMap::new(),
                 command: script.into(),
                 origin: Origin { token: token.clone(), transcript_root: dir.path().to_path_buf() },
@@ -106,7 +109,7 @@ impl Rig {
     }
 
     fn tail(path: PathBuf) -> tui::Tail {
-        tui::Tail::opening(path, claude::transcript::decode_line, Default::default()).marking(claude::transcript::turn_mark)
+        tui::Tail::opening(path, claude::transcript::decode_line, Default::default()).marking(claude::transcript::decode_marked)
     }
 
     fn append(&self, records: &str) {
@@ -338,4 +341,86 @@ fn terminal_output_does_not_clear_a_timeout_the_provider_reported() {
     rig.tick();
     assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
     assert_eq!(rig.status(), TabStatus::Waiting);
+}
+
+fn completed_turns(rig: &Rig) -> usize {
+    rig.kinds().iter().filter(|k| *k == "turn_completed").count()
+}
+
+fn transcript_turn(rig: &Rig) -> Option<tui::TurnMark> {
+    match &rig.rt.lock().unwrap().engine {
+        Engine::Cli(p) => p.transcript_turn,
+        _ => None,
+    }
+}
+
+/// A hook opens a turn without resetting the latch that keeps two closers
+/// from racing; only a prompt does that. The transcript then records the end
+/// and no `Stop` hook comes. The watcher used to ask the latch, be refused,
+/// and skip the tab on every pass: "Working" for good, and never a warning.
+#[test]
+fn a_turn_a_hook_opened_is_closed_by_the_transcript_s_end_whatever_the_latch_says() {
+    let rig = Rig::new("sleep 120");
+    rig.hook("PreToolUse", json!({ "tool_name": "Bash", "tool_input": { "command": "ls" } }));
+    assert!(rig.rt.lock().unwrap().turn_open);
+    assert_eq!(rig.status(), TabStatus::InProgress);
+
+    rig.end_turn_in_transcript();
+    rig.pane_goes_quiet();
+    rig.events_go_quiet();
+    for _ in 0..3 {
+        rig.tick();
+    }
+    assert!(!rig.rt.lock().unwrap().turn_open, "the turn is not left open with nothing to close it");
+    assert_eq!(rig.status(), TabStatus::Completed);
+    assert_eq!(rig.recovery(), None);
+    assert_eq!(completed_turns(&rig), 1, "closed once, however many passes see it");
+}
+
+/// The `Stop` hook closes a turn before the CLI writes that turn's
+/// `turn_duration`. A prompt sent in between is already open when the record
+/// is read, and the record is not that prompt's end.
+#[test]
+fn the_last_turn_s_late_end_record_does_not_close_the_turn_after_it() {
+    let rig = Rig::new("sleep 120");
+    rig.start_turn();
+    rig.hook("Stop", json!({ "last_assistant_message": "pong" }));
+    assert_eq!(rig.status(), TabStatus::Completed);
+    rig.hook("UserPromptSubmit", json!({ "prompt": "and again" }));
+    assert_eq!(rig.status(), TabStatus::InProgress);
+
+    // The first turn's end, late.
+    rig.end_turn_in_transcript();
+    assert_eq!(transcript_turn(&rig), None, "not recorded against the turn that is open now");
+    std::thread::sleep(PATIENCE.settle + Duration::from_millis(50));
+    rig.tick();
+    assert!(rig.rt.lock().unwrap().turn_open);
+    assert_eq!(rig.status(), TabStatus::InProgress);
+    assert_eq!(completed_turns(&rig), 1);
+
+    // The second turn's own end still closes it when no hook does.
+    rig.end_turn_in_transcript();
+    assert_eq!(transcript_turn(&rig), Some(tui::TurnMark::Ended));
+    std::thread::sleep(PATIENCE.settle + Duration::from_millis(50));
+    rig.tick();
+    assert_eq!(rig.status(), TabStatus::Completed);
+    assert_eq!(completed_turns(&rig), 2);
+}
+
+/// A turn can stop being open without a boundary: a prompt that never
+/// reached the CLI is taken back that way. An "ended" left over from it is
+/// not the next turn's.
+#[test]
+fn opening_a_turn_forgets_what_the_transcript_said_about_the_one_before() {
+    let rig = Rig::new("sleep 120");
+    if let Engine::Cli(p) = &mut rig.rt.lock().unwrap().engine {
+        p.transcript_turn = Some(tui::TurnMark::Ended);
+    }
+    rig.hook("PreToolUse", json!({ "tool_name": "Bash", "tool_input": { "command": "ls" } }));
+    assert_eq!(transcript_turn(&rig), None);
+    std::thread::sleep(PATIENCE.settle + Duration::from_millis(50));
+    rig.tick();
+    assert!(rig.rt.lock().unwrap().turn_open);
+    assert_eq!(rig.status(), TabStatus::InProgress);
+    assert_eq!(completed_turns(&rig), 0);
 }

@@ -80,18 +80,34 @@ fn occupancy(usage: &Value) -> Option<u64> {
 
 /// One transcript record as payloads. Unknown record types yield nothing.
 pub fn decode_line(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>) {
+    decode_marked(line, skip, out);
+}
+
+/// [`decode_line`], and what the record says about the turn, for the session
+/// watcher: a prompt opens one; the `turn_duration` record the CLI writes
+/// when it prints "Worked for …", or an interruption, ends it. Both come from
+/// the one parse of the record.
+pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>) -> Option<TurnMark> {
     if line.trim().is_empty() {
-        return;
+        return None;
     }
-    let Ok(v) = serde_json::from_str::<Value>(line) else { return };
+    let v = serde_json::from_str::<Value>(line).ok()?;
     if v["isSidechain"].as_bool().unwrap_or(false) || v["isMeta"].as_bool().unwrap_or(false) {
-        return;
+        return None;
     }
     if v["uuid"].as_str().is_some_and(|u| skip.contains(u)) {
-        return;
+        return None;
     }
     match v["type"].as_str().unwrap_or("") {
-        "user" => decode_user(&v, out),
+        "user" => {
+            let before = out.len();
+            decode_user(&v, out);
+            return match out.get(before)? {
+                Payload::UserMessage { .. } => Some(TurnMark::Opened),
+                Payload::TurnCompleted { .. } => Some(TurnMark::Ended),
+                _ => None,
+            };
+        }
         "assistant" if v["isApiErrorMessage"].as_bool() == Some(true) => {
             out.push(Payload::Error { message: text_of(&v["message"]["content"]), fatal: false });
         }
@@ -107,31 +123,16 @@ pub fn decode_line(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>) {
                 post_tokens: meta["postTokens"].as_u64(),
             });
         }
+        "system" if v["subtype"] == "turn_duration" => return Some(TurnMark::Ended),
         _ => {}
     }
+    None
 }
 
-/// What a record says about the turn, for the session watcher: a prompt
-/// opens one; the `turn_duration` record the CLI writes when it prints
-/// "Worked for …", or an interruption, ends it.
-pub fn turn_mark(line: &str) -> Option<TurnMark> {
-    let v: Value = serde_json::from_str(line).ok()?;
-    if v["isSidechain"].as_bool().unwrap_or(false) || v["isMeta"].as_bool().unwrap_or(false) {
-        return None;
-    }
-    match v["type"].as_str()? {
-        "system" if v["subtype"] == "turn_duration" => Some(TurnMark::Ended),
-        "user" => {
-            let mut out = Vec::new();
-            decode_user(&v, &mut out);
-            match out.first()? {
-                Payload::UserMessage { .. } => Some(TurnMark::Opened),
-                Payload::TurnCompleted { .. } => Some(TurnMark::Ended),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
+/// The mark alone.
+#[cfg(test)]
+fn turn_mark(line: &str) -> Option<TurnMark> {
+    decode_marked(line, &HashSet::new(), &mut Vec::new())
 }
 
 fn decode_user(v: &Value, out: &mut Vec<Payload>) {
@@ -292,7 +293,7 @@ mod tests {
         assert_eq!(marks, vec![TurnMark::Opened, TurnMark::Ended, TurnMark::Opened, TurnMark::Ended]);
 
         // A tail keeps the last mark of what it read, and hands it over once.
-        let mut s = Streamer::at(0, decode_line).marking(Some(turn_mark));
+        let mut s = Streamer::at(0, decode_line).marking(Some(decode_marked));
         let first_end = REAL.find(r#""subtype":"turn_duration""#).unwrap();
         s.push(&REAL.as_bytes()[..first_end]);
         assert_eq!(s.take_mark(), Some(TurnMark::Opened));

@@ -144,8 +144,9 @@ pub enum TurnMark {
     Ended,
 }
 
-/// Reads one transcript record for a [`TurnMark`].
-pub type Marker = fn(&str) -> Option<TurnMark>;
+/// A [`Decoder`] that also reads the record for a [`TurnMark`], from the one
+/// parse. A tail that marks runs this in the decoder's place.
+pub type Marker = fn(&str, &HashSet<String>, &mut Vec<Payload>) -> Option<TurnMark>;
 
 /// A cursor into one transcript file: how far it has been read, and the bytes
 /// after the last newline, which are a record still being written.
@@ -210,9 +211,13 @@ impl Streamer {
             if let Ok(text) = std::str::from_utf8(&line) {
                 let line = text.trim_end_matches(['\n', '\r']);
                 if !line.trim().is_empty() {
-                    (self.decode)(line, &self.skip, &mut out);
-                    if let Some(mark) = self.marker.and_then(|m| m(line)) {
-                        self.mark = Some(mark);
+                    match self.marker {
+                        Some(decode_marked) => {
+                            if let Some(mark) = decode_marked(line, &self.skip, &mut out) {
+                                self.mark = Some(mark);
+                            }
+                        }
+                        None => (self.decode)(line, &self.skip, &mut out),
                     }
                 }
             }
