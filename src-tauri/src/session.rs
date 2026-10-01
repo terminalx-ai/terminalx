@@ -227,6 +227,14 @@ pub struct CliTab {
     /// Keeps the turn's reply from being drawn twice when the `Stop` hook and
     /// the transcript record cross.
     pub turn_tail: tui::TurnTail,
+    /// What the transcript last said about the turn. Hooks close turns; this
+    /// is what the session watcher goes on when they have gone quiet.
+    pub transcript_turn: Option<tui::TurnMark>,
+    /// Set when a turn closes before the transcript has recorded its end,
+    /// which is the usual order: the `Stop` hook comes first. The next end
+    /// the transcript records is then that turn's, and says nothing about
+    /// whichever turn is open by the time it is read.
+    pub transcript_end_owed: bool,
     /// Tools already answered for in this turn, by the command they name.
     /// Codex fires `PreToolUse` and then `PermissionRequest` for the same
     /// call, and one tool must not cost the reader two cards.
@@ -261,6 +269,10 @@ pub struct TabRuntime {
     pub turn_started_at: Option<Instant>,
     pub last_activity: Instant,
     pub recovery: Option<RecoveryKind>,
+    /// When the session watcher raised the `Timeout` now shown, if it did.
+    /// A timeout the provider reported is a different fact and is not
+    /// cleared by the terminal drawing again.
+    pub stalled_at: Option<Instant>,
     pub stopping: bool,
     pub stop_in_flight: bool,
     pub stopping_pid: Option<u32>,
@@ -270,6 +282,15 @@ pub struct TabRuntime {
 }
 
 impl TabRuntime {
+    /// A turn opens. Whatever the transcript last said was about a turn
+    /// before this one, and must not be read as this one's end.
+    fn open_turn(&mut self) {
+        self.turn_open = true;
+        if let Engine::Cli(p) = &mut self.engine {
+            p.transcript_turn = None;
+        }
+    }
+
     fn key(&self) -> String {
         format!("{}/{}", self.session_id, self.tab_id)
     }
@@ -449,15 +470,54 @@ impl SessionManager {
         let watcher = manager.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(30));
-            let tabs: Vec<_> = watcher.tabs.lock().unwrap().values().cloned().collect();
-            for rt in tabs {
-                let mut rt = rt.lock().unwrap();
-                if recovery::is_stale(rt.status == TabStatus::InProgress, rt.last_activity.elapsed()) {
-                    watcher.needs_recovery(&mut rt, RecoveryKind::Timeout);
-                }
-            }
+            watcher.watch_tabs(recovery::Patience::DEFAULT);
         });
         manager
+    }
+
+    /// One pass of the session watcher over every tab.
+    ///
+    /// The hooks and the transcript say what a turn is doing, and either can
+    /// go missing: a single step may run for longer than the limit without an
+    /// event, and a hook frame may never arrive at all. So before silence is
+    /// called a stall the watcher looks at the two other things it can see.
+    /// A transcript that recorded the end of the turn closes it, once the
+    /// hooks have had their chance to; a pane that is still drawing is an
+    /// agent still working. Only silence on every channel raises the warning,
+    /// and a warning raised here is taken back when the pane draws again.
+    fn watch_tabs(&self, patience: recovery::Patience) {
+        let tabs: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
+        for rt in tabs {
+            let mut rt = rt.lock().unwrap();
+            let (pane, ended) = match &rt.engine {
+                Engine::Cli(p) => (Some(p.pane_id.clone()), p.transcript_turn == Some(tui::TurnMark::Ended)),
+                _ => (None, false),
+            };
+            let silent = rt.last_activity.elapsed();
+            if rt.turn_open && ended && silent >= patience.settle {
+                // Not `close_open_turn`: that one defers to the latch that
+                // keeps two closers from racing, and a turn a hook opened
+                // never reset it. Left to the latch, such a turn would not
+                // close here, and skipping the rest of the pass for it would
+                // leave the tab "Working" for good with no warning either.
+                self.end_open_turn(&mut rt, TurnStatus::Ok, None);
+                continue;
+            }
+            // Only a PTY-first tab has a pane; the other engines are judged
+            // on their events alone, as before.
+            let drawn = pane.and_then(|pane| self.terminals.quiet_for(&pane));
+            if let Some(at) = rt.stalled_at {
+                if drawn.is_some_and(|quiet| quiet < at.elapsed()) {
+                    self.stall_disproved(&mut rt);
+                }
+                continue;
+            }
+            let quiet = drawn.map_or(silent, |drawn| drawn.min(silent));
+            if recovery::is_stale(rt.status == TabStatus::InProgress, quiet, patience) {
+                self.needs_recovery(&mut rt, RecoveryKind::Timeout);
+                rt.stalled_at = Some(Instant::now());
+            }
+        }
     }
 
     /// Settle a PTY-first tab when the pane its CLI ran in exits.
@@ -499,6 +559,7 @@ impl SessionManager {
                 turn_started_at: None,
                 last_activity: Instant::now(),
                 recovery: None,
+                stalled_at: None,
                 stopping: false,
                 stop_in_flight: false,
                 stopping_pid: None,
@@ -549,13 +610,35 @@ impl SessionManager {
 
     fn needs_recovery(&self, rt: &mut TabRuntime, kind: RecoveryKind) {
         rt.recovery = Some(kind);
+        // Whatever is reported here replaces the watcher's guess, if there
+        // was one; the watcher marks its own after this returns.
+        rt.stalled_at = None;
         self.publish(rt, Payload::Recovery { kind: Some(kind) }, None);
         self.set_status(rt, TabStatus::Waiting);
     }
 
-    fn set_status(&self, rt: &mut TabRuntime, status: TabStatus) {
-        if status != TabStatus::Waiting && rt.recovery.take().is_some() {
+    /// Take back a stall the watcher called, now that something has shown
+    /// the agent moving since. The warning goes from the log as well as the
+    /// tab, so a reload does not bring it back. Nothing happens to a
+    /// recovery the watcher did not raise.
+    fn stall_disproved(&self, rt: &mut TabRuntime) {
+        if rt.stalled_at.take().is_none() {
+            return;
+        }
+        if rt.turn_open && rt.pending.is_empty() {
+            self.set_status(rt, TabStatus::InProgress);
+        } else if rt.recovery.take().is_some() {
+            // Still waiting, on an ask or on nothing: only the warning goes.
             self.publish(rt, Payload::Recovery { kind: None }, None);
+        }
+    }
+
+    fn set_status(&self, rt: &mut TabRuntime, status: TabStatus) {
+        if status != TabStatus::Waiting {
+            rt.stalled_at = None;
+            if rt.recovery.take().is_some() {
+                self.publish(rt, Payload::Recovery { kind: None }, None);
+            }
         }
         // CLI work starts require a live hook (or a delivered permission
         // answer). Composer optimism and transcript hydration only affect UI.
@@ -931,7 +1014,7 @@ impl SessionManager {
             }
             Engine::Cli(_) | Engine::None => bail!("no engine"),
         }
-        rt.turn_open = true;
+        rt.open_turn();
         rt.turn_started_at = Some(Instant::now());
         rt.last_activity = Instant::now();
         self.set_status(&mut rt, TabStatus::InProgress);
@@ -1450,6 +1533,8 @@ impl SessionManager {
             echoed: Default::default(),
             decisions: HashMap::new(),
             turn_tail: Default::default(),
+            transcript_turn: None,
+            transcript_end_owed: false,
             answered: HashMap::new(),
             command: launch.command,
             origin: Origin { token, transcript_root: launch.transcript_root },
@@ -1504,7 +1589,7 @@ impl SessionManager {
         let carried = fork_from.as_deref().and_then(|parent| claude::transcript::record_uuids(&entry.cwd, parent)).unwrap_or_default();
         Ok(CliLaunch {
             command,
-            tail: tui::Tail::opening(path, claude::transcript::decode_line, carried),
+            tail: tui::Tail::opening(path, claude::transcript::decode_line, carried).marking(claude::transcript::decode_marked),
             minted: (!resume).then_some(provider_id),
             transcript_root,
         })
@@ -1569,8 +1654,8 @@ impl SessionManager {
         Ok(CliLaunch {
             command,
             tail: match rollout {
-                Some(path) => tui::Tail::opening(path, codex::rollout::decode_line, Default::default()),
-                None => tui::Tail::unknown(codex::rollout::decode_line),
+                Some(path) => tui::Tail::opening(path, codex::rollout::decode_line, Default::default()).marking(codex::rollout::decode_marked),
+                None => tui::Tail::unknown(codex::rollout::decode_line).marking(codex::rollout::decode_marked),
             },
             minted: None,
             // Codex names its own rollout, and only ever under the home
@@ -1654,12 +1739,15 @@ impl SessionManager {
     /// tail's own lock orders this against the poll loop, so a `Stop` hook
     /// flushing before it closes the turn cannot overtake it.
     fn pump(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: &Arc<tui::Tail>) {
-        let payloads = tail.drain();
-        if payloads.is_empty() {
+        let (payloads, mark) = tail.drain_marked();
+        if payloads.is_empty() && mark.is_none() {
             return;
         }
         let mut rt = rt_arc.lock().unwrap();
         rt.last_activity = Instant::now();
+        if !payloads.is_empty() {
+            self.stall_disproved(&mut rt);
+        }
         for payload in payloads {
             // A prompt sent from the composer was published when it was sent;
             // the transcript's copy of it would be the same message twice.
@@ -1674,7 +1762,7 @@ impl SessionManager {
                 }
             }
             if matches!(payload, Payload::UserMessage { .. }) {
-                rt.turn_open = true;
+                rt.open_turn();
                 if let Engine::Cli(p) = &mut rt.engine {
                     p.turn_tail.opened();
                 }
@@ -1692,6 +1780,19 @@ impl SessionManager {
                 self.record_activity(&rt, TabStatus::Completed, store::activity::Source::Replay);
             }
             self.apply(&mut rt, payload, None);
+        }
+        // Recorded after the payloads, so an end never gets ahead of the
+        // reply before it, and only against an open turn: the end of a turn
+        // the hooks already closed says nothing about the next one. That
+        // holds when the next one has opened in the meantime too, which is
+        // what `transcript_end_owed` is for: a prompt sent right after `Stop`
+        // is open before the transcript gets round to the turn before it.
+        let open = rt.turn_open;
+        if let (Some(mark), Engine::Cli(p)) = (mark, &mut rt.engine) {
+            let owed = std::mem::take(&mut p.transcript_end_owed);
+            if !(owed && mark == tui::TurnMark::Ended) {
+                p.transcript_turn = open.then_some(mark);
+            }
         }
     }
 
@@ -1734,6 +1835,20 @@ impl SessionManager {
                 return;
             }
         }
+        self.end_open_turn(rt, status, final_text);
+    }
+
+    /// Publish the boundary of the turn that is open, whatever the latch
+    /// says. `turn_open` is the guard: the boundary clears it, so this cannot
+    /// publish a second one for the same turn. The latch is taken on the way,
+    /// so a transcript record that would close the turn again finds it shut.
+    fn end_open_turn(&self, rt: &mut TabRuntime, status: TurnStatus, final_text: Option<String>) {
+        if !rt.turn_open {
+            return;
+        }
+        if let Engine::Cli(p) = &mut rt.engine {
+            let _ = p.turn_tail.closing();
+        }
         let duration_ms = rt.turn_started_at.map(|t| t.elapsed().as_millis() as u64);
         self.apply(rt, Payload::TurnCompleted { status, final_text, usage: None, duration_ms, head: None, auth_failed: false }, None);
     }
@@ -1769,7 +1884,7 @@ impl SessionManager {
         let ev = self.publish(rt, message, None);
         self.type_prompt(rt_arc, &pane, prompt.agent, paths, Some(ready), receipt);
         if !queued {
-            rt.turn_open = true;
+            rt.open_turn();
             rt.turn_started_at = Some(Instant::now());
             self.set_status(rt, TabStatus::InProgress);
         }
@@ -1992,7 +2107,7 @@ impl SessionManager {
                 }
                 rt.last_activity = Instant::now();
                 if !rt.turn_open {
-                    rt.turn_open = true;
+                    rt.open_turn();
                     rt.turn_started_at = Some(Instant::now());
                 }
                 if rt.pending.is_empty() {
@@ -2234,6 +2349,7 @@ impl SessionManager {
             Engine::OpenCode(o) => o.handle(line),
             Engine::Cli(_) | Engine::None => return,
         };
+        self.stall_disproved(&mut rt);
         self.apply_actions(&mut rt, actions);
     }
 
@@ -2241,6 +2357,12 @@ impl SessionManager {
         if subagent.is_none() {
             if rt.pending.is_empty() && rt.recovery.is_some() && rt.recovery != Some(RecoveryKind::PermissionExpired) && matches!(&payload, Payload::AssistantText { .. } | Payload::Delta(Delta::TextDelta { .. }) | Payload::ToolCallStarted { .. }) {
                 self.set_status(rt, TabStatus::InProgress);
+            }
+            // The watcher's timeout is a guess that the turn is stuck, and a
+            // turn that has ended is not. A failed ending raises its own
+            // recovery just below.
+            if payload.is_turn_boundary() && rt.stalled_at.take().is_some() && rt.recovery.take().is_some() {
+                self.publish(rt, Payload::Recovery { kind: None }, None);
             }
             if let Some(kind) = recovery::failure(&payload) { self.needs_recovery(rt, kind); }
         }
@@ -2307,6 +2429,9 @@ impl SessionManager {
 
         if is_boundary {
             rt.turn_open = false;
+            if let Engine::Cli(p) = &mut rt.engine {
+                p.transcript_end_owed = p.transcript_turn.take() != Some(tui::TurnMark::Ended);
+            }
             if !aborted && rt.recovery.is_none() && !rt.queued.is_empty() {
                 let q = rt.queued.remove(0);
                 let actions = match &mut rt.engine {
@@ -2319,7 +2444,7 @@ impl SessionManager {
                 let sent = !actions.is_empty();
                 self.apply_actions(rt, actions);
                 if sent {
-                    rt.turn_open = true;
+                    rt.open_turn();
                     rt.turn_started_at = Some(Instant::now());
                     self.set_status(rt, TabStatus::InProgress);
                     return;
@@ -2373,6 +2498,10 @@ impl Sink for TabSink {
         self.manager.on_exit(&self.rt, pid, code);
     }
 }
+
+#[cfg(test)]
+#[path = "session_watch_tests.rs"]
+mod watch_tests;
 
 #[cfg(test)]
 mod tests {

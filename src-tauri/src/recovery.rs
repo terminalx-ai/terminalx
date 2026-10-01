@@ -29,9 +29,22 @@ impl RecoveryKind {
     }
 }
 
+/// How long the session watcher waits before it says anything about a turn.
+#[derive(Debug, Clone, Copy)]
+pub struct Patience {
+    /// Silence on every channel for this long is a stall.
+    pub stall: std::time::Duration,
+    /// How long the hooks get to close a turn the transcript says has ended.
+    pub settle: std::time::Duration,
+}
+
+impl Patience {
+    pub const DEFAULT: Self = Self { stall: std::time::Duration::from_secs(300), settle: std::time::Duration::from_secs(10) };
+}
+
 /// Silence is an unknown outcome, never proof that a command failed or exited.
-pub fn is_stale(working: bool, quiet: std::time::Duration) -> bool {
-    working && quiet >= std::time::Duration::from_secs(300)
+pub fn is_stale(working: bool, quiet: std::time::Duration, patience: Patience) -> bool {
+    working && quiet >= patience.stall
 }
 
 /// Restore attention after a restart without resurrecting a running claim.
@@ -126,9 +139,9 @@ mod lifecycle_tests {
     #[test]
     fn silence_only_pauses_work_and_never_expires_a_permission() {
         use std::time::Duration;
-        assert!(!is_stale(true, Duration::from_secs(299)));
-        assert!(is_stale(true, Duration::from_secs(300)));
-        assert!(!is_stale(false, Duration::from_secs(3600)));
+        assert!(!is_stale(true, Duration::from_secs(299), Patience::DEFAULT));
+        assert!(is_stale(true, Duration::from_secs(300), Patience::DEFAULT));
+        assert!(!is_stale(false, Duration::from_secs(3600), Patience::DEFAULT));
     }
     #[test]
     fn restore_failure_stop_and_unknown_delivery() {

@@ -26,6 +26,7 @@
 use serde_json::Value;
 
 use crate::events::{BlockRef, EditKind, FileEdit, Payload, ToolResult, ToolType, Usage};
+use crate::harness::tui::TurnMark;
 
 fn block(id: &str) -> BlockRef {
     BlockRef { message_id: id.to_string(), index: 0 }
@@ -88,15 +89,38 @@ fn plain_path(v: &Value) -> Option<String> {
 
 /// One rollout record as payloads. Unknown records yield nothing.
 ///
-/// `_skip` is the tail's list of records already logged under another id; it
+/// `skip` is the tail's list of records already logged under another id; it
 /// is a Claude fork's problem and Codex has no equivalent, since a Codex
 /// conversation is only ever appended to.
-pub fn decode_line(line: &str, _skip: &std::collections::HashSet<String>, out: &mut Vec<Payload>) {
-    let Ok(v) = serde_json::from_str::<Value>(line) else { return };
+pub fn decode_line(line: &str, skip: &std::collections::HashSet<String>, out: &mut Vec<Payload>) {
+    decode_marked(line, skip, out);
+}
+
+/// [`decode_line`], and what the record says about the turn, for the session
+/// watcher, from the one parse of the record. The same `task_complete` the
+/// decoder leaves to the hooks is, when the hooks have gone quiet, the
+/// evidence that the turn is over rather than stalled.
+pub fn decode_marked(line: &str, _skip: &std::collections::HashSet<String>, out: &mut Vec<Payload>) -> Option<TurnMark> {
+    let v = serde_json::from_str::<Value>(line).ok()?;
     if v["type"].as_str() != Some("event_msg") {
-        return;
+        return None;
     }
-    let p = &v["payload"];
+    let mark = match v["payload"]["type"].as_str().unwrap_or("") {
+        "task_started" => Some(TurnMark::Opened),
+        "task_complete" | "turn_aborted" => Some(TurnMark::Ended),
+        _ => None,
+    };
+    decode_event(&v["payload"], out);
+    mark
+}
+
+/// The mark alone.
+#[cfg(test)]
+fn turn_mark(line: &str) -> Option<TurnMark> {
+    decode_marked(line, &Default::default(), &mut Vec::new())
+}
+
+fn decode_event(p: &Value, out: &mut Vec<Payload>) {
     match p["type"].as_str().unwrap_or("") {
         "task_started" => out.push(Payload::ModelRequestStarted),
         // `task_complete` and `turn_aborted` say the turn ended, and so do the
@@ -299,6 +323,16 @@ mod tests {
                 _ => "other",
             })
             .collect()
+    }
+
+    /// The rollout read for what it says about its turns: `task_started`
+    /// opens one and `task_complete` ends it, and nothing in between counts.
+    #[test]
+    fn marks_where_a_rollouts_turns_open_and_end() {
+        let marks: Vec<TurnMark> = FIXTURE.lines().filter_map(turn_mark).collect();
+        assert_eq!(marks, [TurnMark::Opened, TurnMark::Ended].repeat(3));
+        let aborted = r#"{"timestamp":"2026-09-04T10:52:02.106Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-1","reason":"interrupted"}}"#;
+        assert_eq!(turn_mark(aborted), Some(TurnMark::Ended));
     }
 
     #[test]

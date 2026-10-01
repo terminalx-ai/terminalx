@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::events::{Payload, ToolResult, ToolType, TurnStatus, Usage};
+use crate::harness::tui::TurnMark;
 
 /// Where the CLI keeps the transcript for a session run in `cwd`. Every
 /// character outside `[A-Za-z0-9-]` becomes `-`, which is why a dot-folder
@@ -79,18 +80,34 @@ fn occupancy(usage: &Value) -> Option<u64> {
 
 /// One transcript record as payloads. Unknown record types yield nothing.
 pub fn decode_line(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>) {
+    decode_marked(line, skip, out);
+}
+
+/// [`decode_line`], and what the record says about the turn, for the session
+/// watcher: a prompt opens one; the `turn_duration` record the CLI writes
+/// when it prints "Worked for …", or an interruption, ends it. Both come from
+/// the one parse of the record.
+pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>) -> Option<TurnMark> {
     if line.trim().is_empty() {
-        return;
+        return None;
     }
-    let Ok(v) = serde_json::from_str::<Value>(line) else { return };
+    let v = serde_json::from_str::<Value>(line).ok()?;
     if v["isSidechain"].as_bool().unwrap_or(false) || v["isMeta"].as_bool().unwrap_or(false) {
-        return;
+        return None;
     }
     if v["uuid"].as_str().is_some_and(|u| skip.contains(u)) {
-        return;
+        return None;
     }
     match v["type"].as_str().unwrap_or("") {
-        "user" => decode_user(&v, out),
+        "user" => {
+            let before = out.len();
+            decode_user(&v, out);
+            return match out.get(before)? {
+                Payload::UserMessage { .. } => Some(TurnMark::Opened),
+                Payload::TurnCompleted { .. } => Some(TurnMark::Ended),
+                _ => None,
+            };
+        }
         "assistant" if v["isApiErrorMessage"].as_bool() == Some(true) => {
             out.push(Payload::Error { message: text_of(&v["message"]["content"]), fatal: false });
         }
@@ -106,8 +123,16 @@ pub fn decode_line(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>) {
                 post_tokens: meta["postTokens"].as_u64(),
             });
         }
+        "system" if v["subtype"] == "turn_duration" => return Some(TurnMark::Ended),
         _ => {}
     }
+    None
+}
+
+/// The mark alone.
+#[cfg(test)]
+fn turn_mark(line: &str) -> Option<TurnMark> {
+    decode_marked(line, &HashSet::new(), &mut Vec::new())
 }
 
 fn decode_user(v: &Value, out: &mut Vec<Payload>) {
@@ -256,6 +281,31 @@ mod tests {
         assert!(matches!(&p[2], Payload::AssistantText { text, .. } if text == "pong"));
         assert!(matches!(&p[4], Payload::UserMessage { text, .. } if text == "Reply with exactly: second"));
         assert!(matches!(&p[6], Payload::AssistantText { text, .. } if text == "second"));
+    }
+
+    /// The same file, read for what it says about its turns: each prompt
+    /// opens one and each `turn_duration` ends it. The bookkeeping records
+    /// and the replies in between say nothing either way.
+    #[test]
+    fn marks_where_a_real_sessions_turns_open_and_end() {
+        const REAL: &str = include_str!("fixtures/interactive_session.jsonl");
+        let marks: Vec<TurnMark> = REAL.lines().filter_map(turn_mark).collect();
+        assert_eq!(marks, vec![TurnMark::Opened, TurnMark::Ended, TurnMark::Opened, TurnMark::Ended]);
+
+        // A tail keeps the last mark of what it read, and hands it over once.
+        let mut s = Streamer::at(0, decode_line).marking(Some(decode_marked));
+        let first_end = REAL.find(r#""subtype":"turn_duration""#).unwrap();
+        s.push(&REAL.as_bytes()[..first_end]);
+        assert_eq!(s.take_mark(), Some(TurnMark::Opened));
+        assert_eq!(s.take_mark(), None);
+        s.push(&REAL.as_bytes()[first_end..]);
+        assert_eq!(s.take_mark(), Some(TurnMark::Ended));
+
+        // A tool's result is a `user` record too and opens nothing, a
+        // subagent's records are not this turn's, and an interruption ends
+        // the turn as surely as finishing it does.
+        let marks: Vec<TurnMark> = FIXTURE.lines().filter_map(turn_mark).collect();
+        assert_eq!(marks, vec![TurnMark::Opened, TurnMark::Opened, TurnMark::Ended]);
     }
 
     /// A forked tab's log already holds the parent conversation, and the CLI
