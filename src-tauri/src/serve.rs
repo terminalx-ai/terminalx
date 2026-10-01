@@ -178,8 +178,8 @@ struct Runtime {
     host: Arc<crate::harness::host::Host>,
     terminals: Arc<crate::pty::Terminals>,
     manager: crate::session::SessionManager,
-    /// The socket this runtime's agents dial: the data dir's published one,
-    /// or its own when another runtime already holds that dir.
+    /// The socket this runtime listens on and its agents dial: its own, never
+    /// the data dir's published one, which another runtime may hold.
     socket: std::path::PathBuf,
     project_root: Option<String>,
     /// Agent tabs of the project that were mid-turn when the previous

@@ -240,12 +240,6 @@ pub fn run() {
             // it a PTY-first tab still runs, it just cannot report or ask.
             let hooked = manager.clone();
             let service = control::ControlService::new(sink.clone(), manager.clone(), control_endpoint.clone(), computer.clone(), browser.clone());
-            if !control_endpoint.publishes() {
-                store::activity::report_error(
-                    "Another TerminalX is running on the same data directory. Sessions in both keep working, but the terminalx command in a plain shell reaches the other one."
-                        .into(),
-                );
-            }
             match hooks::serve(control_endpoint, move |frame| hooked.on_hook(frame), move |request| service.handle(request)) {
                 Ok(path) => log::info!("hook socket at {}", path.display()),
                 Err(e) => log::warn!("hook socket: {e:#}"),
