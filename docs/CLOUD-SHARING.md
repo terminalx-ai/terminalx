@@ -121,7 +121,11 @@ role changed).
   is kept as the tab's pending settings, shown as chosen, and sent with their
   next message, with "Model, effort and mode changes apply with your next
   message" under the composer until it goes; everyone else's pickers are
-  disabled with the reason.
+  disabled with the reason. If approval rights are taken back in between,
+  the note goes, the unsent change is dropped rather than sent, and the
+  composer says "Your model, effort or mode change was not applied: you can
+  no longer approve permissions"; the same is said when a receipt arrives
+  with `settingsIgnored`.
 - **Permission decisions** are not lease-bound; they need `canApprove`.
 
 ### Revocation
@@ -238,6 +242,23 @@ organization-visible. A workspace created from the sidebar starts private
   switches back to `private`; the server revokes every share with it.
 * Someone who cannot manage shares gets the same list titled "Who has
   access", with neutral copy.
+* Visibility is the API's owner-or-admin switch. A creator who is a plain
+  member (`you.role` is not `manager`) manages the shares of a workspace that
+  is already organization-visible; "Share…" on their private workspace and
+  "Make private again" are disabled with the reason.
+* The two calls of "make visible and share" can part ways. If the share is
+  refused after the workspace became visible, the dialog says so plainly
+  ("… is now visible to the organization, but it is not shared with … yet"),
+  with "Retry sharing" and "Make private again". If the visibility change
+  gets no answer (`cloud_workspace_request_outcome_unknown`), the workspace
+  is read back from the list before any state is shown; if it cannot be
+  read, the dialog says the visibility is not known and offers "Check
+  again", and nothing is shared or made private on a guess.
+* People are offered from the workspace's own organization, which need not
+  be the default one: `organization_members_in(orgId)` reads
+  `GET /v1/desktop/orgs/:orgId/members` (authorized by membership in the path
+  organization) for a member organization, read only. If it cannot be read
+  the dialog says why and offers Retry; the shares above stay manageable.
 
 It lists the active shares with name and email. Someone with `canManageShares` (an
 organization owner or admin, or the workspace's creator) can change a
@@ -344,25 +365,43 @@ organization is live in the sidebar. Sharing follows them there:
 * **Workspace actions.** Resume, Stop, Archive and Delete are the API's
   manage actions (organization owners and admins), so only a `manager` is
   offered them, in the project menu, a workspace row's menu and the header
-  chip; everyone else reads one disabled line saying who can. "New session"
-  on a project creates or wakes a workspace or adds a session to one, all
-  three an owner's or admin's: a member has no "+", and the menu item is
-  disabled with the reason. Closing a tab from the sidebar is a manager's,
+  chip; everyone else reads one disabled line saying who can. A **new
+  session** creates a workspace, resumes one from the sidebar or adds a
+  session to a running one (`session.create`), all three an owner's or
+  admin's, so a member is not offered one anywhere: no "+" on a project, the
+  project menu's and the new-session picker's items disabled with the reason,
+  and `startCloudSessionIn` (which every way into the form passes) only
+  focuses the project. While the account's role in the organization is not
+  known yet nothing is offered either. (A driver's message to an existing
+  session still wakes a stopped workspace it is shared on: that is sending,
+  not starting a session.) Closing a tab from the sidebar is a manager's,
   like the session menu.
 * **No access.** A session of a workspace this person may not open shows the
-  lock pane instead of its body, with Back: "This workspace has not been
-  shared with you", or "Your access to this workspace was removed." when they
-  had it (a role seen in this view, or its conversation kept on this desktop).
-  Access is lost when the role becomes `none` (`collab.you`, the hello after a
-  reconnect, or the list's `you`) or a reconnect is refused for access
-  (`cloud_workspace_not_found` once it is private, a forbidden close). Then
-  nothing of the workspace stays on screen (no tabs, transcript, lease bar,
-  Working state, Stop, Notes, presence or connection chip), the connection is
-  closed instead of retried, and the list is read again so the sidebar row
-  locks or disappears. The lock holds until a list read after the loss says
-  the workspace is shared again, then the session connects again. In the
-  sidebar an unshared workspace lists one row named after it, with no cached
-  session title, tab or status.
+  lock pane instead of its body, with Back, and nothing of the workspace (no
+  tabs, transcript, lease bar, Working state, Stop, Notes, presence or
+  connection chip). Which pane:
+  * "Your access to this workspace was removed." only for a real transition:
+    the runtime gave this person a role in this view and then none, or this
+    desktop holds the session's conversation and the list now says none.
+  * "This workspace has not been shared with you" when they never had it.
+  * "Checking access…" while the workspace list says it is shared with them
+    and the runtime says role `none`. That is normal for the few seconds
+    until the runtime reads its member list after a share. After 15 s it
+    reads "This workspace has not been shared with you yet". Neither chip is
+    shown meanwhile, and "removed" is never said on a first connect.
+
+  The connection is **kept** while the runtime says `none`: it costs nothing,
+  never wakes compute, and the runtime's `collab.you` opens the session the
+  moment a share arrives. The list and the runtime disagreeing never
+  reconnects anything. Only a reconnect the API refuses
+  (`cloud_workspace_not_found`: the workspace went private, the person left
+  the organization, or it was deleted; the one reason the attach really
+  reports for lost access) closes the connection, and a list **asked for**
+  after that refusal (not merely answered after it) reopens it. While any
+  lock pane shows, the list is read again after 5, 10, 20 and then every
+  30 s, so a share made meanwhile is seen where no connection can tell. In
+  the sidebar an unshared workspace lists one row named after it, with no
+  cached session title, tab or status.
 * **Loading.** Until the runtime answers, a member's session shows the one
   line "Loading the session…" and is named after its workspace.
 * **Permission requests** quote the command, file, URL or tool they are

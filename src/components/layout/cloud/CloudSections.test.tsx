@@ -464,6 +464,36 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
     opened.mockRestore();
   });
 
+  it("tells a creator who is a plain member why a private workspace cannot be shared, instead of offering Share…", async () => {
+    const dialog = await import("@/components/cloud/CloudShareDialog");
+    const opened = vi.spyOn(dialog, "openShareDialog").mockImplementation(() => undefined);
+    catalog.resetCloudCatalog();
+    await catalog.ingestCloudList(
+      {
+        workspaces: [
+          // Private, created by this member (demoted since): making it visible is an owner's or admin's.
+          item("fix-login", { repositories, accessMode: "private", lastActivityAt: 50, authority: "participate", you: { role: "driver", canApprove: true, canManageShares: true } }),
+          // Already organization-visible: the same person manages its shares.
+          item("perf-sweep", { repositories, lastActivityAt: 40, authority: "participate", you: { role: "driver", canApprove: true, canManageShares: true } }),
+        ],
+      },
+      ORG,
+    );
+    mount();
+    openMenu("fix-login");
+    const locked = within(await screen.findByRole("menu")).getByTestId("cloud-share-locked");
+    expect(locked.getAttribute("aria-disabled")).toBe("true");
+    expect(locked.textContent).toBe("Share…Only an organization owner or admin can change whether a workspace is private or visible to the organization");
+    fireEvent.click(locked);
+    expect(opened).not.toHaveBeenCalled();
+    cleanup();
+    mount();
+    openMenu("perf-sweep");
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Share…" }));
+    expect(opened).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "perf-sweep", accessMode: "organization", canManage: true }));
+    opened.mockRestore();
+  });
+
   it("offers Stop, Archive and Delete only to an organization owner or admin, and says so to everyone else", async () => {
     catalog.resetCloudCatalog();
     await catalog.ingestCloudList(
@@ -510,12 +540,50 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Project menu for acme/api" }));
     const entry = within(await screen.findByRole("menu")).getByRole("menuitem", { name: /New session/ });
     expect(entry.getAttribute("aria-disabled")).toBe("true");
-    expect(entry.getAttribute("title")).toBe("Only an organization owner or admin can start cloud sessions");
+    expect(entry.getAttribute("title")).toBe("Only an organization owner or admin can start a new cloud session");
     cleanup();
     // An owner or admin keeps both.
     signIn();
     mount();
     expect(screen.getByRole("button", { name: "New session in acme/api" })).toBeTruthy();
+  });
+
+  it("never opens the cloud new-session form for a member, or before the role is known, whichever way it is asked for", async () => {
+    const key = `cloud:${ORG}:github.com/acme/api`;
+    const asRole = (role: string | undefined) => {
+      mocks.status = { ...mocks.status, organizations: mocks.status.organizations!.map((org) => (org.id === ORG ? ({ ...org, role } as typeof org) : org)) };
+    };
+    for (const role of ["member", undefined]) {
+      asRole(role);
+      // The local new-session form is showing (a draft).
+      act(() => sessions.selectSession(null));
+      // `+`, the picker and "New project…" all end here.
+      act(() => sessions.startCloudSessionIn(key));
+      expect(sessions.getSessionStore().cloudSessionPreset).toBeNull();
+      expect(sessions.getSessionStore().selectedCloudProject).toBe(key);
+      // A click on the project row while drafting only focuses the project.
+      act(() => sessions.selectCloudProjectInSidebar(key));
+      expect(sessions.getSessionStore().cloudSessionPreset).toBeNull();
+    }
+    // Not known yet: no "+", and the menu item is off without claiming a refusal.
+    mount();
+    expect(screen.queryByRole("button", { name: "New session in acme/api" })).toBeNull();
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Project menu for acme/api" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+    fireEvent.click(screen.getByRole("button", { name: "Project menu for acme/api" }));
+    const entry = within(await screen.findByRole("menu")).getByRole("menuitem", { name: /New session/ });
+    expect(entry.getAttribute("aria-disabled")).toBe("true");
+    expect(entry.getAttribute("title")).toBeNull();
+    cleanup();
+
+    // An owner or admin gets the form from both.
+    asRole("admin");
+    act(() => sessions.selectSession(null));
+    act(() => sessions.selectCloudProjectInSidebar(key));
+    expect(sessions.getSessionStore().cloudSessionPreset).toEqual({ projectKey: key });
+    act(() => sessions.selectSession(null));
+    act(() => sessions.startCloudSessionIn(key));
+    expect(sessions.getSessionStore().cloudSessionPreset).toEqual({ projectKey: key });
+    act(() => sessions.selectSession(null));
   });
 
   it("lists nothing this desktop kept of a workspace that is not shared: one row named after it, no tab", async () => {

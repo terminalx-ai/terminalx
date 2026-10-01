@@ -10,7 +10,7 @@ import { accessibilityPress, mouseClick } from "@/test/press";
 // workspace, or asks for the one-time cost confirmation before creating one.
 // No local path command runs for a cloud draft.
 
-const { invoke, flow, draft } = vi.hoisted(() => ({
+const { invoke, flow, draft, mayStart } = vi.hoisted(() => ({
   invoke: vi.fn(),
   flow: {
     planCloudStart: vi.fn(),
@@ -18,7 +18,9 @@ const { invoke, flow, draft } = vi.hoisted(() => ({
     prepareCloudCreate: vi.fn(),
     confirmCloudCreate: vi.fn(),
   },
-  draft: { value: null as { project: CloudProject | null; orgName: string } | null },
+  draft: { value: null as { project: CloudProject | null; orgName: string; mayStart: boolean | null } | null },
+  /** Whether this account may start cloud sessions in the organization (an owner or admin). */
+  mayStart: { value: true as boolean | null },
 }));
 
 vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ onDragDropEvent: vi.fn(async () => vi.fn()) }) }));
@@ -62,7 +64,7 @@ vi.mock("@/lib/sessions", () => ({
 vi.mock("./CloudNewSession", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./CloudNewSession")>()),
   useCloudDraft: () => draft.value,
-  useCloudProjectChoices: () => [{ orgId: "org-a", orgName: "Acme", projects: [project, { ...project, key: "cloud:org-a:blank/scratch", identity: "blank/scratch", fullName: "scratch", blank: true }] }],
+  useCloudProjectChoices: () => [{ orgId: "org-a", orgName: "Acme", mayStart: mayStart.value, projects: [project, { ...project, key: "cloud:org-a:blank/scratch", identity: "blank/scratch", fullName: "scratch", blank: true }] }],
 }));
 vi.mock("@/lib/cloudNewSession", () => flow);
 vi.mock("@/components/cloud/RunningLimitNotice", () => ({
@@ -94,7 +96,8 @@ beforeEach(() => {
     throw new Error(`no local command for a cloud draft: ${command}`);
   });
   for (const fn of Object.values(flow)) fn.mockReset();
-  draft.value = { project, orgName: "Acme" };
+  mayStart.value = true;
+  draft.value = { project, orgName: "Acme", mayStart: true };
 });
 
 afterEach(() => cleanup());
@@ -218,6 +221,46 @@ describe("the project picker", () => {
     expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["raccoon", "acme/api", "scratchno repo", "Add a project…"]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: /scratch/ }));
     expect(sessions.startCloudSessionIn).toHaveBeenCalledWith("cloud:org-a:blank/scratch");
+  });
+});
+
+describe("a member, who may not start cloud sessions", () => {
+  it("lists the organization's cloud projects in the picker but offers none, with the reason", async () => {
+    const sessions = await import("@/lib/sessions");
+    vi.mocked(sessions.startCloudSessionIn).mockClear();
+    mayStart.value = false;
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /acme\/api/ }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByTestId("cloud-start-locked").textContent).toBe("Only an organization owner or admin can start a new cloud session");
+    for (const name of [/acme\/api/, /scratch/]) {
+      const entry = within(menu).getByRole("menuitem", { name });
+      expect(entry.getAttribute("aria-disabled")).toBe("true");
+      fireEvent.click(entry);
+    }
+    expect(sessions.startCloudSessionIn).not.toHaveBeenCalled();
+    // The local project stays offered.
+    expect(within(menu).getByRole("menuitem", { name: "raccoon" }).getAttribute("aria-disabled")).not.toBe("true");
+  });
+
+  it("offers nothing while the account's role in the organization is not known yet", async () => {
+    mayStart.value = null;
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /acme\/api/ }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: /acme\/api/ }).getAttribute("aria-disabled")).toBe("true");
+    // Not known is not refused: no reason is claimed yet.
+    expect(within(menu).queryByTestId("cloud-start-locked")).toBeNull();
+  });
+
+  it("keeps Start off, with the reason, if the form is already open for a cloud project", () => {
+    draft.value = { project, orgName: "Acme", mayStart: false };
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    type("fix the login bug");
+    expect(screen.getByTestId("cloud-start-locked").textContent).toBe("Only an organization owner or admin can start a new cloud session");
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    expect(flow.planCloudStart).not.toHaveBeenCalled();
+    expect(flow.prepareCloudCreate).not.toHaveBeenCalled();
   });
 });
 

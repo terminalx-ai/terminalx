@@ -48,6 +48,12 @@ export interface OrgCatalog {
   quota: { used: number; limit: number } | null;
   /** When the workspace list last answered; null for never. */
   fetchedAt: number | null;
+  /**
+   * When the list now shown was asked for (this launch only). What it says
+   * was true no earlier than this, so something learned later than it (a
+   * revocation seen live) is not contradicted by it.
+   */
+  requestedAt?: number | null;
   /** `cache` until this launch's first list answers. */
   source: "cache" | "live";
   /** Why the last refresh failed; the rows above are then last known. */
@@ -312,7 +318,7 @@ export async function ingestCloudList(
     for (const tombstone of tombstones) delete sessions[tombstone.id];
     set({
       ...state,
-      orgs: { ...state.orgs, [org]: { ...current, workspaces, quota: list.quota ?? current.quota, fetchedAt: now, source: "live", error: null, sessions } },
+      orgs: { ...state.orgs, [org]: { ...current, workspaces, quota: list.quota ?? current.quota, fetchedAt: now, requestedAt, source: "live", error: null, sessions } },
       createMemory,
     });
   }

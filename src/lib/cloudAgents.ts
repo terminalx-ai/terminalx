@@ -42,6 +42,12 @@ export interface CloudAgentTab {
   live: boolean;
   /** Model, effort or mode chosen while offline, carried in the next send. */
   pendingConfig: { model?: string; effort?: string | null; mode?: string } | null;
+  /**
+   * A setting change of this tab was dropped: the runtime's receipt said
+   * `settingsIgnored` (this person may no longer approve), or it was not sent
+   * for that reason. Shown until the next change or message; not saved.
+   */
+  settingsIgnored?: boolean;
 }
 
 export interface CloudAgentsSnapshot {
@@ -617,14 +623,53 @@ export async function configureCloudAgentTab(
     tab.pendingConfig = { ...(tab.pendingConfig ?? {}), ...patch };
     tab.info = withPending(tab.info, tab.pendingConfig);
   }
+  // A new choice replaces the notice about the last one.
+  const now = s.tabs.get(tabId);
+  if (now) now.settingsIgnored = false;
   publish(s);
   scheduleSave(s, tabId);
 }
+
+/**
+ * Drop a tab's unsent setting change because this person may no longer make
+ * it (they lost approval rights since choosing it), and say so. The next
+ * message then goes without settings the runtime would only ignore.
+ */
+export function discardPendingConfig(scope: CloudAgentScope, tabId: string) {
+  const s = store(scope);
+  const tab = s.tabs.get(tabId);
+  if (!tab?.pendingConfig) return;
+  tab.pendingConfig = null;
+  tab.settingsIgnored = true;
+  publish(s);
+  scheduleSave(s, tabId);
+}
+
+/** The notice about a dropped setting change was read (a new message is on its way). */
+function clearSettingsIgnored(s: Store, tabId: string) {
+  const tab = s.tabs.get(tabId);
+  if (tab?.settingsIgnored) tab.settingsIgnored = false;
+}
+
 
 // ---- the outbox
 
 function upsert(s: Store, entry: OutboxEntry) {
   const at = s.outbox.findIndex((existing) => existing.clientCommandId === entry.clientCommandId);
+  // A receipt that just arrived saying the message went without its settings
+  // (the sender may not configure the tab any more): say so, and stop
+  // promising that they apply with the next message. Receipts already known
+  // (an earlier launch's) say nothing new.
+  if (at >= 0 && entry.receipt?.settingsIgnored === true && s.outbox[at]!.receipt?.settingsIgnored !== true) {
+    const tab = s.tabs.get(entry.tabId);
+    if (tab) {
+      tab.settingsIgnored = true;
+      if (tab.pendingConfig) {
+        tab.pendingConfig = null;
+        scheduleSave(s, entry.tabId);
+      }
+    }
+  }
   s.outbox = at >= 0 ? s.outbox.map((existing, i) => (i === at ? entry : existing)) : [...s.outbox, entry];
 }
 
@@ -662,6 +707,8 @@ export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, te
   const tab = s.tabs.get(tabId);
   if (isDevScope(scope)) return sendOverLiveRpc(scope, tabId, text, client);
   const sent = tab?.pendingConfig ?? null;
+  // With settings on board, an earlier notice is replaced by this message's own receipt.
+  if (sent) clearSettingsIgnored(s, tabId);
   const entry = await enqueue(scope, tabId, "send", { text, ...(sent ?? {}) }, client);
   // Only what went out is settled; a change made meanwhile waits for the next.
   const current = s.tabs.get(tabId);

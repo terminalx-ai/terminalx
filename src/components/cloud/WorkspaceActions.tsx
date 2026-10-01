@@ -5,7 +5,7 @@ import { CloudWorkspaceLifecycleDialog, actionsFor, type LifecycleAction } from 
 import { openShareDialog } from "@/components/cloud/CloudShareDialog";
 import type { CloudWorkspaceListItem } from "@/lib/api";
 import { refreshCloudCatalog, resumeCloudWorkspace, unarchiveCloudWorkspace } from "@/lib/cloudCatalog";
-import { LIFECYCLE_ADMIN_REASON, workspaceAuthority } from "@/lib/cloudCollab";
+import { LIFECYCLE_ADMIN_REASON, VISIBILITY_ADMIN_REASON, workspaceAuthority } from "@/lib/cloudCollab";
 import { closeCloudConnection } from "@/lib/cloudConnections";
 import { lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 import { deriveCloudActivity } from "@/lib/cloudRowState";
@@ -50,11 +50,24 @@ export function WorkspaceActionItems({
   const shareable = present && (authority.manageShares || (authority.viewShares && workspace.accessMode === "organization"));
   const sharedWith = workspace.sharedWith ?? 0;
   const lifecycle = authority.lifecycle;
+  // Sharing a private workspace means making it organization-visible first,
+  // which is an owner's or admin's: a creator who is a plain member is told
+  // so here, instead of being walked into a refusal.
+  const shareBlocked = workspace.accessMode === "private" && authority.manageShares && !authority.lifecycle;
   const offersLifecycle =
     (workspace.state === "suspended" && !archived) || (actions.includes("stop") && !archived) || actions.includes("archive") || archived || actions.includes("delete");
   return (
     <>
-      {shareable && (
+      {shareable && shareBlocked && (
+        <DropdownMenuItem disabled title={VISIBILITY_ADMIN_REASON} data-testid="cloud-share-locked">
+          <Users />
+          <span className="flex min-w-0 flex-col">
+            <span>Share…</span>
+            <span className="whitespace-normal text-[10px] text-faint">{VISIBILITY_ADMIN_REASON}</span>
+          </span>
+        </DropdownMenuItem>
+      )}
+      {shareable && !shareBlocked && (
         <DropdownMenuItem
           onSelect={() =>
             openShareDialog({

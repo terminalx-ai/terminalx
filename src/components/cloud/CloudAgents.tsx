@@ -13,6 +13,7 @@ import {
   attachCloudAgentTab,
   closeCloudAgentTab,
   configureCloudAgentTab,
+  discardPendingConfig,
   createCloudAgentTab,
   decideCloudAgent,
   DEV_SCOPE_NOTICE,
@@ -39,7 +40,7 @@ import { TERMINAL_OUTBOX_STATES, type CloudAgentScope, type OutboxEntry, type Wa
 import type { ImageInput } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
 import { cn } from "@/lib/cn";
-import { SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
+import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
 import { LeaseBar, NotesPanel, NotSharedNotice, useNowUntil } from "./CloudCollab";
 
@@ -490,6 +491,8 @@ function CloudAgentPane({
       setError("Images cannot be sent to cloud agent tabs yet.");
       throw new Error("images unsupported");
     }
+    // Settings chosen while this person could approve are not sent once they cannot.
+    if (!mayConfigure) discardPendingConfig(scope, tab.tabId);
     await interactive(() => sendToCloudAgent(scope, tab.tabId, text, connected ? client : null));
   };
 
@@ -611,7 +614,8 @@ function CloudAgentPane({
                   onSetMode={(mode) => configure({ mode })}
                   disabled={!!blocked}
                   settingsLockedReason={mayConfigure ? null : SETTINGS_LOCKED_REASON}
-                  settingsNote={tab.pendingConfig ? SETTINGS_WITH_NEXT_MESSAGE : null}
+                  settingsNote={tab.settingsIgnored ? SETTINGS_IGNORED_REASON : tab.pendingConfig && mayConfigure ? SETTINGS_WITH_NEXT_MESSAGE : null}
+                  settingsNoteWarning={!!tab.settingsIgnored}
                   canStop={mayStop}
                   disabledReason={blocked ?? error}
                 />

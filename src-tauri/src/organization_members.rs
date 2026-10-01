@@ -249,6 +249,31 @@ impl OrganizationMembersService {
         self.run(None, &["members"], None)
     }
 
+    /// The roster of a member Organization that need not be the active one
+    /// (PRO-71): the people a cloud workspace there can be shared with. Read
+    /// only. The API authorizes `GET /orgs/:orgId/members` by membership in
+    /// the path Organization; the account decides here whether this desktop
+    /// may name it (a member Organization on a multi-org server, else the
+    /// active one), and an answer that lands after the user left it, signed
+    /// out or changed account is dropped. The roster carries no context
+    /// revision, so it cannot authorize a member mutation.
+    pub fn list_in(&self, organization_id: &str) -> Result<OrganizationRoster, OrganizationMembersError> {
+        let valid = !organization_id.is_empty()
+            && organization_id.len() <= 128
+            && organization_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':' | b'-'));
+        if !valid {
+            return Err(OrganizationMembersError::local("invalid_request"));
+        }
+        let (context, access) = self.account.context_in(organization_id).map_err(OrganizationMembersError::local)?;
+        let result = self.client.request::<OrganizationRoster>(&context, &["members"], None);
+        if !self.account.is_current_in(&context, access) {
+            return Err(OrganizationMembersError::local("account_context_changed"));
+        }
+        let mut roster = result?;
+        roster.context_revision = String::new();
+        Ok(roster)
+    }
+
     pub fn invite(
         &self,
         email: &str,
@@ -369,6 +394,44 @@ mod tests {
     }
 
     const ROSTER: &str = r#"{"members":[{"userId":"user-1","email":"owner@example.com","role":"owner"}],"pendingInvites":[{"email":"new@example.com","role":"member","createdAt":1,"expiresAt":2,"status":"pending"}],"viewerRole":"owner","canManageMembers":true}"#;
+
+    #[test]
+    fn lists_a_member_organizations_roster_by_its_own_path_without_a_revision() {
+        let (base, server) = serve_once("200 OK", "", ROSTER);
+        let members = service(&base);
+        members.account.set_memberships_for_test(&["org-1", "org-2"], true);
+        let roster = members.list_in("org-2").unwrap();
+        let request = server.join().unwrap();
+        assert!(request.starts_with("GET /v1/desktop/orgs/org-2/members "));
+        assert_eq!(roster.members[0].role, "owner");
+        // Read only: nothing here can authorize a member mutation.
+        assert_eq!(roster.context_revision, "");
+    }
+
+    #[test]
+    fn refuses_another_organizations_roster_before_any_request() {
+        let members = service("http://127.0.0.1:9");
+        // Not a member Organization.
+        members.account.set_memberships_for_test(&["org-1", "org-2"], true);
+        assert_eq!(members.list_in("org-9").unwrap_err().code, "cloud_organization_unavailable");
+        assert_eq!(members.list_in("../x").unwrap_err().code, "invalid_request");
+        // A server that authorizes by the active Organization only: just the active one.
+        members.account.set_memberships_for_test(&["org-1", "org-2"], false);
+        assert_eq!(members.list_in("org-2").unwrap_err().code, "cloud_organization_unavailable");
+    }
+
+    #[test]
+    fn drops_a_member_roster_that_lands_after_the_user_left_that_organization() {
+        let members = service("http://127.0.0.1:9");
+        members.account.set_memberships_for_test(&["org-1", "org-2"], true);
+        let account = members.account.clone();
+        let (context, access) = account.context_in("org-2").unwrap();
+        // Left org-2 while the request is in flight.
+        account.set_memberships_for_test(&["org-1"], true);
+        assert!(!account.is_current_in(&context, access));
+        // And so a call made now is refused before it is sent.
+        assert_eq!(members.list_in("org-2").unwrap_err().code, "cloud_organization_unavailable");
+    }
 
     #[test]
     fn lists_the_active_organization_roster_with_a_context_revision() {

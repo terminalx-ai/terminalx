@@ -60,13 +60,14 @@ vi.mock("@/components/chat/Composer", () => ({
     disabledReason?: string | null;
     settingsLockedReason?: string | null;
     settingsNote?: string | null;
+    settingsNoteWarning?: boolean;
     canStop?: boolean;
     cwd?: string;
   }) => (
     <div data-testid="composer" data-cwd={props.cwd ?? ""}>
       {props.disabledReason && <p role="note">{props.disabledReason}</p>}
       {props.settingsLockedReason && <p data-testid="settings-locked">{props.settingsLockedReason}</p>}
-      {props.settingsNote && <p data-testid="settings-note">{props.settingsNote}</p>}
+      {props.settingsNote && <p data-testid="settings-note" data-warning={props.settingsNoteWarning ? "true" : "false"}>{props.settingsNote}</p>}
       <textarea aria-label="Prompt" value={props.draft} onChange={(e) => props.onDraftChange(e.target.value)} />
       <button onClick={() => void Promise.resolve(props.onSend(props.draft, [])).then(() => props.onDraftChange(""), () => undefined)}>{props.busy ? "Queue" : "Send"}</button>
       {props.busy && props.canStop !== false && <button onClick={props.onStop}>Stop</button>}
@@ -867,6 +868,12 @@ describe("sharing states found in the live two-user test", () => {
     await waitFor(() => expect(runtime.methods("collab.state").length).toBeGreaterThan(0));
   }
   const chips = () => screen.queryAllByTestId("cloud-access-chip").map((chip) => chip.textContent);
+  /** The runtime's member list changed this person's role: `collab.you`, and `collab.state` agrees from then on. */
+  const becomes = (role: string, canApprove = false) => {
+    const you = { userId: "u-me", role, canApprove };
+    if (runtime.collab) runtime.collab.you = you;
+    runtime.notify("collab.you", { you: { ...you, listed: true } });
+  };
 
   it("replaces the open session with the lock pane when the share is revoked, and clears every stale control", async () => {
     names();
@@ -908,9 +915,11 @@ describe("sharing states found in the live two-user test", () => {
     expect(screen.queryByRole("button", { name: "New tab" })).toBeNull();
     expect(screen.queryByText("Fix login redirect")).toBeNull();
     expect(chips()).toEqual(["Not shared"]);
-    // The connection is closed, not left to reconnect, and the list is read again so the sidebar row follows.
-    await waitFor(() => expect(closed).toHaveBeenCalled());
-    expect(mocks.refreshCatalog).toHaveBeenCalledWith(ORG);
+    // The list is read again so the sidebar row follows. The connection stays (it costs nothing and
+    // never wakes): nothing is reconnected, and a new share would arrive on it as `collab.you`.
+    await waitFor(() => expect(mocks.refreshCatalog).toHaveBeenCalledWith(ORG));
+    expect(closed).not.toHaveBeenCalled();
+    expect(mocks.workspaceConnection).toHaveBeenCalledTimes(1);
     expect(guard.violations).toEqual([]);
 
     // Back leaves the session.
@@ -961,8 +970,8 @@ describe("sharing states found in the live two-user test", () => {
     expect(screen.getByTitle("login-fix").textContent).toBe("login-fix");
     expect(screen.queryByText("Cloud session")).toBeNull();
     expect(chips()).toEqual(["Not shared"]);
-    // Someone without access holds no connection at all.
-    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+    // Looking never wakes anything, locked or not.
+    expect(activate).not.toHaveBeenCalled();
     expect(guard.violations).toEqual([]);
   });
 
@@ -977,10 +986,32 @@ describe("sharing states found in the live two-user test", () => {
     expect(screen.queryByText("Loading the session…")).toBeNull();
     expect(screen.queryByText(/Add an agent tab/)).toBeNull();
     expect(screen.queryByRole("button", { name: "New tab" })).toBeNull();
-    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+    expect(activate).not.toHaveBeenCalled();
+    // Connected with role none (the runtime agrees with the list, and hands over no tabs): still the same pane and chip, never "removed".
+    runtime.tabs = [];
+    await act(async () => runtime.connectShared({ ...ME, role: "none" }));
+    expect(screen.getByTestId("cloud-not-shared")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-access-removed")).toBeNull();
+    expect(chips()).toEqual(["Not shared"]);
+    expect(screen.queryByTestId("session-connection")).toBeNull();
   });
 
-  it("connects again once a list read after the loss says the workspace is shared again", async () => {
+  it("opens again within the same connection the moment the workspace is shared again", async () => {
+    names();
+    setCatalog(shared("viewer"));
+    runtime.collab = { you: { ...ME, role: "viewer" }, participants: [], leases: [] };
+    await openShared({ ...ME, role: "viewer" });
+    await act(async () => runtime.notify("collab.you", { you: { userId: "u-me", role: "none", canApprove: false, listed: true } }));
+    await screen.findByTestId("cloud-access-removed");
+    await act(async () => becomes("driver"));
+    await waitFor(() => expect(screen.queryByTestId("cloud-access-removed")).toBeNull());
+    expect(await screen.findByText("Fix login redirect")).toBeTruthy();
+    expect(chips()).toEqual(["Driver"]);
+    // One connection throughout: nothing was closed or reopened.
+    expect(mocks.workspaceConnection).toHaveBeenCalledTimes(1);
+  });
+
+  it("after a refused reconnect, only a list asked for after the refusal opens the workspace again", async () => {
     names();
     setCatalog(shared("viewer"));
     runtime.collab = { you: { ...ME, role: "viewer" }, participants: [], leases: [] };
@@ -988,21 +1019,97 @@ describe("sharing states found in the live two-user test", () => {
     await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
     await act(async () => runtime.connectShared({ ...ME, role: "viewer" }));
     await screen.findByText("Fix login redirect");
-    await act(async () => runtime.notify("collab.you", { you: { userId: "u-me", role: "none", canApprove: false, listed: true } }));
+    await act(async () => runtime.emit({ state: "reconnecting", attempt: 1, reason: "cloud_workspace_not_found", retryInMs: 250 }));
     await screen.findByTestId("cloud-access-removed");
-    // The list this desktop had (still "viewer", read before the loss) does not reconnect it in a loop.
     const before = mocks.workspaceConnection.mock.calls.length;
+    // A list that was asked for before the refusal and only answered after it (still "viewer") opens nothing (D8).
+    const org = mocks.catalog.orgs[ORG] as { fetchedAt: number; requestedAt?: number };
+    org.requestedAt = Date.now() - 60_000;
+    org.fetchedAt = Date.now() + 60_000;
     view.rerender(wrap(<CloudHarness />));
     await act(async () => undefined);
     expect(mocks.workspaceConnection.mock.calls.length).toBe(before);
     expect(screen.getByTestId("cloud-access-removed")).toBeTruthy();
-    // A list read after it says driver: the session connects and shows again.
+    // One asked for after it says driver: the session connects and shows again.
     setCatalog(shared("driver"));
-    (mocks.catalog.orgs[ORG] as { fetchedAt: number }).fetchedAt = Date.now() + 10_000;
+    (mocks.catalog.orgs[ORG] as { requestedAt?: number }).requestedAt = Date.now() + 10_000;
     view.rerender(wrap(<CloudHarness />));
-    await waitFor(() => expect(mocks.workspaceConnection.mock.calls.length).toBeGreaterThan(before));
+    await waitFor(() => expect(mocks.workspaceConnection.mock.calls.length).toBe(before + 1));
     await waitFor(() => expect(screen.queryByTestId("cloud-access-removed")).toBeNull());
     expect(await screen.findByText("Fix login redirect")).toBeTruthy();
+  });
+
+  // Review D1: the list says shared, the runtime's member list has not caught up (or is stale).
+  it("checks access instead of saying removed, and never reconnects, while the list and the runtime disagree", async () => {
+    names();
+    setCatalog(shared("viewer"));
+    runtime.collab = { you: { ...ME, role: "none" }, participants: [], leases: [] };
+    const view = render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    // The first connect ever: the hello says role none, listed.
+    await act(async () => runtime.connectShared({ ...ME, role: "none" }));
+    const pane = await screen.findByTestId("cloud-access-checking");
+    expect(pane.textContent).toContain("Checking access…");
+    expect(screen.queryByTestId("cloud-access-removed")).toBeNull();
+    expect(screen.queryByText(/was removed/)).toBeNull();
+    // Neither chip claims anything while it is being checked.
+    expect(chips()).toEqual([]);
+    expect(screen.queryByTestId("session-connection")).toBeNull();
+    expect(screen.queryByTestId("composer")).toBeNull();
+
+    // Every later list still says viewer: nothing reconnects, nothing flashes.
+    for (let i = 1; i <= 5; i++) {
+      setCatalog(shared("viewer"));
+      Object.assign(mocks.catalog.orgs[ORG] as object, { requestedAt: Date.now() + i * 1_000, fetchedAt: Date.now() + i * 1_000 });
+      view.rerender(wrap(<CloudHarness />));
+      await act(async () => undefined);
+      expect(screen.getByTestId("cloud-access-checking")).toBeTruthy();
+    }
+    expect(mocks.workspaceConnection).toHaveBeenCalledTimes(1);
+
+    // Past the grace period it says so plainly, still without "removed".
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now + 60_000);
+    view.rerender(wrap(<CloudHarness />));
+    expect(screen.getByTestId("cloud-access-checking").getAttribute("data-kind")).toBe("pending");
+    expect(screen.getByTestId("cloud-access-checking").textContent).toContain("This workspace has not been shared with you yet");
+    expect(screen.queryByTestId("cloud-access-removed")).toBeNull();
+    clock.mockRestore();
+    expect(mocks.workspaceConnection).toHaveBeenCalledTimes(1);
+
+    // The runtime catches up: the session opens at once, on the same connection.
+    await act(async () => becomes("viewer"));
+    await waitFor(() => expect(screen.queryByTestId("cloud-access-checking")).toBeNull());
+    expect(await screen.findByText("Fix login redirect")).toBeTruthy();
+    expect(chips()).toEqual(["View only"]);
+    expect(mocks.workspaceConnection).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps reading the list while the lock pane shows, backing off, so a share made meanwhile is seen", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      setCatalog(shared("none"));
+      render(wrap(<CloudHarness />));
+      await screen.findByTestId("cloud-not-shared");
+      mocks.refreshCatalog.mockClear();
+      await act(async () => vi.advanceTimersByTimeAsync(5_000));
+      expect(mocks.refreshCatalog).toHaveBeenCalledTimes(1);
+      await act(async () => vi.advanceTimersByTimeAsync(10_000));
+      expect(mocks.refreshCatalog).toHaveBeenCalledTimes(2);
+      await act(async () => vi.advanceTimersByTimeAsync(20_000));
+      expect(mocks.refreshCatalog).toHaveBeenCalledTimes(3);
+      // Capped at 30 s, and only ever a list.
+      await act(async () => vi.advanceTimersByTimeAsync(60_000));
+      expect(mocks.refreshCatalog).toHaveBeenCalledTimes(5);
+      expect(mocks.refreshCatalog).toHaveBeenLastCalledWith(ORG);
+      expect(activate).not.toHaveBeenCalled();
+      // Leaving the pane stops it.
+      cleanup();
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(mocks.refreshCatalog).toHaveBeenCalledTimes(5);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shows a viewer exactly one role chip beside a plain connection chip", async () => {
@@ -1082,6 +1189,26 @@ describe("sharing states found in the live two-user test", () => {
     await waitFor(() => expect(enqueued.find((entry) => entry.kind === "send")?.payload).toEqual({ text: "plan it first", mode: "plan" }));
     await waitFor(() => expect(screen.queryByTestId("settings-note")).toBeNull());
     expect(guard.violations).toEqual([]);
+  });
+
+  it("does not promise a setting change to someone who lost approval rights, and sends the message without it", async () => {
+    names();
+    setCatalog(shared("driver", true));
+    const me = { ...ME, canApprove: true };
+    runtime.collab = { you: me, participants: [], leases: [] };
+    await openShared(me);
+    fireEvent.click(screen.getByRole("button", { name: "Plan mode" }));
+    expect((await screen.findByTestId("settings-note")).textContent).toBe("Model, effort and mode changes apply with your next message");
+    // The grant to approve is taken back before the next message.
+    await act(async () => runtime.notify("collab.you", { you: { userId: "u-me", role: "driver", canApprove: false, listed: true } }));
+    await waitFor(() => expect(screen.queryByTestId("settings-note")).toBeNull());
+    expect(await screen.findByTestId("settings-locked")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "carry on" } });
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(enqueued.find((entry) => entry.kind === "send")?.payload).toEqual({ text: "carry on" }));
+    const note = await screen.findByTestId("settings-note");
+    expect(note.textContent).toBe("Your model, effort or mode change was not applied: you can no longer approve permissions");
+    expect(note.getAttribute("data-warning")).toBe("true");
   });
 
   it("tells someone who may not approve which command is waiting", async () => {

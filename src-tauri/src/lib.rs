@@ -286,6 +286,7 @@ pub fn run() {
             commands::organization_create,
             commands::organization_select,
             commands::organization_members,
+            commands::organization_members_in,
             commands::organization_member_invite,
             commands::organization_invite_revoke,
             commands::organization_member_role_update,

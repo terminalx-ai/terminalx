@@ -6,6 +6,7 @@ import { useAccount } from "@/lib/account";
 import { cloudOrganizations, defaultOrgId, liveCloudOrgIds, placeCloudProjects, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CreateRefused, createErrorMessage, isClientError } from "@/lib/cloudCreate";
 import type { PreparedCreate } from "@/lib/cloudNewSession";
+import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { formatMicros } from "@/lib/organizationCompute";
 import { usePrefs } from "@/lib/prefs";
 import { useSessionStore } from "@/lib/sessions";
@@ -23,7 +24,7 @@ import type { CloudProject } from "@/types/target";
  * sections show them, default first. None while signed out or with the kill
  * switch off.
  */
-export function useCloudProjectChoices(): { orgId: string; orgName: string; projects: CloudProject[] }[] {
+export function useCloudProjectChoices(): { orgId: string; orgName: string; projects: CloudProject[]; mayStart: boolean | null }[] {
   const catalog = useCloudCatalog();
   const prefs = usePrefs();
   const { status } = useAccount();
@@ -40,7 +41,8 @@ export function useCloudProjectChoices(): { orgId: string; orgName: string; proj
         added: prefs.cloudProjects[org.id],
         blank: prefs.cloudBlankProjects[org.id],
       });
-      return { orgId: org.id, orgName: sectionName(org), projects: placed.projects };
+      // Whether this account may start a session there: an owner or admin; null while its role is not known yet.
+      return { orgId: org.id, orgName: sectionName(org), projects: placed.projects, mayStart: mayStartCloudSessions(status, org.id) };
     });
   }, [catalog, prefs.cloudSidebar, prefs.cloudPinned, prefs.cloudProjects, prefs.cloudBlankProjects, status]);
 }
@@ -50,7 +52,7 @@ function sectionName(org: { isPersonal?: boolean; name: string }): string {
 }
 
 /** The cloud project the new-session form is preset with, and its organization's name; null for a local draft. */
-export function useCloudDraft(): { project: CloudProject | null; orgName: string } | null {
+export function useCloudDraft(): { project: CloudProject | null; orgName: string; mayStart: boolean | null } | null {
   const store = useSessionStore();
   const catalog = useCloudCatalog();
   const prefs = usePrefs();
@@ -67,8 +69,8 @@ export function useCloudDraft(): { project: CloudProject | null; orgName: string
       blank: prefs.cloudBlankProjects[orgId],
     });
     const project = [...placed.projects, ...placed.more].find((item) => item.key === key) ?? null;
-    return { project, orgName };
-  }, [key, catalog, prefs.cloudPinned, prefs.cloudProjects, prefs.cloudBlankProjects, status.organizations]);
+    return { project, orgName, mayStart: mayStartCloudSessions(status, orgId) };
+  }, [key, catalog, prefs.cloudPinned, prefs.cloudProjects, prefs.cloudBlankProjects, status]);
 }
 
 export function cloudStartError(error: unknown): string {

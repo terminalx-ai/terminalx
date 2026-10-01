@@ -180,7 +180,8 @@ function CloudLocation({ cloud }: { cloud: CloudSessionModel }) {
           {connection.label}
         </span>
       )}
-      <AccessChip you={cloud.collab.you} viewOnly={cloud.connected && !cloud.manage} className="ml-1" />
+      {/* While the list and the runtime disagree about a new share, the pane says so; no chip claims either. */}
+      {cloud.locked !== "checking" && cloud.locked !== "pending" && <AccessChip you={cloud.collab.you} viewOnly={cloud.connected && !cloud.manage} className="ml-1" />}
       {cloud.collab.live && <PresenceAvatars collabKey={cloud.collab.key} you={cloud.collab.you} tabLabel={(tabId) => tabLabelOf(cloud, tabId)} />}
     </>
   );
@@ -462,7 +463,7 @@ export function SessionView({
                 <div className="flex flex-1 flex-col items-center justify-center gap-1 text-sm text-muted-foreground">
                   {cloud?.locked ? (
                     // No access (never shared, or removed): the lock pane replaces the whole session body.
-                    <NotSharedNotice removed={cloud.locked === "removed"} onBack={() => selectSession(null)} onRecheck={cloud.recheckAccess} />
+                    <NotSharedNotice kind={cloud.locked} onBack={() => selectSession(null)} onRecheck={cloud.recheckAccess} />
                   ) : cloud ? (
                     // One state at a time: stopped, loading, or empty (with what this person can do about it).
                     cloud.asleep ? (

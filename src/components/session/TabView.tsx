@@ -10,7 +10,7 @@ import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { CLOUD_IMAGES_UNSUPPORTED, localSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
 import { CloudOutbox, commandError as cloudCommandError } from "@/components/cloud/CloudAgents";
 import { LeaseBar, NotesPanel, useNowUntil } from "@/components/cloud/CloudCollab";
-import { SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
+import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
 import { Chat } from "@/components/chat/Chat";
 import { Composer } from "@/components/chat/Composer";
@@ -236,6 +236,8 @@ export function TabView({
     }
   }, [backend, draft, tab.id]);
   const outbox = backend.outbox;
+  // What became of the last model, effort or mode chosen here (a cloud tab).
+  const settingsNotice = backend.settingsNotice?.(tab.id) ?? null;
   // What Up and Down recall in the composer: this tab's own messages, plus a cloud tab's commands still on their way.
   const history = useMemo(
     () => sentMessages(transcript, outbox && { entries: outbox.entries(tab.id), followUps: outbox.followUps(tab.id) }),
@@ -297,7 +299,8 @@ export function TabView({
           handoffs={handoffsFor(transcript, isGit && changes.files.length > 0)}
           disabled={!!gate?.blocked}
           settingsLockedReason={gate && !gate.mayConfigure ? SETTINGS_LOCKED_REASON : null}
-          settingsNote={backend.settingsPending?.(tab.id) ? SETTINGS_WITH_NEXT_MESSAGE : null}
+          settingsNote={settingsNotice === "ignored" ? SETTINGS_IGNORED_REASON : settingsNotice === "pending" ? SETTINGS_WITH_NEXT_MESSAGE : null}
+          settingsNoteWarning={settingsNotice === "ignored"}
           canStop={!gate || gate.mayStop}
           disabledReason={gate?.blocked ?? error ?? (viewError ? safeError(viewError) : null) ?? backend.readOnlyReason}
           autoFocus={active}

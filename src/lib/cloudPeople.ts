@@ -42,6 +42,32 @@ export function loadRoster(): Promise<OrganizationMember[]> {
   return roster;
 }
 
+/** Rosters of organizations other than the default one, per organization, for this session. */
+const rosters = new Map<string, Promise<OrganizationMember[]>>();
+
+/**
+ * The members of the organization a workspace is in, which need not be the
+ * default one (every organization is live, PRO-71). Rejects with the reason
+ * when they cannot be read (an older server, or the organization was left),
+ * so a dialog can say so instead of offering nobody.
+ */
+export function loadRosterIn(orgId: string): Promise<OrganizationMember[]> {
+  let pending = rosters.get(orgId);
+  if (!pending) {
+    pending = Promise.resolve()
+      .then(() => organizationMembers.listIn(orgId))
+      .then((listed) => {
+        rememberPeople(listed?.members ?? []);
+        return listed?.members ?? [];
+      });
+    rosters.set(orgId, pending);
+    pending.catch(() => {
+      if (rosters.get(orgId) === pending) rosters.delete(orgId);
+    });
+  }
+  return pending;
+}
+
 export function personName(userId: string | null | undefined): string {
   if (!userId) return "Someone";
   return known.get(userId) ?? `User ${userId.slice(0, 8)}`;
@@ -51,6 +77,7 @@ export function personName(userId: string | null | undefined): string {
 export function resetPeople() {
   known.clear();
   roster = null;
+  rosters.clear();
   changed();
 }
 

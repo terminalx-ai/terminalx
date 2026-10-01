@@ -56,6 +56,7 @@ export function Composer({
   disabled = false,
   settingsLockedReason = null,
   settingsNote = null,
+  settingsNoteWarning = false,
   canStop = true,
   autoFocus,
 }: {
@@ -82,6 +83,8 @@ export function Composer({
   settingsLockedReason?: string | null;
   /** Said under the pickers when a chosen model, effort or mode has not reached the agent yet (a cloud tab: it rides with the next message). */
   settingsNote?: string | null;
+  /** The note reports a change that was not applied, rather than one on its way. */
+  settingsNoteWarning?: boolean;
   /** False hides Stop (someone else drives this tab, or this reader may only watch). */
   canStop?: boolean;
   autoFocus?: boolean;
@@ -487,7 +490,7 @@ export function Composer({
         </div>
       </div>
       {settingsNote && (
-        <div className="mt-1.5 px-2 text-[11px] text-muted-foreground" role="status" data-testid="composer-settings-note">
+        <div className={cn("mt-1.5 px-2 text-[11px]", settingsNoteWarning ? "text-warning" : "text-muted-foreground")} role="status" data-testid="composer-settings-note">
           {settingsNote}
         </div>
       )}

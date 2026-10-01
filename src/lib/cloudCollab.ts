@@ -146,14 +146,23 @@ export const SETTINGS_LOCKED_REASON = "Only a workspace admin or someone who can
 /** Shown on permission requests to someone who may not answer them. */
 export const APPROVE_BLOCKED_REASON = "Waiting for someone who can approve";
 
+/** Shown when a setting change was dropped because this person may no longer change settings (the receipt's `settingsIgnored`). */
+export const SETTINGS_IGNORED_REASON = "Your model, effort or mode change was not applied: you can no longer approve permissions";
+/** Why a creator who is a plain member cannot switch a workspace between private and organization-visible. */
+export const VISIBILITY_ADMIN_REASON = "Only an organization owner or admin can change whether a workspace is private or visible to the organization";
 /** Shown to an approver whose connection cannot change a tab's settings live: they ride with the next message. */
 export const SETTINGS_WITH_NEXT_MESSAGE = "Model, effort and mode changes apply with your next message";
 /** The lock pane of someone whose access ended while they had the session, or who had it before. */
 export const ACCESS_REMOVED_TITLE = "Your access to this workspace was removed.";
 /** Why Stop, Resume, Archive and Delete are not offered: the API keeps them for owners and admins. */
 export const LIFECYCLE_ADMIN_REASON = "Only an organization owner or admin can stop, archive or delete a cloud workspace";
-/** Why a member is not offered a new cloud session: creating, waking and adding sessions are an owner's or admin's. */
-export const NEW_SESSION_ADMIN_REASON = "Only an organization owner or admin can start cloud sessions";
+/**
+ * Why a member is not offered a new cloud session: creating a workspace,
+ * resuming one from the sidebar and adding a session to a running one are an
+ * owner's or admin's. (A driver's message still wakes a stopped workspace it
+ * is shared on; that is sending, not starting a session.)
+ */
+export const NEW_SESSION_ADMIN_REASON = "Only an organization owner or admin can start a new cloud session";
 
 /**
  * What the API lets this person do to a workspace as a whole, from the
@@ -187,26 +196,36 @@ export function workspaceAuthority(workspace: {
 
 /**
  * Whether a connection's reconnect reason says this person may no longer
- * open the workspace at all (it went private, the share and membership were
- * removed, or the runtime closed the connection for access), as opposed to a
- * network drop that the next attempt may fix.
+ * open the workspace at all, as opposed to a drop the next attempt may fix.
+ * The one reason the desktop's attach really reports for that is
+ * `cloud_workspace_not_found`: the API no longer lists the workspace for this
+ * person (it went private, they left the organization, or it was deleted).
+ * A revoked share closes the connection without a reason and the next attach
+ * succeeds with role `none`, which the role reports, not the reason. Nothing
+ * broader is matched: a proxy's 403 on the relay handshake is not lost access.
  */
 export function accessLostReason(reason: string | null | undefined): boolean {
-  if (!reason) return false;
-  return /cloud_workspace_not_found|cloud_workspace_collaboration_forbidden|organization_member_not_found|access[-_ ](revoked|removed|denied)|\bforbidden\b|\b4403\b/i.test(reason);
+  return !!reason && /\bcloud_workspace_not_found\b/.test(reason);
 }
+
+/** How long the list and the runtime may disagree before the pane stops saying "Checking access…". */
+export const ACCESS_GRACE_MS = 15_000;
 
 /**
  * Why a cloud session shows the lock pane instead of its tabs, or null:
  *
- * - `removed`: this person had access (they held the session, or this desktop
- *   kept its conversation) and no longer does;
+ * - `removed`: this person had access and no longer does. Only for a real
+ *   transition: a role seen from the runtime in this view, or the session's
+ *   conversation kept on this desktop, followed by none.
  * - `not-shared`: they never had it.
+ * - `checking`: the workspace list says it is shared with them but the
+ *   runtime does not (yet): normal for a few seconds after a share, until the
+ *   runtime reads its member list. After `ACCESS_GRACE_MS` it is `pending`.
  *
- * The role decides while connected (the runtime's word), else the workspace
- * list's; a reconnect that fails for access counts as removed.
+ * The runtime's role decides while connected, else the list's or the last
+ * one seen; a reconnect refused for access counts as none.
  */
-export type AccessLoss = "removed" | "not-shared";
+export type AccessLoss = "removed" | "not-shared" | "checking" | "pending";
 
 export function accessLoss(input: {
   state: WorkspaceConnectionState;
@@ -214,12 +233,17 @@ export function accessLoss(input: {
   you: WorkspaceYou | null;
   /** This person had a role here earlier in this view, or this desktop holds the session's conversation. */
   hadAccess: boolean;
+  /** The workspace list says it is shared with this person, and nothing seen later says otherwise. */
+  listShared?: boolean;
+  /** How long the runtime has said none while the list says shared. */
+  disagreeingMs?: number;
 }): AccessLoss | null {
   const { state, you } = input;
-  if (state.state === "reconnecting" && accessLostReason(state.reason)) return "removed";
+  if (state.state === "reconnecting" && accessLostReason(state.reason)) return input.hadAccess ? "removed" : "not-shared";
   // A manage attachment is an admin's: the runtime closes it rather than leave it with role none.
   const none = sharingKnown(you) && you.role === "none" && !(state.state === "connected" && state.authority === "manage");
   if (!none) return null;
+  if (state.state === "connected" && input.listShared) return (input.disagreeingMs ?? 0) < ACCESS_GRACE_MS ? "checking" : "pending";
   return input.hadAccess ? "removed" : "not-shared";
 }
 
@@ -402,7 +426,8 @@ export function rememberYou(key: string, you: { role: WorkspaceYou["role"]; canA
 
 /** Who this person is for gating controls: live when connected, else the last known. */
 export function knownYou(state: WorkspaceConnectionState, snapshot: CollabSnapshot): WorkspaceYou | null {
-  if (state.state === "connected") return snapshot.available ? (snapshot.you ?? (state.you ?? null)) : null;
+  // Until the store follows this connection, its hello already says who this is.
+  if (state.state === "connected") return snapshot.available ? (snapshot.you ?? (state.you ?? null)) : collabGranted(state) ? (state.you ?? null) : null;
   return snapshot.lastYou;
 }
 
@@ -498,7 +523,12 @@ export function startCollab(key: string, client: WorkspaceRpcClient): () => void
   }
   return () => {
     stop();
-    if (s.client === client) s.client = null;
+    if (s.client !== client) return;
+    s.client = null;
+    // What this connection said about the person ends with it: the next one's
+    // hello decides afresh, and `lastYou` answers meanwhile. Nothing stale is
+    // read as live after a reconnect.
+    if (stores.get(s.key) === s && (s.snapshot.available || s.snapshot.you)) set(s, { available: false, you: null });
   };
 }
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RuntimeSession, WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable/workspace";
+import { collabGranted } from "@terminalx/portable/workspaceCollab";
 import { RemoteGit, listRepositories, type RemoteRepository } from "@terminalx/portable/workspaceGit";
 import { createTerminal } from "@/components/terminal/TerminalView";
 import { useAccount } from "@/lib/account";
@@ -29,6 +30,7 @@ import {
   accessLostReason,
   canDrive,
   clearCollabAccess,
+  ACCESS_GRACE_MS,
   forgetCollabAccess,
   knownYou,
   listedYou,
@@ -173,6 +175,8 @@ const DEFAULT_AGENTS = [
   { id: "claude", name: cloudAgentLabel("claude") },
   { id: "codex", name: cloudAgentLabel("codex") },
 ];
+/** How long until the list is read again while a lock pane shows: 5 s, then up to 30 s. */
+export const ACCESS_POLL_MS = [5_000, 10_000, 20_000, 30_000] as const;
 const NO_TABS: TabEntry[] = [];
 const NO_TERMINALS: CloudTerminal[] = [];
 
@@ -226,10 +230,15 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   const generation = connected ? `${state.runtimeGeneration}:${state.runtimeEpoch ?? ""}` : null;
 
   // PRO-30 access. While connected the runtime's word decides; while not, the
-  // workspace list's, else the last access this desktop saw. A loss seen live
-  // (role none, or a reconnect refused for access) holds until a list fetched
-  // after it says this person has a role again, so a stale list cannot
-  // reconnect a revoked person in a loop.
+  // workspace list's, else the last access this desktop saw.
+  //
+  // The connection is kept while the runtime says role none: it costs
+  // nothing, never wakes compute, and the runtime's `collab.you` upgrades it
+  // the moment a share arrives. The list and the runtime may disagree (for a
+  // few seconds after a share, or for as long as the runtime's member list is
+  // stale); that never reconnects anything. Only a reconnect the API refuses
+  // (`cloud_workspace_not_found`) closes the connection, and a list asked for
+  // after that refusal reopens it.
   const collab = useCollab(workspaceKey);
   const listedRole = item?.workspace.you?.role ?? null;
   const listedApprove = item?.workspace.you?.canApprove ?? false;
@@ -238,46 +247,64 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     () => (listedRole ? { ...listedYou({ role: listedRole, canApprove: listedApprove })!, userId: knownUserId } : null),
     [listedRole, listedApprove, knownUserId],
   );
-  // Kept with the workspace it is about: the same view may show another workspace's session next.
-  const [lost, setLost] = useState<{ key: string; at: number } | null>(null);
-  const lostAt = lost?.key === workspaceKey ? lost.at : null;
-  const setLostAt = useCallback((at: number | null) => setLost(at === null ? null : { key: workspaceKey, at }), [workspaceKey]);
-  const listedAt = catalog.orgs[orgId]?.fetchedAt ?? null;
-  const liveLoss = (connected && notShared(state, knownYou(state, collab))) || (state.state === "reconnecting" && accessLostReason(state.reason));
+  const liveYou = connected ? knownYou(state, collab) : null;
+  const runtimeNone = connected && notShared(state, liveYou);
+  const refusedNow = state.state === "reconnecting" && accessLostReason(state.reason);
+  // The runtime gave this person a role in this view: none after that is a real loss.
+  const sawRole = useRef<string | null>(null);
+  if (connected && sharingKnown(liveYou) && liveYou.role !== "none") sawRole.current = workspaceKey;
+  // The loss this view is looking at, kept with its workspace (the same view may show another one next).
+  const [loss, setLoss] = useState<{ key: string; at: number; refused: boolean; transition: boolean } | null>(null);
+  const held = loss?.key === workspaceKey ? loss : null;
   useEffect(() => {
-    if (liveLoss && lostAt === null) setLostAt(Date.now());
-  }, [liveLoss, lostAt, setLostAt]);
-  // Shared again, as a list read after the loss says.
-  const regained = lostAt !== null && listedAt !== null && listedAt > lostAt && !!listedRole && listedRole !== "none";
+    if (!runtimeNone && !refusedNow) return;
+    setLoss((current) => {
+      if (current?.key !== workspaceKey) return { key: workspaceKey, at: Date.now(), refused: refusedNow, transition: sawRole.current === workspaceKey };
+      return refusedNow && !current.refused ? { ...current, refused: true } : current;
+    });
+  }, [runtimeNone, refusedNow, workspaceKey]);
+  // What the list says, and whether it was asked for after the loss (D8: asked, not answered:
+  // a list in flight when access ended still carries the old role).
+  const listRequestedAt = catalog.orgs[orgId]?.requestedAt ?? null;
+  const listShared = !!listedRole && listedRole !== "none";
+  const listAfterLoss = !!held && listRequestedAt !== null && listRequestedAt > held.at;
+  const refusedHeld = !!held?.refused;
   useEffect(() => {
-    if (regained) setLostAt(null);
-  }, [regained, setLostAt]);
-  const held = lostAt !== null && !regained;
+    if (!held) return;
+    // The runtime gives a role again (or has no sharing at all): the loss is over.
+    const liveAgain = connected && !runtimeNone && (sharingKnown(liveYou) || !collabGranted(state));
+    // Not connected: only a list asked for after the loss can say it is shared again.
+    const listedAgain = !connected && !refusedNow && listShared && listAfterLoss;
+    if (liveAgain || listedAgain) setLoss(null);
+  }, [held, connected, runtimeNone, refusedNow, liveYou, state, listShared, listAfterLoss]);
   const you: WorkspaceYou | null = connected
-    ? knownYou(state, collab)
-    : held
+    ? liveYou
+    : held && !(listShared && listAfterLoss)
       ? { userId: knownUserId, role: "none", canApprove: false }
       : (fromList ?? collab.lastYou);
   const noAccess = accessLoss({ state, you, hadAccess: false }) !== null;
   // Presence, the lease bar and notes need the live runtime with collab/1, and access.
   const collabLive = connected && collab.available && !noAccess;
-  // Access ended while this desktop watched: drop what it showed, stop the
-  // connection (and its reconnect attempts), and read the list so the sidebar
-  // row locks or disappears.
+  // A loss began: read the list (the sidebar row locks or disappears), and
+  // after a refusal close the connection, which would only retry `open`.
+  const lossAt = held?.at ?? null;
   useEffect(() => {
-    if (lostAt === null || !parsed) return;
+    if (lossAt === null || !parsed) return;
+    void refreshCloudCatalog(orgId);
+  }, [lossAt, orgId]);
+  useEffect(() => {
+    if (!refusedHeld || !parsed) return;
     clearCollabAccess(workspaceKey);
     detachCloudTerminals(workspaceKey);
     closeCloudConnection({ orgId, workspaceId });
-    void refreshCloudCatalog(orgId);
-  }, [lostAt, workspaceKey, orgId, workspaceId]);
+  }, [refusedHeld, workspaceKey, orgId, workspaceId]);
 
   // Connect without waking: a lease from the connection manager (CS-7), shared
   // with the sidebar's session list and kept for a few idle minutes after the
   // view goes, so switching between sessions of one workspace reuses it.
   useEffect(() => {
-    // Someone without access holds no connection: nothing to read, and nothing retries.
-    if (!parsed || noAccess) return;
+    // Refused for access: nothing is held or retried until a later list says otherwise.
+    if (!parsed || refusedHeld) return;
     let cancelled = false;
     let lease: CloudLease | null = null;
     let unsubscribe: (() => void) | null = null;
@@ -307,7 +334,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
       setConnection(null);
       setState(NOT_CONNECTED);
     };
-  }, [orgId, workspaceId, noAccess]);
+  }, [orgId, workspaceId, refusedHeld]);
 
   // Agent tabs: the cache and checkpoint metadata first (never wakes), then the runtime's own list.
   const agents = useCloudAgents(scope);
@@ -385,8 +412,6 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   }, [generation, client]);
 
   // Whether this person ever had the session: a role seen in this view, or its conversation kept on this desktop.
-  const hadRole = useRef<string | null>(null);
-  if (sharingKnown(you) && you.role !== "none") hadRole.current = workspaceKey;
   const authority = connected ? state.authority : (item?.workspace.authority ?? null);
   // A manage attachment manages only while this person is still a manager
   // (a demoted admin's may linger until the runtime closes it).
@@ -448,7 +473,13 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     (tabId: string) => agents.tabs.find((tab) => tab.tabId === tabId)?.info.followUps ?? [],
     [agents.tabs],
   );
-  const settingsPending = useCallback((tabId: string) => !!agents.tabs.find((tab) => tab.tabId === tabId)?.pendingConfig, [agents.tabs]);
+  const settingsNotice = useCallback(
+    (tabId: string) => {
+      const tab = agents.tabs.find((candidate) => candidate.tabId === tabId);
+      return tab?.settingsIgnored ? ("ignored" as const) : tab?.pendingConfig ? ("pending" as const) : null;
+    },
+    [agents.tabs],
+  );
   const backend = useMemo(
     () =>
       cloudSessionBackend({
@@ -465,9 +496,9 @@ export function useCloudSession(key: string): CloudSessionModel | null {
         wake,
         you,
         collabClient: collabLive ? client : null,
-        settingsPending,
+        settingsNotice,
       }),
-    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, wake, you, collabLive, settingsPending],
+    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, wake, you, collabLive, settingsNotice],
   );
 
   const ownTabs = useMemo(() => {
@@ -480,7 +511,38 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   const workspaceName = item?.workspace.name ?? "Cloud workspace";
   const projectName = repo?.fullName ?? repo?.identity.split("/").slice(1).join("/") ?? workspaceName;
   const firstTitle = ownTabs.find((tab) => tab.info.title)?.info.title;
-  const locked = accessLoss({ state, you, hadAccess: hadRole.current === workspaceKey || lostAt !== null || ownTabs.length > 0 });
+  // "Removed" needs a real transition: a role the runtime gave in this view, or the
+  // session's conversation kept on this desktop. A first connect is never one.
+  const hadAccess = sawRole.current === workspaceKey || !!held?.transition || ownTabs.length > 0;
+  // The list's "shared" is believed unless this view watched the access end after that list was asked for.
+  const transition = held ? held.transition : sawRole.current === workspaceKey;
+  const listSharedTrusted = listShared && (!transition || listAfterLoss);
+  const [, graceTick] = useState(0);
+  const disagreeingMs = held ? Date.now() - held.at : 0;
+  const locked = accessLoss({ state, you, hadAccess, listShared: listSharedTrusted, disagreeingMs });
+  // "Checking access…" becomes "not shared yet" when the grace period ends.
+  useEffect(() => {
+    if (locked !== "checking") return;
+    const timer = setTimeout(() => graceTick((n) => n + 1), Math.max(0, ACCESS_GRACE_MS - disagreeingMs) + 50);
+    return () => clearTimeout(timer);
+  }, [locked, lossAt]);
+  // While the lock pane shows, the list is read again with backoff (5 s up to
+  // 30 s), so a share made meanwhile unlocks within seconds even where no
+  // connection can tell (a refused or stopped workspace). Only a list.
+  useEffect(() => {
+    if (!locked || !parsed) return;
+    let attempt = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    const next = () => {
+      timer = setTimeout(() => {
+        attempt++;
+        if (typeof document === "undefined" || document.visibilityState !== "hidden") void refreshCloudCatalog(orgId);
+        next();
+      }, ACCESS_POLL_MS[Math.min(attempt, ACCESS_POLL_MS.length - 1)]);
+    };
+    next();
+    return () => clearTimeout(timer);
+  }, [!!locked, orgId]);
   const session = useMemo<SessionEntry>(
     () => ({
       id: key,
@@ -548,10 +610,10 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     // An older server's list says nothing about roles: only connecting again can tell.
     if (!listedRole) {
       forgetCollabAccess(workspaceKey);
-      setLostAt(null);
+      setLoss(null);
     }
     void refreshCloudCatalog(orgId);
-  }, [listedRole, workspaceKey, orgId, setLostAt]);
+  }, [listedRole, workspaceKey, orgId]);
 
   if (!parsed || !parsed.sessionId) return null;
   return {

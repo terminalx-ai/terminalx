@@ -15,6 +15,7 @@ import {
   configuresLive,
   decideCloudAgent,
   DEV_SCOPE_NOTICE,
+  discardPendingConfig,
   flushCloudAgentCache,
   getCloudAgents,
   loadCloudAgents,
@@ -293,6 +294,45 @@ describe("cloud agent tabs store", () => {
     // Once it went out, the runtime's word is shown again.
     applyLiveTabs(scope, [tabInfo({ permissionMode: "acceptEdits" })]);
     expect(getCloudAgents(scope).tabs[0]!.info.permissionMode).toBe("acceptEdits");
+  });
+
+  it("says so when the runtime ignored a message's settings, and stops promising them", async () => {
+    vi.useFakeTimers();
+    applyLiveTabs(scope, [tabInfo()]);
+    const approver = fakeClient(true, { authority: "participate", you: { userId: "u-bob", role: "driver", canApprove: true } });
+    await configureCloudAgentTab(scope, "t-1", { mode: "acceptEdits" }, approver);
+    const entry = await sendToCloudAgent(scope, "t-1", "go", approver);
+    expect(getCloudAgents(scope).tabs[0]).toMatchObject({ pendingConfig: null });
+    expect(getCloudAgents(scope).tabs[0]!.settingsIgnored).toBeFalsy();
+    // Approval was revoked before the runtime applied it: the receipt says the settings were ignored.
+    backend.syncs = [[{ ...entry, state: "applied", updatedAt: 50, receipt: { settingsIgnored: true } }]];
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(getCloudAgents(scope).tabs[0]!.settingsIgnored).toBe(true);
+    // The runtime's own mode is what the picker shows again.
+    applyLiveTabs(scope, [tabInfo()]);
+    expect(getCloudAgents(scope).tabs[0]!.info.permissionMode).toBe(tabInfo().permissionMode);
+    // The same receipt seen again says nothing new once the notice is gone.
+    await configureCloudAgentTab(scope, "t-1", { mode: "plan" }, approver);
+    expect(getCloudAgents(scope).tabs[0]).toMatchObject({ settingsIgnored: false, pendingConfig: { mode: "plan" } });
+    backend.syncs = [[{ ...entry, state: "applied", updatedAt: 51, receipt: { settingsIgnored: true } }]];
+    await sendToCloudAgent(scope, "t-1", "again", approver);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(getCloudAgents(scope).tabs[0]!.settingsIgnored).toBeFalsy();
+  });
+
+  it("drops an unsent setting change, with the notice, for someone who may no longer make it", async () => {
+    applyLiveTabs(scope, [tabInfo()]);
+    await configureCloudAgentTab(scope, "t-1", { model: "opus" }, null);
+    discardPendingConfig(scope, "t-1");
+    expect(getCloudAgents(scope).tabs[0]).toMatchObject({ pendingConfig: null, settingsIgnored: true });
+    await sendToCloudAgent(scope, "t-1", "go", null);
+    // The message goes without settings the runtime would only ignore.
+    expect(backend.calls.find((c) => c.cmd === "cloud_agent_enqueue")!.args.payload).toEqual({ text: "go" });
+    // Nothing pending: nothing to drop, nothing to say.
+    resetCloudAgents();
+    applyLiveTabs(scope, [tabInfo()]);
+    discardPendingConfig(scope, "t-1");
+    expect(getCloudAgents(scope).tabs[0]!.settingsIgnored).toBeFalsy();
   });
 
   it("configures live only for a manage attachment whose person is still a manager", () => {

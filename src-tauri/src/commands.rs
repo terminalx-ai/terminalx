@@ -105,6 +105,13 @@ pub async fn organization_members(state: tauri::State<'_, crate::AppState>) -> M
     members_call(state, |service| service.list()).await
 }
 
+/// The roster of a member organization other than the active one, read only
+/// (the people a cloud workspace there can be shared with).
+#[tauri::command]
+pub async fn organization_members_in(org_id: String, state: tauri::State<'_, crate::AppState>) -> MembersResult {
+    members_call(state, move |service| service.list_in(&org_id)).await
+}
+
 #[tauri::command]
 pub async fn organization_member_invite(
     email: String,

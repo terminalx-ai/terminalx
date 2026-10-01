@@ -46,6 +46,7 @@ import {
 import { NEW_SESSION_ADMIN_REASON } from "@/lib/cloudCollab";
 import { useCloudConnection } from "@/lib/cloudConnections";
 import { lifecycleErrorMessage } from "@/lib/cloudLifecycle";
+import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { cloudAgentLabel, deriveCloudActivity, type CloudActivity, type RowTone } from "@/lib/cloudRowState";
 import {
   bootCloudSessions,
@@ -411,9 +412,11 @@ function CloudProjectNode({ project, onLifecycle }: { project: CloudProject; onL
 
   const added = (prefs.cloudProjects[project.orgId] ?? []).includes(project.identity);
   const pendingBlank = project.blank && !project.workspaces.length;
-  // Starting a session creates or wakes a workspace, or adds a session to one: the server keeps all three for owners and admins.
-  const mayStart = status.organizations?.find((org) => org.id === project.orgId)?.role !== "member";
-  const startBlocked = !project.selected || !mayStart;
+  // Starting a session creates a workspace, resumes one, or adds a session to
+  // a running one: the server keeps all three for owners and admins. Null
+  // while this account's role is not known yet: nothing is offered until it is.
+  const mayStart = mayStartCloudSessions(status, project.orgId);
+  const startBlocked = !project.selected || mayStart !== true;
   const removable = !project.workspaces.length && (added || pendingBlank);
   const run = async (work: () => Promise<void>) => {
     setError(null);
@@ -450,7 +453,7 @@ function CloudProjectNode({ project, onLifecycle }: { project: CloudProject; onL
         </button>
         <RowActions persistent className={menu.open ? "not-sr-only" : undefined}>
           {/* A member is not shown a + that could only be refused; the menu's "New session" says why. */}
-          {mayStart && (
+          {mayStart === true && (
             <WithTooltip label={`New session in ${project.fullName}`}>
               <Button variant="ghost" size="icon-xs" aria-label={`New session in ${project.fullName}`} onClick={() => startNewCloudSession(project.key)} disabled={startBlocked}>
                 <Plus />
@@ -464,9 +467,9 @@ function CloudProjectNode({ project, onLifecycle }: { project: CloudProject; onL
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-[17rem]">
-              <DropdownMenuItem onSelect={() => startNewCloudSession(project.key)} disabled={startBlocked} title={mayStart ? undefined : NEW_SESSION_ADMIN_REASON}>
+              <DropdownMenuItem onSelect={() => startNewCloudSession(project.key)} disabled={startBlocked} title={mayStart === false ? NEW_SESSION_ADMIN_REASON : undefined}>
                 <Plus /> New session
-                {!mayStart && <span className="ml-auto pl-3 text-[10px] text-faint">admins only</span>}
+                {mayStart === false && <span className="ml-auto pl-3 text-[10px] text-faint">admins only</span>}
               </DropdownMenuItem>
               <DropdownMenuItem
                 onSelect={() => updateOrgList("cloudPinned", project.orgId, (list) => (project.pinned ? list.filter((id) => id !== project.identity) : [...list, project.identity]))}

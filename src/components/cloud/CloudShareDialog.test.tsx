@@ -8,11 +8,19 @@ const mocks = vi.hoisted(() => ({
   revoke: vi.fn(),
   members: vi.fn(),
   access: vi.fn(),
+  membersIn: vi.fn(),
+  workspaces: vi.fn(),
 }));
 vi.mock("@/lib/api", () => ({
-  api: { cloudWorkspaceShares: mocks.shares, cloudWorkspaceSharePut: mocks.put, cloudWorkspaceShareRevoke: mocks.revoke, cloudWorkspaceSetAccess: mocks.access },
+  api: {
+    cloudWorkspaceShares: mocks.shares,
+    cloudWorkspaceSharePut: mocks.put,
+    cloudWorkspaceShareRevoke: mocks.revoke,
+    cloudWorkspaceSetAccess: mocks.access,
+    cloudWorkspaces: mocks.workspaces,
+  },
 }));
-vi.mock("@/lib/organizationMembers", () => ({ organizationMembers: { list: mocks.members } }));
+vi.mock("@/lib/organizationMembers", () => ({ organizationMembers: { list: mocks.members, listIn: mocks.membersIn } }));
 // The account's default organization decides whether the roster applies.
 const account = vi.hoisted(() => ({ status: { identity: { organizationId: "org-1", email: "me@example.com" } } as unknown }));
 vi.mock("@/lib/account", () => ({ useAccount: () => account }));
@@ -52,6 +60,18 @@ beforeEach(() => {
     // Going private revokes every share in the same transaction (saas §21.2).
     if (accessMode === "private") listed = { ...listed, shares: [] };
     return { id: workspaceId, orgId: "org-1", accessMode };
+  });
+  // What the server says the workspace's visibility is, when the dialog reads it back.
+  mocks.workspaces.mockReset().mockResolvedValue({ workspaces: [{ workspace: { id: "ws-1", accessMode: "private" } }] });
+  mocks.membersIn.mockReset().mockResolvedValue({
+    members: [
+      { userId: "u-me", email: "me@example.com", displayName: "Me", role: "admin" },
+      { userId: "u-dana", email: "dana@example.com", displayName: "Dana", role: "member" },
+    ],
+    pendingInvites: [],
+    viewerRole: "admin",
+    canManageMembers: true,
+    contextRevision: "",
   });
   mocks.members.mockReset().mockResolvedValue({
     members: [
@@ -138,16 +158,36 @@ describe("share dialog", () => {
     expect(within(row).queryByRole("combobox")).toBeNull();
   });
 
-  it("manages a workspace in another organization by its own organization, without the default one's roster", async () => {
+  it("shares a workspace in another organization with that organization's own members", async () => {
     render(<CloudShareDialog orgId="org-2" workspaceId="ws-1" name="Payments" onClose={() => undefined} />);
     const row = await screen.findByTestId("cloud-share-row");
     expect(mocks.shares).toHaveBeenCalledWith("ws-1", "org-2");
-    // The default organization's members would be the wrong people to offer.
-    expect(screen.queryByLabelText("Add person")).toBeNull();
-    expect(screen.getByTestId("cloud-share-other-org")).toBeTruthy();
+    // Its own roster, read by its id; never the default organization's people.
+    expect(mocks.membersIn).toHaveBeenCalledWith("org-2");
     expect(mocks.members).not.toHaveBeenCalled();
+    const picker = (await screen.findByLabelText("Add person")) as HTMLSelectElement;
+    await waitFor(() => expect(within(picker).queryByText(/Dana/)).toBeTruthy());
+    expect(within(picker).queryByText(/Bob/)).toBeNull();
+    fireEvent.change(picker, { target: { value: "u-dana" } });
+    fireEvent.click(screen.getByRole("button", { name: "Share" }));
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith("ws-1", "u-dana", "viewer", false, "org-2"));
     fireEvent.click(within(row).getByRole("button", { name: "Revoke Alice" }));
     await waitFor(() => expect(mocks.revoke).toHaveBeenCalledWith("ws-1", "u-alice", "org-2"));
+  });
+
+  it("says why nobody can be added when another organization's members cannot be read, and still manages the shares", async () => {
+    mocks.membersIn.mockRejectedValueOnce({ code: "cloud_organization_unavailable", status: null });
+    render(<CloudShareDialog orgId="org-2" workspaceId="ws-1" name="Payments" onClose={() => undefined} />);
+    const row = await screen.findByTestId("cloud-share-row");
+    const note = await screen.findByTestId("cloud-share-roster-error");
+    expect(note.textContent).toContain("This organization's members can only be read while it is your default organization (Settings).");
+    expect(screen.queryByLabelText("Add person")).toBeNull();
+    fireEvent.click(within(row).getByRole("button", { name: "Revoke Alice" }));
+    await waitFor(() => expect(mocks.revoke).toHaveBeenCalledWith("ws-1", "u-alice", "org-2"));
+    // Retry reads them again.
+    fireEvent.click(within(screen.getByTestId("cloud-share-roster-error")).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.queryByTestId("cloud-share-roster-error")).toBeNull());
+    await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Dana/)).toBeTruthy());
   });
 
   it("opens from anywhere through the one mounted host", async () => {
@@ -299,7 +339,7 @@ describe("sharing a private workspace", () => {
 
   it("keeps the workspace as it was and says why when making it private is refused", async () => {
     mocks.access.mockRejectedValueOnce({ code: "organization_admin_required", status: 403 });
-    listed = { shares: [share()], you: { role: "driver", canApprove: true, canManageShares: true } };
+    listed = { shares: [share()], you: { role: "manager", canApprove: true, canManageShares: true } };
     render(<CloudShareDialog orgId="org-1" workspaceId="ws-1" name="Payments" accessMode="organization" createdBy="u-me" canManage onClose={() => undefined} />);
     await screen.findByTestId("cloud-share-row");
     fireEvent.click(screen.getByRole("button", { name: /Make private again/ }));
@@ -307,5 +347,130 @@ describe("sharing a private workspace", () => {
     expect((await screen.findByTestId("cloud-share-error")).textContent).toMatch(/^Only an organization owner or admin can change whether a workspace is private/);
     expect(screen.getAllByTestId("cloud-share-row")).toHaveLength(1);
     expect(screen.getByRole("button", { name: /Make private again/ })).toBeTruthy();
+  });
+});
+
+// Review D3: the two calls of "make visible and share" can part ways.
+describe("when making it visible and sharing do not both succeed", () => {
+  const open = async () => {
+    listed = { shares: [], you: { role: "manager", canApprove: true, canManageShares: true } };
+    render(<CloudShareDialog orgId="org-1" workspaceId="ws-1" name="Payments" accessMode="private" createdBy="u-me" canManage onClose={() => undefined} />);
+    const picker = (await screen.findByLabelText("Add person")) as HTMLSelectElement;
+    await waitFor(() => expect(within(picker).queryByText(/Bob/)).toBeTruthy());
+    fireEvent.change(picker, { target: { value: "u-bob" } });
+    fireEvent.click(screen.getByRole("button", { name: "Share" }));
+    fireEvent.click(within(await screen.findByTestId("cloud-share-confirm")).getByRole("button", { name: "Make visible and share" }));
+  };
+
+  it("says plainly that the workspace is visible but not shared yet, with Retry and Make private again", async () => {
+    mocks.put.mockRejectedValueOnce({ code: "cloud_workspace_share_limit", status: 429 });
+    await open();
+    const note = await screen.findByTestId("cloud-share-unshared");
+    expect(note.textContent).toContain("Payments is now visible to the organization, but it is not shared with Bob yet.");
+    expect(note.textContent).toContain("maximum number of people (64)");
+    expect(mocks.access).toHaveBeenCalledWith("ws-1", "organization", "org-1");
+    // It is no longer described as private, and nobody else is offered until this is settled.
+    expect(screen.queryByTestId("cloud-share-private")).toBeNull();
+    expect(screen.queryByLabelText("Add person")).toBeNull();
+
+    // Retry grants the same share, without switching visibility again.
+    mocks.access.mockClear();
+    fireEvent.click(within(note).getByRole("button", { name: "Retry sharing" }));
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledTimes(2));
+    expect(mocks.put).toHaveBeenLastCalledWith("ws-1", "u-bob", "viewer", false, "org-1");
+    await waitFor(() => expect(screen.queryByTestId("cloud-share-unshared")).toBeNull());
+    expect(screen.getAllByTestId("cloud-share-row")).toHaveLength(1);
+    expect(mocks.access).not.toHaveBeenCalled();
+  });
+
+  it("can take the visibility back when the share cannot be made", async () => {
+    mocks.put.mockRejectedValueOnce({ code: "organization_member_not_found", status: 404 });
+    await open();
+    const note = await screen.findByTestId("cloud-share-unshared");
+    expect(note.textContent).toContain("Bob is no longer a member of this organization.");
+    fireEvent.click(within(note).getByRole("button", { name: "Make private again" }));
+    fireEvent.click(within(await screen.findByTestId("cloud-private-confirm")).getByRole("button", { name: "Make private" }));
+    await waitFor(() => expect(mocks.access).toHaveBeenLastCalledWith("ws-1", "private", "org-1"));
+    await waitFor(() => expect(screen.queryByTestId("cloud-share-unshared")).toBeNull());
+    expect(await screen.findByTestId("cloud-share-private")).toBeTruthy();
+  });
+
+  it("reads the workspace back when the visibility change got no answer, and shares only if it is visible", async () => {
+    // No answer, but it did go through.
+    mocks.access.mockRejectedValueOnce({ code: "cloud_workspace_request_outcome_unknown", status: null });
+    mocks.workspaces.mockResolvedValueOnce({ workspaces: [{ workspace: { id: "ws-1", accessMode: "organization" } }] });
+    await open();
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith("ws-1", "u-bob", "viewer", false, "org-1"));
+    expect(mocks.workspaces).toHaveBeenCalledWith("org-1");
+    await waitFor(() => expect(screen.getAllByTestId("cloud-share-row")).toHaveLength(1));
+    expect(screen.queryByTestId("cloud-share-error")).toBeNull();
+  });
+
+  it("does not share, and says it is still private, when the lost change did not go through", async () => {
+    mocks.access.mockRejectedValueOnce({ code: "cloud_workspace_request_outcome_unknown", status: null });
+    await open();
+    expect((await screen.findByTestId("cloud-share-error")).textContent).toBe("The server did not answer, and the workspace is still private. Try again.");
+    expect(mocks.put).not.toHaveBeenCalled();
+    expect(screen.getByTestId("cloud-share-private")).toBeTruthy();
+  });
+
+  it("claims neither state when the workspace cannot be read back, until Check again can", async () => {
+    mocks.access.mockRejectedValueOnce({ code: "cloud_workspace_request_outcome_unknown", status: null });
+    mocks.workspaces.mockRejectedValueOnce({ code: "cloud_workspace_unavailable", status: null });
+    await open();
+    const unknown = await screen.findByTestId("cloud-share-access-unknown");
+    expect(unknown.textContent).toContain("It is not known whether this workspace is private or visible to the organization right now.");
+    expect(mocks.put).not.toHaveBeenCalled();
+    // Neither "private" nor "visible" is shown, and nothing can be shared or made private on a guess.
+    expect(screen.queryByTestId("cloud-share-private")).toBeNull();
+    expect(screen.queryByLabelText("Add person")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Make private again/ })).toBeNull();
+    mocks.workspaces.mockResolvedValueOnce({ workspaces: [{ workspace: { id: "ws-1", accessMode: "organization" } }] });
+    fireEvent.click(within(unknown).getByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(screen.queryByTestId("cloud-share-access-unknown")).toBeNull());
+    expect(await screen.findByRole("button", { name: /Make private again/ })).toBeTruthy();
+    expect(screen.getByLabelText("Add person")).toBeTruthy();
+  });
+});
+
+// Review D4: the creator of a workspace who is a plain member manages its shares, not its visibility.
+describe("a creator who is not an owner or admin", () => {
+  const creator = { role: "driver", canApprove: true, canManageShares: true } as const;
+  const reason = "Only an organization owner or admin can change whether a workspace is private or visible to the organization";
+
+  it("cannot share a private workspace, and is told who can make it visible", async () => {
+    listed = { shares: [], you: creator };
+    render(<CloudShareDialog orgId="org-1" workspaceId="ws-1" name="Payments" accessMode="private" createdBy="u-me" canManage onClose={() => undefined} />);
+    const note = await screen.findByTestId("cloud-share-private");
+    expect(note.textContent).toContain(`${reason}: ask one to make it visible, then share it from here.`);
+    const picker = (await screen.findByLabelText("Add person")) as HTMLSelectElement;
+    await waitFor(() => expect(within(picker).queryByText(/Bob/)).toBeTruthy());
+    fireEvent.change(picker, { target: { value: "u-bob" } });
+    const button = screen.getByRole("button", { name: "Share" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toBe(reason);
+    fireEvent.click(button);
+    expect(screen.queryByTestId("cloud-share-confirm")).toBeNull();
+    expect(mocks.access).not.toHaveBeenCalled();
+    expect(mocks.put).not.toHaveBeenCalled();
+  });
+
+  it("still manages the shares of a workspace that is already visible, with Make private again off and explained", async () => {
+    listed = { shares: [share()], you: creator };
+    render(<CloudShareDialog orgId="org-1" workspaceId="ws-1" name="Payments" accessMode="organization" createdBy="u-me" canManage onClose={() => undefined} />);
+    const row = await screen.findByTestId("cloud-share-row");
+    const button = screen.getByRole("button", { name: /Make private again/ }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toBe(reason);
+    expect(screen.getByTestId("cloud-share-visibility").textContent).toBe(`Visible in the organization's sidebar. ${reason}.`);
+    // Adding, changing and revoking shares all still work.
+    const picker = screen.getByLabelText("Add person") as HTMLSelectElement;
+    await waitFor(() => expect(within(picker).queryByText(/Bob/)).toBeTruthy());
+    fireEvent.change(picker, { target: { value: "u-bob" } });
+    fireEvent.click(screen.getByRole("button", { name: "Share" }));
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith("ws-1", "u-bob", "viewer", false, "org-1"));
+    fireEvent.click(within(row).getByRole("button", { name: "Revoke Alice" }));
+    await waitFor(() => expect(mocks.revoke).toHaveBeenCalledWith("ws-1", "u-alice", "org-1"));
+    expect(mocks.access).not.toHaveBeenCalled();
   });
 });

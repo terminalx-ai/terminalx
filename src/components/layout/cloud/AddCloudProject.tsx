@@ -8,6 +8,9 @@ import { blankIdentity, cloudOrgArg, getCloudCatalog, placeCloudProjects, setClo
 import { errorCode } from "@/lib/cloudTerminals";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { startCloudSessionIn } from "@/lib/sessions";
+import { useAccount } from "@/lib/account";
+import { NEW_SESSION_ADMIN_REASON } from "@/lib/cloudCollab";
+import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { cloudProjectKey } from "@/types/target";
 
 /**
@@ -139,6 +142,8 @@ const NAME_MAX = 80;
 
 export function NewBlankProjectDialog({ orgId, orgName, onClose }: { orgId: string; orgName: string; onClose: () => void }) {
   const [name, setName] = useState("");
+  const { status } = useAccount();
+  const mayStart = mayStartCloudSessions(status, orgId);
   const trimmed = name.trim();
   const taken = useMemo(() => {
     if (!trimmed) return false;
@@ -155,6 +160,8 @@ export function NewBlankProjectDialog({ orgId, orgName, onClose }: { orgId: stri
     setPrefs({ cloudBlankProjects: { ...prefs.cloudBlankProjects, [orgId]: [...current, trimmed] } });
     onClose();
     // The next step is its first session; the form spends nothing until Start.
+    // For a member it only focuses the new project: starting a cloud session
+    // is an owner's or admin's (`startCloudSessionIn` decides).
     startCloudSessionIn(cloudProjectKey(orgId, blankIdentity(trimmed)));
   };
 
@@ -182,6 +189,11 @@ export function NewBlankProjectDialog({ orgId, orgName, onClose }: { orgId: stri
             className="h-8 w-full rounded-md bg-well px-2 text-[13px] outline-none focus:ring-2 focus:ring-ring/40"
           />
           {problem && <p className="mt-1 text-xs text-destructive">{problem}</p>}
+          {mayStart === false && (
+            <p className="mt-2 text-xs text-muted-foreground" role="note" data-testid="cloud-start-locked">
+              {NEW_SESSION_ADMIN_REASON}. The project is added to your sidebar; an owner or admin starts its first session.
+            </p>
+          )}
           <DialogFooter>
             <Button type="button" variant="ghost" size="sm" onClick={onClose}>
               Cancel

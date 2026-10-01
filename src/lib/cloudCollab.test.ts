@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable/workspace";
 import {
+  ACCESS_GRACE_MS,
   APPROVE_BLOCKED_REASON,
   NOT_SHARED_REASON,
   VIEWER_REASON,
@@ -110,13 +111,33 @@ describe("losing access", () => {
   const connected = (authority: "manage" | "participate" = "participate"): WorkspaceConnectionState => ({ state: "connected", runtimeGeneration: 1, runtimeVersion: "1", capabilities: [], authority });
   const idle: WorkspaceConnectionState = { state: "idle" };
 
-  it("reads a refused reconnect as lost access, and a network drop as a reconnect", () => {
-    for (const reason of ["cloud_workspace_not_found", "cloud_workspace_collaboration_forbidden", "4403 forbidden", "access-revoked", "closed: access removed"]) {
+  it("reads only the attach's own refusal as lost access", () => {
+    // What the desktop's attach reports when the API no longer lists the workspace for this person.
+    for (const reason of ["cloud_workspace_not_found", "open failed: cloud_workspace_not_found"]) {
       expect(accessLostReason(reason), reason).toBe(true);
       expect(accessLoss({ state: { state: "reconnecting", attempt: 1, reason, retryInMs: 250 }, you: you("driver"), hadAccess: true })).toBe("removed");
+      expect(accessLoss({ state: { state: "reconnecting", attempt: 1, reason, retryInMs: 250 }, you: you("driver"), hadAccess: false })).toBe("not-shared");
     }
-    for (const reason of ["4104 relay restarting", "connection reset by peer", "4101 stale", "", null, undefined]) expect(accessLostReason(reason), String(reason)).toBe(false);
-    expect(accessLoss({ state: { state: "reconnecting", attempt: 1, reason: "4104 relay restarting", retryInMs: 250 }, you: you("driver"), hadAccess: true })).toBeNull();
+    // Drops the next attempt may fix, and anything a proxy or the relay may say: an owner is never locked out by a 403 on the handshake.
+    for (const reason of [
+      "4104 relay restarting",
+      "connection reset by peer",
+      "4101 stale",
+      "connection closed",
+      "relay refused the attach",
+      "403 Forbidden",
+      "4403 forbidden",
+      "forbidden",
+      "access-revoked",
+      "organization_member_not_found",
+      "[redacted]",
+      "",
+      null,
+      undefined,
+    ]) {
+      expect(accessLostReason(reason), String(reason)).toBe(false);
+    }
+    expect(accessLoss({ state: { state: "reconnecting", attempt: 1, reason: "403 Forbidden", retryInMs: 250 }, you: you("manager"), hadAccess: true })).toBeNull();
   });
 
   it("tells removed from never shared by whether this person had the session before", () => {
@@ -125,6 +146,18 @@ describe("losing access", () => {
     // Not connected: the list's role decides the same way.
     expect(accessLoss({ state: idle, you: listedYou({ role: "none", canApprove: false }), hadAccess: true })).toBe("removed");
     expect(accessLoss({ state: idle, you: listedYou({ role: "none", canApprove: false }), hadAccess: false })).toBe("not-shared");
+  });
+
+  it("checks, then says not shared yet, while the list says shared and the runtime does not: never removed", () => {
+    const disagreeing = (disagreeingMs: number, hadAccess = false) => accessLoss({ state: connected(), you: you("none"), hadAccess, listShared: true, disagreeingMs });
+    expect(disagreeing(0)).toBe("checking");
+    expect(disagreeing(ACCESS_GRACE_MS - 1)).toBe("checking");
+    expect(disagreeing(ACCESS_GRACE_MS)).toBe("pending");
+    expect(disagreeing(10 * 60_000)).toBe("pending");
+    // Even with this desktop's cached conversation: the list says it is shared again.
+    expect(disagreeing(0, true)).toBe("checking");
+    // The list is not believed (this view watched the access end after it was asked for): removed.
+    expect(accessLoss({ state: connected(), you: you("none"), hadAccess: true, listShared: false, disagreeingMs: 0 })).toBe("removed");
   });
 
   it("locks nobody who has a role, whose sharing is unknown, or whose runtime has no member list yet", () => {

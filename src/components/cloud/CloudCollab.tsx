@@ -1,9 +1,9 @@
 import { useEffect, useReducer, useState } from "react";
-import { Keyboard, Lock, StickyNote, Users, X } from "lucide-react";
+import { Keyboard, Loader2, Lock, StickyNote, Users, X } from "lucide-react";
 import type { WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { leaseHeldBy, leaseLive, type TabLease } from "@terminalx/portable/workspaceCollab";
 import { Button } from "@/components/ui/button";
-import { ACCESS_REMOVED_TITLE, acquireLease, canDrive, loadNotes, postNote, releaseLease, setNotesOpen, sharingKnown, takeOverLease, useCollab } from "@/lib/cloudCollab";
+import { ACCESS_REMOVED_TITLE, type AccessLoss, acquireLease, canDrive, loadNotes, postNote, releaseLease, setNotesOpen, sharingKnown, takeOverLease, useCollab } from "@/lib/cloudCollab";
 import { initials, usePeople } from "@/lib/cloudPeople";
 import { cn } from "@/lib/cn";
 
@@ -160,25 +160,44 @@ export function ShareBadge({ you, sharedWith, className }: { you?: { role: Works
   );
 }
 
+const LOCK_COPY: Record<AccessLoss, { title: string; body: string }> = {
+  removed: {
+    title: ACCESS_REMOVED_TITLE,
+    body: "It is no longer shared with you, or it was made private or deleted. Ask an organization admin or its creator if you still need it.",
+  },
+  "not-shared": {
+    title: "This workspace has not been shared with you",
+    body: "You can see that it exists, but not its agent tabs, terminals or files. Ask an organization admin or its creator to share it with you.",
+  },
+  checking: {
+    title: "Checking access…",
+    body: "The workspace list says this is shared with you. Waiting for the workspace to confirm it; this usually takes a few seconds.",
+  },
+  pending: {
+    title: "This workspace has not been shared with you yet",
+    body: "The workspace list says it is shared with you, but the workspace itself has not confirmed it. It opens here as soon as it does; if it does not, ask an organization admin to share it again.",
+  },
+};
+
 /**
  * The lock pane: what someone sees instead of a workspace's content when it
- * is not shared with them, or (`removed`) when their access ended. With
- * `onBack` it replaces a whole session, so it offers the way out.
+ * is not shared with them (`not-shared`), when their access ended
+ * (`removed`), or while the list and the runtime disagree about a new share
+ * (`checking`, then `pending`). With `onBack` it replaces a whole session, so
+ * it offers the way out.
  */
-export function NotSharedNotice({ removed = false, onBack, onRecheck }: { removed?: boolean; onBack?: () => void; onRecheck?: () => void } = {}) {
+export function NotSharedNotice({ kind = "not-shared", onBack, onRecheck }: { kind?: AccessLoss; onBack?: () => void; onRecheck?: () => void } = {}) {
+  const copy = LOCK_COPY[kind];
   return (
     <div
       className="flex flex-1 flex-col items-center justify-center gap-1 p-6 text-center text-xs text-muted-foreground"
-      data-testid={removed ? "cloud-access-removed" : "cloud-not-shared"}
+      data-testid={kind === "removed" ? "cloud-access-removed" : kind === "not-shared" ? "cloud-not-shared" : "cloud-access-checking"}
+      data-kind={kind}
       role="status"
     >
-      <Lock className="size-4" />
-      <p className="text-sm text-foreground">{removed ? ACCESS_REMOVED_TITLE : "This workspace has not been shared with you"}</p>
-      <p>
-        {removed
-          ? "It is no longer shared with you, or it was made private or deleted. Ask an organization admin or its creator if you still need it."
-          : "You can see that it exists, but not its agent tabs, terminals or files. Ask an organization admin or its creator to share it with you."}
-      </p>
+      {kind === "checking" ? <Loader2 className="size-4 animate-spin" /> : <Lock className="size-4" />}
+      <p className="text-sm text-foreground">{copy.title}</p>
+      <p className="max-w-md">{copy.body}</p>
       {(onBack || onRecheck) && (
         <div className="mt-2 flex items-center gap-2">
           {onBack && (
@@ -186,7 +205,7 @@ export function NotSharedNotice({ removed = false, onBack, onRecheck }: { remove
               Back
             </Button>
           )}
-          {onRecheck && (
+          {onRecheck && kind !== "checking" && (
             <Button size="sm" variant="ghost" onClick={onRecheck}>
               Check again
             </Button>
