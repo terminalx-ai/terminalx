@@ -1255,6 +1255,35 @@ async fn two_agent_tabs_and_a_shell_survive_a_reattach_and_a_fenced_restart() {
     desk.until_tab(&mut feeds, &b_tab, "B resumes its conversation", |f| has(f, "after the reboot")).await;
     let shell = desk.ok("pty.create", json!({ "cols": 100, "rows": 30, "clientRequestId": "pro12-shell-after" })).await;
     assert_ne!(shell["ptyId"], pty_id.as_str());
+
+    // The additive namespaces (`agents/1`, `session/2`, `pty/2`) on the same
+    // Linux runtime: what can run, the session index, and a session's terminal.
+    let agents = desk.ok("runtime.agents", json!({})).await;
+    let claude = agents["agents"].as_array().unwrap().iter().find(|a| a["id"] == "claude").unwrap_or_else(|| panic!("claude is installed: {agents}"));
+    assert!(!claude["models"].as_array().unwrap().is_empty() && claude["modes"].as_array().unwrap().iter().any(|m| m == "manual"), "{claude}");
+    let added = desk.ok("session.addTab", json!({ "sessionId": a_session, "agent": "claude", "mode": "manual", "clientRequestId": "pro12-add-tab" })).await;
+    let added_tab = added["tabId"].as_str().unwrap().to_string();
+    assert!(added_tab != a_tab && added_tab != b_tab, "a third tab: {added}");
+    let resent = desk.ok("session.addTab", json!({ "sessionId": a_session, "agent": "claude", "mode": "manual", "clientRequestId": "pro12-add-tab" })).await;
+    assert_eq!(resent["tabId"], added_tab.as_str(), "a resend adds nothing");
+    assert_eq!(desk.ok("session.tabs", json!({})).await["tabs"].as_array().unwrap().len(), 3);
+    let renamed = desk.ok("session.update", json!({ "sessionId": a_session, "title": "PRO-12 on Linux", "pinned": true, "clientRequestId": "pro12-update" })).await;
+    assert_eq!((renamed["session"]["title"].as_str(), renamed["session"]["pinned"].as_bool()), (Some("PRO-12 on Linux"), Some(true)));
+    let owned = desk.ok("pty.create", json!({ "sessionId": b_session, "cols": 100, "rows": 30, "clientRequestId": "pro12-session-shell" })).await;
+    let owned_id = owned["ptyId"].as_str().unwrap().to_string();
+    let of = |terminals: &Value, id: &str| terminals["terminals"].as_array().unwrap().iter().find(|t| t["ptyId"] == id).cloned();
+    let terminals = desk.ok("pty.list", json!({})).await;
+    assert_eq!(of(&terminals, &owned_id).expect("the session's terminal")["sessionId"], b_session.as_str(), "{terminals}");
+    assert!(of(&terminals, shell["ptyId"].as_str().unwrap()).expect("the plain shell").get("sessionId").is_none(), "{terminals}");
+    let deleted = desk.ok("session.delete", json!({ "sessionId": b_session, "clientRequestId": "pro12-delete" })).await;
+    assert_eq!(deleted["deleted"], json!([b_session]));
+    let sessions = desk.ok("session.list", json!({})).await;
+    let listed: Vec<&str> = sessions["sessions"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap()).collect();
+    assert_eq!(listed, vec![a_session.as_str()], "only A is left, renamed: {sessions}");
+    assert_eq!(sessions["sessions"][0]["title"], "PRO-12 on Linux");
+    let terminals = desk.ok("pty.list", json!({})).await;
+    assert!(of(&terminals, &owned_id).is_none(), "deleting a session closes its terminal: {terminals}");
+    assert!(of(&terminals, shell["ptyId"].as_str().unwrap()).is_some(), "and leaves the others: {terminals}");
     desk.supervisor.stop();
     drop(runtime);
 }

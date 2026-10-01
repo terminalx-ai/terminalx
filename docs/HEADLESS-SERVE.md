@@ -155,8 +155,11 @@ only, using the bootstrap's Relay Token and host key (`src/remote/host.rs`):
 - A client connection runs the E2EE v2 handshake, proves the attachment's device token,
   may install a resume credential (`pairing.provisionRelay`) and then speaks
   `terminalx-workspace-rpc/1` (`src/remote/server.rs`): `rpc.hello` capability
-  negotiation and the versioned `pty.*`, `fs.*`, `git.*` and `session.*` methods, each
-  authorized against the attachment's authority, with idempotent mutations.
+  negotiation and the versioned `pty.*`, `fs.*`, `git.*`, `session.*`, `keys.*`,
+  `lifecycle.*` and `runtime.agents` methods (`CAPABILITIES` and `METHODS` in
+  `src/remote/protocol.rs`), each authorized against the attachment's authority, with
+  idempotent mutations. `session/2`, `pty/2` and `agents/1` are additive: a client that
+  asks only for `session/1` and `pty/1` is served as before.
 - A rejected runtime credential disconnects every client and stops serving until the
   API accepts one again.
 
@@ -180,7 +183,10 @@ BUILD_ONLY=1 ...  # only the binary, at target-linux/terminalx-serve
 `two_agent_tabs_and_a_shell_survive_a_reattach_and_a_fenced_restart` is the PRO-12 check:
 two fake-Claude agent tabs and a shell run at once, a new connection finds the same tabs,
 transcripts, shell process and output, and after a reboot on a newer generation the old
-generation is refused, transcripts survive and the old shell is gone. terminalx-saas
+generation is refused, transcripts survive and the old shell is gone. It then exercises
+the additive namespaces on that runtime: `runtime.agents`, `session.addTab` (and its
+resend), `session.update`, a session's terminal (`pty.create` with `sessionId`) and
+`session.delete`, which closes that terminal and leaves the others. terminalx-saas
 `bun run cloud:e2e:local` builds its local-docker image from `target-linux/terminalx-serve`
 (or `TERMINALX_SERVE_BIN`) and runs the full workspace lifecycle against it.
 
@@ -188,15 +194,18 @@ generation is refused, transcripts survive and the old shell is gone. terminalx-
 
 - **Repository clone** for a workspace without an Environment template. The runtime does
   not advertise `organization-setup-v*`, so the server sends no clone list and such a
-  workspace starts with an empty project. Organization credentials need no setup: agent
+  workspace starts with an empty project; a launch into it makes the folder a Git
+  repository on its work branch. Organization credentials need no setup: agent
   logins arrive as sealed grants (`cloud_grants`) and GitHub access through the broker
   (`cloud_github`).
 - **Organization sessions.** A `participate` attachment on an organization workspace sees
   no sessions (`shared_sessions` stays empty, failing closed); the legacy runtime shared
-  them with organization members.
+  them with organization members. The server's sharing contract (`collaboration-v1` on
+  refresh, the `collab/1` namespace; terminalx-saas PRO-30) is not implemented here.
 - **The `terminalx` agent CLI inside the runtime.** The CLI module links the desktop's
   computer-use and browser parsers, so it is still desktop-only.
-- **The published artifact.** terminalx-saas installs this binary behind
-  `CLOUD_WORKSPACE_RUNTIME_KIND=terminalx-serve` (versioned directory, atomic `current`
-  swap, health check, rollback). A signed, pinned linux-x64/arm64 build is not published
-  yet.
+- **A signed artifact, and arm64 in the cloud.** `release-serve.yml` publishes
+  `terminalx-serve-linux-x64` and `-arm64` as a runtime prerelease after CI passes on
+  `main` ([RELEASING.md](RELEASING.md)). terminalx-saas installs the newest compatible x64
+  one by default (versioned directory, atomic `current` swap, health check, rollback). It
+  is verified by SHA-256, not signed, and the server does not provision the arm64 build.
