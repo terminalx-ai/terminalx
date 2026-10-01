@@ -39,6 +39,11 @@ export interface CollabSnapshot {
   /** By tab; null once the runtime said the tab has no lease. */
   leases: Record<string, TabLease | null>;
   notes: Record<string, TabNotes>;
+  /**
+   * By tab: notes from other people that arrived while the Notes drawer was
+   * closed, counted on its toggle until it is opened.
+   */
+  unreadNotes: Record<string, number>;
   error: string | null;
 }
 
@@ -55,6 +60,8 @@ interface Store {
   snapshot: CollabSnapshot;
   presence: Presence;
   client: WorkspaceRpcClient | null;
+  /** Tabs whose Notes drawer is open: their notes are read as they arrive. */
+  notesOpen: Set<string>;
 }
 
 /** A typing indicator is refreshed at most this often while someone keeps typing. */
@@ -62,7 +69,7 @@ export const TYPING_REFRESH_MS = 10_000;
 /** Back to "viewing" after this long without a keystroke. */
 export const TYPING_IDLE_MS = 4_000;
 
-const EMPTY: CollabSnapshot = { available: false, you: null, lastYou: null, participants: [], leases: {}, notes: {}, error: null };
+const EMPTY: CollabSnapshot = { available: false, you: null, lastYou: null, participants: [], leases: {}, notes: {}, unreadNotes: {}, error: null };
 const stores = new Map<string, Store>();
 
 /**
@@ -89,7 +96,7 @@ function subscribeTo(key: string, listener: () => void): () => void {
 function store(key: string): Store {
   let s = stores.get(key);
   if (!s) {
-    s = { key, snapshot: { ...EMPTY }, presence: { tabId: null, activity: "viewing", typingSentAt: 0, idle: null }, client: null };
+    s = { key, snapshot: { ...EMPTY }, presence: { tabId: null, activity: "viewing", typingSentAt: 0, idle: null }, client: null, notesOpen: new Set() };
     stores.set(key, s);
   }
   return s;
@@ -138,6 +145,148 @@ export const NOT_SHARED_REASON = "This workspace has not been shared with you. A
 export const SETTINGS_LOCKED_REASON = "Only a workspace admin or someone who can approve permissions changes the model, effort or permission mode";
 /** Shown on permission requests to someone who may not answer them. */
 export const APPROVE_BLOCKED_REASON = "Waiting for someone who can approve";
+
+/** Shown when a setting change was dropped because this person may no longer change settings (the receipt's `settingsIgnored`). */
+export const SETTINGS_IGNORED_REASON = "Your model, effort or mode change was not applied: you can no longer approve permissions";
+/** Why a creator who is a plain member cannot switch a workspace between private and organization-visible. */
+export const VISIBILITY_ADMIN_REASON = "Only an organization owner or admin can change whether a workspace is private or visible to the organization";
+/** Shown to an approver whose connection cannot change a tab's settings live: they ride with the next message. */
+export const SETTINGS_WITH_NEXT_MESSAGE = "Model, effort and mode changes apply with your next message";
+/** The lock pane of someone whose access ended while they had the session, or who had it before. */
+export const ACCESS_REMOVED_TITLE = "Your access to this workspace was removed.";
+/** Why Stop, Resume, Archive and Delete are not offered: the API keeps them for owners and admins. */
+export const LIFECYCLE_ADMIN_REASON = "Only an organization owner or admin can stop, archive or delete a cloud workspace";
+/**
+ * Why a member is not offered a new cloud session: creating a workspace,
+ * resuming one from the sidebar and adding a session to a running one are an
+ * owner's or admin's. (A driver's message still wakes a stopped workspace it
+ * is shared on; that is sending, not starting a session.)
+ */
+export const NEW_SESSION_ADMIN_REASON = "Only an organization owner or admin can start a new cloud session";
+
+/**
+ * What the API lets this person do to a workspace as a whole, from the
+ * workspace list (saas contract §21.2) and what opening it would grant:
+ *
+ * - `lifecycle`: stop, resume, archive, unarchive and delete are an
+ *   organization owner's or admin's (the API's manage check), whoever created
+ *   or drives the workspace.
+ * - `viewShares`: anyone who sees the workspace may read who it is shared
+ *   with (the API allows the list to every member who can see it).
+ * - `manageShares`: owners, admins and the creator change it.
+ *
+ * An older server says neither role nor share rights: nothing about sharing
+ * is offered, and the lifecycle follows the attachment authority as before.
+ */
+export interface WorkspaceAuthority {
+  lifecycle: boolean;
+  viewShares: boolean;
+  manageShares: boolean;
+}
+
+export function workspaceAuthority(workspace: {
+  you?: { role: WorkspaceYou["role"]; canApprove: boolean; canManageShares?: boolean } | null;
+  authority?: string | null;
+}): WorkspaceAuthority {
+  const { you } = workspace;
+  if (!you) return { lifecycle: workspace.authority !== "participate", viewShares: false, manageShares: false };
+  const manager = you.role === "manager";
+  return { lifecycle: manager, viewShares: true, manageShares: manager || !!you.canManageShares };
+}
+
+/**
+ * Whether a connection's reconnect reason says this person may no longer
+ * open the workspace at all, as opposed to a drop the next attempt may fix.
+ * The one reason the desktop's attach really reports for that is
+ * `cloud_workspace_not_found`: the API no longer lists the workspace for this
+ * person (it went private, they left the organization, or it was deleted).
+ * A revoked share closes the connection without a reason and the next attach
+ * succeeds with role `none`, which the role reports, not the reason. Nothing
+ * broader is matched: a proxy's 403 on the relay handshake is not lost access.
+ */
+export function accessLostReason(reason: string | null | undefined): boolean {
+  return !!reason && /\bcloud_workspace_not_found\b/.test(reason);
+}
+
+/** How long the list and the runtime may disagree before the pane stops saying "Checking access…". */
+export const ACCESS_GRACE_MS = 15_000;
+
+/**
+ * Why a cloud session shows the lock pane instead of its tabs, or null:
+ *
+ * - `removed`: this person had access and no longer does. Only for a real
+ *   transition: a role seen from the runtime in this view, or the session's
+ *   conversation kept on this desktop, followed by none.
+ * - `not-shared`: they never had it.
+ * - `checking`: the workspace list says it is shared with them but the
+ *   runtime does not (yet): normal for a few seconds after a share, until the
+ *   runtime reads its member list. After `ACCESS_GRACE_MS` it is `pending`.
+ *
+ * The runtime's role decides while connected, else the list's or the last
+ * one seen; a reconnect refused for access counts as none.
+ */
+export type AccessLoss = "removed" | "not-shared" | "checking" | "pending";
+
+export function accessLoss(input: {
+  state: WorkspaceConnectionState;
+  /** The live role while connected, else the list's or the last one seen. */
+  you: WorkspaceYou | null;
+  /** This person had a role here earlier in this view, or this desktop holds the session's conversation. */
+  hadAccess: boolean;
+  /** The workspace list says it is shared with this person, and nothing seen later says otherwise. */
+  listShared?: boolean;
+  /** How long the runtime has said none while the list says shared. */
+  disagreeingMs?: number;
+}): AccessLoss | null {
+  const { state, you } = input;
+  if (state.state === "reconnecting" && accessLostReason(state.reason)) return input.hadAccess ? "removed" : "not-shared";
+  // A manage attachment is an admin's: the runtime closes it rather than leave it with role none.
+  const none = sharingKnown(you) && you.role === "none" && !(state.state === "connected" && state.authority === "manage");
+  if (!none) return null;
+  if (state.state === "connected" && input.listShared) return (input.disagreeingMs ?? 0) < ACCESS_GRACE_MS ? "checking" : "pending";
+  return input.hadAccess ? "removed" : "not-shared";
+}
+
+// ---- access changes
+
+type AccessListener = (orgId: string) => void;
+const accessListeners = new Set<AccessListener>();
+
+/**
+ * Told whenever who may open a workspace of `orgId` changed as far as this
+ * desktop can see: its own role, the people the runtime lists, or a share or
+ * visibility change made here. The catalog lists the organization again, so
+ * rows and chips follow without a manual refresh. Listing never wakes compute.
+ */
+export function onAccessChanged(listener: AccessListener): () => void {
+  accessListeners.add(listener);
+  return () => accessListeners.delete(listener);
+}
+
+export function notifyAccessChanged(orgId: string | null | undefined) {
+  if (!orgId) return;
+  for (const listener of [...accessListeners]) {
+    try {
+      listener(orgId);
+    } catch {
+      /* one listener never stops the others */
+    }
+  }
+}
+
+/** The organization of a `cloud:<orgId>:<workspaceId>` key. */
+function orgOf(key: string): string | null {
+  const parts = key.split(":");
+  return parts[0] === "cloud" && parts.length >= 3 ? parts[1] : null;
+}
+
+/** Who is listed with which rights: what a share change alters, not what they look at. */
+function membersKey(participants: readonly Participant[]): string {
+  return participants
+    .map((person) => `${person.userId}:${person.role}:${person.canApprove ? 1 : 0}`)
+    .sort()
+    .join(",");
+}
 
 /**
  * This person's access from the workspace list (saas contract §21.2), before
@@ -197,7 +346,8 @@ export function tabGate(
 ): TabGate {
   // The runtime keeps the holder's lease for as long as their turn runs.
   const liveLease = leaseLive(lease, now) || (lease && turnRunning) ? lease : null;
-  const heldByOther = !!you && !!liveLease && liveLease.holderId !== you.userId;
+  // Without this person's own id (the list's role, before a connection) a lease cannot be called someone else's.
+  const heldByOther = !!you && !!you.userId && !!liveLease && liveLease.holderId !== you.userId;
   let blocked: string | null = null;
   if (you && !canDrive(you)) blocked = you.role === "none" && you.listed !== false ? NOT_SHARED_REASON : VIEWER_REASON;
   else if (you && heldByOther)
@@ -231,6 +381,42 @@ export function notShared(state: WorkspaceConnectionState, you: WorkspaceYou | n
   return state.state === "connected" && state.authority === "participate" && you?.role === "none" && you.listed !== false;
 }
 
+/**
+ * This person lost access to the workspace (role none, or a reconnect refused
+ * for access): drop its leases, people and notes, and stop following the
+ * connection. `lastYou` then says "none", so reopening shows the lock pane.
+ */
+export function clearCollabAccess(key: string) {
+  const s = store(key);
+  if (s.presence.idle) clearTimeout(s.presence.idle);
+  s.presence.idle = null;
+  s.notesOpen.clear();
+  const { snapshot } = s;
+  const cleared = snapshot.lastYou?.role === "none" && !snapshot.participants.length && !Object.keys(snapshot.leases).length && !Object.keys(snapshot.notes).length;
+  if (cleared && (!snapshot.you || snapshot.you.role === "none")) return;
+  const none: WorkspaceYou = { userId: snapshot.you?.userId ?? snapshot.lastYou?.userId ?? "", role: "none", canApprove: false };
+  set(s, { you: snapshot.you ? none : null, lastYou: none, participants: [], leases: {}, notes: {}, unreadNotes: {}, error: null });
+}
+
+/** Forget the last access this desktop saw here, so the next connection decides afresh. */
+export function forgetCollabAccess(key: string) {
+  const s = store(key);
+  if (s.snapshot.you || !s.snapshot.lastYou) return;
+  set(s, { lastYou: null });
+}
+
+/** The Notes drawer of a tab opened or closed: while open, its notes are read as they arrive. */
+export function setNotesOpen(key: string, tabId: string, open: boolean) {
+  const s = store(key);
+  if (open) s.notesOpen.add(tabId);
+  else s.notesOpen.delete(tabId);
+  if (open && s.snapshot.unreadNotes[tabId]) {
+    const unreadNotes = { ...s.snapshot.unreadNotes };
+    delete unreadNotes[tabId];
+    set(s, { unreadNotes });
+  }
+}
+
 /** Remember this person's access from the share list (it answers while the workspace sleeps). */
 export function rememberYou(key: string, you: { role: WorkspaceYou["role"]; canApprove: boolean }) {
   const s = store(key);
@@ -240,21 +426,30 @@ export function rememberYou(key: string, you: { role: WorkspaceYou["role"]; canA
 
 /** Who this person is for gating controls: live when connected, else the last known. */
 export function knownYou(state: WorkspaceConnectionState, snapshot: CollabSnapshot): WorkspaceYou | null {
-  if (state.state === "connected") return snapshot.available ? (snapshot.you ?? (state.you ?? null)) : null;
+  // Until the store follows this connection, its hello already says who this is.
+  if (state.state === "connected") return snapshot.available ? (snapshot.you ?? (state.you ?? null)) : collabGranted(state) ? (state.you ?? null) : null;
   return snapshot.lastYou;
 }
 
 export function applyCollabEvent(key: string, event: CollabEvent) {
   const s = store(key);
   switch (event.type) {
-    case "presence":
+    case "presence": {
+      const before = membersKey(s.snapshot.participants);
       set(s, { participants: event.participants });
+      // Someone was added, removed or changed role: the share count and chips are stale.
+      if (before !== membersKey(event.participants)) notifyAccessChanged(orgOf(key));
       break;
+    }
     case "note": {
-      const current = s.snapshot.notes[event.note.tabId] ?? { notes: [], more: false, loaded: false };
+      const tabId = event.note.tabId;
+      const current = s.snapshot.notes[tabId] ?? { notes: [], more: false, loaded: false };
       if (current.notes.some((note) => note.id === event.note.id)) return;
       const notes = [...current.notes, event.note].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
-      set(s, { notes: { ...s.snapshot.notes, [event.note.tabId]: { ...current, notes } } });
+      // Someone else's note with the drawer closed is unread until it is opened.
+      const mine = !!s.snapshot.you?.userId && event.note.authorId === s.snapshot.you.userId;
+      const unread = mine || s.notesOpen.has(tabId) ? s.snapshot.unreadNotes : { ...s.snapshot.unreadNotes, [tabId]: (s.snapshot.unreadNotes[tabId] ?? 0) + 1 };
+      set(s, { notes: { ...s.snapshot.notes, [tabId]: { ...current, notes } }, unreadNotes: unread });
       break;
     }
     case "lease": {
@@ -263,9 +458,18 @@ export function applyCollabEvent(key: string, event: CollabEvent) {
     }
     case "you": {
       const before = s.snapshot.you;
-      set(s, { you: event.you, lastYou: event.you });
+      if (event.you.role === "none" && event.you.listed !== false) {
+        // Access ended: nothing of the workspace's people, leases or notes stays on screen.
+        if (s.presence.idle) clearTimeout(s.presence.idle);
+        s.presence.idle = null;
+        s.notesOpen.clear();
+        set(s, { you: event.you, lastYou: event.you, participants: [], leases: {}, notes: {}, unreadNotes: {}, error: null });
+      } else {
+        set(s, { you: event.you, lastYou: event.you });
+      }
       // Shared again (or for the first time): what was hidden can be read now.
       if (before?.role === "none" && event.you.role !== "none" && s.client) void refreshCollab(key, s.client);
+      if (before?.role !== event.you.role || before?.canApprove !== event.you.canApprove) notifyAccessChanged(orgOf(key));
       break;
     }
   }
@@ -301,7 +505,16 @@ export function startCollab(key: string, client: WorkspaceRpcClient): () => void
   }
   s.client = client;
   const you = state.state === "connected" ? (state.you ?? null) : null;
-  set(s, { available: true, you, lastYou: you ?? s.snapshot.lastYou, error: null });
+  const before = s.snapshot.lastYou;
+  if (you?.role === "none" && you.listed !== false) {
+    // Reconnected without access (the share was revoked): leases, people and notes of before are not shown.
+    s.notesOpen.clear();
+    set(s, { available: true, you, lastYou: you, participants: [], leases: {}, notes: {}, unreadNotes: {}, error: null });
+  } else {
+    set(s, { available: true, you, lastYou: you ?? s.snapshot.lastYou, error: null });
+  }
+  // The role differs from what this desktop last knew: the list's rows and chips are stale.
+  if (you && sharingKnown(you) && before && (before.role !== you.role || before.canApprove !== you.canApprove)) notifyAccessChanged(orgOf(key));
   const stop = new WorkspaceCollab(client).onEvent((event) => applyCollabEvent(key, event));
   if (you?.role !== "none") {
     void refreshCollab(key, client);
@@ -310,7 +523,12 @@ export function startCollab(key: string, client: WorkspaceRpcClient): () => void
   }
   return () => {
     stop();
-    if (s.client === client) s.client = null;
+    if (s.client !== client) return;
+    s.client = null;
+    // What this connection said about the person ends with it: the next one's
+    // hello decides afresh, and `lastYou` answers meanwhile. Nothing stale is
+    // read as live after a reconnect.
+    if (stores.get(s.key) === s && (s.snapshot.available || s.snapshot.you)) set(s, { available: false, you: null });
   };
 }
 

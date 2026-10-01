@@ -50,6 +50,12 @@ export interface OrganizationMembersError {
 
 export const organizationMembers = {
   list: () => invoke<OrganizationRoster>("organization_members"),
+  /**
+   * The roster of a member organization that is not the active one, read only
+   * (the people a cloud workspace there can be shared with). Its
+   * `contextRevision` is empty: member changes stay with the active organization.
+   */
+  listIn: (orgId: string) => invoke<OrganizationRoster>("organization_members_in", { orgId }),
   invite: (email: string, role: AssignableRole, contextRevision: string) =>
     invoke<OrganizationRoster>("organization_member_invite", { email, role, contextRevision }),
   revokeInvite: (email: string, contextRevision: string) =>

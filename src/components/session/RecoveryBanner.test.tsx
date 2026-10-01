@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RecoveryBanner } from "./RecoveryBanner";
+import { askDetail } from "@/components/chat/AskCards";
 import type { PendingAsk } from "@/lib/transcript";
 import type { ModelInfo } from "@/lib/api";
 
@@ -64,5 +65,31 @@ describe("session recovery UI smoke", () => {
     render(<RecoveryBanner {...props()} kind="permission_expired" busy />);
     expect(screen.queryByRole("button", { name: /^Allow/ })).toBeNull();
     expect((screen.getByRole("button", { name: "Stop session" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("names the command to everyone on a shared cloud workspace, whether or not they may answer", () => {
+    const p = props();
+    const shared: PendingAsk = { ...ask, input: { command: "touch /tmp/bob-asked" } };
+    const { rerender } = render(<RecoveryBanner {...p} waiting asks={[shared]} askDetail answerBlockedReason="Waiting for someone who can approve" />);
+    expect(screen.getByTestId("permission-detail").textContent).toBe("touch /tmp/bob-asked");
+    expect((screen.getByRole("button", { name: /^Allow/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("answer-blocked").textContent).toBe("Waiting for someone who can approve");
+    // An approver reads the same line, with the buttons enabled.
+    rerender(<RecoveryBanner {...p} waiting asks={[shared]} askDetail />);
+    expect(screen.getByTestId("permission-detail").textContent).toBe("touch /tmp/bob-asked");
+    expect((screen.getByRole("button", { name: /^Allow/ }) as HTMLButtonElement).disabled).toBe(false);
+    // A local session's banner stays as it was: no detail.
+    rerender(<RecoveryBanner {...p} waiting asks={[shared]} />);
+    expect(screen.queryByTestId("permission-detail")).toBeNull();
+  });
+
+  it("describes what a request is about by its tool: a command, a file, a URL, or the tool itself", () => {
+    expect(askDetail({ toolName: "Bash", input: { command: "ls  -la\n/tmp" } })).toBe("ls -la /tmp");
+    expect(askDetail({ toolName: "Edit", input: { file_path: "/workspace/api/src/login.ts", old_string: "a" } })).toBe("/workspace/api/src/login.ts");
+    expect(askDetail({ toolName: "WebFetch", input: { url: "https://example.com/docs" } })).toBe("https://example.com/docs");
+    expect(askDetail({ toolName: "mcp__linear__create_issue", input: { title: "x" } })).toBe("linear · create_issue");
+    expect(askDetail({ toolName: "Task", input: {} })).toBe("Task");
+    expect(askDetail({ toolName: "Bash", input: { command: "x".repeat(500) } })).toHaveLength(241);
+    expect(askDetail({ input: null })).toBeNull();
   });
 });

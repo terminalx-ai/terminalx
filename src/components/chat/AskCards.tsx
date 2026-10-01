@@ -10,7 +10,52 @@ import type { PendingAsk } from "@/lib/transcript";
  * A held tool call. The buttons are the harness's own options; the app only
  * ever answers with an option id. The first option answers to Enter.
  */
-export function PermissionCard({ ask, onAnswer, busy }: { ask: PendingAsk; onAnswer: (optionId: string) => void; busy?: boolean }) {
+/** How much of a command or path a permission card quotes. */
+const DETAIL_MAX = 240;
+
+function field(input: unknown, ...names: string[]): string | null {
+  if (!input || typeof input !== "object") return null;
+  for (const name of names) {
+    const value = (input as Record<string, unknown>)[name];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+/**
+ * What a permission request is about, in one line: the command, the file,
+ * the URL or the tool. Everyone on a shared workspace sees the same line,
+ * whether or not they may answer.
+ */
+export function askDetail(ask: Pick<PendingAsk, "toolName" | "input" | "title">): string | null {
+  const tool = ask.toolName ?? "";
+  const detail =
+    tool === "Bash" || tool === "shell"
+      ? field(ask.input, "command", "cmd")
+      : tool === "WebFetch"
+        ? field(ask.input, "url")
+        : tool === "WebSearch"
+          ? field(ask.input, "query")
+          : (field(ask.input, "file_path", "path", "notebook_path") ?? (tool.startsWith("mcp__") ? tool.replace(/^mcp__/, "").replace(/__/g, " · ") : null));
+  const text = detail ?? ask.title?.trim() ?? (tool || null);
+  if (!text) return null;
+  const line = text.replace(/\s+/g, " ");
+  return line.length > DETAIL_MAX ? `${line.slice(0, DETAIL_MAX)}…` : line;
+}
+
+export function PermissionCard({
+  ask,
+  onAnswer,
+  busy,
+  showDetail = false,
+}: {
+  ask: PendingAsk;
+  onAnswer: (optionId: string) => void;
+  busy?: boolean;
+  /** Quote what is asked for (the command, file or tool) under the heading. */
+  showDetail?: boolean;
+}) {
+  const detail = showDetail ? askDetail(ask) : null;
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     // The card is shown by its own scroller; focus alone would scroll every box above it too, the window included.
@@ -30,6 +75,11 @@ export function PermissionCard({ ask, onAnswer, busy }: { ask: PendingAsk; onAns
           <div className="text-[13px] font-medium">
             Waiting for permission to {verbFor(ask.toolName ?? "")}
           </div>
+          {detail && (
+            <div className="mt-1.5 break-words rounded-md bg-well px-2 py-1 font-mono text-[11.5px] text-muted-foreground" data-testid="permission-detail" title={detail}>
+              {detail}
+            </div>
+          )}
           <div className="mt-3 flex flex-wrap items-center gap-1.5">
             {ask.options?.map((o, i) => (
               <Button

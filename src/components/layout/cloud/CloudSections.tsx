@@ -44,9 +44,11 @@ import {
   useCloudCatalog,
   type OrgCatalog,
 } from "@/lib/cloudCatalog";
+import { NEW_SESSION_ADMIN_REASON } from "@/lib/cloudCollab";
 import { useCloudConnection } from "@/lib/cloudConnections";
 import { lifecycleErrorMessage } from "@/lib/cloudLifecycle";
-import { deriveCloudActivity, type CloudActivity, type RowTone } from "@/lib/cloudRowState";
+import { mayStartCloudSessions } from "@/lib/multiOrg";
+import { cloudAgentLabel, deriveCloudActivity, type CloudActivity, type RowTone } from "@/lib/cloudRowState";
 import {
   bootCloudSessions,
   closeCloudSessionTab,
@@ -415,6 +417,11 @@ function CloudProjectNode({ project, onLifecycle }: { project: CloudProject; onL
 
   const added = (prefs.cloudProjects[project.orgId] ?? []).includes(project.identity);
   const pendingBlank = project.blank && !project.workspaces.length;
+  // Starting a session creates a workspace, resumes one, or adds a session to
+  // a running one: the server keeps all three for owners and admins. Null
+  // while this account's role is not known yet: nothing is offered until it is.
+  const mayStart = mayStartCloudSessions(status, project.orgId);
+  const startBlocked = !project.selected || mayStart !== true;
   const removable = !project.workspaces.length && (added || pendingBlank);
   const run = async (work: () => Promise<void>) => {
     setError(null);
@@ -450,11 +457,14 @@ function CloudProjectNode({ project, onLifecycle }: { project: CloudProject; onL
           {!project.selected && <RowChip>not accessible</RowChip>}
         </button>
         <RowActions persistent className={menu.open ? "not-sr-only" : undefined}>
-          <WithTooltip label={`New session in ${project.fullName}`}>
-            <Button variant="ghost" size="icon-xs" aria-label={`New session in ${project.fullName}`} onClick={() => startNewCloudSession(project.key)} disabled={!project.selected}>
-              <Plus />
-            </Button>
-          </WithTooltip>
+          {/* A member is not shown a + that could only be refused; the menu's "New session" says why. */}
+          {mayStart === true && (
+            <WithTooltip label={`New session in ${project.fullName}`}>
+              <Button variant="ghost" size="icon-xs" aria-label={`New session in ${project.fullName}`} onClick={() => startNewCloudSession(project.key)} disabled={startBlocked}>
+                <Plus />
+              </Button>
+            </WithTooltip>
+          )}
           <DropdownMenu {...menu.root}>
             <DropdownMenuTrigger asChild {...menu.trigger}>
               <Button variant="ghost" size="icon-xs" aria-label={`Project menu for ${project.fullName}`}>
@@ -462,8 +472,9 @@ function CloudProjectNode({ project, onLifecycle }: { project: CloudProject; onL
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-[17rem]">
-              <DropdownMenuItem onSelect={() => startNewCloudSession(project.key)} disabled={!project.selected}>
+              <DropdownMenuItem onSelect={() => startNewCloudSession(project.key)} disabled={startBlocked} title={mayStart === false ? NEW_SESSION_ADMIN_REASON : undefined}>
                 <Plus /> New session
+                {mayStart === false && <span className="ml-auto pl-3 text-[10px] text-faint">admins only</span>}
               </DropdownMenuItem>
               <DropdownMenuItem
                 onSelect={() => updateOrgList("cloudPinned", project.orgId, (list) => (project.pinned ? list.filter((id) => id !== project.identity) : [...list, project.identity]))}
@@ -942,7 +953,7 @@ function CloudSessionNode({ row, node, manage, location }: { row: CloudSessionRo
         {error && <p className="ml-6 text-[10px] text-destructive">{error}</p>}
         <TreeGroup expanded={expanded} className="pl-5">
           {row.tabs.map((tab) => {
-            const label = tab.title?.trim() || (tab.harness === "codex" ? "Codex" : tab.harness === "claude" ? "Claude" : tab.harness);
+            const label = tab.title?.trim() || cloudAgentLabel(tab.harness);
             const peer = { kind: "agent" as const, id: tab.tabId };
             return (
               <AgentTabRow
@@ -957,7 +968,8 @@ function CloudSessionNode({ row, node, manage, location }: { row: CloudSessionRo
                 terminalView={false}
                 selected={shown?.kind === "agent" && shown.id === tab.tabId}
                 onOpen={() => open(peer)}
-                onClose={() => void closeTab(tab.tabId, label)}
+                // Closing a tab stops its agent: a workspace manager's, like the session menu.
+                onClose={manage ? () => void closeTab(tab.tabId, label) : undefined}
               />
             );
           })}
@@ -972,11 +984,14 @@ function CloudSessionNode({ row, node, manage, location }: { row: CloudSessionRo
                 exited={terminal.exited || !!terminal.gone}
                 selected={shown?.kind === "terminal" && shown.id === terminal.id}
                 onOpen={() => open(peer)}
-                onClose={() => void act(() => closeTerminalRow(node, terminal))}
+                // Killing a terminal is a workspace manager's too.
+                onClose={manage ? () => void act(() => closeTerminalRow(node, terminal)) : undefined}
               />
             );
           })}
-          {row.tabs.length === 0 && terminals.length === 0 ? <div className="px-3 py-1 text-[11px] text-faint">No tabs.</div> : null}
+          {row.tabs.length === 0 && terminals.length === 0 ? (
+            <div className="px-3 py-1 text-[11px] text-faint">{node.item.workspace.you?.role === "none" ? "Not shared with you." : "No tabs."}</div>
+          ) : null}
         </TreeGroup>
       </TreeNode>
     </div>

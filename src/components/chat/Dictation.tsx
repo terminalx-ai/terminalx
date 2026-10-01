@@ -210,7 +210,7 @@ export function DictationStatus({ dictation }: { dictation: Dictation }) {
 }
 
 /** Nothing while the availability check is out or dictation is unsupported. */
-export function MicButton({ dictation }: { dictation: Dictation }) {
+export function MicButton({ dictation, disabled = false }: { dictation: Dictation; disabled?: boolean }) {
   const { state, dictating, available, toggle } = dictation;
   const input = useTranscriptionInput();
   if (available === false) return null;
@@ -223,7 +223,7 @@ export function MicButton({ dictation }: { dictation: Dictation }) {
           aria-label={dictating ? "Stop dictating" : "Dictate"}
           aria-pressed={dictating}
           onClick={toggle}
-          disabled={input.saving || (state.phase !== "idle" && !dictating)}
+          disabled={(disabled && !dictating) || input.saving || (state.phase !== "idle" && !dictating)}
           className={cn("shrink-0", dictating && "bg-destructive/15 text-destructive hover:bg-destructive/25 hover:text-destructive")}
         >
           <Mic className={cn(dictating && state.phase === "listening" && "animate-pulse-soft")} />

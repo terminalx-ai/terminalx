@@ -6,6 +6,7 @@ import {
   attachCloudAgentTab,
   configureCloudAgentTab,
   decideCloudAgent,
+  discardPendingConfig,
   isDeciding,
   markCloudAgentRead,
   refreshFromCheckpoint,
@@ -16,7 +17,7 @@ import {
   stopCloudAgent,
 } from "@/lib/cloudAgents";
 import type { CloudAgentScope, OutboxEntry } from "@/lib/cloudAgentApi";
-import { APPROVE_BLOCKED_REASON, canApprove, roleBlockReason } from "@/lib/cloudCollab";
+import { APPROVE_BLOCKED_REASON, canApprove, mayConfigure, roleBlockReason } from "@/lib/cloudCollab";
 import type { AgentEvent } from "@/types/events";
 import type { TabEntry, TabStatus } from "@/types/session";
 
@@ -73,6 +74,14 @@ export interface SessionBackend {
   /** The UI's copy of a tab. A cloud tab's store updates itself, so this is local only. */
   patchTab(tabId: string, patch: Partial<TabEntry>): void;
   setTabStatus(tabId: string, status: TabStatus): void;
+  /**
+   * Cloud only: what happened to a model, effort or mode chosen here.
+   * `pending`: it has not reached the agent yet and rides with the next
+   * message (an approver's connection cannot configure a tab live, and
+   * nobody's can while offline). `ignored`: it was dropped, because this
+   * person may no longer change settings (the receipt's `settingsIgnored`).
+   */
+  settingsNotice?(tabId: string): "pending" | "ignored" | null;
   /** Why this person may not answer permission requests (a shared workspace's non-approver), or null. */
   approveBlockedReason?: string | null;
   /**
@@ -195,6 +204,8 @@ export interface CloudSessionContext {
   followUps: (tabId: string) => { clientCommandId: string; text: string }[];
   /** Raise the connection to `wake`: only called for an interactive command on a stopped workspace. */
   wake: () => Promise<void>;
+  /** What became of a tab's last setting change (see `SessionBackend.settingsNotice`). */
+  settingsNotice?: (tabId: string) => "pending" | "ignored" | null;
   /** PRO-30: this person's access (live, last known or from the list); null when sharing does not apply. */
   you?: WorkspaceYou | null;
   /** The connection, when it was granted `collab/1`. */
@@ -263,6 +274,8 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     },
     send: async (tabId, text, images) => {
       if (images.length) throw new Error(CLOUD_IMAGES_UNSUPPORTED);
+      // Settings chosen while this person could approve are not sent once they cannot: the runtime would ignore them.
+      if (!mayConfigure(you)) discardPendingConfig(scope, tabId);
       await interactive(() => sendToCloudAgent(scope, tabId, text, client));
       return { events: [], queued: true };
     },
@@ -291,6 +304,11 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     setPermissionMode: async (tabId, mode) => {
       guard();
       await configureCloudAgentTab(scope, tabId, { mode }, client);
+    },
+    settingsNotice: (tabId) => {
+      const notice = ctx.settingsNotice?.(tabId) ?? null;
+      // Someone who may no longer configure is not told their change "applies with the next message".
+      return notice === "pending" && !mayConfigure(you) ? null : notice;
     },
     markRead: (tabId) => markCloudAgentRead(scope, tabId, client),
     patchTab: () => undefined,

@@ -16,6 +16,7 @@ import { getAccount, refreshAccount, subscribeAccount } from "@/lib/account";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { phaseOf, settled } from "@/lib/cloudCreate";
 import { isArchived, isOpen, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
+import { onAccessChanged } from "@/lib/cloudCollab";
 import { cloudProjectKey, cloudWorkspaceKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
 
 /**
@@ -47,6 +48,12 @@ export interface OrgCatalog {
   quota: { used: number; limit: number } | null;
   /** When the workspace list last answered; null for never. */
   fetchedAt: number | null;
+  /**
+   * When the list now shown was asked for (this launch only). What it says
+   * was true no earlier than this, so something learned later than it (a
+   * revocation seen live) is not contradicted by it.
+   */
+  requestedAt?: number | null;
   /** `cache` until this launch's first list answers. */
   source: "cache" | "live";
   /** Why the last refresh failed; the rows above are then last known. */
@@ -311,7 +318,7 @@ export async function ingestCloudList(
     for (const tombstone of tombstones) delete sessions[tombstone.id];
     set({
       ...state,
-      orgs: { ...state.orgs, [org]: { ...current, workspaces, quota: list.quota ?? current.quota, fetchedAt: now, source: "live", error: null, sessions } },
+      orgs: { ...state.orgs, [org]: { ...current, workspaces, quota: list.quota ?? current.quota, fetchedAt: now, requestedAt, source: "live", error: null, sessions } },
       createMemory,
     });
   }
@@ -450,6 +457,10 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
 
 export const POLL_FOCUSED_MS = 30_000;
 export const POLL_CHANGING_MS = 3_000;
+/** While the window is visible but another app has the focus: slow, so a share or a revocation still shows. */
+export const POLL_BACKGROUND_MS = 120_000;
+/** A burst of access changes (a share dialog, several role notifications) lists once. */
+export const ACCESS_REFRESH_DELAY_MS = 400;
 
 /** Starting, or a stop, resume, archive or delete still running. */
 export function isChanging(item: CloudWorkspaceListItem): boolean {
@@ -458,16 +469,18 @@ export function isChanging(item: CloudWorkspaceListItem): boolean {
 
 /**
  * How long until an organization's next list: every 3 s while anything in it
- * is changing state, every 30 s while the window is focused, and never while
- * it is hidden (or visible but in the background with nothing changing;
- * focusing it lists at once when the rows are stale). Each live organization
- * follows this on its own timer, so an idle desktop sends one list per
- * organization per 30 s (until the cross-organization feed, CS-21).
+ * is changing state, every 30 s while the window is focused, every 2 min
+ * while it is visible in the background (so a share or a revocation made by
+ * someone else shows without a manual refresh), and never while it is hidden.
+ * Focusing the window lists at once when the rows are stale. Each live
+ * organization follows this on its own timer, so an idle focused desktop
+ * sends one list per organization per 30 s (until the cross-organization
+ * feed, CS-21). Listing never wakes compute.
  */
 export function pollDelay(org: OrgCatalog | undefined, window: { visible: boolean; focused: boolean }): number | null {
   if (!window.visible) return null;
   if (org?.workspaces.some(isChanging)) return POLL_CHANGING_MS;
-  return window.focused ? POLL_FOCUSED_MS : null;
+  return window.focused ? POLL_FOCUSED_MS : POLL_BACKGROUND_MS;
 }
 
 /** Per live organization, its next list. */
@@ -515,6 +528,27 @@ function onWindowChange() {
     if (visible && focused && stale) void refreshCloudCatalog(orgId);
     else schedulePoll(orgId);
   }
+}
+
+/** Lists asked for by an access change, per organization, not yet sent. */
+const accessTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * Who may open a workspace of `orgId` changed (this person's role, the
+ * runtime's member list, or a share made here): list the organization again
+ * soon, focused or not, so rows lock, unlock or disappear. Only a list: it
+ * never attaches to or resumes anything.
+ */
+function onAccessChange(orgId: string) {
+  if (!booted || accessTimers.has(orgId)) return;
+  if (!liveCloudOrgIds(getAccount().status).includes(orgId)) return;
+  accessTimers.set(
+    orgId,
+    setTimeout(() => {
+      accessTimers.delete(orgId);
+      void refreshCloudCatalog(orgId);
+    }, ACCESS_REFRESH_DELAY_MS),
+  );
 }
 
 // ---- Saved cache -----------------------------------------------------------
@@ -630,6 +664,7 @@ async function loadSaved(owner: string, revision: string) {
 
 let booted = false;
 let unsubscribe: (() => void) | null = null;
+let unsubscribeAccess: (() => void) | null = null;
 
 /** Follow the account: load the saved catalog for a signed-in user, list the default organization, and poll. */
 function syncAccount() {
@@ -689,6 +724,7 @@ export function bootCloudCatalog() {
   if (booted) return;
   booted = true;
   unsubscribe = subscribeAccount(syncAccount);
+  unsubscribeAccess = onAccessChanged(onAccessChange);
   if (typeof window !== "undefined") {
     window.addEventListener("focus", onWindowChange);
     window.addEventListener("blur", onWindowChange);
@@ -701,6 +737,10 @@ export function bootCloudCatalog() {
 export function resetCloudCatalog() {
   unsubscribe?.();
   unsubscribe = null;
+  unsubscribeAccess?.();
+  unsubscribeAccess = null;
+  for (const timer of accessTimers.values()) clearTimeout(timer);
+  accessTimers.clear();
   if (typeof window !== "undefined") {
     window.removeEventListener("focus", onWindowChange);
     window.removeEventListener("blur", onWindowChange);

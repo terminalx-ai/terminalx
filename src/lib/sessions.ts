@@ -2,6 +2,8 @@ import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { api } from "@/lib/api";
+import { getAccount } from "@/lib/account";
+import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
 import { setSelectedAgent } from "@/lib/terminal";
 import { buildPaletteIndex, type PaletteIndex } from "@/lib/commandPalette";
 import type {
@@ -237,7 +239,8 @@ export function selectCloudWorkspace(key: string | null) {
  * focused project, and when no session is open the new-session form shows it.
  */
 export function selectCloudProjectInSidebar(projectKey: string) {
-  const drafting = !state.selectedSessionId && state.view === "new";
+  // The form takes the project only for someone who may start a session in it.
+  const drafting = !state.selectedSessionId && state.view === "new" && mayStartCloudSessions(getAccount().status, cloudKeyOrgId(projectKey)) === true;
   set({
     selectedCloudProject: projectKey,
     navigationVersion: state.navigationVersion + 1,
@@ -247,6 +250,13 @@ export function selectCloudProjectInSidebar(projectKey: string) {
 
 /** Open the new-session form for a cloud project, as the project row's `+` does. */
 export function startCloudSessionIn(projectKey: string) {
+  // Every way into the cloud new-session form passes here. A member (or an
+  // account whose role is not known yet) only focuses the project: the form
+  // could end in nothing but a refusal.
+  if (mayStartCloudSessions(getAccount().status, cloudKeyOrgId(projectKey)) !== true) {
+    set({ selectedCloudProject: projectKey, navigationVersion: state.navigationVersion + 1 });
+    return;
+  }
   set({
     selectedCloudProject: projectKey,
     selectedSessionId: null,

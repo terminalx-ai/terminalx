@@ -173,7 +173,7 @@ describe("sessions under the project", () => {
     expect(chip.textContent).toContain("fix-login");
     expect(chip.getAttribute("title")).toContain("Runs on box");
     // Tabs sit under their session.
-    expect(within(rows[0]).getByRole("treeitem", { name: "Claude", hidden: true })).toBeTruthy();
+    expect(within(rows[0]).getByRole("treeitem", { name: "Claude Code", hidden: true })).toBeTruthy();
     expectNoAttachOrResume();
   });
 
@@ -186,7 +186,7 @@ describe("sessions under the project", () => {
     fireEvent.click(within(sessionNode(`cloud:${ORG}:fix-login:s1`)).getByText("Fix login redirect"));
     expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${ORG}:fix-login:s1`);
     // A tab click selects its session too, and still looks only.
-    fireEvent.click(within(sessionNode(`cloud:${ORG}:fix-login:s1`)).getByRole("treeitem", { name: "Claude", hidden: true }));
+    fireEvent.click(within(sessionNode(`cloud:${ORG}:fix-login:s1`)).getByRole("treeitem", { name: "Claude Code", hidden: true }));
     await new Promise((resolve) => setTimeout(resolve, 10));
     expectNoAttachOrResume();
   });
@@ -196,8 +196,8 @@ describe("sessions under the project", () => {
     working.tabs[0].status = "in_progress";
     await load([item("sleepy", { state: "suspended", repositories: [acmeApi] })], { sleepy: { sessions: [working], capabilities: null } });
     mount();
-    const tab = within(sessionNode(`cloud:${ORG}:sleepy:s1`)).getByRole("treeitem", { name: "Claude", hidden: true });
-    expect(tab.getAttribute("title")).toBe("Claude · Idle");
+    const tab = within(sessionNode(`cloud:${ORG}:sleepy:s1`)).getByRole("treeitem", { name: "Claude Code", hidden: true });
+    expect(tab.getAttribute("title")).toBe("Claude Code · Idle");
     expect(within(sessionNode(`cloud:${ORG}:sleepy:s1`)).getByTestId("cloud-location-chip").getAttribute("title")).toContain("State: Stopped");
   });
 
@@ -484,12 +484,12 @@ describe("terminals under the session", () => {
     mount();
     expand("Fix login redirect");
     expand("Add tests");
-    expect(tabRows().map((row) => row.getAttribute("aria-label"))).toEqual(["Claude"]);
+    expect(tabRows().map((row) => row.getAttribute("aria-label"))).toEqual(["Claude Code"]);
     await listed([pty("p1", 1, "s1")]);
-    expect(tabRows().map((row) => row.getAttribute("aria-label"))).toEqual(["Claude", "Terminal 1"]);
+    expect(tabRows().map((row) => row.getAttribute("aria-label"))).toEqual(["Claude Code", "Terminal 1"]);
     // Someone else opens another: it appears with the next read of the list.
     await listed([pty("p1", 1, "s1"), pty("p2", 2, "s1"), pty("p3", 3, "s2")]);
-    expect(tabRows().map((row) => row.getAttribute("aria-label"))).toEqual(["Claude", "Terminal 1", "Terminal 2"]);
+    expect(tabRows().map((row) => row.getAttribute("aria-label"))).toEqual(["Claude Code", "Terminal 1", "Terminal 2"]);
     expect(within(sessionNode(`cloud:${ORG}:fix-login:s2`)).getByRole("treeitem", { name: "Terminal 3" })).toBeTruthy();
     expect(screen.queryByTestId("cloud-workspace-terminals")).toBeNull();
     expectNoAttachOrResume();
@@ -500,16 +500,16 @@ describe("terminals under the session", () => {
     act(() => sessions.selectCloudSession(KEY));
     mount();
     // The agent tab shows first: its row is the selected one, not the terminal's.
-    expect(selectedRows()).toEqual(["Claude"]);
+    expect(selectedRows()).toEqual(["Claude Code"]);
 
     fireEvent.click(within(sessionNode(KEY)).getByRole("treeitem", { name: "Terminal 1" }));
     expect(terminalStore.getTerminalState().selected[KEY]).toEqual({ kind: "terminal", id: `cloud:${WORKSPACE}:p1` });
     expect(selectedRows()).toEqual(["Terminal 1"]);
 
     // Clicking the agent row goes back: it used to stay highlighted and do nothing.
-    fireEvent.click(within(sessionNode(KEY)).getByRole("treeitem", { name: "Claude" }));
+    fireEvent.click(within(sessionNode(KEY)).getByRole("treeitem", { name: "Claude Code" }));
     expect(terminalStore.getTerminalState().selected[KEY]).toEqual({ kind: "agent", id: "s1-tab" });
-    expect(selectedRows()).toEqual(["Claude"]);
+    expect(selectedRows()).toEqual(["Claude Code"]);
     expectNoAttachOrResume();
   });
 
@@ -521,7 +521,7 @@ describe("terminals under the session", () => {
     act(() => setVisibleSessionTab(KEY, { kind: "terminal", id: `cloud:${WORKSPACE}:p1` }));
     expect(selectedRows()).toEqual(["Terminal 1"]);
     act(() => setVisibleSessionTab(KEY, { kind: "agent", id: "s1-tab" }));
-    expect(selectedRows()).toEqual(["Claude"]);
+    expect(selectedRows()).toEqual(["Claude Code"]);
     act(() => setVisibleSessionTab(KEY, null));
   });
 
@@ -543,7 +543,7 @@ describe("terminals under the session", () => {
     await listed([pty("p1", 1), pty("p2", 2)]);
     mount();
     expand("Fix login redirect");
-    expect(tabRows().map((row) => row.getAttribute("aria-label"))).toEqual(["Claude"]);
+    expect(tabRows().map((row) => row.getAttribute("aria-label"))).toEqual(["Claude Code"]);
     const group = screen.getByTestId("cloud-workspace-terminals");
     expect(within(group).getByText("Workspace terminals")).toBeTruthy();
     const rows = within(group).getAllByRole("treeitem").filter((row) => row.hasAttribute("aria-controls"));

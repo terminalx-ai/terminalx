@@ -31,6 +31,7 @@ import { WorkspaceNameEditor } from "./WorkspaceNameEditor";
 import { CloudCreateConfirm, cloudStartError, useCloudDraft, useCloudProjectChoices } from "./CloudNewSession";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { RunningLimitNotice } from "@/components/cloud/RunningLimitNotice";
+import { NEW_SESSION_ADMIN_REASON } from "@/lib/cloudCollab";
 import { RUNNING_LIMIT_CODE, runningLimitMessage, runningLimitReached } from "@/lib/runningLimit";
 import { confirmCloudCreate, planCloudStart, prepareCloudCreate, startInWorkspace, type CloudSessionRequest, type PreparedCreate } from "@/lib/cloudNewSession";
 
@@ -140,7 +141,7 @@ export function NewSessionView({
   const canSend = useMemo(
     () =>
       cloud
-        ? !!cloud.project && !!harness && text.trim().length > 0 && !hasImages && !busy && !confirm && cloud.project.selected
+        ? !!cloud.project && !!harness && text.trim().length > 0 && !hasImages && !busy && !confirm && cloud.project.selected && cloud.mayStart === true
         : !!project && !!harness && available && (text.trim().length > 0 || hasImages) && (!useWorktree || !!preset?.cwd || !!workspaceName) && !busy,
     [cloud, project, harness, available, text, hasImages, useWorktree, preset?.cwd, workspaceName, busy, confirm],
   );
@@ -301,8 +302,19 @@ export function NewSessionView({
                   <DropdownMenuGroup key={section.orgId} aria-label={`${section.orgName} cloud projects`}>
                     <DropdownMenuSeparator />
                     <DropdownMenuLabel>{section.orgName} cloud</DropdownMenuLabel>
+                    {/* A member's cloud projects are listed but not startable: the server keeps new cloud sessions for owners and admins. */}
+                    {section.mayStart === false && (
+                      <DropdownMenuLabel className="max-w-64 whitespace-normal text-[11px] font-normal text-muted-foreground" data-testid="cloud-start-locked">
+                        {NEW_SESSION_ADMIN_REASON}
+                      </DropdownMenuLabel>
+                    )}
                     {section.projects.map((choice) => (
-                      <DropdownMenuItem key={choice.key} disabled={!choice.selected} onSelect={() => startCloudSessionIn(choice.key)}>
+                      <DropdownMenuItem
+                        key={choice.key}
+                        disabled={!choice.selected || section.mayStart !== true}
+                        title={section.mayStart === false ? NEW_SESSION_ADMIN_REASON : undefined}
+                        onSelect={() => startCloudSessionIn(choice.key)}
+                      >
                         <Cloud className={cn(choice.key === cloud?.project?.key && "text-foreground")} />
                         <span className="truncate">{choice.fullName}</span>
                         {choice.blank && <span className="ml-auto pl-3 text-[11px] text-faint">no repo</span>}
@@ -517,6 +529,12 @@ export function NewSessionView({
               </Button>
             </div>
           </div>
+          {/* Reached with a role that changed meanwhile (demoted while drafting): Start is off, with the reason. */}
+          {cloud && cloud.mayStart === false && (
+            <div className="mt-2 rounded-md bg-warning/10 px-3 py-2 text-xs text-warning" role="note" data-testid="cloud-start-locked">
+              {NEW_SESSION_ADMIN_REASON}
+            </div>
+          )}
           {error && <div className="mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
           {cloud && error && limitOrg && <RunningLimitNotice orgId={limitOrg} />}
         </div>

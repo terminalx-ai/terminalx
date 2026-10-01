@@ -234,7 +234,7 @@ describe("launching with a stopped cloud session selected", () => {
     let menu = await openMenu();
     expect(within(menu).getByText(/^Stopped:/)).toBeTruthy();
     expect(within(menu).getByRole("menuitem", { name: "Terminal on the VM: wakes the workspace" })).toBeTruthy();
-    for (const name of ["Claude", "Codex"]) expect(within(menu).getByRole("menuitem", { name }).getAttribute("aria-disabled")).toBe("true");
+    for (const name of ["Claude Code", "Codex"]) expect(within(menu).getByRole("menuitem", { name }).getAttribute("aria-disabled")).toBe("true");
 
     // Escape closes it, choosing nothing (even with Terminal highlighted).
     fireEvent.pointerMove(within(menu).getByRole("menuitem", { name: /wakes the workspace/ }));

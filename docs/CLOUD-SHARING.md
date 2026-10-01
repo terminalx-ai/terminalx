@@ -115,8 +115,17 @@ role changed).
   on its own (`bypassPermissions`). A queued `send`/`steer` applies them only
   from a manager or someone with `canApprove`; from a plain driver the message
   is applied without them and the receipt says `settingsIgnored: true`. The
-  live `session.configure` needs manage. The desktop disables the pickers,
-  with the reason, for anyone else.
+  live `session.configure` needs manage. The desktop follows both rules, so no
+  picker ever does nothing: a manage connection whose person is a manager
+  configures live; an approving driver's change (a participate connection)
+  is kept as the tab's pending settings, shown as chosen, and sent with their
+  next message, with "Model, effort and mode changes apply with your next
+  message" under the composer until it goes; everyone else's pickers are
+  disabled with the reason. If approval rights are taken back in between,
+  the note goes, the unsent change is dropped rather than sent, and the
+  composer says "Your model, effort or mode change was not applied: you can
+  no longer approve permissions"; the same is said when a receipt arrives
+  with `settingsIgnored`.
 - **Permission decisions** are not lease-bound; they need `canApprove`.
 
 ### Revocation
@@ -172,6 +181,13 @@ decrypted, they keep. The server still never holds a key.
 | `cloud_workspace_shares(workspaceId)` | `GET /v1/desktop/orgs/:orgId/cloud-workspaces/:workspaceId/shares` | `{ shares, you: { role, canApprove, canManageShares } }` |
 | `cloud_workspace_share_put(workspaceId, userId, role, canApprove)` | `PUT …/shares/:userId` with `{ "v": 1, "role", "canApprove" }` | `{ share, created }` |
 | `cloud_workspace_share_revoke(workspaceId, userId)` | `DELETE …/shares/:userId` | `{ share }` |
+| `cloud_workspace_set_access(workspaceId, accessMode)` | `POST …/cloud-workspaces/:workspaceId/access` with `{ "accessMode": "private" \| "organization" }` | the workspace |
+
+`set_access` is the PRO-29 visibility switch: only an organization owner or
+admin may (`organization_admin_required` otherwise). `private` revokes every
+share in the same transaction and hides the workspace from everyone but its
+creator. An answer about another workspace or organization is treated as an
+unknown outcome. Binding: `api.cloudWorkspaceSetAccess`.
 
 Like the other cloud workspace commands, the token and organization stay
 native, a response that lands after an account or organization switch is
@@ -209,8 +225,42 @@ roster (`organization_members`) and the share list, else `User <short id>`.
 
 ### What the person sees
 
-**Share dialog** (the Share button in the workspace header). It lists the
-active shares with name and email. Someone with `canManageShares` (an
+**Share dialog.** "Share…" is offered to whoever manages the shares (owners,
+admins and the creator) on every workspace they see, private ones included;
+everyone else gets "Who has access…" once the workspace is
+organization-visible. A workspace created from the sidebar starts private
+(only its creator sees it), so the dialog is also where it becomes shareable:
+
+* While it is private the dialog says so in plain words: sharing makes the
+  workspace visible in the organization's sidebar; the people added and
+  organization admins can open it; other members see only that it exists.
+* Sharing with the first person asks for a confirmation ("Make visible and
+  share"), then switches the access mode to `organization` and grants the
+  share, in that order. Cancel changes nothing.
+* "Make private again" (after a confirmation that names how many people lose
+  access, and that an admin who did not create it stops seeing it too)
+  switches back to `private`; the server revokes every share with it.
+* Someone who cannot manage shares gets the same list titled "Who has
+  access", with neutral copy.
+* Visibility is the API's owner-or-admin switch. A creator who is a plain
+  member (`you.role` is not `manager`) manages the shares of a workspace that
+  is already organization-visible; "Share…" on their private workspace and
+  "Make private again" are disabled with the reason.
+* The two calls of "make visible and share" can part ways. If the share is
+  refused after the workspace became visible, the dialog says so plainly
+  ("… is now visible to the organization, but it is not shared with … yet"),
+  with "Retry sharing" and "Make private again". If the visibility change
+  gets no answer (`cloud_workspace_request_outcome_unknown`), the workspace
+  is read back from the list before any state is shown; if it cannot be
+  read, the dialog says the visibility is not known and offers "Check
+  again", and nothing is shared or made private on a guess.
+* People are offered from the workspace's own organization, which need not
+  be the default one: `organization_members_in(orgId)` reads
+  `GET /v1/desktop/orgs/:orgId/members` (authorized by membership in the path
+  organization) for a member organization, read only. If it cannot be read
+  the dialog says why and offers Retry; the shares above stay manageable.
+
+It lists the active shares with name and email. Someone with `canManageShares` (an
 organization owner or admin, or the workspace's creator) can change a
 share's role (Viewer or Driver), toggle "Can approve permissions", revoke it,
 and add a person from the organization roster (people already shared are not
@@ -223,6 +273,7 @@ offered again). Refusals are shown in words:
 | `cloud_workspace_share_limit` | the 64-person limit, revoke someone first |
 | `cloud_workspace_share_forbidden` | only admins and the creator can change sharing |
 | `organization_member_not_found` | the person is no longer a member |
+| `organization_admin_required` | only an owner or admin can change whether a workspace is private or visible to the organization |
 
 Everyone else sees the same list read-only, with their own access ("Your
 access: Viewer …, can approve permissions").
@@ -290,7 +341,10 @@ organization is live in the sidebar. Sharing follows them there:
   the share routes are authorized by membership in it. For a workspace in an
   organization other than the default, the dialog lists and changes shares
   but does not offer the default organization's roster for adding people.
-* **Session header.** Next to the connection chip: the lock chip, and the
+* **Session header.** One connection chip ("Live", "Stopped", "Connecting",
+  …: whether the workspace runs, never what this person may do) and one role
+  chip ("View only", "Driver" or "Not shared"; none for a manager; "View
+  only" too for a read-only attachment whose sharing is unknown). Then the
   other people in the workspace as initials (ringed while typing; name, role,
   activity and tab in the tooltip; at most three, then "+N").
 * **Agent tabs** (`TabView`). The same rules as the workspace page, shared
@@ -308,7 +362,54 @@ organization is live in the sidebar. Sharing follows them there:
   someone who would manage it (terminals are a manager's); a viewer or driver
   is not offered a wake that would end in a refusal.
 * **Terminals.** Drivers get "Take control" and see who is typing.
-* **What each person is offered.** Stop is hidden unless this person may stop
+* **Workspace actions.** Resume, Stop, Archive and Delete are the API's
+  manage actions (organization owners and admins), so only a `manager` is
+  offered them, in the project menu, a workspace row's menu and the header
+  chip; everyone else reads one disabled line saying who can. A **new
+  session** creates a workspace, resumes one from the sidebar or adds a
+  session to a running one (`session.create`), all three an owner's or
+  admin's, so a member is not offered one anywhere: no "+" on a project, the
+  project menu's and the new-session picker's items disabled with the reason,
+  and `startCloudSessionIn` (which every way into the form passes) only
+  focuses the project. While the account's role in the organization is not
+  known yet nothing is offered either. (A driver's message to an existing
+  session still wakes a stopped workspace it is shared on: that is sending,
+  not starting a session.) Closing a tab from the sidebar is a manager's,
+  like the session menu.
+* **No access.** A session of a workspace this person may not open shows the
+  lock pane instead of its body, with Back, and nothing of the workspace (no
+  tabs, transcript, lease bar, Working state, Stop, Notes, presence or
+  connection chip). Which pane:
+  * "Your access to this workspace was removed." only for a real transition:
+    the runtime gave this person a role in this view and then none, or this
+    desktop holds the session's conversation and the list now says none.
+  * "This workspace has not been shared with you" when they never had it.
+  * "Checking access…" while the workspace list says it is shared with them
+    and the runtime says role `none`. That is normal for the few seconds
+    until the runtime reads its member list after a share. After 15 s it
+    reads "This workspace has not been shared with you yet". Neither chip is
+    shown meanwhile, and "removed" is never said on a first connect.
+
+  The connection is **kept** while the runtime says `none`: it costs nothing,
+  never wakes compute, and the runtime's `collab.you` opens the session the
+  moment a share arrives. The list and the runtime disagreeing never
+  reconnects anything. Only a reconnect the API refuses
+  (`cloud_workspace_not_found`: the workspace went private, the person left
+  the organization, or it was deleted; the one reason the attach really
+  reports for lost access) closes the connection, and a list **asked for**
+  after that refusal (not merely answered after it) reopens it. While any
+  lock pane shows, the list is read again after 5, 10, 20 and then every
+  30 s, so a share made meanwhile is seen where no connection can tell. In
+  the sidebar an unshared workspace lists one row named after it, with no
+  cached session title, tab or status.
+* **Loading.** Until the runtime answers, a member's session shows the one
+  line "Loading the session…" and is named after its workspace.
+* **Permission requests** quote the command, file, URL or tool they are
+  about, for approvers and for everyone waiting on one.
+* **Notes** show a count on their toggle for notes from other people that
+  arrived while the drawer was closed.
+* **What each person is offered.** Attach files and Dictate are off with the
+  composer; Stop is hidden unless this person may stop
   (the lease holder or a manager); the model, effort and mode pickers are
   disabled with the reason for anyone who is neither a manager nor an
   approver; a `manage` attachment whose person is no longer a manager (a
@@ -318,12 +419,22 @@ organization is live in the sidebar. Sharing follows them there:
 * **Leaving an organization** drops its workspaces' presence, notes and
   leases with the rest of its cloud state.
 
+**Share state without a manual refresh.** The catalog lists an organization
+every 30 s while the window is focused and every 2 min while it is visible in
+the background, and at once (debounced) when access changes: this person's
+role (`collab.you`, or a hello that differs from the last one seen), the
+people the runtime lists (`collab.presence` with a different set of people,
+roles or approval rights), or a share or visibility change made in the
+dialog. All of these only list; none attaches to or resumes a workspace.
+
 Not moved yet: the full participants bar (names, windows, tabs) stays on the
 workspace page; SessionView shows the compact avatars.
 
 ### Tests
 
-`src/lib/cloudCollab.test.ts` (gating), the PRO-30 blocks of
+`src/lib/cloudCollab.test.ts` (gating, authority, lost access, unread notes),
+the "live two-user test" blocks of `SessionView.cloud.test.tsx`,
+`CloudSections.test.tsx` and `CloudShareDialog.test.tsx`, the PRO-30 blocks of
 `src/components/session/SessionView.cloud.test.tsx` and
 `src/components/layout/cloud/CloudSections.test.tsx`,
 `packages/portable/src/workspaceCollab.test.ts`,

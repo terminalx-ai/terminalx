@@ -7,7 +7,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
-import { openAutomations, renameWorkspace, useSessionStore } from "@/lib/sessions";
+import { openAutomations, renameWorkspace, selectSession, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
 import { ContinuationDialog } from "./ContinuationDialog";
@@ -29,6 +29,7 @@ import { WorkspaceNameEditor } from "./WorkspaceNameEditor";
 import { workspaceName } from "@/lib/dashboard";
 import { localSessionBackend } from "@/lib/sessionBackend";
 import type { CloudSessionModel } from "@/lib/cloudSession";
+import { cloudAgentLabel } from "@/lib/cloudRowState";
 import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
 import { AccessChip, NotSharedNotice, PresenceAvatars } from "@/components/cloud/CloudCollab";
 import { presenceTab } from "@/lib/cloudCollab";
@@ -83,9 +84,11 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
       <aside className="flex h-full w-(--panel-w) shrink-0 flex-col border-l border-hairline" data-testid="cloud-panel-offline">
         <div data-tauri-drag-region="deep" className="h-(--titlebar-h) shrink-0" />
         <div className="flex flex-1 items-center justify-center px-6 text-center text-xs text-muted-foreground">
-          {cloud.asleep
-            ? "The workspace is stopped. Changes, Files and Git appear once it runs again; sending a message wakes it."
-            : "Changes, Files and Git appear once the workspace is connected."}
+          {cloud.locked
+            ? "Changes, Files and Git are only shown to people this workspace is shared with."
+            : cloud.asleep
+              ? "The workspace is stopped. Changes, Files and Git appear once it runs again; sending a message wakes it."
+              : "Changes, Files and Git appear once the workspace is connected."}
         </div>
       </aside>
     );
@@ -115,7 +118,7 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
 /** What a presence tab id names in this session: an agent tab's title or a terminal. */
 function tabLabelOf(cloud: CloudSessionModel, tabId: string): string | null {
   const tab = cloud.session.tabs.find((candidate) => candidate.id === tabId);
-  if (tab) return tab.title?.trim() || tab.harness;
+  if (tab) return tab.title?.trim() || cloudAgentLabel(tab.harness);
   const terminal = cloud.terminals.find((candidate) => candidate.ptyId === tabId || candidate.id === tabId);
   return terminal ? `Terminal ${terminal.number}` : null;
 }
@@ -164,18 +167,22 @@ function CloudLocation({ cloud }: { cloud: CloudSessionModel }) {
       )}
       {request && <WorkspaceLifecycleDialog request={request} onClose={() => setRequest(null)} />}
       {diagnostics && <CloudDiagnosticsDialog request={{ orgId: cloud.orgId, workspaceId: cloud.workspaceId }} onClose={() => setDiagnostics(false)} />}
-      <span
-        className={cn(
-          "ml-1 flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] hairline",
-          connection.tone === "live" ? "text-foreground" : "text-muted-foreground",
-        )}
-        data-testid="session-connection"
-        role="status"
-      >
-        <span className={cn("size-1.5 rounded-full", connection.tone === "live" ? "bg-success" : connection.tone === "pending" ? "bg-warning" : "bg-faint")} aria-hidden />
-        {connection.label}
-      </span>
-      <AccessChip you={cloud.collab.you} className="ml-1" />
+      {/* One connection chip (is it live) and one role chip (what this person may do); a locked session has no connection to report. */}
+      {!cloud.locked && (
+        <span
+          className={cn(
+            "ml-1 flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] hairline",
+            connection.tone === "live" ? "text-foreground" : "text-muted-foreground",
+          )}
+          data-testid="session-connection"
+          role="status"
+        >
+          <span className={cn("size-1.5 rounded-full", connection.tone === "live" ? "bg-success" : connection.tone === "pending" ? "bg-warning" : "bg-faint")} aria-hidden />
+          {connection.label}
+        </span>
+      )}
+      {/* While the list and the runtime disagree about a new share, the pane says so; no chip claims either. */}
+      {cloud.locked !== "checking" && cloud.locked !== "pending" && <AccessChip you={cloud.collab.you} viewOnly={cloud.connected && !cloud.manage} className="ml-1" />}
       {cloud.collab.live && <PresenceAvatars collabKey={cloud.collab.key} you={cloud.collab.you} tabLabel={(tabId) => tabLabelOf(cloud, tabId)} />}
     </>
   );
@@ -339,7 +346,7 @@ export function SessionView({
 
           <div className="ml-auto flex max-w-[70%] shrink-0 items-center gap-0.5">
             {/* Keyed by session: a menu left open never carries over to another session. */}
-            <TabActions key={session.id} session={session} selected={selected} cloud={cloud} />
+            {!cloud?.locked && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} />}
             {activeTab && local && (
               <WithTooltip label="Continue in New Session…">
                 <Button variant="ghost" size="icon-sm" aria-label="Continue in New Session…" onClick={() => setContinuationSource(activeTab)}>
@@ -456,15 +463,28 @@ export function SessionView({
               ))}
               {!session.tabs.length && !shellPanes.length && !browserPages.length && !cloudTerminals.length && (
                 <div className="flex flex-1 flex-col items-center justify-center gap-1 text-sm text-muted-foreground">
-                  {cloud?.collab.notShared ? (
-                    <NotSharedNotice />
+                  {cloud?.locked ? (
+                    // No access (never shared, or removed): the lock pane replaces the whole session body.
+                    <NotSharedNotice kind={cloud.locked} onBack={() => selectSession(null)} onRecheck={cloud.recheckAccess} />
                   ) : cloud ? (
-                    <>
-                      <span>{cloud.asleep ? "Workspace stopped" : cloud.connected ? "No tabs in this session" : "Loading the session…"}</span>
-                      <span className="text-xs text-faint">
-                        {cloud.asleep ? "Its saved conversations appear here; nothing runs until you send a message." : "Add an agent tab or a terminal on the VM."}
-                      </span>
-                    </>
+                    // One state at a time: stopped, loading, or empty (with what this person can do about it).
+                    cloud.asleep ? (
+                      <>
+                        <span>Workspace stopped</span>
+                        <span className="text-xs text-faint">
+                          {cloud.backend.readOnlyReason ? "Its saved conversations appear here; nothing runs while it is stopped." : "Its saved conversations appear here; nothing runs until you send a message."}
+                        </span>
+                      </>
+                    ) : !cloud.connected ? (
+                      <span data-testid="cloud-session-loading">Loading the session…</span>
+                    ) : (
+                      <>
+                        <span>No tabs in this session</span>
+                        <span className="text-xs text-faint">
+                          {cloud.manage ? "Add an agent tab or a terminal on the VM." : "A workspace admin can add an agent tab or a terminal."}
+                        </span>
+                      </>
+                    )
                   ) : (
                     <>
                       <span>Workspace open</span>

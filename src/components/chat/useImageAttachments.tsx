@@ -246,7 +246,7 @@ export function AttachmentThumbs({ attach }: { attach: ImageAttachments }) {
 }
 
 /** The attach button and the hidden browser picker behind it. */
-export function AttachButton({ attach }: { attach: ImageAttachments }) {
+export function AttachButton({ attach, disabled = false }: { attach: ImageAttachments; disabled?: boolean }) {
   return (
     <>
       <input
@@ -264,7 +264,7 @@ export function AttachButton({ attach }: { attach: ImageAttachments }) {
         }}
       />
       <WithTooltip label="Attach files">
-        <Button variant="ghost" size="icon-sm" aria-label="Attach files" onClick={() => void attach.chooseFiles()}>
+        <Button variant="ghost" size="icon-sm" aria-label="Attach files" disabled={disabled} onClick={() => void attach.chooseFiles()}>
           <Paperclip />
         </Button>
       </WithTooltip>

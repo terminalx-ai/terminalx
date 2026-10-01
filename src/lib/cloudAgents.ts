@@ -42,6 +42,12 @@ export interface CloudAgentTab {
   live: boolean;
   /** Model, effort or mode chosen while offline, carried in the next send. */
   pendingConfig: { model?: string; effort?: string | null; mode?: string } | null;
+  /**
+   * A setting change of this tab was dropped: the runtime's receipt said
+   * `settingsIgnored` (this person may no longer approve), or it was not sent
+   * for that reason. Shown until the next change or message; not saved.
+   */
+  settingsIgnored?: boolean;
 }
 
 export interface CloudAgentsSnapshot {
@@ -400,7 +406,8 @@ export function applyLiveTabs(scope: CloudAgentScope, tabs: AgentTabInfo[]) {
       s.tabs.set(info.tabId, newTab(info, "live"));
     } else {
       noteStatus(existing, info.status);
-      existing.info = info;
+      // Settings chosen here and not sent yet stay shown as chosen.
+      existing.info = withPending(info, existing.pendingConfig);
       existing.source = "live";
       existing.placeholder = false;
     }
@@ -560,38 +567,109 @@ export async function closeCloudAgentTab(scope: CloudAgentScope, tabId: string, 
   publish(s);
 }
 
-/** Model, effort or permission mode: now when connected, else with the next message. */
+type TabSettings = { model?: string; effort?: string | null; mode?: string };
+
+/** A tab's info with the settings still waiting for the next message shown as chosen. */
+function withPending(info: AgentTabInfo, pending: TabSettings | null): AgentTabInfo {
+  if (!pending) return info;
+  return {
+    ...info,
+    ...(pending.model !== undefined ? { model: pending.model } : {}),
+    ...(pending.effort !== undefined ? { effort: pending.effort } : {}),
+    ...(pending.mode !== undefined ? { permissionMode: pending.mode } : {}),
+  };
+}
+
+/**
+ * Whether this connection may change a tab's settings with the live
+ * `session.configure`: the runtime keeps it for a manage attachment whose
+ * person is (still) a manager. Everyone else's change rides with their next
+ * message, which the runtime applies for a manager or an approver
+ * (docs/CLOUD-SHARING.md, Settings).
+ */
+export function configuresLive(client: WorkspaceRpcClient | null): client is WorkspaceRpcClient {
+  const state = client?.connection;
+  return !!state && state.state === "connected" && state.authority === "manage" && (!state.you || state.you.listed === false || state.you.role === "manager");
+}
+
+/**
+ * Model, effort or permission mode: now over the live connection when it may
+ * configure tabs, else kept and sent with the next message. Either way the
+ * tab shows what was chosen, and `pendingConfig` says it has not reached the
+ * agent yet, so a picker never changes back without a word.
+ */
 export async function configureCloudAgentTab(
   scope: CloudAgentScope,
   tabId: string,
-  patch: { model?: string; effort?: string | null; mode?: string },
+  patch: TabSettings,
   client: WorkspaceRpcClient | null,
 ) {
   const s = store(scope);
   const tab = s.tabs.get(tabId);
   if (!tab) return;
-  const optimistic = {
-    ...tab.info,
-    ...(patch.model !== undefined ? { model: patch.model } : {}),
-    ...(patch.effort !== undefined ? { effort: patch.effort } : {}),
-    ...(patch.mode !== undefined ? { permissionMode: patch.mode } : {}),
-  };
-  if (client && client.connection.state === "connected" && tab.info.sessionId) {
+  if (configuresLive(client) && tab.info.sessionId) {
     const updated = await client.configureAgentTab({ sessionId: tab.info.sessionId, tabId, ...patch });
     const current = s.tabs.get(tabId);
-    if (current) current.info = updated ?? optimistic;
+    if (current) {
+      // What was just applied no longer waits for a message.
+      if (current.pendingConfig) {
+        const rest = { ...current.pendingConfig };
+        for (const key of Object.keys(patch) as (keyof TabSettings)[]) delete rest[key];
+        current.pendingConfig = Object.keys(rest).length ? rest : null;
+      }
+      current.info = withPending(updated ?? withPending(current.info, patch), current.pendingConfig);
+    }
   } else {
     tab.pendingConfig = { ...(tab.pendingConfig ?? {}), ...patch };
-    tab.info = optimistic;
+    tab.info = withPending(tab.info, tab.pendingConfig);
   }
+  // A new choice replaces the notice about the last one.
+  const now = s.tabs.get(tabId);
+  if (now) now.settingsIgnored = false;
   publish(s);
   scheduleSave(s, tabId);
 }
+
+/**
+ * Drop a tab's unsent setting change because this person may no longer make
+ * it (they lost approval rights since choosing it), and say so. The next
+ * message then goes without settings the runtime would only ignore.
+ */
+export function discardPendingConfig(scope: CloudAgentScope, tabId: string) {
+  const s = store(scope);
+  const tab = s.tabs.get(tabId);
+  if (!tab?.pendingConfig) return;
+  tab.pendingConfig = null;
+  tab.settingsIgnored = true;
+  publish(s);
+  scheduleSave(s, tabId);
+}
+
+/** The notice about a dropped setting change was read (a new message is on its way). */
+function clearSettingsIgnored(s: Store, tabId: string) {
+  const tab = s.tabs.get(tabId);
+  if (tab?.settingsIgnored) tab.settingsIgnored = false;
+}
+
 
 // ---- the outbox
 
 function upsert(s: Store, entry: OutboxEntry) {
   const at = s.outbox.findIndex((existing) => existing.clientCommandId === entry.clientCommandId);
+  // A receipt that just arrived saying the message went without its settings
+  // (the sender may not configure the tab any more): say so, and stop
+  // promising that they apply with the next message. Receipts already known
+  // (an earlier launch's) say nothing new.
+  if (at >= 0 && entry.receipt?.settingsIgnored === true && s.outbox[at]!.receipt?.settingsIgnored !== true) {
+    const tab = s.tabs.get(entry.tabId);
+    if (tab) {
+      tab.settingsIgnored = true;
+      if (tab.pendingConfig) {
+        tab.pendingConfig = null;
+        scheduleSave(s, entry.tabId);
+      }
+    }
+  }
   s.outbox = at >= 0 ? s.outbox.map((existing, i) => (i === at ? entry : existing)) : [...s.outbox, entry];
 }
 
@@ -629,12 +707,16 @@ export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, te
   const tab = s.tabs.get(tabId);
   if (isDevScope(scope)) return sendOverLiveRpc(scope, tabId, text, client);
   const sent = tab?.pendingConfig ?? null;
+  // With settings on board, an earlier notice is replaced by this message's own receipt.
+  if (sent) clearSettingsIgnored(s, tabId);
   const entry = await enqueue(scope, tabId, "send", { text, ...(sent ?? {}) }, client);
   // Only what went out is settled; a change made meanwhile waits for the next.
   const current = s.tabs.get(tabId);
   if (current && sent && current.pendingConfig === sent) {
     current.pendingConfig = null;
     scheduleSave(s, tabId);
+    // The "applies with your next message" note goes with the message.
+    publish(s);
   }
   return entry;
 }

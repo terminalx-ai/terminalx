@@ -186,7 +186,7 @@ describe("tree keyboard across Local and organization sections", () => {
     press("ArrowRight");
     expect(session.getAttribute("aria-expanded")).toBe("true");
     press("ArrowRight");
-    expect(focusedItem()).toBe("Claude");
+    expect(focusedItem()).toBe("Claude Code");
     press("ArrowLeft");
     expect(focusedItem()).toBe("Fix login redirect");
     press("ArrowLeft");
@@ -219,7 +219,7 @@ describe("tree keyboard across Local and organization sections", () => {
     within(tree).getByRole("button", { name: "Fix login redirect" }).focus();
     press("ArrowRight");
     press("ArrowDown");
-    expect(focusedItem()).toBe("Claude");
+    expect(focusedItem()).toBe("Claude Code");
     press("Enter");
     expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${ORG}:ws-1:s1`);
     act(() => sessions.selectSession(null));
