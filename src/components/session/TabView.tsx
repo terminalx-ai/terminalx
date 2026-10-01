@@ -10,7 +10,7 @@ import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { CLOUD_IMAGES_UNSUPPORTED, localSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
 import { CloudOutbox, commandError as cloudCommandError } from "@/components/cloud/CloudAgents";
 import { LeaseBar, NotesPanel, useNowUntil } from "@/components/cloud/CloudCollab";
-import { SETTINGS_LOCKED_REASON, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
+import { SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
 import { Chat } from "@/components/chat/Chat";
 import { Composer } from "@/components/chat/Composer";
@@ -88,7 +88,8 @@ export function TabView({
   const collabLive = !!shared?.client && collab.available && !!shared.you;
   // The roster gives names to presence, leases and follow-ups; only a live shared workspace shows them.
   const nameOf = usePeople(collabLive);
-  const lease = shared ? (collab.leases[tab.id] ?? null) : null;
+  // A lease is the live runtime's word: while reconnecting, the last one seen says nothing about who drives now.
+  const lease = shared && collabLive ? (collab.leases[tab.id] ?? null) : null;
   const now = useNowUntil(lease?.expiresAt);
   const tabLive = tab.status === "in_progress" || tab.status === "waiting";
   const gate = shared ? tabGate(shared.you, lease, now, tabLive, nameOf) : null;
@@ -296,6 +297,7 @@ export function TabView({
           handoffs={handoffsFor(transcript, isGit && changes.files.length > 0)}
           disabled={!!gate?.blocked}
           settingsLockedReason={gate && !gate.mayConfigure ? SETTINGS_LOCKED_REASON : null}
+          settingsNote={backend.settingsPending?.(tab.id) ? SETTINGS_WITH_NEXT_MESSAGE : null}
           canStop={!gate || gate.mayStop}
           disabledReason={gate?.blocked ?? error ?? (viewError ? safeError(viewError) : null) ?? backend.readOnlyReason}
           autoFocus={active}
@@ -347,6 +349,7 @@ export function TabView({
         notesOpen={notesOpen}
         onToggleNotes={() => setNotesOpen((open) => !open)}
         noteCount={collab.notes[tab.id]?.notes.length ?? 0}
+        unreadNotes={collab.unreadNotes[tab.id] ?? 0}
       />
     )}
     {outbox && <CloudOutbox entries={outbox.entries(tab.id)} followUps={outbox.followUps(tab.id)} nameOf={nameOf} onSendAgain={(entry) => void outbox.sendAgain(entry).catch((e) => setError(commandError(e)))} />}
@@ -354,7 +357,7 @@ export function TabView({
       Session closed. Untracked or remote commands may still be running; verify their outcome before continuing.
       <Button size="sm" disabled={recovering} onClick={() => void retry()}>Resume safely</Button>
     </div>}
-    <RecoveryBanner kind={recovery} waiting={tab.status === "waiting"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding} answerBlockedReason={backend.approveBlockedReason ?? null}
+    <RecoveryBanner kind={recovery} waiting={tab.status === "waiting"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding} answerBlockedReason={backend.approveBlockedReason ?? null} askDetail={!!shared}
       models={models.filter(m => m.id !== tab.model && !m.upgrade)} onPermission={answerPermission} onQuestions={answerQuestions}
       onRetry={retry} onStop={stop} onContinue={() => {
         if (recoveryLock.current) return;

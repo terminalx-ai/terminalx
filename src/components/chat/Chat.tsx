@@ -37,6 +37,7 @@ export function Chat({
   onAnswerQuestions,
   answering,
   answerBlockedReason,
+  askDetail = false,
   footer,
 }: {
   sessionId: string;
@@ -50,6 +51,8 @@ export function Chat({
   answering: boolean;
   /** Set when this reader may not answer permission requests or questions (a shared workspace's viewer). */
   answerBlockedReason?: string | null;
+  /** Quote the command, file or tool a permission request is about (a shared cloud workspace). */
+  askDetail?: boolean;
   footer: React.ReactNode;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
@@ -209,7 +212,7 @@ export function Chat({
           {transcript.pendingAsks.map((ask) => (
             <div key={ask.requestId} className="mb-3">
               {ask.kind === "permission" ? (
-                <PermissionCard ask={ask} busy={answering || !!answerBlockedReason} onAnswer={(o) => onAnswerPermission(ask.requestId, o)} />
+                <PermissionCard ask={ask} busy={answering || !!answerBlockedReason} showDetail={askDetail} onAnswer={(o) => onAnswerPermission(ask.requestId, o)} />
               ) : (
                 <QuestionCard ask={ask} busy={answering || !!answerBlockedReason} onAnswer={(a) => onAnswerQuestions(ask.requestId, a)} />
               )}

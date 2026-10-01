@@ -156,6 +156,33 @@ export function buildCloudSessions(input: {
   const { item } = input;
   const { orgId, id: workspaceId, name, state, launch } = item.workspace;
   const stopped = state === "suspended" || state === "archived";
+  // Not shared with this person (saas §21.2): nothing this desktop kept of
+  // the workspace is listed, no session title, tab or status. One row, named
+  // after the workspace, opens the lock pane: the selected session if it is
+  // here, else the first one the launch intent names.
+  if (item.workspace.you?.role === "none") {
+    const prefix = `${cloudWorkspaceKey(orgId, workspaceId)}:`;
+    const selected = input.selectedKey?.startsWith(prefix) ? input.selectedKey.slice(prefix.length) : null;
+    const sessionId = selected || launch?.sessionId || null;
+    if (!sessionId) return [];
+    return [
+      {
+        key: cloudSessionKey(orgId, workspaceId, sessionId),
+        orgId,
+        workspaceId,
+        sessionId,
+        title: name,
+        branch: null,
+        worktreeName: null,
+        created: iso(item.workspace.createdAt),
+        modified: iso(item.workspace.lastActivityAt ?? item.workspace.updatedAt),
+        pinned: false,
+        archived: false,
+        tabs: [],
+        source: "launch",
+      },
+    ];
+  }
   const agentTabs = new Map((input.agentTabs ?? []).map((tab) => [tab.tabId, tab]));
   const rows = new Map<string, CloudSessionRow>();
   const source: CloudSessionRow["source"] = input.live ? "live" : "cache";

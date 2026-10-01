@@ -73,6 +73,12 @@ export interface SessionBackend {
   /** The UI's copy of a tab. A cloud tab's store updates itself, so this is local only. */
   patchTab(tabId: string, patch: Partial<TabEntry>): void;
   setTabStatus(tabId: string, status: TabStatus): void;
+  /**
+   * Cloud only: the tab has a model, effort or mode chosen here that has not
+   * reached the agent yet. It rides with the next message (an approver's
+   * connection cannot configure a tab live, and nobody's can while offline).
+   */
+  settingsPending?(tabId: string): boolean;
   /** Why this person may not answer permission requests (a shared workspace's non-approver), or null. */
   approveBlockedReason?: string | null;
   /**
@@ -195,6 +201,8 @@ export interface CloudSessionContext {
   followUps: (tabId: string) => { clientCommandId: string; text: string }[];
   /** Raise the connection to `wake`: only called for an interactive command on a stopped workspace. */
   wake: () => Promise<void>;
+  /** Whether a tab has settings waiting for its next message. */
+  settingsPending?: (tabId: string) => boolean;
   /** PRO-30: this person's access (live, last known or from the list); null when sharing does not apply. */
   you?: WorkspaceYou | null;
   /** The connection, when it was granted `collab/1`. */
@@ -292,6 +300,7 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
       guard();
       await configureCloudAgentTab(scope, tabId, { mode }, client);
     },
+    settingsPending: (tabId) => ctx.settingsPending?.(tabId) ?? false,
     markRead: (tabId) => markCloudAgentRead(scope, tabId, client),
     patchTab: () => undefined,
     setTabStatus: () => undefined,

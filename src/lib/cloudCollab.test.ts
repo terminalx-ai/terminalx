@@ -1,6 +1,23 @@
-import { describe, expect, it } from "vitest";
-import type { WorkspaceYou } from "@terminalx/portable/workspace";
-import { APPROVE_BLOCKED_REASON, NOT_SHARED_REASON, VIEWER_REASON, listedYou, roleBlockReason, tabGate } from "./cloudCollab";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable/workspace";
+import {
+  APPROVE_BLOCKED_REASON,
+  NOT_SHARED_REASON,
+  VIEWER_REASON,
+  accessLoss,
+  accessLostReason,
+  applyCollabEvent,
+  clearCollabAccess,
+  getCollab,
+  listedYou,
+  mayConfigure,
+  onAccessChanged,
+  resetCollab,
+  roleBlockReason,
+  setNotesOpen,
+  tabGate,
+  workspaceAuthority,
+} from "./cloudCollab";
 import { cloudReadOnlyReason } from "./sessionBackend";
 
 // PRO-30 gating shared by the cloud workspace page and SessionView.
@@ -55,5 +72,133 @@ describe("one agent tab's lease and approvals", () => {
     expect(tabGate(you("viewer"), null, now, false, nameOf)).toMatchObject({ blocked: VIEWER_REASON, mayStop: false });
     // Sharing does not apply: nothing is gated here.
     expect(tabGate(null, lease("u-alice", now + 1), now, true, nameOf)).toMatchObject({ blocked: null, mayStop: true, approveBlocked: null });
+  });
+
+  it("never calls a lease someone else's while this person's own id is unknown (the list's role, before a connection)", () => {
+    const fromList = listedYou({ role: "driver", canApprove: false })!;
+    expect(tabGate(fromList, lease("u-me", now + 1), now, false, nameOf).blocked).toBeNull();
+  });
+});
+
+describe("what the server lets a person do to a workspace", () => {
+  it("keeps Stop, Archive and Delete for owners and admins, and share changes for them and the creator", () => {
+    expect(workspaceAuthority({ you: { role: "manager", canApprove: true, canManageShares: true } })).toEqual({ lifecycle: true, viewShares: true, manageShares: true });
+    // The creator (a member): manages shares, but the lifecycle is still an admin's.
+    expect(workspaceAuthority({ you: { role: "driver", canApprove: true, canManageShares: true }, authority: "participate" })).toEqual({ lifecycle: false, viewShares: true, manageShares: true });
+    expect(workspaceAuthority({ you: { role: "driver", canApprove: false } })).toEqual({ lifecycle: false, viewShares: true, manageShares: false });
+    expect(workspaceAuthority({ you: { role: "viewer", canApprove: true } })).toEqual({ lifecycle: false, viewShares: true, manageShares: false });
+    expect(workspaceAuthority({ you: { role: "none", canApprove: false } })).toEqual({ lifecycle: false, viewShares: true, manageShares: false });
+  });
+
+  it("follows the attachment on an older server that reports no role, and offers nothing about sharing", () => {
+    expect(workspaceAuthority({ authority: "manage" })).toEqual({ lifecycle: true, viewShares: false, manageShares: false });
+    expect(workspaceAuthority({ authority: "participate" })).toEqual({ lifecycle: false, viewShares: false, manageShares: false });
+    expect(workspaceAuthority({})).toEqual({ lifecycle: true, viewShares: false, manageShares: false });
+  });
+
+  it("lets a manager or an approving driver change settings, and nobody the runtime would refuse", () => {
+    expect(mayConfigure(you("manager"))).toBe(true);
+    expect(mayConfigure(you("driver", { canApprove: true }))).toBe(true);
+    expect(mayConfigure(you("driver"))).toBe(false);
+    // An approving viewer cannot send, so nothing would carry the change.
+    expect(mayConfigure(you("viewer", { canApprove: true }))).toBe(false);
+    expect(mayConfigure(null)).toBe(true);
+  });
+});
+
+describe("losing access", () => {
+  const connected = (authority: "manage" | "participate" = "participate"): WorkspaceConnectionState => ({ state: "connected", runtimeGeneration: 1, runtimeVersion: "1", capabilities: [], authority });
+  const idle: WorkspaceConnectionState = { state: "idle" };
+
+  it("reads a refused reconnect as lost access, and a network drop as a reconnect", () => {
+    for (const reason of ["cloud_workspace_not_found", "cloud_workspace_collaboration_forbidden", "4403 forbidden", "access-revoked", "closed: access removed"]) {
+      expect(accessLostReason(reason), reason).toBe(true);
+      expect(accessLoss({ state: { state: "reconnecting", attempt: 1, reason, retryInMs: 250 }, you: you("driver"), hadAccess: true })).toBe("removed");
+    }
+    for (const reason of ["4104 relay restarting", "connection reset by peer", "4101 stale", "", null, undefined]) expect(accessLostReason(reason), String(reason)).toBe(false);
+    expect(accessLoss({ state: { state: "reconnecting", attempt: 1, reason: "4104 relay restarting", retryInMs: 250 }, you: you("driver"), hadAccess: true })).toBeNull();
+  });
+
+  it("tells removed from never shared by whether this person had the session before", () => {
+    expect(accessLoss({ state: connected(), you: you("none"), hadAccess: true })).toBe("removed");
+    expect(accessLoss({ state: connected(), you: you("none"), hadAccess: false })).toBe("not-shared");
+    // Not connected: the list's role decides the same way.
+    expect(accessLoss({ state: idle, you: listedYou({ role: "none", canApprove: false }), hadAccess: true })).toBe("removed");
+    expect(accessLoss({ state: idle, you: listedYou({ role: "none", canApprove: false }), hadAccess: false })).toBe("not-shared");
+  });
+
+  it("locks nobody who has a role, whose sharing is unknown, or whose runtime has no member list yet", () => {
+    for (const role of ["viewer", "driver", "manager"] as const) expect(accessLoss({ state: connected(), you: you(role), hadAccess: true })).toBeNull();
+    expect(accessLoss({ state: connected(), you: null, hadAccess: true })).toBeNull();
+    expect(accessLoss({ state: connected(), you: you("none", { listed: false }), hadAccess: true })).toBeNull();
+    expect(accessLoss({ state: idle, you: null, hadAccess: false })).toBeNull();
+  });
+});
+
+describe("the collaboration store", () => {
+  const KEY = "cloud:org-1:ws-1";
+  const note = (id: string, authorId: string, createdAt: number) => ({ id, tabId: "t-1", authorId, text: id, createdAt });
+  afterEach(() => resetCollab());
+
+  it("counts other people's notes as unread until the tab's drawer opens, and reads them as they arrive while it is open", () => {
+    applyCollabEvent(KEY, { type: "you", you: you("driver") });
+    applyCollabEvent(KEY, { type: "note", note: note("n1", "u-alice", 1) });
+    applyCollabEvent(KEY, { type: "note", note: note("n2", "u-alice", 2) });
+    // A repeat of the same note, and this person's own, add nothing.
+    applyCollabEvent(KEY, { type: "note", note: note("n2", "u-alice", 2) });
+    applyCollabEvent(KEY, { type: "note", note: note("n3", "u-me", 3) });
+    expect(getCollab(KEY).unreadNotes).toEqual({ "t-1": 2 });
+    setNotesOpen(KEY, "t-1", true);
+    expect(getCollab(KEY).unreadNotes).toEqual({});
+    applyCollabEvent(KEY, { type: "note", note: note("n4", "u-alice", 4) });
+    expect(getCollab(KEY).unreadNotes).toEqual({});
+    setNotesOpen(KEY, "t-1", false);
+    applyCollabEvent(KEY, { type: "note", note: note("n5", "u-alice", 5) });
+    expect(getCollab(KEY).unreadNotes).toEqual({ "t-1": 1 });
+    expect(getCollab(KEY).notes["t-1"]!.notes.map((n) => n.id)).toEqual(["n1", "n2", "n3", "n4", "n5"]);
+  });
+
+  it("drops leases, people and notes the moment the runtime says this person's role is none", () => {
+    applyCollabEvent(KEY, { type: "you", you: you("driver") });
+    applyCollabEvent(KEY, { type: "presence", participants: [{ userId: "u-alice", role: "manager", canApprove: true, surfaces: 1, tabId: "t-1", activity: "viewing", since: 1 }] });
+    applyCollabEvent(KEY, { type: "lease", tabId: "t-1", lease: lease("u-me", Date.now() + 60_000) });
+    applyCollabEvent(KEY, { type: "note", note: note("n1", "u-alice", 1) });
+    applyCollabEvent(KEY, { type: "you", you: you("none") });
+    expect(getCollab(KEY)).toMatchObject({ participants: [], leases: {}, notes: {}, unreadNotes: {}, you: { role: "none" }, lastYou: { role: "none" } });
+  });
+
+  it("clears a workspace this person can no longer open, so reopening it starts locked", () => {
+    applyCollabEvent(KEY, { type: "you", you: you("viewer") });
+    applyCollabEvent(KEY, { type: "lease", tabId: "t-1", lease: lease("u-alice", Date.now() + 60_000) });
+    clearCollabAccess(KEY);
+    expect(getCollab(KEY)).toMatchObject({ leases: {}, participants: [], lastYou: { userId: "u-me", role: "none", canApprove: false } });
+    // Doing it again changes nothing (no re-render loop).
+    const snapshot = getCollab(KEY);
+    clearCollabAccess(KEY);
+    expect(getCollab(KEY)).toBe(snapshot);
+  });
+
+  it("says the organization's access changed when this person's role or the listed people change, not when someone only moves", () => {
+    const changed = vi.fn();
+    const stop = onAccessChanged(changed);
+    const person = (role: "viewer" | "driver", tabId: string | null, activity: "viewing" | "typing" = "viewing") => ({ userId: "u-bob", role, canApprove: false, surfaces: 1, tabId, activity, since: 1 });
+    applyCollabEvent(KEY, { type: "you", you: you("driver") });
+    expect(changed).toHaveBeenCalledTimes(1);
+    expect(changed).toHaveBeenLastCalledWith("org-1");
+    // The same role again is not a change.
+    applyCollabEvent(KEY, { type: "you", you: you("driver") });
+    expect(changed).toHaveBeenCalledTimes(1);
+    applyCollabEvent(KEY, { type: "presence", participants: [person("viewer", "t-1")] });
+    expect(changed).toHaveBeenCalledTimes(2);
+    // Typing, or switching tab: who has access did not change.
+    applyCollabEvent(KEY, { type: "presence", participants: [person("viewer", "t-2", "typing")] });
+    expect(changed).toHaveBeenCalledTimes(2);
+    applyCollabEvent(KEY, { type: "presence", participants: [person("driver", "t-2")] });
+    expect(changed).toHaveBeenCalledTimes(3);
+    applyCollabEvent(KEY, { type: "you", you: you("none") });
+    expect(changed).toHaveBeenCalledTimes(4);
+    stop();
+    applyCollabEvent(KEY, { type: "you", you: you("viewer") });
+    expect(changed).toHaveBeenCalledTimes(4);
   });
 });

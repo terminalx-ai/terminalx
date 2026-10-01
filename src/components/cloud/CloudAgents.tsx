@@ -39,7 +39,7 @@ import { TERMINAL_OUTBOX_STATES, type CloudAgentScope, type OutboxEntry, type Wa
 import type { ImageInput } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
 import { cn } from "@/lib/cn";
-import { SETTINGS_LOCKED_REASON, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
+import { SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
 import { LeaseBar, NotesPanel, NotSharedNotice, useNowUntil } from "./CloudCollab";
 
@@ -557,6 +557,7 @@ function CloudAgentPane({
             notesOpen={notesOpen}
             onToggleNotes={() => setNotesOpen((open) => !open)}
             noteCount={noteCount}
+            unreadNotes={collab.unreadNotes[tab.tabId] ?? 0}
           />
         )}
         {isDevScope(scope) && (
@@ -584,6 +585,7 @@ function CloudAgentPane({
             progressing={live && !transcript.pendingAsks.length}
             answering={deciding}
             answerBlockedReason={approveBlocked}
+            askDetail={!!you}
             onAnswerPermission={(requestId, optionId) => decide({ requestId, optionId })}
             onAnswerQuestions={(requestId, answers) => decide({ requestId, answers })}
             footer={
@@ -609,6 +611,7 @@ function CloudAgentPane({
                   onSetMode={(mode) => configure({ mode })}
                   disabled={!!blocked}
                   settingsLockedReason={mayConfigure ? null : SETTINGS_LOCKED_REASON}
+                  settingsNote={tab.pendingConfig ? SETTINGS_WITH_NEXT_MESSAGE : null}
                   canStop={mayStop}
                   disabledReason={blocked ?? error}
                 />

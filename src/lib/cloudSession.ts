@@ -4,7 +4,15 @@ import { RemoteGit, listRepositories, type RemoteRepository } from "@terminalx/p
 import { createTerminal } from "@/components/terminal/TerminalView";
 import { useAccount } from "@/lib/account";
 import type { CloudWorkspaceConnection, CloudWorkspaceListItem } from "@/lib/api";
-import { retainCloudConnection, setSelectedCloudConnection, useCloudConnection, waitCloudConnected, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
+import {
+  closeCloudConnection,
+  retainCloudConnection,
+  setSelectedCloudConnection,
+  useCloudConnection,
+  waitCloudConnected,
+  wakeCloudConnection,
+  type CloudLease,
+} from "@/lib/cloudConnections";
 import {
   flushCloudAgentCache,
   loadCloudAgents,
@@ -16,7 +24,21 @@ import {
   type CloudAgentTab,
 } from "@/lib/cloudAgents";
 import { refreshCloudCatalog, repositoryOf, useCloudCatalog } from "@/lib/cloudCatalog";
-import { canDrive, knownYou, listedYou, notShared, sharingKnown, startCollab, useCollab } from "@/lib/cloudCollab";
+import {
+  accessLoss,
+  accessLostReason,
+  canDrive,
+  clearCollabAccess,
+  forgetCollabAccess,
+  knownYou,
+  listedYou,
+  notShared,
+  sharingKnown,
+  startCollab,
+  useCollab,
+  type AccessLoss,
+} from "@/lib/cloudCollab";
+import { cloudAgentLabel } from "@/lib/cloudRowState";
 import { createCloudTerminal, detachCloudTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
 import { cloudGitSource, desktopGitIdentity, type GitSource } from "@/lib/gitSource";
 import { clearCloudWake, cloudAsleep, cloudSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
@@ -60,7 +82,8 @@ export function cloudConnectionChip(
   if (state.state === "connected" && workspaceState === "suspended" && !options.woke) return { label: "Stopped", tone: "offline" };
   switch (state.state) {
     case "connected":
-      return { label: state.authority === "manage" ? "Live" : "Live · view only", tone: "live" };
+      // What this person may do here is the role chip's to say, not the connection's.
+      return { label: "Live", tone: "live" };
     case "connecting":
     case "opening":
       return { label: "Connecting", tone: "pending" };
@@ -103,6 +126,16 @@ export interface CloudSessionModel {
    * not apply (an older server or runtime).
    */
   collab: { key: string; you: WorkspaceYou | null; live: boolean; notShared: boolean };
+  /**
+   * This person may not open the workspace: it was never shared with them
+   * (`not-shared`), or their access ended (`removed`: a revoked share, a
+   * workspace made private, or membership gone). The session then shows the
+   * lock pane and nothing of the workspace: no tabs, terminals, lease,
+   * presence or notes, and no connection is held or retried.
+   */
+  locked: AccessLoss | null;
+  /** Read the workspace list again, and connect again if it says this person has access now. */
+  recheckAccess(): void;
   /** May take control of a terminal: manage, or a driver of a shared workspace. */
   mayControlTerminals: boolean;
   /**
@@ -137,9 +170,11 @@ export interface CloudSessionModel {
 
 const NOT_CONNECTED: WorkspaceConnectionState = { state: "idle" };
 const DEFAULT_AGENTS = [
-  { id: "claude", name: "Claude" },
-  { id: "codex", name: "Codex" },
+  { id: "claude", name: cloudAgentLabel("claude") },
+  { id: "codex", name: cloudAgentLabel("codex") },
 ];
+const NO_TABS: TabEntry[] = [];
+const NO_TERMINALS: CloudTerminal[] = [];
 
 function statusShown(tab: CloudAgentTab, asleep: boolean): TabEntry["status"] {
   const { status, process } = tab.info;
@@ -190,11 +225,59 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   const client = connection?.client ?? null;
   const generation = connected ? `${state.runtimeGeneration}:${state.runtimeEpoch ?? ""}` : null;
 
+  // PRO-30 access. While connected the runtime's word decides; while not, the
+  // workspace list's, else the last access this desktop saw. A loss seen live
+  // (role none, or a reconnect refused for access) holds until a list fetched
+  // after it says this person has a role again, so a stale list cannot
+  // reconnect a revoked person in a loop.
+  const collab = useCollab(workspaceKey);
+  const listedRole = item?.workspace.you?.role ?? null;
+  const listedApprove = item?.workspace.you?.canApprove ?? false;
+  const knownUserId = collab.lastYou?.userId ?? "";
+  const fromList = useMemo(
+    () => (listedRole ? { ...listedYou({ role: listedRole, canApprove: listedApprove })!, userId: knownUserId } : null),
+    [listedRole, listedApprove, knownUserId],
+  );
+  // Kept with the workspace it is about: the same view may show another workspace's session next.
+  const [lost, setLost] = useState<{ key: string; at: number } | null>(null);
+  const lostAt = lost?.key === workspaceKey ? lost.at : null;
+  const setLostAt = useCallback((at: number | null) => setLost(at === null ? null : { key: workspaceKey, at }), [workspaceKey]);
+  const listedAt = catalog.orgs[orgId]?.fetchedAt ?? null;
+  const liveLoss = (connected && notShared(state, knownYou(state, collab))) || (state.state === "reconnecting" && accessLostReason(state.reason));
+  useEffect(() => {
+    if (liveLoss && lostAt === null) setLostAt(Date.now());
+  }, [liveLoss, lostAt, setLostAt]);
+  // Shared again, as a list read after the loss says.
+  const regained = lostAt !== null && listedAt !== null && listedAt > lostAt && !!listedRole && listedRole !== "none";
+  useEffect(() => {
+    if (regained) setLostAt(null);
+  }, [regained, setLostAt]);
+  const held = lostAt !== null && !regained;
+  const you: WorkspaceYou | null = connected
+    ? knownYou(state, collab)
+    : held
+      ? { userId: knownUserId, role: "none", canApprove: false }
+      : (fromList ?? collab.lastYou);
+  const noAccess = accessLoss({ state, you, hadAccess: false }) !== null;
+  // Presence, the lease bar and notes need the live runtime with collab/1, and access.
+  const collabLive = connected && collab.available && !noAccess;
+  // Access ended while this desktop watched: drop what it showed, stop the
+  // connection (and its reconnect attempts), and read the list so the sidebar
+  // row locks or disappears.
+  useEffect(() => {
+    if (lostAt === null || !parsed) return;
+    clearCollabAccess(workspaceKey);
+    detachCloudTerminals(workspaceKey);
+    closeCloudConnection({ orgId, workspaceId });
+    void refreshCloudCatalog(orgId);
+  }, [lostAt, workspaceKey, orgId, workspaceId]);
+
   // Connect without waking: a lease from the connection manager (CS-7), shared
   // with the sidebar's session list and kept for a few idle minutes after the
   // view goes, so switching between sessions of one workspace reuses it.
   useEffect(() => {
-    if (!parsed) return;
+    // Someone without access holds no connection: nothing to read, and nothing retries.
+    if (!parsed || noAccess) return;
     let cancelled = false;
     let lease: CloudLease | null = null;
     let unsubscribe: (() => void) | null = null;
@@ -224,7 +307,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
       setConnection(null);
       setState(NOT_CONNECTED);
     };
-  }, [orgId, workspaceId]);
+  }, [orgId, workspaceId, noAccess]);
 
   // Agent tabs: the cache and checkpoint metadata first (never wakes), then the runtime's own list.
   const agents = useCloudAgents(scope);
@@ -281,20 +364,12 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   }, [generation, client, workspaceKey, terminalBase]);
 
   // Presence, notes and leases of a shared workspace (PRO-30), per connection.
-  const collab = useCollab(workspaceKey);
+  // A live runtime without collab/1 has no sharing: the attachment's
+  // authority decides, as before.
   useEffect(() => {
     if (!generation || !client) return;
     return startCollab(workspaceKey, client);
   }, [generation, client, workspaceKey]);
-  // Live when connected with collab/1. While not connected, what the
-  // workspace list says now (the server's word), else the last access this
-  // desktop saw. A live runtime without collab/1 has no sharing: the
-  // attachment's authority decides, as before.
-  const listedRole = item?.workspace.you?.role ?? null;
-  const listedApprove = item?.workspace.you?.canApprove ?? false;
-  const fromList = useMemo(() => (listedRole ? listedYou({ role: listedRole, canApprove: listedApprove }) : null), [listedRole, listedApprove]);
-  const you: WorkspaceYou | null = connected ? knownYou(state, collab) : (fromList ?? collab.lastYou);
-  const collabLive = connected && collab.available;
 
   const [agentList, setAgentList] = useState(DEFAULT_AGENTS);
   useEffect(() => {
@@ -309,6 +384,9 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     };
   }, [generation, client]);
 
+  // Whether this person ever had the session: a role seen in this view, or its conversation kept on this desktop.
+  const hadRole = useRef<string | null>(null);
+  if (sharingKnown(you) && you.role !== "none") hadRole.current = workspaceKey;
   const authority = connected ? state.authority : (item?.workspace.authority ?? null);
   // A manage attachment manages only while this person is still a manager
   // (a demoted admin's may linger until the runtime closes it).
@@ -370,6 +448,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     (tabId: string) => agents.tabs.find((tab) => tab.tabId === tabId)?.info.followUps ?? [],
     [agents.tabs],
   );
+  const settingsPending = useCallback((tabId: string) => !!agents.tabs.find((tab) => tab.tabId === tabId)?.pendingConfig, [agents.tabs]);
   const backend = useMemo(
     () =>
       cloudSessionBackend({
@@ -386,8 +465,9 @@ export function useCloudSession(key: string): CloudSessionModel | null {
         wake,
         you,
         collabClient: collabLive ? client : null,
+        settingsPending,
       }),
-    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, wake, you, collabLive],
+    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, wake, you, collabLive, settingsPending],
   );
 
   const ownTabs = useMemo(() => {
@@ -400,6 +480,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   const workspaceName = item?.workspace.name ?? "Cloud workspace";
   const projectName = repo?.fullName ?? repo?.identity.split("/").slice(1).join("/") ?? workspaceName;
   const firstTitle = ownTabs.find((tab) => tab.info.title)?.info.title;
+  const locked = accessLoss({ state, you, hadAccess: hadRole.current === workspaceKey || lostAt !== null || ownTabs.length > 0 });
   const session = useMemo<SessionEntry>(
     () => ({
       id: key,
@@ -409,15 +490,16 @@ export function useCloudSession(key: string): CloudSessionModel | null {
       baseRef: null,
       worktreeName: null,
       worktreeRemoved: false,
-      title: runtimeSession?.title || firstTitle || "Cloud session",
+      // Nothing of a workspace this person may not open is named; until a session has a title it goes by its workspace.
+      title: locked ? workspaceName : runtimeSession?.title || firstTitle || workspaceName,
       created: runtimeSession?.created ?? ownTabs[0]?.info.created ?? "",
       modified: runtimeSession?.modified ?? ownTabs[0]?.info.modified ?? "",
       archived: runtimeSession?.archived ?? false,
       pinned: runtimeSession?.pinned ?? false,
-      tabs: ownTabs.map((tab) => tabEntry(tab, asleep)),
-      activeTab: runtimeSession?.activeTab ?? null,
+      tabs: locked ? NO_TABS : ownTabs.map((tab) => tabEntry(tab, asleep)),
+      activeTab: locked ? null : (runtimeSession?.activeTab ?? null),
     }),
-    [key, repo?.identity, orgId, workspaceKey, root, runtimeSession, item?.workspace.launch?.workBranch, firstTitle, ownTabs, asleep],
+    [key, repo?.identity, orgId, workspaceKey, root, runtimeSession, item?.workspace.launch?.workBranch, firstTitle, ownTabs, asleep, locked, workspaceName],
   );
 
   // Who would manage once it runs: the role when sharing says (PRO-30), else what opening would grant.
@@ -462,6 +544,15 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     [backend.readOnlyReason, client, connected, runtimeSessionId, scope, key],
   );
 
+  const recheckAccess = useCallback(() => {
+    // An older server's list says nothing about roles: only connecting again can tell.
+    if (!listedRole) {
+      forgetCollabAccess(workspaceKey);
+      setLostAt(null);
+    }
+    void refreshCloudCatalog(orgId);
+  }, [listedRole, workspaceKey, orgId, setLostAt]);
+
   if (!parsed || !parsed.sessionId) return null;
   return {
     backend,
@@ -476,11 +567,13 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     connection: chip,
     connected,
     manage,
-    collab: { key: workspaceKey, you, live: collabLive, notShared: notShared(state, you) },
+    collab: { key: workspaceKey, you, live: collabLive, notShared: !!locked },
+    locked,
+    recheckAccess,
     mayControlTerminals: manage || (collabLive && canDrive(you)),
     canWakeForTerminal,
     asleep,
-    terminals,
+    terminals: locked ? NO_TERMINALS : terminals,
     openTerminal,
     addAgentTab,
     // session.addTab is a manager's (the runtime refuses anyone else).
@@ -491,8 +584,8 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     repositories,
     repository,
     selectRepository: setRepository,
-    gitSource,
-    fileSource,
+    gitSource: locked ? undefined : gitSource,
+    fileSource: locked ? undefined : fileSource,
     error,
   };
 }

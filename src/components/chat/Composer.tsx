@@ -55,6 +55,7 @@ export function Composer({
   disabledReason,
   disabled = false,
   settingsLockedReason = null,
+  settingsNote = null,
   canStop = true,
   autoFocus,
 }: {
@@ -79,6 +80,8 @@ export function Composer({
   disabled?: boolean;
   /** Set when this reader may not change the model, effort or mode (a shared cloud workspace); the pickers are disabled with it. */
   settingsLockedReason?: string | null;
+  /** Said under the pickers when a chosen model, effort or mode has not reached the agent yet (a cloud tab: it rides with the next message). */
+  settingsNote?: string | null;
   /** False hides Stop (someone else drives this tab, or this reader may only watch). */
   canStop?: boolean;
   autoFocus?: boolean;
@@ -352,8 +355,9 @@ export function Composer({
           className="max-h-60 w-full resize-none bg-transparent px-1.5 py-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
         />
         <div className="mt-1 flex items-center gap-1">
-          <AttachButton attach={attach} />
-          <MicButton dictation={dictation} />
+          {/* Nothing can be sent: attaching and dictating into it are off too. */}
+          <AttachButton attach={attach} disabled={disabled} />
+          <MicButton dictation={dictation} disabled={disabled} />
           {cwd && (
             <WithTooltip label="Mention a file">
               <Button
@@ -482,6 +486,11 @@ export function Composer({
           </div>
         </div>
       </div>
+      {settingsNote && (
+        <div className="mt-1.5 px-2 text-[11px] text-muted-foreground" role="status" data-testid="composer-settings-note">
+          {settingsNote}
+        </div>
+      )}
     </div>
   );
 }

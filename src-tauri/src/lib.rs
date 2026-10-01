@@ -332,6 +332,7 @@ pub fn run() {
             commands::cloud_workspace_shares,
             commands::cloud_workspace_share_put,
             commands::cloud_workspace_share_revoke,
+            commands::cloud_workspace_set_access,
             commands::cloud_workspace_operation,
             commands::cloud_workspace_operation_cancel,
             cloud_remote::cloud_remote_attach,

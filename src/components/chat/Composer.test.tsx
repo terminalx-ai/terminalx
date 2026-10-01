@@ -15,7 +15,8 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: openDialog }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children }));
 vi.mock("@/components/chat/Dictation", () => ({
   DictationStatus: () => null,
-  MicButton: () => null,
+  // Only what the composer hands it: whether dictating into this composer is off.
+  MicButton: ({ disabled }: { disabled?: boolean }) => (disabled === undefined ? null : <button aria-label="Dictate" disabled={disabled} />),
   useDictationInto: () => ({ dictating: false, toggle: vi.fn() }),
 }));
 vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn() }));
@@ -255,6 +256,30 @@ describe("a shared cloud tab's limits (PRO-30 review)", () => {
     const mode = screen.getByRole("button", { name: /^Permission mode: Only a workspace admin/ }) as HTMLButtonElement;
     expect(model.disabled && mode.disabled).toBe(true);
     expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  });
+
+  it("turns Attach files and Dictate off with the composer for someone who may not send (a viewer)", () => {
+    const base = { tab, busy: false, draft: "", onDraftChange: vi.fn(), onSend: vi.fn(), onStop: vi.fn(), onSetModel: vi.fn(), onSetEffort: vi.fn(), onSetMode: vi.fn() };
+    const { rerender } = render(<Composer {...base} disabled disabledReason="You can view this workspace; ask an admin for driver access" />);
+    expect((screen.getByRole("button", { name: "Attach files" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Dictate" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
+    // A click on the disabled paperclip opens nothing.
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+    expect(openDialog).not.toHaveBeenCalled();
+    rerender(<Composer {...base} />);
+    expect((screen.getByRole("button", { name: "Attach files" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Dictate" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("says when a chosen setting has not reached the agent yet", () => {
+    const base = { tab, busy: false, draft: "", onDraftChange: vi.fn(), onSend: vi.fn(), onStop: vi.fn(), onSetModel: vi.fn(), onSetEffort: vi.fn(), onSetMode: vi.fn() };
+    const { rerender } = render(<Composer {...base} settingsNote="Model, effort and mode changes apply with your next message" />);
+    expect(screen.getByTestId("composer-settings-note").textContent).toBe("Model, effort and mode changes apply with your next message");
+    // The pickers stay usable: this is not a lock.
+    expect(screen.queryByRole("button", { name: /^Model: / })).toBeNull();
+    rerender(<Composer {...base} />);
+    expect(screen.queryByTestId("composer-settings-note")).toBeNull();
   });
 
   it("keeps the pickers and Stop by default", () => {

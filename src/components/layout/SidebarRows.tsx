@@ -184,7 +184,8 @@ export interface TabRowProps extends TabRowPassThrough {
   selected: boolean;
   closeLabel: string;
   onOpen: () => void;
-  onClose: () => void;
+  /** Absent when this reader may not close the tab (a cloud tab for anyone but a workspace manager): no close button is drawn. */
+  onClose?: () => void;
   children: ReactNode;
 }
 
@@ -206,7 +207,7 @@ export function TabRow({ tone, nodeId, panelId, label, title, selected, closeLab
       tabIndex={0}
       title={title}
       onClick={onOpen}
-      onAuxClick={(event) => event.button === 1 && onClose()}
+      onAuxClick={(event) => event.button === 1 && onClose?.()}
       onKeyDown={(event) => {
         if (event.target !== event.currentTarget) return;
         if (event.key === "Enter" || event.key === " ") {
@@ -217,17 +218,19 @@ export function TabRow({ tone, nodeId, panelId, label, title, selected, closeLab
       className={cn(style.row, selected ? "bg-(--surface-thumb) text-foreground shadow-button" : style.idle)}
     >
       {children}
-      <button
-        type="button"
-        aria-label={closeLabel}
-        onClick={(event) => {
-          event.stopPropagation();
-          onClose();
-        }}
-        className={style.close}
-      >
-        <X className="size-3" />
-      </button>
+      {onClose && (
+        <button
+          type="button"
+          aria-label={closeLabel}
+          onClick={(event) => {
+            event.stopPropagation();
+            onClose();
+          }}
+          className={style.close}
+        >
+          <X className="size-3" />
+        </button>
+      )}
     </div>
   );
 }

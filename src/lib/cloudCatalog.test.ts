@@ -48,6 +48,8 @@ import {
   parseCatalog,
   placeCloudProjects,
   pollDelay,
+  ACCESS_REFRESH_DELAY_MS,
+  POLL_BACKGROUND_MS,
   POLL_CHANGING_MS,
   POLL_FOCUSED_MS,
   refreshCloudCatalog,
@@ -57,6 +59,7 @@ import {
   type OrgCatalog,
 } from "./cloudCatalog";
 import { resetPurged } from "./cloudLifecycle";
+import { notifyAccessChanged } from "./cloudCollab";
 import { createWorkspace, type CreateApi } from "./cloudCreate";
 // What the Rust `cloud_workspaces` command hands the webview for a saas #137/#139
 // list; cloud_workspaces.rs asserts it serializes exactly this.
@@ -394,9 +397,12 @@ describe("saved cache", () => {
 
 describe("poll policy", () => {
   const changing = item("c", { state: "provisioning" }, { state: "running", action: null });
-  it("polls every 30 s while focused, every 3 s while something changes, and pauses while hidden", () => {
+  it("polls every 30 s while focused, every 2 min in the background, every 3 s while something changes, and pauses while hidden", () => {
     expect(pollDelay(org([item("w")]), { visible: true, focused: true })).toBe(POLL_FOCUSED_MS);
-    expect(pollDelay(org([item("w")]), { visible: true, focused: false })).toBeNull();
+    // Visible but another app has the focus: slow, so a share or revocation still shows without a manual refresh.
+    expect(pollDelay(org([item("w")]), { visible: true, focused: false })).toBe(POLL_BACKGROUND_MS);
+    expect(POLL_BACKGROUND_MS).toBe(120_000);
+    expect(pollDelay(org([item("w")]), { visible: false, focused: false })).toBeNull();
     expect(pollDelay(org([changing]), { visible: true, focused: false })).toBe(POLL_CHANGING_MS);
     expect(pollDelay(org([changing]), { visible: false, focused: false })).toBeNull();
     const stopping = item("s", {}, { state: "running", action: "suspend" });
@@ -413,6 +419,52 @@ describe("poll policy", () => {
     expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(POLL_FOCUSED_MS);
     expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("share state without a focused window", () => {
+  it("lists every 2 min while visible in the background, and not while hidden", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w")] });
+    signIn();
+    bootCloudCatalog();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(POLL_FOCUSED_MS);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(POLL_BACKGROUND_MS - POLL_FOCUSED_MS);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(2);
+    // Hidden: nothing is listed, however long it stays hidden.
+    visibility.mockReturnValue("hidden");
+    await vi.advanceTimersByTimeAsync(POLL_BACKGROUND_MS);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(POLL_BACKGROUND_MS * 3);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(3);
+    visibility.mockRestore();
+  });
+
+  it("lists once, soon, when a workspace's access changes, focused or not, and never attaches or resumes", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w")] });
+    signIn();
+    bootCloudCatalog();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(1);
+    // A burst (the runtime's role and member notifications, a share made here) is one list.
+    notifyAccessChanged(ORG);
+    notifyAccessChanged(ORG);
+    notifyAccessChanged(ORG);
+    await vi.advanceTimersByTimeAsync(ACCESS_REFRESH_DELAY_MS);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(2);
+    // An organization that is not live is not listed for it.
+    notifyAccessChanged("org-elsewhere");
+    await vi.advanceTimersByTimeAsync(ACCESS_REFRESH_DELAY_MS);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(2);
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    expect(mocks.api.cloudRemoteAttach).not.toHaveBeenCalled();
   });
 });
 

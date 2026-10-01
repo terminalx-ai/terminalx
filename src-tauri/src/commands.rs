@@ -635,6 +635,19 @@ pub async fn cloud_workspace_share_revoke(
         .share_revoke(org_id.as_deref(), &workspace_id, &user_id))
 }
 
+/// Switch who may see a cloud workspace: `organization` so it can be shared,
+/// `private` to hide it again (the server revokes every share with it).
+#[tauri::command]
+pub async fn cloud_workspace_set_access(
+    workspace_id: String,
+    access_mode: crate::cloud_workspaces::WorkspaceAccessMode,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<crate::cloud_workspaces::CloudWorkspace, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
+        .set_access(org_id.as_deref(), &workspace_id, access_mode))
+}
+
 #[tauri::command]
 pub async fn cloud_workspace_operation(
     operation_id: String,

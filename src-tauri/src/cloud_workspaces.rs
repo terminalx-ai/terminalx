@@ -1635,6 +1635,32 @@ impl CloudWorkspaceService {
         })
     }
 
+    /// Who may see the workspace (PRO-29): `organization` lets it be shared
+    /// (§21.2), `private` hides it from everyone but its creator and revokes
+    /// every share in the same transaction. Only an organization owner or
+    /// admin may; anyone else gets `organization_admin_required`.
+    pub fn set_access(&self, org: Option<&str>, workspace_id: &str, access_mode: WorkspaceAccessMode) -> Result<CloudWorkspace, CloudWorkspaceClientError> {
+        if !valid_resource_id(workspace_id) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        self.run_in(org, RequestRisk::Mutation, |client, context| {
+            let result: CloudWorkspace = client.request(
+                context,
+                &["cloud-workspaces", workspace_id, "access"],
+                None,
+                Some(json!({ "accessMode": access_mode })),
+                None,
+                RequestRisk::Mutation,
+            )?;
+            // An answer about another workspace or organization says nothing
+            // about whether this one changed.
+            if result.id != workspace_id || result.org_id != context.organization_id {
+                return Err(post_send_error(RequestRisk::Mutation));
+            }
+            Ok(result)
+        })
+    }
+
     /// Who the workspace is shared with, and what the caller may do (§21.2).
     pub fn shares(&self, org: Option<&str>, workspace_id: &str) -> Result<CloudWorkspaceShares, CloudWorkspaceClientError> {
         if !valid_resource_id(workspace_id) {
@@ -3417,6 +3443,49 @@ mod tests {
         let parsed: CloudWorkspace = serde_json::from_value(workspace).unwrap();
         let value = serde_json::to_value(&parsed).unwrap();
         assert!(value.get("you").is_none() && value.get("sharedWith").is_none());
+    }
+
+    #[test]
+    fn set_access_posts_the_mode_and_checks_the_answer_is_that_workspace() {
+        let mut workspace: Value = serde_json::from_str::<Value>(&snapshot_body(None)).unwrap()["workspace"].clone();
+        workspace["accessMode"] = json!("organization");
+        let (base, _, request) = serve_once(response("200 OK", &workspace.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let changed = service.set_access(None, "workspace-1", WorkspaceAccessMode::Organization).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/access HTTP/1.1"));
+        let sent: Value = serde_json::from_str(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(sent, json!({ "accessMode": "organization" }));
+        assert!(matches!(changed.access_mode, WorkspaceAccessMode::Organization));
+
+        // Back to private: the same route, the other mode.
+        workspace["accessMode"] = json!("private");
+        let (base, _, request) = serve_once(response("200 OK", &workspace.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let changed = service.set_access(None, "workspace-1", WorkspaceAccessMode::Private).unwrap();
+        let captured = request.join().unwrap();
+        let sent: Value = serde_json::from_str(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(sent, json!({ "accessMode": "private" }));
+        assert!(matches!(changed.access_mode, WorkspaceAccessMode::Private));
+
+        // An answer for another workspace is an unknown outcome, not a success.
+        workspace["id"] = json!("workspace-9");
+        let (base, _, request) = serve_once(response("200 OK", &workspace.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.set_access(None, "workspace-1", WorkspaceAccessMode::Private).unwrap_err();
+        request.join().unwrap();
+        assert_eq!(error.code, "cloud_workspace_request_outcome_unknown");
+    }
+
+    #[test]
+    fn set_access_keeps_the_refusal_of_a_member_and_checks_the_id_first() {
+        let (base, _, request) = serve_once(response("403 Forbidden", r#"{"error":"organization_admin_required"}"#, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.set_access(None, "workspace-1", WorkspaceAccessMode::Organization).unwrap_err();
+        request.join().unwrap();
+        assert_eq!((error.code.as_str(), error.status), ("organization_admin_required", Some(403)));
+        let (_, service) = test_service("http://127.0.0.1:9");
+        assert_eq!(service.set_access(None, "../x", WorkspaceAccessMode::Private).unwrap_err().code, "cloud_workspace_request_invalid");
     }
 
     #[test]

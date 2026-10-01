@@ -169,7 +169,7 @@ describe("sessions under the project", () => {
     expect(chip.textContent).toContain("fix-login");
     expect(chip.getAttribute("title")).toContain("Runs on box");
     // Tabs sit under their session.
-    expect(within(rows[0]).getByRole("treeitem", { name: "Claude", hidden: true })).toBeTruthy();
+    expect(within(rows[0]).getByRole("treeitem", { name: "Claude Code", hidden: true })).toBeTruthy();
     expectNoAttachOrResume();
   });
 
@@ -182,7 +182,7 @@ describe("sessions under the project", () => {
     fireEvent.click(within(sessionNode(`cloud:${ORG}:fix-login:s1`)).getByText("Fix login redirect"));
     expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${ORG}:fix-login:s1`);
     // A tab click selects its session too, and still looks only.
-    fireEvent.click(within(sessionNode(`cloud:${ORG}:fix-login:s1`)).getByRole("treeitem", { name: "Claude", hidden: true }));
+    fireEvent.click(within(sessionNode(`cloud:${ORG}:fix-login:s1`)).getByRole("treeitem", { name: "Claude Code", hidden: true }));
     await new Promise((resolve) => setTimeout(resolve, 10));
     expectNoAttachOrResume();
   });
@@ -192,8 +192,8 @@ describe("sessions under the project", () => {
     working.tabs[0].status = "in_progress";
     await load([item("sleepy", { state: "suspended", repositories: [acmeApi] })], { sleepy: { sessions: [working], capabilities: null } });
     mount();
-    const tab = within(sessionNode(`cloud:${ORG}:sleepy:s1`)).getByRole("treeitem", { name: "Claude", hidden: true });
-    expect(tab.getAttribute("title")).toBe("Claude · Idle");
+    const tab = within(sessionNode(`cloud:${ORG}:sleepy:s1`)).getByRole("treeitem", { name: "Claude Code", hidden: true });
+    expect(tab.getAttribute("title")).toBe("Claude Code · Idle");
     expect(within(sessionNode(`cloud:${ORG}:sleepy:s1`)).getByTestId("cloud-location-chip").getAttribute("title")).toContain("State: Stopped");
   });
 

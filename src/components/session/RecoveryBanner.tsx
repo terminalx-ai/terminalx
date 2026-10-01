@@ -5,7 +5,7 @@ import { PermissionCard, QuestionCard } from "@/components/chat/AskCards";
 import { Button } from "@/components/ui/button";
 import type { ModelInfo } from "@/lib/api";
 
-export function RecoveryBanner({ kind, waiting, asks, busy, answering = false, answerBlockedReason = null, models, onPermission, onQuestions, onRetry, onStop, onContinue }: {
+export function RecoveryBanner({ kind, waiting, asks, busy, answering = false, answerBlockedReason = null, askDetail = false, models, onPermission, onQuestions, onRetry, onStop, onContinue }: {
   kind: RecoveryKind | null;
   waiting: boolean;
   asks: PendingAsk[];
@@ -13,6 +13,8 @@ export function RecoveryBanner({ kind, waiting, asks, busy, answering = false, a
   answering?: boolean;
   /** Set when this reader may not answer requests (a shared cloud workspace's non-approver, PRO-30). */
   answerBlockedReason?: string | null;
+  /** Quote the command, file or tool each permission request is about (a shared cloud workspace: approvers and everyone waiting on them see the same). */
+  askDetail?: boolean;
   models: ModelInfo[];
   onPermission: (id: string, option: string) => void;
   onQuestions: (id: string, answers: Record<string, string>) => void;
@@ -25,7 +27,7 @@ export function RecoveryBanner({ kind, waiting, asks, busy, answering = false, a
     <p className="font-medium">{asks.length ? "Waiting for input" : kind ? "Needs attention" : "Waiting for input"}</p>
     <p className="mt-1">{kind ? RECOVERY_MESSAGES[kind] : asks.length ? "Review the pending request to continue." : "Check the terminal for a pending decision, or stop the session."}</p>
     {asks.map(ask => <div key={ask.requestId} className="mt-2">{ask.kind === "permission"
-      ? <PermissionCard ask={ask} busy={busy || answering || !!answerBlockedReason} onAnswer={option => onPermission(ask.requestId, option)} />
+      ? <PermissionCard ask={ask} busy={busy || answering || !!answerBlockedReason} showDetail={askDetail} onAnswer={option => onPermission(ask.requestId, option)} />
       : <QuestionCard ask={ask} busy={busy || answering || !!answerBlockedReason} onAnswer={answers => onQuestions(ask.requestId, answers)} />}</div>)}
     {asks.length > 0 && answerBlockedReason && <p className="mt-1 text-muted-foreground" data-testid="answer-blocked">{answerBlockedReason}</p>}
     <div className="mt-2 flex flex-wrap gap-2">

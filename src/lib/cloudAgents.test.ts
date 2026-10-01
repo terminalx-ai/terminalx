@@ -12,6 +12,7 @@ import {
   applyLiveTabs,
   attachCloudAgentTab,
   configureCloudAgentTab,
+  configuresLive,
   decideCloudAgent,
   DEV_SCOPE_NOTICE,
   flushCloudAgentCache,
@@ -118,9 +119,10 @@ class FakeBackend {
 
 let backend: FakeBackend;
 
-function fakeClient(connected = true) {
+function fakeClient(connected = true, connection: Record<string, unknown> = {}) {
   const client = {
-    connection: { state: connected ? "connected" : "suspended" },
+    // A manage attachment unless a test says who is behind the connection.
+    connection: { state: connected ? "connected" : "suspended", authority: "manage", ...connection },
     subscribeSession: vi.fn(async (_s: string, _t: string, _on: (event: unknown) => void, _options?: Record<string, unknown>) => () => undefined),
     nudgeMailbox: vi.fn(async () => undefined),
     markAgentTabRead: vi.fn(async () => undefined),
@@ -270,6 +272,39 @@ describe("cloud agent tabs store", () => {
     const client = fakeClient();
     await configureCloudAgentTab(scope, "t-1", { model: "sonnet" }, client);
     expect(client.configureAgentTab).toHaveBeenCalledWith({ sessionId: "s-1", tabId: "t-1", model: "sonnet" });
+  });
+
+  it("sends an approver's setting change with their next message instead of a live configure the runtime would refuse", async () => {
+    applyLiveTabs(scope, [tabInfo()]);
+    // A driver who may approve, on a participate attachment: `session.configure` needs manage.
+    const approver = fakeClient(true, { authority: "participate", you: { userId: "u-bob", role: "driver", canApprove: true } });
+    expect(configuresLive(approver)).toBe(false);
+    await configureCloudAgentTab(scope, "t-1", { mode: "acceptEdits" }, approver);
+    expect(approver.configureAgentTab).not.toHaveBeenCalled();
+    // The picker shows what was chosen, and the tab says it is still waiting for a message.
+    expect(getCloudAgents(scope).tabs[0]).toMatchObject({ info: { permissionMode: "acceptEdits" }, pendingConfig: { mode: "acceptEdits" } });
+    // The runtime's next tab list (still the old mode) does not snap the picker back.
+    applyLiveTabs(scope, [tabInfo()]);
+    expect(getCloudAgents(scope).tabs[0]!.info.permissionMode).toBe("acceptEdits");
+
+    await sendToCloudAgent(scope, "t-1", "go", approver);
+    expect(backend.calls.find((c) => c.cmd === "cloud_agent_enqueue")!.args.payload).toEqual({ text: "go", mode: "acceptEdits" });
+    expect(getCloudAgents(scope).tabs[0]!.pendingConfig).toBeNull();
+    // Once it went out, the runtime's word is shown again.
+    applyLiveTabs(scope, [tabInfo({ permissionMode: "acceptEdits" })]);
+    expect(getCloudAgents(scope).tabs[0]!.info.permissionMode).toBe("acceptEdits");
+  });
+
+  it("configures live only for a manage attachment whose person is still a manager", () => {
+    expect(configuresLive(null)).toBe(false);
+    expect(configuresLive(fakeClient(false))).toBe(false);
+    expect(configuresLive(fakeClient())).toBe(true);
+    expect(configuresLive(fakeClient(true, { you: { userId: "u-a", role: "manager", canApprove: true } }))).toBe(true);
+    // A demoted admin's lingering manage attachment, and every participate one.
+    expect(configuresLive(fakeClient(true, { you: { userId: "u-a", role: "driver", canApprove: true } }))).toBe(false);
+    expect(configuresLive(fakeClient(true, { authority: "participate" }))).toBe(false);
+    // No member list yet: the attachment decides, as before sharing existed.
+    expect(configuresLive(fakeClient(true, { you: { userId: "u-a", role: "none", canApprove: false, listed: false } }))).toBe(true);
   });
 
   it("keeps an offline setting across a restart, and a change made while a send is queued goes with the next one", async () => {

@@ -400,7 +400,8 @@ export function applyLiveTabs(scope: CloudAgentScope, tabs: AgentTabInfo[]) {
       s.tabs.set(info.tabId, newTab(info, "live"));
     } else {
       noteStatus(existing, info.status);
-      existing.info = info;
+      // Settings chosen here and not sent yet stay shown as chosen.
+      existing.info = withPending(info, existing.pendingConfig);
       existing.source = "live";
       existing.placeholder = false;
     }
@@ -560,29 +561,61 @@ export async function closeCloudAgentTab(scope: CloudAgentScope, tabId: string, 
   publish(s);
 }
 
-/** Model, effort or permission mode: now when connected, else with the next message. */
+type TabSettings = { model?: string; effort?: string | null; mode?: string };
+
+/** A tab's info with the settings still waiting for the next message shown as chosen. */
+function withPending(info: AgentTabInfo, pending: TabSettings | null): AgentTabInfo {
+  if (!pending) return info;
+  return {
+    ...info,
+    ...(pending.model !== undefined ? { model: pending.model } : {}),
+    ...(pending.effort !== undefined ? { effort: pending.effort } : {}),
+    ...(pending.mode !== undefined ? { permissionMode: pending.mode } : {}),
+  };
+}
+
+/**
+ * Whether this connection may change a tab's settings with the live
+ * `session.configure`: the runtime keeps it for a manage attachment whose
+ * person is (still) a manager. Everyone else's change rides with their next
+ * message, which the runtime applies for a manager or an approver
+ * (docs/CLOUD-SHARING.md, Settings).
+ */
+export function configuresLive(client: WorkspaceRpcClient | null): client is WorkspaceRpcClient {
+  const state = client?.connection;
+  return !!state && state.state === "connected" && state.authority === "manage" && (!state.you || state.you.listed === false || state.you.role === "manager");
+}
+
+/**
+ * Model, effort or permission mode: now over the live connection when it may
+ * configure tabs, else kept and sent with the next message. Either way the
+ * tab shows what was chosen, and `pendingConfig` says it has not reached the
+ * agent yet, so a picker never changes back without a word.
+ */
 export async function configureCloudAgentTab(
   scope: CloudAgentScope,
   tabId: string,
-  patch: { model?: string; effort?: string | null; mode?: string },
+  patch: TabSettings,
   client: WorkspaceRpcClient | null,
 ) {
   const s = store(scope);
   const tab = s.tabs.get(tabId);
   if (!tab) return;
-  const optimistic = {
-    ...tab.info,
-    ...(patch.model !== undefined ? { model: patch.model } : {}),
-    ...(patch.effort !== undefined ? { effort: patch.effort } : {}),
-    ...(patch.mode !== undefined ? { permissionMode: patch.mode } : {}),
-  };
-  if (client && client.connection.state === "connected" && tab.info.sessionId) {
+  if (configuresLive(client) && tab.info.sessionId) {
     const updated = await client.configureAgentTab({ sessionId: tab.info.sessionId, tabId, ...patch });
     const current = s.tabs.get(tabId);
-    if (current) current.info = updated ?? optimistic;
+    if (current) {
+      // What was just applied no longer waits for a message.
+      if (current.pendingConfig) {
+        const rest = { ...current.pendingConfig };
+        for (const key of Object.keys(patch) as (keyof TabSettings)[]) delete rest[key];
+        current.pendingConfig = Object.keys(rest).length ? rest : null;
+      }
+      current.info = withPending(updated ?? withPending(current.info, patch), current.pendingConfig);
+    }
   } else {
     tab.pendingConfig = { ...(tab.pendingConfig ?? {}), ...patch };
-    tab.info = optimistic;
+    tab.info = withPending(tab.info, tab.pendingConfig);
   }
   publish(s);
   scheduleSave(s, tabId);
@@ -635,6 +668,8 @@ export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, te
   if (current && sent && current.pendingConfig === sent) {
     current.pendingConfig = null;
     scheduleSave(s, tabId);
+    // The "applies with your next message" note goes with the message.
+    publish(s);
   }
   return entry;
 }

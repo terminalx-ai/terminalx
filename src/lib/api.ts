@@ -204,10 +204,17 @@ export const api = {
   /** Revoke a member's share; their connections to the workspace close. */
   cloudWorkspaceShareRevoke: (workspaceId: string, userId: string, orgId?: string | null) =>
     invoke<{ share: CloudWorkspaceShare }>("cloud_workspace_share_revoke", { workspaceId, userId, orgId: orgId ?? null }),
-  /** Drop the agent outbox, transcript cache and keys this Mac kept for a deleted workspace. */
+  /**
+   * Who may see the workspace: `organization` so it can be shared, `private` to
+   * hide it from everyone but its creator (the server revokes every share with
+   * it). Only an organization owner or admin may (`organization_admin_required`).
+   */
+  cloudWorkspaceSetAccess: (workspaceId: string, accessMode: "private" | "organization", orgId?: string | null) =>
+    invoke<CloudWorkspace>("cloud_workspace_set_access", { workspaceId, accessMode, orgId: orgId ?? null }),
   /** The saved cloud catalog (PRO-57) of the signed-in user; refused once `revision` is not the current account. */
   cloudCatalogLoad: (revision: string) => invoke<unknown>("cloud_catalog_load", { revision }),
   cloudCatalogSave: (revision: string, catalog: unknown) => invoke<void>("cloud_catalog_save", { revision, catalog }),
+  /** Drop the agent outbox, transcript cache and keys this Mac kept for a deleted workspace. */
   cloudAgentPurgeWorkspace: (organizationId: string, workspaceId: string) =>
     invoke<{ removed: boolean; unsentCommands: number; cachedTabs: number }>("cloud_agent_purge_workspace", { organizationId, workspaceId }),
   cloudWorkspaceOperation: (operationId: string, orgId?: string | null) =>

@@ -3,7 +3,7 @@ import { Keyboard, Lock, StickyNote, Users, X } from "lucide-react";
 import type { WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { leaseHeldBy, leaseLive, type TabLease } from "@terminalx/portable/workspaceCollab";
 import { Button } from "@/components/ui/button";
-import { acquireLease, canDrive, loadNotes, postNote, releaseLease, sharingKnown, takeOverLease, useCollab } from "@/lib/cloudCollab";
+import { ACCESS_REMOVED_TITLE, acquireLease, canDrive, loadNotes, postNote, releaseLease, setNotesOpen, sharingKnown, takeOverLease, useCollab } from "@/lib/cloudCollab";
 import { initials, usePeople } from "@/lib/cloudPeople";
 import { cn } from "@/lib/cn";
 
@@ -107,20 +107,33 @@ export function PresenceAvatars({ collabKey, you, tabLabel }: { collabKey: strin
 }
 
 /**
- * The lock chip of a shared workspace this person may only read, or is not
- * shared with (PRO-23 view-only rule). Nothing when sharing is unknown.
+ * The one role chip of a cloud workspace: what this person may do there.
+ * "View only" (a viewer), "Driver", or "Not shared"; nothing for a manager,
+ * whose access needs no caveat. The connection chip beside it says only
+ * whether the workspace is live, so the two never contradict each other.
+ * With sharing unknown (an older server or runtime) the attachment decides:
+ * `viewOnly` marks a connection that may only read.
  */
-export function AccessChip({ you, className }: { you: WorkspaceYou | null; className?: string }) {
-  if (!sharingKnown(you) || (you.role !== "viewer" && you.role !== "none")) return null;
-  const viewer = you.role === "viewer";
+export function AccessChip({ you, viewOnly = false, className }: { you: WorkspaceYou | null; viewOnly?: boolean; className?: string }) {
+  const role = sharingKnown(you) ? you.role : viewOnly ? "viewer" : null;
+  if (!role || role === "manager") return null;
+  const title =
+    role === "viewer"
+      ? sharingKnown(you)
+        ? "Shared with you as a viewer: you can read it; ask an admin for driver access to send or type."
+        : "View only: this attachment can read the workspace, but not send, type or change anything in it."
+      : role === "driver"
+        ? `Shared with you as a driver: you can send to agents and type in terminals${you?.canApprove ? ", and approve permission requests" : "; someone else approves permission requests"}.`
+        : "Not shared with you: ask an organization admin or its creator to share it.";
   return (
     <span
       className={cn("flex shrink-0 items-center gap-1 rounded-sm bg-veil-raised px-1 text-[10px] text-muted-foreground", className)}
-      title={viewer ? "Shared with you as a viewer: you can read it; ask an admin for driver access to send or type." : "Not shared with you: ask an organization admin or its creator to share it."}
+      title={title}
       data-testid="cloud-access-chip"
+      data-role={role}
     >
-      <Lock className="size-2.5" />
-      {viewer ? "View only" : "Not shared"}
+      {role !== "driver" && <Lock className="size-2.5" />}
+      {role === "viewer" ? "View only" : role === "driver" ? "Driver" : "Not shared"}
     </span>
   );
 }
@@ -132,6 +145,7 @@ export function AccessChip({ you, className }: { you: WorkspaceYou | null; class
  */
 export function ShareBadge({ you, sharedWith, className }: { you?: { role: WorkspaceYou["role"]; canApprove: boolean } | null; sharedWith?: number | null; className?: string }) {
   if (!you) return null;
+  // Rows mark only what limits this person; a driver's row shows the share count like a manager's.
   if (you.role === "viewer" || you.role === "none") return <AccessChip you={{ userId: "", ...you }} className={className} />;
   if (!sharedWith) return null;
   return (
@@ -146,13 +160,39 @@ export function ShareBadge({ you, sharedWith, className }: { you?: { role: Works
   );
 }
 
-/** Explains an empty workspace to someone it was not shared with. */
-export function NotSharedNotice() {
+/**
+ * The lock pane: what someone sees instead of a workspace's content when it
+ * is not shared with them, or (`removed`) when their access ended. With
+ * `onBack` it replaces a whole session, so it offers the way out.
+ */
+export function NotSharedNotice({ removed = false, onBack, onRecheck }: { removed?: boolean; onBack?: () => void; onRecheck?: () => void } = {}) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-1 p-6 text-center text-xs text-muted-foreground" data-testid="cloud-not-shared">
+    <div
+      className="flex flex-1 flex-col items-center justify-center gap-1 p-6 text-center text-xs text-muted-foreground"
+      data-testid={removed ? "cloud-access-removed" : "cloud-not-shared"}
+      role="status"
+    >
       <Lock className="size-4" />
-      <p className="text-sm text-foreground">This workspace has not been shared with you</p>
-      <p>You can see that it exists, but not its agent tabs, terminals or files. Ask an organization admin or its creator to share it with you.</p>
+      <p className="text-sm text-foreground">{removed ? ACCESS_REMOVED_TITLE : "This workspace has not been shared with you"}</p>
+      <p>
+        {removed
+          ? "It is no longer shared with you, or it was made private or deleted. Ask an organization admin or its creator if you still need it."
+          : "You can see that it exists, but not its agent tabs, terminals or files. Ask an organization admin or its creator to share it with you."}
+      </p>
+      {(onBack || onRecheck) && (
+        <div className="mt-2 flex items-center gap-2">
+          {onBack && (
+            <Button size="sm" variant="outline" onClick={onBack}>
+              Back
+            </Button>
+          )}
+          {onRecheck && (
+            <Button size="sm" variant="ghost" onClick={onRecheck}>
+              Check again
+            </Button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -168,6 +208,7 @@ export function LeaseBar({
   notesOpen,
   onToggleNotes,
   noteCount,
+  unreadNotes = 0,
 }: {
   collabKey: string;
   client: WorkspaceRpcClient;
@@ -179,6 +220,8 @@ export function LeaseBar({
   notesOpen: boolean;
   onToggleNotes: () => void;
   noteCount: number;
+  /** Notes from other people that arrived since the drawer was last open. */
+  unreadNotes?: number;
 }) {
   const nameOf = usePeople();
   const now = useNowUntil(lease?.expiresAt);
@@ -239,10 +282,15 @@ export function LeaseBar({
         variant={notesOpen ? "secondary" : "ghost"}
         className="ml-auto"
         aria-pressed={notesOpen}
-        aria-label="Notes"
+        aria-label={unreadNotes > 0 && !notesOpen ? `Notes, ${unreadNotes} unread` : "Notes"}
         onClick={onToggleNotes}
       >
         <StickyNote className="size-3" /> Notes{noteCount ? ` (${noteCount})` : ""}
+        {unreadNotes > 0 && !notesOpen && (
+          <span className="flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-accent px-1 text-[9px] font-medium leading-none text-accent-foreground" data-testid="cloud-notes-unread" aria-hidden>
+            {unreadNotes > 9 ? "9+" : unreadNotes}
+          </span>
+        )}
       </Button>
     </div>
   );
@@ -263,6 +311,11 @@ export function NotesPanel({ collabKey, client, tabId, onClose }: { collabKey: s
   useEffect(() => {
     void loadNotes(collabKey, client, tabId).catch((e: unknown) => setError(`Could not load notes (${codeOf(e)}).`));
   }, [collabKey, client, tabId]);
+  // While the drawer is open its notes are read as they arrive.
+  useEffect(() => {
+    setNotesOpen(collabKey, tabId, true);
+    return () => setNotesOpen(collabKey, tabId, false);
+  }, [collabKey, tabId]);
 
   const post = async () => {
     if (!text.trim()) return;

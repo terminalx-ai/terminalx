@@ -415,7 +415,7 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
     const menu = await screen.findByRole("menu");
     expect(within(menu).getAllByRole("menuitem")[0]!.textContent?.trim()).toBe("Share…2");
     cleanup();
-    // The creator (a driver who manages the shares) reads Share… too; a viewer reads Sharing….
+    // The creator (a driver who manages the shares) reads Share… too; a viewer reads the neutral "Who has access…".
     catalog.resetCloudCatalog();
     await catalog.ingestCloudList(
       {
@@ -432,13 +432,113 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
     cleanup();
     mount();
     openMenu("perf-sweep");
-    expect(within(await screen.findByRole("menu")).getAllByRole("menuitem")[0]!.textContent?.trim()).toBe("Sharing…");
+    expect(within(await screen.findByRole("menu")).getAllByRole("menuitem")[0]!.textContent?.trim()).toBe("Who has access…");
     cleanup();
     catalog.resetCloudCatalog();
     await catalog.ingestCloudList(list, ORG);
     mount();
     openMenu("fix-login");
     const older = await screen.findByRole("menu");
-    expect(within(older).queryByRole("menuitem", { name: /Shar/ })).toBeNull();
+    expect(within(older).queryByRole("menuitem", { name: /Shar|access/ })).toBeNull();
+  });
+
+  // The live two-user test: a workspace made from the sidebar is private, and Share… was not offered at all.
+  it("offers Share… on a private workspace to whoever manages its shares, and hands the dialog its access mode", async () => {
+    const dialog = await import("@/components/cloud/CloudShareDialog");
+    const opened = vi.spyOn(dialog, "openShareDialog").mockImplementation(() => undefined);
+    catalog.resetCloudCatalog();
+    await catalog.ingestCloudList(
+      {
+        workspaces: [
+          item("fix-login", { repositories, accessMode: "private", createdBy: "u-alice", lastActivityAt: 50, you: { role: "manager", canApprove: true, canManageShares: true } }),
+          item("perf-sweep", { repositories, lastActivityAt: 40, you: { role: "driver", canApprove: true, canManageShares: true } }),
+        ],
+      },
+      ORG,
+    );
+    mount();
+    openMenu("fix-login");
+    const share = within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Share…" });
+    fireEvent.click(share);
+    expect(opened).toHaveBeenCalledWith({ orgId: ORG, workspaceId: "fix-login", name: "fix-login", accessMode: "private", createdBy: "u-alice", canManage: true });
+    opened.mockRestore();
+  });
+
+  it("offers Stop, Archive and Delete only to an organization owner or admin, and says so to everyone else", async () => {
+    catalog.resetCloudCatalog();
+    await catalog.ingestCloudList(
+      {
+        workspaces: [
+          item("fix-login", { repositories, lastActivityAt: 50, you: { role: "manager", canApprove: true, canManageShares: true } }),
+          item("perf-sweep", { repositories, lastActivityAt: 40, you: { role: "viewer", canApprove: false, canManageShares: false } }),
+          item("driven", { repositories, lastActivityAt: 35, you: { role: "driver", canApprove: true, canManageShares: true } }),
+          item("unshared", { repositories, lastActivityAt: 30, you: { role: "none", canApprove: false, canManageShares: false } }),
+          item("asleep", { repositories, state: "suspended", lastActivityAt: 20, you: { role: "driver", canApprove: false, canManageShares: false } }),
+        ],
+      },
+      ORG,
+    );
+    mount();
+    openMenu("fix-login");
+    const names = (menu: HTMLElement) => within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim());
+    expect(names(await screen.findByRole("menu"))).toEqual(["Share…", "Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…"]);
+    cleanup();
+    // A viewer, a driver (even the creator) and an unshared member: the server refuses all three, so none is offered.
+    for (const [name, first] of [
+      ["perf-sweep", "Who has access…"],
+      ["driven", "Share…"],
+      ["unshared", "Who has access…"],
+      ["asleep", "Who has access…"],
+    ] as const) {
+      mount();
+      openMenu(name);
+      const menu = await screen.findByRole("menu");
+      expect(names(menu)).toEqual([first, "Only an organization owner or admin can stop, archive or delete a cloud workspace"]);
+      expect(within(menu).getByTestId("cloud-lifecycle-locked").getAttribute("aria-disabled")).toBe("true");
+      expect(within(menu).queryByRole("menuitem", { name: /^(Stop|Resume|Archive|Delete)/ })).toBeNull();
+      cleanup();
+    }
+  });
+
+  it("does not offer a new session to a member, who could only be refused", async () => {
+    mocks.status = { ...mocks.status, organizations: mocks.status.organizations!.map((org) => (org.id === ORG ? { ...org, role: "member" } : org)) };
+    catalog.resetCloudCatalog();
+    await catalog.ingestCloudList(shared, ORG);
+    mount();
+    expect(screen.queryByRole("button", { name: "New session in acme/api" })).toBeNull();
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Project menu for acme/api" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+    fireEvent.click(screen.getByRole("button", { name: "Project menu for acme/api" }));
+    const entry = within(await screen.findByRole("menu")).getByRole("menuitem", { name: /New session/ });
+    expect(entry.getAttribute("aria-disabled")).toBe("true");
+    expect(entry.getAttribute("title")).toBe("Only an organization owner or admin can start cloud sessions");
+    cleanup();
+    // An owner or admin keeps both.
+    signIn();
+    mount();
+    expect(screen.getByRole("button", { name: "New session in acme/api" })).toBeTruthy();
+  });
+
+  it("lists nothing this desktop kept of a workspace that is not shared: one row named after it, no tab", async () => {
+    catalog.resetCloudCatalog();
+    await catalog.ingestCloudList(
+      {
+        workspaces: [
+          item("unshared", {
+            repositories,
+            lastActivityAt: 30,
+            launch: { ...launch("terminalx/unshared-1"), sessionId: "s-1", tabId: "t-1" },
+            you: { role: "none", canApprove: false, canManageShares: false },
+          }),
+        ],
+      },
+      ORG,
+    );
+    mount();
+    const node = screen.getByTestId("cloud-session-node");
+    expect(node.getAttribute("data-session")).toBe(`cloud:${ORG}:unshared:s-1`);
+    // No phantom "Claude" tab (and so no Close button) for a session this person cannot open.
+    expect(within(node).queryByRole("treeitem", { name: /Claude/ })).toBeNull();
+    expect(within(node).queryByRole("button", { name: /^Close/ })).toBeNull();
+    expect(within(node).getByTestId("cloud-access-chip").textContent).toBe("Not shared");
   });
 });
