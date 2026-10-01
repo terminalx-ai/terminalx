@@ -125,6 +125,9 @@ pub enum ClientState {
         runtime_version: String,
         capabilities: Vec<String>,
         authority: String,
+        /// The person's collaboration role when `collab/1` was granted
+        /// (`{ userId, role, canApprove }`, saas contract §21.5).
+        you: Option<Value>,
     },
     Reconnecting {
         attempt: u32,
@@ -368,9 +371,11 @@ async fn run(shared: Arc<Shared>, source: Arc<dyn AttachSource>, events: mpsc::U
                 shared.activation.send_replace(Activation::Connect);
                 activation.borrow_and_update();
             }
+            if let Ok(outcome) = &opened {
+                refresh_pairing = still_refreshing(refresh_pairing, outcome);
+            }
             match opened {
                 Ok(OpenOutcome::Ready(grant)) => {
-                    refresh_pairing = false;
                     let same = attached.as_ref().is_some_and(|a| a.grant.attachment_id == grant.attachment_id);
                     let invite_used = same && attached.as_ref().is_some_and(|a| a.invite_used && a.grant.offer.relay.invite_token == grant.offer.relay.invite_token);
                     if resume.as_ref().is_some_and(|(attachment, _)| attachment != &grant.attachment_id) {
@@ -480,6 +485,14 @@ async fn run(shared: Arc<Shared>, source: Arc<dyn AttachSource>, events: mpsc::U
     emit(ClientState::Stopped);
 }
 
+/// Whether the next `open` must still ask for a fresh pairing. The API
+/// answers such a request by re-minting the attachment (waiting for the
+/// runtime), and re-mints a ready one on every such request, so asking again
+/// after it waits would re-mint forever and never see it ready.
+fn still_refreshing(requested: bool, outcome: &OpenOutcome) -> bool {
+    requested && !matches!(outcome, OpenOutcome::Ready(_) | OpenOutcome::WaitingForRuntime)
+}
+
 /// Install a resume credential on an invite connection, then negotiate
 /// `rpc.hello` and check the generation against the ticket.
 async fn establish(connection: &mut Connection, attached: &Attached, was_invite: bool) -> Result<(ClientState, Option<String>), Closed> {
@@ -518,6 +531,7 @@ async fn establish(connection: &mut Connection, attached: &Attached, was_invite:
             runtime_version: hello["runtime"]["version"].as_str().unwrap_or_default().to_string(),
             capabilities: serde_json::from_value(hello["capabilities"].clone()).unwrap_or_default(),
             authority: hello["authority"].as_str().unwrap_or_default().to_string(),
+            you: hello.get("you").filter(|you| you.is_object()).cloned(),
         },
         installed,
     ))
@@ -657,6 +671,16 @@ mod tests {
         assert!(decode_pairing_code(&offer_code("short")).is_err());
         let v1 = general_purpose::URL_SAFE_NO_PAD.encode(json!({ "v": 1 }).to_string());
         assert!(decode_pairing_code(&v1).is_err());
+    }
+
+    #[test]
+    fn a_fresh_pairing_is_asked_for_once() {
+        // Re-minted (waiting) or answered: the next open must not re-mint again.
+        assert!(!still_refreshing(true, &OpenOutcome::WaitingForRuntime));
+        assert!(!still_refreshing(true, &open_outcome(&json!({ "id": "a", "state": "ready", "pairingCode": offer_code(&"b".repeat(43)) })).unwrap()));
+        // Suspended: nothing was re-minted yet.
+        assert!(still_refreshing(true, &OpenOutcome::Suspended));
+        assert!(!still_refreshing(false, &OpenOutcome::Suspended));
     }
 
     #[test]

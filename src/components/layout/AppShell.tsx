@@ -22,6 +22,7 @@ import { startNotifications } from "@/lib/notify";
 import { subscribeTabPty } from "@/lib/tabViews";
 import { StarReminder } from "@/components/ui/StarReminder";
 import { Toasts } from "@/components/ui/Toasts";
+import { CloudShareDialogHost } from "@/components/cloud/CloudShareDialog";
 import { BypassDialog } from "@/components/session/BypassDialog";
 import { SettleDialog } from "@/components/session/SettleDialog";
 import { WorkspaceDeleteDialog } from "@/components/session/WorkspaceDeleteDialog";
@@ -127,6 +128,7 @@ export function AppShell() {
         <Toasts />
       </div>
       <BypassDialog />
+      <CloudShareDialogHost />
       <SettleDialog />
       <WorkspaceDeleteDialog />
       <div className="flex min-h-0 flex-1">

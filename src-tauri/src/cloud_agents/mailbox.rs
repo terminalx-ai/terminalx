@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use super::api::{Ack, AckOutcome, CallError, Lease};
 use super::receipts::{FollowUp, Known, Receipt};
 use super::{crypto, now_ms, CloudAgents, DecisionError, Settings};
+use crate::remote::collab::Role;
 
 const LEASE_LIMIT: u32 = 16;
 const ATTACHED_POLL: Duration = Duration::from_secs(3);
@@ -128,10 +129,29 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
     let Some(tab) = agents.tab(&lease.tab_id) else {
         return finish(agents, lease, "rejected", Some("tab-unknown"), json!({}));
     };
-    // Participants may act only in tabs shared with them; none are yet
-    // (the same rule as live RPC, which shares nothing with `participate`).
-    if lease.actor.authority != "manage" {
+    // The actor's role now: stamped by the API at lease time and narrowed
+    // by the runtime's latest member list (contract §21.4-21.5).
+    let access = agents.actor_access(&lease.actor);
+    let allowed = match lease.kind.as_str() {
+        "permission-decision" => access.can_approve,
+        _ => access.can_drive(),
+    };
+    if !allowed {
         return finish(agents, lease, "rejected", Some("forbidden"), json!({}));
+    }
+    // Competing input is serialized by the tab's driver lease: nobody else
+    // sends, steers or stops (managers may stop) while it is held, and an
+    // applied send or steer claims it (below). Whether a turn ran is read
+    // before this command starts one: only a lease live then counts.
+    let busy_before = agents.ops.busy(&tab.session_id, &lease.tab_id);
+    if let (Some(collab), "send" | "steer" | "stop") = (agents.collab(), lease.kind.as_str()) {
+        let busy = busy_before;
+        let held = collab
+            .held_by_other(&lease.tab_id, &lease.actor.user_id, now_ms(), busy)
+            .filter(|_| !(lease.kind == "stop" && access.role == Role::Manager));
+        if let Some(held) = held {
+            return finish(agents, lease, "rejected", Some("lease-held"), json!({ "holderId": held.holder_id }));
+        }
     }
     if let Err(error) = agents.receipts.applying(id) {
         // Without the durable mark the outcome could not be proven later,
@@ -139,7 +159,16 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
         log::error!("record applying {id}: {error:#}");
         return Receipt { outcome: "rejected".into(), category: Some("receipt-store-failed".into()), result_iv: None, result_ciphertext: None };
     }
-    let (outcome, category, extra) = apply(agents, lease, &tab.session_id, &plaintext);
+    // Model, effort and permission mode change what the agent may do on its
+    // own: only a manager or someone who may approve permissions sets them
+    // (the live `session.configure` needs manage). A driver's send still
+    // goes through, without them.
+    let may_configure = access.role == Role::Manager || access.can_approve;
+    let (outcome, category, extra) = apply(agents, lease, &tab.session_id, &plaintext, may_configure);
+    // Only input that reached the agent (or its queue) claims the tab.
+    if let (Some(collab), "applied", "send" | "steer") = (agents.collab(), outcome, lease.kind.as_str()) {
+        let _ = collab.claim(&lease.tab_id, &lease.actor.user_id, now_ms(), busy_before, false);
+    }
     finish(agents, lease, outcome, category, extra)
 }
 
@@ -163,7 +192,7 @@ fn decrypt(agents: &CloudAgents, lease: &Lease) -> Result<Value, &'static str> {
 
 type Applied = (&'static str, Option<&'static str>, Value);
 
-fn apply(agents: &CloudAgents, lease: &Lease, session_id: &str, plaintext: &Value) -> Applied {
+fn apply(agents: &CloudAgents, lease: &Lease, session_id: &str, plaintext: &Value, may_configure: bool) -> Applied {
     let tab_id = lease.tab_id.as_str();
     let ops = &agents.ops;
     let text = || -> Option<String> {
@@ -180,23 +209,37 @@ fn apply(agents: &CloudAgents, lease: &Lease, session_id: &str, plaintext: &Valu
                 Ok(settings) => settings,
                 Err(_) => return ("rejected", Some("payload-invalid"), json!({})),
             };
-            if !settings.is_empty() {
+            let settings_ignored = !settings.is_empty() && !may_configure;
+            if settings_ignored {
+                log::warn!("{} {}: settings ignored, the actor may not configure the tab", lease.kind, lease.client_command_id);
+            } else if !settings.is_empty() {
                 if let Err(error) = ops.configure(session_id, tab_id, &settings) {
                     return failed(error);
                 }
             }
+            let mark = |mut extra: Value| {
+                if settings_ignored {
+                    extra["settingsIgnored"] = json!(true);
+                }
+                extra
+            };
             let queue = lease.kind == "send" && (ops.busy(session_id, tab_id) || !agents.follow_ups.list(tab_id).is_empty());
             if queue {
-                let follow_up = FollowUp { client_command_id: lease.client_command_id.clone(), session_id: session_id.to_string(), text };
+                let follow_up = FollowUp {
+                    client_command_id: lease.client_command_id.clone(),
+                    session_id: session_id.to_string(),
+                    text,
+                    actor_id: lease.actor.user_id.clone(),
+                };
                 if let Err(error) = agents.follow_ups.push(tab_id, follow_up) {
                     return failed(error);
                 }
                 // The turn may have ended between the check and the push.
                 agents.nudge_follow_ups(tab_id);
-                ("applied", None, json!({ "queued": true }))
+                ("applied", None, mark(json!({ "queued": true })))
             } else {
                 match ops.send(session_id, tab_id, &text) {
-                    Ok(()) => ("applied", None, json!({ "queued": false })),
+                    Ok(()) => ("applied", None, mark(json!({ "queued": false }))),
                     Err(error) => failed(error),
                 }
             }

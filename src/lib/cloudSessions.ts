@@ -57,6 +57,8 @@ export interface CloudSessionRow {
 interface LiveList {
   sessions: RuntimeSession[];
   capabilities: string[];
+  /** The connection manages the workspace (the runtime's effective authority). */
+  manage: boolean;
 }
 
 const live = new Map<string, LiveList>();
@@ -71,8 +73,8 @@ function subscribe(listener: () => void) {
   return () => listeners.delete(listener);
 }
 
-function takeLive(target: CloudTarget, sessions: RuntimeSession[], capabilities: string[]) {
-  live.set(cloudWorkspaceKey(target.orgId, target.workspaceId), { sessions, capabilities });
+function takeLive(target: CloudTarget, sessions: RuntimeSession[], capabilities: string[], manage: boolean) {
+  live.set(cloudWorkspaceKey(target.orgId, target.workspaceId), { sessions, capabilities, manage });
   cacheCloudSessions(target.orgId, target.workspaceId, sessions, capabilities);
   publish();
 }
@@ -82,21 +84,28 @@ function capabilitiesOf(client: WorkspaceRpcClient): string[] {
   return state.state === "connected" ? state.capabilities : [];
 }
 
+/** The runtime reports the effective authority: a demoted admin's manage attachment reads participate. */
+function managesOf(client: WorkspaceRpcClient): boolean {
+  const state = client.connection;
+  return state.state === "connected" && state.authority === "manage" && (!state.you || state.you.listed === false || state.you.role === "manager");
+}
+
 /** Read the lists on every connect and follow them while connected. */
 function onConnected(target: CloudTarget, client: WorkspaceRpcClient): () => void {
   const scope = { organizationId: target.orgId, workspaceId: target.workspaceId };
   const capabilities = capabilitiesOf(client);
+  const manage = managesOf(client);
   let open = true;
   void client
     .listSessions()
-    .then((sessions) => open && takeLive(target, sessions, capabilities))
+    .then((sessions) => open && takeLive(target, sessions, capabilities, manage))
     .catch(() => undefined);
   void client
     .listAgentTabs()
     .then((tabs) => open && applyLiveTabs(scope, tabs))
     .catch(() => undefined);
   const stopTabs = watchLiveTabs(scope, client);
-  const stopSessions = client.onSessions((sessions) => open && takeLive(target, sessions, capabilities));
+  const stopSessions = client.onSessions((sessions) => open && takeLive(target, sessions, capabilities, manage));
   return () => {
     open = false;
     stopTabs();
@@ -275,6 +284,11 @@ export function hasLiveCloudSessions(orgId: string, workspaceId: string): boolea
 export function useCloudWorkspaceSessions(node: CloudWorkspaceNode, options: { load: boolean; showArchived: boolean; selectedKey: string | null }): {
   sessions: CloudSessionRow[];
   capabilities: string[] | null;
+  /**
+   * May rename, pin, archive and delete sessions: the live connection's
+   * authority, else the list's role (saas §21.2), else as before.
+   */
+  manage: boolean;
   known: boolean;
 } {
   const { orgId, id: workspaceId } = node.item.workspace;
@@ -294,6 +308,7 @@ export function useCloudWorkspaceSessions(node: CloudWorkspaceNode, options: { l
   return {
     sessions,
     capabilities: liveList?.capabilities ?? cached?.capabilities ?? null,
+    manage: liveList ? liveList.manage : node.item.workspace.you ? node.item.workspace.you.role === "manager" : true,
     known: !!liveList || !!cached || agents.tabs.length > 0 || !!node.item.workspace.launch?.sessionId,
   };
 }
@@ -323,7 +338,7 @@ function applySession(row: CloudSessionRow, session: RuntimeSession | null, remo
   if (!current) return;
   let sessions = current.sessions.filter((existing) => !removed.includes(existing.id));
   if (session) sessions = sessions.some((existing) => existing.id === session.id) ? sessions.map((existing) => (existing.id === session.id ? session : existing)) : [...sessions, session];
-  takeLive({ orgId: row.orgId, workspaceId: row.workspaceId }, sessions, current.capabilities);
+  takeLive({ orgId: row.orgId, workspaceId: row.workspaceId }, sessions, current.capabilities, current.manage);
 }
 
 export function updateCloudSession(row: CloudSessionRow, patch: RuntimeSessionPatch): Promise<void> {
@@ -345,7 +360,7 @@ export function deleteCloudSession(row: CloudSessionRow): Promise<string[]> {
 
 /** Read a workspace's list again now, e.g. after creating a session on a runtime without `session/2` notifications. */
 export async function refreshCloudSessions(target: CloudTarget, client: WorkspaceRpcClient): Promise<void> {
-  takeLive(target, await client.listSessions(), capabilitiesOf(client));
+  takeLive(target, await client.listSessions(), capabilitiesOf(client), managesOf(client));
 }
 
 /** Close one agent tab of a session on the VM (its process stops); a stopped workspace is refused, never resumed. */

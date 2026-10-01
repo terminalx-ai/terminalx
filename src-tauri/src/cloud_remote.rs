@@ -154,7 +154,10 @@ impl CloudRemote {
                             // A dev attach has no identity: its close is recorded without an Organization and never exported.
                             closes.record(identity.as_ref().map(|identity| identity.organization_id.as_str()), workspace_id.as_deref(), code, chrono::Utc::now().timestamp_millis());
                         }
-                        keys_granted = matches!(&state, ClientState::Connected { capabilities, .. } if capabilities.iter().any(|capability| capability == "keys/1"))
+                        // A participant gets the key only while the workspace
+                        // is shared with them (saas contract §21.5).
+                        keys_granted = matches!(&state, ClientState::Connected { capabilities, authority, you, .. }
+                                if capabilities.iter().any(|capability| capability == "keys/1") && may_hold_keys(authority, you.as_ref()))
                             && identity.is_some()
                             && workspace_id.is_some();
                         if keys_granted {
@@ -176,6 +179,15 @@ impl CloudRemote {
                                 fetch_keys(&mut keys_request);
                             }
                             continue;
+                        }
+                        // Shared with this person now (or no longer): fetch
+                        // the key, which the runtime answers only while shared.
+                        Intercept::RoleChanged => {
+                            if identity.is_some() && workspace_id.is_some() && may_hold_keys("participate", message.pointer("/params/you")) {
+                                keys_granted = true;
+                                fetch_keys(&mut keys_request);
+                            }
+                            RemoteEvent::Message { connection_id: id.clone(), message }
                         }
                         Intercept::Forward => RemoteEvent::Message { connection_id: id.clone(), message },
                     },
@@ -385,7 +397,16 @@ enum Intercept {
     KeysAnswer,
     /// `keys.changed`: the workspace key rotated; fetch it again.
     KeysChanged,
+    /// `collab.you`: this person's role changed; forwarded, and the key is
+    /// fetched if they may now hold it.
+    RoleChanged,
     Forward,
+}
+
+/// Whether a connection may ask for the workspace content key: a manage
+/// attachment always, a participant while its role is not `none`.
+fn may_hold_keys(authority: &str, you: Option<&Value>) -> bool {
+    authority == "manage" || you.and_then(|you| you.get("role")).and_then(Value::as_str).is_some_and(|role| role != "none")
 }
 
 fn intercept(message: &Value) -> Intercept {
@@ -394,6 +415,9 @@ fn intercept(message: &Value) -> Intercept {
     }
     if message.get("event").and_then(Value::as_str) == Some("keys.changed") {
         return Intercept::KeysChanged;
+    }
+    if message.get("event").and_then(Value::as_str) == Some("collab.you") {
+        return Intercept::RoleChanged;
     }
     Intercept::Forward
 }
@@ -471,6 +495,15 @@ mod intercept_tests {
         assert_eq!(intercept(&json!({ "event": "keys.changed", "params": {} })), Intercept::KeysChanged);
         assert_eq!(intercept(&json!({ "id": "req-1", "ok": true, "result": {} })), Intercept::Forward);
         assert_eq!(intercept(&json!({ "event": "session.tabs", "params": { "tabs": [] } })), Intercept::Forward);
+        assert_eq!(intercept(&json!({ "event": "collab.you", "params": { "you": { "role": "viewer" } } })), Intercept::RoleChanged);
+    }
+
+    #[test]
+    fn only_a_shared_participant_asks_for_keys() {
+        assert!(may_hold_keys("manage", None));
+        assert!(!may_hold_keys("participate", None));
+        assert!(!may_hold_keys("participate", Some(&json!({ "role": "none" }))));
+        assert!(may_hold_keys("participate", Some(&json!({ "role": "viewer" }))));
     }
 
     /// The exact shape `NativeWorkspaceTransport.route` (src/lib/api.ts) reads;

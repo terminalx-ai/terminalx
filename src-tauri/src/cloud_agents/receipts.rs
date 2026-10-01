@@ -193,6 +193,10 @@ pub struct FollowUp {
     pub client_command_id: String,
     pub session_id: String,
     pub text: String,
+    /// Who sent it (PRO-30); re-checked before it is typed. Empty for a
+    /// follow-up queued before sharing existed.
+    #[serde(default)]
+    pub actor_id: String,
 }
 
 /// Follow-ups per tab, in order, rewritten durably on every change so an
@@ -239,6 +243,25 @@ impl FollowUps {
             }
         })?;
         Ok(taken)
+    }
+
+    /// Drop the follow-ups `keep` refuses, in every tab; returns them with
+    /// their tab.
+    pub fn retain(&self, keep: impl Fn(&FollowUp) -> bool) -> Result<Vec<(String, FollowUp)>> {
+        let mut dropped = Vec::new();
+        self.change(|tabs| {
+            for (tab_id, queue) in tabs.iter_mut() {
+                queue.retain(|follow_up| {
+                    let kept = keep(follow_up);
+                    if !kept {
+                        dropped.push((tab_id.clone(), follow_up.clone()));
+                    }
+                    kept
+                });
+            }
+            tabs.retain(|_, queue| !queue.is_empty());
+        })?;
+        Ok(dropped)
     }
 
     /// Drop every follow-up of a tab (a stop); returns what was dropped.
@@ -344,7 +367,7 @@ mod tests {
     fn follow_ups_are_ordered_per_tab_and_durable() {
         let dir = tempfile::tempdir().unwrap();
         let queue = FollowUps::open(dir.path()).unwrap();
-        let item = |id: &str| FollowUp { client_command_id: id.into(), session_id: "s".into(), text: id.into() };
+        let item = |id: &str| FollowUp { client_command_id: id.into(), session_id: "s".into(), text: id.into(), actor_id: String::new() };
         queue.push("t1", item("a")).unwrap();
         queue.push("t1", item("b")).unwrap();
         queue.push("t2", item("c")).unwrap();

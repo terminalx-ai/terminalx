@@ -62,6 +62,7 @@ import { getSessionStore, selectCloudProjectInSidebar, selectCloudSession, selec
 import { orgSectionKey, parseCloudWorkspaceKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
 import { AddRepositoryDialog, NewBlankProjectDialog } from "./AddCloudProject";
 import { useRowMenu } from "@/components/ui/useRowMenu";
+import { ShareBadge } from "@/components/cloud/CloudCollab";
 import { WorkspaceActionItems, WorkspaceLifecycleDialog, type LifecycleRequest as Dialog } from "@/components/cloud/WorkspaceActions";
 import { CloudDiagnosticsDialog, CloudDiagnosticsMenuItem, offersCloudDiagnostics } from "@/components/cloud/CloudDiagnosticsDialog";
 
@@ -599,6 +600,7 @@ function WorkspaceGroupNode({ node, expanded: projectExpanded, onLifecycle }: { 
             <RowChip mono>{branch}</RowChip>
           </span>
         )}
+        <ShareBadge you={workspace.you} sharedWith={workspace.sharedWith} className={yieldsToRowActions} />
         <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", DOT[activity.tone])} />
         <span className={cn("shrink-0 text-[10px] text-faint", activity.tone === "attention" && "text-destructive", yieldsToRowActions)} data-testid="cloud-workspace-row-state">
           {activity.label}
@@ -627,7 +629,7 @@ function WorkspaceGroupNode({ node, expanded: projectExpanded, onLifecycle }: { 
 /** A workspace's sessions, straight under the project (or under its group row). */
 function WorkspaceSessions({ node, shown, showLocation }: { node: CloudWorkspaceNode; shown: boolean; showLocation: boolean }) {
   const store = useSessionStore();
-  const { sessions, capabilities, known } = useCloudWorkspaceSessions(node, { load: shown, showArchived: store.showArchived, selectedKey: store.selectedSessionId });
+  const { sessions, capabilities, manage: manages, known } = useCloudWorkspaceSessions(node, { load: shown, showArchived: store.showArchived, selectedKey: store.selectedSessionId });
   const activity = useWorkspaceActivity(node, sessions, sessions.every((row) => row.source !== "live"));
   const card = workspaceCard(node.item, activity);
   const connection = useCloudConnection(node.key);
@@ -636,7 +638,10 @@ function WorkspaceSessions({ node, shown, showLocation }: { node: CloudWorkspace
   // participant is refused session changes, so it is not offered them; an
   // older server that says neither keeps the menu.
   const authority = connection.authority ?? node.item.workspace.authority ?? null;
-  const manage = !!capabilities?.includes("session/2") && (authority === null || authority === "manage");
+  // Both rules hold: the attachment's authority (above), and on a shared
+  // workspace the manager role (PRO-30): session/2 refuses anyone else, a
+  // demoted admin's lingering manage attachment included.
+  const manage = manages && !!capabilities?.includes("session/2") && (authority === null || authority === "manage");
   const { state } = node.item.workspace;
   if (!sessions.length) {
     const openable = (state === "ready" || state === "suspended") && activity.tone !== "changing" && activity.tone !== "attention";
@@ -747,6 +752,7 @@ function CloudSessionNode({ row, node, manage, location }: { row: CloudSessionRo
           ) : (
             <ItemTitle title={row.title} pinned={row.pinned} archived={row.archived} onActivate={() => selectCloudSession(row.key)} />
           )}
+          {location && <ShareBadge you={node.item.workspace.you} sharedWith={node.item.workspace.sharedWith} className={yieldsToRowActions} />}
           {location && <LocationChip name={node.item.workspace.name} tone={location.tone} card={location.card} />}
           <RowTime at={row.modified} />
           {manage && (

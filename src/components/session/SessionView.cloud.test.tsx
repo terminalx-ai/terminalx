@@ -52,13 +52,16 @@ vi.mock("@/components/chat/Composer", () => ({
     onSetEffort: (e: string | null) => void;
     onSetMode: (m: string) => void;
     disabledReason?: string | null;
+    settingsLockedReason?: string | null;
+    canStop?: boolean;
     cwd?: string;
   }) => (
     <div data-testid="composer" data-cwd={props.cwd ?? ""}>
       {props.disabledReason && <p role="note">{props.disabledReason}</p>}
+      {props.settingsLockedReason && <p data-testid="settings-locked">{props.settingsLockedReason}</p>}
       <textarea aria-label="Prompt" value={props.draft} onChange={(e) => props.onDraftChange(e.target.value)} />
       <button onClick={() => void Promise.resolve(props.onSend(props.draft, [])).then(() => props.onDraftChange(""), () => undefined)}>{props.busy ? "Queue" : "Send"}</button>
-      {props.busy && <button onClick={props.onStop}>Stop</button>}
+      {props.busy && props.canStop !== false && <button onClick={props.onStop}>Stop</button>}
       <button onClick={() => props.onSetModel("opus")}>Use opus</button>
       <button onClick={() => props.onSetEffort("high")}>Effort high</button>
       <button onClick={() => props.onSetMode("plan")}>Plan mode</button>
@@ -73,6 +76,7 @@ import { useCloudSession } from "@/lib/cloudSession";
 import { resetCloudAgents } from "@/lib/cloudAgents";
 import { resetCloudTerminals } from "@/lib/cloudTerminals";
 import { resetCloudConnections } from "@/lib/cloudConnections";
+import { resetCollab } from "@/lib/cloudCollab";
 import { selectSessionTab } from "@/lib/terminal";
 import { resetCloudWakes } from "@/lib/sessionBackend";
 import { getSessionStore, selectCloudSession, upsertSession } from "@/lib/sessions";
@@ -188,6 +192,21 @@ class FakeRuntime implements WorkspaceTransport {
       authority,
     });
   }
+  /** PRO-30: what `collab.state` answers on a runtime that granted `collab/1`. */
+  collab: { you: Record<string, unknown>; participants: unknown[]; leases: unknown[] } | null = null;
+  connectShared(you: { userId: string; role: string; canApprove: boolean }, authority: "manage" | "participate" = "participate") {
+    this.collab ??= { you, participants: [], leases: [] };
+    this.collab.you = you;
+    this.emit({
+      state: "connected",
+      runtimeGeneration: 3,
+      runtimeEpoch: "e1",
+      runtimeVersion: "0.3.0",
+      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "collab/1"],
+      authority,
+      you: { ...you, listed: true },
+    } as WorkspaceConnectionState);
+  }
   methods(name: string) {
     return this.sent.filter((frame) => frame.method === name);
   }
@@ -207,6 +226,10 @@ class FakeRuntime implements WorkspaceTransport {
         return ok({});
       case "session.configure":
         return ok({ tab: { ...this.tabs[0], ...(params.model ? { model: params.model } : {}), ...(params.effort ? { effort: params.effort } : {}), ...(params.mode ? { permissionMode: params.mode } : {}) } });
+      case "collab.state":
+        return this.collab ? ok(this.collab) : { id: frame.id, ok: false, error: { code: "method_not_found", message: frame.method } };
+      case "presence.update":
+        return ok({});
       case "runtime.agents":
         return ok({ agents: [{ id: "claude", name: "Claude Code", caps: {}, models: [], modes: [], defaultMode: "bypassPermissions" }] });
       case "pty.list":
@@ -309,6 +332,7 @@ afterEach(() => {
   resetCloudTerminals();
   resetCloudWakes();
   resetCloudConnections();
+  resetCollab();
   client.close();
 });
 
@@ -614,4 +638,192 @@ describe("the session header's New tab menu", () => {
     expect(await screen.findByRole("menu")).toBeTruthy();
   });
 
+});
+
+describe("a shared cloud workspace in SessionView (PRO-30)", () => {
+  const ME = { userId: "u-me", role: "driver", canApprove: false };
+  const shared = (role: "manager" | "driver" | "viewer" | "none", canApprove = false, state: CloudWorkspaceListItem["workspace"]["state"] = "ready") => {
+    const item = workspaceItem(state, "participate");
+    item.workspace.accessMode = "organization";
+    item.workspace.you = { role, canApprove };
+    item.workspace.sharedWith = 2;
+    return item;
+  };
+  const names = () => {
+    guard.handlers.organization_members = () => ({ members: [{ userId: "u-alice", email: "alice@example.com", displayName: "Alice", role: "member" }], pendingInvites: [], viewerRole: "member", canManageMembers: false, removedOnDelete: [], runtimeFacts: { available: true }, contextRevision: "r" });
+  };
+  async function openShared(you: typeof ME) {
+    runtime.tabs = [tabInfo()];
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connectShared(you));
+    await screen.findByText("Fix login redirect");
+    await waitFor(() => expect(runtime.methods("collab.state").length).toBeGreaterThan(0));
+  }
+
+  it("lets a driver on a participate attachment send, and shows who else is here", async () => {
+    names();
+    setCatalog(shared("driver"));
+    runtime.collab = {
+      you: ME,
+      participants: [
+        { userId: "u-me", role: "driver", canApprove: false, surfaces: 1, tabId: "t-1", activity: "viewing", since: 1 },
+        { userId: "u-alice", role: "manager", canApprove: true, surfaces: 1, tabId: "t-1", activity: "typing", since: 2 },
+      ],
+      leases: [],
+    };
+    await openShared(ME);
+    // No "View only": a driver sends through the mailbox like a manager.
+    expect(screen.queryAllByRole("note").some((note) => note.textContent?.startsWith("View only"))).toBe(false);
+    expect(screen.queryByTestId("cloud-access-chip")).toBeNull();
+    const faces = await screen.findAllByTestId("session-presence-person");
+    expect(faces).toHaveLength(1);
+    await waitFor(() => expect(faces[0]!.getAttribute("title")).toBe("Alice · Admin · typing · on Fix login"));
+    // What this person looks at is their presence.
+    await waitFor(() => expect(runtime.methods("presence.update").map((frame) => frame.params)).toContainEqual({ tabId: "t-1", activity: "viewing" }));
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "add a test" } });
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(enqueued.find((entry) => entry.kind === "send")?.payload).toEqual({ text: "add a test" }));
+    // The lease bar says nobody drives yet and offers the wheel.
+    expect((await screen.findByTestId("cloud-agent-lease")).textContent).toContain("No one is driving");
+    expect(guard.violations).toEqual([]);
+  });
+
+  it("keeps the composer closed while someone else holds the tab's lease", async () => {
+    names();
+    setCatalog(shared("driver"));
+    runtime.collab = { you: ME, participants: [], leases: [{ tabId: "t-1", holderId: "u-alice", acquiredAt: 1, expiresAt: Date.now() + 60_000 }] };
+    await openShared(ME);
+    await waitFor(() => expect(screen.getAllByRole("note").some((note) => note.textContent === "Alice is driving this tab. You can send once they release it.")).toBe(true));
+    expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("Driving: Alice");
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "me too" } });
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send" }));
+    await act(async () => undefined);
+    expect(enqueued.filter((entry) => entry.kind === "send")).toEqual([]);
+    expect(guard.violations).toEqual([]);
+  });
+
+  it("does not let a driver without approval rights answer a permission request", async () => {
+    names();
+    setCatalog(shared("driver"));
+    runtime.collab = { you: ME, participants: [], leases: [] };
+    runtime.events = [
+      ev({ type: "permission_requested", requestId: "req-1", toolUseId: "tool-1", toolName: "Bash", input: { command: "ls" }, options: [{ id: "allow", label: "Allow", kind: "allow_once" }] } as Payload),
+    ];
+    runtime.tabs = [tabInfo({ status: "waiting" })];
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connectShared(ME));
+    await screen.findByText(/Waiting for permission/);
+    const allow = await screen.findByRole("button", { name: /^Allow/ });
+    expect((allow as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("answer-blocked").textContent).toBe("Waiting for someone who can approve");
+    fireEvent.click(allow);
+    await act(async () => undefined);
+    expect(enqueued.filter((entry) => entry.kind === "permission-decision")).toEqual([]);
+  });
+
+  it("shows a viewer the lock chip and a closed composer, awake or asleep", async () => {
+    names();
+    setCatalog(shared("viewer"));
+    runtime.collab = { you: { ...ME, role: "viewer" }, participants: [], leases: [] };
+    await openShared({ ...ME, role: "viewer" });
+    expect(screen.getByTestId("cloud-access-chip").textContent).toBe("View only");
+    expect(screen.getAllByRole("note").some((note) => note.textContent === "You can view this workspace; ask an admin for driver access")).toBe(true);
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "hello" } });
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send" }));
+    await act(async () => undefined);
+    expect(enqueued).toEqual([]);
+    cleanup();
+
+    // A stopped workspace: nothing connects, and the list's role still gates.
+    resetCloudConnections();
+    setCatalog(shared("viewer", false, "suspended"));
+    cache["t-1"] = { tab: tabInfo(), events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    render(wrap(<CloudHarness />));
+    await act(async () => runtime.emit({ state: "suspended" }));
+    expect((await screen.findByTestId("cloud-access-chip")).textContent).toBe("View only");
+    expect(screen.getAllByRole("note").some((note) => note.textContent === "You can view this workspace; ask an admin for driver access")).toBe(true);
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "wake up" } });
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send" }));
+    await act(async () => undefined);
+    expect(enqueued).toEqual([]);
+    expect(activate).not.toHaveBeenCalled();
+  });
+
+  it("locks the model, effort and mode for a driver who may not approve (review M1)", async () => {
+    names();
+    setCatalog(shared("driver"));
+    runtime.collab = { you: ME, participants: [], leases: [] };
+    await openShared(ME);
+    expect((await screen.findByTestId("settings-locked")).textContent).toMatch(/^Only a workspace admin or someone who can approve/);
+    fireEvent.click(screen.getByRole("button", { name: "Use opus" }));
+    fireEvent.click(screen.getByRole("button", { name: "Plan mode" }));
+    await act(async () => undefined);
+    expect(runtime.methods("session.configure")).toEqual([]);
+    expect(enqueued).toEqual([]);
+  });
+
+  it("hides Stop from a driver while someone else drives the running turn", async () => {
+    names();
+    setCatalog(shared("driver", true));
+    runtime.tabs = [tabInfo({ status: "in_progress" })];
+    runtime.collab = { you: { ...ME, canApprove: true }, participants: [], leases: [{ tabId: "t-1", holderId: "u-alice", acquiredAt: 1, expiresAt: Date.now() + 60_000 }] };
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connectShared({ ...ME, canApprove: true }));
+    await screen.findByText("Fix login redirect");
+    await waitFor(() => expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("Driving: Alice"));
+    expect(within(composer()).queryByRole("button", { name: "Stop" })).toBeNull();
+    // An approving driver may still change the settings.
+    expect(screen.queryByTestId("settings-locked")).toBeNull();
+  });
+
+  it("gives a demoted admin's manage attachment no writes, terminals or new tabs", async () => {
+    names();
+    setCatalog(shared("viewer"));
+    runtime.collab = { you: { ...ME, role: "viewer" }, participants: [], leases: [] };
+    runtime.tabs = [tabInfo()];
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connectShared({ ...ME, role: "viewer" }, "manage"));
+    await screen.findByText("Fix login redirect");
+    expect(screen.getByTestId("cloud-access-chip").textContent).toBe("View only");
+    // Git and files: read-only with the reason.
+    expect((await screen.findByTestId("panel-read-only")).textContent).toMatch(/View only|driver access/);
+    await waitFor(() => expect(runtime.methods("pty.list").length).toBeGreaterThan(0));
+    act(() => selectSessionTab(KEY, { kind: "terminal", id: `cloud:cloud:${ORG}:${WS}:p1` }));
+    await screen.findByTestId("xterm");
+    expect(screen.queryByRole("button", { name: "Take control" })).toBeNull();
+    // The New tab menu stays, with every item disabled and the reason.
+    mouseClick(screen.getByRole("button", { name: "New tab" }));
+    const menu = await screen.findByRole("menu");
+    const items = within(menu).getAllByRole("menuitem");
+    expect(items.length).toBeGreaterThan(0);
+    expect(items.every((item) => item.getAttribute("aria-disabled") === "true" || item.hasAttribute("data-disabled"))).toBe(true);
+  });
+
+  it("offers the waking Terminal on a stopped workspace only to someone who would manage it", async () => {
+    const asleep = async (role: "manager" | "driver" | "viewer") => {
+      resetCloudConnections();
+      const item = shared(role, role !== "viewer", "suspended");
+      if (role === "manager") item.workspace.authority = "manage";
+      setCatalog(item);
+      render(wrap(<CloudHarness />));
+      await act(async () => runtime.emit({ state: "suspended" }));
+      await screen.findByTestId("session-connection");
+      mouseClick(screen.getByRole("button", { name: "New tab" }));
+      return screen.findByRole("menu");
+    };
+    for (const role of ["driver", "viewer"] as const) {
+      const menu = await asleep(role);
+      // Terminals are a manager's: no wake is offered that would end in a refusal.
+      expect(within(menu).queryByRole("menuitem", { name: /wakes the workspace/ })).toBeNull();
+      expect(within(menu).getByRole("menuitem", { name: /Terminal/ }).getAttribute("aria-disabled")).toBe("true");
+      cleanup();
+    }
+    const menu = await asleep("manager");
+    expect(within(menu).getByRole("menuitem", { name: "Terminal on the VM: wakes the workspace" })).toBeTruthy();
+    expect(activate).not.toHaveBeenCalled();
+  });
 });

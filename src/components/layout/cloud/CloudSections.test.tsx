@@ -385,3 +385,60 @@ describe("every organization live (CS-18)", () => {
     act(() => prefs.setPrefs({ sidebarSections: {} }));
   });
 });
+
+describe("shared workspaces in the sidebar (PRO-30)", () => {
+  const shared = {
+    workspaces: [
+      item("fix-login", { repositories, launch: launch("terminalx/fix-login-3f2a9c01d4e7"), lastActivityAt: 50, you: { role: "manager", canApprove: true }, sharedWith: 2 }),
+      item("perf-sweep", { repositories, launch: launch("terminalx/perf-sweep-8be104c2a9f1"), lastActivityAt: 40, you: { role: "viewer", canApprove: false }, sharedWith: 3 }),
+      item("unshared", { repositories, lastActivityAt: 30, you: { role: "none", canApprove: false } }),
+    ],
+  };
+
+  it("badges each workspace row with its share count or the lock chip, from the list alone", async () => {
+    await catalog.ingestCloudList(shared, ORG);
+    mount();
+    expect(within(row("fix-login")).getByTestId("cloud-share-badge").textContent).toBe("2");
+    expect(within(row("fix-login")).queryByTestId("cloud-access-chip")).toBeNull();
+    expect(within(row("perf-sweep")).getByTestId("cloud-access-chip").textContent).toBe("View only");
+    // A viewer is not told how many others have access beyond the lock.
+    expect(within(row("perf-sweep")).queryByTestId("cloud-share-badge")).toBeNull();
+    expect(within(row("unshared")).getByTestId("cloud-access-chip").textContent).toBe("Not shared");
+    // Nothing attached to learn any of this.
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+  });
+
+  it("offers Share… from the workspace menu of a server that reports roles, and nothing on an older one", async () => {
+    await catalog.ingestCloudList(shared, ORG);
+    mount();
+    openMenu("fix-login");
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem")[0]!.textContent?.trim()).toBe("Share…2");
+    cleanup();
+    // The creator (a driver who manages the shares) reads Share… too; a viewer reads Sharing….
+    catalog.resetCloudCatalog();
+    await catalog.ingestCloudList(
+      {
+        workspaces: [
+          item("fix-login", { repositories, lastActivityAt: 50, you: { role: "driver", canApprove: true, canManageShares: true } }),
+          item("perf-sweep", { repositories, lastActivityAt: 40, you: { role: "viewer", canApprove: false, canManageShares: false } }),
+        ],
+      },
+      ORG,
+    );
+    mount();
+    openMenu("fix-login");
+    expect(within(await screen.findByRole("menu")).getAllByRole("menuitem")[0]!.textContent?.trim()).toBe("Share…");
+    cleanup();
+    mount();
+    openMenu("perf-sweep");
+    expect(within(await screen.findByRole("menu")).getAllByRole("menuitem")[0]!.textContent?.trim()).toBe("Sharing…");
+    cleanup();
+    catalog.resetCloudCatalog();
+    await catalog.ingestCloudList(list, ORG);
+    mount();
+    openMenu("fix-login");
+    const older = await screen.findByRole("menu");
+    expect(within(older).queryByRole("menuitem", { name: /Shar/ })).toBeNull();
+  });
+});

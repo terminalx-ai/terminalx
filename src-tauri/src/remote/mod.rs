@@ -8,9 +8,11 @@
 //! - [`git`]: `git/1` and the repository facts of `lifecycle/1`.
 //! - [`host`]: the runtime's outbound relay registration.
 //! - [`client`]: the desktop's attach, E2EE and supervision.
+//! - [`collab`]: who may do what in a shared workspace (`collab/1`, PRO-30).
 
 pub mod bootstrap_link;
 pub mod client;
+pub mod collab;
 pub mod files;
 pub mod git;
 pub mod host;

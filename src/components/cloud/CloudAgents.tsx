@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Bot, Loader2, Plus, X } from "lucide-react";
-import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import type { WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { Chat } from "@/components/chat/Chat";
 import { Composer } from "@/components/chat/Composer";
 import { Button } from "@/components/ui/button";
@@ -38,6 +38,9 @@ import { TERMINAL_OUTBOX_STATES, type CloudAgentScope, type OutboxEntry, type Wa
 import type { ImageInput } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
 import { cn } from "@/lib/cn";
+import { SETTINGS_LOCKED_REASON, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
+import { usePeople } from "@/lib/cloudPeople";
+import { LeaseBar, NotesPanel, NotSharedNotice, useNowUntil } from "./CloudCollab";
 
 /**
  * The agent tabs of a cloud workspace (PRO-22). Tabs and transcripts show
@@ -51,6 +54,8 @@ export function CloudAgentsView({
   state,
   workspaceState,
   wakeWorkspace,
+  collabKey,
+  active: shown = true,
 }: {
   scope: CloudAgentScope;
   client: WorkspaceRpcClient;
@@ -59,14 +64,23 @@ export function CloudAgentsView({
   workspaceState: string | null;
   /** Raise the connection to `wake` after an interactive command. */
   wakeWorkspace?: () => void;
+  /** Where this workspace's presence, notes and leases are kept (cloudCollab); defaults to its target key. */
+  collabKey?: string;
+  /** The agent view is the one on screen (presence reports its tab). */
+  active?: boolean;
 }) {
   const snapshot = useCloudAgents(scope);
   const [selected, setSelected] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const connected = state.state === "connected";
-  const manage = connected && state.authority === "manage";
   const generation = connected ? `${state.runtimeGeneration}:${state.runtimeEpoch ?? ""}` : null;
+  const key = collabKey ?? `cloud:${scope.organizationId}:${scope.workspaceId}`;
+  const collab = useCollab(key);
+  const you = effectiveYou(state, collab);
+  // New tabs are a manager's; a demoted admin's manage attachment is not.
+  const manage = connected && state.authority === "manage" && (!collab.available || !sharingKnown(you) || you.role === "manager");
+  const hidden = notShared(state, you);
 
   useEffect(() => {
     void loadCloudAgents(scope);
@@ -89,6 +103,20 @@ export function CloudAgentsView({
 
   const tabs = snapshot.tabs;
   const active = tabs.find((tab) => tab.tabId === selected) ?? tabs[0] ?? null;
+
+  // Others see which agent tab this person is on.
+  const activeTabId = active?.tabId ?? null;
+  useEffect(() => {
+    if (shown && collab.available) presenceTab(key, activeTabId);
+  }, [shown, collab.available, key, activeTabId]);
+
+  if (hidden) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col" data-testid="cloud-agents">
+        <NotSharedNotice />
+      </div>
+    );
+  }
 
   const close = async (tab: CloudAgentTab) => {
     setError(null);
@@ -156,6 +184,8 @@ export function CloudAgentsView({
           snapshot={snapshot}
           wakeWorkspace={wakeWorkspace}
           sleeping={!connected && (workspaceState === "suspended" || state.state === "suspended")}
+          collabKey={key}
+          you={knownYou(state, collab)}
         />
       ) : (
         <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
@@ -350,6 +380,7 @@ export function commandError(e: unknown): string {
   const code = errorText(e);
   if (code === KEY_MISSING) return "Connect to this workspace once so this device can encrypt commands for it.";
   if (code === DEV_SCOPE_NOTICE) return DEV_SCOPE_NOTICE;
+  if (code === "cloud_workspace_collaboration_forbidden") return "Your access to this workspace does not allow this. Ask an admin for driver or approver access.";
   return `Could not queue the command (${code}).`;
 }
 
@@ -361,6 +392,8 @@ function CloudAgentPane({
   snapshot,
   sleeping,
   wakeWorkspace,
+  collabKey,
+  you,
 }: {
   scope: CloudAgentScope;
   tab: CloudAgentTab;
@@ -369,8 +402,22 @@ function CloudAgentPane({
   snapshot: CloudAgentsSnapshot;
   sleeping: boolean;
   wakeWorkspace?: () => void;
+  collabKey: string;
+  /** Set only while connected to a runtime with `collab/1`: sharing rules apply. */
+  you: WorkspaceYou | null;
 }) {
   const { info } = tab;
+  const collab = useCollab(collabKey);
+  const nameOf = usePeople();
+  const [notesOpen, setNotesOpen] = useState(false);
+  const lease = tab.tabId in collab.leases ? (collab.leases[tab.tabId] ?? null) : (info.lease ?? null);
+  const now = useNowUntil(lease?.expiresAt);
+  const turnRunning = (info.status === "in_progress" || info.status === "waiting") && info.process === "running";
+  const { blocked, mayStop, approveBlocked, mayConfigure } = tabGate(you, lease, now, turnRunning, nameOf);
+  // Presence, the lease bar and notes need the live runtime; `you` alone may
+  // be the last known access of a sleeping workspace.
+  const collabLive = connected && collab.available && !!you;
+  const noteCount = collab.notes[tab.tabId]?.notes.length ?? 0;
   const log = useTabLog(info.sessionId, tab.tabId);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -451,12 +498,26 @@ function CloudAgentPane({
     await interactive(() => steerCloudAgent(scope, tab.tabId, text, connected ? client : null)).then(() => setDraft(""), () => undefined);
   };
 
-  const stop = () => void interactive(() => stopCloudAgent(scope, tab.tabId, connected ? client : null)).catch(() => undefined);
+  const stop = () => {
+    if (!mayStop) {
+      setError("Only the person driving this tab or an admin can stop the agent.");
+      return;
+    }
+    void interactive(() => stopCloudAgent(scope, tab.tabId, connected ? client : null)).catch(() => undefined);
+  };
 
-  const decide = (decision: { requestId: string; optionId: string } | { requestId: string; answers: Record<string, string> }) =>
+  const decide = (decision: { requestId: string; optionId: string } | { requestId: string; answers: Record<string, string> }) => {
+    if (approveBlocked) return;
     void interactive(() => decideCloudAgent(scope, tab.tabId, decision, connected ? client : null)).catch(() => undefined);
+  };
+
+  const changeDraft = (text: string) => {
+    setDraft(text);
+    if (collabLive && text) presenceTyping(collabKey);
+  };
 
   const configure = (patch: { model?: string; effort?: string | null; mode?: string }) => {
+    if (!mayConfigure) return;
     setError(null);
     void configureCloudAgentTab(scope, tab.tabId, patch, connected ? client : null).catch((e: unknown) => setError(errorText(e)));
   };
@@ -482,54 +543,80 @@ function CloudAgentPane({
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col" data-testid="cloud-agent-pane">
-      {isDevScope(scope) && (
-        <p className="border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground" data-testid="cloud-agent-dev-notice">
-          {DEV_SCOPE_NOTICE}
-        </p>
-      )}
-      {endedMidTurn && (
-        <p className="border-b border-hairline bg-warning/10 px-3 py-1.5 text-xs" data-testid="cloud-agent-exited">
-          Agent process ended — the saved conversation resumes on your next message.
-        </p>
-      )}
-      <CloudOutbox entries={entries} followUps={info.followUps} onSendAgain={(e) => void interactive(() => sendAgain(scope, e, connected ? client : null)).catch(() => undefined)} />
-      <div className="min-h-0 flex-1">
-        <Chat
-          sessionId={info.sessionId}
-          transcript={transcript}
-          stream={log.stream}
-          live={live}
-          progressing={live && !transcript.pendingAsks.length}
-          answering={deciding}
-          onAnswerPermission={(requestId, optionId) => decide({ requestId, optionId })}
-          onAnswerQuestions={(requestId, answers) => decide({ requestId, answers })}
-          footer={
-            <div className="flex flex-col">
-              {live && draft.trim() && !isDevScope(scope) && (
-                <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-4 text-xs text-muted-foreground">
-                  <span>Send now queues it for when the agent pauses.</span>
-                  <Button size="xs" variant="outline" onClick={() => void steer()}>
-                    Steer now
-                  </Button>
-                </div>
-              )}
-              <Composer
-                tab={entry}
-                busy={live}
-                draft={draft}
-                onDraftChange={setDraft}
-                onSend={send}
-                onStop={stop}
-                onSetModel={(model) => configure({ model })}
-                onSetEffort={(effort) => configure({ effort })}
-                onSetMode={(mode) => configure({ mode })}
-                disabledReason={error}
-              />
-            </div>
-          }
+    <div className="flex min-h-0 flex-1" data-testid="cloud-agent-pane">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {collabLive && (
+          <LeaseBar
+            collabKey={collabKey}
+            client={client}
+            tabId={tab.tabId}
+            lease={lease}
+            turnRunning={turnRunning}
+            you={you}
+            notesOpen={notesOpen}
+            onToggleNotes={() => setNotesOpen((open) => !open)}
+            noteCount={noteCount}
+          />
+        )}
+        {isDevScope(scope) && (
+          <p className="border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground" data-testid="cloud-agent-dev-notice">
+            {DEV_SCOPE_NOTICE}
+          </p>
+        )}
+        {endedMidTurn && (
+          <p className="border-b border-hairline bg-warning/10 px-3 py-1.5 text-xs" data-testid="cloud-agent-exited">
+            Agent process ended — the saved conversation resumes on your next message.
+          </p>
+        )}
+        <CloudOutbox
+          entries={entries}
+          followUps={info.followUps}
+          nameOf={nameOf}
+          onSendAgain={(e) => void interactive(() => sendAgain(scope, e, connected ? client : null)).catch(() => undefined)}
         />
+        <div className="min-h-0 flex-1">
+          <Chat
+            sessionId={info.sessionId}
+            transcript={transcript}
+            stream={log.stream}
+            live={live}
+            progressing={live && !transcript.pendingAsks.length}
+            answering={deciding}
+            answerBlockedReason={approveBlocked}
+            onAnswerPermission={(requestId, optionId) => decide({ requestId, optionId })}
+            onAnswerQuestions={(requestId, answers) => decide({ requestId, answers })}
+            footer={
+              <div className="flex flex-col">
+                {live && draft.trim() && !isDevScope(scope) && !blocked && (
+                  <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-4 text-xs text-muted-foreground">
+                    <span>Send now queues it for when the agent pauses.</span>
+                    <Button size="xs" variant="outline" onClick={() => void steer()}>
+                      Steer now
+                    </Button>
+                  </div>
+                )}
+                <Composer
+                  tab={entry}
+                  busy={live}
+                  draft={draft}
+                  onDraftChange={changeDraft}
+                  onSend={send}
+                  onStop={stop}
+                  onSetModel={(model) => configure({ model })}
+                  onSetEffort={(effort) => configure({ effort })}
+                  onSetMode={(mode) => configure({ mode })}
+                  disabled={!!blocked}
+                  settingsLockedReason={mayConfigure ? null : SETTINGS_LOCKED_REASON}
+                  canStop={mayStop}
+                  disabledReason={blocked ?? error}
+                />
+                {blocked && error && <p className="mx-auto w-full max-w-3xl px-4 pb-2 text-xs text-destructive">{error}</p>}
+              </div>
+            }
+          />
+        </div>
       </div>
+      {collabLive && notesOpen && <NotesPanel collabKey={collabKey} client={client} tabId={tab.tabId} onClose={() => setNotesOpen(false)} />}
     </div>
   );
 }
@@ -550,10 +637,12 @@ const KIND_TEXT: Record<string, string> = { send: "Message", steer: "Steer", sto
 export function CloudOutbox({
   entries,
   followUps,
+  nameOf,
   onSendAgain,
 }: {
   entries: OutboxEntry[];
-  followUps: { clientCommandId: string; text: string }[];
+  followUps: { clientCommandId: string; text: string; actorId?: string | null }[];
+  nameOf: (userId: string | null | undefined) => string;
   onSendAgain: (entry: OutboxEntry) => void;
 }) {
   const queuedIds = new Set(followUps.map((f) => f.clientCommandId));
@@ -566,7 +655,7 @@ export function CloudOutbox({
     <ul className="flex shrink-0 flex-col gap-1 border-b border-hairline px-3 py-1.5 text-xs" data-testid="cloud-agent-outbox">
       {followUps.map((f) => (
         <li key={`f-${f.clientCommandId}`} className="flex items-center gap-2" data-testid="cloud-agent-followup">
-          <span className="text-muted-foreground">Queued follow-up:</span>
+          <span className="text-muted-foreground">Queued follow-up{f.actorId ? ` from ${nameOf(f.actorId)}` : ""}:</span>
           <span className="min-w-0 truncate">{f.text}</span>
           <span className="ml-auto text-faint">sends when the agent finishes its turn</span>
         </li>
@@ -582,10 +671,7 @@ export function CloudOutbox({
           >
             <span className="text-muted-foreground">{KIND_TEXT[entry.kind] ?? entry.kind}:</span>
             {entry.text && <span className="min-w-0 truncate">{entry.text}</span>}
-            <span className="ml-auto shrink-0">
-              {STATE_TEXT[entry.state] ?? entry.state}
-              {entry.state === "rejected" && entry.category ? ` (${entry.category})` : ""}
-            </span>
+            <span className="ml-auto shrink-0">{outboxStateText(entry, nameOf)}</span>
             {entry.state === "outcome-unknown" && entry.kind !== "permission-decision" && (
               <Button size="xs" variant="outline" onClick={() => onSendAgain(entry)}>
                 Send again
@@ -595,4 +681,15 @@ export function CloudOutbox({
         ))}
     </ul>
   );
+}
+
+/** A command's state, in words; a refusal because of sharing says whose turn it is. */
+function outboxStateText(entry: OutboxEntry, nameOf: (userId: string | null | undefined) => string): string {
+  if (entry.state === "rejected" && entry.category === "lease-held") {
+    const holder = entry.receipt?.holderId;
+    return `${typeof holder === "string" ? nameOf(holder) : "Someone else"} is driving — your message was not sent`;
+  }
+  if (entry.state === "rejected" && entry.category === "access-revoked") return "Not sent: your access changed";
+  const text = STATE_TEXT[entry.state] ?? entry.state;
+  return entry.state === "rejected" && entry.category ? `${text} (${entry.category})` : text;
 }

@@ -22,8 +22,9 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 /// - `pty/2`: `pty.create` takes a `sessionId`, and `pty.list` returns it.
 /// - `agents/1`: `runtime.agents`, the installed agents with their models,
 ///   efforts and modes.
-pub const CAPABILITIES: [&str; 9] =
-    ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1"];
+/// - `collab/1` (PRO-30): presence, notes, tab leases and `collab.state`.
+pub const CAPABILITIES: [&str; 10] =
+    ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1"];
 
 /// Authority an attachment grants, from the API's `authority` (`manage` →
 /// runtime scope, `participate` → session scope).
@@ -75,9 +76,9 @@ pub const METHODS: &[Method] = &[
     method("session.markRead", "session/1", Participate, false),
     method("session.nudge", "session/1", Participate, false),
     // The workspace content key travels only over the E2EE channel. It
-    // opens every tab's checkpoint, so only `manage` gets it until tabs can
-    // be shared with participants.
-    method("keys.get", "keys/1", Manage, false),
+    // opens every tab's checkpoint: a participant gets it only while the
+    // workspace is shared with them (PRO-30; checked per call against their role).
+    method("keys.get", "keys/1", Participate, false),
     method("keys.rotate", "keys/1", Manage, true),
     method("session.unsubscribe", "session/1", Participate, false),
     // CS-12: the session index, through the same `session_ops` as local.
@@ -90,10 +91,11 @@ pub const METHODS: &[Method] = &[
     method("pty.create", "pty/1", Manage, true),
     method("pty.list", "pty/1", Participate, false),
     // Input and size belong to the terminal's controller; `pty.control`
-    // takes them over explicitly. Participants only ever watch.
-    method("pty.write", "pty/1", Manage, false),
-    method("pty.resize", "pty/1", Manage, false),
-    method("pty.control", "pty/1", Manage, false),
+    // takes them over explicitly. A participant may only if the workspace is
+    // shared with them as a driver (PRO-30; checked per call against their role).
+    method("pty.write", "pty/1", Participate, false),
+    method("pty.resize", "pty/1", Participate, false),
+    method("pty.control", "pty/1", Participate, false),
     method("pty.kill", "pty/1", Manage, false),
     method("pty.attach", "pty/1", Participate, false),
     method("pty.detach", "pty/1", Participate, false),
@@ -134,7 +136,33 @@ pub const METHODS: &[Method] = &[
     method("git.prMerge", "git/1", Manage, true),
     // PRO-34 facts before archive or delete (saas contract 10.2): read-only.
     method("lifecycle.dispositionFacts", "lifecycle/1", Participate, false),
+    // PRO-30 (saas contract §21.5): presence, notes and the tab driver
+    // lease. Every call also needs the caller to have a role (not `none`).
+    method("collab.state", "collab/1", Participate, false),
+    method("presence.update", "collab/1", Participate, false),
+    method("notes.list", "collab/1", Participate, false),
+    method("notes.post", "collab/1", Participate, true),
+    method("lease.acquire", "collab/1", Participate, false),
+    method("lease.release", "collab/1", Participate, false),
+    method("lease.takeOver", "collab/1", Participate, false),
 ];
+
+/// Method prefixes of a namespace: `collab/1` spans presence, notes and
+/// leases.
+pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
+    match capability {
+        "collab/1" => &["collab.", "presence.", "notes.", "lease."],
+        "pty/1" | "pty/2" => &["pty."],
+        "fs/1" => &["fs."],
+        "git/1" => &["git."],
+        "session/1" | "session/2" => &["session."],
+        // `agents/1` describes the runtime's agents: `runtime.agents`.
+        "agents/1" => &["runtime.agents"],
+        "keys/1" => &["keys."],
+        "lifecycle/1" => &["lifecycle."],
+        _ => &[],
+    }
+}
 
 pub fn find_method(name: &str) -> Option<&'static Method> {
     METHODS.iter().find(|method| method.name == name)
@@ -145,11 +173,17 @@ pub fn find_method(name: &str) -> Option<&'static Method> {
 pub struct RpcError {
     pub code: &'static str,
     pub message: String,
+    /// Structured detail for the client (`lease_held` carries the lease).
+    pub data: Option<Value>,
 }
 
 impl RpcError {
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self { code, message: message.into(), data: None }
+    }
+    pub fn with_data(mut self, data: Value) -> Self {
+        self.data = Some(data);
+        self
     }
     pub fn invalid(message: impl Into<String>) -> Self {
         Self::new("invalid_params", message)
@@ -176,7 +210,11 @@ pub fn success(id: &str, result: Value) -> Value {
 }
 
 pub fn failure(id: &str, error: &RpcError) -> Value {
-    json!({ "id": id, "ok": false, "error": { "code": error.code, "message": error.message } })
+    let mut body = json!({ "code": error.code, "message": error.message });
+    if let Some(data) = &error.data {
+        body["data"] = data.clone();
+    }
+    json!({ "id": id, "ok": false, "error": body })
 }
 
 /// `rpc.hello`: the intersection of what the client wants and what this
@@ -219,7 +257,7 @@ impl IdempotencyCache {
         self.evict(now);
         self.entries.get(&(scope.to_string(), request_id.to_string())).map(|(_, result)| match result {
             Ok(value) => Ok(value.clone()),
-            Err((code, message)) => Err(RpcError { code: leak_code(code), message: message.clone() }),
+            Err((code, message)) => Err(RpcError::new(leak_code(code), message.clone())),
         })
     }
 
@@ -266,6 +304,7 @@ fn leak_code(code: &str) -> &'static str {
         "auth_failed",
         "outcome_unknown",
         "unpushed",
+        "lease_held",
     ];
     CODES.iter().find(|known| **known == code).copied().unwrap_or("internal")
 }
@@ -344,17 +383,14 @@ mod tests {
     fn every_method_names_a_served_capability_and_mutations_are_idempotent() {
         for method in METHODS {
             assert!(CAPABILITIES.contains(&method.capability), "{}", method.name);
-            // `runtime.agents` is the one method served by a namespace it is
-            // not named after: `agents/1` describes the runtime's agents.
-            let namespace = if method.name == "runtime.agents" { "agents" } else { method.name.split('.').next().unwrap() };
-            assert_eq!(namespace, method.capability.split('/').next().unwrap(), "{}", method.name);
+            assert!(namespace_prefixes(method.capability).iter().any(|prefix| method.name.starts_with(prefix)), "{}", method.name);
         }
         for name in ["session.update", "session.addTab", "session.delete"] {
             let method = find_method(name).unwrap();
             assert!(method.idempotent, "{name}");
             assert_eq!((method.capability, method.authority), ("session/2", Manage), "{name}");
         }
-        for name in ["pty.create", "fs.write", "git.commit", "session.send", "session.create"] {
+        for name in ["pty.create", "fs.write", "git.commit", "session.send", "session.create", "notes.post"] {
             assert!(find_method(name).unwrap().idempotent, "{name}");
         }
         assert!(find_method("runtime.exec").is_none());
