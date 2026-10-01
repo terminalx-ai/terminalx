@@ -223,6 +223,23 @@ describe("sessions under the project", () => {
     expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Rename", "Pin", "Archive", "Delete session…"]);
   });
 
+  it("offers the session menu only to a manager of the workspace (PRO-30 review)", async () => {
+    await load(
+      [
+        item("managed", { repositories: [acmeApi], you: { role: "manager", canApprove: true } }),
+        item("driven", { repositories: [acmeWeb], you: { role: "driver", canApprove: false } }),
+      ],
+      {
+        managed: { sessions: [session("m", "Managed")], capabilities: ["session/1", "session/2"] },
+        driven: { sessions: [session("d", "Driven")], capabilities: ["session/1", "session/2"] },
+      },
+    );
+    mount();
+    expect(within(sessionNode(`cloud:${ORG}:managed:m`)).getByRole("button", { name: "Session menu for Managed" })).toBeTruthy();
+    // session/2 is granted, but only managers may rename, pin, archive or delete.
+    expect(within(sessionNode(`cloud:${ORG}:driven:d`)).queryByRole("button", { name: /Session menu/ })).toBeNull();
+  });
+
   it("hides the session menu from a participant, whom the runtime would refuse anyway", async () => {
     await load([item("shared", { repositories: [acmeApi], authority: "participate" }), item("mine", { repositories: [acmeWeb], authority: "manage" })], {
       shared: { sessions: [session("p", "Someone else's")], capabilities: ["session/1", "session/2"] },

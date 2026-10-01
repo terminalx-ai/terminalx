@@ -49,6 +49,9 @@ export function Composer({
   contextMax,
   handoffs,
   disabledReason,
+  disabled = false,
+  settingsLockedReason = null,
+  canStop = true,
   autoFocus,
 }: {
   tab: TabEntry;
@@ -66,6 +69,12 @@ export function Composer({
   /** Next-step prompts offered after a turn lands (commit, PR, run). */
   handoffs?: { label: string; prompt: string }[];
   disabledReason?: string | null;
+  /** Nothing can be typed or sent (shown with `disabledReason`); stopping stays with the owner. */
+  disabled?: boolean;
+  /** Set when this reader may not change the model, effort or mode (a shared cloud workspace); the pickers are disabled with it. */
+  settingsLockedReason?: string | null;
+  /** False hides Stop (someone else drives this tab, or this reader may only watch). */
+  canStop?: boolean;
   autoFocus?: boolean;
 }) {
   const models = useModels(tab.harness);
@@ -216,7 +225,7 @@ export function Composer({
 
   const send = useCallback(async () => {
     const text = draft.trim();
-    if ((!text && !attachments.length) || sending) return;
+    if ((!text && !attachments.length) || sending || disabled) return;
     setSending(true);
     try {
       await onSend(text, attach.images);
@@ -230,7 +239,7 @@ export function Composer({
     onDraftChange("");
     attach.clear();
     ref.current?.focus();
-  }, [draft, attachments, attach, sending, onSend, onDraftChange]);
+  }, [draft, attachments, attach, sending, disabled, onSend, onDraftChange]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (pickerOpen && items.length) {
@@ -315,6 +324,7 @@ export function Composer({
           }}
           onSelect={(e) => setCaret((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
           onKeyDown={onKeyDown}
+          disabled={disabled}
           rows={1}
           placeholder={placeholder}
           className="max-h-60 w-full resize-none bg-transparent px-1.5 py-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
@@ -347,7 +357,7 @@ export function Composer({
 
           <DropdownMenu {...modelMenu.root}>
             <DropdownMenuTrigger asChild {...modelMenu.trigger}>
-              <Button variant="ghost" size="sm" className="gap-1.5 px-2 text-muted-foreground">
+              <Button variant="ghost" size="sm" className="gap-1.5 px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? undefined} aria-label={settingsLockedReason ? `Model: ${settingsLockedReason}` : undefined}>
                 <AgentMark id={tab.harness} className="size-3.5" />
                 <span className="text-foreground">{model?.label ?? tab.model ?? "Model"}</span>
                 {tab.effort && model?.efforts.length ? <span className="text-faint">{EFFORT_LABEL[tab.effort] ?? tab.effort}</span> : null}
@@ -385,7 +395,7 @@ export function Composer({
 
           <DropdownMenu {...modeMenu.root}>
             <DropdownMenuTrigger asChild {...modeMenu.trigger}>
-              <Button variant="ghost" size="sm" className="gap-1.5 px-2 text-muted-foreground">
+              <Button variant="ghost" size="sm" className="gap-1.5 px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? undefined} aria-label={settingsLockedReason ? `Permission mode: ${settingsLockedReason}` : undefined}>
                 <span
                   className={cn(
                     "size-2 rounded-full",
@@ -429,7 +439,7 @@ export function Composer({
                 </div>
               </WithTooltip>
             )}
-            {busy ? (
+            {busy && canStop ? (
               <WithTooltip label="Stop" keys={["Esc"]}>
                 <Button size="icon-sm" variant="secondary" aria-label="Stop" onClick={onStop}>
                   <Square className="size-3 fill-current" />
@@ -441,7 +451,7 @@ export function Composer({
                 size="icon-sm"
                 variant={draft.trim() || attachments.length ? "accent" : "secondary"}
                 aria-label="Send"
-                disabled={sending || (!draft.trim() && !attachments.length)}
+                disabled={disabled || sending || (!draft.trim() && !attachments.length)}
                 onClick={() => void send()}
               >
                 <ArrowUp />

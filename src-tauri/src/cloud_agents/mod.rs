@@ -19,7 +19,7 @@ pub mod receipts;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -27,6 +27,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::events::Payload;
+use crate::remote::collab::{self, Access, Collaboration};
 use crate::session::SessionManager;
 use crate::sink::EventSink;
 use crate::store::index::{self, TabStatus};
@@ -73,6 +74,8 @@ pub struct AgentTabInfo {
     pub process: &'static str,
     pub pending_permissions: Vec<PendingRequest>,
     pub follow_ups: Vec<FollowUpView>,
+    /// Who is driving the tab (contract §21.5), if anyone.
+    pub lease: Option<crate::remote::collab::TabLease>,
     pub last_seq: u64,
     pub created: String,
     pub modified: String,
@@ -83,6 +86,8 @@ pub struct AgentTabInfo {
 pub struct FollowUpView {
     pub client_command_id: String,
     pub text: String,
+    /// Who sent it; empty for one queued before sharing existed.
+    pub actor_id: String,
 }
 
 /// Why a permission decision could not be delivered.
@@ -119,6 +124,15 @@ pub trait AgentOps: Send + Sync {
 pub struct SessionSummary {
     pub title: String,
     pub branch: Option<String>,
+}
+
+/// Why `keys.get` handed nothing out.
+#[derive(Debug)]
+pub enum HandoutRefusal<E> {
+    /// The person may not have the key (now).
+    Forbidden(E),
+    /// Their handout could not be recorded durably.
+    HolderNotRecorded,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -201,6 +215,7 @@ impl AgentOps for ManagerOps {
                         })
                         .collect(),
                     follow_ups: Vec::new(),
+                    lease: None,
                     last_seq,
                     created: tab.created.clone(),
                     modified: tab.modified.clone(),
@@ -323,6 +338,21 @@ pub struct CloudAgents {
     /// Set while an archive waits for the final checkpoint (contract §10.3):
     /// no command is leased and no follow-up typed until it is lifted.
     quiesced: AtomicBool,
+    /// Roles and tab leases, shared with the workspace RPC (PRO-30). Absent
+    /// in tests without one: actors then have the role the API stamped.
+    collab: OnceLock<Arc<Collaboration>>,
+    dir: PathBuf,
+    holders_lock: Mutex<()>,
+    /// Held while the content key rotates or is handed out.
+    rotation_lock: Mutex<()>,
+}
+
+/// Who was handed the current workspace content key.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KeyHolders {
+    key_id: String,
+    users: Vec<String>,
 }
 
 impl CloudAgents {
@@ -357,7 +387,114 @@ impl CloudAgents {
             dispatch_signal: Signal::default(),
             generation: AtomicU64::new(generation),
             quiesced: AtomicBool::new(false),
+            collab: OnceLock::new(),
+            dir: dir.to_path_buf(),
+            holders_lock: Mutex::new(()),
+            rotation_lock: Mutex::new(()),
         }))
+    }
+
+    /// Use the workspace RPC's roles and leases, and keep notes next to the
+    /// rest of the agent state.
+    pub fn share_collaboration(&self, collab: Arc<Collaboration>) {
+        collab.store_notes_in(&self.dir.join("notes"));
+        let _ = self.collab.set(collab);
+    }
+
+    pub fn collab(&self) -> Option<&Arc<Collaboration>> {
+        self.collab.get()
+    }
+
+    /// `keys.get`: check `allowed` and hand out the keys under the rotation
+    /// lock, after durably recording `user` as a holder of the current key
+    /// (`key-holders.json`), so a person removed while the runtime was down
+    /// still triggers a rotation (§21.5). No record, no key (review N3).
+    pub fn hand_out_key<E>(
+        &self,
+        user: Option<&str>,
+        allowed: impl FnOnce() -> Result<(), E>,
+    ) -> std::result::Result<Value, HandoutRefusal<E>> {
+        let _rotation = self.rotation_lock.lock().unwrap();
+        allowed().map_err(HandoutRefusal::Forbidden)?;
+        if let Some(user) = user {
+            self.note_key_holder(user).map_err(|error| {
+                log::error!("record who holds the workspace content key: {error:#}");
+                HandoutRefusal::HolderNotRecorded
+            })?;
+        }
+        Ok(self.keys.handout(now_ms()))
+    }
+
+    /// Record that `user` was handed the current workspace content key,
+    /// durably in `key-holders.json`. A new key starts a new record.
+    pub fn note_key_holder(&self, user: &str) -> Result<()> {
+        let Some((key_id, _)) = self.keys.current() else { return Ok(()) };
+        let _guard = self.holders_lock.lock().unwrap();
+        let mut record = self.holders_record();
+        if record.key_id != key_id {
+            record = KeyHolders { key_id, users: Vec::new() };
+        }
+        if record.users.iter().any(|known| known == user) {
+            return Ok(());
+        }
+        record.users.push(user.to_string());
+        let bytes = serde_json::to_vec(&record)?;
+        crate::cloud_bootstrap::write_durable(&self.holders_path(), &bytes)
+    }
+
+    fn holders_path(&self) -> PathBuf {
+        self.dir.join("key-holders.json")
+    }
+
+    /// The people the current key was handed to (across restarts).
+    pub fn key_holders(&self) -> Vec<String> {
+        let Some((key_id, _)) = self.keys.current() else { return Vec::new() };
+        let record = self.holders_record();
+        if record.key_id == key_id {
+            record.users
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn holders_record(&self) -> KeyHolders {
+        std::fs::read(self.dir.join("key-holders.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+    }
+
+    /// What a mailbox actor may do now (contract §21.4-21.5).
+    pub fn actor_access(&self, actor: &api::Actor) -> Access {
+        let stamped = collab::stamped_access(actor.role.as_deref(), actor.can_approve);
+        match self.collab.get() {
+            Some(collab) => collab.actor_access(&actor.authority, &actor.user_id, stamped),
+            None => stamped.unwrap_or(if actor.authority == "manage" { Access::MANAGER } else { Access::NONE }),
+        }
+    }
+
+    /// Whether a queued follow-up's sender may still drive. One queued
+    /// before sharing existed, or before the API listed anyone, is kept.
+    fn follow_up_allowed(&self, follow_up: &FollowUp) -> bool {
+        match self.collab.get() {
+            Some(collab) if collab.known() && !follow_up.actor_id.is_empty() => collab.access_of(Some(&follow_up.actor_id)).can_drive(),
+            _ => true,
+        }
+    }
+
+    /// Drop queued follow-ups whose sender lost driver access, saying so in
+    /// their transcripts (contract §21.5). False when the queue could not
+    /// be rewritten.
+    pub fn revalidate_follow_ups(&self) -> bool {
+        let dropped = match self.follow_ups.retain(|follow_up| self.follow_up_allowed(follow_up)) {
+            Ok(dropped) => dropped,
+            Err(error) => {
+                log::warn!("revalidate queued follow-ups: {error:#}");
+                return false;
+            }
+        };
+        for (tab_id, follow_up) in dropped {
+            self.ops.note(&follow_up.session_id, &tab_id, "Dropped a queued message from a person who no longer has driver access.");
+            self.changed(Some(&tab_id), true);
+        }
+        true
     }
 
     pub fn state_dir(data_dir: &Path) -> PathBuf {
@@ -412,8 +549,12 @@ impl CloudAgents {
                 .follow_ups
                 .list(&tab.tab_id)
                 .into_iter()
-                .map(|follow_up| FollowUpView { client_command_id: follow_up.client_command_id, text: follow_up.text })
+                .map(|follow_up| FollowUpView { client_command_id: follow_up.client_command_id, text: follow_up.text, actor_id: follow_up.actor_id })
                 .collect();
+            if let Some(collab) = self.collab.get() {
+                let busy = matches!(tab.status, TabStatus::InProgress | TabStatus::Waiting) && tab.process == "running";
+                tab.lease = collab.lease(&tab.tab_id, now_ms(), busy);
+            }
         }
         tabs
     }
@@ -435,6 +576,7 @@ impl CloudAgents {
     /// Retire the current key for a new one: new checkpoints are sealed
     /// with it and connected clients are told to fetch it.
     pub fn rotate_key(&self) -> Result<String> {
+        let _rotation = self.rotation_lock.lock().unwrap();
         let key_id = self.keys.rotate(now_ms())?;
         if let Some(sink) = &self.sink {
             sink.emit(KEYS_CHANGED, &serde_json::json!({ "currentKeyId": key_id }));
@@ -466,6 +608,16 @@ impl CloudAgents {
         for tab_id in tabs {
             let Some(next) = self.follow_ups.list(&tab_id).into_iter().next() else { continue };
             if self.ops.busy(&next.session_id, &tab_id) {
+                continue;
+            }
+            // Checked again right before it is typed: the sender's access
+            // may have changed while it waited.
+            // Never typed while it may not be; if the queue cannot be
+            // rewritten it waits for the next nudge rather than spinning.
+            if !self.follow_up_allowed(&next) {
+                if self.revalidate_follow_ups() {
+                    self.nudge_follow_ups(&tab_id);
+                }
                 continue;
             }
             // Taken durably before it is typed: a crash in between loses

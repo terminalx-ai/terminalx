@@ -17,6 +17,12 @@ pub struct Actor {
     #[serde(default)]
     pub user_id: String,
     pub authority: String,
+    /// The actor's collaboration role and approval right when the API
+    /// leased the command (contract §21.4); absent before PRO-30.
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub can_approve: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -54,13 +54,14 @@ pub const TOKEN_PATH_ENV: &str = "TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_TOKEN_PATH
 /// `/v1/cloud-workspace-bootstrap/github-token`, never in first-run setup.
 /// `quiesce-v1` asks for an archive's final-checkpoint request in the
 /// refresh answer (`cloud_quiesce`, contract §10.3).
-pub const CAPABILITIES: &str = "organization-access-v1,agent-grants-v1,github-broker-v1,quiesce-v1";
+pub const CAPABILITIES: &str = "organization-access-v1,agent-grants-v1,github-broker-v1,quiesce-v1,collaboration-v1";
 const CAPABILITIES_HEADER: &str = "x-terminalx-cloud-workspace-runtime-capabilities";
 pub(crate) const VERSION_HEADER: &str = "x-terminalx-cloud-workspace-runtime-version";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+pub const ATTACHED_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const STATE_DIR: &str = "cloud-workspace";
 const HOST_KEY_FILE: &str = "host-key.json";
 const STATE_FILE: &str = "runtime.json";
@@ -218,6 +219,9 @@ pub struct Session {
     /// An archive waiting for this runtime's final checkpoint
     /// (terminalx-saas contract §10.3); `cloud_quiesce` answers it.
     pub quiesce: Option<QuiesceRequest>,
+    /// Who the workspace is shared with (contract §21.3), kept raw and read
+    /// by the relay host; absent from an API before PRO-30.
+    pub collaboration: Option<serde_json::Value>,
 }
 
 /// Read leniently: a field the server adds later must not fail the whole
@@ -267,6 +271,9 @@ pub struct Refreshed {
     // instead of failing the refresh.
     #[serde(default)]
     quiesce: Option<serde_json::Value>,
+    // Sent because this runtime advertises `collaboration-v1`.
+    #[serde(default)]
+    collaboration: Option<serde_json::Value>,
 }
 
 impl Drop for Redeemed {
@@ -547,6 +554,7 @@ fn redeem(config: &Config, api: &dyn Api, key: &HostKey, stored: Option<(&str, &
                 attachments: Vec::new(),
                 revocations: Vec::new(),
                 quiesce: None,
+                collaboration: None,
             }
         }
     };
@@ -639,7 +647,9 @@ impl Bootstrapped {
     /// Keep the relay token fresh in the background until the process ends.
     pub fn spawn_refresh_loop(self: Arc<Self>, api: Arc<dyn Api + Send + Sync>) {
         let spawned = std::thread::Builder::new().name("cloud-refresh".into()).spawn(move || loop {
-            std::thread::sleep(REFRESH_INTERVAL);
+            // Faster while a client is attached, so a revoked share or
+            // membership stops access promptly (contract §21.5).
+            std::thread::sleep(if crate::cloud_activity::attached_count() > 0 { ATTACHED_REFRESH_INTERVAL } else { REFRESH_INTERVAL });
             match self.refresh(api.as_ref()) {
                 // A rotated session may carry a new runtime generation.
                 Ok(()) => self.record_memory_baseline(),
@@ -681,6 +691,7 @@ fn session_from_refresh(mut refreshed: Refreshed, relay_host_id: &str) -> Result
         access_mode: refreshed.access_mode.unwrap_or(AccessMode::Private),
         attachments: std::mem::take(&mut refreshed.attachments),
         revocations: std::mem::take(&mut refreshed.revocations),
+        collaboration: refreshed.collaboration.take().filter(|value| !value.is_null()),
         quiesce: refreshed.quiesce.take().filter(|value| !value.is_null()).and_then(|value| {
             match serde_json::from_value::<QuiesceRequest>(value) {
                 Ok(request) if opaque_id(&request.operation_id) => Some(request),
@@ -997,6 +1008,7 @@ mod tests {
                 setup: None,
                 access_mode: Some(AccessMode::Organization),
                 quiesce: None,
+                collaboration: None,
             })
         }
     }

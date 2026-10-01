@@ -632,6 +632,356 @@ async fn participants_read_git_and_disposition_facts_but_never_publish() {
     assert_eq!(facts["activeTasks"], json!([]));
 }
 
+// ---- sharing, presence, notes and leases (PRO-30, saas contract §21) ---------
+
+/// One idle agent tab, `tab-1` in session `s1`.
+struct OneTab;
+
+impl crate::cloud_agents::AgentOps for OneTab {
+    fn tabs(&self) -> Vec<crate::cloud_agents::AgentTabInfo> {
+        vec![crate::cloud_agents::AgentTabInfo {
+            session_id: "s1".into(),
+            tab_id: "tab-1".into(),
+            title: None,
+            harness: "claude".into(),
+            model: String::new(),
+            effort: None,
+            permission_mode: "default".into(),
+            status: crate::store::index::TabStatus::Idle,
+            process: "running",
+            pending_permissions: Vec::new(),
+            follow_ups: Vec::new(),
+            lease: None,
+            last_seq: 0,
+            created: String::new(),
+            modified: String::new(),
+        }]
+    }
+    fn busy(&self, _: &str, _: &str) -> bool {
+        false
+    }
+    fn send(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+        panic!("a note or a lease never reaches the agent")
+    }
+    fn stop(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn respond(&self, _: &str, _: &str, _: &str, _: &str) -> Result<(), crate::cloud_agents::DecisionError> {
+        Err(crate::cloud_agents::DecisionError::NotPending)
+    }
+    fn answer(&self, _: &str, _: &str, _: &str, _: HashMap<String, String>) -> Result<(), crate::cloud_agents::DecisionError> {
+        Err(crate::cloud_agents::DecisionError::NotPending)
+    }
+    fn configure(&self, _: &str, _: &str, _: &crate::cloud_agents::Settings) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn note(&self, _: &str, _: &str, _: &str) {}
+    fn events(&self, _: &str, _: &str) -> anyhow::Result<Vec<Value>> {
+        Ok(Vec::new())
+    }
+}
+
+fn members(list: Value) -> Option<collab::Members> {
+    Some(serde_json::from_value(json!({ "v": 1, "members": list })).unwrap())
+}
+
+const ALL: [&str; 6] = ["pty/1", "fs/1", "session/1", "keys/1", "collab/1", "git/1"];
+
+async fn person(rpc: &Arc<WorkspaceRpc>, device: &str, authority: Authority, user: &str) -> (Arc<Peer>, Notifications, Value) {
+    let (peer, events) = Peer::for_user(device.into(), authority, Some(user.into()));
+    let hello = call(rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ALL })).await.unwrap();
+    (peer, events, hello)
+}
+
+fn with_tab(f: &Fixture) -> Arc<crate::cloud_agents::CloudAgents> {
+    let agents = crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), Arc::new(OneTab), None, None, 7).unwrap();
+    f.rpc.set_agents(agents.clone());
+    agents
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn roles_decide_what_a_participant_reads_types_and_holds() {
+    let f = fixture();
+    let agents = with_tab(&f);
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager", "canApprove": true },
+        { "userId": "alice", "role": "driver", "canApprove": false },
+        { "userId": "bob", "role": "viewer", "canApprove": true },
+    ])));
+    let (admin, mut admin_events, hello) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    assert_eq!(hello["you"], json!({ "userId": "admin", "role": "manager", "canApprove": true, "listed": true }));
+    let (alice, _alice_events, hello) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    assert_eq!(hello["you"]["role"], "driver");
+    let (bob, _bob_events, _) = person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
+    // Carol is a member the workspace was never shared with; the outsider
+    // never gets an attachment at all (the API answers 404).
+    let (carol, _carol_events, hello) = person(&f.rpc, "d-carol", Authority::Participate, "carol").await;
+    assert_eq!(hello["you"]["role"], "none");
+
+    for method in ["pty.list", "keys.get", "collab.state", "session.tabs"] {
+        assert_eq!(code(call(&f.rpc, &carol, method, json!({})).await), "forbidden", "{method}");
+    }
+    assert_eq!(code(call(&f.rpc, &carol, "fs.list", json!({})).await), "forbidden", "sharing now also gates files");
+    assert_eq!(call(&f.rpc, &bob, "session.tabs", json!({})).await.unwrap()["tabs"][0]["tabId"], "tab-1");
+    // The key handout follows sharing.
+    assert_eq!(call(&f.rpc, &bob, "keys.get", json!({})).await.unwrap()["currentKeyId"], agents.keys.current().unwrap().0);
+
+    let created = call(&f.rpc, &admin, "pty.create", json!({ "clientRequestId": "request-share-1" })).await.unwrap();
+    let pty_id = created["ptyId"].as_str().unwrap().to_string();
+    assert_eq!(created["controllerId"], "admin");
+    call(&f.rpc, &admin, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    assert_eq!(code(call(&f.rpc, &bob, "pty.control", json!({ "ptyId": pty_id })).await), "forbidden", "viewers watch");
+    let taken = call(&f.rpc, &alice, "pty.control", json!({ "ptyId": pty_id })).await.unwrap();
+    assert_eq!((taken["control"].as_str(), taken["controllerId"].as_str()), (Some("you"), Some("alice")));
+    let told = next_event(&mut admin_events, "pty.control").await;
+    assert_eq!((told["control"].as_str(), told["controllerId"].as_str()), (Some("other"), Some("alice")));
+    call(&f.rpc, &alice, "pty.write", json!({ "ptyId": pty_id, "data": "echo shared\n", "seq": 1, "writerId": "a" })).await.unwrap();
+    output_until(&mut admin_events, "shared").await;
+
+    // Downgraded mid-session: the next write is refused and control is gone.
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager" },
+        { "userId": "alice", "role": "viewer" },
+        { "userId": "bob", "role": "viewer", "canApprove": true },
+    ])));
+    assert_eq!(
+        code(call(&f.rpc, &alice, "pty.write", json!({ "ptyId": pty_id, "data": "x", "seq": 2, "writerId": "a" })).await),
+        "forbidden"
+    );
+    let told = next_event(&mut admin_events, "pty.control").await;
+    assert_eq!((told["control"].as_str(), told["controllerId"].clone()), (Some("none"), Value::Null));
+    assert!(tokio::time::timeout(Duration::from_millis(50), alice.closed()).await.is_err(), "a viewer stays connected");
+
+    // Revoked: the connection is closed and the content key rotates.
+    let before = agents.keys.current().unwrap().0;
+    f.rpc.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }, { "userId": "bob", "role": "viewer" }])));
+    tokio::time::timeout(Duration::from_secs(5), alice.closed()).await.expect("alice's connection is closed");
+    assert_ne!(agents.keys.current().unwrap().0, before);
+    assert_eq!(code(call(&f.rpc, &alice, "keys.get", json!({})).await), "forbidden");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_member_list_participants_keep_what_they_had() {
+    let f = fixture();
+    with_tab(&f);
+    let (phone, _events, hello) = person(&f.rpc, "d-phone", Authority::Participate, "alice").await;
+    assert_eq!(hello["you"]["role"], "none");
+    assert!(call(&f.rpc, &phone, "pty.list", json!({})).await.is_ok());
+    assert!(call(&f.rpc, &phone, "fs.list", json!({})).await.is_ok());
+    assert_eq!(call(&f.rpc, &phone, "session.tabs", json!({})).await.unwrap()["tabs"], json!([]));
+    for method in ["keys.get", "collab.state", "notes.list"] {
+        assert_eq!(code(call(&f.rpc, &phone, method, json!({ "tabId": "tab-1" })).await), "forbidden", "{method}");
+    }
+    // A list this runtime cannot read fails closed.
+    f.rpc.set_collaboration(Some(collab::Members { v: 9, members: Vec::new() }));
+    assert_eq!(code(call(&f.rpc, &phone, "pty.list", json!({})).await), "forbidden");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn presence_and_notes_are_attributed_and_never_reach_the_agent() {
+    let f = fixture();
+    with_tab(&f);
+    f.rpc.set_collaboration(members(json!([{ "userId": "alice", "role": "driver" }, { "userId": "bob", "role": "viewer" }])));
+    let (alice, _alice_events, _) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (bob, mut bob_events, _) = person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
+    let (_bob_phone, _phone_events, _) = person(&f.rpc, "d-bob-phone", Authority::Participate, "bob").await;
+    let state = call(&f.rpc, &bob, "collab.state", json!({})).await.unwrap();
+    let people: Vec<(String, u64)> = state["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|person| (person["userId"].as_str().unwrap().to_string(), person["surfaces"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(people, vec![("alice".to_string(), 1), ("bob".to_string(), 2)], "one row per person");
+
+    call(&f.rpc, &alice, "presence.update", json!({ "tabId": "tab-1", "activity": "typing" })).await.unwrap();
+    let presence = loop {
+        let params = next_event(&mut bob_events, "collab.presence").await;
+        let alice_row = params["participants"].as_array().unwrap().iter().find(|row| row["userId"] == "alice").cloned().unwrap();
+        if alice_row["activity"] == "typing" {
+            break alice_row;
+        }
+    };
+    assert_eq!(presence["tabId"], "tab-1");
+    assert_eq!(code(call(&f.rpc, &alice, "presence.update", json!({ "activity": "shouting" })).await), "invalid_params");
+
+    // A viewer may take part in the discussion; the author is the verified person.
+    let posted = call(&f.rpc, &bob, "notes.post", json!({ "tabId": "tab-1", "text": "LGTM, ship it", "author": "mallory", "clientRequestId": "request-note-1" }))
+        .await
+        .unwrap();
+    assert_eq!(posted["note"]["authorId"], "bob");
+    let again = call(&f.rpc, &bob, "notes.post", json!({ "tabId": "tab-1", "text": "LGTM, ship it", "clientRequestId": "request-note-1" })).await.unwrap();
+    assert_eq!(again, posted, "a resent note is not posted twice");
+    assert_eq!(next_event(&mut bob_events, "notes.posted").await["note"]["id"], posted["note"]["id"]);
+    let listed = call(&f.rpc, &alice, "notes.list", json!({ "tabId": "tab-1" })).await.unwrap();
+    assert_eq!(listed["notes"].as_array().unwrap().len(), 1);
+    assert_eq!(code(call(&f.rpc, &alice, "notes.list", json!({ "tabId": "tab-9" })).await), "not_found");
+    assert_eq!(
+        code(call(&f.rpc, &alice, "notes.post", json!({ "tabId": "tab-1", "text": " ", "clientRequestId": "request-note-2" })).await),
+        "invalid_params"
+    );
+    f.rpc.disconnect(&alice);
+    let after = call(&f.rpc, &bob, "collab.state", json!({})).await.unwrap();
+    assert_eq!(after["participants"].as_array().unwrap().len(), 1, "a person leaves with their last connection");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_driver_lease_is_visible_and_only_a_manager_takes_it_over() {
+    let f = fixture();
+    let agents = with_tab(&f);
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager" },
+        { "userId": "alice", "role": "driver" },
+        { "userId": "bob", "role": "driver" },
+        { "userId": "vic", "role": "viewer" },
+    ])));
+    let (admin, _admin_events, _) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    let (alice, _alice_events, _) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (bob, mut bob_events, _) = person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
+    let (vic, _vic_events, _) = person(&f.rpc, "d-vic", Authority::Participate, "vic").await;
+    assert_eq!(code(call(&f.rpc, &vic, "lease.acquire", json!({ "tabId": "tab-1" })).await), "forbidden");
+    let lease = call(&f.rpc, &alice, "lease.acquire", json!({ "tabId": "tab-1" })).await.unwrap();
+    assert_eq!(lease["lease"]["holderId"], "alice");
+    assert_eq!(next_event(&mut bob_events, "collab.lease").await["lease"]["holderId"], "alice");
+    let response = f.rpc.handle(&bob, &json!({ "id": "9", "method": "lease.acquire", "params": { "tabId": "tab-1" } })).await;
+    assert_eq!(response["error"]["code"], "lease_held");
+    assert_eq!(response["error"]["data"]["lease"]["holderId"], "alice");
+    assert_eq!(code(call(&f.rpc, &bob, "lease.takeOver", json!({ "tabId": "tab-1" })).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &bob, "lease.release", json!({ "tabId": "tab-1" })).await), "forbidden");
+    assert_eq!(agents.tabs()[0].lease.as_ref().unwrap().holder_id, "alice", "tabs show who drives");
+    let taken = call(&f.rpc, &admin, "lease.takeOver", json!({ "tabId": "tab-1" })).await.unwrap();
+    assert_eq!(taken["lease"]["holderId"], "admin");
+    call(&f.rpc, &admin, "lease.release", json!({ "tabId": "tab-1" })).await.unwrap();
+    assert_eq!(call(&f.rpc, &bob, "lease.acquire", json!({ "tabId": "tab-1" })).await.unwrap()["lease"]["holderId"], "bob");
+    assert_eq!(call(&f.rpc, &vic, "collab.state", json!({})).await.unwrap()["leases"][0]["holderId"], "bob");
+    // A lease past its idle expiry is checked against the tab's turn without
+    // holding the lease lock (reading the tabs reads the leases).
+    f.rpc.collab.release("tab-1", "bob", false);
+    f.rpc.collab.claim("tab-1", "alice", 1, false, false).unwrap();
+    let state = tokio::time::timeout(Duration::from_secs(5), call(&f.rpc, &vic, "collab.state", json!({}))).await.expect("no deadlock").unwrap();
+    assert_eq!(state["leases"], json!([]), "an idle lease past its expiry is not live");
+}
+
+// ---- security review of PRO-30 ------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_demoted_admins_manage_connection_loses_management_and_is_closed() {
+    let f = fixture();
+    let agents = with_tab(&f);
+    f.rpc.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }, { "userId": "creator", "role": "driver", "canApprove": true }])));
+    let (admin, _events, hello) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    assert_eq!(hello["authority"], "manage");
+    let before = agents.keys.current().unwrap().0;
+    // Demoted to a member the workspace is not shared with.
+    f.rpc.set_collaboration(members(json!([{ "userId": "creator", "role": "driver", "canApprove": true }])));
+    tokio::time::timeout(Duration::from_secs(5), admin.closed()).await.expect("the demoted admin's connection is closed");
+    assert_ne!(agents.keys.current().unwrap().0, before, "the key rotated");
+    // Nothing on it works any more, even before the transport hangs up.
+    assert_eq!(code(call(&f.rpc, &admin, "pty.create", json!({ "clientRequestId": "request-demoted-1" })).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &admin, "keys.get", json!({})).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &admin, "fs.write", json!({ "path": "x", "text": "x", "clientRequestId": "request-demoted-2" })).await), "forbidden");
+    // A demoted admin who created the workspace keeps the creator's driver role, as a participant.
+    let (creator, _events, hello) = person(&f.rpc, "d-creator", Authority::Manage, "creator").await;
+    assert_eq!((hello["authority"].as_str(), hello["you"]["role"].as_str()), (Some("participate"), Some("driver")));
+    assert_eq!(code(call(&f.rpc, &creator, "pty.create", json!({ "clientRequestId": "request-demoted-3" })).await), "forbidden");
+}
+
+/// Review N1: a manage attachment saved before attachments named their
+/// person cannot be matched to the member list, so once there is one it has
+/// no access, is closed, and never becomes a key holder.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manage_attachment_that_names_no_person_loses_everything_once_members_are_listed() {
+    let f = fixture();
+    let agents = with_tab(&f);
+    let (legacy, _events) = Peer::for_user("d-legacy".into(), Authority::Manage, None);
+    let hello = call(&f.rpc, &legacy, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ALL })).await.unwrap();
+    // Before any list it keeps its pre-PRO-30 meaning.
+    assert_eq!(hello["authority"], "manage");
+    f.rpc.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }])));
+    tokio::time::timeout(Duration::from_secs(5), legacy.closed()).await.expect("the unnamed manage connection is closed");
+    assert_eq!(code(call(&f.rpc, &legacy, "keys.get", json!({})).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &legacy, "pty.create", json!({ "clientRequestId": "request-legacy-1" })).await), "forbidden");
+    assert!(agents.key_holders().is_empty());
+    // A new connection of the same kind gets nothing either.
+    let (again, _events) = Peer::for_user("d-legacy-2".into(), Authority::Manage, None);
+    let hello = call(&f.rpc, &again, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ALL })).await.unwrap();
+    assert_eq!((hello["authority"].as_str(), hello["you"]["role"].as_str()), (Some("participate"), Some("none")));
+}
+
+/// Review N3: the key is handed out only after the holder is recorded, and
+/// only if access still holds when the handout runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_key_is_handed_out_unless_the_holder_is_recorded_and_still_allowed() {
+    let f = fixture();
+    let agents = with_tab(&f);
+    f.rpc.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }, { "userId": "bob", "role": "viewer" }])));
+    let (bob, _events, _) = person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
+    // The record cannot be written: no key.
+    let holders = f._dir.path().join("agents").join("key-holders.json");
+    std::fs::create_dir_all(&holders).unwrap();
+    assert_eq!(code(call(&f.rpc, &bob, "keys.get", json!({})).await), "unavailable");
+    std::fs::remove_dir_all(&holders).unwrap();
+    let handed = call(&f.rpc, &bob, "keys.get", json!({})).await.unwrap();
+    assert!(handed["currentKeyId"].is_string());
+    assert_eq!(agents.key_holders(), vec!["bob".to_string()]);
+    // Access re-checked inside the handout: refused, nothing recorded.
+    let refused = agents.hand_out_key(Some("carol"), || Err::<(), _>("revoked"));
+    assert!(matches!(refused, Err(crate::cloud_agents::HandoutRefusal::Forbidden("revoked"))));
+    assert_eq!(agents.key_holders(), vec!["bob".to_string()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_member_list_stops_streams_of_people_without_access() {
+    let f = fixture();
+    with_tab(&f);
+    let (admin, _admin_events, _) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    let created = call(&f.rpc, &admin, "pty.create", json!({ "clientRequestId": "request-first-list" })).await.unwrap();
+    let pty_id = created["ptyId"].as_str().unwrap().to_string();
+    // Before any list, a participant may still watch, as before PRO-30.
+    let (carol, mut carol_events, hello) = person(&f.rpc, "d-carol", Authority::Participate, "carol").await;
+    assert_eq!(hello["you"]["listed"], false, "no list yet is not \"not shared\"");
+    call(&f.rpc, &carol, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    // The first list does not name her: her stream ends, her connection stays.
+    f.rpc.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }])));
+    let you = next_event(&mut carol_events, "collab.you").await;
+    assert_eq!((you["you"]["role"].as_str(), you["you"]["listed"].as_bool()), (Some("none"), Some(true)));
+    inject(&f, &pty_id, b"secret output");
+    let leaked = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            match carol_events.recv().await {
+                Some(event) if event["event"] == "pty.output" => return event,
+                Some(_) => continue,
+                None => std::future::pending::<()>().await,
+            }
+        }
+    })
+    .await;
+    assert!(leaked.is_err(), "no terminal output after the list: {leaked:?}");
+    assert!(tokio::time::timeout(Duration::from_millis(50), carol.closed()).await.is_err(), "the connection stays (it shows \"not shared\")");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_holder_removed_while_the_runtime_was_down_triggers_a_rotation() {
+    let f = fixture();
+    let agents = with_tab(&f);
+    f.rpc.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }, { "userId": "vic", "role": "viewer" }])));
+    let (vic, _events, _) = person(&f.rpc, "d-vic", Authority::Participate, "vic").await;
+    let handed = call(&f.rpc, &vic, "keys.get", json!({})).await.unwrap()["currentKeyId"].clone();
+    assert_eq!(agents.key_holders(), vec!["vic".to_string()]);
+    // The runtime restarts (a suspend); the share is revoked meanwhile.
+    let restarted = WorkspaceRpc::new(&f.root, 7, Arc::new(BroadcastSink::new(64)), f.terminals.clone(), None).unwrap();
+    let reopened = crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), Arc::new(OneTab), None, None, 7).unwrap();
+    restarted.set_agents(reopened.clone());
+    assert_eq!(reopened.keys.current().unwrap().0, handed.as_str().unwrap(), "the same key after the restart");
+    restarted.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }])));
+    assert_ne!(reopened.keys.current().unwrap().0, handed.as_str().unwrap(), "rotated on the first list after the restart");
+    assert!(reopened.key_holders().is_empty(), "nobody holds the new key yet");
+    // Someone still listed is no reason to rotate again.
+    let current = reopened.keys.current().unwrap().0;
+    restarted.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }, { "userId": "bob", "role": "viewer" }])));
+    assert_eq!(reopened.keys.current().unwrap().0, current);
+}
+
 // ---- CS-12: agents/1, session/2, pty/2 ---------------------------------------
 
 /// A session in the index, made by the same `session_ops` the runtime uses.
@@ -733,6 +1083,51 @@ async fn participants_are_refused_every_session_2_write_and_see_only_shared_sess
     assert_eq!(call(&f.rpc, &participant, "session.list", json!({})).await.unwrap()["sessions"], json!([]));
     // Reading what can run is not a write.
     assert!(call(&f.rpc, &participant, "runtime.agents", json!({})).await.is_ok());
+}
+
+/// PRO-30 on top of CS-12: sharing is workspace-wide, so the session list and
+/// `session.sessions` follow the person's role, while the session/2 writes
+/// stay with managers, a demoted admin's `manage` attachment included.
+#[tokio::test(flavor = "multi_thread")]
+async fn shared_people_see_every_session_but_only_managers_change_the_index() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    f.rpc.set_offered_for_tests(installed_agents());
+    let session = seed_session(&f.root, "Fix login", None);
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager", "canApprove": true },
+        { "userId": "alice", "role": "driver", "canApprove": false },
+        { "userId": "demoted", "role": "viewer", "canApprove": false },
+    ])));
+    let hello = |device: &str, authority, user: &str| {
+        let (peer, events) = Peer::for_user(device.into(), authority, Some(user.into()));
+        let rpc = f.rpc.clone();
+        async move {
+            call(&rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": protocol::CAPABILITIES })).await.unwrap();
+            (peer, events)
+        }
+    };
+    let (admin, _admin_events) = hello("d-admin", Authority::Manage, "admin").await;
+    let (alice, mut alice_events) = hello("d-alice", Authority::Participate, "alice").await;
+    let (carol, mut carol_events) = hello("d-carol", Authority::Participate, "carol").await;
+    // An admin demoted since the attachment was issued: the list says viewer.
+    let (demoted, _demoted_events) = hello("d-demoted", Authority::Manage, "demoted").await;
+
+    let ids = |value: Value| value["sessions"].as_array().unwrap().iter().map(|entry| entry["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    assert_eq!(ids(call(&f.rpc, &alice, "session.list", json!({})).await.unwrap()), vec![session.id.clone()]);
+    assert_eq!(ids(call(&f.rpc, &demoted, "session.list", json!({})).await.unwrap()), vec![session.id.clone()]);
+    // Listed with no role: reads are refused outright, not answered empty.
+    assert_eq!(code(call(&f.rpc, &carol, "session.list", json!({})).await), "forbidden");
+    for (who, peer) in [("alice", &alice), ("carol", &carol), ("demoted", &demoted)] {
+        let params = json!({ "sessionId": session.id, "title": "x", "clientRequestId": format!("request-{who}") });
+        assert_eq!(code(call(&f.rpc, peer, "session.update", params).await), "forbidden", "{who}");
+    }
+    assert_eq!(index::get(&session.id).unwrap().title, "Fix login");
+
+    // A manager's change reaches everyone with session/2, by the same rule.
+    call(&f.rpc, &admin, "session.update", json!({ "sessionId": session.id, "pinned": true, "clientRequestId": "request-admin-1" })).await.unwrap();
+    assert_eq!(ids(json!({ "sessions": next_event(&mut alice_events, "session.sessions").await["sessions"] })), vec![session.id.clone()]);
+    assert_eq!(next_event(&mut carol_events, "session.sessions").await["sessions"], json!([]));
 }
 
 #[tokio::test(flavor = "multi_thread")]

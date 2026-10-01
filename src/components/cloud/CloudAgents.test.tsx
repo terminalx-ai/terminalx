@@ -19,12 +19,13 @@ vi.mock("@/lib/models", () => ({
 }));
 // The composer's own behaviour is covered by Composer.test; here it only needs to send and stop.
 vi.mock("@/components/chat/Composer", () => ({
-  Composer: (props: { draft: string; busy: boolean; onDraftChange: (v: string) => void; onSend: (t: string, i: unknown[]) => Promise<void>; onStop: () => void; disabledReason?: string | null }) => (
+  Composer: (props: { draft: string; busy: boolean; onDraftChange: (v: string) => void; onSend: (t: string, i: unknown[]) => Promise<void>; onStop: () => void; onSetMode: (m: string) => void; disabledReason?: string | null; disabled?: boolean; settingsLockedReason?: string | null; canStop?: boolean }) => (
     <div>
-      {props.disabledReason && <p>{props.disabledReason}</p>}
-      <textarea aria-label="Prompt" value={props.draft} onChange={(e) => props.onDraftChange(e.target.value)} />
-      <button onClick={() => void props.onSend(props.draft, []).then(() => props.onDraftChange(""), () => undefined)}>{props.busy ? "Queue" : "Send"}</button>
-      {props.busy && <button onClick={props.onStop}>Stop</button>}
+      {props.disabledReason && <p data-testid="composer-reason">{props.disabledReason}</p>}
+      <button disabled={!!props.settingsLockedReason} title={props.settingsLockedReason ?? undefined} onClick={() => props.onSetMode("bypassPermissions")}>Bypass mode</button>
+      <textarea aria-label="Prompt" disabled={props.disabled} value={props.draft} onChange={(e) => props.onDraftChange(e.target.value)} />
+      <button disabled={props.disabled} onClick={() => void props.onSend(props.draft, []).then(() => props.onDraftChange(""), () => undefined)}>{props.busy ? "Queue" : "Send"}</button>
+      {props.busy && props.canStop !== false && <button onClick={props.onStop}>Stop</button>}
     </div>
   ),
 }));
@@ -34,6 +35,8 @@ vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonRunner: () => null, Racc
 
 import { CloudAgentsView, provisioningLabel } from "./CloudAgents";
 import { resetCloudAgents } from "@/lib/cloudAgents";
+import { rememberYou, resetCollab, startCollab, TYPING_IDLE_MS } from "@/lib/cloudCollab";
+import { rememberPeople, resetPeople } from "@/lib/cloudPeople";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 const scope = { organizationId: "org-1", workspaceId: "ws-1" };
@@ -118,11 +121,26 @@ const connected = (fields: Partial<Extract<WorkspaceConnectionState, { state: "c
   ...fields,
 });
 
+type Answer = (params: Record<string, unknown>) => unknown;
+let answers: Record<string, Answer>;
+const notificationListeners = new Set<(notification: { event: string; params: Record<string, unknown> }) => void>();
+
 function makeClient() {
   return {
     connection: { state: "connected" } as WorkspaceConnectionState,
     listAgentTabs: vi.fn(async () => liveTabs),
-    onNotification: vi.fn(() => () => undefined),
+    onNotification: vi.fn((listener: (notification: { event: string; params: Record<string, unknown> }) => void) => {
+      notificationListeners.add(listener);
+      return () => notificationListeners.delete(listener);
+    }),
+    call: vi.fn(async (method: string, params: Record<string, unknown> = {}) => {
+      const answer = answers[method];
+      return answer ? answer(params) : {};
+    }),
+    mutate: vi.fn(async (method: string, params: Record<string, unknown>, _clientRequestId?: string) => {
+      const answer = answers[method];
+      return answer ? answer(params) : {};
+    }),
     subscribeSession: vi.fn(async (sessionId: string, tabId: string, onEvent: (e: unknown) => void) => {
       for (const event of streams[`${sessionId}/${tabId}`] ?? []) onEvent(event);
       return () => undefined;
@@ -153,6 +171,8 @@ beforeEach(() => {
   liveTabs = [];
   streams = {};
   client = makeClient();
+  answers = {};
+  notificationListeners.clear();
   mocks.invoke.mockReset();
   mocks.invoke.mockImplementation((cmd: string, args?: Record<string, unknown>) => backend(cmd, args));
 });
@@ -160,6 +180,9 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   resetCloudAgents();
+  resetCollab();
+  resetPeople();
+  vi.useRealTimers();
 });
 
 describe("cloud agent tabs", () => {
@@ -354,6 +377,201 @@ describe("cloud agent tabs", () => {
   });
 });
 
+describe("shared cloud workspace agent tabs (PRO-30)", () => {
+  const KEY = "cloud:org-1:ws-1";
+  type You = { userId: string; role: "manager" | "driver" | "viewer" | "none"; canApprove: boolean };
+  const me = (role: You["role"], canApprove = role === "manager"): You => ({ userId: "u-me", role, canApprove });
+  const alice = (fields: Partial<{ expiresAt: number }> = {}) => ({ tabId: "t-1", holderId: "u-alice", acquiredAt: 1, expiresAt: Date.now() + 60_000, ...fields });
+
+  /** Connect with collab/1 as `you`, with the runtime answering collab.state. */
+  function share(you: You, leases: unknown[] = [], authority: "manage" | "participate" = you.role === "manager" ? "manage" : "participate") {
+    const state = connected({ capabilities: ["session/1", "keys/1", "collab/1"], authority, you });
+    client.connection = state;
+    answers["collab.state"] = () => ({ you, participants: [], leases });
+    rememberPeople([{ userId: "u-alice", name: "Alice" }]);
+    act(() => void startCollab(KEY, client as unknown as WorkspaceRpcClient));
+    return state;
+  }
+  const notify = (event: string, params: Record<string, unknown>) => act(() => notificationListeners.forEach((listener) => listener({ event, params })));
+
+  it("disables the mode, model and effort pickers for a driver who may not approve (review M1)", async () => {
+    cache["t-1"] = { tab: tabInfo(), events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    liveTabs = [tabInfo()];
+    render(view(share(me("driver"))));
+    const bypass = (await screen.findByRole("button", { name: "Bypass mode" })) as HTMLButtonElement;
+    await waitFor(() => expect(bypass.disabled).toBe(true));
+    expect(bypass.title).toMatch(/^Only a workspace admin or someone who can approve/);
+    cleanup();
+    resetCollab();
+    render(view(share(me("driver", true))));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Bypass mode" }) as HTMLButtonElement).disabled).toBe(false));
+  });
+
+  it("keeps a viewer's controls disabled while the workspace sleeps or reconnects", async () => {
+    cache["t-1"] = { tab: tabInfo(), events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    liveTabs = [tabInfo()];
+    const state = share(me("viewer"));
+    const { rerender } = render(view(state));
+    await waitFor(() => expect(screen.getByTestId("composer-reason").textContent).toBe("You can view this workspace; ask an admin for driver access"));
+    // The connection drops and the workspace goes to sleep: still a viewer.
+    rerender(view({ state: "suspended" }, "suspended"));
+    await waitFor(() => expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).disabled).toBe(true));
+    expect(screen.getByTestId("composer-reason").textContent).toBe("You can view this workspace; ask an admin for driver access");
+    expect(screen.queryByTestId("cloud-agent-lease")).toBeNull();
+  });
+
+  it("uses the share list's word on access for a workspace that was asleep from the start", async () => {
+    cache["t-1"] = { tab: tabInfo(), events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    act(() => rememberYou(KEY, { role: "viewer", canApprove: false }));
+    render(view({ state: "suspended" }, "suspended"));
+    await waitFor(() => expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).disabled).toBe(true));
+    expect(screen.getByTestId("composer-reason").textContent).toBe("You can view this workspace; ask an admin for driver access");
+  });
+
+  it("disables the composer for a viewer and says why", async () => {
+    liveTabs = [tabInfo()];
+    const state = share(me("viewer"));
+    render(view(state));
+    await waitFor(() => expect(screen.getByTestId("composer-reason").textContent).toBe("You can view this workspace; ask an admin for driver access"));
+    expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
+    // A viewer never takes the wheel.
+    expect(screen.queryByRole("button", { name: "Take the wheel" })).toBeNull();
+    expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("No one is driving");
+  });
+
+  it("shows who drives, blocks sending while someone else does, and lets a manager take over", async () => {
+    liveTabs = [tabInfo()];
+    const state = share(me("manager"), [alice()]);
+    answers["lease.takeOver"] = ({ tabId }) => ({ lease: { tabId, holderId: "u-me", acquiredAt: 2, expiresAt: Date.now() + 120_000 } });
+    render(view(state));
+    await waitFor(() => expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("Driving: Alice"));
+    expect(screen.getByTestId("composer-reason").textContent).toContain("Alice is driving this tab. Take over to send.");
+    expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Take over" }));
+    await waitFor(() => expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("You are driving"));
+    expect(client.call).toHaveBeenCalledWith("lease.takeOver", { tabId: "t-1" });
+    expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByTestId("composer-reason")).toBeNull();
+  });
+
+  it("follows lease changes from the runtime and lets a driver take a free wheel", async () => {
+    liveTabs = [tabInfo()];
+    const state = share(me("driver"), [alice()]);
+    answers["lease.acquire"] = ({ tabId }) => ({ lease: { tabId, holderId: "u-me", acquiredAt: 3, expiresAt: Date.now() + 120_000 } });
+    render(view(state));
+    await waitFor(() => expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("Driving: Alice"));
+    // A driver cannot take over.
+    expect(screen.queryByRole("button", { name: "Take over" })).toBeNull();
+    notify("collab.lease", { tabId: "t-1", lease: null });
+    await waitFor(() => expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("No one is driving"));
+    expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Take the wheel" }));
+    await waitFor(() => expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("You are driving"));
+    fireEvent.click(screen.getByRole("button", { name: "Release" }));
+    await waitFor(() => expect(client.call).toHaveBeenCalledWith("lease.release", { tabId: "t-1" }));
+    await waitFor(() => expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("No one is driving"));
+  });
+
+  it("says whose turn it was when a message was refused for the lease or for changed access, and who queued a follow-up", async () => {
+    liveTabs = [tabInfo({ status: "in_progress", followUps: [{ clientCommandId: "cmd-f", text: "then run the tests", actorId: "u-alice" }] })];
+    outbox = [
+      { clientCommandId: "c-1", tabId: "t-1", kind: "send", text: "deploy", state: "rejected", category: "lease-held", receipt: { holderId: "u-alice" }, createdAt: 1, updatedAt: 1 },
+      { clientCommandId: "c-2", tabId: "t-1", kind: "send", text: "hi", state: "rejected", category: "access-revoked", createdAt: 1, updatedAt: 1 },
+    ];
+    const state = share(me("driver"));
+    render(view(state));
+    expect(await screen.findByText("Alice is driving — your message was not sent")).toBeTruthy();
+    expect(screen.getByText("Not sent: your access changed")).toBeTruthy();
+    expect(screen.getByTestId("cloud-agent-followup").textContent).toContain("Queued follow-up from Alice:");
+  });
+
+  it("keeps notes apart from the agent: posting one never enqueues a command", async () => {
+    liveTabs = [tabInfo()];
+    const state = share(me("viewer"));
+    answers["notes.list"] = () => ({ notes: [{ id: "note_1", tabId: "t-1", authorId: "u-alice", text: "I am on the login bug", createdAt: 1_000 }], more: false });
+    answers["notes.post"] = ({ tabId, text }) => ({ note: { id: "note_2", tabId, authorId: "u-me", text, createdAt: 2_000 } });
+    render(view(state));
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    const panel = await screen.findByTestId("cloud-agent-notes");
+    await waitFor(() => expect(within(panel).getAllByTestId("cloud-note")).toHaveLength(1));
+    expect(within(panel).getByTestId("cloud-note").textContent).toContain("Alice");
+    const input = within(panel).getByPlaceholderText("Add a note for teammates (not sent to the agent)");
+    fireEvent.change(input, { target: { value: "taking the tests" } });
+    fireEvent.click(within(panel).getByRole("button", { name: "Post note" }));
+    await waitFor(() => expect(within(panel).getAllByTestId("cloud-note")).toHaveLength(2));
+    expect(client.mutate).toHaveBeenCalledWith("notes.post", { tabId: "t-1", text: "taking the tests" }, expect.any(String));
+    // Someone else's note arrives by notification.
+    notify("notes.posted", { note: { id: "note_3", tabId: "t-1", authorId: "u-alice", text: "thanks", createdAt: 3_000 } });
+    await waitFor(() => expect(within(panel).getAllByTestId("cloud-note")).toHaveLength(3));
+    expect(enqueued).toHaveLength(0);
+    expect(mocks.invoke.mock.calls.map(([cmd]) => cmd)).not.toContain("cloud_agent_enqueue");
+    expect(client.mutate.mock.calls.map(([method]) => method)).not.toContain("session.send");
+  });
+
+  it("lets only approvers decide permission requests", async () => {
+    const permission = ev(2, {
+      type: "permission_requested",
+      requestId: "req-9",
+      toolUseId: "tool-1",
+      toolName: "Bash",
+      input: { command: "rm -rf build" },
+      options: [
+        { id: "allow", label: "Allow", kind: "allow_once" },
+        { id: "deny", label: "Deny", kind: "deny" },
+      ],
+    });
+    liveTabs = [tabInfo({ status: "waiting" })];
+    streams["s-1/t-1"] = [ev(1, { type: "user_message", text: "clean up", queued: false }), permission];
+    const state = share(me("driver", false));
+    const { unmount } = render(view(state));
+    const allow = await screen.findByRole("button", { name: /^Allow/ });
+    expect((allow as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("answer-blocked").textContent).toBe("Waiting for someone who can approve");
+    fireEvent.click(allow);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(enqueued).toHaveLength(0);
+    unmount();
+    resetCollab();
+
+    // A viewer who may approve can decide, though not send.
+    const approver = share(me("viewer", true));
+    render(view(approver));
+    const enabled = await screen.findByRole("button", { name: /^Allow/ });
+    await waitFor(() => expect((enabled as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByTestId("answer-blocked")).toBeNull();
+    fireEvent.click(enabled);
+    await waitFor(() => expect(enqueued).toHaveLength(1));
+    expect(enqueued[0]).toMatchObject({ kind: "permission-decision", payload: { requestId: "req-9", optionId: "allow" } });
+  });
+
+  it("explains an empty workspace to someone it was not shared with", async () => {
+    liveTabs = [tabInfo()];
+    const state = connected({ capabilities: ["session/1", "collab/1"], authority: "participate", you: me("none") });
+    client.connection = state;
+    act(() => void startCollab(KEY, client as unknown as WorkspaceRpcClient));
+    render(view(state));
+    expect((await screen.findByTestId("cloud-not-shared")).textContent).toContain("This workspace has not been shared with you");
+    expect(screen.queryByTestId("cloud-agent-tab")).toBeNull();
+    expect(client.call).not.toHaveBeenCalledWith("collab.state", {});
+  });
+
+  it("reports typing while composing, throttled, and viewing again once idle", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    liveTabs = [tabInfo()];
+    const state = share(me("driver"));
+    render(view(state));
+    await waitFor(() => expect(client.call).toHaveBeenCalledWith("presence.update", { tabId: "t-1", activity: "viewing" }));
+    const prompt = screen.getByLabelText("Prompt");
+    fireEvent.change(prompt, { target: { value: "a" } });
+    fireEvent.change(prompt, { target: { value: "ab" } });
+    fireEvent.change(prompt, { target: { value: "abc" } });
+    const presence = () => client.call.mock.calls.filter(([method]) => method === "presence.update").map(([, params]) => params);
+    expect(presence().filter((params) => params?.activity === "typing")).toHaveLength(1);
+    await act(async () => void (await vi.advanceTimersByTimeAsync(TYPING_IDLE_MS + 10)));
+    expect(presence().at(-1)).toEqual({ tabId: "t-1", activity: "viewing" });
+  });
+});
 
 describe("wake refused at the running limit (saas PRO-76)", () => {
   const offline = { state: "idle" } as unknown as WorkspaceConnectionState;

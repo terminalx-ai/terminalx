@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { Archive, ArchiveRestore, Pause, Play, Trash2 } from "lucide-react";
+import { Archive, ArchiveRestore, Pause, Play, Trash2, Users } from "lucide-react";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/menu";
 import { CloudWorkspaceLifecycleDialog, actionsFor, type LifecycleAction } from "@/components/cloud/CloudWorkspaceLifecycle";
+import { openShareDialog } from "@/components/cloud/CloudShareDialog";
 import type { CloudWorkspaceListItem } from "@/lib/api";
 import { refreshCloudCatalog, resumeCloudWorkspace, unarchiveCloudWorkspace } from "@/lib/cloudCatalog";
 import { closeCloudConnection } from "@/lib/cloudConnections";
@@ -33,8 +34,20 @@ export function WorkspaceActionItems({
   const state = deriveCloudActivity(item);
   const actions = actionsFor(item);
   const busy = state.tone === "changing";
+  // PRO-30: an organization-visible workspace can be shared. Anyone who sees
+  // it may read who it is shared with; the dialog lets managers and the
+  // creator change it.
+  // Offered only by a server that reports roles (`you`, saas §21.2).
+  const shareable = !!item.workspace.you && !archived && item.workspace.accessMode === "organization" && item.workspace.state !== "destroyed" && !item.workspace.deletedAt;
+  const sharedWith = item.workspace.sharedWith ?? 0;
   return (
     <>
+      {shareable && (
+        <DropdownMenuItem onSelect={() => openShareDialog({ orgId: item.workspace.orgId, workspaceId: item.workspace.id, name: item.workspace.name })}>
+          <Users /> {item.workspace.you?.role === "manager" || item.workspace.you?.canManageShares ? "Share…" : "Sharing…"}
+          {sharedWith > 0 && <span className="ml-auto text-[10px] text-faint">{sharedWith}</span>}
+        </DropdownMenuItem>
+      )}
       {item.workspace.state === "suspended" && !archived && (
         <DropdownMenuItem disabled={busy} onSelect={() => void run(() => resumeCloudWorkspace(item))}>
           <Play /> Resume
