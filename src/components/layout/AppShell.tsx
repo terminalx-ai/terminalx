@@ -45,6 +45,13 @@ const SettingsPage = lazy(() => import("@/components/settings/SettingsPage").the
 const statusBarFallback = <div aria-hidden className="h-[22px] shrink-0 border-t border-hairline bg-background/70" />;
 const viewFallback = <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-faint">Loading view…</div>;
 
+/**
+ * The main slot: as tall as the window row it sits in and never taller. What
+ * a view draws past it is clipped, not scrolled into: only a view's own
+ * scroller (a transcript, a list) scrolls.
+ */
+const MAIN = "flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-clip";
+
 export const TITLEBAR_INSET = 78; // traffic-light clearance, px
 
 /**
@@ -122,7 +129,7 @@ export function AppShell() {
   const cloudKey = prefs.cloudSidebar && isCloudKey(store.selectedSessionId) ? store.selectedSessionId : null;
 
   return (
-    <div className="flex h-full w-full flex-col">
+    <div data-app-shell className="flex h-full w-full flex-col">
       <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
         <StarReminder />
         <Toasts />
@@ -158,13 +165,13 @@ export function AppShell() {
             )}
 
             {cloudKey ? (
-              <main className="flex h-full min-w-0 flex-1 flex-col">
+              <main className={MAIN}>
                 <ErrorBoundary key={cloudKey} label="the session">
                   <CloudSessionHost sessionKey={cloudKey} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
                 </ErrorBoundary>
               </main>
             ) : selected ? (
-              <main className="flex h-full min-w-0 flex-1 flex-col">
+              <main className={MAIN}>
                 <ErrorBoundary key={selected.id} label="the session">
                   <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
                 </ErrorBoundary>
@@ -234,7 +241,7 @@ function UnselectedWorkspace({
 
   return (
     <>
-      <main className="flex h-full min-w-0 flex-1 flex-col">
+      <main className={MAIN}>
         <header
           data-tauri-drag-region="deep"
           className="flex h-(--titlebar-h) shrink-0 items-center gap-1 px-2"

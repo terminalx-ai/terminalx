@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import { CalendarClock, CircleDot, Cloud, GitBranch, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Terminal } from "lucide-react";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -33,6 +33,7 @@ import { cloudAgentLabel } from "@/lib/cloudRowState";
 import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
 import { AccessChip, NotSharedNotice, PresenceAvatars } from "@/components/cloud/CloudCollab";
 import { presenceTab } from "@/lib/cloudCollab";
+import { resolveSessionTab, setVisibleSessionTab } from "@/lib/visibleTab";
 import { WorkspaceActionItems, WorkspaceLifecycleDialog, useLifecycleRun, type LifecycleRequest } from "@/components/cloud/WorkspaceActions";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -218,20 +219,21 @@ export function SessionView({
     if (local) void bootBrowser();
   }, [local]);
   const requested = terminals.selected[session.id];
-  const persistedAgent = session.tabs.find((tab) => tab.id === session.activeTab) ?? session.tabs[0];
   const terminalIds = local ? shellPanes.map((pane) => pane.id) : cloudTerminals.map((terminal) => terminal.id);
-  const selected: SelectedSessionTab | null =
-    requested?.kind === "agent" && session.tabs.some((tab) => tab.id === requested.id)
-      ? requested
-      : requested?.kind === "terminal" && terminalIds.includes(requested.id)
-        ? requested
-        : requested?.kind === "browser" && browserPages.some((page) => page.id === requested.id)
-          ? requested
-        : persistedAgent
-          ? { kind: "agent", id: persistedAgent.id }
-          : terminalIds.length
-            ? { kind: "terminal", id: terminalIds[0] }
-            : null;
+  const selected: SelectedSessionTab | null = resolveSessionTab({
+    requested,
+    agentIds: session.tabs.map((tab) => tab.id),
+    activeTab: session.activeTab,
+    terminalIds,
+    browserIds: browserPages.map((page) => page.id),
+  });
+  // The sidebar marks the row of the tab that is on screen.
+  const selectedKind = selected?.kind ?? null;
+  const selectedId = selected?.id ?? null;
+  useLayoutEffect(() => {
+    setVisibleSessionTab(session.id, selectedKind && selectedId ? { kind: selectedKind, id: selectedId } : null);
+    return () => setVisibleSessionTab(session.id, null);
+  }, [session.id, selectedKind, selectedId]);
   const activeTab = selected?.kind === "agent" ? session.tabs.find((tab) => tab.id === selected.id) : undefined;
   const activeShell = selected?.kind === "terminal" ? shellPanes.find((pane) => pane.id === selected.id) : undefined;
   const tabViews = useTabViews();
@@ -271,8 +273,8 @@ export function SessionView({
     else if (cloudTerminals.length) selectSessionTab(session.id, { kind: "terminal", id: cloudTerminals[cloudTerminals.length - 1].id });
   });
   return (
-    <div className="flex h-full min-w-0 flex-1">
-      <div className="flex h-full min-w-0 flex-1 flex-col">
+    <div className="flex h-full min-h-0 min-w-0 flex-1">
+      <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
         <header
           data-tauri-drag-region="deep"
           className="flex h-(--titlebar-h) shrink-0 items-center gap-1 px-2"
@@ -384,7 +386,7 @@ export function SessionView({
         <section className="flex min-h-0 flex-1 flex-col">
           <div className="@container/editor-host relative flex min-h-0 flex-1">
             <div
-              className="relative flex h-full min-w-0 flex-1 flex-col"
+              className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col"
               onPointerDownCapture={() => setLastFocused("chat")}
               onFocusCapture={() => setLastFocused("chat")}
             >

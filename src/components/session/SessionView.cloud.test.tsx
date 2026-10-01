@@ -83,7 +83,7 @@ import { SessionView } from "./SessionView";
 import { CloudSessionHost } from "./CloudSessionHost";
 import { useCloudSession } from "@/lib/cloudSession";
 import { resetCloudAgents } from "@/lib/cloudAgents";
-import { resetCloudTerminals } from "@/lib/cloudTerminals";
+import { TERMINAL_POLL_MS, cloudTerminalsOf, resetCloudTerminals, sessionTerminals } from "@/lib/cloudTerminals";
 import { resetCloudConnections } from "@/lib/cloudConnections";
 import { resetCollab } from "@/lib/cloudCollab";
 import { selectSessionTab } from "@/lib/terminal";
@@ -164,6 +164,11 @@ class FakeRuntime implements WorkspaceTransport {
   repositories = [
     { repo: "api", branch: "tx/login-fix", head: "abc", remote: "origin", defaultBranch: "main" },
     { repo: "web", branch: "tx/login-fix", head: "def", remote: "origin", defaultBranch: "main" },
+  ];
+  /** What `pty.list` answers: one terminal of the session, one that belongs to no session. */
+  terminals: Record<string, unknown>[] = [
+    { ptyId: "p1", number: 1, epoch: "e1", pid: 1, cwd: "/workspace/api", cols: 80, rows: 24, createdAt: 1, offset: 0, exited: false, exitCode: null, control: "you", sessionId: "s-1" },
+    { ptyId: "p2", number: 2, epoch: "e1", pid: 2, cwd: "/workspace", cols: 80, rows: 24, createdAt: 1, offset: 0, exited: false, exitCode: null, control: "you" },
   ];
   private messages = new Set<(message: unknown) => void>();
   private states = new Set<(state: WorkspaceConnectionState) => void>();
@@ -248,7 +253,7 @@ class FakeRuntime implements WorkspaceTransport {
       case "runtime.agents":
         return ok({ agents: [{ id: "claude", name: "Claude Code", caps: {}, models: [], modes: [], defaultMode: "bypassPermissions" }] });
       case "pty.list":
-        return ok({ epoch: "e1", terminals: [{ ptyId: "p1", number: 1, epoch: "e1", pid: 1, cwd: "/workspace/api", cols: 80, rows: 24, createdAt: 1, offset: 0, exited: false, exitCode: null, control: "you", sessionId: "s-1" }, { ptyId: "p2", number: 2, epoch: "e1", pid: 2, cwd: "/workspace", cols: 80, rows: 24, createdAt: 1, offset: 0, exited: false, exitCode: null, control: "you" }] });
+        return ok({ epoch: "e1", terminals: this.terminals });
       case "pty.attach":
         return ok({ subscriptionId: `sub-${++this.subscription}`, epoch: "e1", offset: 0, data: "", truncated: false, exited: false, control: "you", cols: 80, rows: 24 });
       case "git.repositories":
@@ -353,6 +358,8 @@ afterEach(() => {
 });
 
 const composer = () => screen.getByTestId("composer");
+/** The session's terminals as the store has them (the tab strip's and the sidebar's source). */
+const getCloudSessionTerminals = () => sessionTerminals(cloudTerminalsOf(`cloud:${ORG}:${WS}`).terminals, "s-1").map((terminal) => terminal.title);
 
 async function openConnected(authority: "manage" | "participate" = "manage") {
   runtime.tabs = [tabInfo()];
@@ -412,6 +419,50 @@ describe("the same SessionView for local and cloud sessions", () => {
 });
 
 describe("cloud session actions", () => {
+  it("shows a terminal someone else opens in the session without reopening it", async () => {
+    // Only the poll's interval is faked: everything else runs as it does.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      await openConnected();
+      await waitFor(() => expect(getCloudSessionTerminals()).toEqual(["Terminal 1"]));
+      const lists = runtime.methods("pty.list").length;
+      // Another person opens a terminal for this session on the runtime.
+      runtime.terminals = [...runtime.terminals, { ptyId: "p3", number: 3, epoch: "e1", pid: 3, cwd: "/workspace/api", cols: 80, rows: 24, createdAt: 2, offset: 0, exited: false, exitCode: null, control: "other", controllerId: "u-bob", sessionId: "s-1" }];
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(TERMINAL_POLL_MS);
+      });
+      await waitFor(() => expect(getCloudSessionTerminals()).toEqual(["Terminal 1", "Terminal 3"]));
+      expect(runtime.methods("pty.list").length).toBe(lists + 1);
+      // It is a tab of the session view like the first one.
+      act(() => selectSessionTab(KEY, { kind: "terminal", id: `cloud:cloud:${ORG}:${WS}:p3` }));
+      expect((await screen.findByTestId("xterm")).textContent).toBe(`cloud:cloud:${ORG}:${WS}:p3`);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the chat inside the window: the tab's body is a flex column the transcript scrolls in", async () => {
+    runtime.events = [ev({ type: "user_message", text: "a long transcript", queued: false })];
+    await openConnected();
+    const scroller = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>("[data-chat-scroller]");
+      expect(found).toBeTruthy();
+      return found!;
+    });
+    // jsdom lays nothing out (pnpm test:webkit-layout measures it); this is
+    // the structure the layout depends on. The chat is `flex-1 min-h-0`, which
+    // only bounds its height when every box up to the tab panel is a flex
+    // column that may shrink. A plain block there let the transcript grow
+    // past the window and take the composer with it.
+    const panel = scroller.closest('[role="tabpanel"]')!;
+    for (let node = scroller.parentElement!; node !== panel; node = node.parentElement!) {
+      const classes = node.className.split(/\s+/);
+      expect(classes, node.className).toContain("flex");
+      expect(classes, node.className).toContain("min-h-0");
+    }
+    expect(panel.parentElement!.className).toContain("min-h-0");
+  });
+
   it("sends, steers, stops, answers a permission and changes model, effort and mode", async () => {
     runtime.events = [
       ev({ type: "user_message", text: "clean up", queued: false }),

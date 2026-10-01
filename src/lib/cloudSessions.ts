@@ -4,6 +4,7 @@ import type { CloudWorkspaceListItem } from "@/lib/api";
 import { applyLiveTabs, closeCloudAgentTab, loadCloudAgents, useCloudAgents, watchLiveTabs, type CloudAgentTab } from "@/lib/cloudAgents";
 import { cacheCloudSessions, useCloudCatalog, type CachedWorkspaceSessions } from "@/lib/cloudCatalog";
 import { onCloudConnected, retainCloudConnection, waitCloudConnected, type CloudTarget } from "@/lib/cloudConnections";
+import { closeCloudTerminal, cloudTerminalsOf } from "@/lib/cloudTerminals";
 import { cloudSessionKey, cloudWorkspaceKey, type CloudKey, type CloudWorkspaceNode } from "@/types/target";
 import type { TabStatus } from "@/types/session";
 
@@ -48,6 +49,8 @@ export interface CloudSessionRow {
   pinned: boolean;
   archived: boolean;
   tabs: CloudSessionTab[];
+  /** The agent tab the runtime last had in front, when its list says. */
+  activeTab?: string | null;
   /** Where the session itself is known from. */
   source: "launch" | "cache" | "agents" | "live";
 }
@@ -216,6 +219,7 @@ export function buildCloudSessions(input: {
       pinned: session.pinned,
       archived: session.archived,
       tabs: session.tabs.map((tab) => tabOf(tab.id, { harness: tab.harness, title: tab.title, status: tab.status })),
+      activeTab: session.activeTab ?? null,
       source,
     });
   }
@@ -388,6 +392,19 @@ export function deleteCloudSession(row: CloudSessionRow): Promise<string[]> {
 /** Read a workspace's list again now, e.g. after creating a session on a runtime without `session/2` notifications. */
 export async function refreshCloudSessions(target: CloudTarget, client: WorkspaceRpcClient): Promise<void> {
   takeLive(target, await client.listSessions(), capabilitiesOf(client), managesOf(client));
+}
+
+/**
+ * Close one terminal of a workspace: its shell ends on the VM. One that is
+ * already gone (closed elsewhere, or its runtime restarted) is only dropped
+ * from this window. A stopped workspace is refused, never resumed.
+ */
+export function closeCloudWorkspaceTerminal(target: CloudTarget, terminalId: string): Promise<void> {
+  const key = cloudWorkspaceKey(target.orgId, target.workspaceId);
+  const terminal = cloudTerminalsOf(key).terminals.find((candidate) => candidate.id === terminalId);
+  if (!terminal) return Promise.resolve();
+  if (terminal.gone) return closeCloudTerminal(key, null, terminalId);
+  return onRuntime({ orgId: target.orgId, workspaceId: target.workspaceId }, (client) => closeCloudTerminal(key, client, terminalId));
 }
 
 /** Close one agent tab of a session on the VM (its process stops); a stopped workspace is refused, never resumed. */

@@ -70,6 +70,15 @@
     margin: 0;
     overflow: hidden;
   }
+  /* The window never scrolls: only a view's own scroller does. `hidden` still
+     makes a box that focus() and scrollIntoView() can scroll, which moved the
+     whole app out of the window; `clip` makes none. (`hidden` stays for
+     engines without `clip`, where lib/shellScroll.ts undoes such a scroll.) */
+  body,
+  #root,
+  [data-app-shell] {
+    overflow: clip;
+  }
   body {
     font-family: var(--font-sans);
     font-size: 13.5px;

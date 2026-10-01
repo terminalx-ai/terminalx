@@ -94,9 +94,19 @@ pub struct KeychainKeys {
     service: OnceLock<String>,
 }
 
+/// The Keychain service workspace keys are kept under. A debug build that was
+/// given its own service (`RACCOON_DEV_KEYCHAIN_SERVICE`, as the account
+/// session uses) keeps its keys under that one: two development instances on
+/// one Mac otherwise share `<app identifier>.cloud-agent-keys`, and each
+/// overwrites or deletes the other's keys for the same workspace. Release
+/// builds never have a development service.
+fn key_service_name(app_identifier: &str, dev_service: Option<&str>) -> String {
+    format!("{}.cloud-agent-keys", dev_service.unwrap_or(app_identifier))
+}
+
 impl KeychainKeys {
     pub fn configure(&self, app_identifier: &str) {
-        let _ = self.service.set(format!("{app_identifier}.cloud-agent-keys"));
+        let _ = self.service.set(key_service_name(app_identifier, crate::account::dev_keychain_service().as_deref()));
     }
 
     #[cfg(target_os = "macos")]
@@ -483,7 +493,12 @@ impl CloudAgentClient {
         let ctx = self.ctx(organization_id)?;
         let dir = self.dir(&ctx, workspace_id)?;
         let Some(current) = self.index(&dir)?.current_key_id else { return Ok(false) };
-        Ok(self.keys.get(organization_id, workspace_id, &current).ok().flatten().is_some())
+        // A store that cannot be read is not "no key": connecting again would not help.
+        match self.key(organization_id, workspace_id, &current).map(Zeroizing::new) {
+            Ok(_) => Ok(true),
+            Err(code) if code == "cloud_agent_key_missing" => Ok(false),
+            Err(code) => Err(code),
+        }
     }
 
     // ------------------------------------------------------------ outbox

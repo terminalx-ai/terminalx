@@ -41,6 +41,10 @@ export interface CloudTerminal {
 interface WorkspaceTerminals {
   terminals: CloudTerminal[];
   selected: string | null;
+  /** The workspace view is showing the selected terminal (not its agent, files or Git view). */
+  shown?: boolean;
+  /** Counts each request to show the selected terminal there. */
+  reveal?: number;
 }
 
 let state: Record<string, WorkspaceTerminals> = {};
@@ -53,7 +57,10 @@ function publish(next: Record<string, WorkspaceTerminals>) {
 }
 
 function update(workspace: string, change: (current: WorkspaceTerminals) => WorkspaceTerminals) {
-  publish({ ...state, [workspace]: change(state[workspace] ?? EMPTY) });
+  const current = state[workspace] ?? EMPTY;
+  const next = change(current);
+  // Unchanged (a poll that found nothing new): nobody re-renders.
+  if (next !== current) publish({ ...state, [workspace]: next });
 }
 
 function patch(workspace: string, id: string, fields: Partial<CloudTerminal>) {
@@ -81,11 +88,19 @@ export function cloudTerminalsOf(workspace: string): WorkspaceTerminals {
 /** The live stream and the client its xterm types into, per terminal. */
 interface Binding {
   client: WorkspaceRpcClient;
+  /** Null while the attach call is on its way. */
   attachment: PtyAttachment | null;
+  attaching: boolean;
 }
 const bindings = new Map<string, Binding>();
 /** Where each terminal's view left off, kept across connections. */
 const cursors = new Map<string, PtyCursor>();
+/**
+ * Orders list reads against terminals this window opened: a list asked for
+ * before a terminal existed says nothing about it, whenever its answer lands.
+ */
+let clock = 0;
+const openedAt = new Map<string, number>();
 
 function terminalId(workspace: string, ptyId: string) {
   return `cloud:${workspace}:${ptyId}`;
@@ -157,12 +172,15 @@ export function cloudTerminalFactory(workspace: string, terminal: CloudTerminal,
 /** Start (or resume) the output stream of one terminal on `client`. */
 async function attach(workspace: string, client: WorkspaceRpcClient, terminal: CloudTerminal, create: () => TerminalInstance) {
   const existing = bindings.get(terminal.id);
-  if (existing?.client === client && existing.attachment) return;
+  // Streaming on this client already, or about to: a second attach (the list
+  // is read again every few seconds) would print the same output twice.
+  if (existing?.client === client && (existing.attachment || existing.attaching)) return;
   existing?.attachment?.detach();
-  const binding: Binding = { client, attachment: null };
+  const binding: Binding = { client, attachment: null, attaching: true };
   bindings.set(terminal.id, binding);
   const instance = getInstance(terminal.id, cloudTerminalFactory(workspace, terminal, create));
-  const attachment = await client.attachPty(terminal.ptyId, {
+  const attachment = await client
+    .attachPty(terminal.ptyId, {
     since: cursors.get(terminal.id),
     onData: (bytes) => instance.term.write(bytes),
     onTruncated: () => instance.term.write("\r\n\x1b[2m[earlier output was dropped while this view was away]\x1b[0m\r\n"),
@@ -187,12 +205,23 @@ async function attach(workspace: string, client: WorkspaceRpcClient, terminal: C
       cursors.delete(terminal.id);
       patch(workspace, terminal.id, { gone });
     },
-  });
+  })
+    .catch((error: unknown) => {
+      // Not streaming: the next sync attaches again.
+      binding.attaching = false;
+      throw error;
+    });
+  binding.attaching = false;
   if (bindings.get(terminal.id) !== binding) {
     attachment.detach();
     return;
   }
   binding.attachment = attachment;
+}
+
+/** `next` when it says something new about the terminal, else the object the views already hold. */
+function unchanged(current: CloudTerminal, next: CloudTerminal): CloudTerminal {
+  return (Object.keys(next) as (keyof CloudTerminal)[]).every((field) => current[field] === next[field]) ? current : next;
 }
 
 /**
@@ -205,19 +234,22 @@ export async function syncCloudTerminals(
   client: WorkspaceRpcClient,
   create: () => TerminalInstance,
 ): Promise<CloudTerminal[]> {
+  const asked = ++clock;
   const listed = await client.listPtys();
   const byPty = new Map(listed.terminals.map((info) => [info.ptyId, info]));
   update(workspace, (current) => {
     const known = new Set(current.terminals.map((terminal) => terminal.ptyId));
     const terminals = current.terminals.map((terminal): CloudTerminal => {
       const info = byPty.get(terminal.ptyId);
-      if (info) return { ...fromInfo(workspace, info), title: terminal.title, inputError: terminal.inputError };
-      if (terminal.gone) return terminal;
+      if (info) return unchanged(terminal, { ...fromInfo(workspace, info), title: terminal.title, inputError: terminal.inputError });
+      // Gone already, or opened here after this list was asked for.
+      if (terminal.gone || (openedAt.get(terminal.id) ?? 0) > asked) return terminal;
       return { ...terminal, gone: terminal.epoch === listed.epoch ? "closed" : "runtime-restarted" };
     });
     for (const info of listed.terminals) if (!known.has(info.ptyId)) terminals.push(fromInfo(workspace, info));
     const selected = current.selected && terminals.some((terminal) => terminal.id === current.selected) ? current.selected : (terminals[0]?.id ?? null);
-    return { terminals, selected };
+    if (selected === current.selected && terminals.length === current.terminals.length && terminals.every((terminal, index) => terminal === current.terminals[index])) return current;
+    return { ...current, terminals, selected };
   });
   const live = cloudTerminalsOf(workspace).terminals.filter((terminal) => !terminal.gone);
   await Promise.all(live.map((terminal) => attach(workspace, client, terminal, create).catch(() => undefined)));
@@ -233,7 +265,9 @@ export async function createCloudTerminal(
 ): Promise<CloudTerminal> {
   const info = await client.createPty(options.sessionId ? { ...size, sessionId: options.sessionId } : size);
   const terminal = fromInfo(workspace, info);
+  openedAt.set(terminal.id, ++clock);
   update(workspace, (current) => ({
+    ...current,
     terminals: current.terminals.some((item) => item.ptyId === info.ptyId) ? current.terminals : [...current.terminals, terminal],
     selected: terminal.id,
   }));
@@ -242,7 +276,66 @@ export async function createCloudTerminal(
 }
 
 export function selectCloudTerminal(workspace: string, id: string | null) {
-  update(workspace, (current) => ({ ...current, selected: id }));
+  update(workspace, (current) => (current.selected === id ? current : { ...current, selected: id }));
+}
+
+/** Select a terminal and ask the workspace view to show it (a sidebar row was chosen). */
+export function revealCloudTerminal(workspace: string, id: string) {
+  update(workspace, (current) => ({ ...current, selected: id, reveal: (current.reveal ?? 0) + 1 }));
+}
+
+/** The workspace view says whether it is showing its selected terminal, so the sidebar marks the right row. */
+export function setCloudTerminalShown(workspace: string, shown: boolean) {
+  update(workspace, (current) => (!!current.shown === shown ? current : { ...current, shown }));
+}
+
+/** How often a connected workspace's terminal list is read again. */
+export const TERMINAL_POLL_MS = 3_000;
+
+/**
+ * Keep a connected workspace's terminals current. The runtime has no
+ * notification for a terminal that someone else opens or closes, so the list
+ * is read again every few seconds: a terminal one person creates appears for
+ * everyone connected, without reopening the session. It reads only while
+ * connected and while the window is visible, and a read is not activity:
+ * it never wakes a workspace or keeps one from idling. Returns what stops it.
+ */
+export function followCloudTerminals(workspace: string, client: WorkspaceRpcClient, create: () => TerminalInstance, intervalMs = TERMINAL_POLL_MS): () => void {
+  let stopped = false;
+  let reading = false;
+  const read = async () => {
+    if (stopped || reading || document.visibilityState === "hidden" || client.connection.state !== "connected") return;
+    reading = true;
+    try {
+      await syncCloudTerminals(workspace, client, create);
+    } catch {
+      // The next read tries again; a dropped connection re-syncs on connect.
+    } finally {
+      reading = false;
+    }
+  };
+  const timer = setInterval(() => void read(), intervalMs);
+  const onVisible = () => void read();
+  document.addEventListener("visibilitychange", onVisible);
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+    document.removeEventListener("visibilitychange", onVisible);
+  };
+}
+
+/** The terminals of one session (`pty/2` names it), in the order they were opened. */
+export function sessionTerminals(terminals: readonly CloudTerminal[], sessionId: string): CloudTerminal[] {
+  return terminals.filter((terminal) => terminal.sessionId === sessionId);
+}
+
+/**
+ * Terminals that belong to no session shown here: every terminal of a runtime
+ * older than `pty/2`, one opened for the workspace itself, or one whose
+ * session is gone. The sidebar lists them once, as "Workspace terminals".
+ */
+export function workspaceTerminals(terminals: readonly CloudTerminal[], sessionIds: readonly string[]): CloudTerminal[] {
+  return terminals.filter((terminal) => !terminal.sessionId || !sessionIds.includes(terminal.sessionId));
 }
 
 /** Close the tab; a live shell is ended on the runtime too. */
@@ -261,12 +354,13 @@ export async function closeCloudTerminal(workspace: string, client: WorkspaceRpc
   bindings.get(id)?.attachment?.detach();
   bindings.delete(id);
   cursors.delete(id);
+  openedAt.delete(id);
   disposeInstance(id);
   update(workspace, (current) => {
     const index = current.terminals.findIndex((item) => item.id === id);
     const terminals = current.terminals.filter((item) => item.id !== id);
     const selected = current.selected === id ? (terminals[Math.min(index, terminals.length - 1)]?.id ?? null) : current.selected;
-    return { terminals, selected };
+    return { ...current, terminals, selected };
   });
 }
 
@@ -326,5 +420,6 @@ export function resetCloudTerminals() {
   for (const workspace of Object.values(state)) for (const terminal of workspace.terminals) disposeInstance(terminal.id);
   bindings.clear();
   cursors.clear();
+  openedAt.clear();
   publish({});
 }

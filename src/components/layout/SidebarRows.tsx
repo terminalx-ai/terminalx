@@ -1,4 +1,4 @@
-import type { HTMLAttributes, ReactNode, Ref } from "react";
+import { useLayoutEffect, useRef, type HTMLAttributes, type ReactNode, type Ref } from "react";
 import { Archive, ArrowUp, ChevronDown, Globe, Lock, Pin, Terminal, X } from "lucide-react";
 import { AgentMark, agentName } from "@/components/AgentMark";
 import { actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
@@ -137,10 +137,58 @@ export function GroupTitle({ label, onActivate }: { label: string; onActivate: (
   );
 }
 
-/** An item row's label: opens the item, with pinned and archived marks and an optional branch chip. */
-export function ItemTitle({ title, pinned, archived, badge, onActivate }: { title: string; pinned?: boolean; archived?: boolean; badge?: string | null; onActivate: () => void }) {
+/**
+ * Keeps the first `chars` characters of a truncating label in view: `holder`
+ * (the flex item around `label`) gets that much as its minimum width, so the
+ * row's shrinkable trailing chips give way before the label does. The width is
+ * measured from those characters laid out, so it is exact for the font in use. Does
+ * nothing without `chars`, or where nothing is laid out (tests).
+ */
+function useLabelFloor(text: string, chars: number | undefined) {
+  const holder = useRef<HTMLButtonElement>(null);
+  const label = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    const box = holder.current;
+    const span = label.current;
+    if (!chars || !box || !span) return;
+    const measure = () => {
+      // A hidden copy of the leading characters, in the label's own font: the
+      // label itself only reports what its ellipsis leaves showing.
+      const probe = document.createElement("span");
+      probe.textContent = text.slice(0, chars);
+      probe.className = span.className;
+      probe.style.cssText = "position:absolute;visibility:hidden;pointer-events:none;white-space:pre;overflow:visible;max-width:none;flex:none";
+      span.after(probe);
+      const width = probe.getBoundingClientRect().width;
+      probe.remove();
+      if (!width) return;
+      // What precedes the label (pin, archive marks), the characters, and room for the ellipsis when more follow.
+      const lead = span.getBoundingClientRect().left - box.getBoundingClientRect().left;
+      const ellipsis = text.length > chars ? parseFloat(getComputedStyle(span).fontSize) : 0;
+      box.style.minWidth = `${Math.ceil(lead + width + ellipsis)}px`;
+    };
+    measure();
+    // The first measure may be in a fallback font.
+    let live = true;
+    void document.fonts?.ready.then(() => live && measure());
+    return () => {
+      live = false;
+      box.style.minWidth = "";
+    };
+  }, [text, chars]);
+  return { holder, label };
+}
+
+/**
+ * An item row's label: opens the item, with pinned and archived marks and an
+ * optional branch chip. `minChars` keeps that many leading characters visible
+ * in a row whose trailing chips can shrink (cloud rows).
+ */
+export function ItemTitle({ title, pinned, archived, badge, minChars, onActivate }: { title: string; pinned?: boolean; archived?: boolean; badge?: string | null; minChars?: number; onActivate: () => void }) {
+  const floor = useLabelFloor(title, minChars);
   return (
     <button
+      ref={floor.holder}
       type="button"
       onClick={onActivate}
       className="flex min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
@@ -148,7 +196,7 @@ export function ItemTitle({ title, pinned, archived, badge, onActivate }: { titl
     >
       {pinned ? <Pin className="size-3 shrink-0 text-faint" /> : null}
       {archived ? <Archive className="size-3 shrink-0 text-faint" aria-label="Archived session" /> : null}
-      <span className="min-w-0 flex-1 truncate text-[12px]">{title}</span>
+      <span ref={floor.label} className="min-w-0 flex-1 truncate text-[12px]">{title}</span>
       {badge ? <RowChip mono>{badge}</RowChip> : null}
     </button>
   );

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type MouseEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import {
   Archive,
   ArrowLeftRight,
@@ -11,6 +11,7 @@ import {
   PinOff,
   Plus,
   RefreshCw,
+  Terminal,
   Trash2,
   X,
 } from "lucide-react";
@@ -29,7 +30,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
-import { AgentTabRow, ItemTitle, RowChip, RowTime, StatusStripe, TreeGroup, TreeNode, TreeRow, TreeToggle } from "@/components/layout/SidebarRows";
+import { AgentTabRow, ItemTitle, RowChip, RowTime, ShellTabRow, StatusStripe, TreeGroup, TreeNode, TreeRow, TreeToggle } from "@/components/layout/SidebarRows";
 import { archiveLine } from "@/components/cloud/CloudWorkspaceLifecycle";
 import { describeWorkspace } from "@/components/cloud/CloudSessionPage";
 import { api, errorMessage, type CloudWorkspaceListItem, type OrganizationSummary } from "@/lib/api";
@@ -51,13 +52,17 @@ import { cloudAgentLabel, deriveCloudActivity, type CloudActivity, type RowTone 
 import {
   bootCloudSessions,
   closeCloudSessionTab,
+  closeCloudWorkspaceTerminal,
   cloudSessionStatus,
   deleteCloudSession,
   updateCloudSession,
   useCloudWorkspaceSessions,
   type CloudSessionRow,
 } from "@/lib/cloudSessions";
-import { errorCode } from "@/lib/cloudTerminals";
+import { errorCode, revealCloudTerminal, sessionTerminals, useCloudTerminals, workspaceTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
+import { tabNodeId, tabPanelId } from "@/lib/sessionTabs";
+import { selectSessionTab, useTerminals } from "@/lib/terminal";
+import { resolveSessionTab, useVisibleSessionTab } from "@/lib/visibleTab";
 import { cn } from "@/lib/cn";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { getSessionStore, selectCloudProjectInSidebar, selectCloudSession, selectCloudWorkspace, selectSession, startCloudSessionIn, useSessionStore } from "@/lib/sessions";
@@ -657,16 +662,19 @@ function WorkspaceSessions({ node, shown, showLocation }: { node: CloudWorkspace
   if (!sessions.length) {
     const openable = (state === "ready" || state === "suspended") && activity.tone !== "changing" && activity.tone !== "attention";
     return (
-      <div className="flex min-w-0 items-center gap-1.5 px-5 py-1 text-[11px] text-faint" data-testid="cloud-workspace-empty" data-workspace={node.item.workspace.id} title={card}>
-        {showLocation && <LocationChip name={node.item.workspace.name} tone={activity.tone} card={card} />}
-        {known || !openable ? (
-          <span className="min-w-0 truncate">{known ? "No sessions yet." : activity.label}</span>
-        ) : (
-          <button type="button" className="min-w-0 truncate underline-offset-2 hover:text-muted-foreground hover:underline" onClick={() => selectCloudWorkspace(node.key)}>
-            Open to load sessions
-          </button>
-        )}
-      </div>
+      <>
+        <div className="flex min-w-0 items-center gap-1.5 px-5 py-1 text-[11px] text-faint" data-testid="cloud-workspace-empty" data-workspace={node.item.workspace.id} title={card}>
+          {showLocation && <LocationChip name={node.item.workspace.name} tone={activity.tone} card={card} />}
+          {known || !openable ? (
+            <span className="min-w-0 truncate">{known ? "No sessions yet." : activity.label}</span>
+          ) : (
+            <button type="button" className="min-w-0 truncate underline-offset-2 hover:text-muted-foreground hover:underline" onClick={() => selectCloudWorkspace(node.key)}>
+              Open to load sessions
+            </button>
+          )}
+        </div>
+        <WorkspaceTerminals node={node} sessionIds={[]} />
+      </>
     );
   }
   return (
@@ -674,19 +682,145 @@ function WorkspaceSessions({ node, shown, showLocation }: { node: CloudWorkspace
       {sessions.map((row) => (
         <CloudSessionNode key={row.key} row={row} node={node} manage={manage} location={showLocation ? { tone: activity.tone, card } : null} />
       ))}
+      <WorkspaceTerminals node={node} sessionIds={sessions.map((row) => row.sessionId)} />
     </>
   );
 }
 
-/** Where a session runs: a small chip, with the workspace's hover card. */
+/** Asks first: closing a live terminal ends its shell on the VM for everyone. */
+async function closeTerminalRow(node: CloudWorkspaceNode, terminal: CloudTerminal): Promise<void> {
+  if (!terminal.gone && !terminal.exited) {
+    const yes = await ask(`Close ${terminal.title}? Its shell ends on the cloud workspace.`, { title: "Close terminal", kind: "warning", okLabel: "Close", cancelLabel: "Cancel" }).catch(() => false);
+    if (!yes) return;
+  }
+  await closeCloudWorkspaceTerminal({ orgId: node.item.workspace.orgId, workspaceId: node.item.workspace.id }, terminal.id);
+}
+
+/**
+ * Terminals of a workspace that belong to none of its sessions: all of them on
+ * a runtime older than `pty/2`, which does not say which session a terminal
+ * was opened for. Listed once per workspace; choosing one opens the workspace
+ * view on that terminal. Only terminals this window has seen (it connected to
+ * the workspace) are known, so nothing here connects or wakes anything.
+ */
+function WorkspaceTerminals({ node, sessionIds }: { node: CloudWorkspaceNode; sessionIds: string[] }) {
+  const store = useSessionStore();
+  const state = useCloudTerminals(node.key);
+  const [expanded, setExpanded] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const terminals = workspaceTerminals(state.terminals, sessionIds);
+  if (!terminals.length) return null;
+  const showing = store.selectedCloudWorkspace === node.key && !!state.shown;
+  return (
+    <div role="treeitem" aria-label="Workspace terminals" aria-expanded={expanded} className="min-w-0" data-testid="cloud-workspace-terminals" data-workspace={node.item.workspace.id} onClickCapture={focusClicked}>
+      <TreeRow level="group" selected={false} title={`Terminals of ${node.item.workspace.name} that belong to no session`}>
+        <TreeToggle expanded={expanded} label="Workspace terminals" onToggle={() => setExpanded((open) => !open)} className="ml-0.5" />
+        <Terminal className="size-3 shrink-0" aria-hidden />
+        <button type="button" onClick={() => setExpanded((open) => !open)} className="min-w-0 flex-1 truncate rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
+          Workspace terminals
+        </button>
+      </TreeRow>
+      {error && <p className="ml-6 text-[10px] text-destructive">{error}</p>}
+      <TreeGroup expanded={expanded} className="pl-5">
+        {terminals.map((terminal) => (
+          <ShellTabRow
+            key={terminal.id}
+            nodeId={`cloud-terminal-${node.item.workspace.id}-${terminal.ptyId}`}
+            panelId={`cloud-terminal-panel-${node.item.workspace.id}-${terminal.ptyId}`}
+            title={terminal.title}
+            exited={terminal.exited || !!terminal.gone}
+            selected={showing && state.selected === terminal.id}
+            onOpen={() => {
+              selectCloudWorkspace(node.key);
+              revealCloudTerminal(node.key, terminal.id);
+            }}
+            onClose={() => {
+              setError(null);
+              void closeTerminalRow(node, terminal).catch((e: unknown) => setError(errorMessage(e)));
+            }}
+          />
+        ))}
+      </TreeGroup>
+    </div>
+  );
+}
+
+/** A session title keeps this many leading characters before its row's chips stop shrinking. */
+const TITLE_FLOOR = 12;
+
+/**
+ * Where a session runs: a small chip, with the workspace's hover card. It is
+ * the first thing in the row to give way to the title: the name truncates,
+ * then leaves the state dot and the cloud icon (the tooltip still names it).
+ */
 function LocationChip({ name, tone, card }: { name: string; tone: RowTone; card: string }) {
   return (
-    <span className={cn("flex max-w-24 shrink-0 items-center gap-1 rounded-sm bg-veil-raised px-1 text-[9px] text-faint", yieldsToRowActions)} title={card} data-testid="cloud-location-chip">
+    <span
+      className={cn(
+        // One line high; a name with no room left for even its ellipsis wraps out of sight.
+        "flex h-3.5 max-w-24 min-w-[26px] shrink flex-wrap content-start items-center gap-x-1 overflow-hidden whitespace-nowrap rounded-sm bg-veil-raised px-1 text-[9px] leading-[14px] text-faint",
+        yieldsToRowActions,
+      )}
+      title={card}
+      data-testid="cloud-location-chip"
+    >
       <span aria-hidden className={cn("size-1 shrink-0 rounded-full", DOT[tone])} />
       <Cloud className="size-2.5 shrink-0" aria-label="Runs in the cloud" />
-      <span className="min-w-0 truncate">{name}</span>
+      <span className="min-w-[9px] grow basis-0 truncate">{name}</span>
     </span>
   );
+}
+
+/**
+ * The lock chip ("View only", "Not shared") in a session row marked tight:
+ * its label is cut off whole and the lock stays, with the chip's tooltip.
+ */
+const LOCK_CHIP_IN_TIGHT_ROW = "[&>svg]:shrink-0 group-data-[tight]/session:w-[18px] group-data-[tight]/session:overflow-hidden group-data-[tight]/session:whitespace-nowrap";
+
+/**
+ * Marks a session row `data-tight` when its title, at its floor of
+ * {@link TITLE_FLOOR} characters, would not fit beside the location chip at
+ * its smallest and the lock chip at full size. The lock chip then shows its
+ * icon only. Every width asked for here is the same whether or not the row is
+ * marked, so the mark never flips back and forth.
+ */
+function useTightRow(...deps: unknown[]) {
+  const host = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const node = host.current;
+    const line = node?.querySelector<HTMLElement>("[data-tree-row]");
+    if (!node || !line || typeof ResizeObserver === "undefined") return;
+    const check = () => {
+      const row = getComputedStyle(line);
+      const room = line.clientWidth - parseFloat(row.paddingLeft) - parseFloat(row.paddingRight);
+      if (!(room > 0)) return;
+      let wanted = 0;
+      let parts = 0;
+      for (const child of Array.from(line.children) as HTMLElement[]) {
+        const style = getComputedStyle(child);
+        if (style.position === "absolute" || style.display === "none") continue;
+        parts++;
+        if (child.dataset.testid === "cloud-access-chip") wanted += child.scrollWidth;
+        else if (child.dataset.testid === "cloud-location-chip") wanted += parseFloat(style.minWidth) || 0;
+        else if (child.style.minWidth) wanted += parseFloat(child.style.minWidth);
+        else wanted += child.getBoundingClientRect().width;
+      }
+      wanted += Math.max(0, parts - 1) * (parseFloat(row.columnGap) || 0);
+      node.toggleAttribute("data-tight", wanted > room + 0.5);
+    };
+    check();
+    const observer = new ResizeObserver(check);
+    observer.observe(line);
+    // The title's floor is measured again once the fonts are in.
+    let live = true;
+    void document.fonts?.ready.then(() => live && check());
+    return () => {
+      live = false;
+      observer.disconnect();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+  return host;
 }
 
 // ---- sessions --------------------------------------------------------------
@@ -732,13 +866,31 @@ function CloudSessionNode({ row, node, manage, location }: { row: CloudSessionRo
       if (getSessionStore().selectedSessionId === row.key) selectSession(null);
     });
   };
+  const you = node.item.workspace.you;
+  const locked = you?.role === "viewer" || you?.role === "none";
+  const tight = useTightRow(row.title, row.pinned, row.archived, row.modified, locked, node.item.workspace.sharedWith, !!location, renaming);
   const closeTab = async (tabId: string, label: string) => {
     const yes = await ask(`Close ${label}? Its agent stops on the cloud workspace.`, { title: "Close tab", kind: "warning", okLabel: "Close", cancelLabel: "Cancel" }).catch(() => false);
     if (yes) await act(() => closeCloudSessionTab(row, tabId));
   };
+  // Its terminals, as this window knows them: listed once it has connected to
+  // the workspace, and kept current while it stays connected.
+  const terminals = sessionTerminals(useCloudTerminals(node.key).terminals, row.sessionId);
+  // The row that is marked is the tab the open session shows; before its view
+  // has said, the same rule the view uses.
+  const requested = useTerminals().selected[row.key];
+  const visible = useVisibleSessionTab(row.key);
+  const shown = selected
+    ? (visible ?? resolveSessionTab({ requested, agentIds: row.tabs.map((tab) => tab.tabId), activeTab: row.activeTab, terminalIds: terminals.map((terminal) => terminal.id) }))
+    : null;
+  /** A tab row opens its session on that tab. */
+  const open = (tab: { kind: "agent" | "terminal"; id: string }) => {
+    selectSessionTab(row.key, tab);
+    selectCloudSession(row.key);
+  };
 
   return (
-    <div role="none" data-testid="cloud-session-node" data-session={row.key} onClickCapture={focusClicked}>
+    <div ref={tight} role="none" className="group/session" data-testid="cloud-session-node" data-session={row.key} onClickCapture={focusClicked}>
       <TreeNode label={row.title} expanded={expanded}>
         <TreeRow level="item" selected={selected} title={location?.card}>
           <StatusStripe status={status} size="row" />
@@ -761,9 +913,9 @@ function CloudSessionNode({ row, node, manage, location }: { row: CloudSessionRo
               className="h-6 min-w-0 flex-1 rounded-sm bg-well px-1 text-[12px] outline-none focus:ring-2 focus:ring-ring/40"
             />
           ) : (
-            <ItemTitle title={row.title} pinned={row.pinned} archived={row.archived} onActivate={() => selectCloudSession(row.key)} />
+            <ItemTitle title={row.title} pinned={row.pinned} archived={row.archived} minChars={TITLE_FLOOR} onActivate={() => selectCloudSession(row.key)} />
           )}
-          {location && <ShareBadge you={node.item.workspace.you} sharedWith={node.item.workspace.sharedWith} className={yieldsToRowActions} />}
+          {location && <ShareBadge you={you} sharedWith={node.item.workspace.sharedWith} className={cn(locked && LOCK_CHIP_IN_TIGHT_ROW, yieldsToRowActions)} />}
           {location && <LocationChip name={node.item.workspace.name} tone={location.tone} card={location.card} />}
           <RowTime at={row.modified} />
           {manage && (
@@ -802,24 +954,44 @@ function CloudSessionNode({ row, node, manage, location }: { row: CloudSessionRo
         <TreeGroup expanded={expanded} className="pl-5">
           {row.tabs.map((tab) => {
             const label = tab.title?.trim() || cloudAgentLabel(tab.harness);
+            const peer = { kind: "agent" as const, id: tab.tabId };
             return (
               <AgentTabRow
                 key={tab.tabId}
-                nodeId={`cloud-tab-${row.workspaceId}-${tab.tabId}`}
-                panelId={`cloud-panel-${row.workspaceId}-${tab.tabId}`}
+                // The open session's panels are labelled by these rows; other sessions' rows only need unique ids.
+                nodeId={selected ? tabNodeId(peer) : `cloud-tab-${row.workspaceId}-${tab.tabId}`}
+                panelId={selected ? tabPanelId(peer) : `cloud-panel-${row.workspaceId}-${tab.tabId}`}
                 harness={tab.harness}
                 label={label}
                 status={tab.status}
                 mobileDriven={false}
                 terminalView={false}
-                selected={selected}
-                onOpen={() => selectCloudSession(row.key)}
+                selected={shown?.kind === "agent" && shown.id === tab.tabId}
+                onOpen={() => open(peer)}
                 // Closing a tab stops its agent: a workspace manager's, like the session menu.
                 onClose={manage ? () => void closeTab(tab.tabId, label) : undefined}
               />
             );
           })}
-          {row.tabs.length === 0 ? <div className="px-3 py-1 text-[11px] text-faint">{node.item.workspace.you?.role === "none" ? "Not shared with you." : "No tabs."}</div> : null}
+          {terminals.map((terminal) => {
+            const peer = { kind: "terminal" as const, id: terminal.id };
+            return (
+              <ShellTabRow
+                key={terminal.id}
+                nodeId={selected ? tabNodeId(peer) : `cloud-terminal-${row.workspaceId}-${terminal.ptyId}`}
+                panelId={selected ? tabPanelId(peer) : `cloud-terminal-panel-${row.workspaceId}-${terminal.ptyId}`}
+                title={terminal.title}
+                exited={terminal.exited || !!terminal.gone}
+                selected={shown?.kind === "terminal" && shown.id === terminal.id}
+                onOpen={() => open(peer)}
+                // Killing a terminal is a workspace manager's too.
+                onClose={manage ? () => void act(() => closeTerminalRow(node, terminal)) : undefined}
+              />
+            );
+          })}
+          {row.tabs.length === 0 && terminals.length === 0 ? (
+            <div className="px-3 py-1 text-[11px] text-faint">{node.item.workspace.you?.role === "none" ? "Not shared with you." : "No tabs."}</div>
+          ) : null}
         </TreeGroup>
       </TreeNode>
     </div>

@@ -3,6 +3,7 @@ import { fs, type LocalPathInfo } from "@/lib/api";
 import { openBrowserTab } from "@/lib/browser";
 import { fileKind, openFile } from "@/lib/editors";
 import { getPrefs } from "@/lib/prefs";
+import { scrollToInOwnScroller } from "@/lib/shellScroll";
 
 export interface ChatLinkContext {
   /** The session and workspace that rendered the link, captured at render time. */
@@ -173,7 +174,9 @@ export async function openChatLink(destination: ChatLinkDestination, context: Ch
     return;
   }
   if (destination.kind === "anchor") {
-    document.getElementById(destination.href.slice(1))?.scrollIntoView();
+    // Within the transcript only: a plain scrollIntoView() also scrolls every ancestor it can.
+    const target = document.getElementById(destination.href.slice(1));
+    if (target) scrollToInOwnScroller(target);
     return;
   }
   if (destination.kind === "rejected") throw new Error(destination.reason);

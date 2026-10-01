@@ -153,7 +153,7 @@ export function Composer({
   }, [fit]);
 
   useEffect(() => {
-    if (autoFocus) ref.current?.focus();
+    if (autoFocus) ref.current?.focus({ preventScroll: true });
   }, [autoFocus, tab.id]);
 
   // Slash commands come from the harness once per directory.
@@ -239,7 +239,7 @@ export function Composer({
       requestAnimationFrame(() => {
         const el = ref.current;
         if (el) {
-          el.focus();
+          el.focus({ preventScroll: true });
           el.setSelectionRange(pos, pos);
           setCaret(pos);
         }
@@ -264,7 +264,7 @@ export function Composer({
     // Sending a recalled message gives back the draft that was set aside for it.
     onDraftChange(recall.sent());
     attach.clear();
-    ref.current?.focus();
+    ref.current?.focus({ preventScroll: true });
   }, [draft, attachments, attach, sending, disabled, onSend, onDraftChange, recall.sent]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -331,7 +331,7 @@ export function Composer({
                 type="button"
                 onClick={() => {
                   onDraftChange(h.prompt);
-                  requestAnimationFrame(() => ref.current?.focus());
+                  requestAnimationFrame(() => ref.current?.focus({ preventScroll: true }));
                 }}
                 className="rounded-full bg-veil-raised px-2.5 py-0.5 text-[11.5px] text-muted-foreground transition-colors hover:bg-veil-strong hover:text-foreground"
               >
@@ -373,7 +373,7 @@ export function Composer({
                   onDraftChange(next);
                   setDismissedToken(null);
                   requestAnimationFrame(() => {
-                    ref.current?.focus();
+                    ref.current?.focus({ preventScroll: true });
                     ref.current?.setSelectionRange(next.length, next.length);
                     setCaret(next.length);
                   });

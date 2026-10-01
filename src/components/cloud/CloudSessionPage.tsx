@@ -39,7 +39,9 @@ import {
   createCloudTerminal,
   detachCloudTerminals,
   errorCode,
+  followCloudTerminals,
   selectCloudTerminal,
+  setCloudTerminalShown,
   syncCloudTerminals,
   useCloudTerminals,
   type CloudTerminal,
@@ -506,8 +508,18 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
   const client = connection.client;
   const key = workspaceTargetKey(connection.target);
   const agentScope = connection.target.kind === "cloud" ? connection.target : { organizationId: "", workspaceId: key };
-  const { terminals, selected } = useCloudTerminals(key);
+  const { terminals, selected, reveal } = useCloudTerminals(key);
   const [view, setView] = useState<View>({ kind: "terminal" });
+  // A terminal row chosen in the sidebar shows that terminal, whatever view was up.
+  useEffect(() => {
+    if (reveal) setView({ kind: "terminal" });
+  }, [reveal]);
+  // The sidebar marks the terminal's row only while the terminal is what shows.
+  const terminalShown = view.kind === "terminal";
+  useEffect(() => {
+    setCloudTerminalShown(key, terminalShown);
+    return () => setCloudTerminalShown(key, false);
+  }, [key, terminalShown]);
   const [filesShown, setFilesShown] = useState(false);
   if (view.kind === "files" && !filesShown) setFilesShown(true);
   const [gitShown, setGitShown] = useState(false);
@@ -581,6 +593,11 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
       cancelled = true;
     };
   }, [generation, key, client, base, manage, hidden, role]);
+  // Terminals other people open or close, while connected.
+  useEffect(() => {
+    if (!generation || hidden) return;
+    return followCloudTerminals(key, client, base);
+  }, [generation, key, client, base, hidden]);
 
   const newTerminal = async () => {
     setError(null);

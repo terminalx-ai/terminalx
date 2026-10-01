@@ -41,7 +41,7 @@ import {
   type AccessLoss,
 } from "@/lib/cloudCollab";
 import { cloudAgentLabel } from "@/lib/cloudRowState";
-import { createCloudTerminal, detachCloudTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
+import { createCloudTerminal, detachCloudTerminals, followCloudTerminals, sessionTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
 import { cloudGitSource, desktopGitIdentity, type GitSource } from "@/lib/gitSource";
 import { clearCloudWake, cloudAsleep, cloudSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
 import { selectSessionTab } from "@/lib/terminal";
@@ -384,10 +384,12 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   mode.current = resolvedMode;
   const terminalBase = useCallback(() => createTerminal(mode.current), []);
   const allTerminals = useCloudTerminals(workspaceKey).terminals;
-  const terminals = useMemo(() => allTerminals.filter((terminal) => terminal.sessionId === runtimeSessionId), [allTerminals, runtimeSessionId]);
+  const terminals = useMemo(() => sessionTerminals(allTerminals, runtimeSessionId), [allTerminals, runtimeSessionId]);
   useEffect(() => {
     if (!generation || !client) return;
     void syncCloudTerminals(workspaceKey, client, terminalBase).catch(() => undefined);
+    // A terminal someone else opens or closes shows here without reopening the session.
+    return followCloudTerminals(workspaceKey, client, terminalBase);
   }, [generation, client, workspaceKey, terminalBase]);
 
   // Presence, notes and leases of a shared workspace (PRO-30), per connection.

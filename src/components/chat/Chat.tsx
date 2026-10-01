@@ -7,6 +7,7 @@ import type { StreamBlock } from "@/lib/agentEvents";
 import { TurnBlock } from "./TurnBlock";
 import { PermissionCard, QuestionCard } from "./AskCards";
 import { RaccoonRunner, RaccoonScene } from "@/components/raccoon/Raccoon";
+import { READER_SCROLL_EVENT } from "@/lib/shellScroll";
 
 const NEAR_BOTTOM_PX = 40;
 const FIRST_MOUNT = 12;
@@ -16,11 +17,14 @@ const MOUNT_STEP = 12;
  * The transcript scroller.
  *
  * Follow pin: a ref the reader's own input decides. An upward wheel (or an
- * upward scrollbar drag) unpins; a scroll re-pins only when it moved down into
- * the bottom zone, so a small upward step inside that zone can't re-pin and be
- * undone by the next render. Scrolls without input never unpin, so a resize
- * clamp or layout nudge can't fight the pin, and programmatic writes record the
- * position they set, so they never read as the reader moving.
+ * upward scrollbar drag, or a key that scrolls up) unpins; a scroll re-pins
+ * only when it moved down into the bottom zone, so a small upward step inside
+ * that zone can't re-pin and be undone by the next render. Scrolls without
+ * input never unpin, so a resize clamp or layout nudge can't fight the pin: a
+ * pinned view takes the bottom back from one. Programmatic writes record the
+ * position they set, so they never read as the reader moving. Whose turn it
+ * is makes no difference: output from a turn someone else drives on a shared
+ * workspace is followed exactly like the reader's own.
  * A ResizeObserver on both the scroller and its content re-takes the bottom
  * after async growth (highlighting, images) with no React commit involved.
  * Long logs mount the newest turns first and backfill above in idle steps,
@@ -109,8 +113,11 @@ export function Chat({
     lastTop.current = el.scrollTop;
   }, [oldestMounted, offsetInContent]);
 
-  // Wheel up unpins before the scroll lands. A scroll only unpins while the
-  // reader holds the scrollbar: layout can nudge scrollTop up on its own.
+  // Wheel up unpins before the scroll lands, and so do the keys that scroll
+  // up and a link that jumps within the transcript. A scroll only unpins while
+  // the reader holds the scrollbar: layout can nudge scrollTop up on its own,
+  // and a nudge while pinned is taken back at once, so a transcript that then
+  // sits idle (or grows by a turn someone else drives) is still at its bottom.
   useEffect(() => {
     const el = scroller.current;
     if (!el) return;
@@ -118,6 +125,13 @@ export function Chat({
     const onWheel = (e: WheelEvent) => {
       if (e.deltaY < 0 && el.scrollTop > 0) follow(false);
     };
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest?.("input, textarea, select, [contenteditable]")) return;
+      const up = e.key === "PageUp" || e.key === "ArrowUp" || e.key === "Home" || (e.key === " " && e.shiftKey);
+      if (up && el.scrollTop > 0) follow(false);
+    };
+    const onReaderScroll = () => follow(false);
     const onPointerDown = () => {
       dragging = true;
     };
@@ -131,20 +145,26 @@ export function Chat({
       const dist = el.scrollHeight - top - el.clientHeight;
       if (moved < 0 && dragging && dist >= 1) follow(false);
       else if (moved > 0 && dist < NEAR_BOTTOM_PX) follow(true);
+      // Not the reader's doing (they would be unpinned by now): back to the bottom.
+      else if (moved < 0 && pinned.current && dist >= 1) pinToBottom();
     };
     el.addEventListener("wheel", onWheel, { passive: true });
+    el.addEventListener("keydown", onKeyDown);
+    el.addEventListener(READER_SCROLL_EVENT, onReaderScroll);
     el.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointercancel", onPointerUp);
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => {
       el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("keydown", onKeyDown);
+      el.removeEventListener(READER_SCROLL_EVENT, onReaderScroll);
       el.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerUp);
       el.removeEventListener("scroll", onScroll);
     };
-  }, [follow]);
+  }, [follow, pinToBottom]);
 
   // Heights change without a commit: re-pin after layout, before paint.
   useLayoutEffect(() => {
@@ -175,7 +195,7 @@ export function Chat({
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
-      <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto overscroll-none scrollbar-thin [overflow-anchor:none]">
+      <div ref={scroller} data-chat-scroller className="min-h-0 flex-1 overflow-y-auto overscroll-none scrollbar-thin [overflow-anchor:none]">
         <div ref={content} className="mx-auto w-full max-w-3xl px-6 pb-4 pt-5">
           {oldestMounted > 0 && (
             <div className="mb-4 text-center text-xs text-faint">Loading earlier turns…</div>
