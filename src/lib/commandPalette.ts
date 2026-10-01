@@ -27,6 +27,8 @@ export interface PaletteSessionItem extends PaletteEntityBase {
   agents: string[];
   agentIds: string[];
   modified: string;
+  /** A cloud session's key (`cloud:<orgId>:<workspaceId>:<sessionId>`); opening it selects it and never wakes it. */
+  cloudKey?: string;
 }
 
 export interface PaletteWorkspaceItem extends PaletteEntityBase {
@@ -205,6 +207,61 @@ export function buildPaletteIndex(
     sessions: recent(indexedSessions),
     workspaces: recent(indexedWorkspaces),
     projects: recent(indexedProjects),
+  };
+}
+
+/** What the palette needs of a cloud session (PRO-23 CS-19); `CloudDashboardSession` has it. */
+export interface CloudPaletteSession {
+  key: string;
+  title: string;
+  projectKey: string;
+  projectName: string;
+  /** `host/owner/name`; null for a blank project. */
+  repository: string | null;
+  orgName: string;
+  workspaceName: string;
+  branch?: string | null;
+  worktreeName?: string | null;
+  modified: string;
+  archived: boolean;
+  tabs: { harness: string }[];
+}
+
+/** Cloud sessions as palette documents: found by title, project or repository, branch, workspace and organization. */
+export function buildCloudPaletteSessions(sessions: readonly CloudPaletteSession[], harnesses: HarnessInfo[]): PaletteSessionItem[] {
+  const harnessById = new Map(harnesses.map((harness) => [harness.id, harness.name]));
+  return sessions
+    .filter((session) => !session.archived)
+    .map((session): PaletteSessionItem => {
+      const agentIds = [...new Set(session.tabs.map((tab) => tab.harness))];
+      const agents = agentIds.map((id) => harnessById.get(id) ?? id);
+      const branch = session.branch ?? null;
+      const location = branch ?? session.worktreeName ?? session.workspaceName;
+      const secondary = `${session.projectName} · ${location} · ${session.orgName} cloud · ${agents.length ? agents.join(", ") : "Workspace"}`;
+      return {
+        id: `cloud-session:${session.key}`,
+        group: "sessions",
+        sessionId: session.key,
+        cloudKey: session.key,
+        projectPath: session.projectKey,
+        branch,
+        agents,
+        agentIds,
+        modified: session.modified,
+        primary: session.title,
+        secondary,
+        recentAt: parseDate(session.modified),
+        searchFields: searchFields(session.title, secondary, [session.repository ?? "", session.workspaceName, session.worktreeName ?? "", branch ?? "", session.orgName]),
+      };
+    });
+}
+
+/** The index with cloud sessions among the sessions, newest first; the same index when there are none. */
+export function withCloudSessions(index: PaletteIndex, cloud: PaletteSessionItem[]): PaletteIndex {
+  if (!cloud.length) return index;
+  return {
+    ...index,
+    sessions: [...index.sessions, ...cloud].sort((a, b) => b.recentAt - a.recentAt || a.primary.localeCompare(b.primary)),
   };
 }
 

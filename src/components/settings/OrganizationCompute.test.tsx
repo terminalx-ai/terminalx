@@ -34,6 +34,7 @@ const view = (overrides: Partial<ComputePolicyView> = {}, policy: Partial<Comput
   canEdit: true,
   counts: { workspaces: 3, running: 2 },
   workspaceCeiling: 10,
+  runningWorkspaceCeiling: null,
   contextRevision: "rev-1",
   ...overrides,
 });
@@ -209,4 +210,27 @@ it("keeps allow lists for providers this build does not edit and shows the pause
   await waitFor(() =>
     expect(api.updatePolicy).toHaveBeenCalledWith(expect.objectContaining({ allowedLocations: { "local-docker": ["local"] } }), "rev-1"),
   );
+});
+
+
+it("shows the running limit in force, never \"no running limit\" (saas PRO-76)", async () => {
+  // A newer server: blank means the operator ceiling, capped by the workspace limit.
+  api.policy.mockResolvedValue(view({ workspaceCeiling: 50, runningWorkspaceCeiling: 3 }, { maxWorkspaces: 20, maxRunningWorkspaces: null }));
+  render(<OrganizationCompute contextRevision="account-1" />);
+  const status = await screen.findByLabelText("Compute status");
+  expect(status.textContent).toContain("Running 2 of 3");
+  expect(status.textContent).not.toContain("no running limit");
+  const field = screen.getByLabelText("Maximum running workspaces") as HTMLInputElement;
+  expect(field.value).toBe("");
+  expect(field.placeholder).toBe("3 (default)");
+  fireEvent.change(field, { target: { value: "5" } });
+  expect(screen.getByText(/or 3, the most this TerminalX service allows/)).toBeTruthy();
+  expect((screen.getByRole("button", { name: "Save limits" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it("on an older server, a blank running limit means the workspace limit", async () => {
+  api.policy.mockResolvedValue(view({}, { maxWorkspaces: 4, maxRunningWorkspaces: null }));
+  render(<OrganizationCompute contextRevision="account-1" />);
+  expect((await screen.findByLabelText("Compute status")).textContent).toContain("Running 2 of 4");
+  expect((screen.getByLabelText("Maximum running workspaces") as HTMLInputElement).placeholder).toBe("4 (default)");
 });

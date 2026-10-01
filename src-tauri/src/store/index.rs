@@ -11,7 +11,32 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
+/// The launch mode of any session or tab whose creator did not name one —
+/// the desktop, the CLI, the relay, a cloud launch, an automation — and of a
+/// stored tab that has none. Only an explicit mode overrides it.
 pub const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
+
+/// A requested mode, or the default when none was named. Blank is not a mode.
+pub fn permission_mode_or_default(mode: Option<&str>) -> String {
+    match mode.map(str::trim) {
+        Some(mode) if !mode.is_empty() => mode.to_string(),
+        _ => DEFAULT_PERMISSION_MODE.into(),
+    }
+}
+
+/// A mode as a request carries it: blank is the same as absent, so the
+/// caller's own default (`DEFAULT_PERMISSION_MODE` for a new tab, "no change"
+/// for a settings update) applies rather than an "unknown mode" refusal.
+pub fn requested_mode(mode: Option<String>) -> Option<String> {
+    mode.filter(|mode| !mode.trim().is_empty())
+}
+
+/// Serde's side of the same rule, for a stored tab whose mode is `null` or
+/// blank — written by a build that knew no mode.
+fn mode_or_default<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<String, D::Error> {
+    let mode: Option<String> = Option::deserialize(d)?;
+    Ok(permission_mode_or_default(mode.as_deref()))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -37,7 +62,7 @@ pub struct TabEntry {
     pub model: String,
     #[serde(default)]
     pub effort: Option<String>,
-    #[serde(default = "default_mode")]
+    #[serde(default = "default_mode", deserialize_with = "mode_or_default")]
     pub permission_mode: String,
     /// The harness's own conversation id (Claude session id, Codex thread id).
     #[serde(default)]
@@ -289,6 +314,18 @@ mod tests {
         .unwrap();
 
         assert_eq!(tab.permission_mode, DEFAULT_PERMISSION_MODE);
+
+        // Blank or null is no mode either; a named one is kept as it is.
+        for (stored, expected) in [(serde_json::json!(""), DEFAULT_PERMISSION_MODE), (serde_json::Value::Null, DEFAULT_PERMISSION_MODE), (serde_json::json!("manual"), "manual"), (serde_json::json!("plan"), "plan")] {
+            let tab: TabEntry = serde_json::from_value(serde_json::json!({"id": "t1", "harness": "claude", "created": "x", "permissionMode": stored})).unwrap();
+            assert_eq!(tab.permission_mode, expected);
+        }
+        assert_eq!(permission_mode_or_default(None), "bypassPermissions");
+        assert_eq!(permission_mode_or_default(Some("  ")), "bypassPermissions");
+        assert_eq!(permission_mode_or_default(Some("acceptEdits")), "acceptEdits");
+        assert_eq!(requested_mode(Some(" ".into())), None);
+        assert_eq!(requested_mode(None), None);
+        assert_eq!(requested_mode(Some("plan".into())), Some("plan".into()));
     }
 
     #[test]

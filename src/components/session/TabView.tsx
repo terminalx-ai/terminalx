@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { agent, type ImageInput } from "@/lib/api";
-import { applyEvent, loadTab, setTabStatus, useTabLog } from "@/lib/agentEvents";
+import type { ImageInput } from "@/lib/api";
+import { applyEvent, useTabLog } from "@/lib/agentEvents";
 import { buildTranscript, type Transcript } from "@/lib/transcript";
 import { getDraft, setDraft, useDraft } from "@/lib/drafts";
-import { patchTab, useSessionStore } from "@/lib/sessions";
+import { useSessionStore } from "@/lib/sessions";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { changeRange, useChanges } from "@/lib/changes";
+import { localGitSource, type GitSource } from "@/lib/gitSource";
+import { CLOUD_IMAGES_UNSUPPORTED, localSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
+import { CloudOutbox, commandError as cloudCommandError } from "@/components/cloud/CloudAgents";
 import { Chat } from "@/components/chat/Chat";
 import { Composer } from "@/components/chat/Composer";
 import { TerminalView } from "@/components/terminal/TerminalView";
@@ -38,16 +41,34 @@ function handoffsFor(t: Transcript, changed: boolean): { label: string; prompt: 
   ];
 }
 
-export function TabView({ session, tab, active, continuationOpen = false }: { session: SessionEntry; tab: TabEntry; active: boolean; continuationOpen?: boolean }) {
+export function TabView({
+  session,
+  tab,
+  active,
+  continuationOpen = false,
+  backend: given,
+  gitSource,
+}: {
+  session: SessionEntry;
+  tab: TabEntry;
+  active: boolean;
+  continuationOpen?: boolean;
+  /** Where the tab runs; the local Tauri commands when absent. */
+  backend?: SessionBackend;
+  /** A cloud session's Git, for the after-turn handoffs; a local one reads its checkout. */
+  gitSource?: GitSource;
+}) {
+  const backend = given ?? localSessionBackend(session.id);
+  const local = backend.caps.local;
   const isGit = useSessionStore().projects.find((p) => p.path === session.projectPath)?.kind !== "folder";
-  const log = useTabLog(session.id, tab.id);
+  const log = useTabLog(backend.logSessionId, tab.id);
   const draft = useDraft(tab.id);
   const [error, setError] = useState<string | null>(null);
   const views = useTabViews();
   const terminalMode = views.views[tab.id] === "terminal";
   const viewError = views.errors[tab.id] ?? null;
   const terms = useTerminals();
-  const ptyFirst = isPtyFirst(tab.harness);
+  const ptyFirst = local && isPtyFirst(tab.harness);
   const paneId = terminalPaneId(tab.id);
   const pane = terms.panes.find((p) => p.id === paneId);
   const [answering, setAnswering] = useState(false);
@@ -57,12 +78,19 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
   const [continueOpen, setContinueOpen] = useState(false);
   const models = useModels(tab.harness);
   const eventRecovery = useMemo(() => recoveryFromEvents(log.events), [log.events, log.version]);
-  const recovery = eventRecovery ?? (error || viewError ? classifyRecovery(error ?? viewError!) : null);
+  // The retry and resume flows restart a local agent process; a cloud tab's runtime recovers itself.
+  const recovery = !backend.caps.recovery ? null : eventRecovery ?? (error || viewError ? classifyRecovery(error ?? viewError!) : null);
   const safeError = (e: unknown) => RECOVERY_MESSAGES[classifyRecovery(String(e))];
+  // A cloud command's refusal says what happened to it (queued, view only, no key yet).
+  const commandError = (e: unknown) => {
+    const message = e instanceof Error ? e.message : null;
+    if (message && (message === CLOUD_IMAGES_UNSUPPORTED || message === backend.readOnlyReason)) return message;
+    return cloudCommandError(e);
+  };
 
-  useEffect(() => {
-    void loadTab(session.id, tab.id).catch(e => setError(safeError(e)));
-  }, [session.id, tab.id]);
+  const backendRef = useRef(backend);
+  backendRef.current = backend;
+  useEffect(() => backendRef.current.openTab(tab.id, (e) => setError(safeError(e))) ?? undefined, [backend.key, backend.generation, tab.id]);
 
   // A PTY-first tab is its CLI, so opening the tab starts it. Idempotent, and
   // the pane it lands in is adopted from the backend's own event.
@@ -73,50 +101,51 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
   // Viewing a finished tab marks it read.
   useEffect(() => {
     if (active && tab.status === "completed") {
-      void agent.markRead(session.id, tab.id);
-      patchTab(session.id, tab.id, { status: "idle" });
+      void backendRef.current.markRead(tab.id);
+      backendRef.current.patchTab(tab.id, { status: "idle" });
     }
-  }, [active, tab.status, session.id, tab.id]);
+  }, [active, tab.status, backend.key, tab.id]);
 
   const live = tab.status === "in_progress" || tab.status === "waiting";
   const transcript = useMemo(() => buildTranscript(log.events, live), [log.events, log.version, live]);
   // Whether the session's checkout differs from where the conversation
   // started, by tree diff, so a shell heredoc counts as much as an edit tool.
   const range = useMemo(() => changeRange(log.events, session.baseRef), [log.events, log.version, session.baseRef]);
-  const changes = useChanges(session.cwd, range, isGit && active && !live);
+  const changes = useChanges(local ? (session.cwd ? localGitSource(session.cwd) : undefined) : gitSource, range, isGit && active && !live);
 
   const send = useCallback(
     async (text: string, images: ImageInput[]) => {
       setError(null);
       setStopped(false);
       try {
-        const out = await agent.send(session.id, tab.id, text, images);
+        const out = await backend.send(tab.id, text, images);
         for (const ev of out.events) applyEvent(ev);
-        if (!out.queued) patchTab(session.id, tab.id, { status: "in_progress" });
+        if (!out.queued) backend.patchTab(tab.id, { status: "in_progress" });
       } catch (e) {
-        setError(safeError(e));
-        setTabStatus(session.id, tab.id, "waiting");
+        setError(local ? safeError(e) : commandError(e));
+        backend.setTabStatus(tab.id, "waiting");
         setDraft(tab.id, getDraft(tab.id) || text);
         throw e;
       }
     },
-    [session.id, tab.id],
+    [backend, local, tab.id],
   );
 
   const stop = useCallback(() => {
     if (recoveryLock.current) return;
     recoveryLock.current = true;
     setRecovering(true);
-    void agent.stop(session.id, tab.id).then(() => {
-      setTabStatus(session.id, tab.id, "idle");
-      setStopped(true);
+    void backend.stop(tab.id).then(() => {
+      backend.setTabStatus(tab.id, "idle");
+      // A queued cloud stop ends the turn on the runtime; there is nothing local to resume.
+      if (backend.caps.recovery) setStopped(true);
       setError(null);
       clearTabViewError(tab.id);
-    }).catch((e) => setError(safeError(e))).finally(() => {
+    }).catch((e) => setError(local ? safeError(e) : commandError(e))).finally(() => {
       recoveryLock.current = false;
       setRecovering(false);
     });
-  }, [session.id, tab.id]);
+  }, [backend, local, tab.id]);
 
   const retry = async (model?: string) => {
     if (recoveryLock.current) return;
@@ -125,12 +154,12 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
     try {
       // Await confirmed local exit before starting a replacement. Remote
       // outcomes remain unknown and the continuation asks to verify them.
-      await agent.stop(session.id, tab.id);
+      await backend.stop(tab.id);
       if (model) {
-        await agent.setModel(session.id, tab.id, model);
-        patchTab(session.id, tab.id, { model });
+        await backend.setModel(tab.id, model);
+        backend.patchTab(tab.id, { model });
       }
-      const out = await agent.send(session.id, tab.id, RECOVERY_PROMPT, []);
+      const out = await backend.send(tab.id, RECOVERY_PROMPT, []);
       setStopped(false);
       for (const ev of out.events) applyEvent(ev);
       setError(null);
@@ -147,45 +176,68 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
     async (requestId: string, optionId: string) => {
       setAnswering(true);
       try {
-        await agent.respondPermission(session.id, tab.id, requestId, optionId);
+        await backend.respondPermission(tab.id, requestId, optionId);
       } catch (e) {
-        setError(safeError(e));
+        setError(local ? safeError(e) : commandError(e));
       } finally {
         setAnswering(false);
       }
     },
-    [session.id, tab.id],
+    [backend, local, tab.id],
   );
 
   const answerQuestions = useCallback(
     async (requestId: string, answers: Record<string, string>) => {
       setAnswering(true);
       try {
-        await agent.answerQuestions(session.id, tab.id, requestId, answers);
+        await backend.answerQuestions(tab.id, requestId, answers);
       } catch (e) {
-        setError(safeError(e));
+        setError(local ? safeError(e) : commandError(e));
       } finally {
         setAnswering(false);
       }
     },
-    [session.id, tab.id],
+    [backend, local, tab.id],
   );
+
+  const steer = useCallback(async () => {
+    const text = draft.trim();
+    if (!text) return;
+    setError(null);
+    try {
+      await backend.steer(tab.id, text);
+      setDraft(tab.id, "");
+    } catch (e) {
+      setError(commandError(e));
+    }
+  }, [backend, draft, tab.id]);
+  const outbox = backend.outbox;
+  const deciding = !!outbox && transcript.pendingAsks.some((ask) => outbox.deciding(ask.requestId));
 
   const chat = (
     <Chat
-      sessionId={session.id}
+      sessionId={backend.logSessionId}
       transcript={{ ...transcript, pendingAsks: [] }}
       stream={log.stream}
-      cwd={session.cwd}
+      cwd={local ? session.cwd : undefined}
       live={live}
       progressing={tab.status === "in_progress" && !recovery && !transcript.pendingAsks.length}
-      answering={answering}
+      answering={answering || deciding}
       onAnswerPermission={answerPermission}
       onAnswerQuestions={answerQuestions}
       footer={
+        <>
+        {backend.caps.steer && backend.caps.write && live && draft.trim() && (
+          <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-4 text-xs text-muted-foreground">
+            <span>Send queues it for when the agent pauses.</span>
+            <Button size="xs" variant="outline" onClick={() => void steer()}>
+              Steer now
+            </Button>
+          </div>
+        )}
         <Composer
           tab={tab}
-          cwd={session.cwd}
+          cwd={local ? session.cwd : undefined}
           busy={live}
           draft={draft}
           onDraftChange={(v) => {
@@ -196,22 +248,23 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
           onStop={stop}
           onSetModel={(m) => {
             if (recovery) { void retry(m); return; }
-            void agent.setModel(session.id, tab.id, m).then(() => patchTab(session.id, tab.id, { model: m })).catch((e) => setError(safeError(e)));
+            void backend.setModel(tab.id, m).then(() => backend.patchTab(tab.id, { model: m })).catch((e) => setError(local ? safeError(e) : commandError(e)));
           }}
           onSetEffort={(e) => {
-            patchTab(session.id, tab.id, { effort: e });
-            void agent.setEffort(session.id, tab.id, e).catch((err) => setError(safeError(err)));
+            backend.patchTab(tab.id, { effort: e });
+            void backend.setEffort(tab.id, e).catch((err) => setError(local ? safeError(err) : commandError(err)));
           }}
           onSetMode={(m) => {
-            patchTab(session.id, tab.id, { permissionMode: m });
-            void agent.setPermissionMode(session.id, tab.id, m).catch((e) => setError(safeError(e)));
+            backend.patchTab(tab.id, { permissionMode: m });
+            void backend.setPermissionMode(tab.id, m).catch((e) => setError(local ? safeError(e) : commandError(e)));
           }}
           contextUsed={transcript.contextUsed ?? tab.contextUsed ?? undefined}
           contextMax={transcript.contextMax ?? tab.contextMax ?? undefined}
           handoffs={handoffsFor(transcript, isGit && changes.files.length > 0)}
-          disabledReason={error ?? (viewError ? safeError(viewError) : null)}
+          disabledReason={error ?? (viewError ? safeError(viewError) : null) ?? backend.readOnlyReason}
           autoFocus={active}
         />
+        </>
       }
     />
   );
@@ -247,17 +300,18 @@ export function TabView({ session, tab, active, continuationOpen = false }: { se
   );
 
   const wrap = (body: React.ReactNode) => <div className="flex h-full min-h-0 flex-col">
+    {outbox && <CloudOutbox entries={outbox.entries(tab.id)} followUps={outbox.followUps(tab.id)} onSendAgain={(entry) => void outbox.sendAgain(entry).catch((e) => setError(commandError(e)))} />}
     {stopped && <div role="status" className="flex items-center gap-2 border-b border-hairline p-3 text-xs">
       Session closed. Untracked or remote commands may still be running; verify their outcome before continuing.
       <Button size="sm" disabled={recovering} onClick={() => void retry()}>Resume safely</Button>
     </div>}
-    <RecoveryBanner kind={recovery} waiting={tab.status === "waiting"} asks={transcript.pendingAsks} busy={recovering} answering={answering}
+    <RecoveryBanner kind={recovery} waiting={tab.status === "waiting"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding}
       models={models.filter(m => m.id !== tab.model && !m.upgrade)} onPermission={answerPermission} onQuestions={answerQuestions}
       onRetry={retry} onStop={stop} onContinue={() => {
         if (recoveryLock.current) return;
         recoveryLock.current = true;
         setRecovering(true);
-        void agent.stop(session.id, tab.id).then(() => setContinueOpen(true)).catch(e => setError(safeError(e))).finally(() => {
+        void backend.stop(tab.id).then(() => setContinueOpen(true)).catch(e => setError(safeError(e))).finally(() => {
           recoveryLock.current = false;
           setRecovering(false);
         });

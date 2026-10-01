@@ -1,0 +1,244 @@
+name: Release terminalx-serve
+
+# Publishes the headless cloud-workspace runtime as runtime-only prereleases.
+# The TerminalX cloud server polls them and provisions the newest compatible
+# `terminalx-serve-linux-x64`, checked against SHA256SUMS and gated on the
+# `protocol` in `terminalx-serve.json`.
+#
+# After CI succeeds on a push to main (or by hand from main), and only if the
+# commit is a strict descendant of the newest runtime prerelease's commit and
+# is still on main, this builds and publishes
+# `runtime-v<serve version>-<commit UTC yyyymmddHHMMSS>-<sha7>`. Anything
+# else, including a re-run of an old CI or release run, is a skip, so a
+# publish can never roll the fleet back. Prereleases are never marked latest
+# (the desktop updater's latest.json is never involved), and only the newest
+# 10 are kept. Nothing here touches any other release.
+#
+# The build job runs third-party build scripts and the freshly built binary,
+# so it gets a read-only token and no GH_TOKEN; only the publish job can
+# write. Built on Ubuntu 22.04: glibc floor 2.35 or lower.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUNTIME_TAG_PATTERN: '^runtime-v[0-9]+\.[0-9]+\.[0-9]+-[0-9]{14}-[0-9a-f]{7}$'
+  KEEP_RUNTIME_RELEASES: 10
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      ref: ${{ steps.plan.outputs.ref }}
+      tag: ${{ steps.plan.outputs.tag }}
+      built_at: ${{ steps.plan.outputs.built_at }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          out() { echo "$1=$2" >> "$GITHUB_OUTPUT"; echo "$1=$2"; }
+          skip() { echo "::notice::$1"; out mode skip; exit 0; }
+          runtime_releases() {
+            gh api --paginate "repos/$GH_REPO/releases" \
+              --jq '.[] | select(.prerelease and (.draft | not)) | [.created_at, .tag_name] | @tsv' \
+              | while IFS=$'\t' read -r created tag; do
+                  if [[ "$tag" =~ $RUNTIME_TAG_PATTERN ]]; then printf '%s\t%s\n' "$created" "$tag"; fi
+                done | sort -r
+          }
+          case "$EVENT" in
+            workflow_run)
+              [ "$RUN_CONCLUSION" = success ] || skip "CI concluded $RUN_CONCLUSION"
+              [ "$RUN_EVENT" = push ] && [ "$RUN_BRANCH" = main ] && [ "$RUN_REPO" = "$GH_REPO" ] \
+                || skip "not a push to main of $GH_REPO"
+              sha=$RUN_SHA ;;
+            workflow_dispatch)
+              [ "$GITHUB_REF" = refs/heads/main ] || skip "runtime prereleases are built from main only"
+              sha=$GITHUB_SHA ;;
+            *) skip "unhandled event $EVENT" ;;
+          esac
+          # Still on main: the tip itself, or an ancestor of it.
+          tip=$(gh api "repos/$GH_REPO/branches/main" --jq .commit.sha)
+          git fetch --quiet --no-tags origin "$tip"
+          git merge-base --is-ancestor "$sha" "$tip" || skip "$sha is not on main (tip $tip)"
+          # Strictly newer than the newest runtime prerelease, whose commit is
+          # the ancestry baseline; equal or older (a re-run) is a skip.
+          previous=$(runtime_releases | head -1 | cut -f2)
+          base=
+          if [ -n "$previous" ]; then
+            # Resolved through the API, not local refs: the tag may have been
+            # created after this job's checkout. Failing to resolve it is an
+            # error, never a silent skip.
+            base=$(gh api "repos/$GH_REPO/commits/$previous" --jq .sha) \
+              || { echo "::error::cannot resolve $previous"; exit 1; }
+            [ "$base" != "$sha" ] || skip "$previous already covers $sha"
+            git fetch --quiet --no-tags origin "$base" \
+              || { echo "::error::cannot fetch $base for $previous"; exit 1; }
+            git merge-base --is-ancestor "$base" "$sha" || skip "$sha is not newer than $previous"
+          fi
+          version=$(git show "$sha:src-tauri/serve/Cargo.toml" | sed -n 's/^version = "\([0-9.]*\)"$/\1/p' | head -1)
+          [ -n "$version" ] || { echo "::error::no serve version at $sha"; exit 1; }
+          # The committer time orders tags by commit, not by when this ran.
+          committed=$(git show -s --format=%ct "$sha")
+          out mode runtime
+          out ref "$sha"
+          out tag "runtime-v$version-$(date -u -d "@$committed" +%Y%m%d%H%M%S)-${sha:0:7}"
+          out built_at "$(date -u -d "@$committed" +%Y-%m-%dT%H:%M:%SZ)"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.mode == 'runtime'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            asset: terminalx-serve-linux-x64
+          - runner: ubuntu-22.04-arm
+            asset: terminalx-serve-linux-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
+          persist-credentials: false
+      - name: The ref carries the serve crate and its runtime protocol
+        run: |
+          test -f src-tauri/serve/Cargo.toml || { echo "::error::no src-tauri/serve"; exit 1; }
+          grep -q '^runtime-protocol = [0-9]' src-tauri/serve/Cargo.toml || { echo "::error::no runtime-protocol in src-tauri/serve/Cargo.toml"; exit 1; }
+      - name: Show the Rust toolchain
+        run: rustup show && cargo --version
+      - name: Build terminalx-serve (release)
+        working-directory: src-tauri/serve
+        run: cargo build --locked --release --bin terminalx-serve
+      - name: Self-test (start, shell PTY, clean exit)
+        working-directory: src-tauri/serve
+        run: ../target/release/terminalx-serve --data-dir "$RUNNER_TEMP/serve" --project-root "$GITHUB_WORKSPACE" --runtime-kind cloud-workspace --self-test
+      - name: Report the glibc floor
+        run: objdump -T src-tauri/target/release/terminalx-serve | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+      - name: Stage the asset
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          cp src-tauri/target/release/terminalx-serve "$RUNNER_TEMP/out/${{ matrix.asset }}"
+          chmod 0755 "$RUNNER_TEMP/out/${{ matrix.asset }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ runner.temp }}/out/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    # Only runs that plan decided to publish get here, so skipped runs (PR
+    # CI, failed CI, forks) never queue behind or cancel a real publish.
+    concurrency:
+      group: release-serve-publish
+      cancel-in-progress: false
+    env:
+      REF: ${{ needs.plan.outputs.ref }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      BUILT_AT: ${{ needs.plan.outputs.built_at }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
+          sparse-checkout: src-tauri/serve/Cargo.toml
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Write terminalx-serve.json
+        run: |
+          python3 - <<'PY'
+          import json, os, tomllib
+          with open('src-tauri/serve/Cargo.toml', 'rb') as f:
+              crate = tomllib.load(f)['package']
+          manifest = {
+              'version': crate['version'],
+              'protocol': int(crate['metadata']['terminalx']['runtime-protocol']),
+              'commit': os.environ['REF'],
+              'builtAt': os.environ['BUILT_AT'],
+          }
+          with open('assets/terminalx-serve.json', 'w') as f:
+              json.dump(manifest, f, indent=2)
+          print(json.dumps(manifest))
+          PY
+      # Publishes serialize here, so the ancestry check is repeated against
+      # whatever runtime prerelease is newest now, not when plan ran.
+      - name: Publish the runtime prerelease
+        working-directory: assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ $RUNTIME_TAG_PATTERN ]] || { echo "::error::bad runtime tag $TAG"; exit 1; }
+          newest=$(gh api --paginate "repos/$GH_REPO/releases" \
+            --jq '.[] | select(.prerelease and (.draft | not)) | [.created_at, .tag_name] | @tsv' \
+            | while IFS=$'\t' read -r created tag; do
+                if [[ "$tag" =~ $RUNTIME_TAG_PATTERN ]]; then printf '%s\t%s\n' "$created" "$tag"; fi
+              done | sort -r | head -1 | cut -f2)
+          if [ -n "$newest" ]; then
+            status=$(gh api "repos/$GH_REPO/compare/$newest...$REF" --jq .status)
+            if [ "$status" != ahead ]; then
+              echo "::notice::$REF is $status relative to $newest; not publishing"
+              exit 0
+            fi
+          fi
+          files=(terminalx-serve-linux-x64 terminalx-serve-linux-arm64 terminalx-serve.json)
+          sha256sum "${files[@]}" > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "$TAG" "${files[@]}" SHA256SUMS \
+            --target "$REF" --prerelease --latest=false \
+            --title "$TAG" \
+            --notes "Cloud workspace runtime (terminalx-serve) built from $REF. Runtime-only prerelease: no desktop app, never marked latest."
+      - name: Prune runtime prereleases beyond the newest ${{ env.KEEP_RUNTIME_RELEASES }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Only prereleases whose tag is a runtime tag are ever candidates.
+          gh api --paginate "repos/$GH_REPO/releases" \
+            --jq '.[] | select(.prerelease and (.draft | not)) | [.created_at, .tag_name] | @tsv' \
+            | while IFS=$'\t' read -r created tag; do
+                if [[ "$tag" =~ $RUNTIME_TAG_PATTERN ]]; then printf '%s\t%s\n' "$created" "$tag"; fi
+              done | sort -r \
+            | tail -n +"$((KEEP_RUNTIME_RELEASES + 1))" | cut -f2 \
+            | while read -r old; do
+                [[ "$old" =~ $RUNTIME_TAG_PATTERN ]] || continue
+                echo "deleting $old"
+                gh release delete "$old" --cleanup-tag --yes
+              done

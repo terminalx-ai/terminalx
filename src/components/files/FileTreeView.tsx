@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { fs } from "@/lib/api";
 import { useWorkingChanges } from "@/lib/changes";
 import { getDraft, setDraft } from "@/lib/drafts";
 import { openFile, useEditors } from "@/lib/editors";
-import { fileErrorText, StaleRequestError, type FileSource, type SourceEntry } from "@/lib/workspaceFiles";
+import { fileErrorText, localFileSource, StaleRequestError, type FileSource, type SourceEntry } from "@/lib/workspaceFiles";
 import { cn } from "@/lib/cn";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "@/components/ui/menu";
 import type { ChangeStatus } from "@/types/session";
@@ -31,7 +30,7 @@ interface FileTreeViewProps {
   /** Any string that changes when an agent's status does; bumps the git refresh. */
   statusKey?: string;
   refreshTick?: number;
-  /** A cloud workspace's files (PRO-24); the local checkout at `root` when absent. */
+  /** Where the tree reads: the local checkout at `root` when absent, or a cloud workspace's files (PRO-24). */
   source?: FileSource;
 }
 
@@ -64,8 +63,11 @@ function RootedFileTreeView({
   mentionTabId,
   statusKey = "",
   refreshTick = 0,
-  source,
+  source: given,
 }: FileTreeViewProps) {
+  const reader = useMemo(() => given ?? localFileSource(root), [given, root]);
+  // A cloud workspace: watched rather than polled, and never offered local-only actions.
+  const source = reader.kind === "cloud" ? reader : undefined;
   const [children, setChildren] = useState<Record<string, SourceEntry[] | undefined>>({});
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set([""]));
   const [error, setError] = useState<string | null>(null);
@@ -78,7 +80,7 @@ function RootedFileTreeView({
   const load = useCallback(
     async (rel: string) => {
       try {
-        const list: SourceEntry[] = source ? await source.listDir(rel) : await fs.listDir(root, rel);
+        const list: SourceEntry[] = await reader.listDir(rel);
         setChildren((c) => ({ ...c, [rel]: list }));
         setError(null);
       } catch (e) {
@@ -98,7 +100,7 @@ function RootedFileTreeView({
         } else setError(String(e));
       }
     },
-    [root, source],
+    [reader, source],
   );
 
   // First listing on show; a refresh re-lists every directory still open.

@@ -48,7 +48,7 @@ vi.mock("@/lib/models", () => ({
     { id: "auto", label: "Auto", hint: "" },
     { id: "bypassPermissions", label: "Bypass permissions", hint: "" },
   ],
-  bypassEffect: () => ({ flag: "--permission-mode bypassPermissions", effect: "Claude Code stops asking about anything." }),
+  bypassEffect: () => ({ flag: "--dangerously-skip-permissions", effect: "Claude Code stops asking about anything." }),
   refreshModels: vi.fn(),
   upgradeHint: () => null,
   useModels: () => [],

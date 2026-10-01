@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactNode } from "react";
-import { Archive, CircleDot, FolderOpen, GitBranch, MessageSquare, PanelsTopLeft, Square } from "lucide-react";
+import { Archive, CircleDot, Cloud, FolderGit2, FolderOpen, GitBranch, MessageSquare, PanelsTopLeft, Square } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { AgentMark, agentName as agentDisplayName } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,7 @@ import { archiveSession, selectSession } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
 import { workspaceName, type ColumnId } from "@/lib/dashboard";
+import type { CloudDashboardSession } from "@/lib/cloudDashboard";
 import type { Project, SessionEntry } from "@/types/session";
 
 /**
@@ -151,6 +152,122 @@ export function AgentCard({
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => void archiveSession(session.id, true)}>
           <Archive /> Archive
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/**
+ * A cloud session as a card (PRO-23 CS-19), drawn like a local one: its
+ * agents, title, branch, and what it waits on. It runs in a cloud workspace,
+ * so there is no local transcript to quote; the card says where it runs and
+ * what it waits on instead. Opening it only looks: nothing wakes the workspace.
+ */
+export function CloudAgentCard({
+  session,
+  column,
+  agentName,
+  focused,
+  onFocus,
+  onOpen,
+}: {
+  session: CloudDashboardSession;
+  column: ColumnId;
+  agentName: string;
+  focused: boolean;
+  onFocus: () => void;
+  onOpen: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const harnesses = [...new Set(session.tabs.map((t) => t.harness))];
+  const waiting = session.tabs.find((t) => t.status === "waiting");
+  useEffect(() => {
+    if (focused) ref.current?.scrollIntoView({ block: "nearest" });
+  }, [focused]);
+  const state = column === "needs"
+    ? waiting?.waitingOn ? `Wants to use ${waiting.waitingOn}` : "Waiting for your decision"
+    : column === "working" ? "Working" : session.stopped ? "Workspace stopped" : "Finished";
+
+  return (
+    <DropdownMenu>
+      <div
+        ref={ref}
+        role="button"
+        tabIndex={-1}
+        aria-label={`${session.title}, ${harnesses.map(agentDisplayName).join(", ")}, in ${session.orgName} cloud`}
+        data-testid="cloud-agent-card"
+        data-session={session.key}
+        onClick={() => {
+          onFocus();
+          onOpen();
+        }}
+        onFocus={onFocus}
+        onKeyDown={(e) => e.key === "Enter" && onOpen()}
+        className={cn(
+          "group relative flex cursor-default flex-col gap-1.5 overflow-hidden rounded-lg bg-card p-2.5 pl-3 text-left shadow-card outline-none hairline transition-colors hover:bg-selected/50",
+          focused && "ring-2 ring-ring/50",
+        )}
+      >
+        <span
+          aria-hidden
+          className={cn(
+            "absolute left-0 top-2 bottom-2 w-0.5 rounded-full",
+            column === "needs" && "bg-warning",
+            column === "working" && "bg-info animate-pulse-soft",
+            column === "done" && "bg-add",
+          )}
+        />
+
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="flex shrink-0 -space-x-1 text-muted-foreground">
+            {harnesses.map((h) => (
+              <AgentMark key={h} id={h} className="size-4 rounded-full bg-background" decorative />
+            ))}
+          </div>
+          <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{session.title}</span>
+          <span className="shrink-0 text-[11px] tabular-nums text-faint group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0">
+            {relativeTime(session.modified)}
+          </span>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Session menu"
+              className="absolute right-1.5 top-1.5 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <span className="text-[13px] leading-none">…</span>
+            </Button>
+          </DropdownMenuTrigger>
+        </div>
+
+        <div className="flex min-w-0 flex-wrap items-center gap-1">
+          {(session.worktreeName || session.branch) && (
+            <span className="flex min-w-0 max-w-full items-center gap-1 rounded-sm bg-veil-raised px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              <GitBranch className="size-2.5 shrink-0" />
+              <span className="truncate font-mono">{workspaceName(session)}</span>
+            </span>
+          )}
+          <span className="flex min-w-0 shrink items-center gap-1 rounded-sm bg-veil-raised px-1.5 py-0.5 text-[10px] text-muted-foreground" title={`Runs in the cloud workspace ${session.workspaceName} (${session.orgName}), not on this computer`}>
+            <Cloud className="size-2.5 shrink-0" />
+            <span className="truncate">{session.workspaceName}</span>
+          </span>
+        </div>
+
+        <Snippet who={agentName} text={state} tone={column === "needs" ? "warning" : undefined} />
+
+        <div className="flex min-w-0 items-center gap-1.5 pt-0.5 text-[11px] text-faint">
+          <FolderGit2 className="size-3 shrink-0" />
+          <span className="min-w-0 truncate">{session.projectName}</span>
+          <span className="shrink-0">· {session.orgName}</span>
+          {session.tabs.length > 1 && <span className="shrink-0">· {session.tabs.length} tabs</span>}
+        </div>
+      </div>
+
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onSelect={onOpen}>
+          <PanelsTopLeft /> Open
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Archive, ArchiveRestore, ArrowLeft, Bot, Cloud, FolderTree, GitBranch, Loader2, Pause, Plug, Plus, TerminalSquare, Trash2, X } from "lucide-react";
-import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
-import { TerminalView, createTerminal } from "@/components/terminal/TerminalView";
+import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
+import { createTerminal } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
 import { CloudAgentsView } from "./CloudAgents";
+import { CloudTerminalPane } from "./CloudTerminalPane";
 import { CloudFilesView } from "./CloudFiles";
 import { CloudGitView } from "./CloudGit";
 import { CloudCreateWorkspace } from "./CloudCreateWorkspace";
 import { actionsFor, archiveLine, CloudWorkspaceLifecycleDialog, DeletionProgress, type LifecycleAction } from "./CloudWorkspaceLifecycle";
-import { useAccount } from "@/lib/account";
+import { getAccount, useAccount } from "@/lib/account";
+import { applyCloudSnapshot, cloudOrgArg, defaultOrgId, ingestCloudList, unarchiveCloudWorkspace } from "@/lib/cloudCatalog";
 import { failureMessage, PHASES, phaseOf, runtimeNotPickedUp, settled } from "@/lib/cloudCreate";
 import {
   archiving,
@@ -19,7 +21,6 @@ import {
   lifecycleErrorMessage,
   operationFailureText,
   purgeNoticeText,
-  purgeTombstones,
   type PurgeNotice,
 } from "@/lib/cloudLifecycle";
 import {
@@ -33,21 +34,19 @@ import {
 } from "@/lib/api";
 import {
   closeCloudTerminal,
-  cloudTerminalFactory,
   createCloudTerminal,
   detachCloudTerminals,
   errorCode,
   selectCloudTerminal,
   syncCloudTerminals,
-  takeControl,
   useCloudTerminals,
   type CloudTerminal,
 } from "@/lib/cloudTerminals";
-import { getInstance } from "@/lib/terminal";
 import { useTheme } from "@/lib/theme";
+import { cloudProviderName } from "@/lib/cloudSession";
 
 /** Where an open session's commands run, as the page labels it. */
-interface OpenedWorkspace {
+export interface OpenedWorkspace {
   connection: CloudWorkspaceConnection;
   name: string;
   provider: string | null;
@@ -55,12 +54,8 @@ interface OpenedWorkspace {
   workspaceState: string | null;
 }
 
-const PROVIDER_NAMES: Record<string, string> = { box: "Boat", machine0: "Machine0", "local-docker": "Local Docker" };
-
-export function providerName(provider: string | null): string {
-  if (!provider) return "Development runtime";
-  return PROVIDER_NAMES[provider] ?? provider;
-}
+/** A cloud provider's display name. */
+export const providerName = cloudProviderName;
 
 /**
  * A session in a cloud workspace: the desktop attaches to the workspace's
@@ -80,20 +75,30 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
   const [lifecycle, setLifecycle] = useState<{ item: CloudWorkspaceListItem; action: LifecycleAction } | null>(null);
   const [notices, setNotices] = useState<PurgeNotice[]>([]);
   const [rowError, setRowError] = useState<{ id: string; message: string } | null>(null);
-  const names = useRef(new Map<string, string>());
   const { status } = useAccount();
   const scope = status.state === "signed-in" ? (status.context?.scope ?? "signed-in") : "signed-out";
 
   const reload = useCallback(() => {
+    // The page works in the default organization; the list is asked for it,
+    // and filed under it only, so a default change while it is in flight
+    // never files one organization's rows under another.
+    const asked = defaultOrgId(getAccount().status);
     api
-      .cloudWorkspaces()
+      .cloudWorkspaces(cloudOrgArg(asked))
       .then(async (list) => {
+        // Filed under one organization only: the one asked for, or (not known
+        // yet) the one every row and tombstone names. A list that mixes
+        // organizations, or answers for another, is shown but not filed.
+        const named = new Set([...list.workspaces.map((item) => item.workspace.orgId), ...(list.tombstones ?? []).map((tombstone) => tombstone.orgId)]);
+        const orgId = asked ?? (named.size === 1 ? [...named][0] : null);
+        const own = !!orgId && [...named].every((id) => id === orgId);
+        // The catalog drops tombstoned rows, purges what this Mac kept of
+        // them, and keeps the sidebar's copy of the list current.
+        const ingest = own ? ingestCloudList(list, orgId) : Promise.resolve({ notices: [] as PurgeNotice[] });
         const deleted = new Set((list.tombstones ?? []).map((tombstone) => tombstone.id));
-        // A tombstoned workspace is gone, whatever else still lists it.
-        setWorkspaces(list.workspaces.filter((item) => !deleted.has(item.workspace.id)));
+        setWorkspaces(list.workspaces.filter((item) => !deleted.has(item.workspace.id) && (!asked || item.workspace.orgId === asked)));
         setListError(null);
-        for (const item of list.workspaces) names.current.set(item.workspace.id, item.workspace.name);
-        const purged = await purgeTombstones(list.tombstones ?? [], names.current);
+        const { notices: purged } = await ingest;
         if (purged.length) setNotices((current) => [...current, ...purged]);
       })
       .catch((e: unknown) => setListError(errorCode(e)));
@@ -104,6 +109,7 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
   // The create form polls the workspace it tracks; its snapshots keep that
   // row current while the list itself does not poll.
   const progress = useCallback((snapshot: CloudWorkspaceSnapshot) => {
+    applyCloudSnapshot(snapshot);
     setWorkspaces((current) =>
       current?.map((item) => (item.workspace.id === snapshot.workspace.id ? { workspace: snapshot.workspace, latestOperation: snapshot.operation } : item)) ??
       current,
@@ -172,7 +178,7 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
     async (item: CloudWorkspaceListItem) => {
       setRowError(null);
       try {
-        await api.cloudWorkspaceUnarchive(item.workspace.id);
+        await unarchiveCloudWorkspace(item);
         reload();
       } catch (e) {
         setRowError({ id: item.workspace.id, message: lifecycleErrorMessage(errorCode(e)) });
@@ -433,7 +439,7 @@ function LifecycleButtons({ item, onChoose }: { item: CloudWorkspaceListItem; on
   );
 }
 
-function archivingText(item: CloudWorkspaceListItem): string {
+export function archivingText(item: CloudWorkspaceListItem): string {
   return item.latestOperation?.errorCode === "runtime_checkpoint_pending"
     ? "Archiving: waiting for the runtime to save its conversations (up to a minute)…"
     : "Archiving…";
@@ -476,7 +482,7 @@ export function describeWorkspace(item: CloudWorkspaceListItem, now = Date.now()
 }
 
 /** Says, wherever a cloud shell is shown, that it runs in the cloud workspace and not on this Mac. */
-function ExecutionLocation({ provider, name }: { provider: string | null; name: string }) {
+export function ExecutionLocation({ provider, name }: { provider: string | null; name: string }) {
   return (
     <span
       className="inline-flex items-center gap-1 rounded-full border border-hairline px-2 py-0.5 text-[11px] text-muted-foreground"
@@ -490,7 +496,7 @@ function ExecutionLocation({ provider, name }: { provider: string | null; name: 
 
 type View = { kind: "terminal" } | { kind: "agent" } | { kind: "files" } | { kind: "git" };
 
-function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: WorkspaceConnectionState }) {
+export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: WorkspaceConnectionState }) {
   const { connection } = opened;
   const client = connection.client;
   const key = workspaceTargetKey(connection.target);
@@ -662,89 +668,7 @@ function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: Work
   );
 }
 
-function CloudTerminalPane({
-  workspace,
-  terminal,
-  client,
-  connected,
-  manage,
-  base,
-}: {
-  workspace: string;
-  terminal: CloudTerminal;
-  client: WorkspaceRpcClient;
-  connected: boolean;
-  manage: boolean;
-  base: () => ReturnType<typeof createTerminal>;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const create = useCallback(() => cloudTerminalFactory(workspace, terminal, base)(), [workspace, terminal.id]);
-  const controlling = terminal.control === "you";
-
-  const control = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const instance = getInstance(terminal.id, create);
-      const size = instance.fit.proposeDimensions();
-      await takeControl(workspace, client, terminal.id, size && size.cols > 0 && size.rows > 0 ? { cols: size.cols, rows: size.rows } : null);
-    } catch (e) {
-      setError(errorCode(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  let notice: string | null = null;
-  if (terminal.gone === "runtime-restarted") notice = "This terminal ended when the workspace runtime restarted. Input is not sent anywhere.";
-  else if (terminal.gone === "closed") notice = "This terminal was closed.";
-  else if (terminal.exited) notice = `The shell exited${terminal.exitCode === null ? "" : ` with code ${terminal.exitCode}`}.`;
-  else if (terminal.inputError) notice = `Input was not delivered: ${inputErrorText(terminal.inputError)}`;
-
-  return (
-    <div className="flex min-h-0 flex-1 flex-col" data-testid="cloud-terminal">
-      {!terminal.gone && !terminal.exited && !controlling && (
-        <div className="flex items-center gap-2 border-b border-hairline px-3 py-1 text-xs text-muted-foreground" data-testid="cloud-terminal-viewer">
-          <span>
-            {manage ? "Another device controls this terminal's input and size; you are watching." : "View only: this attachment cannot type into or resize terminals."}
-          </span>
-          {manage && (
-            <Button size="sm" variant="outline" disabled={busy || !connected} onClick={() => void control()}>
-              Take control
-            </Button>
-          )}
-        </div>
-      )}
-      {notice && (
-        <p className="border-b border-hairline px-3 py-1 text-xs text-muted-foreground" data-testid="cloud-terminal-notice">
-          {notice}
-        </p>
-      )}
-      {error && <p className="px-3 py-1 text-xs text-red-500">{error}</p>}
-      <div className="min-h-0 flex-1">
-        <TerminalView id={terminal.id} visible create={create} fit={controlling && !terminal.gone} />
-      </div>
-    </div>
-  );
-}
-
-function inputErrorText(code: string): string {
-  switch (code) {
-    case "not_controller":
-      return "another device controls this terminal. Take control to type.";
-    case "unavailable":
-      return "the shell has exited.";
-    case "not_found":
-      return "the terminal no longer exists.";
-    case "not connected":
-      return "not connected to the workspace.";
-    default:
-      return code;
-  }
-}
-
-function describe(state: WorkspaceConnectionState): string {
+export function describe(state: WorkspaceConnectionState): string {
   switch (state.state) {
     case "connected":
       return `Connected · runtime ${state.runtimeVersion} · generation ${state.runtimeGeneration} · ${state.authority}`;

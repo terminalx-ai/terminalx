@@ -48,6 +48,7 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_not_found"
             | "cloud_workspace_request_invalid"
             | "cloud_compute_policy_conflict"
+            | "cloud_compute_running_limit_above_ceiling"
             | "cloud_provider_unavailable"
     )
 }
@@ -347,6 +348,16 @@ mod tests {
         let revision = AccountManager::context_revision(&context());
         let error = service.update_policy(&json!({"maxWorkspaces": 4}), &revision).unwrap_err();
         assert_eq!(error.code, "cloud_workspace_request_invalid");
+    }
+
+    #[test]
+    fn keeps_the_running_limit_ceiling_refusal_distinct() {
+        let body = r#"{"error":"cloud_compute_running_limit_above_ceiling","runningWorkspaceCeiling":2,"message":"x"}"#;
+        let (base, server) = serve_once("422 Unprocessable Entity", body);
+        let error = service(&base).usage().unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.code, "cloud_compute_running_limit_above_ceiling");
+        assert_eq!(error.status, Some(422));
     }
 
     #[test]

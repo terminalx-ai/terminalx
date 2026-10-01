@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import type { AgentEvent } from "@/types/events";
 import type { ChangedFile } from "@/types/session";
@@ -36,33 +35,38 @@ export function changeRange(events: AgentEvent[], fallbackBase?: string | null):
 
 const cache = new Map<string, ChangedFile[]>();
 
-export function useChanges(cwd: string | undefined, range: ChangeRange | null, active: boolean, tick = 0) {
+/**
+ * What a turn changed in a local checkout or a cloud repository: the
+ * source's diff over the turn's range. A closed range (both ends are
+ * snapshots) is cached forever under the source's key.
+ */
+export function useChanges(source: GitSource | undefined, range: ChangeRange | null, active: boolean, tick = 0) {
   const [files, setFiles] = useState<ChangedFile[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    if (!cwd || !range || !active) return;
-    const key = `${cwd}|${range.base}|${range.head ?? "live"}`;
+    if (!source || !range || !active) return;
+    const key = `${source.key}|${range.base}|${range.head ?? "live"}`;
     if (range.head && cache.has(key)) {
       setFiles(cache.get(key)!);
       return;
     }
     let cancelled = false;
     setLoading(true);
-    api
-      .changesBetween(cwd, range.base, range.head)
+    source
+      .changesBetween(range.base, range.head)
       .then((f) => {
         if (cancelled) return;
         if (range.head) cache.set(key, f);
         setFiles(f);
         setError(null);
       })
-      .catch((e) => !cancelled && setError(String(e)))
+      .catch((e) => !cancelled && setError(source.cloud ? source.errorMessage(e) : String(e)))
       .finally(() => !cancelled && setLoading(false));
     return () => {
       cancelled = true;
     };
-  }, [cwd, range?.base, range?.head, active, tick]);
+  }, [source, range?.base, range?.head, active, tick]);
   return { files, loading, error };
 }
 

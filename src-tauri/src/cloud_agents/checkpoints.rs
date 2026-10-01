@@ -131,10 +131,13 @@ impl Checkpoints {
 pub fn projection(agents: &CloudAgents, tab_id: &str, budget: usize) -> Result<Value> {
     let tab = agents.tab(tab_id).ok_or_else(|| anyhow!("no such tab"))?;
     let events = agents.ops.events(&tab.session_id, tab_id)?;
-    Ok(project(&tab, &events, budget))
+    let session = agents.ops.session(&tab.session_id);
+    Ok(project(&tab, session.as_ref(), &events, budget))
 }
 
-fn project(tab: &super::AgentTabInfo, events: &[Value], budget: usize) -> Value {
+/// `session` (title and branch) is additive within schema 1: a reader that
+/// does not know it ignores it.
+fn project(tab: &super::AgentTabInfo, session: Option<&super::SessionSummary>, events: &[Value], budget: usize) -> Value {
     let mut kept = Vec::new();
     let mut size = 0;
     for event in events.iter().rev() {
@@ -147,7 +150,7 @@ fn project(tab: &super::AgentTabInfo, events: &[Value], budget: usize) -> Value 
     }
     let truncated = kept.len() < events.len();
     kept.reverse();
-    json!({
+    let mut projection = json!({
         "v": 1,
         "sessionId": tab.session_id,
         "tabId": tab.tab_id,
@@ -164,7 +167,11 @@ fn project(tab: &super::AgentTabInfo, events: &[Value], budget: usize) -> Value 
         "events": kept,
         "truncated": truncated,
         "updatedAt": now_ms(),
-    })
+    });
+    if let Some(session) = session {
+        projection["session"] = json!({ "title": session.title, "branch": session.branch });
+    }
+    projection
 }
 
 /// Build, seal and upload one tab's checkpoint.
@@ -178,10 +185,11 @@ pub fn upload(agents: &CloudAgents, tab_id: &str) -> Result<(), CallError> {
     // Removed meanwhile: nothing to upload.
     let Some(tab) = agents.tab(tab_id) else { return Ok(()) };
     let events = agents.ops.events(&tab.session_id, tab_id).map_err(transient)?;
+    let session = agents.ops.session(&tab.session_id);
     // Halve the event budget until the compressed ciphertext fits.
     let mut budget = PROJECTION_BUDGET;
     let packed = loop {
-        let projection = project(&tab, &events, budget);
+        let projection = project(&tab, session.as_ref(), &events, budget);
         let packed = crypto::gzip(projection.to_string().as_bytes()).map_err(transient)?;
         if packed.len() + 16 <= crypto::MAX_CHECKPOINT_CIPHERTEXT || budget < 4096 {
             break packed;

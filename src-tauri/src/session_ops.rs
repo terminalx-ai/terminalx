@@ -110,10 +110,7 @@ pub(crate) fn new_tab_entry(t: &NewTab) -> TabEntry {
         title: None,
         model: t.model.clone(),
         effort: t.effort.clone(),
-        permission_mode: t
-            .permission_mode
-            .clone()
-            .unwrap_or_else(|| index::DEFAULT_PERMISSION_MODE.into()),
+        permission_mode: index::permission_mode_or_default(t.permission_mode.as_deref()),
         provider_session_id: None,
         status: TabStatus::Idle,
         created: index::now(),
@@ -246,4 +243,90 @@ pub(crate) fn remove_session_entries(doomed: &[SessionEntry]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Title, pin and archive changes to one session. `None` leaves a field as it is.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPatch {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub pinned: Option<bool>,
+    #[serde(default)]
+    pub archived: Option<bool>,
+}
+
+impl SessionPatch {
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none() && self.pinned.is_none() && self.archived.is_none()
+    }
+}
+
+/// Apply a [`SessionPatch`] and return the updated entry.
+pub(crate) fn update_session_meta(session_id: &str, patch: &SessionPatch) -> Result<SessionEntry> {
+    index::update_session(session_id, |s| {
+        if let Some(title) = &patch.title {
+            s.title = title.clone();
+        }
+        if let Some(pinned) = patch.pinned {
+            s.pinned = pinned;
+        }
+        if let Some(archived) = patch.archived {
+            s.archived = archived;
+        }
+        Ok(s.clone())
+    })
+    .map_err(err)
+}
+
+/// Add an agent tab to a session and make it the active one.
+pub(crate) fn add_tab_entry(session_id: &str, tab: &NewTab) -> Result<TabEntry> {
+    let t = new_tab_entry(tab);
+    let out = t.clone();
+    index::update_session(session_id, |s| {
+        s.tabs.push(t);
+        s.active_tab = Some(out.id.clone());
+        Ok(())
+    })
+    .map_err(err)?;
+    Ok(out)
+}
+
+/// Delete a session, its logs, attachments and (best effort) its worktree.
+/// Removing the worktree takes every session that ran in it along, since a
+/// checkout that no longer exists has nothing left for them to run in.
+/// `stop` ends whatever each doomed session's tabs are running before
+/// anything is removed. Returns the removed sessions.
+pub(crate) fn delete_session_blocking(
+    sink: &dyn EventSink,
+    session_id: &str,
+    remove_worktree: bool,
+    stop: &dyn Fn(&SessionEntry),
+) -> Result<Vec<SessionEntry>> {
+    let entry = index::get(session_id).map_err(err)?;
+    let worktree = remove_worktree.then(|| entry.worktree_name.clone()).flatten();
+    let attached = if worktree.is_some() { sessions_in_workspace(Path::new(&entry.cwd))? } else { vec![entry.clone()] };
+    for session in &attached {
+        stop(session);
+    }
+    let worktree_removed = match worktree.as_deref() {
+        Some(name) => match git::remove_worktree(Path::new(&entry.project_path), name) {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("worktree cleanup for {session_id} failed: {e:#}");
+                false
+            }
+        },
+        None => false,
+    };
+    // A worktree that survived keeps hosting its other sessions.
+    let doomed: Vec<SessionEntry> = if worktree_removed { attached } else { vec![entry.clone()] };
+    remove_session_entries(&doomed)?;
+    if worktree_removed {
+        notify_workspace_deleted(sink, &entry.project_path, &doomed);
+    } else {
+        notify_sessions_deleted(sink, &doomed);
+    }
+    Ok(doomed)
 }
