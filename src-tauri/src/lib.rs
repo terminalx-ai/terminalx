@@ -28,6 +28,8 @@ mod commands;
 #[cfg(feature = "desktop")]
 mod cloud_agent_client;
 #[cfg(feature = "desktop")]
+mod cloud_diagnostics;
+#[cfg(feature = "desktop")]
 mod cloud_remote;
 #[cfg(feature = "desktop")]
 mod cloud_workspaces;
@@ -336,6 +338,9 @@ pub fn run() {
             cloud_remote::cloud_remote_send,
             cloud_remote::cloud_remote_activate,
             cloud_remote::cloud_remote_detach,
+            cloud_diagnostics::commands::cloud_diagnostics,
+            cloud_diagnostics::commands::cloud_connection_diagnostics,
+            cloud_diagnostics::commands::cloud_diagnostics_export,
             cloud_agent_client::cloud_agent_enqueue,
             cloud_agent_client::cloud_agent_outbox,
             cloud_agent_client::cloud_agent_outbox_sync,

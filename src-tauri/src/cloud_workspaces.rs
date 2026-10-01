@@ -23,6 +23,8 @@ const SUPPORTED_PROVIDERS: &str = if cfg!(debug_assertions) { "machine0,box,loca
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const RESPONSE_LIMIT_BYTES: u64 = 512 * 1024;
 const MAX_RETRY_AFTER_SECONDS: u64 = 60 * 60;
+/// Diagnostics carry up to a few hundred operations with their history.
+const DIAGNOSTICS_RESPONSE_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -1086,6 +1088,37 @@ impl Client {
         idempotency_key: Option<&str>,
         risk: RequestRisk,
     ) -> Result<T, CloudWorkspaceClientError> {
+        self.send(method, context, tail, query, body, idempotency_key, risk, RESPONSE_LIMIT_BYTES)
+    }
+
+    /// Like [`Self::request`], for an answer that may pass the usual size cap.
+    #[allow(clippy::too_many_arguments)]
+    fn request_limited<T: DeserializeOwned>(
+        &self,
+        context: &AccountContext,
+        tail: &[&str],
+        query: Option<(&str, &str)>,
+        body: Option<Value>,
+        idempotency_key: Option<&str>,
+        risk: RequestRisk,
+        limit: u64,
+    ) -> Result<T, CloudWorkspaceClientError> {
+        let method = if matches!(risk, RequestRisk::Read) { "GET" } else { "POST" };
+        self.send(method, context, tail, query, body, idempotency_key, risk, limit)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        context: &AccountContext,
+        tail: &[&str],
+        query: Option<(&str, &str)>,
+        body: Option<Value>,
+        idempotency_key: Option<&str>,
+        risk: RequestRisk,
+        limit: u64,
+    ) -> Result<T, CloudWorkspaceClientError> {
         let mut url = self.base.clone();
         {
             let mut segments = url.path_segments_mut().map_err(|_| {
@@ -1117,7 +1150,7 @@ impl Client {
             None => request.call(),
         };
         match response {
-            Ok(response) => decode_response(response, risk),
+            Ok(response) => decode_response(response, risk, limit),
             Err(ureq::Error::Status(status, response)) => Err(http_error(status, response, risk)),
             Err(ureq::Error::Transport(_)) => Err(transport_error(risk)),
         }
@@ -1159,6 +1192,12 @@ impl CloudWorkspaceService {
                 self.account.context_in(organization).map_err(|code| CloudWorkspaceClientError::local(code, false))
             }
         }
+    }
+
+    /// The Organization a call for `organization` (the active one when none)
+    /// is made in: a member Organization, or an error. No request is made.
+    pub fn organization_in(&self, organization: Option<&str>) -> Result<String, CloudWorkspaceClientError> {
+        self.context_in(organization).map(|(context, _)| context.organization_id)
     }
 
     fn context(&self) -> Result<AccountContext, CloudWorkspaceClientError> {
@@ -1425,6 +1464,41 @@ impl CloudWorkspaceService {
                 error.requires_original_account_context = false;
             }
             error
+        })
+    }
+
+    /// Cloud diagnostics of `org` (the active Organization when none) for the
+    /// last `window_days` (1-30) days (PRO-38). Owners and administrators of
+    /// that Organization only: the server checks the role there, and a member
+    /// gets `organization_admin_required`. A server without the endpoint
+    /// answers 404, reported as `cloud_diagnostics_not_supported`.
+    pub fn diagnostics(&self, org: Option<&str>, window_days: u8) -> Result<crate::cloud_diagnostics::CloudDiagnostics, CloudWorkspaceClientError> {
+        if !(1..=crate::cloud_diagnostics::MAX_WINDOW_DAYS).contains(&window_days) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        let days = window_days.to_string();
+        self.run_in(org, RequestRisk::Read, |client, context| {
+            let result: crate::cloud_diagnostics::CloudDiagnostics = client
+                .request_limited(
+                    context,
+                    &["cloud-diagnostics"],
+                    Some(("windowDays", &days)),
+                    None,
+                    None,
+                    RequestRisk::Read,
+                    DIAGNOSTICS_RESPONSE_LIMIT_BYTES,
+                )
+                .map_err(|mut error| {
+                    if error.status == Some(404) && error.code == "cloud_workspace_unavailable" {
+                        error.code = "cloud_diagnostics_not_supported".into();
+                        error.retryable = false;
+                    }
+                    error
+                })?;
+            if result.organization_id != context.organization_id {
+                return Err(invalid_response());
+            }
+            Ok(result)
         })
     }
 
@@ -1700,8 +1774,9 @@ impl CloudWorkspaceService {
 fn decode_response<T: DeserializeOwned>(
     response: ureq::Response,
     risk: RequestRisk,
+    limit: u64,
 ) -> Result<T, CloudWorkspaceClientError> {
-    let bytes = bounded_body(response, risk)?;
+    let bytes = bounded_body_limited(response, risk, limit)?;
     serde_json::from_slice(&bytes).map_err(|_| post_send_error(risk))
 }
 
@@ -1709,13 +1784,21 @@ fn bounded_body(
     response: ureq::Response,
     risk: RequestRisk,
 ) -> Result<Vec<u8>, CloudWorkspaceClientError> {
+    bounded_body_limited(response, risk, RESPONSE_LIMIT_BYTES)
+}
+
+fn bounded_body_limited(
+    response: ureq::Response,
+    risk: RequestRisk,
+    limit: u64,
+) -> Result<Vec<u8>, CloudWorkspaceClientError> {
     let mut bytes = Vec::new();
     response
         .into_reader()
-        .take(RESPONSE_LIMIT_BYTES + 1)
+        .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| post_send_error(risk))?;
-    if bytes.len() as u64 > RESPONSE_LIMIT_BYTES {
+    if bytes.len() as u64 > limit {
         return Err(post_send_error(risk));
     }
     Ok(bytes)
@@ -2953,6 +3036,91 @@ mod tests {
         let error = service.preflight(None, vec![repo("app", None)]).unwrap_err();
         request.join().unwrap();
         assert_eq!((error.code.as_str(), error.retryable), ("cloud_workspace_unavailable", true));
+    }
+
+    fn diagnostics_body(organization_id: &str) -> String {
+        json!({
+            "v": 1, "organizationId": organization_id, "generatedAt": 10,
+            "window": { "from": 1, "to": 10, "maxOperations": 200, "truncated": false },
+            "stageTimings": { "create": { "samples": 0, "totalMs": { "p50": null, "p95": null }, "stages": {} } },
+            "operations": [], "workspaces": [], "closeReasons": [],
+            "newerField": { "ignored": true }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn diagnostics_uses_the_desktop_contract_and_the_window() {
+        let (base, _, request) = serve_once(response("200 OK", &diagnostics_body("org-1"), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let diagnostics = service.diagnostics(None, 7).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/cloud-diagnostics?windowDays=7 HTTP/1.1"));
+        let lower = captured.text.to_ascii_lowercase();
+        assert!(lower.contains("authorization: bearer native-secret-token"));
+        assert!(lower.contains("x-terminalx-cloud-workspace-contract: providers-v1"));
+        assert_eq!(diagnostics.window.max_operations, Some(200));
+        assert_eq!(diagnostics.stage_timings.create.unwrap().total_ms.p50, None);
+    }
+
+    #[test]
+    fn diagnostics_of_a_member_organization_use_its_own_path() {
+        // An older server: another Organization is refused before any request.
+        let (_, service) = test_service("http://127.0.0.1:9");
+        assert_eq!(service.diagnostics(Some("org-2"), 7).unwrap_err().code, "cloud_organization_unavailable");
+
+        // The target Organization is the path's; the server checks the role there.
+        let (base, _, request) = serve_once(response("200 OK", &diagnostics_body("org-2"), ""), Duration::ZERO);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        assert_eq!(service.diagnostics(Some("org-2"), 7).unwrap().organization_id, "org-2");
+        assert!(request.join().unwrap().text.starts_with("GET /v1/desktop/orgs/org-2/cloud-diagnostics?windowDays=7 HTTP/1.1"));
+
+        // An answer for another Organization than the one asked never lands.
+        let (base, _, request) = serve_once(response("200 OK", &diagnostics_body("org-1"), ""), Duration::ZERO);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        assert_eq!(service.diagnostics(Some("org-2"), 7).unwrap_err().code, "cloud_workspace_invalid_response");
+        request.join().unwrap();
+
+        // A member of the target gets the server's refusal, whatever they are elsewhere.
+        let (base, _, request) = serve_once(response("403 Forbidden", r#"{"error":"organization_admin_required"}"#, ""), Duration::ZERO);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        assert_eq!(service.diagnostics(Some("org-2"), 7).unwrap_err().code, "organization_admin_required");
+        request.join().unwrap();
+
+        // Never an Organization the user is not a member of.
+        assert_eq!(service.diagnostics(Some("org-3"), 7).unwrap_err().code, "cloud_organization_unavailable");
+        // What the export and the close log are scoped to.
+        assert_eq!(service.organization_in(None).unwrap(), "org-1");
+        assert_eq!(service.organization_in(Some("org-2")).unwrap(), "org-2");
+        assert_eq!(service.organization_in(Some("org-3")).unwrap_err().code, "cloud_organization_unavailable");
+    }
+
+    #[test]
+    fn diagnostics_refusals_old_servers_and_foreign_answers() {
+        let (base, _, request) = serve_once(response("403 Forbidden", r#"{"error":"organization_admin_required"}"#, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.diagnostics(None, 7).unwrap_err();
+        request.join().unwrap();
+        assert_eq!((error.code.as_str(), error.status), ("organization_admin_required", Some(403)));
+
+        let (base, _, request) = serve_once(response("404 Not Found", "404 Not Found", ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.diagnostics(None, 30).unwrap_err();
+        request.join().unwrap();
+        assert_eq!((error.code.as_str(), error.retryable), ("cloud_diagnostics_not_supported", false));
+
+        let (base, _, request) = serve_once(response("200 OK", &diagnostics_body("org-2"), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.diagnostics(None, 1).unwrap_err();
+        request.join().unwrap();
+        assert_eq!(error.code, "cloud_workspace_invalid_response");
+
+        let (_, service) = test_service("http://127.0.0.1:9");
+        assert_eq!(service.diagnostics(None, 0).unwrap_err().code, "cloud_workspace_request_invalid");
+        assert_eq!(service.diagnostics(None, 31).unwrap_err().code, "cloud_workspace_request_invalid");
     }
 
     #[test]
