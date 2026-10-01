@@ -74,6 +74,7 @@ import { useCloudSession } from "@/lib/cloudSession";
 import { resetCloudAgents } from "@/lib/cloudAgents";
 import { resetCloudTerminals } from "@/lib/cloudTerminals";
 import { resetCloudConnections } from "@/lib/cloudConnections";
+import { resetCollab } from "@/lib/cloudCollab";
 import { selectSessionTab } from "@/lib/terminal";
 import { resetCloudWakes } from "@/lib/sessionBackend";
 import { getSessionStore, selectCloudSession, upsertSession } from "@/lib/sessions";
@@ -328,6 +329,7 @@ afterEach(() => {
   resetCloudTerminals();
   resetCloudWakes();
   resetCloudConnections();
+  resetCollab();
   client.close();
 });
 
@@ -767,5 +769,29 @@ describe("a shared cloud workspace in SessionView (PRO-30)", () => {
     const items = within(menu).getAllByRole("menuitem");
     expect(items.length).toBeGreaterThan(0);
     expect(items.every((item) => item.getAttribute("aria-disabled") === "true" || item.hasAttribute("data-disabled"))).toBe(true);
+  });
+
+  it("offers the waking Terminal on a stopped workspace only to someone who would manage it", async () => {
+    const asleep = async (role: "manager" | "driver" | "viewer") => {
+      resetCloudConnections();
+      const item = shared(role, role !== "viewer", "suspended");
+      if (role === "manager") item.workspace.authority = "manage";
+      setCatalog(item);
+      render(wrap(<CloudHarness />));
+      await act(async () => runtime.emit({ state: "suspended" }));
+      await screen.findByTestId("session-connection");
+      mouseClick(screen.getByRole("button", { name: "New tab" }));
+      return screen.findByRole("menu");
+    };
+    for (const role of ["driver", "viewer"] as const) {
+      const menu = await asleep(role);
+      // Terminals are a manager's: no wake is offered that would end in a refusal.
+      expect(within(menu).queryByRole("menuitem", { name: /wakes the workspace/ })).toBeNull();
+      expect(within(menu).getByRole("menuitem", { name: /Terminal/ }).getAttribute("aria-disabled")).toBe("true");
+      cleanup();
+    }
+    const menu = await asleep("manager");
+    expect(within(menu).getByRole("menuitem", { name: "Terminal on the VM: wakes the workspace" })).toBeTruthy();
+    expect(activate).not.toHaveBeenCalled();
   });
 });

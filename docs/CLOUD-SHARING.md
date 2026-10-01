@@ -302,9 +302,11 @@ organization is live in the sidebar. Sharing follows them there:
   `participate` attachment can send; with no role known (an older server or
   runtime, or before the runtime has a member list) the attachment rule stays:
   only `manage` sends.
-* **While asleep.** The last known access, else the list's `you`, gates the
-  same controls, so a sleeping workspace never shows a viewer an open
-  composer.
+* **While asleep.** The list's `you`, else the last access this desktop saw,
+  gates the same controls, so a sleeping workspace never shows a viewer an
+  open composer. The "+" menu's Terminal wakes a stopped workspace only for
+  someone who would manage it (terminals are a manager's); a viewer or driver
+  is not offered a wake that would end in a refusal.
 * **Terminals.** Drivers get "Take control" and see who is typing.
 * **What each person is offered.** Stop is hidden unless this person may stop
   (the lease holder or a manager); the model, effort and mode pickers are

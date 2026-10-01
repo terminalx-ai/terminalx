@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AccountStatus, CloudSelectedRepository, CloudWorkspaceListItem } from "@/lib/api";
+import type { AccountStatus, CloudSelectedRepository, CloudWorkspaceList, CloudWorkspaceListItem } from "@/lib/api";
 
 const mocks = vi.hoisted(() => ({
   api: {
@@ -58,6 +58,9 @@ import {
 } from "./cloudCatalog";
 import { resetPurged } from "./cloudLifecycle";
 import { createWorkspace, type CreateApi } from "./cloudCreate";
+// What the Rust `cloud_workspaces` command hands the webview for a saas #137/#139
+// list; cloud_workspaces.rs asserts it serializes exactly this.
+import rustShapedList from "./fixtures/cloudWorkspaceList.webview.json";
 
 const ORG = "org-a";
 
@@ -176,6 +179,28 @@ describe("placement", () => {
   it("does not call a repository inaccessible before the organization's list is known", () => {
     const placed = placeCloudProjects(org([item("w", { repositories: [{ identity: "github.com/acme/api", fullName: "acme/api", cloneUrl: null }] })], null), {});
     expect(placed.projects[0].selected).toBe(true);
+  });
+});
+
+describe("a list as the Rust command passes it on (saas #137)", () => {
+  it("places the workspace by repositories[0].identity and keeps runtimeActivity, authority and quota", async () => {
+    const list = structuredClone(rustShapedList) as unknown as CloudWorkspaceList;
+    for (const entry of list.workspaces) entry.workspace.orgId = ORG;
+    for (const tombstone of list.tombstones ?? []) tombstone.orgId = ORG;
+    mocks.api.cloudWorkspaces.mockResolvedValue(list);
+    signIn();
+    bootCloudCatalog();
+    await refreshCloudCatalog(ORG);
+    const catalog = getCloudCatalog().orgs[ORG];
+    const placed = placeCloudProjects(catalog, {});
+    expect(placed.projects.map((p) => [p.identity, p.fullName, p.blank, p.workspaces.map((w) => [w.item.workspace.id, w.placedBy])])).toEqual([
+      ["github.com/acme/api", "acme/api", false, [["workspace-1", "server"]]],
+    ]);
+    const workspace = catalog.workspaces[0].workspace;
+    expect(workspace.runtimeActivity).toMatchObject({ online: true, activeTurns: 1, pendingApprovals: 2 });
+    expect(workspace.authority).toBe("participate");
+    expect(workspace.lastActivityAt).toBe(1790000006000);
+    expect(catalog.quota).toMatchObject({ used: 1, limit: 2, running: { used: 1, limit: 2 }, total: { used: 5, limit: 20 } });
   });
 });
 

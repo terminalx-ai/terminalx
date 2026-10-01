@@ -4,7 +4,7 @@ import { RemoteGit, listRepositories, type RemoteRepository } from "@terminalx/p
 import { createTerminal } from "@/components/terminal/TerminalView";
 import { useAccount } from "@/lib/account";
 import type { CloudWorkspaceConnection, CloudWorkspaceListItem } from "@/lib/api";
-import { retainCloudConnection, setSelectedCloudConnection, useCloudConnection, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
+import { retainCloudConnection, setSelectedCloudConnection, useCloudConnection, waitCloudConnected, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
 import {
   flushCloudAgentCache,
   loadCloudAgents,
@@ -105,10 +105,21 @@ export interface CloudSessionModel {
   collab: { key: string; you: WorkspaceYou | null; live: boolean; notShared: boolean };
   /** May take control of a terminal: manage, or a driver of a shared workspace. */
   mayControlTerminals: boolean;
+  /**
+   * Opening a terminal may wake this stopped workspace: only for someone who
+   * would manage it once it runs (terminals are a manager's). A viewer or a
+   * driver is never offered a wake that would end in a refusal.
+   */
+  canWakeForTerminal: boolean;
   /** Stopped as far as this client knows: nothing here attaches or wakes until an interactive command. */
   asleep: boolean;
   terminals: CloudTerminal[];
-  openTerminal(): Promise<void>;
+  /**
+   * A new terminal on the VM. On a stopped workspace it opens only with
+   * `wake: true`, the reader's explicit choice: one wake, then the terminal
+   * once the runtime is back. Without it a stopped workspace stays stopped.
+   */
+  openTerminal(options?: { wake?: boolean }): Promise<void>;
   addAgentTab(params: { agent: string; model?: string; effort?: string | null; mode?: string }): Promise<void>;
   /** The runtime supports adding tabs to an existing session (`session/2`). */
   canAddTabs: boolean;
@@ -275,13 +286,14 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     if (!generation || !client) return;
     return startCollab(workspaceKey, client);
   }, [generation, client, workspaceKey]);
-  // Live when connected with collab/1; the last known access while asleep;
-  // else what the workspace list says. A live runtime without collab/1 has
-  // no sharing: the attachment's authority decides, as before.
+  // Live when connected with collab/1. While not connected, what the
+  // workspace list says now (the server's word), else the last access this
+  // desktop saw. A live runtime without collab/1 has no sharing: the
+  // attachment's authority decides, as before.
   const listedRole = item?.workspace.you?.role ?? null;
   const listedApprove = item?.workspace.you?.canApprove ?? false;
   const fromList = useMemo(() => (listedRole ? listedYou({ role: listedRole, canApprove: listedApprove }) : null), [listedRole, listedApprove]);
-  const you: WorkspaceYou | null = knownYou(state, collab) ?? (connected ? null : fromList);
+  const you: WorkspaceYou | null = connected ? knownYou(state, collab) : (fromList ?? collab.lastYou);
   const collabLive = connected && collab.available;
 
   const [agentList, setAgentList] = useState(DEFAULT_AGENTS);
@@ -408,13 +420,35 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     [key, repo?.identity, orgId, workspaceKey, root, runtimeSession, item?.workspace.launch?.workBranch, firstTitle, ownTabs, asleep],
   );
 
-  const openTerminal = useCallback(async () => {
-    if (backend.readOnlyReason) throw new Error(backend.readOnlyReason);
-    if (!client || !connected) throw new Error("Terminals open once the workspace is connected.");
-    if (!manage) throw new Error("View only: this attachment cannot open terminals.");
-    const terminal = await createCloudTerminal(workspaceKey, client, { cols: 100, rows: 30 }, terminalBase, { sessionId: runtimeSessionId });
-    selectSessionTab(key, { kind: "terminal", id: terminal.id });
-  }, [backend.readOnlyReason, client, connected, manage, workspaceKey, terminalBase, runtimeSessionId, key]);
+  // Who would manage once it runs: the role when sharing says (PRO-30), else what opening would grant.
+  const wouldManage = sharingKnown(you) ? you.role === "manager" : authority !== "participate";
+  const canWakeForTerminal = asleep && !connected && !backend.readOnlyReason && wouldManage;
+  const openTerminal = useCallback(
+    async (options: { wake?: boolean } = {}) => {
+      if (backend.readOnlyReason) throw new Error(backend.readOnlyReason);
+      let target = client && connected ? client : null;
+      if (!target) {
+        if (!options.wake || !asleep) throw new Error("Terminals open once the workspace is connected.");
+        // Never wake compute for someone who could not open the terminal anyway.
+        if (!canWakeForTerminal) throw new Error("View only: opening terminals needs a workspace admin.");
+        // Chosen explicitly on a stopped workspace: one wake, then the terminal once it runs.
+        const lease = await wakeCloudConnection({ orgId, workspaceId });
+        try {
+          await waitCloudConnected(lease.client);
+          target = lease.client;
+        } finally {
+          lease.release();
+        }
+      }
+      const live = target.connection;
+      if (live.state !== "connected" || live.authority !== "manage" || (sharingKnown(live.you) && live.you.role !== "manager")) {
+        throw new Error("View only: this attachment cannot open terminals.");
+      }
+      const terminal = await createCloudTerminal(workspaceKey, target, { cols: 100, rows: 30 }, terminalBase, { sessionId: runtimeSessionId });
+      selectSessionTab(key, { kind: "terminal", id: terminal.id });
+    },
+    [backend.readOnlyReason, client, connected, asleep, canWakeForTerminal, orgId, workspaceId, workspaceKey, terminalBase, runtimeSessionId, key],
+  );
 
   const addAgentTab = useCallback(
     async (params: { agent: string; model?: string; effort?: string | null; mode?: string }) => {
@@ -444,6 +478,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     manage,
     collab: { key: workspaceKey, you, live: collabLive, notShared: notShared(state, you) },
     mayControlTerminals: manage || (collabLive && canDrive(you)),
+    canWakeForTerminal,
     asleep,
     terminals,
     openTerminal,

@@ -240,6 +240,16 @@ describe("sessions under the project", () => {
     expect(within(sessionNode(`cloud:${ORG}:driven:d`)).queryByRole("button", { name: /Session menu/ })).toBeNull();
   });
 
+  it("hides the session menu from a participant, whom the runtime would refuse anyway", async () => {
+    await load([item("shared", { repositories: [acmeApi], authority: "participate" }), item("mine", { repositories: [acmeWeb], authority: "manage" })], {
+      shared: { sessions: [session("p", "Someone else's")], capabilities: ["session/1", "session/2"] },
+      mine: { sessions: [session("m", "My own")], capabilities: ["session/1", "session/2"] },
+    });
+    mount();
+    expect(within(sessionNode(`cloud:${ORG}:shared:p`)).queryByRole("button", { name: /Session menu/ })).toBeNull();
+    expect(within(sessionNode(`cloud:${ORG}:mine:m`)).getByRole("button", { name: "Session menu for My own" })).toBeTruthy();
+  });
+
   it("puts the workspace lifecycle actions in the project's menu", async () => {
     await load([item("fix-login", { repositories: [acmeApi] })]);
     mount();

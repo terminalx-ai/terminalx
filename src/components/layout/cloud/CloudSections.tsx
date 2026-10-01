@@ -621,8 +621,16 @@ function WorkspaceSessions({ node, shown, showLocation }: { node: CloudWorkspace
   const { sessions, capabilities, manage: manages, known } = useCloudWorkspaceSessions(node, { load: shown, showArchived: store.showArchived, selectedKey: store.selectedSessionId });
   const activity = useWorkspaceActivity(node, sessions, sessions.every((row) => row.source !== "live"));
   const card = workspaceCard(node.item, activity);
-  // Renaming, pinning, archiving and deleting sessions is a manager's (session/2 refuses anyone else).
-  const manage = manages && !!capabilities?.includes("session/2");
+  const connection = useCloudConnection(node.key);
+  // What this desktop may do here: the attach result's authority once it has
+  // connected, else what the list says opening would grant (§20.1). A
+  // participant is refused session changes, so it is not offered them; an
+  // older server that says neither keeps the menu.
+  const authority = connection.authority ?? node.item.workspace.authority ?? null;
+  // Both rules hold: the attachment's authority (above), and on a shared
+  // workspace the manager role (PRO-30): session/2 refuses anyone else, a
+  // demoted admin's lingering manage attachment included.
+  const manage = manages && !!capabilities?.includes("session/2") && (authority === null || authority === "manage");
   const { state } = node.item.workspace;
   if (!sessions.length) {
     const openable = (state === "ready" || state === "suspended") && activity.tone !== "changing" && activity.tone !== "attention";
