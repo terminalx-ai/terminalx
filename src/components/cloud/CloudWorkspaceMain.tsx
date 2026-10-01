@@ -99,7 +99,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   const org = parsed ? catalog.orgs[parsed.orgId] : undefined;
 
   return (
-    <main className="flex h-full min-w-0 flex-1 flex-col" data-testid="cloud-workspace-main">
+    <main className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-clip" data-testid="cloud-workspace-main">
       <header
         data-tauri-drag-region="deep"
         className="flex h-(--titlebar-h) shrink-0 items-center gap-2 border-b border-hairline px-2"

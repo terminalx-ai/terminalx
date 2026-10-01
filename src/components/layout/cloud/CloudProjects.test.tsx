@@ -54,6 +54,9 @@ const sessions = await import("@/lib/sessions");
 const prefs = await import("@/lib/prefs");
 const { resetCloudAgents } = await import("@/lib/cloudAgents");
 const { resetCloudSessions } = await import("@/lib/cloudSessions");
+const cloudTerminals = await import("@/lib/cloudTerminals");
+const terminalStore = await import("@/lib/terminal");
+const { setVisibleSessionTab } = await import("@/lib/visibleTab");
 
 const ORG = "org-a";
 const acmeApi = { identity: "github.com/acme/api", fullName: "acme/api", cloneUrl: "https://github.com/acme/api.git", primary: true };
@@ -145,6 +148,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  cloudTerminals.resetCloudTerminals();
   catalog.resetCloudCatalog();
   resetCloudAgents();
   resetCloudSessions();
@@ -451,5 +455,119 @@ describe("rows behave like local rows", () => {
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(document.activeElement).toBe(name);
     elsewhere.remove();
+  });
+});
+
+// A cloud session's terminals in the sidebar, like a local session's shells.
+describe("terminals under the session", () => {
+  const KEY = `cloud:${ORG}:fix-login:s1`;
+  const WORKSPACE = `cloud:${ORG}:fix-login`;
+  const pty = (ptyId: string, number: number, sessionId?: string) => ({ ptyId, number, epoch: "e1", pid: number, cwd: "/w", cols: 80, rows: 24, createdAt: 1, offset: 0, exited: false, exitCode: null, control: "other" as const, ...(sessionId ? { sessionId } : {}) });
+  const xterm = () => ({ el: document.createElement("div"), term: { write: vi.fn(), onData: vi.fn(), onBinary: vi.fn(), onResize: vi.fn(), dispose: vi.fn(), cols: 80, rows: 24, resize: vi.fn() }, fit: {} }) as never;
+  /** What a connected session view put in the store: the runtime's terminal list. */
+  const listed = async (terminals: ReturnType<typeof pty>[]) => {
+    const client = { connection: { state: "connected" }, listPtys: async () => ({ epoch: "e1", terminals }), attachPty: async () => ({ cursor: () => undefined, detach: () => undefined }) } as never;
+    await act(async () => {
+      await cloudTerminals.syncCloudTerminals(WORKSPACE, client, xterm);
+    });
+  };
+  const tabRows = () => within(sessionNode(KEY)).getAllByRole("treeitem").filter((row) => row.hasAttribute("aria-controls"));
+  /** A session that is not open starts collapsed; its chevron shows its tabs. */
+  const expand = (title: string) => fireEvent.click(screen.getByRole("button", { name: `Expand ${title}` }));
+  const selectedRows = () => tabRows().filter((row) => row.getAttribute("aria-selected") === "true").map((row) => row.getAttribute("aria-label"));
+
+  beforeEach(async () => {
+    await load([item("fix-login", { repositories: [acmeApi] })], { "fix-login": { sessions: [session("s1", "Fix login redirect"), session("s2", "Add tests")], capabilities: ["session/2"] } });
+  });
+
+  it("lists a session's terminals under it, and a new one when the runtime's list gains it", async () => {
+    mount();
+    expand("Fix login redirect");
+    expand("Add tests");
+    expect(tabRows().map((row) => row.getAttribute("aria-label"))).toEqual(["Claude"]);
+    await listed([pty("p1", 1, "s1")]);
+    expect(tabRows().map((row) => row.getAttribute("aria-label"))).toEqual(["Claude", "Terminal 1"]);
+    // Someone else opens another: it appears with the next read of the list.
+    await listed([pty("p1", 1, "s1"), pty("p2", 2, "s1"), pty("p3", 3, "s2")]);
+    expect(tabRows().map((row) => row.getAttribute("aria-label"))).toEqual(["Claude", "Terminal 1", "Terminal 2"]);
+    expect(within(sessionNode(`cloud:${ORG}:fix-login:s2`)).getByRole("treeitem", { name: "Terminal 3" })).toBeTruthy();
+    expect(screen.queryByTestId("cloud-workspace-terminals")).toBeNull();
+    expectNoAttachOrResume();
+  });
+
+  it("marks the row of the tab that shows, and a row switches to its tab", async () => {
+    await listed([pty("p1", 1, "s1")]);
+    act(() => sessions.selectCloudSession(KEY));
+    mount();
+    // The agent tab shows first: its row is the selected one, not the terminal's.
+    expect(selectedRows()).toEqual(["Claude"]);
+
+    fireEvent.click(within(sessionNode(KEY)).getByRole("treeitem", { name: "Terminal 1" }));
+    expect(terminalStore.getTerminalState().selected[KEY]).toEqual({ kind: "terminal", id: `cloud:${WORKSPACE}:p1` });
+    expect(selectedRows()).toEqual(["Terminal 1"]);
+
+    // Clicking the agent row goes back: it used to stay highlighted and do nothing.
+    fireEvent.click(within(sessionNode(KEY)).getByRole("treeitem", { name: "Claude" }));
+    expect(terminalStore.getTerminalState().selected[KEY]).toEqual({ kind: "agent", id: "s1-tab" });
+    expect(selectedRows()).toEqual(["Claude"]);
+    expectNoAttachOrResume();
+  });
+
+  it("follows the open session view: the tab it reports showing is the row that is marked", async () => {
+    await listed([pty("p1", 1, "s1")]);
+    act(() => sessions.selectCloudSession(KEY));
+    mount();
+    // The shortcuts (⌘⇧[ / ⌘⇧]) switch in the view; the sidebar follows what it shows.
+    act(() => setVisibleSessionTab(KEY, { kind: "terminal", id: `cloud:${WORKSPACE}:p1` }));
+    expect(selectedRows()).toEqual(["Terminal 1"]);
+    act(() => setVisibleSessionTab(KEY, { kind: "agent", id: "s1-tab" }));
+    expect(selectedRows()).toEqual(["Claude"]);
+    act(() => setVisibleSessionTab(KEY, null));
+  });
+
+  it("opens a row of another session on that tab", async () => {
+    await listed([pty("p3", 3, "s2")]);
+    act(() => sessions.selectCloudSession(KEY));
+    mount();
+    const other = `cloud:${ORG}:fix-login:s2`;
+    expand("Add tests");
+    fireEvent.click(within(sessionNode(other)).getByRole("treeitem", { name: "Terminal 3" }));
+    expect(sessions.getSessionStore().selectedSessionId).toBe(other);
+    expect(terminalStore.getTerminalState().selected[other]).toEqual({ kind: "terminal", id: `cloud:${WORKSPACE}:p3` });
+    expect(within(sessionNode(other)).getByRole("treeitem", { name: "Terminal 3" }).getAttribute("aria-selected")).toBe("true");
+    // The session left behind marks no tab.
+    expect(selectedRows()).toEqual([]);
+  });
+
+  it('lists terminals that belong to no session once, as "Workspace terminals" (a runtime without pty/2)', async () => {
+    await listed([pty("p1", 1), pty("p2", 2)]);
+    mount();
+    expand("Fix login redirect");
+    expect(tabRows().map((row) => row.getAttribute("aria-label"))).toEqual(["Claude"]);
+    const group = screen.getByTestId("cloud-workspace-terminals");
+    expect(within(group).getByText("Workspace terminals")).toBeTruthy();
+    const rows = within(group).getAllByRole("treeitem").filter((row) => row.hasAttribute("aria-controls"));
+    expect(rows.map((row) => row.getAttribute("aria-label"))).toEqual(["Terminal 1", "Terminal 2"]);
+
+    // Choosing one opens the workspace's own view on that terminal.
+    fireEvent.click(rows[1]);
+    expect(sessions.getSessionStore().selectedCloudWorkspace).toBe(WORKSPACE);
+    expect(cloudTerminals.cloudTerminalsOf(WORKSPACE).selected).toBe(`cloud:${WORKSPACE}:p2`);
+    // Its row is marked once that view shows the terminal.
+    expect(rows[1].getAttribute("aria-selected")).toBe("false");
+    act(() => cloudTerminals.setCloudTerminalShown(WORKSPACE, true));
+    expect(rows[1].getAttribute("aria-selected")).toBe("true");
+    expect(rows[0].getAttribute("aria-selected")).toBe("false");
+    expectNoAttachOrResume();
+  });
+
+  it("gives the title its first characters ahead of the chips, on cloud rows only", async () => {
+    mount();
+    // jsdom lays nothing out, so no width is set here; the WebKit layout check
+    // (pnpm test:webkit-layout) measures it. The chips are what can shrink.
+    const chip = within(sessionNode(KEY)).getByTestId("cloud-location-chip");
+    expect(chip.className).toContain("shrink");
+    expect(chip.className).not.toContain("shrink-0");
+    expect(chip.getAttribute("title")).toContain("Cloud workspace fix-login");
   });
 });

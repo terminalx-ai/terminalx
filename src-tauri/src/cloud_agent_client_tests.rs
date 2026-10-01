@@ -102,6 +102,50 @@ fn command_json(envelope: &Value, state: &str) -> Value {
 }
 
 #[test]
+fn workspace_keys_live_under_the_app_service_or_a_debug_builds_own() {
+    // Release builds, and debug builds given no service of their own.
+    assert_eq!(key_service_name("com.terminalx.next.dev", None), "com.terminalx.next.dev.cloud-agent-keys");
+    // Two development instances on one Mac: each keeps its keys apart.
+    let alice = key_service_name("com.terminalx.next.dev", Some("dev.terminalx.alice"));
+    let bob = key_service_name("com.terminalx.next.dev", Some("dev.terminalx.bob"));
+    assert_eq!(alice, "dev.terminalx.alice.cloud-agent-keys");
+    assert_eq!(bob, "dev.terminalx.bob.cloud-agent-keys");
+    assert_ne!(alice, bob);
+    // Never the account session's own service.
+    assert_ne!(alice, "dev.terminalx.alice");
+}
+
+/// A key store that takes keys and then cannot be read (a locked Keychain, or one that refuses this build).
+#[derive(Default)]
+struct UnreadableKeys(MemoryKeys);
+
+impl KeyStore for UnreadableKeys {
+    fn put(&self, organization_id: &str, workspace_id: &str, key_id: &str, key: &[u8; crypto::KEY_LEN]) -> Result<()> {
+        self.0.put(organization_id, workspace_id, key_id, key)
+    }
+    fn get(&self, _: &str, _: &str, _: &str) -> Result<Option<[u8; crypto::KEY_LEN]>> {
+        Err(anyhow!("the keychain is locked"))
+    }
+    fn delete(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<()> {
+        self.0.delete(organization_id, workspace_id, key_id)
+    }
+}
+
+#[test]
+fn an_unreadable_key_store_is_reported_as_unavailable_not_as_a_missing_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Arc::new(Fixed(Mutex::new(Some((USER.into(), ORG.into()))), Mutex::new(Vec::new())));
+    let base = serve(Arc::new(|_, _, _| Some((500, json!({})))));
+    let client = CloudAgentClient::with(account, Arc::new(UnreadableKeys::default()), Url::parse(&base).unwrap(), dir.path().join("cloud-agent"));
+    client
+        .store_keys(USER, ORG, WS, &json!({ "currentKeyId": KEY_ID, "keys": [{ "keyId": KEY_ID, "key": crypto::b64(&key()), "createdAt": 1 }] }))
+        .unwrap();
+    // The workspace has a key; it just cannot be read. Connecting again would not fix that.
+    assert_eq!(client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" })).unwrap_err(), "cloud_agent_key_store_unavailable");
+    assert_eq!(client.has_key(ORG, WS).unwrap_err(), "cloud_agent_key_store_unavailable");
+}
+
+#[test]
 fn a_command_needs_a_workspace_key_first() {
     let fixture = fixture(&serve(Arc::new(|_, _, _| Some((500, json!({}))))));
     let error = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" })).unwrap_err();

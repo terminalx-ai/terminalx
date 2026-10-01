@@ -375,6 +375,23 @@ describe("cloud agent tabs", () => {
     expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe("hi");
     act(() => undefined);
   });
+
+  it("says the key store could not be read, not that this device needs to connect", async () => {
+    liveTabs = [tabInfo()];
+    render(view(connected()));
+    await screen.findByLabelText("Prompt");
+    mocks.invoke.mockImplementation((cmd: string, args?: Record<string, unknown>) =>
+      cmd === "cloud_agent_enqueue" ? Promise.reject("cloud_agent_key_store_unavailable") : backend(cmd, args),
+    );
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "hi" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByText(/could not read its key for this workspace from the system key store/)).toBeTruthy();
+    // The key exists; connecting again would not help, and the raw code is not shown.
+    expect(screen.queryByText(/Connect to this workspace once/)).toBeNull();
+    expect(screen.queryByText(/cloud_agent_key_store_unavailable/)).toBeNull();
+    expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe("hi");
+    act(() => undefined);
+  });
 });
 
 describe("shared cloud workspace agent tabs (PRO-30)", () => {
