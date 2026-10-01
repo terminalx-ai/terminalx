@@ -156,3 +156,20 @@ describe("worktree deletion events", () => {
     expect(sessions.getSessionStore().workspaces[projectPath]).toEqual([main]);
   });
 });
+
+describe("cloud workspace selection (PRO-58)", () => {
+  it("shows a cloud workspace until another session or view is chosen", () => {
+    sessions.selectCloudWorkspace("cloud:org-a:ws-1");
+    expect(sessions.getSessionStore().selectedCloudWorkspace).toBe("cloud:org-a:ws-1");
+    expect(sessions.getSessionStore().selectedSessionId).toBeNull();
+    sessions.openIssues();
+    expect(sessions.getSessionStore().selectedCloudWorkspace).toBeNull();
+    sessions.selectCloudWorkspace("cloud:org-a:ws-1");
+    sessions.selectSession(null);
+    expect(sessions.getSessionStore().selectedCloudWorkspace).toBeNull();
+    sessions.selectCloudWorkspace("cloud:org-a:ws-1");
+    // Focusing a local project in the sidebar is not navigation away.
+    sessions.selectProjectInSidebar(null);
+    expect(sessions.getSessionStore().selectedCloudWorkspace).toBe("cloud:org-a:ws-1");
+  });
+});

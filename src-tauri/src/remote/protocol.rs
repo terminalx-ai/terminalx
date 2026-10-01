@@ -13,8 +13,17 @@ use serde_json::{json, Value};
 
 pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 
-/// Namespace versions this build speaks, in preference order.
-pub const CAPABILITIES: [&str; 6] = ["pty/1", "fs/1", "git/1", "session/1", "keys/1", "lifecycle/1"];
+/// Namespace versions this build speaks, in preference order. A newer
+/// version adds methods or fields to its namespace; it never changes what the
+/// older one means, so a client that asks only for `session/1` is served
+/// exactly as before.
+/// - `session/2`: `session.update`, `session.addTab`, `session.delete` and
+///   the `session.sessions` notification.
+/// - `pty/2`: `pty.create` takes a `sessionId`, and `pty.list` returns it.
+/// - `agents/1`: `runtime.agents`, the installed agents with their models,
+///   efforts and modes.
+pub const CAPABILITIES: [&str; 9] =
+    ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1"];
 
 /// Authority an attachment grants, from the API's `authority` (`manage` →
 /// runtime scope, `participate` → session scope).
@@ -71,6 +80,13 @@ pub const METHODS: &[Method] = &[
     method("keys.get", "keys/1", Manage, false),
     method("keys.rotate", "keys/1", Manage, true),
     method("session.unsubscribe", "session/1", Participate, false),
+    // CS-12: the session index, through the same `session_ops` as local.
+    // Participants never change it.
+    method("session.update", "session/2", Manage, true),
+    method("session.addTab", "session/2", Manage, true),
+    method("session.delete", "session/2", Manage, true),
+    // What a new session or tab may run; read-only, like `harness::offered`.
+    method("runtime.agents", "agents/1", Participate, false),
     method("pty.create", "pty/1", Manage, true),
     method("pty.list", "pty/1", Participate, false),
     // Input and size belong to the terminal's controller; `pty.control`
@@ -328,7 +344,15 @@ mod tests {
     fn every_method_names_a_served_capability_and_mutations_are_idempotent() {
         for method in METHODS {
             assert!(CAPABILITIES.contains(&method.capability), "{}", method.name);
-            assert!(method.name.starts_with(method.capability.split('/').next().unwrap()));
+            // `runtime.agents` is the one method served by a namespace it is
+            // not named after: `agents/1` describes the runtime's agents.
+            let namespace = if method.name == "runtime.agents" { "agents" } else { method.name.split('.').next().unwrap() };
+            assert_eq!(namespace, method.capability.split('/').next().unwrap(), "{}", method.name);
+        }
+        for name in ["session.update", "session.addTab", "session.delete"] {
+            let method = find_method(name).unwrap();
+            assert!(method.idempotent, "{name}");
+            assert_eq!((method.capability, method.authority), ("session/2", Manage), "{name}");
         }
         for name in ["pty.create", "fs.write", "git.commit", "session.send", "session.create"] {
             assert!(find_method(name).unwrap().idempotent, "{name}");
@@ -341,6 +365,11 @@ mod tests {
     fn negotiation_grants_the_intersection_and_refuses_no_overlap() {
         let granted = negotiate(&json!({"protocol": PROTOCOL, "want": ["pty/1", "fs/2", "session/1"]})).unwrap();
         assert_eq!(granted, vec!["pty/1", "session/1"]);
+        // A session/1-only client is not handed the additions.
+        let old = negotiate(&json!({"protocol": PROTOCOL, "want": ["pty/1", "fs/1", "git/1", "session/1", "keys/1", "lifecycle/1"]})).unwrap();
+        assert!(!old.iter().any(|capability| ["pty/2", "session/2", "agents/1"].contains(&capability.as_str())));
+        let new = negotiate(&json!({"protocol": PROTOCOL, "want": CAPABILITIES})).unwrap();
+        assert_eq!(new, CAPABILITIES.to_vec());
         assert_eq!(negotiate(&json!({"protocol": PROTOCOL, "want": ["pty/9"]})).unwrap_err().code, "update_required");
         assert_eq!(negotiate(&json!({"protocol": "terminalx-workspace-rpc/2", "want": ["pty/1"]})).unwrap_err().code, "update_required");
     }

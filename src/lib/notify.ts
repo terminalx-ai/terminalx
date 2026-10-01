@@ -3,6 +3,9 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { getPrefs } from "@/lib/prefs";
 import { getSessions, selectSession, subscribeSessions } from "@/lib/sessions";
+import { isUnread, sessionColumn } from "@/lib/dashboard";
+import { createCloudAttentionTracker, getCloudDashboard, openCloudSession, subscribeCloudDashboard, type CloudAttention } from "@/lib/cloudDashboard";
+import { isCloudKey } from "@/types/target";
 import { sessionStatus, type SessionEntry, type TabEntry, type TabStatus } from "@/types/session";
 import type { AutomationRun } from "@/types/automations";
 
@@ -20,6 +23,8 @@ export interface Notice {
   sessionId: string;
   tabId: string;
   kind: NoticeKind;
+  /** The agent, for a session the local store does not hold (a cloud one). */
+  harness?: string;
   title: string;
   body: string;
   at: number;
@@ -48,7 +53,9 @@ export function dismissNotice(id: string) {
 }
 
 export function openNotice(n: Notice) {
-  selectSession(n.sessionId);
+  // A cloud session opens on the tab that asked, and only looks: nothing wakes its workspace.
+  if (isCloudKey(n.sessionId)) openCloudSession(n.sessionId, n.tabId);
+  else selectSession(n.sessionId);
   dismissNotice(n.id);
 }
 
@@ -158,11 +165,45 @@ export function noteAutomationFailure(name: string, run: AutomationRun) {
   window.setTimeout(() => dismissNotice(id), 8000);
 }
 
+// ---- cloud sessions (PRO-23 CS-19)
+
+let observeCloud: ReturnType<typeof createCloudAttentionTracker> | null = null;
+
+function agentLabel(harness: string): string {
+  return getSessions().harnesses.find((h) => h.id === harness)?.name ?? (harness === "claude" ? "Claude" : harness === "codex" ? "Codex" : harness || "Agent");
+}
+
+/** Raise a cloud session's wait or finish: the same focus-aware path as a local tab's. */
+export function raiseCloudAttention({ kind, session, tab }: CloudAttention) {
+  const agent = agentLabel(tab.harness);
+  const title = `TerminalX — ${kind === "waiting" ? `${agent} needs attention` : `${agent} finished`}`;
+  const where = `${session.title} · ${session.orgName} cloud`;
+  const body = kind === "waiting" ? `${where}. Open the session to review its pending request.` : `${where}. Open the session to review the conversation.`;
+  if (!focused) {
+    void canNotify().then((ok) => ok && sendNotification({ title, body }));
+    return;
+  }
+  playSound(kind);
+  if (getSessions().selectedSessionId === session.key) return;
+  const id = `${session.key}:${tab.tabId}:${Date.now()}`;
+  notices = [...notices.filter((n) => !(n.sessionId === session.key && n.tabId === tab.tabId)), { id, sessionId: session.key, tabId: tab.tabId, kind, harness: tab.harness, title, body, at: Date.now() }];
+  emit();
+  window.setTimeout(() => dismissNotice(id), 8000);
+}
+
+function onCloudSessions() {
+  observeCloud ??= createCloudAttentionTracker();
+  for (const event of observeCloud(getCloudDashboard())) raiseCloudAttention(event);
+}
+
 // ---- dock badge
 
 let lastBadge = -1;
 function refreshBadge() {
-  const n = getSessions().sessions.filter((s) => !s.archived && ["waiting", "completed"].includes(sessionStatus(s))).length;
+  const local = getSessions().sessions.filter((s) => !s.archived && ["waiting", "completed"].includes(sessionStatus(s))).length;
+  // Cloud sessions that want the reader back: waiting, or finished and unread.
+  const cloud = getCloudDashboard().filter((s) => !s.archived && s.tabs.length > 0 && (sessionColumn(s) === "needs" || isUnread(s))).length;
+  const n = local + cloud;
   if (n === lastBadge) return;
   lastBadge = n;
   try {
@@ -179,6 +220,11 @@ export function startNotifications() {
   if (started) return;
   started = true;
   subscribeSessions(refreshBadge);
+  subscribeCloudDashboard(() => {
+    onCloudSessions();
+    refreshBadge();
+  });
+  onCloudSessions();
   refreshBadge();
 }
 

@@ -1,4 +1,4 @@
-import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { dispositionFacts, hasUnpublishedWork, type DispositionFacts, type RepositoryFacts } from "@terminalx/portable/workspaceGit";
 import {
   api,
@@ -13,6 +13,7 @@ import {
   type CloudWorkspaceOperation,
   type CloudWorkspaceTombstone,
 } from "@/lib/api";
+import { closeCloudConnection } from "@/lib/cloudConnections";
 import { dropCloudAgents } from "@/lib/cloudAgents";
 import { dropCloudTerminals } from "@/lib/cloudTerminals";
 import { dropEditors, getEditors } from "@/lib/editors";
@@ -120,6 +121,7 @@ export function checkpointText(checkpoint: CloudWorkspaceOperation["checkpoint"]
 }
 
 const MESSAGES: Record<string, string> = {
+  cloud_workspace_concurrency_exceeded: "Your organization is running as many cloud workspaces as its limit allows. Stop one to start another.",
   cloud_workspace_active_work: "An agent is still working in this workspace.",
   cloud_workspace_archived: "This workspace is archived. Unarchive it first.",
   cloud_teardown_in_progress: "Your organization is shutting down its cloud workspaces; this cannot change now.",
@@ -154,8 +156,14 @@ export function operationFailureText(operation: Pick<CloudWorkspaceOperation, "e
 
 export type RuntimeCheck =
   | { kind: "checked"; facts: DispositionFacts }
-  /** Not running: nothing can be asked without waking it. */
+  /** Not running (stopped, archived, starting): nothing can be asked without waking it. */
   | { kind: "offline" }
+  /**
+   * Running by the server's account, but this desktop could not reach its
+   * runtime in time (the relay was slow, the connection kept dropping).
+   * Nothing is known about its work, which is not the same as it being off.
+   */
+  | { kind: "unreachable" }
   /** The runtime predates `lifecycle.dispositionFacts`. */
   | { kind: "unsupported" }
   | { kind: "error"; message: string };
@@ -188,6 +196,18 @@ export function risksOf(server: CloudWorkspaceDisposition | null, runtime: Runti
   };
 }
 
+/**
+ * What to call a repository in a list of work at risk. The runtime reports
+ * paths relative to the workspace, so a blank project's one repository (the
+ * workspace folder itself) comes back as ".": that shows as the workspace's
+ * name, or "Project folder" without one.
+ */
+export function repositoryLabel(repo: Pick<RepositoryFacts, "path">, workspaceName?: string | null): string {
+  const path = repo.path.trim().replace(/^(\.\/)+/, "").replace(/\/+$/, "");
+  if (path === "" || path === ".") return workspaceName?.trim() || "Project folder";
+  return path;
+}
+
 /** One line per thing at risk in a repository. */
 export function repositoryRiskLines(repo: RepositoryFacts): string[] {
   const lines: string[] = [];
@@ -198,36 +218,59 @@ export function repositoryRiskLines(repo: RepositoryFacts): string[] {
   return lines;
 }
 
-function waitConnected(client: WorkspaceRpcClient, withinMs: number): Promise<boolean> {
-  if (client.connection.state === "connected") return Promise.resolve(true);
+type WaitResult = "connected" | "suspended" | "unreachable";
+
+/**
+ * Wait for a connection to be up. `suspended` is the native side's answer
+ * from the API that compute is not running (a `connect` never wakes it);
+ * anything else that does not end connected in time is `unreachable`.
+ */
+function waitConnected(client: WorkspaceRpcClient, withinMs: number): Promise<WaitResult> {
+  const now = (state: WorkspaceConnectionState["state"]): WaitResult | null =>
+    state === "connected" ? "connected" : state === "suspended" ? "suspended" : state === "stopped" || state === "updateRequired" ? "unreachable" : null;
+  const first = now(client.connection.state);
+  if (first) return Promise.resolve(first);
   return new Promise((resolve) => {
-    const done = (value: boolean) => {
+    let settled = false;
+    let stop: (() => void) | null = null;
+    const done = (value: WaitResult) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      stop();
+      stop?.();
       resolve(value);
     };
-    const timer = setTimeout(() => done(false), withinMs);
-    const stop = client.onState((state) => {
-      if (state.state === "connected") done(true);
-      else if (["suspended", "stopped", "updateRequired"].includes(state.state)) done(false);
+    const timer = setTimeout(() => done("unreachable"), withinMs);
+    // `onState` reports the current state at once, before it returns.
+    stop = client.onState((state) => {
+      const result = now(state.state);
+      if (result) done(result);
     });
+    if (settled) stop();
   });
 }
 
 /**
  * Ask a running workspace's runtime what an archive or delete would lose
- * (`lifecycle.dispositionFacts`). Never wakes suspended compute: a workspace
- * that is not running is reported offline instead of guessed at.
+ * (`lifecycle.dispositionFacts`). Looking never wakes compute: only a
+ * workspace the server reports ready is connected to, with `connect`,
+ * reusing a connection the desktop already holds. A workspace that is not
+ * running is reported `offline`; one that is running but could not be
+ * reached in time is `unreachable`, never "not running".
  */
 export async function checkRuntime(workspace: CloudWorkspace, server: CloudWorkspaceDisposition | null, withinMs = 15_000): Promise<RuntimeCheck> {
   if (server && !server.runtimeFacts.available) return { kind: "unsupported" };
-  if (workspace.state !== "ready") return { kind: "offline" };
+  // The server's just-read state is fresher than the list row's.
+  if ((server?.state ?? workspace.state) !== "ready") return { kind: "offline" };
   const target = { kind: "cloud" as const, organizationId: workspace.orgId, workspaceId: workspace.id };
   // Only a connection made for this check is closed after it.
   const owned = !hasWorkspaceConnection(target);
   try {
     const connection = await workspaceConnection(target, "connect");
-    if (!connection || !(await waitConnected(connection.client, withinMs))) return { kind: "offline" };
+    if (!connection) return { kind: "unreachable" };
+    const reached = await waitConnected(connection.client, withinMs);
+    if (reached === "suspended") return { kind: "offline" };
+    if (reached === "unreachable") return { kind: "unreachable" };
     const facts = await dispositionFacts(connection.client);
     return facts ? { kind: "checked", facts } : { kind: "unsupported" };
   } catch (error) {
@@ -275,6 +318,7 @@ export async function purgeTombstones(tombstones: CloudWorkspaceTombstone[], nam
     const scope = { organizationId: tombstone.orgId, workspaceId: tombstone.id };
     const target = { kind: "cloud" as const, ...scope };
     const key = workspaceTargetKey(target);
+    closeCloudConnection({ orgId: tombstone.orgId, workspaceId: tombstone.id });
     closeWorkspaceConnection(target);
     const editors = getEditors().editors.filter((entry) => entry.sessionId === key);
     const unsavedFiles = editors.filter((entry) => entry.dirty).length;

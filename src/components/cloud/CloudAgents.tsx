@@ -4,9 +4,10 @@ import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/po
 import { Chat } from "@/components/chat/Chat";
 import { Composer } from "@/components/chat/Composer";
 import { Button } from "@/components/ui/button";
+import { runningLimitReached } from "@/lib/runningLimit";
 import { useTabLog } from "@/lib/agentEvents";
 import { buildTranscript } from "@/lib/transcript";
-import { EFFORT_LABEL, PERMISSION_MODES, useModels } from "@/lib/models";
+import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, useModels } from "@/lib/models";
 import {
   attachCloudAgentTab,
   closeCloudAgentTab,
@@ -101,7 +102,7 @@ export function CloudAgentsView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="cloud-agents">
-      <StatusBar state={state} tab={active} snapshot={snapshot} workspaceState={workspaceState} />
+      <StatusBar state={state} tab={active} snapshot={snapshot} workspaceState={workspaceState} orgId={scope.organizationId} />
       <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-hairline px-3 py-1" role="tablist" aria-label="Agent tabs">
         {tabs.map((tab, index) => (
           <div key={tab.tabId} className="flex items-center" data-testid="cloud-agent-tab">
@@ -186,17 +187,19 @@ function StatusBar({
   tab,
   snapshot,
   workspaceState,
+  orgId,
 }: {
   state: WorkspaceConnectionState;
   tab: CloudAgentTab | null;
   snapshot: CloudAgentsSnapshot;
   workspaceState: string | null;
+  orgId: string;
 }) {
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline px-3 py-1 text-[11px] text-muted-foreground">
       <Chip label="Connection" value={connectionLabel(state)} testId="cloud-agent-connection" />
       <Chip label="Agent" value={tab ? turnLabel(tab) : "No tab"} testId="cloud-agent-turn" />
-      <Chip label="Workspace" value={provisioningLabel(workspaceState, snapshot.wake, state)} testId="cloud-agent-provisioning" />
+      <Chip label="Workspace" value={provisioningLabel(workspaceState, snapshot.wake, state, snapshot.wake === "unavailable" && runningLimitReached(orgId))} testId="cloud-agent-provisioning" />
     </div>
   );
 }
@@ -248,9 +251,15 @@ export function turnLabel(tab: CloudAgentTab): string {
   }
 }
 
-export function provisioningLabel(workspaceState: string | null, wake: WakeResult | null, state: WorkspaceConnectionState): string {
+/**
+ * `runningLimitReached`: the server does not say why a wake was unavailable,
+ * but when the organization's last list shows its running limit reached,
+ * that is the likely reason, and stopping a workspace is the way out.
+ */
+export function provisioningLabel(workspaceState: string | null, wake: WakeResult | null, state: WorkspaceConnectionState, runningLimitReached = false): string {
   if (wake === "queued") return "Waking";
   if (wake === "in-progress" && state.state !== "connected") return "Starting";
+  if (wake === "unavailable" && runningLimitReached) return "Cannot wake: the running limit is reached. Stop a workspace (commands stay queued)";
   if (wake === "unavailable") return "Cannot wake (commands stay queued)";
   if (state.state === "waitingForRuntime") return "Starting";
   if (state.state === "connected") return "Ready";
@@ -282,7 +291,7 @@ function NewAgentForm({
   const models = useModels(agent);
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
-  const [mode, setMode] = useState("manual");
+  const [mode, setMode] = useState(DEFAULT_PERMISSION_MODE);
   const [busy, setBusy] = useState(false);
   const chosen = models.find((m) => m.id === model) ?? models.find((m) => m.isDefault);
   const select = "rounded-md border border-hairline bg-transparent px-2 py-1 text-xs";
@@ -337,7 +346,7 @@ function NewAgentForm({
 
 const KEY_MISSING = "cloud_agent_key_missing";
 
-function commandError(e: unknown): string {
+export function commandError(e: unknown): string {
   const code = errorText(e);
   if (code === KEY_MISSING) return "Connect to this workspace once so this device can encrypt commands for it.";
   if (code === DEV_SCOPE_NOTICE) return DEV_SCOPE_NOTICE;
@@ -484,7 +493,7 @@ function CloudAgentPane({
           Agent process ended — the saved conversation resumes on your next message.
         </p>
       )}
-      <Outbox entries={entries} followUps={info.followUps} onSendAgain={(e) => void interactive(() => sendAgain(scope, e, connected ? client : null)).catch(() => undefined)} />
+      <CloudOutbox entries={entries} followUps={info.followUps} onSendAgain={(e) => void interactive(() => sendAgain(scope, e, connected ? client : null)).catch(() => undefined)} />
       <div className="min-h-0 flex-1">
         <Chat
           sessionId={info.sessionId}
@@ -538,7 +547,7 @@ const STATE_TEXT: Record<string, string> = {
 const KIND_TEXT: Record<string, string> = { send: "Message", steer: "Steer", stop: "Stop", "permission-decision": "Decision" };
 
 /** Commands on their way, and the ones whose fate needs the reader. */
-function Outbox({
+export function CloudOutbox({
   entries,
   followUps,
   onSendAgain,

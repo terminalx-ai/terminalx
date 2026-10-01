@@ -48,7 +48,9 @@ In `--json` output, read the accessibility tree and action indexes from `result.
 
 ## App Selectors
 
-Prefer bundle IDs from `list-apps`; names are acceptable when unambiguous. Use `pid:<number>` only when bundle ID or name matching is ambiguous, or when the app has no bundle ID (a binary run outside an app bundle, such as a dev build).
+Prefer bundle IDs from `list-apps`; names are acceptable when unambiguous. Use `pid:<number>` only when bundle ID or name matching is ambiguous, or when the app has no bundle ID (a binary run outside an app bundle, such as a dev build). When several running copies share one bundle ID (TerminalX Dev builds, for example), target the one you mean with `pid:<n>` from `list-apps`.
+
+`--restore-window` (and a click, which brings its window forward) activates the exact running instance the selector resolved to, by pid. Computer use never launches an app and never asks macOS to open one by bundle ID, so it cannot start a second or stale copy. A name or bundle ID picks an instance that is already running; a target that is not running is an `app_not_running` error.
 
 ```text
 terminalx computer get-app-state --app "Microsoft Edge" --json
@@ -145,6 +147,7 @@ Slack: the accessibility tree may be shallow while the screenshot contains usefu
 ## Errors
 
 - `app_not_found`: run `list-apps` and retry with the returned app name or `pid:<n>` (or a bundle ID on macOS). If the target is a web app such as Gmail, choose the desktop browser app/window that contains it; do not retry `terminalx computer ... --app Gmail` unchanged because `terminalx computer` app selectors refer to desktop apps, not website names.
+- `app_not_running`: the targeted instance quit, and computer use never launches apps. Ask the reader to start it (or start it yourself only if asked), then run `list-apps` and retry with the new `pid:<n>`.
 - `app_blocked`: stop; the target is intentionally blocked from computer-use.
 - `window_not_found` / `window_stale`: run `list-windows`, choose a current selector, then rerun `get-app-state`.
 - `window_not_focused`: retry once with `--restore-window`; if the message says restore was already requested, stop retrying restore and bring the app forward manually or check permissions. For editable fields prefer `set-value`, then inspect before assuming keyboard input worked.

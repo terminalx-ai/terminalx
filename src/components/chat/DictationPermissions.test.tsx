@@ -2,6 +2,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { useRef, useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mouseClick } from "@/test/press";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 
@@ -115,7 +116,8 @@ describe("passive dictation surfaces", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("transcription_models"));
     expect(invoke).not.toHaveBeenCalledWith("transcription_inputs");
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: /System default/i }), { button: 0, ctrlKey: false });
+    // A whole mouse click: the picker opens on the click, not on pointerdown alone.
+    mouseClick(screen.getByRole("button", { name: /System default/i }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("transcription_inputs"));
   });
 });

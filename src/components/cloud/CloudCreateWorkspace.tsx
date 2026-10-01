@@ -31,8 +31,9 @@ import {
   type PendingCreate,
   type PhaseId,
 } from "@/lib/cloudCreate";
+import { cloudOrgArg, rememberCreatedWorkspace } from "@/lib/cloudCatalog";
 import { errorCode } from "@/lib/cloudTerminals";
-import { EFFORT_LABEL, PERMISSION_MODES, useModels } from "@/lib/models";
+import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, useModels } from "@/lib/models";
 
 const AGENTS = [
   { id: "claude", label: "Claude Code" },
@@ -79,7 +80,7 @@ export function CloudCreateWorkspace({
     agent: "claude",
     model: "",
     effort: "",
-    mode: "acceptEdits",
+    mode: DEFAULT_PERMISSION_MODE,
     accessMode: "private",
   });
   const [step, setStep] = useState<CreateStep | null>(null);
@@ -135,6 +136,7 @@ export function CloudCreateWorkspace({
         pending: retry ? pending : null,
         onStep: setStep,
         onPending: keep,
+        onCreated: (created, request) => rememberCreatedWorkspace(created, request.repositories),
       });
       setTracked(snapshot);
       onChanged?.();
@@ -413,6 +415,7 @@ export function CreationProgress({
   const [now, setNow] = useState(() => Date.now());
   const phase = phaseOf(snapshot);
   const operationId = snapshot.operation.id;
+  const orgId = snapshot.workspace.orgId;
   const latest = useRef(onUpdate);
   latest.current = onUpdate;
 
@@ -422,7 +425,7 @@ export function CreationProgress({
     const timer = window.setInterval(() => {
       setNow(Date.now());
       api
-        .cloudWorkspaceOperation(operationId)
+        .cloudWorkspaceOperation(operationId, cloudOrgArg(orgId))
         .then((next) => {
           if (!stopped) latest.current(next);
         })
@@ -509,12 +512,12 @@ export function CreationProgress({
           </Button>
         )}
         {!settled(phase) && snapshot.operation.cancelable && (
-          <Button size="sm" variant="outline" disabled={busy} onClick={() => void act(() => api.cloudWorkspaceOperationCancel(operationId))}>
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => void act(() => api.cloudWorkspaceOperationCancel(operationId, cloudOrgArg(snapshot.workspace.orgId)))}>
             Cancel
           </Button>
         )}
         {retryable && (
-          <Button size="sm" variant="outline" disabled={busy} onClick={() => void act(() => api.cloudWorkspaceResume(snapshot.workspace.id))}>
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => void act(() => api.cloudWorkspaceResume(snapshot.workspace.id, cloudOrgArg(snapshot.workspace.orgId)))}>
             <RotateCcw className="size-3" /> Retry
           </Button>
         )}

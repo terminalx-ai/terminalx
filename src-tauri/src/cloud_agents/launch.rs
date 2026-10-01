@@ -39,6 +39,17 @@ pub struct Repository {
     pub base_ref: Option<String>,
 }
 
+/// The tab a claimed launch starts. A launch that names no mode (or a blank
+/// one) starts in the default launch mode, bypass, like any other session.
+pub(crate) fn new_tab(claim: &Claim) -> crate::session_ops::NewTab {
+    crate::session_ops::NewTab {
+        harness: claim.agent.clone(),
+        model: claim.model.clone().unwrap_or_default(),
+        effort: claim.effort.clone(),
+        permission_mode: crate::store::index::requested_mode(claim.mode.clone()),
+    }
+}
+
 /// `launch` of a claim response.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -183,10 +194,22 @@ pub enum StartError {
 /// Prepares one repository; the real one runs git.
 pub trait Checkout: Send + Sync {
     fn prepare(&self, repository: &Repository, work_branch: &str) -> Result<Branch>;
+    /// A launch with no repository (a blank project): make its folder a Git
+    /// repository on the work branch, so changes can be tracked. The default
+    /// does nothing.
+    fn prepare_blank(&self, _root: &Path, _work_branch: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
+/// `launch.json` on the workspace machine. Its fields stay snake_case on
+/// purpose (`{"stage":"applying","launch_id":…}`): runtimes in the field
+/// have already written this file, and it is the exactly-once guard for the
+/// first prompt. Renaming `launch_id` would make an upgraded runtime fail to
+/// read its own record, treat the launch as new and could send the prompt a
+/// second time. Only this module reads the file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "stage", rename_all = "camelCase")]
+#[serde(tag = "stage", rename_all = "camelCase", rename_all_fields = "snake_case")]
 enum Record {
     Applying { launch_id: String },
     Done { launch_id: String, outcome: Outcome },
@@ -295,6 +318,14 @@ impl Launcher {
         }
         if let Some(state) = self.api.phase(&claim.launch_id, "syncing-repository")? {
             return Err(CallError::Settled(state));
+        }
+        if claim.repositories.is_empty() {
+            // A blank project: an empty folder, made a Git repository so the
+            // Changes and Git panels work. Not being able to is no reason to
+            // withhold the agent; it is not reported as a branch either.
+            if let Err(error) = self.checkout.prepare_blank(&self.root, &claim.work_branch) {
+                log::warn!("prepare the blank project folder: {error:#}");
+            }
         }
         let mut branches = Vec::new();
         for repository in &claim.repositories {
@@ -448,6 +479,56 @@ impl Checkout for GitCheckout {
         let head = crate::git::head_commit(path).ok_or_else(|| anyhow!("no commit at HEAD"))?;
         Ok(Branch { path: repository.path.clone(), branch: work_branch.to_string(), head })
     }
+
+    fn prepare_blank(&self, root: &Path, work_branch: &str) -> Result<()> {
+        init_blank_repository(root, work_branch).map(|_| ())
+    }
+}
+
+/// Directories never searched for repositories (as `git.repositories` skips them).
+const SKIPPED_DIRS: &[&str] = &["node_modules", "target", "vendor", "dist", "build"];
+
+/// A Git repository at `root` or up to two levels below it.
+fn contains_repository(root: &Path) -> bool {
+    let mut frontier = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = frontier.pop() {
+        if dir.join(".git").exists() {
+            return true;
+        }
+        if depth >= 2 {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || SKIPPED_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                frontier.push((entry.path(), depth + 1));
+            }
+        }
+    }
+    false
+}
+
+/// Make a folder with no repository a Git repository on `branch`, with an
+/// empty first commit so worktrees can be cut from it. A folder that is, or
+/// holds, a repository (an environment image's checkouts) is left alone.
+/// Returns whether it initialised one.
+pub fn init_blank_repository(root: &Path, branch: &str) -> Result<bool> {
+    std::fs::create_dir_all(root)?;
+    if crate::git::is_repo(root) || contains_repository(root) {
+        return Ok(false);
+    }
+    if !valid_branch(branch) {
+        bail!("invalid branch name");
+    }
+    crate::git::run(root, &["init", "-q"])?;
+    crate::git::run(root, &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")])?;
+    // The runtime has no Git identity of its own; this commit only anchors the branch.
+    crate::git::run(root, &["-c", "user.name=TerminalX", "-c", "user.email=runtime@terminalx.invalid", "commit", "--allow-empty", "-q", "-m", "Start the project"])?;
+    Ok(true)
 }
 
 /// The agent tab, created the way `session.create` creates one.
@@ -476,12 +557,7 @@ impl Starter for ManagerStarter {
                 issue: None,
                 automation: None,
                 cwd: (cwd != Path::new(&self.root)).then(|| cwd.to_string_lossy().into_owned()),
-                tab: Some(crate::session_ops::NewTab {
-                    harness: claim.agent.clone(),
-                    model: claim.model.clone().unwrap_or_default(),
-                    effort: claim.effort.clone(),
-                    permission_mode: claim.mode.clone(),
-                }),
+                tab: Some(new_tab(claim)),
             },
         )
         .map_err(|error| StartError::NotStarted(anyhow!("{error}")))?;

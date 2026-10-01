@@ -3,7 +3,7 @@
 //! OAuth state and every credential stay in the native process. The webview
 //! receives only the identity it needs to draw the account surfaces.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -19,6 +19,11 @@ use url::Url;
 use uuid::Uuid;
 
 pub const STATUS_EVENT: &str = "account_status";
+
+/// The server authorizes desktop cloud routes by membership in the path
+/// Organization rather than by the active one (PRO-70, CS-17). Without it a
+/// desktop reaches only its active Organization, as before.
+pub const MULTI_ORG_CAPABILITY: &str = "cloud.desktop.multi-org.v1";
 
 const API_BASE_URL: &str = "https://login.terminalx.ai";
 /// Debug builds only: point the account service (and everything built on it,
@@ -72,6 +77,8 @@ pub struct AccountStatus {
     last_error: Option<String>,
     context: Option<OnboardingContext>,
     organizations: Vec<OrganizationSummary>,
+    /// The server lets this desktop work in every member Organization at once (CS-18).
+    multi_org: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -79,6 +86,9 @@ pub struct AccountStatus {
 pub struct OnboardingContext {
     scope: String,
     revision: String,
+    /// The signed-in user and profile, without the Organization: what cloud
+    /// state belongs to when every member Organization is live (CS-18).
+    account: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -87,6 +97,22 @@ pub struct OrganizationSummary {
     pub id: String,
     pub name: String,
     pub role: String,
+    /// The user's personal organization (PRO-69); absent from older servers.
+    #[serde(default)]
+    pub is_personal: bool,
+    /// What the cloud offers in this organization (PRO-69); absent from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<OrganizationCloud>,
+}
+
+/// Per-organization cloud capabilities, as the desktop session reports them.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationCloud {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub flags: BTreeMap<String, bool>,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -103,6 +129,8 @@ pub struct AccountIdentity {
     name: Option<String>,
     email: String,
     organization: Option<String>,
+    /// The active (default) organization's id, so the webview need not match by name.
+    organization_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -115,6 +143,55 @@ pub(crate) struct AccountContext {
     pub organization_id: String,
     pub relay_entitled: bool,
     pub generation: u64,
+}
+
+/// How a cloud call's Organization was authorized, which decides what keeps
+/// its answer current (CS-18).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OrgAccess {
+    /// The active Organization, on a server without [`MULTI_ORG_CAPABILITY`]:
+    /// the call is stale once the active Organization changes (as before).
+    Active,
+    /// A member Organization on a server with the capability: the call stays
+    /// current while the user is still a member, whatever the default is.
+    Member,
+}
+
+/// Who the cloud state on this desktop belongs to: the user and profile, and
+/// the Organizations it may reach. Cheap to read (no Keychain load or token
+/// refresh), so connection watchers can poll it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CloudScope {
+    pub user_id: String,
+    pub profile_id: String,
+    pub active_org_id: String,
+    pub multi_org: bool,
+    /// Every Organization the user is a member of, the active one included.
+    pub members: BTreeSet<String>,
+}
+
+impl CloudScope {
+    /// Whether a cloud call or connection in `organization_id` is allowed:
+    /// the active Organization always; another one only by membership, on a
+    /// server with the capability.
+    pub fn allows(&self, organization_id: &str) -> bool {
+        !organization_id.is_empty()
+            && (organization_id == self.active_org_id
+                || (self.multi_org && self.members.contains(organization_id)))
+    }
+
+    /// The Organizations whose cloud data (keys, outbox, transcript cache)
+    /// this desktop keeps: every member Organization, whether or not the
+    /// server authorizes by membership right now. Only a lost membership (or
+    /// another user) drops an Organization's data; an Organization that is not
+    /// reachable (no capability, not the default) keeps it, inactive.
+    pub fn kept_orgs(&self) -> BTreeSet<String> {
+        let mut kept = self.members.clone();
+        if !self.active_org_id.is_empty() {
+            kept.insert(self.active_org_id.clone());
+        }
+        kept
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -150,6 +227,10 @@ struct Organization {
     org_id: String,
     name: String,
     role: String,
+    #[serde(default)]
+    is_personal: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cloud: Option<OrganizationCloud>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -181,6 +262,10 @@ struct Inner {
 #[derive(Default)]
 pub struct AccountManager {
     service: OnceLock<String>,
+    /// Where status changes are announced. A token refresh can happen inside
+    /// any service call (`context()`), not only a status read, so the webview
+    /// is told from here whenever what it sees changed.
+    app: OnceLock<AppHandle>,
     inner: Mutex<Inner>,
     refresh_gate: Mutex<()>,
 }
@@ -231,6 +316,25 @@ impl AccountManager {
         });
     }
 
+    /// Tests: the member Organizations and whether the server authorizes by membership.
+    #[cfg(test)]
+    pub(crate) fn set_memberships_for_test(&self, organizations: &[&str], multi_org: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        let session = inner.session.as_mut().expect("signed in");
+        session.organizations = organizations
+            .iter()
+            .map(|id| Organization { org_id: (*id).into(), name: (*id).into(), role: "member".into(), is_personal: false, cloud: None })
+            .collect();
+        session.capabilities.flags.insert(MULTI_ORG_CAPABILITY.into(), multi_org);
+    }
+
+    /// Tests: another client changed the default (active) Organization.
+    #[cfg(test)]
+    pub(crate) fn set_active_org_for_test(&self, organization_id: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.session.as_mut().expect("signed in").cloud.active_org_id = Some(organization_id.into());
+    }
+
     pub fn configure(&self, app_identifier: &str) -> Result<()> {
         let wanted = keychain_service_name(app_identifier);
         if let Some(current) = self.service.get() {
@@ -244,12 +348,15 @@ impl AccountManager {
             .map_err(|_| anyhow!("account service was already configured"))
     }
 
-    pub fn status(&self, app: &AppHandle) -> AccountStatus {
-        self.ensure_loaded();
-        if self.refresh_if_needed() {
-            self.emit(app);
-        }
+    /// Announce status changes (a silent token refresh with new organizations) to this app.
+    pub fn attach_app(&self, app: &AppHandle) {
+        let _ = self.app.set(app.clone());
+    }
 
+    pub fn status(&self, app: &AppHandle) -> AccountStatus {
+        self.attach_app(app);
+        self.ensure_loaded();
+        self.refresh_if_needed();
         self.snapshot()
     }
 
@@ -275,11 +382,46 @@ impl AccountManager {
         })
     }
 
-    /// The signed-in user and active organization as last loaded, without a
-    /// Keychain load or token refresh: cheap enough to poll.
-    pub(crate) fn current_identity(&self) -> Option<(String, String)> {
+    /// The signed-in user, profile and the Organizations cloud work may
+    /// reach, as last loaded, without a Keychain load or token refresh:
+    /// cheap enough to poll.
+    pub(crate) fn current_scope(&self) -> Option<CloudScope> {
         let inner = self.inner.lock().unwrap();
-        inner.session.as_ref().map(|session| (session.cloud.user_id.clone(), session.cloud.active_org_id.clone().unwrap_or_default()))
+        inner.session.as_ref().map(cloud_scope)
+    }
+
+    /// The context for a cloud call in `organization_id` (CS-18). The active
+    /// Organization is always allowed; another one only when the server
+    /// authorizes by membership and the user is a member. The access says
+    /// what keeps the answer current (see [`Self::is_current_in`]).
+    pub(crate) fn context_in(&self, organization_id: &str) -> Result<(AccountContext, OrgAccess), &'static str> {
+        let mut context = self.context().ok_or("account_signed_out")?;
+        let scope = self.current_scope().ok_or("account_signed_out")?;
+        if scope.user_id != context.user_id || !scope.allows(organization_id) {
+            return Err("cloud_organization_unavailable");
+        }
+        context.organization_id = organization_id.to_string();
+        Ok((context, if scope.multi_org { OrgAccess::Member } else { OrgAccess::Active }))
+    }
+
+    /// [`Self::is_current`] for a context from [`Self::context_in`]: a
+    /// member Organization's answer stays current across a change of the
+    /// default Organization, and is fenced by the account and the membership.
+    pub(crate) fn is_current_in(&self, context: &AccountContext, access: OrgAccess) -> bool {
+        match access {
+            OrgAccess::Active => self.is_current(context),
+            OrgAccess::Member => {
+                let inner = self.inner.lock().unwrap();
+                inner.generation == context.generation
+                    && inner.session.as_ref().is_some_and(|session| {
+                        let scope = cloud_scope(session);
+                        scope.user_id == context.user_id
+                            && scope.profile_id == context.profile_id
+                            && scope.multi_org
+                            && scope.allows(&context.organization_id)
+                    })
+            }
+        }
     }
 
     /// Fence native service responses against sign-out or account replacement.
@@ -294,6 +436,17 @@ impl AccountManager {
                     && session.cloud.active_org_id.as_deref().unwrap_or_default()
                         == context.organization_id
             })
+    }
+
+    /// The signed-in user and the webview's context revision, as last loaded,
+    /// without a Keychain load or token refresh. Writes of per-user files are
+    /// fenced by the revision so a late write never lands in the next account.
+    pub(crate) fn current_revision(&self) -> Option<(String, String)> {
+        let inner = self.inner.lock().unwrap();
+        inner.session.as_ref().map(|session| {
+            let scope = context_scope(&session.cloud.user_id, &session.cloud.cloud_profile_id, session.cloud.active_org_id.as_deref().unwrap_or_default());
+            (session.cloud.user_id.clone(), format!("{scope}:{}", inner.generation))
+        })
     }
 
     pub(crate) fn context_revision(context: &AccountContext) -> String {
@@ -549,7 +702,24 @@ impl AccountManager {
 
     fn refresh_session(&self, generation: u64, session: DesktopSession) {
         let result = refresh(&session);
+        if self.apply_refresh(generation, &session, result) {
+            if let Some(app) = self.app.get() {
+                self.emit(app);
+            }
+        }
+    }
+
+    /// Take a refresh's outcome; true when what the webview sees changed
+    /// (organizations and their cloud capabilities, identity, sign-out, the
+    /// error, or the expiry the webview schedules its own refresh from).
+    fn apply_refresh(&self, generation: u64, session: &DesktopSession, result: Result<DesktopSession, CloudError>) -> bool {
         let mut inner = self.inner.lock().unwrap();
+        let before = serde_json::to_value(snapshot(&inner)).ok();
+        self.apply_refresh_locked(&mut inner, generation, session, result);
+        serde_json::to_value(snapshot(&inner)).ok() != before
+    }
+
+    fn apply_refresh_locked(&self, inner: &mut Inner, generation: u64, session: &DesktopSession, result: Result<DesktopSession, CloudError>) {
         let unchanged = inner.generation == generation
             && inner
                 .session
@@ -730,6 +900,7 @@ fn snapshot(inner: &Inner) -> AccountStatus {
                 name: session.cloud.display_name.clone(),
                 email: session.cloud.email.clone(),
                 organization: session.cloud.active_org_name.clone(),
+                organization_id: session.cloud.active_org_id.clone(),
             }),
             Some(session.expires_at),
         )
@@ -745,9 +916,30 @@ fn snapshot(inner: &Inner) -> AccountStatus {
         last_error: inner.last_error.clone(),
         context: inner.session.as_ref().map(|session| {
             let scope = context_scope(&session.cloud.user_id, &session.cloud.cloud_profile_id, session.cloud.active_org_id.as_deref().unwrap_or_default());
-            OnboardingContext { revision: format!("{scope}:{}", inner.generation), scope }
+            let account = format!("{:x}", Sha256::digest(serde_json::to_vec(&(&session.cloud.user_id, &session.cloud.cloud_profile_id)).expect("serialize account")));
+            OnboardingContext { revision: format!("{scope}:{}", inner.generation), scope, account }
         }),
-        organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone() }).collect()).unwrap_or_default(),
+        organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone(), is_personal: org.is_personal, cloud: org.cloud.clone() }).collect()).unwrap_or_default(),
+        multi_org: inner.session.as_ref().is_some_and(multi_org),
+    }
+}
+
+fn multi_org(session: &DesktopSession) -> bool {
+    session.capabilities.flags.get(MULTI_ORG_CAPABILITY) == Some(&true)
+}
+
+fn cloud_scope(session: &DesktopSession) -> CloudScope {
+    let active_org_id = session.cloud.active_org_id.clone().unwrap_or_default();
+    let mut members: BTreeSet<String> = session.organizations.iter().map(|org| org.org_id.clone()).filter(|id| !id.is_empty()).collect();
+    if !active_org_id.is_empty() {
+        members.insert(active_org_id.clone());
+    }
+    CloudScope {
+        user_id: session.cloud.user_id.clone(),
+        profile_id: session.cloud.cloud_profile_id.clone(),
+        active_org_id,
+        multi_org: multi_org(session),
+        members,
     }
 }
 
@@ -1053,6 +1245,169 @@ mod tests {
         assert_eq!(session.access_token, "access");
         assert_eq!(session.cloud.display_name.as_deref(), Some("Owner"));
         assert_eq!(session.cloud.active_org_name.as_deref(), Some("TerminalX"));
+    }
+
+    #[test]
+    fn carries_per_organization_cloud_capabilities_to_the_webview() {
+        let session: DesktopSession = serde_json::from_value(json!({
+            "accessToken": "access",
+            "refreshToken": "refresh",
+            "expiresAt": 1_800_000_000_000_i64,
+            "cloud": { "cloudProfileId": "profile", "userId": "user", "email": "a@example.com", "activeOrgId": "org-a", "activeOrgName": "Acme", "linkedAt": 1 },
+            "organizations": [
+                { "orgId": "org-a", "name": "Acme", "role": "admin", "isPersonal": false, "cloud": { "enabled": true, "flags": { "cloud.session-runtimes.v1": true } } },
+                { "orgId": "org-me", "name": "Me", "role": "owner", "isPersonal": true, "cloud": { "enabled": false, "flags": {} } },
+                { "orgId": "org-old", "name": "Old", "role": "member" }
+            ],
+            "capabilities": { "flags": {}, "refreshedAt": 1 }
+        }))
+        .unwrap();
+        let inner = Inner { loaded: true, session: Some(normalize_session(session).unwrap()), generation: 3, ..Default::default() };
+        let status = serde_json::to_value(snapshot(&inner)).unwrap();
+        assert_eq!(status["identity"]["organizationId"], "org-a");
+        let orgs = status["organizations"].as_array().unwrap();
+        assert_eq!(orgs[0]["isPersonal"], false);
+        assert_eq!(orgs[0]["cloud"]["enabled"], true);
+        assert_eq!(orgs[0]["cloud"]["flags"]["cloud.session-runtimes.v1"], true);
+        assert_eq!(orgs[1]["isPersonal"], true);
+        assert_eq!(orgs[1]["cloud"]["enabled"], false);
+        // An older server's organization says nothing about the cloud.
+        assert_eq!(orgs[2]["isPersonal"], false);
+        assert!(orgs[2].get("cloud").is_none());
+    }
+
+    #[test]
+    fn a_silent_refresh_that_brings_organization_capabilities_is_announced() {
+        let manager = AccountManager::default();
+        manager.set_context_for_test(Some(AccountContext {
+            access_token: "old-access".into(),
+            user_id: "user".into(),
+            email: "a@example.com".into(),
+            display_name: "A".into(),
+            profile_id: "profile".into(),
+            organization_id: "org-a".into(),
+            relay_entitled: false,
+            generation: 4,
+        }));
+        let stored = manager.inner.lock().unwrap().session.clone().unwrap();
+        assert!(snapshot(&manager.inner.lock().unwrap()).organizations.is_empty());
+        let refreshed: DesktopSession = serde_json::from_value(json!({
+            "accessToken": "new-access",
+            "refreshToken": "new-refresh",
+            "expiresAt": 4_000_000_000_000_i64,
+            "cloud": { "cloudProfileId": "profile", "userId": "user", "email": "a@example.com", "displayName": "A", "activeOrgId": "org-a", "activeOrgName": "Test Organization", "linkedAt": 1 },
+            "organizations": [{ "orgId": "org-a", "name": "Acme", "role": "owner", "isPersonal": false, "cloud": { "enabled": true, "flags": {} } }],
+            "capabilities": { "flags": {}, "refreshedAt": 1 }
+        }))
+        .unwrap();
+        assert!(manager.apply_refresh(4, &stored, Ok(refreshed.clone())));
+        let status = serde_json::to_value(snapshot(&manager.inner.lock().unwrap())).unwrap();
+        assert_eq!(status["organizations"][0]["cloud"]["enabled"], true);
+        // The same answer again changes nothing the webview sees, so nothing is announced.
+        assert!(!manager.apply_refresh(4, &refreshed, Ok(refreshed.clone())));
+        // A refresh for an older generation is dropped.
+        assert!(!manager.apply_refresh(3, &refreshed, Ok(stored)));
+    }
+
+    #[test]
+    fn the_webviews_default_organization_is_the_one_api_calls_use_even_after_a_silent_refresh() {
+        let manager = AccountManager::default();
+        manager.set_context_for_test(Some(AccountContext {
+            access_token: "a".into(),
+            user_id: "user".into(),
+            email: "a@example.com".into(),
+            display_name: "A".into(),
+            profile_id: "profile".into(),
+            organization_id: "org-demo".into(),
+            relay_entitled: false,
+            generation: 2,
+        }));
+        let stored = manager.inner.lock().unwrap().session.clone().unwrap();
+        let mut refreshed = stored.clone();
+        refreshed.refresh_token = "rotated".into();
+        // The server moved the active organization (another client switched it).
+        refreshed.cloud.active_org_id = Some("org-e2e-box".into());
+        refreshed.cloud.active_org_name = Some("E2E Box".into());
+        assert!(manager.apply_refresh(2, &stored, Ok(refreshed)));
+        let status = serde_json::to_value(snapshot(&manager.inner.lock().unwrap())).unwrap();
+        let context = manager.inner.lock().unwrap().session.as_ref().unwrap().cloud.active_org_id.clone();
+        assert_eq!(status["identity"]["organizationId"], "org-e2e-box");
+        assert_eq!(context.as_deref(), Some("org-e2e-box"));
+    }
+
+    fn signed_in(active: &str) -> AccountManager {
+        let manager = AccountManager::default();
+        manager.set_context_for_test(Some(AccountContext {
+            access_token: "a".into(),
+            user_id: "user".into(),
+            email: "a@example.com".into(),
+            display_name: "A".into(),
+            profile_id: "profile".into(),
+            organization_id: active.into(),
+            relay_entitled: false,
+            generation: 7,
+        }));
+        manager
+    }
+
+    #[test]
+    fn without_the_capability_only_the_active_organization_is_reachable_and_kept() {
+        let manager = signed_in("org-a");
+        manager.set_memberships_for_test(&["org-a", "org-b"], false);
+        let scope = manager.current_scope().unwrap();
+        assert!(scope.allows("org-a") && !scope.allows("org-b"));
+        // Reachable is the active organization only; kept is every member one.
+        assert_eq!(scope.kept_orgs(), BTreeSet::from(["org-a".to_string(), "org-b".to_string()]));
+        assert_eq!(manager.context_in("org-b").err(), Some("cloud_organization_unavailable"));
+        let (context, access) = manager.context_in("org-a").unwrap();
+        assert_eq!(access, OrgAccess::Active);
+        // As before: a switch of the active organization fences the call.
+        manager.set_active_org_for_test("org-b");
+        assert!(!manager.is_current_in(&context, access));
+        // Switching the active organization drops no member organization's data.
+        assert_eq!(manager.current_scope().unwrap().kept_orgs(), scope.kept_orgs());
+        assert_eq!(serde_json::to_value(manager.snapshot()).unwrap()["multiOrg"], false);
+    }
+
+    #[test]
+    fn with_the_capability_every_member_organization_is_reachable_and_a_default_change_keeps_them() {
+        let manager = signed_in("org-a");
+        manager.set_memberships_for_test(&["org-a", "org-b"], true);
+        let before = manager.current_scope().unwrap();
+        assert!(before.allows("org-a") && before.allows("org-b") && !before.allows("org-c"));
+        assert_eq!(manager.context_in("org-c").err(), Some("cloud_organization_unavailable"));
+        let (context, access) = manager.context_in("org-b").unwrap();
+        assert_eq!((context.organization_id.as_str(), access), ("org-b", OrgAccess::Member));
+        let status = serde_json::to_value(manager.snapshot()).unwrap();
+        assert_eq!(status["multiOrg"], true);
+        let account = status["context"]["account"].clone();
+
+        // Changing the default organization: the same identity, the same kept
+        // organizations, and calls in either stay current.
+        manager.set_active_org_for_test("org-b");
+        let after = manager.current_scope().unwrap();
+        assert_eq!(before.kept_orgs(), after.kept_orgs());
+        assert!(manager.is_current_in(&context, access));
+        assert_eq!(serde_json::to_value(manager.snapshot()).unwrap()["context"]["account"], account);
+
+        // Leaving an organization: only it stops being reachable and kept.
+        let (in_a, access_a) = manager.context_in("org-a").unwrap();
+        manager.set_memberships_for_test(&["org-b"], true);
+        assert!(!manager.is_current_in(&in_a, access_a));
+        assert!(manager.is_current_in(&context, access));
+        assert!(manager.context_in("org-a").is_err());
+        assert_eq!(manager.current_scope().unwrap().kept_orgs(), BTreeSet::from(["org-b".to_string()]));
+    }
+
+    #[test]
+    fn a_capability_flap_keeps_every_member_organizations_data() {
+        let manager = signed_in("org-a");
+        manager.set_memberships_for_test(&["org-a", "org-b"], true);
+        let with = manager.current_scope().unwrap().kept_orgs();
+        manager.set_memberships_for_test(&["org-a", "org-b"], false);
+        let scope = manager.current_scope().unwrap();
+        assert_eq!(scope.kept_orgs(), with, "nothing of a still-member organization is purged");
+        assert!(!scope.allows("org-b"), "but it is inactive: nothing reaches it");
     }
 
     #[test]

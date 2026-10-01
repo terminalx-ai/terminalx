@@ -4,9 +4,12 @@
 //! The web view never sees relay credentials or E2EE keys. It attaches a
 //! `WorkspaceTarget::Cloud` and gets a connection id; frames it sends are
 //! workspace RPC requests, and everything the runtime answers or streams
-//! comes back as `cloud_remote_event`. On an organization or account change
-//! every connection is stopped, so nothing attached for the old identity
-//! keeps running (the web view drops its caches on the same event).
+//! comes back as `cloud_remote_event`. A connection belongs to one user,
+//! profile and Organization. On an account change every connection is
+//! stopped; when the user leaves an Organization, only that Organization's
+//! connections are. On a server that authorizes by membership (CS-18) a
+//! change of the default Organization stops nothing; without it, as before,
+//! only the active Organization's connections survive.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -17,7 +20,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 
-use crate::account::AccountManager;
+use crate::account::{AccountManager, CloudScope};
 use crate::cloud_agent_client::CloudAgentClient;
 use crate::cloud_diagnostics::ConnectionCloseLog;
 use crate::cloud_workspaces::{CloudWorkspaceService, WorkspaceState};
@@ -26,19 +29,33 @@ use crate::remote::protocol::Activation;
 
 pub const EVENT: &str = "cloud_remote_event";
 
+/// The web view's `NativeWorkspaceTransport` reads `kind`, `connectionId`,
+/// `state`, `message` and `connectionIds`: `rename_all` only renames the
+/// variant tags, so the fields need `rename_all_fields` too.
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 enum RemoteEvent {
     State { connection_id: String, state: ClientState },
     Message { connection_id: String, message: Value },
-    /// The account or organization changed; every connection was stopped.
+    /// The account changed or an Organization is no longer reachable; these
+    /// connections were stopped.
     IdentityChanged { connection_ids: Vec<String> },
 }
 
-#[derive(Clone, PartialEq, Eq)]
+/// Who a connection was made for.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Identity {
     user_id: String,
+    profile_id: String,
     organization_id: String,
+}
+
+impl Identity {
+    /// Whether this connection may still be used under `scope`: the same user
+    /// and profile, and an Organization the scope still reaches.
+    fn allowed_by(&self, scope: Option<&CloudScope>) -> bool {
+        scope.is_some_and(|scope| scope.user_id == self.user_id && scope.profile_id == self.profile_id && scope.allows(&self.organization_id))
+    }
 }
 
 struct Attached {
@@ -69,8 +86,8 @@ impl CloudRemote {
     }
 
     /// Cheap: no Keychain load or token refresh, so it can run per frame.
-    fn identity(&self) -> Option<Identity> {
-        self.account.current_identity().map(|(user_id, organization_id)| Identity { user_id, organization_id })
+    fn scope(&self) -> Option<CloudScope> {
+        self.account.current_scope()
     }
 
     /// Stop connections made for an identity that is no longer current.
@@ -81,17 +98,17 @@ impl CloudRemote {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 // Keys, outbox and cache of a previous identity are dropped.
                 let agents = remote.agents.clone();
-                let observed = remote.account.current_identity();
+                let scope = remote.scope();
+                let observed = scope.as_ref().map(|scope| (scope.user_id.clone(), scope.kept_orgs()));
                 let _ = tauri::async_runtime::spawn_blocking(move || agents.observe_identity(observed)).await;
                 if remote.connections.lock().unwrap().is_empty() {
                     continue;
                 }
-                let current = remote.identity();
                 let stale: Vec<String> = {
                     let mut connections = remote.connections.lock().unwrap();
                     let ids: Vec<String> = connections
                         .iter()
-                        .filter(|(_, attached)| attached.identity.is_some() && current != attached.identity)
+                        .filter(|(_, attached)| attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref())))
                         .map(|(id, _)| id.clone())
                         .collect();
                     for id in &ids {
@@ -173,7 +190,7 @@ impl CloudRemote {
         let attached = connections.get(connection_id).ok_or("cloud_remote_connection_unknown")?;
         // A connection made for another identity is never used, even before
         // the watcher has stopped it.
-        if attached.identity.is_some() && self.identity() != attached.identity {
+        if attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(self.scope().as_ref())) {
             return Err("cloud_remote_identity_changed".into());
         }
         Ok(attached.supervisor.clone())
@@ -191,7 +208,8 @@ struct ApiSource {
 impl AttachSource for ApiSource {
     fn open(&self, refresh_pairing: bool, activation: Activation) -> anyhow::Result<OpenOutcome> {
         let error = |code: String| anyhow::anyhow!(code);
-        let list = self.service.workspaces().map_err(|e| error(e.code))?;
+        let organization = Some(self.identity.organization_id.as_str());
+        let list = self.service.workspaces(organization).map_err(|e| error(e.code))?;
         let workspace = list
             .workspaces
             .iter()
@@ -216,7 +234,7 @@ impl AttachSource for ApiSource {
             WorkspaceState::Suspended => {
                 // Only an interactive action wakes compute.
                 self.service
-                    .lifecycle(&self.workspace_id, crate::cloud_workspaces::OperationAction::Resume)
+                    .lifecycle(organization, &self.workspace_id, crate::cloud_workspaces::OperationAction::Resume)
                     .map_err(|e| error(e.code))?;
                 return Ok(OpenOutcome::WaitingForRuntime);
             }
@@ -229,7 +247,7 @@ impl AttachSource for ApiSource {
             WorkspaceState::Ready => {}
         }
         let (organization_id, response) =
-            self.service.open_attachment(&self.workspace_id, &self.installation_id, refresh_pairing).map_err(|e| error(e.code))?;
+            self.service.open_attachment(organization, &self.workspace_id, &self.installation_id, refresh_pairing).map_err(|e| error(e.code))?;
         if organization_id != self.identity.organization_id {
             anyhow::bail!("cloud_remote_identity_changed");
         }
@@ -269,10 +287,13 @@ pub async fn cloud_remote_attach(
     target: CloudTarget,
     activation: Activation,
 ) -> Result<String, String> {
-    let identity = remote.identity().ok_or("account_signed_out")?;
-    if identity.organization_id != target.organization_id {
+    let scope = remote.scope().ok_or("account_signed_out")?;
+    // The target's Organization is checked against the membership list (on a
+    // server that authorizes by membership) or the active one, never assumed.
+    if !scope.allows(&target.organization_id) {
         return Err("cloud_remote_organization_mismatch".into());
     }
+    let identity = Identity { user_id: scope.user_id, profile_id: scope.profile_id, organization_id: target.organization_id };
     let source = Arc::new(ApiSource {
         service: remote.service.clone(),
         identity: identity.clone(),
@@ -381,6 +402,57 @@ mod intercept_tests {
     use super::*;
     use serde_json::json;
 
+    fn scope(active: &str, members: &[&str], multi_org: bool) -> CloudScope {
+        CloudScope {
+            user_id: "user".into(),
+            profile_id: "profile".into(),
+            active_org_id: active.into(),
+            multi_org,
+            members: members.iter().map(|org| org.to_string()).collect(),
+        }
+    }
+
+    fn made_in(org: &str) -> Identity {
+        Identity { user_id: "user".into(), profile_id: "profile".into(), organization_id: org.into() }
+    }
+
+    #[test]
+    fn a_default_organization_change_stops_no_connection_on_a_multi_org_server() {
+        let (a, b) = (made_in("org-a"), made_in("org-b"));
+        let before = scope("org-a", &["org-a", "org-b"], true);
+        let after = scope("org-b", &["org-a", "org-b"], true);
+        assert!(a.allowed_by(Some(&before)) && b.allowed_by(Some(&before)));
+        assert!(a.allowed_by(Some(&after)) && b.allowed_by(Some(&after)), "sessions from both organizations stay open");
+    }
+
+    #[test]
+    fn a_membership_loss_stops_only_that_organizations_connections() {
+        let (a, b) = (made_in("org-a"), made_in("org-b"));
+        let left_b = scope("org-a", &["org-a"], true);
+        assert!(a.allowed_by(Some(&left_b)));
+        assert!(!b.allowed_by(Some(&left_b)));
+    }
+
+    #[test]
+    fn without_the_capability_only_the_active_organizations_connections_survive() {
+        let (a, b) = (made_in("org-a"), made_in("org-b"));
+        let switched = scope("org-b", &["org-a", "org-b"], false);
+        assert!(!a.allowed_by(Some(&switched)));
+        assert!(b.allowed_by(Some(&switched)));
+    }
+
+    #[test]
+    fn another_user_profile_or_a_sign_out_stops_everything() {
+        let a = made_in("org-a");
+        let mut other = scope("org-a", &["org-a"], true);
+        other.user_id = "user-2".into();
+        assert!(!a.allowed_by(Some(&other)));
+        let mut profile = scope("org-a", &["org-a"], true);
+        profile.profile_id = "profile-2".into();
+        assert!(!a.allowed_by(Some(&profile)));
+        assert!(!a.allowed_by(None));
+    }
+
     #[test]
     fn typed_relay_closes_reach_the_diagnostics_log() {
         let reconnecting = |close_code| ClientState::Reconnecting { attempt: 1, reason: "4101 stale".into(), retry_in_ms: 250, close_code };
@@ -398,5 +470,22 @@ mod intercept_tests {
         assert_eq!(intercept(&json!({ "event": "keys.changed", "params": {} })), Intercept::KeysChanged);
         assert_eq!(intercept(&json!({ "id": "req-1", "ok": true, "result": {} })), Intercept::Forward);
         assert_eq!(intercept(&json!({ "event": "session.tabs", "params": { "tabs": [] } })), Intercept::Forward);
+    }
+
+    /// The exact shape `NativeWorkspaceTransport.route` (src/lib/api.ts) reads;
+    /// with snake_case fields it dropped every state and message, so an
+    /// opened cloud session stayed "Not connected".
+    #[test]
+    fn events_reach_the_web_view_in_its_field_names() {
+        let state = serde_json::to_value(RemoteEvent::State {
+            connection_id: "cloud-1".into(),
+            state: ClientState::Connecting { attempt: 2 },
+        })
+        .unwrap();
+        assert_eq!(state, json!({ "kind": "state", "connectionId": "cloud-1", "state": { "state": "connecting", "attempt": 2 } }));
+        let message = serde_json::to_value(RemoteEvent::Message { connection_id: "cloud-1".into(), message: json!({ "id": "r1" }) }).unwrap();
+        assert_eq!(message, json!({ "kind": "message", "connectionId": "cloud-1", "message": { "id": "r1" } }));
+        let changed = serde_json::to_value(RemoteEvent::IdentityChanged { connection_ids: vec!["cloud-1".into()] }).unwrap();
+        assert_eq!(changed, json!({ "kind": "identityChanged", "connectionIds": ["cloud-1"] }));
     }
 }

@@ -17,7 +17,7 @@
 //! Everything lives under `<store root>/cloud-agent/<user>/<organization>/<workspace>/`
 //! and is dropped when the signed-in identity changes.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -42,6 +42,9 @@ const STATUS_BATCH: usize = 100;
 const KINDS: [&str; 4] = ["send", "steer", "stop", "permission-decision"];
 const TERMINAL_STATES: [&str; 4] = ["applied", "rejected", "cancelled", "outcome-unknown"];
 
+/// The signed-in user and the Organizations whose cloud agent data is kept.
+pub type KeptIdentity = (String, BTreeSet<String>);
+
 /// The account a call is made for.
 #[derive(Clone)]
 pub struct Ctx {
@@ -51,13 +54,30 @@ pub struct Ctx {
 }
 
 pub trait AccountSource: Send + Sync {
-    fn context(&self) -> Option<Ctx>;
+    /// The account for a call in `organization_id`: the active Organization,
+    /// or (CS-18) any member Organization on a server that authorizes desktop
+    /// cloud routes by membership. Errors are `account_signed_out` or
+    /// `cloud_remote_organization_mismatch`.
+    fn context_in(&self, organization_id: &str) -> Result<Ctx, String>;
+
+    /// Whether `user_id` may still write in `organization_id`, checked right
+    /// before a write so a call that began before a membership loss or a user
+    /// change never recreates what was purged. Must not block on the network.
+    fn still_allowed(&self, user_id: &str, organization_id: &str) -> bool {
+        self.context_in(organization_id).is_ok_and(|ctx| ctx.user_id == user_id)
+    }
 }
 
 impl AccountSource for crate::account::AccountManager {
-    fn context(&self) -> Option<Ctx> {
-        let context = crate::account::AccountManager::context(self)?;
-        Some(Ctx { user_id: context.user_id, organization_id: context.organization_id, access_token: Zeroizing::new(context.access_token) })
+    fn context_in(&self, organization_id: &str) -> Result<Ctx, String> {
+        let (context, _) = crate::account::AccountManager::context_in(self, organization_id).map_err(|code| {
+            if code == "account_signed_out" { code.to_string() } else { "cloud_remote_organization_mismatch".to_string() }
+        })?;
+        Ok(Ctx { user_id: context.user_id, organization_id: context.organization_id, access_token: Zeroizing::new(context.access_token) })
+    }
+
+    fn still_allowed(&self, user_id: &str, organization_id: &str) -> bool {
+        self.current_scope().is_some_and(|scope| scope.user_id == user_id && scope.allows(organization_id))
     }
 }
 
@@ -352,8 +372,9 @@ pub struct CloudAgentClient {
     /// POST, and across a cancel, so a cancelled command is never posted.
     send_locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
     agent: ureq::Agent,
-    /// The identity last observed, so a change drops the old one's data.
-    observed: Mutex<Option<(String, String)>>,
+    /// The identity last observed (the user and the Organizations whose data
+    /// is kept), so a change drops what no longer belongs to it.
+    observed: Mutex<Option<KeptIdentity>>,
 }
 
 impl CloudAgentClient {
@@ -367,13 +388,29 @@ impl CloudAgentClient {
         Self { accounts, keys, base, root, lock: Mutex::new(()), send_locks: Mutex::new(HashMap::new()), agent, observed: Mutex::new(None) }
     }
 
-    /// The current account, which must be in `organization_id`.
+    /// The current account, allowed in `organization_id` (CS-18: by
+    /// membership when the server supports it, else the active Organization).
     fn ctx(&self, organization_id: &str) -> Result<Ctx, String> {
-        let ctx = self.accounts.context().ok_or("account_signed_out")?;
-        if ctx.organization_id.is_empty() || ctx.organization_id != organization_id {
+        if organization_id.is_empty() {
+            return Err("cloud_remote_organization_mismatch".into());
+        }
+        let ctx = self.accounts.context_in(organization_id)?;
+        if ctx.organization_id != organization_id {
             return Err("cloud_remote_organization_mismatch".into());
         }
         Ok(ctx)
+    }
+
+    /// Whether a workspace directory (`<root>/<user>/<org>/<workspace>`) still
+    /// belongs to the signed-in user and a reachable organization. Checked
+    /// under `self.lock` right before a write, the lock a purge holds.
+    fn writable(&self, dir: &Path) -> bool {
+        let Ok(relative) = dir.strip_prefix(&self.root) else { return false };
+        let mut parts = relative.components().map(|part| part.as_os_str().to_string_lossy().into_owned());
+        match (parts.next(), parts.next()) {
+            (Some(user), Some(org)) => self.accounts.still_allowed(&user, &org),
+            _ => false,
+        }
     }
 
     fn send_lock(&self, dir: &Path) -> Arc<Mutex<()>> {
@@ -392,11 +429,17 @@ impl CloudAgentClient {
     /// Store what `keys.get` answered for a workspace. Called by
     /// `cloud_remote` for the identity the connection was made for.
     pub fn store_keys(&self, user_id: &str, organization_id: &str, workspace_id: &str, result: &Value) -> Result<()> {
-        let current = self.accounts.context().ok_or_else(|| anyhow!("signed out"))?;
+        let current = self.accounts.context_in(organization_id).map_err(|_| anyhow!("the identity changed before the keys arrived"))?;
         if current.user_id != user_id || current.organization_id != organization_id {
             return Err(anyhow!("the identity changed before the keys arrived"));
         }
         let dir = self.dir(&current, workspace_id).map_err(anyhow::Error::msg)?;
+        // Held from the first key written: a purge (which takes the same lock)
+        // runs wholly before or after, and after it nothing is written back.
+        let _guard = self.lock.lock().unwrap();
+        if !self.writable(&dir) {
+            return Err(anyhow!("the identity changed before the keys arrived"));
+        }
         let current_key_id = result.get("currentKeyId").and_then(Value::as_str).filter(|id| valid_id(id)).map(str::to_string);
         let mut metas = Vec::new();
         for key in result.get("keys").and_then(Value::as_array).into_iter().flatten() {
@@ -408,7 +451,6 @@ impl CloudAgentClient {
         if current_key_id.as_ref().is_some_and(|id| !metas.iter().any(|meta| &meta.key_id == id)) {
             return Err(anyhow!("currentKeyId is not among the keys"));
         }
-        let _guard = self.lock.lock().unwrap();
         let path = dir.join("keys.json");
         let mut index: KeyIndex = read_json(&path)?.unwrap_or_default();
         // Keys the runtime no longer lists are forgotten, secret included.
@@ -450,7 +492,11 @@ impl CloudAgentClient {
         read_json(&dir.join("outbox.json")).map_err(|_| "cloud_agent_store_unreadable".to_string()).map(Option::unwrap_or_default)
     }
 
+    /// Callers hold `self.lock`.
     fn save_outbox(&self, dir: &Path, entries: &[Stored]) -> Result<(), String> {
+        if !self.writable(dir) {
+            return Err("cloud_remote_organization_mismatch".into());
+        }
         let bytes = serde_json::to_vec(entries).map_err(|_| "cloud_agent_store_unwritable".to_string())?;
         write_atomic(&dir.join("outbox.json"), &bytes).map_err(|error| {
             log::warn!("write the cloud agent outbox: {error:#}");
@@ -784,6 +830,9 @@ impl CloudAgentClient {
             return Err("cloud_agent_cache_too_large".into());
         }
         let _guard = self.lock.lock().unwrap();
+        if !self.writable(&dir) {
+            return Err("cloud_remote_organization_mismatch".into());
+        }
         let path = dir.join("cache.json");
         let mut tabs: BTreeMap<String, Value> = read_json(&path).ok().flatten().unwrap_or_default();
         match entry {
@@ -828,9 +877,15 @@ impl CloudAgentClient {
 
     // ------------------------------------------------------------ identity
 
-    /// Called with the signed-in `(user, organization)` whenever it is read.
-    /// Everything stored for another identity is dropped, keys included.
-    pub fn observe_identity(&self, current: Option<(String, String)>) {
+    /// Called with the signed-in user and the Organizations whose data is
+    /// kept whenever it is read. Everything stored for another user, or for an
+    /// Organization that is no longer kept, is dropped, keys included.
+    ///
+    /// With every member Organization live (CS-18) the kept set is the
+    /// membership list, so a change of the default Organization drops nothing
+    /// and only a membership loss (or another user) prunes. Without it the set
+    /// is the active Organization alone, as before.
+    pub fn observe_identity(&self, current: Option<KeptIdentity>) {
         let changed = {
             let mut observed = self.observed.lock().unwrap();
             let changed = *observed != current;
@@ -845,7 +900,7 @@ impl CloudAgentClient {
         }
     }
 
-    fn retain_only(&self, keep: Option<&(String, String)>) {
+    fn retain_only(&self, keep: Option<&KeptIdentity>) {
         let _guard = self.lock.lock().unwrap();
         let Ok(users) = std::fs::read_dir(&self.root) else { return };
         for user in users.flatten() {
@@ -853,7 +908,7 @@ impl CloudAgentClient {
             let Ok(orgs) = std::fs::read_dir(user.path()) else { continue };
             for org in orgs.flatten() {
                 let organization_id = org.file_name().to_string_lossy().into_owned();
-                if keep.is_some_and(|(u, o)| *u == user_id && *o == organization_id) {
+                if keep.is_some_and(|(u, orgs)| *u == user_id && orgs.contains(&organization_id)) {
                     continue;
                 }
                 for workspace in std::fs::read_dir(org.path()).into_iter().flatten().flatten() {

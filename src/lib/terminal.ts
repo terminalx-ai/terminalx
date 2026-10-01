@@ -226,6 +226,14 @@ export function setActiveTerminal(sessionId: string, id: string) {
   });
 }
 
+/**
+ * Select a tab of a session by kind and id, with no pane lookup: a cloud
+ * session's terminals live in the cloud terminal store, not in `panes`.
+ */
+export function selectSessionTab(sessionId: string, tab: SelectedSessionTab) {
+  set({ selected: { ...state.selected, [sessionId]: tab } });
+}
+
 export function setSelectedAgent(sessionId: string, id: string) {
   set({ selected: { ...state.selected, [sessionId]: { kind: "agent", id } } });
 }

@@ -9,6 +9,8 @@ import { IssuesView } from "@/components/issues/IssuesView";
 import { AgentDashboard } from "@/components/dashboard/AgentDashboard";
 import { SkillsView } from "@/components/skills/SkillsView";
 import { SessionView } from "@/components/session/SessionView";
+import { CloudSessionHost } from "@/components/session/CloudSessionHost";
+import { isCloudKey } from "@/types/target";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
@@ -29,12 +31,14 @@ import { bootAutomations } from "@/lib/automations";
 import { RightPanel } from "@/components/layout/RightPanel";
 import { CommandPalette } from "@/components/command/CommandPalette";
 import { bootAccount } from "@/lib/account";
+import { bootCloudCatalog } from "@/lib/cloudCatalog";
 import { bootPairing } from "@/lib/pairing";
 import { useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
+const CloudWorkspaceMain = lazy(() => import("@/components/cloud/CloudWorkspaceMain").then((module) => ({ default: module.CloudWorkspaceMain })));
 const CloudSessionPage = lazy(() => import("@/components/cloud/CloudSessionPage").then((module) => ({ default: module.CloudSessionPage })));
 const SettingsPage = lazy(() => import("@/components/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const statusBarFallback = <div aria-hidden className="h-[22px] shrink-0 border-t border-hairline bg-background/70" />;
@@ -65,6 +69,7 @@ export function AppShell() {
     startNotifications();
     void bootStatus();
     void bootAccount();
+    bootCloudCatalog();
     void bootPairing();
   }, []);
 
@@ -110,6 +115,10 @@ export function AppShell() {
 
   const sidebarOpen = prefs.sidebarOpen;
   const selected = store.sessions.find((s) => s.id === store.selectedSessionId) ?? null;
+  // A cloud workspace in the main slot (PRO-23), unless the kill switch hides cloud rows.
+  const cloudWorkspace = prefs.cloudSidebar ? (store.selectedCloudWorkspace ?? null) : null;
+  // A cloud session (`cloud:…`) renders in the same slot, with the sidebar kept.
+  const cloudKey = prefs.cloudSidebar && isCloudKey(store.selectedSessionId) ? store.selectedSessionId : null;
 
   return (
     <div className="flex h-full w-full flex-col">
@@ -142,15 +151,28 @@ export function AppShell() {
                 onOpenAutomations={showAutomations}
                 onOpenSkills={showSkills}
                 onSearch={() => setPaletteOpen(true)}
+                onOpenCloudPage={() => setCloudSessionOpen(true)}
               />
             )}
 
-            {selected ? (
+            {cloudKey ? (
+              <main className="flex h-full min-w-0 flex-1 flex-col">
+                <ErrorBoundary key={cloudKey} label="the session">
+                  <CloudSessionHost sessionKey={cloudKey} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                </ErrorBoundary>
+              </main>
+            ) : selected ? (
               <main className="flex h-full min-w-0 flex-1 flex-col">
                 <ErrorBoundary key={selected.id} label="the session">
                   <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
                 </ErrorBoundary>
               </main>
+            ) : cloudWorkspace ? (
+              <ErrorBoundary key={cloudWorkspace} label="the cloud workspace">
+                <Suspense fallback={viewFallback}>
+                  <CloudWorkspaceMain workspaceKey={cloudWorkspace} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                </Suspense>
+              </ErrorBoundary>
             ) : (
               <UnselectedWorkspace
                 key={store.view}
@@ -202,7 +224,8 @@ function UnselectedWorkspace({
   const project = store.view === "new" ? newProject : store.view === "issues" ? issueProject : null;
   const cwd = store.view === "new" ? (preset?.cwd ?? project?.path ?? null) : project?.path ?? null;
   const workspace = cwd && project ? (store.workspaces[project.path] ?? []).find((item) => item.path === cwd) : null;
-  const panelAvailable = !!cwd && !!project;
+  // A cloud draft has no local checkout to show.
+  const panelAvailable = !!cwd && !!project && !(store.view === "new" && store.cloudSessionPreset);
   const checkoutEditorId = cwd ? `checkout:${cwd}` : null;
   const hasCheckoutEditors = !!checkoutEditorId && editors.editors.some((editor) => editor.sessionId === checkoutEditorId);
   const labelMode = preset?.cwd && store.view === "new" ? "branch" : useWorktree ? "base" : "branch";

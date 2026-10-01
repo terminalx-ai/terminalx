@@ -263,7 +263,7 @@ final class Provider {
         let windowIndex = try requestedWindowIndex(params)
         let app = try resolveApp(query)
         if params["restoreWindow"]?.bool == true {
-            recoverWindow(app)
+            try recoverWindow(app)
         }
         let snapshot = try buildSnapshot(
             app: app,
@@ -537,10 +537,28 @@ final class Provider {
             throw ProviderError.coded("app_blocked", "app '\(trimmed)' is blocked for safety")
         }
         if let app = listApps().first(where: { matches($0, query: trimmed) }) {
-            try rejectBlockedApp(app)
-            return app
+            // Several running instances can share a bundle id (Dev builds): pick one
+            // that is running, by a stable rule, and never ask LaunchServices for one.
+            let chosen = runningInstance(sharingBundleWith: app) ?? app
+            try rejectBlockedApp(chosen)
+            return chosen
         }
         throw ProviderError.coded("app_not_found", "app '\(trimmed)' not found")
+    }
+
+    private func runningInstance(sharingBundleWith app: AppDescriptor) -> AppDescriptor? {
+        guard let bundleId = app.bundleId else { return nil }
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
+            .filter { $0.activationPolicy == .regular && pidIsLive($0.processIdentifier) }
+        guard running.count > 1 else { return nil }
+        let instances = running.map {
+            RunningAppInstance(pid: $0.processIdentifier, bundleId: $0.bundleIdentifier, isTerminated: $0.isTerminated)
+        }
+        let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        guard let picked = RunningAppActivation.pickRunning(bundleId: bundleId, among: instances, frontmostPid: frontmost) else {
+            return nil
+        }
+        return appByPid(picked.pid)
     }
 
     private func rejectBlockedApp(_ app: AppDescriptor) throws {
@@ -738,7 +756,7 @@ final class Provider {
         let modifiers = try KeyMap.parseModifiers(params["modifiers"]?.string)
         // Why: agents expect a click into a target app to make the next
         // keyboard action safe, even when the click uses an AX action path.
-        recoverWindow(snapshot.app, windowId: snapshot.windowId, windowBounds: snapshot.windowBounds)
+        try recoverWindow(snapshot.app, windowId: snapshot.windowId, windowBounds: snapshot.windowBounds)
         if let elementIndex = try optionalInteger(params, "elementIndex") {
             let record = try element(snapshot, elementIndex)
             if modifiers.isEmpty,
@@ -1105,7 +1123,7 @@ private func focusedWindow(appElement: AXUIElement, app: AppDescriptor, visibleW
         return window
     }
     if allowRecovery {
-        recoverWindow(app)
+        try recoverWindow(app)
         if let window = lookupUsableWindow(systemWide: systemWide, appElement: appElement, app: app) {
             return window
         }
@@ -1376,17 +1394,35 @@ private func matchingWindow(appElement: AXUIElement, capture: WindowCapture, foc
     } ?? focused
 }
 
+/// Bring the target's window forward. This activates the exact running
+/// instance the selector resolved to, by pid, and never asks LaunchServices
+/// for an app by bundle id (neither `open` by bundle nor NSWorkspace's open by bundle):
+/// when builds share a bundle id, that launched a different, stale copy. An
+/// instance that is no longer running is an error; nothing is launched.
 private func recoverWindow(
     _ app: AppDescriptor,
     windowId: CGWindowID? = nil,
     windowBounds: CGRect? = nil
-) {
-    _ = app.app.unhide()
-    _ = app.app.activate(options: [.activateAllWindows])
-    if let bundleId = app.bundleId {
-        openBundle(bundleId)
+) throws {
+    let current = NSRunningApplication(processIdentifier: app.pid)
+    let decision = RunningAppActivation.decide(
+        targetPid: app.pid,
+        name: app.name,
+        current: current.map {
+            RunningAppInstance(pid: $0.processIdentifier, bundleId: $0.bundleIdentifier, isTerminated: $0.isTerminated || !pidIsLive($0.processIdentifier))
+        }
+    )
+    guard case .activate = decision, let running = current else {
+        if case let .refuse(code, message) = decision {
+            throw ProviderError.coded(code, message)
+        }
+        throw ProviderError.coded(RunningAppActivation.notRunningCode, RunningAppActivation.notRunningMessage(name: app.name, pid: app.pid))
     }
+    _ = running.unhide()
+    _ = running.activate(options: [.activateAllWindows])
     let appElement = AXUIElementCreateApplication(app.pid)
+    // Frontmost through the target's own accessibility element, the same process.
+    _ = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
     let focusedWindow = copyElement(appElement, kAXFocusedWindowAttribute as String)
     var cachedWindows: [AXUIElement]?
     func windows() -> [AXUIElement] {
@@ -1438,16 +1474,6 @@ private func windowFramesMatch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
         abs(lhs.minY - rhs.minY) <= tolerance &&
         abs(lhs.width - rhs.width) <= tolerance &&
         abs(lhs.height - rhs.height) <= tolerance
-}
-
-private func openBundle(_ bundleId: String) {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-    process.arguments = ["-b", bundleId]
-    process.standardOutput = Pipe()
-    process.standardError = Pipe()
-    try? process.run()
-    process.waitUntilExit()
 }
 
 private func hasRequestedWindowSelector(_ params: [String: JSONValue]) -> Bool {

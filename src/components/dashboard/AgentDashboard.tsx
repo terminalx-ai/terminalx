@@ -3,7 +3,7 @@ import { ListFilter, Search, X } from "lucide-react";
 import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
-import { AgentCard, AgentCardSkeleton } from "@/components/dashboard/AgentCard";
+import { AgentCard, AgentCardSkeleton, CloudAgentCard } from "@/components/dashboard/AgentCard";
 import { useHotkey } from "@/lib/hotkeys";
 import { selectSession, useSessionStore } from "@/lib/sessions";
 import { useSessionSummaries } from "@/lib/summaries";
@@ -14,12 +14,21 @@ import {
   hasFilters,
   NO_FILTERS,
   toggleFilter,
-  type Buckets,
   type ColumnId,
   type DashboardFilters,
 } from "@/lib/dashboard";
 import { cn } from "@/lib/cn";
+import { isCloudDashboardSession, openCloudSession, attentionTab, useCloudDashboard, type CloudDashboardSession } from "@/lib/cloudDashboard";
 import type { SessionEntry } from "@/types/session";
+
+/** A card: a local session, or a cloud one (PRO-23 CS-19) in the same columns. */
+type CardSession = SessionEntry | CloudDashboardSession;
+
+function openCard(session: CardSession) {
+  // A cloud card opens its session on the tab that wants the reader, and only looks: nothing wakes it.
+  if (isCloudDashboardSession(session)) openCloudSession(session.key, attentionTab(session)?.tabId);
+  else selectSession(session.id);
+}
 
 /**
  * Every session at once, in three columns: what needs the reader, what is
@@ -38,32 +47,41 @@ export function AgentDashboard() {
   const [doneLimit, setDoneLimit] = useState(DONE_PAGE);
   const [cursor, setCursor] = useState<{ column: ColumnId; row: number } | null>(null);
 
-  const live = useMemo(() => store.sessions.filter((s) => !s.archived && s.tabs.length > 0), [store.sessions]);
-  const summaries = useSessionSummaries(live, store.loaded);
+  const cloud = useCloudDashboard();
+  const sessions = useMemo<CardSession[]>(() => (cloud.length ? [...store.sessions, ...cloud] : store.sessions), [store.sessions, cloud]);
+  const localLive = useMemo(() => store.sessions.filter((s) => !s.archived && s.tabs.length > 0), [store.sessions]);
+  const summaries = useSessionSummaries(localLive, store.loaded);
+  const cloudLive = useMemo(() => cloud.filter((s) => !s.archived && s.tabs.length > 0), [cloud]);
+  // Cloud projects to filter by and name: `cloud:<orgId>:<identity>` → "acme/api · Acme".
+  const cloudProjects = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const s of cloudLive) names.set(s.projectKey, `${s.projectName} · ${s.orgName}`);
+    return names;
+  }, [cloudLive]);
 
   const projectName = useCallback(
-    (path: string) => store.projects.find((p) => p.path === path)?.name ?? path.replace(/\/+$/, "").split("/").pop() ?? path,
-    [store.projects],
+    (path: string) => cloudProjects.get(path) ?? store.projects.find((p) => p.path === path)?.name ?? path.replace(/\/+$/, "").split("/").pop() ?? path,
+    [store.projects, cloudProjects],
   );
   const buckets = useMemo(
-    () => bucketSessions(store.sessions, { query, filters, projectName }),
-    [store.sessions, query, filters, projectName],
+    () => bucketSessions(sessions, { query, filters, projectName }),
+    [sessions, query, filters, projectName],
   );
   // Only the done column is capped; the other two are meant to be read whole.
-  const shown: Buckets = useMemo(
+  const shown: Record<ColumnId, CardSession[]> = useMemo(
     () => ({ needs: buckets.needs, working: buckets.working, done: buckets.done.slice(0, doneLimit) }),
     [buckets, doneLimit],
   );
 
   // Agents to filter by: the ones actually in use, plus whatever is installed.
   const harnesses = useMemo(() => {
-    const used = new Set(store.sessions.flatMap((s) => s.tabs.map((t) => t.harness)));
+    const used = new Set(sessions.flatMap((s) => s.tabs.map((t) => t.harness)));
     for (const h of store.harnesses) if (h.available) used.add(h.id);
     return [...used].map((id) => ({ id, name: store.harnesses.find((h) => h.id === id)?.name ?? id }));
-  }, [store.sessions, store.harnesses]);
+  }, [sessions, store.harnesses]);
   const agentName = useCallback(
-    (s: SessionEntry) => {
-      const tab = s.tabs.find((t) => t.id === s.activeTab) ?? s.tabs[0];
+    (s: CardSession) => {
+      const tab = isCloudDashboardSession(s) ? attentionTab(s) : (s.tabs.find((t) => t.id === s.activeTab) ?? s.tabs[0]);
       if (!tab) return "Agent";
       return tab.title ?? store.harnesses.find((h) => h.id === tab.harness)?.name ?? tab.harness;
     },
@@ -72,7 +90,7 @@ export function AgentDashboard() {
 
   // ---- keyboard: a cursor that walks the cards, Enter opens one.
   const at = useCallback(
-    (column: ColumnId, row: number): SessionEntry | undefined => shown[column][row],
+    (column: ColumnId, row: number): CardSession | undefined => shown[column][row],
     [shown],
   );
   const move = useCallback(
@@ -112,11 +130,11 @@ export function AgentDashboard() {
     if (menuIsOpen()) return false;
     const s = cursor && at(cursor.column, cursor.row);
     if (!s) return false; // nothing focused: let the chord fall through
-    selectSession(s.id); // the same thing a click does; the store swaps the workspace over
+    openCard(s); // the same thing a click does; the store swaps the workspace over
     return true;
   });
 
-  const total = live.length;
+  const total = localLive.length + cloudLive.length;
   const loading = !store.loaded || (summaries.loading && total > 0);
 
   return (
@@ -168,6 +186,16 @@ export function AgentDashboard() {
                   <span className="truncate">{p.name}</span>
                 </DropdownMenuCheckboxItem>
               ))}
+              {[...cloudProjects].map(([key, name]) => (
+                <DropdownMenuCheckboxItem
+                  key={key}
+                  checked={filters.projects.includes(key)}
+                  onSelect={(e) => e.preventDefault()}
+                  onCheckedChange={() => setFilters((f) => ({ ...f, projects: toggleFilter(f.projects, key) }))}
+                >
+                  <span className="truncate">{name}</span>
+                </DropdownMenuCheckboxItem>
+              ))}
               <DropdownMenuSeparator />
               <DropdownMenuLabel>Agent</DropdownMenuLabel>
               {harnesses.map((h) => (
@@ -210,18 +238,30 @@ export function AgentDashboard() {
         <div className="flex flex-col gap-4 @min-[760px]:h-full @min-[760px]:flex-row @min-[760px]:gap-3">
           {COLUMNS.map((c) => (
             <Column key={c.id} id={c.id} label={c.label} count={buckets[c.id].length} loading={loading}>
-              {shown[c.id].map((s, row) => (
-                <AgentCard
-                  key={s.id}
-                  session={s}
-                  summary={summaries.get(s.id)}
-                  column={c.id}
-                  project={store.projects.find((p) => p.path === s.projectPath)}
-                  agentName={agentName(s)}
-                  focused={cursor?.column === c.id && cursor.row === row}
-                  onFocus={() => setCursor({ column: c.id, row })}
-                />
-              ))}
+              {shown[c.id].map((s, row) =>
+                isCloudDashboardSession(s) ? (
+                  <CloudAgentCard
+                    key={s.id}
+                    session={s}
+                    column={c.id}
+                    agentName={agentName(s)}
+                    focused={cursor?.column === c.id && cursor.row === row}
+                    onFocus={() => setCursor({ column: c.id, row })}
+                    onOpen={() => openCard(s)}
+                  />
+                ) : (
+                  <AgentCard
+                    key={s.id}
+                    session={s}
+                    summary={summaries.get(s.id)}
+                    column={c.id}
+                    project={store.projects.find((p) => p.path === s.projectPath)}
+                    agentName={agentName(s)}
+                    focused={cursor?.column === c.id && cursor.row === row}
+                    onFocus={() => setCursor({ column: c.id, row })}
+                  />
+                ),
+              )}
               {c.id === "done" && buckets.done.length > shown.done.length && (
                 <Button variant="ghost" size="sm" className="w-full" onClick={() => setDoneLimit((n) => n + DONE_PAGE)}>
                   Show {Math.min(DONE_PAGE, buckets.done.length - shown.done.length)} more

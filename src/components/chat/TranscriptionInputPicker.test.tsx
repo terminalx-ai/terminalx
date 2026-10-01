@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { accessibilityPress, mouseClick } from "@/test/press";
 
 const { invoke, recording } = vi.hoisted(() => ({ invoke: vi.fn(), recording: { phase: "idle" } }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -144,5 +145,26 @@ describe("transcription input picker", () => {
     render(<TranscriptionInputPicker compact />);
     await waitFor(() => expect(screen.getByRole("button", { name: `Transcription audio input: ${selected}` })).toBeTruthy());
     expect(screen.getByText(selected).className).toContain("truncate");
+  });
+});
+
+describe("opening the transcription input picker", () => {
+  const picker = () => screen.getByRole("button", { name: /Transcription audio input/, hidden: true });
+
+  it("opens on a real mouse click, reads the inputs, and a second click closes it", async () => {
+    render(<TranscriptionInputPicker />);
+    await waitFor(() => expect(picker().textContent).toContain("Studio Microphone"));
+    mouseClick(picker());
+    await screen.findByRole("menu");
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("transcription_inputs"));
+    mouseClick(picker());
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  });
+
+  it("opens on an accessibility press (a click with no pointerdown)", async () => {
+    render(<TranscriptionInputPicker />);
+    await waitFor(() => expect(picker().textContent).toContain("Studio Microphone"));
+    accessibilityPress(picker());
+    await screen.findByRole("menu");
   });
 });

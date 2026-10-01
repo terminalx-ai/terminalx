@@ -107,6 +107,18 @@ pub trait AgentOps: Send + Sync {
     fn note(&self, session_id: &str, tab_id: &str, text: &str);
     /// Committed events, oldest first (checkpoint projection).
     fn events(&self, session_id: &str, tab_id: &str) -> Result<Vec<Value>>;
+    /// The session a tab belongs to, for the checkpoint projection.
+    fn session(&self, _session_id: &str) -> Option<SessionSummary> {
+        None
+    }
+}
+
+/// What a checkpoint says about a tab's session. It travels only inside the
+/// encrypted projection.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SessionSummary {
+    pub title: String,
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -125,7 +137,9 @@ impl Settings {
                 Some(_) => Err(anyhow!("{name} must be a short string")),
             }
         };
-        let settings = Self { model: text("model")?, effort: text("effort")?, mode: text("mode")? };
+        // A blank mode says nothing, like an absent one: the tab keeps its own.
+        let mode = index::requested_mode(text("mode")?);
+        let settings = Self { model: text("model")?, effort: text("effort")?, mode };
         if let Some(mode) = settings.mode.as_deref() {
             if !matches!(mode, "plan" | "manual" | "auto" | "acceptEdits" | "bypassPermissions" | "default") {
                 return Err(anyhow!("unknown permission mode {mode}"));
@@ -194,6 +208,11 @@ impl AgentOps for ManagerOps {
             }
         }
         out
+    }
+
+    fn session(&self, session_id: &str) -> Option<SessionSummary> {
+        let entry = index::get(session_id).ok().filter(|entry| entry.project_path == self.root)?;
+        Some(SessionSummary { title: entry.title, branch: entry.branch })
     }
 
     fn busy(&self, session_id: &str, tab_id: &str) -> bool {

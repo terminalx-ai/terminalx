@@ -24,7 +24,7 @@ export function Toasts() {
             <Icon className={cn("mt-0.5 size-4 shrink-0", n.kind === "waiting" ? "text-warning" : n.kind === "failed" ? "text-destructive" : "text-add")} />
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5 font-medium">
-                {tab && <AgentMark id={tab.harness} className="size-3.5" />}
+                {(tab?.harness ?? n.harness) && <AgentMark id={(tab?.harness ?? n.harness)!} className="size-3.5" />}
                 <span className="truncate">{n.title}</span>
               </div>
               <div className="truncate text-xs text-muted-foreground">{n.body}</div>

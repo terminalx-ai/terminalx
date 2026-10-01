@@ -77,6 +77,8 @@ export interface Projection {
   truncated: boolean;
   followUps: { clientCommandId: string; text: string }[];
   updatedAt: number;
+  /** The tab's session, from runtimes with CS-12; sealed with the rest of the projection. */
+  session?: { title: string; branch: string | null };
 }
 
 export interface Checkpoint {

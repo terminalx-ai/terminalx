@@ -14,6 +14,7 @@ import {
   type WakeResult,
 } from "@/lib/cloudAgentApi";
 import type { AgentEvent } from "@/types/events";
+import { DEFAULT_PERMISSION_MODE } from "@/lib/models";
 
 /**
  * Agent tabs of cloud workspaces (PRO-22), per organization and workspace.
@@ -81,6 +82,14 @@ export const SAVE_DEBOUNCE_MS = 500;
 const CACHE_EVENTS = 2_000;
 
 const stores = new Map<string, Store>();
+/** Told when any workspace's tabs change (the dashboard, notifications and palette read every workspace). */
+const anyListeners = new Set<() => void>();
+
+/** Follow every workspace's tabs at once; the listener is told after any change. */
+export function subscribeAllCloudAgents(listener: () => void): () => void {
+  anyListeners.add(listener);
+  return () => anyListeners.delete(listener);
+}
 
 /**
  * A runtime attached by pairing code for development: no organization, so no
@@ -129,6 +138,7 @@ function publish(s: Store) {
   const tabs = [...s.tabs.values()].sort((a, b) => a.info.created.localeCompare(b.info.created) || a.tabId.localeCompare(b.tabId));
   s.snapshot = { tabs, outbox: s.outbox, loaded: s.loaded, wake: s.wake, error: s.error, version: s.snapshot.version + 1 };
   for (const listener of [...s.listeners]) listener();
+  for (const listener of [...anyListeners]) listener();
 }
 
 export function useCloudAgents(scope: CloudAgentScope): CloudAgentsSnapshot {
@@ -174,6 +184,15 @@ export function dropCloudAgents(scope: CloudAgentScope): number {
   return count;
 }
 
+/** Forget one organization's tabs and polling: the user left it (CS-18). */
+export function dropCloudAgentsIn(orgId: string): void {
+  for (const key of [...stores.keys()]) {
+    if (!key.startsWith(`${orgId}:`)) continue;
+    const [organizationId, ...rest] = key.split(":");
+    dropCloudAgents({ organizationId, workspaceId: rest.join(":") });
+  }
+}
+
 export function errorText(error: unknown): string {
   if (error && typeof error === "object" && "code" in error && typeof (error as { code: unknown }).code === "string") return (error as { code: string }).code;
   if (error instanceof Error) return error.message;
@@ -188,7 +207,7 @@ function placeholderInfo(tabId: string): AgentTabInfo {
     harness: "claude",
     model: "",
     effort: null,
-    permissionMode: "manual",
+    permissionMode: DEFAULT_PERMISSION_MODE,
     status: "idle",
     process: "not-started",
     pendingPermissions: [],
@@ -509,7 +528,7 @@ export async function markCloudAgentRead(scope: CloudAgentScope, tabId: string, 
 export async function createCloudAgentTab(
   scope: CloudAgentScope,
   client: WorkspaceRpcClient,
-  params: { agent: string; model?: string; effort?: string | null; mode?: string; title?: string },
+  params: { agent: string; model?: string; effort?: string | null; mode?: string; title?: string; prompt?: string; useWorktree?: boolean },
 ): Promise<string> {
   const created = await client.createAgentTab(params);
   const s = store(scope);
@@ -520,7 +539,7 @@ export async function createCloudAgentTab(
     harness: params.agent,
     model: params.model ?? "",
     effort: params.effort ?? null,
-    permissionMode: params.mode ?? "manual",
+    permissionMode: params.mode || DEFAULT_PERMISSION_MODE,
     title: params.title ?? null,
     created: now,
     modified: now,

@@ -42,7 +42,7 @@ vi.mock("@/lib/models", () => ({
     { id: "auto", label: "Auto" },
     { id: "bypassPermissions", label: "Bypass permissions" },
   ],
-  bypassEffect: () => ({ flag: "--permission-mode bypassPermissions", effect: "Claude Code stops asking about anything." }),
+  bypassEffect: () => ({ flag: "--dangerously-skip-permissions", effect: "Claude Code stops asking about anything." }),
   useModels: () => [{ id: "sonnet", label: "Sonnet", harness: "claude", isDefault: true, efforts: [], defaultEffort: null }],
 }));
 // The interactive-session preference is deliberately "auto" (and "manual" in

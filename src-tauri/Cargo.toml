@@ -136,3 +136,5 @@ strip = true
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
+# tests/serde_field_naming.rs parses the source to check serde field naming.
+syn = { version = "2", features = ["full", "visit"] }
