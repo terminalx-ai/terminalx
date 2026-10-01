@@ -26,6 +26,7 @@ dist-ssr
 # per-project worktrees created by Raccoon itself
 /.raccoon/
 /target/
+/target-linux/
 /.superdesign/
 
 # Swift helper build output

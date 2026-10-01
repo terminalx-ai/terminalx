@@ -111,15 +111,39 @@ The token is kept in every failure case.
 
 Requests carry `x-terminalx-cloud-workspace-runtime-version` and, on refresh,
 `x-terminalx-cloud-workspace-runtime-capabilities` (`organization-access-v1`,
-`agent-grants-v1`, `github-broker-v1`, `quiesce-v1`, `collaboration-v1`; see `CAPABILITIES` in
-`src/cloud_bootstrap.rs`). With `quiesce-v1` the refresh answer carries an archive's
-final-checkpoint request, which `src/cloud_quiesce.rs` answers (see
-[CLOUD-LIFECYCLE.md](CLOUD-LIFECYCLE.md)). With `collaboration-v1` it carries who the
-workspace is shared with ([CLOUD-SHARING.md](CLOUD-SHARING.md)); the session is refreshed
-every 5 s while a client is attached so a revoked share stops access promptly. The `ready`
-line reports `cloudWorkspace` (`workspaceId`, `relayHostId`, `capabilities`), or `null`
-without a bootstrap. The
-session is refreshed every 30 seconds in the background.
+`agent-grants-v1`, `github-broker-v1`, `quiesce-v1`, `environment-template-v1`,
+`collaboration-v1`; see `CAPABILITIES` in `src/cloud_bootstrap.rs`). With `quiesce-v1` the
+refresh answer carries an archive's final-checkpoint request, which `src/cloud_quiesce.rs`
+answers (see [CLOUD-LIFECYCLE.md](CLOUD-LIFECYCLE.md)). With `collaboration-v1` it carries
+who the workspace is shared with ([CLOUD-SHARING.md](CLOUD-SHARING.md)). The `ready` line reports `cloudWorkspace`
+(`workspaceId`, `relayHostId`, `capabilities`), or `null` without a bootstrap. The session
+is refreshed every 5 seconds in the background, as the legacy runtime did: a new
+attachment waits for the next refresh before the relay host can answer it, and a revoked
+share stops access that promptly.
+
+## Environment templates (PRO-15)
+
+A workspace pinned to an Environment version boots from an image that already holds every
+repository at `/home/repos/<owner>/<name>`. `environment-template-v1` makes the refresh
+carry `setup.environment`, and `cloud_environment.rs` applies it after the GitHub
+credential helper is installed and before any agent starts (a plan that only arrives on a
+later refresh is applied then):
+
+- An entry with a `ref` switches that checkout to the branch. The single ref is fetched
+  first only when the image lacks it. Launch never clones.
+- An entry without a `ref` stays on the built default branch.
+- The whole checkout is bounded (120 s); a timed-out git call has its process group killed.
+- The outcome goes to `/v1/cloud-workspace-bootstrap/progress` (`repository-ready` or
+  `repository-clone-failed`), then to `environment-checkout.json` next to the bootstrap
+  token, where the worker and the local e2e read it. The record is written whether or not
+  the API takes the report (it answers 401 once the operation has settled), so a
+  successful checkout of a version is final and a restart never switches a person's
+  branch back. A failed checkout or a new version is applied again on the next boot.
+- A checkout this process cannot see (`unreachable`: the directory cannot be opened, as
+  under the systemd unit's `ProtectHome=true`, which hides `/home/repos`) is not a failed
+  clone: git never ran. Nothing is reported, the record says `unreachable`, and it is
+  tried again on the next boot. A directory that is there but is not a checkout is still
+  `missing`, and reported as `repository-clone-failed`.
 
 Debug builds honour `TERMINALX_SERVE_TEST_CRASH_AT=<step>`, which SIGKILLs the process at
 that step. `serve/tests/bootstrap_crash.rs` uses it against a fake server to check each
@@ -136,11 +160,19 @@ only, using the bootstrap's Relay Token and host key (`src/remote/host.rs`):
 - Each pending attachment from `/refresh` gets a single-use relay invite and a pairing
   code (offer v2), published with `/attachments/:id/complete`. Attached devices (token
   hashes only) are kept in `run/remote-devices.json`.
+- Each revocation from `/refresh` drops the device and closes its connections, then, once
+  the device list is saved, is confirmed with `/revocations/:id/complete`. The API lists a revocation until it is
+  confirmed, and a refresh that lists more than 256 is refused, so an unconfirmed backlog
+  would eventually stop the relay token from renewing.
 - A client connection runs the E2EE v2 handshake, proves the attachment's device token,
   may install a resume credential (`pairing.provisionRelay`) and then speaks
   `terminalx-workspace-rpc/1` (`src/remote/server.rs`): `rpc.hello` capability
-  negotiation and the versioned `pty.*`, `fs.*`, `git.*` and `session.*` methods, each
-  authorized against the attachment's authority, with idempotent mutations.
+  negotiation and the versioned `pty.*`, `fs.*`, `git.*`, `session.*`, `keys.*`,
+  `lifecycle.*` and `runtime.agents` methods, plus sharing (`collab/1`,
+  [CLOUD-SHARING.md](CLOUD-SHARING.md)); see `CAPABILITIES` and `METHODS` in
+  `src/remote/protocol.rs`. Each is authorized against the attachment's authority, with
+  idempotent mutations. `session/2`, `pty/2`, `agents/1` and `collab/1` are additive: a
+  client that asks only for `session/1` and `pty/1` is served as before.
 - A rejected runtime credential disconnects every client and stops serving until the
   API accepts one again.
 
@@ -149,13 +181,40 @@ Registration states are printed as `{"type":"relay","status":{...}}` lines.
 `scripts/remote-runtime/e2e.sh` uses it to run `serve/tests/relay_e2e.rs` against the
 terminalx-saas relay code.
 
+## Testing on Linux
+
+`scripts/remote-runtime/e2e-linux.sh` builds `terminalx-serve` in a `rust:1-bookworm`
+container (`scripts/remote-runtime/linux.Dockerfile`, with bun, Redis and python3) and runs
+the relay e2e there, so a Mac checks the Linux runtime the cloud boots:
+
+```sh
+TERMINALX_SAAS_DIR=~/code/ai/terminalx/terminalx-saas scripts/remote-runtime/e2e-linux.sh
+UNIT=1 ...        # also the library unit tests, serve's clippy and its own tests
+BUILD_ONLY=1 ...  # only the binary, at target-linux/terminalx-serve
+```
+
+`two_agent_tabs_and_a_shell_survive_a_reattach_and_a_fenced_restart` is the PRO-12 check:
+two fake-Claude agent tabs and a shell run at once, a new connection finds the same tabs,
+transcripts, shell process and output, and after a reboot on a newer generation the old
+generation is refused, transcripts survive and the old shell is gone. It then exercises
+the additive namespaces on that runtime: `runtime.agents`, `session.addTab` (and its
+resend), `session.update`, a session's terminal (`pty.create` with `sessionId`) and
+`session.delete`, which closes that terminal and leaves the others. terminalx-saas
+`bun run cloud:e2e:local` builds its local-docker image from `target-linux/terminalx-serve`
+(or `TERMINALX_SERVE_BIN`) and runs the full workspace lifecycle against it.
+
 ## Not yet
 
-- **First-run setup** (organization credentials, repository clone). The runtime does not
-  advertise `organization-setup-v*`, so the server does not send it.
+- **Repository clone** for a workspace without an Environment template. The runtime does
+  not advertise `organization-setup-v*`, so the server sends no clone list and such a
+  workspace starts with an empty project; a launch into it makes the folder a Git
+  repository on its work branch. Organization credentials need no setup: agent
+  logins arrive as sealed grants (`cloud_grants`) and GitHub access through the broker
+  (`cloud_github`).
 - **The `terminalx` agent CLI inside the runtime.** The CLI module links the desktop's
   computer-use and browser parsers, so it is still desktop-only.
-- **The published artifact.** terminalx-saas installs this binary behind
-  `CLOUD_WORKSPACE_RUNTIME_KIND=terminalx-serve` (versioned directory, atomic `current`
-  swap, health check, rollback). A signed, pinned linux-x64/arm64 build is not published
-  yet.
+- **A signed artifact, and arm64 in the cloud.** `release-serve.yml` publishes
+  `terminalx-serve-linux-x64` and `-arm64` as a runtime prerelease after CI passes on
+  `main` ([RELEASING.md](RELEASING.md)). terminalx-saas installs the newest compatible x64
+  one by default (versioned directory, atomic `current` swap, health check, rollback). It
+  is verified by SHA-256, not signed, and the server does not provision the arm64 build.
