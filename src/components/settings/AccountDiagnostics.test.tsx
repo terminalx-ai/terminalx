@@ -64,5 +64,5 @@ it("an administrator sees the diagnostics section", async () => {
   mocks.status = signedIn("admin");
   render(<AccountTab />);
   expect(screen.getByText("Cloud diagnostics")).toBeTruthy();
-  await waitFor(() => expect(mocks.api.cloudDiagnostics).toHaveBeenCalledWith(7));
+  await waitFor(() => expect(mocks.api.cloudDiagnostics).toHaveBeenCalledWith(7, null));
 });

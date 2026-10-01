@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   workspaceConnection: vi.fn(),
   catalog: { owner: "me", revision: "r", loaded: true, orgs: {} as Record<string, unknown>, createMemory: {}, notices: [] },
   prefs: { panelOpen: true, panelWidth: 360, sidebarOpen: true, lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", useWorktree: true },
+  /** This account's role in the session's organization. */
+  role: "member",
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (command: string, args?: Record<string, unknown>) => mocks.guard.invoke(command, args) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
@@ -22,7 +24,7 @@ vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("@/lib/api", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/api")>()), workspaceConnection: mocks.workspaceConnection, hasWorkspaceConnection: () => true }));
 vi.mock("@/lib/cloudCatalog", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/cloudCatalog")>()), useCloudCatalog: () => mocks.catalog }));
 vi.mock("@/lib/account", () => {
-  const account = { status: { state: "signed-in", identity: { name: null, email: "a@b.c", organization: "Acme", organizationId: "org-1" }, expiresAt: null, lastError: null, organizations: [{ id: "org-1", name: "Acme", role: "member" }] } };
+  const account = { status: { state: "signed-in", identity: { name: null, email: "a@b.c", organization: "Acme", organizationId: "org-1" }, expiresAt: null, lastError: null, organizations: [{ id: "org-1", name: "Acme", get role() { return mocks.role; } }] } };
   return { useAccount: () => account, getAccount: () => account, subscribeAccount: () => () => undefined, refreshAccount: vi.fn() };
 });
 vi.mock("@/lib/theme", () => ({ useTheme: () => ({ resolvedMode: "dark" }) }));
@@ -295,6 +297,7 @@ beforeEach(() => {
   mocks.workspaceConnection.mockReset();
   mocks.workspaceConnection.mockImplementation(async () => ({ target: { kind: "cloud", organizationId: ORG, workspaceId: WS }, client, activate, close: vi.fn() }));
   mocks.prefs.panelOpen = true;
+  mocks.role = "member";
   setCatalog(workspaceItem("ready"));
   // Tab selection is per session key and outlives a render.
   selectSessionTab(KEY, { kind: "agent", id: "t-1" });
@@ -505,6 +508,35 @@ describe("the session header's location and connection chips", () => {
     click(screen.getByTestId("session-location"));
     const menu = await screen.findByRole("menu");
     expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…"]);
+  });
+
+  // PRO-38: the organization's diagnostics, from where the session runs.
+  // A member (the role every other test here has) is not offered it: the
+  // menu above is exactly Stop, Archive and Delete.
+  it("the location chip opens cloud diagnostics for an administrator of the session's organization", async () => {
+    mocks.role = "admin";
+    guard.handlers.cloud_diagnostics = () => ({
+      v: 1,
+      organizationId: "org-1",
+      generatedAt: 2,
+      window: { from: 1, to: 2, maxOperations: 200, truncated: false },
+      retention: null,
+      stageTimings: { create: null, resume: null },
+      operations: [],
+      workspaces: [],
+      closeReasons: [],
+    });
+    guard.handlers.cloud_connection_diagnostics = () => [];
+    await openConnected();
+    click(screen.getByTestId("session-location"));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…", "Cloud diagnostics…"]);
+    fireEvent.click(within(menu).getByRole("menuitem", { name: /Cloud diagnostics/ }));
+    const dialog = await screen.findByTestId("cloud-diagnostics-dialog");
+    expect(within(dialog).getByText("Cloud diagnostics · Acme")).toBeTruthy();
+    await waitFor(() => expect(guard.calls.some((call) => call.command === "cloud_diagnostics" && call.args.windowDays === 7)).toBe(true));
+    expect(await within(dialog).findByText("No cloud operations in this window.")).toBeTruthy();
+    expect(guard.violations).toEqual([]);
   });
 
   it("the location chip offers Resume on a stopped workspace", async () => {

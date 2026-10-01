@@ -3,6 +3,8 @@ import { Download, Loader2, RefreshCw } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
+import { cloudOrgArg } from "@/lib/cloudCatalog";
+import { cn } from "@/lib/cn";
 import {
   DEFAULT_DIAGNOSTICS_WINDOW_DAYS,
   DIAGNOSTICS_WINDOW_OPTIONS,
@@ -46,9 +48,25 @@ function Timings({ label, timings }: { label: string; timings: DiagnosticsOperat
 
 /**
  * Cloud diagnostics for organization owners and administrators (PRO-38).
- * The server decides who may see them; a member gets a short explanation.
+ * The server decides who may see them, by the role in the organization asked
+ * for; a member gets a short explanation.
  */
-export function OrganizationDiagnostics({ contextRevision, member = false }: { contextRevision: string; member?: boolean }) {
+export function OrganizationDiagnostics({
+  contextRevision,
+  member = false,
+  orgId = null,
+  workspaceId = null,
+  framed = true,
+}: {
+  contextRevision: string;
+  member?: boolean;
+  /** The organization to report on: the active one when none (Settings). */
+  orgId?: string | null;
+  /** The workspace the view was opened from; its rows are marked. */
+  workspaceId?: string | null;
+  /** False inside a dialog, which has its own frame and title. */
+  framed?: boolean;
+}) {
   const [windowDays, setWindowDays] = useState<number>(DEFAULT_DIAGNOSTICS_WINDOW_DAYS);
   const [diagnostics, setDiagnostics] = useState<CloudDiagnostics | null>(null);
   const [closes, setCloses] = useState<ConnectionClose[]>([]);
@@ -64,7 +82,7 @@ export function OrganizationDiagnostics({ contextRevision, member = false }: { c
     // The account already says this is a member: skip a request the server refuses.
     const refused = Promise.reject({ code: "organization_admin_required" });
     refused.catch(() => {});
-    const [server, local] = await Promise.allSettled([member ? refused : api.cloudDiagnostics(days), api.cloudConnectionDiagnostics()]);
+    const [server, local] = await Promise.allSettled([member ? refused : api.cloudDiagnostics(days, cloudOrgArg(orgId)), api.cloudConnectionDiagnostics()]);
     if (current !== loadSeq.current) return;
     if (server.status === "fulfilled") {
       setDiagnostics(server.value);
@@ -75,7 +93,7 @@ export function OrganizationDiagnostics({ contextRevision, member = false }: { c
     }
     setCloses(local.status === "fulfilled" ? local.value : []);
     setLoading(false);
-  }, [member]);
+  }, [member, orgId]);
 
   useEffect(() => {
     setDiagnostics(null);
@@ -97,7 +115,7 @@ export function OrganizationDiagnostics({ contextRevision, member = false }: { c
     if (!path) return;
     setExporting(true);
     try {
-      await api.cloudDiagnosticsExport(path, windowDays);
+      await api.cloudDiagnosticsExport(path, windowDays, cloudOrgArg(orgId));
       setExportResult({ ok: true, text: `Saved to ${path}` });
     } catch (failure) {
       setExportResult({ ok: false, text: exportErrorMessage(failure) });
@@ -112,10 +130,11 @@ export function OrganizationDiagnostics({ contextRevision, member = false }: { c
   const operations = diagnostics?.operations ?? [];
   const workspaces = diagnostics?.workspaces ?? [];
   return (
-    <div className="rounded-lg border border-hairline p-3">
+    <div className={cn(framed && "rounded-lg border border-hairline p-3")} data-testid="cloud-diagnostics">
       <div className="flex items-center justify-between gap-2">
-        <div className="text-sm font-medium">Cloud diagnostics</div>
-        <div className="flex items-center gap-1">
+        {/* A dialog names the view in its own title. */}
+        <div className="min-w-0 truncate text-sm font-medium">{framed ? "Cloud diagnostics" : "Recent activity"}</div>
+        <div className="flex shrink-0 items-center gap-1">
           {!memberOnly && (
             <select
               aria-label="Diagnostics window"
@@ -174,7 +193,7 @@ export function OrganizationDiagnostics({ contextRevision, member = false }: { c
           {operations.length ? (
             <ul aria-label="Recent operations" className="mt-1 flex flex-col divide-y divide-hairline text-[11px]">
               {operations.map((operation) => (
-                <li key={operation.operationId} className="py-1.5">
+                <li key={operation.operationId} className={cn("py-1.5", workspaceId && operation.workspaceId === workspaceId && "-mx-1 rounded-sm bg-selected/50 px-1")} data-current={workspaceId && operation.workspaceId === workspaceId ? "" : undefined}>
                   <div className="flex flex-wrap items-baseline gap-x-2">
                     <span className="font-medium">{operation.type}</span>
                     <span>{operation.state}</span>
@@ -209,7 +228,7 @@ export function OrganizationDiagnostics({ contextRevision, member = false }: { c
           {workspaces.length ? (
             <ul aria-label="Workspace connections" className="mt-1 flex flex-col gap-0.5 text-[11px]">
               {workspaces.map((workspace) => (
-                <li key={workspace.workspaceId} className="flex flex-wrap gap-x-2">
+                <li key={workspace.workspaceId} className={cn("flex flex-wrap gap-x-2", workspaceId && workspace.workspaceId === workspaceId && "-mx-1 rounded-sm bg-selected/50 px-1")} data-current={workspaceId && workspace.workspaceId === workspaceId ? "" : undefined}>
                   <span className="truncate font-mono">{workspace.workspaceId}</span>
                   <span className="text-muted-foreground">{workspace.state}</span>
                   {workspace.oomRelaunchCount ? <span className="text-destructive">{workspace.oomRelaunchCount} out-of-memory relaunches</span> : null}

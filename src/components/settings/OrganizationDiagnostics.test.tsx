@@ -10,6 +10,8 @@ vi.mock("@/lib/api", () => ({
   api: { cloudDiagnostics: vi.fn(), cloudConnectionDiagnostics: vi.fn(), cloudDiagnosticsExport: vi.fn() },
   errorMessage: (error: unknown) => String(error),
 }));
+// The real rule (the organization only when the server authorizes by membership) is covered in CloudProjects.test.tsx.
+vi.mock("@/lib/cloudCatalog", () => ({ cloudOrgArg: (orgId: string | null | undefined) => orgId ?? null }));
 
 const diagnostics = (): CloudDiagnostics => ({
   v: 1,
@@ -89,7 +91,7 @@ it("shows timings, operations with retry hints, restart decisions, connections a
   expect(legend.textContent).toContain("stale_generation");
   expect(legend.textContent).toContain("Update TerminalX");
   expect(screen.getByLabelText("Connection closes on this Mac").textContent).toContain("auth_expired");
-  expect(api.cloudDiagnostics).toHaveBeenCalledWith(7);
+  expect(api.cloudDiagnostics).toHaveBeenCalledWith(7, null);
 });
 
 it("tells a member the organization's diagnostics are for administrators and keeps this Mac's closes", async () => {
@@ -128,10 +130,10 @@ it("exports only to a path the user chose, with the selected window", async () =
   expect(api.cloudDiagnosticsExport).not.toHaveBeenCalled();
 
   fireEvent.change(screen.getByRole("combobox", { name: "Diagnostics window" }), { target: { value: "30" } });
-  await waitFor(() => expect(api.cloudDiagnostics).toHaveBeenLastCalledWith(30));
+  await waitFor(() => expect(api.cloudDiagnostics).toHaveBeenLastCalledWith(30, null));
   await screen.findByLabelText("Recent operations");
   fireEvent.click(screen.getByRole("button", { name: /Export diagnostics/ }));
-  await waitFor(() => expect(api.cloudDiagnosticsExport).toHaveBeenCalledWith("/tmp/diagnostics.json", 30));
+  await waitFor(() => expect(api.cloudDiagnosticsExport).toHaveBeenCalledWith("/tmp/diagnostics.json", 30, null));
   expect((await screen.findByText(/Saved to/)).textContent).toContain("/tmp/diagnostics.json");
 });
 
@@ -143,4 +145,32 @@ it("explains a refused export in words", async () => {
   await screen.findByLabelText("Recent operations");
   fireEvent.click(screen.getByRole("button", { name: /Export diagnostics/ }));
   expect((await screen.findByRole("alert")).textContent).toContain("could not be written there");
+});
+
+it("reports on and exports the organization it was opened for, marking the workspace it came from", async () => {
+  const report = diagnostics();
+  report.organizationId = "org_2";
+  report.operations.push({ ...report.operations[0], operationId: "op_2", workspaceId: "cw_2" });
+  report.workspaces.push({ ...report.workspaces[0], workspaceId: "cw_2" });
+  vi.mocked(api.cloudDiagnostics).mockResolvedValue(report);
+  vi.mocked(api.cloudDiagnosticsExport).mockResolvedValue(undefined);
+  vi.mocked(save).mockResolvedValue("/tmp/org-2.json");
+  render(<OrganizationDiagnostics contextRevision="rev-1" orgId="org_2" workspaceId="cw_2" framed={false} />);
+
+  const operations = within(await screen.findByLabelText("Recent operations")).getAllByRole("listitem");
+  expect(api.cloudDiagnostics).toHaveBeenCalledWith(7, "org_2");
+  expect(operations.map((row) => row.hasAttribute("data-current"))).toEqual([false, true]);
+  const workspaces = within(screen.getByLabelText("Workspace connections")).getAllByRole("listitem");
+  expect(workspaces.map((row) => row.hasAttribute("data-current"))).toEqual([false, true]);
+  // Inside a dialog the frame's own title is the dialog's.
+  expect(screen.queryByText("Cloud diagnostics")).toBeNull();
+
+  fireEvent.click(screen.getByRole("button", { name: /Export diagnostics/ }));
+  await waitFor(() => expect(api.cloudDiagnosticsExport).toHaveBeenCalledWith("/tmp/org-2.json", 7, "org_2"));
+});
+
+it("explains an organization this account cannot reach", async () => {
+  vi.mocked(api.cloudDiagnostics).mockRejectedValue({ code: "cloud_workspace_not_found", status: 404 });
+  render(<OrganizationDiagnostics contextRevision="rev-1" orgId="org_9" />);
+  expect((await screen.findByRole("alert")).textContent).toContain("not available for this organization");
 });

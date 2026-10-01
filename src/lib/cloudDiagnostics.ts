@@ -124,6 +124,9 @@ export function diagnosticsErrorMessage(error: unknown): string {
   switch (code) {
     case "organization_admin_required":
       return "Only organization owners and administrators can view cloud diagnostics.";
+    case "cloud_workspace_not_found":
+    case "cloud_organization_unavailable":
+      return "Cloud diagnostics are not available for this organization from this account.";
     case "cloud_diagnostics_not_supported":
       return "Cloud diagnostics are not available on this server yet.";
     case "account_signed_out":

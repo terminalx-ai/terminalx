@@ -520,20 +520,22 @@ pub mod commands {
         window_days.unwrap_or(DEFAULT_WINDOW_DAYS).clamp(1, MAX_WINDOW_DAYS)
     }
 
-    async fn fetch(state: &tauri::State<'_, crate::AppState>, window_days: u8) -> Result<CloudDiagnostics, CloudWorkspaceClientError> {
+    async fn fetch(state: &tauri::State<'_, crate::AppState>, org_id: Option<String>, window_days: u8) -> Result<CloudDiagnostics, CloudWorkspaceClientError> {
         let service = state.cloud_workspaces.clone();
-        tauri::async_runtime::spawn_blocking(move || service.diagnostics(window_days))
+        tauri::async_runtime::spawn_blocking(move || service.diagnostics(org_id.as_deref(), window_days))
             .await
             .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Read))?
     }
 
-    /// Organization owners and administrators only; the server decides.
+    /// Owners and administrators of `org_id` (the active Organization when
+    /// none) only; the server decides by the role in that Organization.
     #[tauri::command]
     pub async fn cloud_diagnostics(
         window_days: Option<u8>,
         state: tauri::State<'_, crate::AppState>,
+        org_id: Option<String>,
     ) -> Result<CloudDiagnostics, CloudWorkspaceClientError> {
-        fetch(&state, window(window_days)).await
+        fetch(&state, org_id, window(window_days)).await
     }
 
     /// Local only: needs no account and touches no network.
@@ -553,6 +555,7 @@ pub mod commands {
         app: tauri::AppHandle,
         state: tauri::State<'_, crate::AppState>,
         remote: tauri::State<'_, Arc<CloudRemote>>,
+        org_id: Option<String>,
     ) -> Result<(), String> {
         let mut target = PathBuf::from(&path);
         if !target.is_absolute() {
@@ -564,7 +567,7 @@ pub mod commands {
         }
         let window_days = window(window_days);
         // Signed out, the service answers `account_signed_out` without a request.
-        let server = fetch(&state, window_days).await;
+        let server = fetch(&state, org_id, window_days).await;
         let closes = remote.close_log().snapshot();
         let export = build_export(&ExportInputs {
             app: AppInfo {
@@ -700,6 +703,134 @@ mod tests {
         assert_eq!(export["server"]["diagnostics"]["workspaces"][0]["workspaceId"], "cw_1");
         assert!(is_id("op_7d2c9a4e-1b1f-4c55-9e0a-3f1c2b3a4d5e"));
         assert!(is_code("cloud_workspace_credential_verification_unavailable"));
+    }
+
+    /// Secret-shaped values, the lowercase ones included (they fit the code
+    /// alphabet), are written into every string the builder can read: each
+    /// string of the server answer, a stage name, the refusal code, the app
+    /// details and the close log. None may reach the export, whole or in part.
+    #[test]
+    fn secret_shaped_values_in_every_exported_field_are_redacted() {
+        const SECRETS: &[(&str, &str)] = &[
+            ("github token", "ghp_0123456789abcdefghijklmnopqrstuvwxyz"),
+            ("lowercase github token", "ghs_abcdefabcdef"),
+            ("github fine-grained token", "github_pat_11abcdefg0123456789"),
+            ("gitlab token", "glpat-abcdef012345"),
+            ("api key", "sk-ant-api03-AbCdEf0123456789-xyz"),
+            ("short lowercase api key", "sk-live-abc"),
+            ("stripe keys", "sk_live_0123456789abcdef"),
+            ("restricted key", "rk_live_abc"),
+            ("publishable key", "pk_live_abc"),
+            ("slack token", "xoxb-1234-abcd"),
+            ("linear key", "lin_api_abcdef"),
+            ("jwt", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl"),
+            ("lowercased jwt", "eyjhbgcioijiuzi1nij9.eyjzdwiioiixin0"),
+            ("bearer header", "Bearer 0123456789abcdef"),
+            ("environment assignment", "DATABASE_URL=postgres://user:hunter2@db.internal/app"),
+            ("lowercase environment value", "token=abc"),
+            ("clone url with credentials", "https://x-access-token:ghs_abc@github.com/acme/private-api.git"),
+            ("plain clone url", "https://github.com/acme/private-api.git"),
+            ("ssh clone url", "git@github.com:acme/private-api.git"),
+            ("email", "someone@acme.example"),
+            ("sha-256", "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"),
+            ("lowercase base32 token", "op_mfrggzdfmztwq2lknnwg23tpobyxe43u"),
+            ("attach ticket", "dGhpcy1pcy1hbi1hdHRhY2gtdGlja2V0LXZhbHVlLTAx_-x"),
+            ("relay token", "relay_4e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b"),
+            ("encrypted payload", "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0NTY3ODk="),
+            ("private key", "-----BEGIN PRIVATE KEY-----"),
+            ("local path", "/Users/someone/code/secret-repo"),
+            ("repository name", "acme/private-api"),
+            ("sentence", "provider said invalid token for account"),
+            ("newline", "ready\nsecret-value"),
+        ];
+        // Strings the export is allowed to hold besides `[redacted]`.
+        let allowed = |text: &str| {
+            text == REDACTED
+                || text == "terminalx-cloud-diagnostics"
+                || EXCLUDED.contains(&text)
+                || (4100..=4104).any(|code| close_reason_name(code) == Some(text))
+        };
+        fn poison(value: &mut Value, secret: &str, replaced: &mut usize) {
+            match value {
+                Value::String(text) => {
+                    *text = secret.to_string();
+                    *replaced += 1;
+                }
+                Value::Array(items) => items.iter_mut().for_each(|item| poison(item, secret, replaced)),
+                Value::Object(map) => map.values_mut().for_each(|item| poison(item, secret, replaced)),
+                _ => {}
+            }
+        }
+        fn strings(value: &Value, out: &mut Vec<String>) {
+            match value {
+                Value::String(text) => out.push(text.clone()),
+                Value::Array(items) => items.iter().for_each(|item| strings(item, out)),
+                Value::Object(map) => map.values().for_each(|item| strings(item, out)),
+                _ => {}
+            }
+        }
+        fn keys(value: &Value, out: &mut Vec<String>) {
+            match value {
+                Value::Array(items) => items.iter().for_each(|item| keys(item, out)),
+                Value::Object(map) => map.iter().for_each(|(key, item)| {
+                    out.push(key.clone());
+                    keys(item, out);
+                }),
+                _ => {}
+            }
+        }
+        let clean_keys = {
+            let diagnostics: CloudDiagnostics = serde_json::from_value(fixture()).unwrap();
+            let refusal = CloudWorkspaceClientError::local("organization_admin_required", false);
+            let mut out = Vec::new();
+            keys(&build_export(&ExportInputs { app: app(), exported_at: 1, window_days: 7, server: Ok(&diagnostics), closes: &[] }), &mut out);
+            keys(&build_export(&ExportInputs { app: app(), exported_at: 1, window_days: 7, server: Err(&refusal), closes: &[] }), &mut out);
+            out
+        };
+
+        for (name, secret) in SECRETS {
+            let mut value = fixture();
+            // The two optional codes the fixture leaves empty.
+            value["operations"][0]["history"][0]["errorCode"] = json!("set");
+            value["operations"][0]["history"][0]["detailCode"] = json!("set");
+            let mut replaced = 0;
+            poison(&mut value, secret, &mut replaced);
+            // Every string the answer type holds: 1 organization id, 8 on the
+            // operation, 3 on its restart decision, 4 on its history entry,
+            // 4 on the workspace and 2 on the close reason.
+            assert_eq!(replaced, 22, "{name}: the fixture no longer covers every string field");
+            value["stageTimings"]["create"]["stages"][*secret] = json!({ "samples": 1, "p50": 1, "p95": 1 });
+            value["stageTimings"]["resume"]["stages"][*secret] = json!({ "samples": 1, "p50": 1, "p95": 1 });
+            let diagnostics: CloudDiagnostics = serde_json::from_value(value).unwrap();
+            let closes = [
+                ConnectionClose { workspace_id: Some(secret.to_string()), code: 4101, name: "stale_generation", at: 1 },
+                ConnectionClose { workspace_id: None, code: 4104, name: "backpressure", at: 2 },
+            ];
+            let hostile_app = || AppInfo { version: secret.to_string(), os: secret.to_string(), arch: secret.to_string() };
+            let mut refusal = CloudWorkspaceClientError::local("organization_admin_required", false);
+            refusal.code = secret.to_string();
+
+            for export in [
+                build_export(&ExportInputs { app: hostile_app(), exported_at: 1, window_days: 7, server: Ok(&diagnostics), closes: &closes }),
+                build_export(&ExportInputs { app: hostile_app(), exported_at: 1, window_days: 7, server: Err(&refusal), closes: &closes }),
+            ] {
+                let text = serde_json::to_string_pretty(&export).unwrap();
+                assert!(!text.contains(secret), "{name} leaked: {text}");
+                // Not a piece of it either: every string left is `[redacted]`
+                // or one of this module's fixed labels, and every key is one a
+                // clean export has.
+                let mut found = Vec::new();
+                strings(&export, &mut found);
+                for text in &found {
+                    assert!(allowed(text), "{name}: unexpected string {text:?} in the export");
+                }
+                let mut exported_keys = Vec::new();
+                keys(&export, &mut exported_keys);
+                for key in &exported_keys {
+                    assert!(clean_keys.contains(key), "{name}: unexpected key {key:?} in the export");
+                }
+            }
+        }
     }
 
     /// The canary test: every secret or content category is seeded into every

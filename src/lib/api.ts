@@ -215,11 +215,12 @@ export const api = {
     invoke<void>("cloud_remote_activate", { connectionId, activation }),
   cloudRemoteDetach: (connectionId: string) => invoke<void>("cloud_remote_detach", { connectionId }),
   // Cloud diagnostics (PRO-38): owners and administrators only, decided by the server.
-  cloudDiagnostics: (windowDays: number) => invoke<CloudDiagnostics>("cloud_diagnostics", { windowDays }),
+  cloudDiagnostics: (windowDays: number, orgId?: string | null) => invoke<CloudDiagnostics>("cloud_diagnostics", { windowDays, orgId: orgId ?? null }),
   /** Local and in memory only: no account, no network. */
   cloudConnectionDiagnostics: () => invoke<ConnectionClose[]>("cloud_connection_diagnostics"),
   /** Writes the redacted export to a path the user chose. */
-  cloudDiagnosticsExport: (path: string, windowDays: number) => invoke<void>("cloud_diagnostics_export", { path, windowDays }),
+  cloudDiagnosticsExport: (path: string, windowDays: number, orgId?: string | null) =>
+    invoke<void>("cloud_diagnostics_export", { path, windowDays, orgId: orgId ?? null }),
 
   // opt-in device pairing
   pairingStatus: () => invoke<PairingStatus>("pairing_status"),

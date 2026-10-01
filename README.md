@@ -109,8 +109,10 @@ Some detail on each:
   system browser; the app opens only `https://github.com` links from that flow.
 - **Cloud diagnostics.** Organization owners and administrators see recent
   cloud operations, create/resume stage timings, connection counts and relay
-  close reasons in Settings → Account → Cloud diagnostics, fetched from
+  close reasons from a cloud project's "…" menu, a cloud session's location
+  chip, or Settings → Account → Cloud diagnostics, fetched from
   `/v1/desktop/orgs/:orgId/cloud-diagnostics` on the same API — no other host.
+  The server checks the role in the organization the report is for.
   The server sends identifiers, states, codes and timings only. The last 50
   relay closes (4100–4104) this Mac met are kept in memory, never on disk;
   members see those but make no diagnostics request.

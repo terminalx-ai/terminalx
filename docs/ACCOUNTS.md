@@ -358,17 +358,31 @@ the row, close its live connection, and let the script finish.
 **Contract:** `GET /v1/desktop/orgs/:orgId/cloud-diagnostics?windowDays=1..30`
 (terminalx-saas, PRO-38), with the same desktop bearer and cloud-workspace
 contract headers as `/v1/desktop/orgs/:orgId/cloud-workspaces`. Owners and
-administrators only; a member gets `403 organization_admin_required`. A server
-without the endpoint answers 404, which Settings shows as "not available on
+administrators of `:orgId` only: the server checks the caller's role in that
+organization, whichever organization is the default here, so a member gets
+`403 organization_admin_required` even when they own the default one, and
+someone who is not a member gets `404 cloud_workspace_not_found`. A server
+without the endpoint answers 404, which the view shows as "not available on
 this server".
+
+**Where it opens.** A cloud project's "…" menu in the sidebar and a cloud
+session's location chip in the session header both offer **Cloud
+diagnostics…**, which opens the report of that project's or session's
+organization in a dialog and marks the workspace it was opened from. The entry
+is hidden from someone the account already reports as a member of that
+organization. Settings → Account keeps the same view for the default
+organization. With a server that authorizes by membership
+(`cloud.desktop.multi-org.v1`) the request and the export name the
+organization; otherwise they use the default one, as before.
 
 **Network.** One new request, to the TerminalX cloud API the app already signs
 in against (`login.terminalx.ai`, or the debug-only
 `TERMINALX_DEV_API_BASE_URL`). No new third-party host. It is made only while
-signed in with an organization, when Settings → Account shows the diagnostics
-section or an export is requested; signed out, nothing is fetched and every
-local workflow is unchanged. The desktop skips the request when the active
-organization's role is `member`; a member still sees this Mac's own relay
+signed in with an organization, when the diagnostics view is open (the dialog
+or Settings → Account) or an export is requested; opening it never attaches to
+a workspace or resumes one. Signed out, nothing is fetched and every local
+workflow is unchanged. The desktop skips the request when the role in that
+organization is `member`; in Settings a member still sees this Mac's own relay
 closes and can export them.
 
 **What the server sends.** Operation and workspace identifiers, operation type,
@@ -386,8 +400,8 @@ the client's own generation check of the runtime's hello) as
 `{ workspaceId, code, name, at }` in a ring buffer of 50 entries in memory. It
 is never written to disk except inside an export the user asks for.
 
-**Export.** Settings → Account → Cloud diagnostics → **Export diagnostics…**
-opens a save dialog and writes one JSON file to the chosen path; it is never
+**Export.** **Export diagnostics…**, at the bottom of the view wherever it is
+open, opens a save dialog and writes one JSON file to the chosen path; it is never
 uploaded. `src-tauri/src/cloud_diagnostics.rs` builds it from an allowlist
 (never by serializing app state), then redacts every string that is not an
 identifier or a machine code: lowercase letters, digits and separators, no
@@ -408,7 +422,20 @@ output, transcripts and prompts. The builder has no input that carries them,
 and `default_export_contains_no_canary` seeds canary values for each category
 into every input and unexpected field and asserts none reaches the file;
 `lowercase_credentials_in_code_fields_are_redacted` covers lowercase hex,
-base32 and prefixed tokens placed in identifier and code fields.
+base32 and prefixed tokens placed in identifier and code fields; and
+`secret_shaped_values_in_every_exported_field_are_redacted` writes 30
+secret shapes (provider and GitHub tokens, JWTs, bearer headers, `ENV=value`
+assignments, clone URLs with and without credentials, email addresses, hashes,
+tickets, relay tokens, encrypted payloads, key headers, paths, sentences) into
+every string of the server answer, a stage name, the refusal code, the app
+details and the close log, and asserts that every string left in the file is
+`[redacted]` or one of this module's fixed labels. The server applies the same
+shape rule to its answer before the desktop sees it. Shape cannot tell a
+short, lowercase, word-like secret from a code; the control for that is that
+neither the server's query nor the builder reads a field that holds one.
+The close log is this Mac's, not the organization's: an export lists the
+workspace ids of every typed close this Mac met, whichever organization the
+report is for.
 
 ## Would require a server change (out of scope)
 

@@ -22,6 +22,9 @@ const mocks = vi.hoisted(() => ({
     cloudCatalogLoad: vi.fn(),
     cloudCatalogSave: vi.fn(),
     organizationSelect: vi.fn(),
+    cloudDiagnostics: vi.fn(),
+    cloudConnectionDiagnostics: vi.fn(),
+    cloudDiagnosticsExport: vi.fn(),
   },
   workspaceConnection: vi.fn(),
   invoke: vi.fn(),
@@ -239,8 +242,65 @@ describe("sessions under the project", () => {
     mouseClick(within(projectRow(`cloud:${ORG}:github.com/acme/api`)!).getByRole("button", { name: "Project menu for acme/api" }));
     const menu = await screen.findByRole("menu");
     const labels = within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim());
-    expect(labels).toEqual(["New session", "Pin project", "Refresh", "Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…"]);
+    expect(labels).toEqual(["New session", "Pin project", "Refresh", "Cloud diagnostics…", "Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…"]);
     expect(within(menu).getByText("Workspace · fix-login")).toBeTruthy();
+  });
+
+  // PRO-38: diagnostics where the project shows, for the project's organization.
+  describe("cloud diagnostics from the project menu", () => {
+    const openProjectMenu = async () => {
+      mouseClick(within(projectRow(`cloud:${ORG}:github.com/acme/api`)!).getByRole("button", { name: "Project menu for acme/api" }));
+      return screen.findByRole("menu");
+    };
+    const emptyReport = {
+      v: 1,
+      organizationId: ORG,
+      generatedAt: 2,
+      window: { from: 1, to: 2, maxOperations: 200, truncated: false },
+      retention: null,
+      stageTimings: { create: null, resume: null },
+      operations: [],
+      workspaces: [{ workspaceId: "fix-login", provider: "box", state: "ready", runtimeGeneration: 1, lastActivityAt: 1, connections: { ready: 1, waitingForRuntime: 0, expired: 0 }, lastOperationId: null }],
+      closeReasons: [],
+    };
+
+    beforeEach(() => {
+      mocks.api.cloudDiagnostics.mockReset().mockResolvedValue(emptyReport);
+      mocks.api.cloudConnectionDiagnostics.mockReset().mockResolvedValue([]);
+    });
+
+    it("opens the organization's report for an administrator, marking the project's workspace", async () => {
+      await load([item("fix-login", { repositories: [acmeApi] })]);
+      mount();
+      fireEvent.click(within(await openProjectMenu()).getByRole("menuitem", { name: /Cloud diagnostics/ }));
+      const dialog = await screen.findByTestId("cloud-diagnostics-dialog");
+      expect(within(dialog).getByText("Cloud diagnostics · Acme")).toBeTruthy();
+      // A server that authorizes by the active organization: no organization is named.
+      await waitFor(() => expect(mocks.api.cloudDiagnostics).toHaveBeenCalledWith(7, null));
+      const row = await within(dialog).findByText("fix-login");
+      expect(row.closest("li")!.hasAttribute("data-current")).toBe(true);
+      // Looking spends nothing: no attach and no resume.
+      expect(mocks.api.cloudRemoteAttach).not.toHaveBeenCalled();
+      expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    });
+
+    it("asks for the project's own organization when the server authorizes by membership", async () => {
+      mocks.status = { ...mocks.status, multiOrg: true };
+      await load([item("fix-login", { repositories: [acmeApi] })]);
+      mount();
+      fireEvent.click(within(await openProjectMenu()).getByRole("menuitem", { name: /Cloud diagnostics/ }));
+      await screen.findByTestId("cloud-diagnostics-dialog");
+      await waitFor(() => expect(mocks.api.cloudDiagnostics).toHaveBeenCalledWith(7, ORG));
+    });
+
+    it("is not offered to a member of the project's organization", async () => {
+      mocks.status = { ...mocks.status, organizations: mocks.status.organizations!.map((org) => ({ ...org, role: "member" })) };
+      await load([item("fix-login", { repositories: [acmeApi] })]);
+      mount();
+      const labels = within(await openProjectMenu()).getAllByRole("menuitem").map((entry) => entry.textContent?.trim());
+      expect(labels).not.toContain("Cloud diagnostics…");
+      expect(mocks.api.cloudDiagnostics).not.toHaveBeenCalled();
+    });
   });
 
   it("`+` on a project opens the new-session form for it, spending nothing", async () => {
