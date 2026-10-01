@@ -671,10 +671,12 @@ impl Bootstrapped {
     }
 
     /// Switch the pinned Environment's checkouts and report the outcome
-    /// (`cloud_environment`, PRO-15). Each version is tried once per process;
-    /// the outcome is recorded only once the API has it, so a failed checkout
-    /// or report is tried again on the next boot. Returns at once when there
-    /// is nothing to do, so it can run on every refresh.
+    /// (`cloud_environment`, PRO-15). Each version is tried once per process.
+    /// The outcome is recorded whether or not the API takes the report (it
+    /// refuses one once the operation has settled), so a successful checkout
+    /// is never switched again; a failed one is tried again on the next boot.
+    /// Returns at once when there is nothing to do, so it can run on every
+    /// refresh.
     pub fn apply_environment(&self, api: &HttpApi) {
         let raw = self.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).environment.clone();
         let Some(raw) = raw else { return };
@@ -691,12 +693,11 @@ impl Bootstrapped {
             return;
         }
         let applied = crate::cloud_environment::apply(&environment);
-        let reported: Result<serde_json::Value, CallError> =
-            api.post("/v1/cloud-workspace-bootstrap/progress", &self.credential, serde_json::json!({ "v": 1, "code": applied.code }), None);
-        match reported {
-            Ok(_) => applied.commit(&record),
-            Err(error) => log::warn!("report the environment checkout: {}", describe(&error)),
-        }
+        applied.settle(&record, |code| {
+            let reported: Result<serde_json::Value, CallError> =
+                api.post("/v1/cloud-workspace-bootstrap/progress", &self.credential, serde_json::json!({ "v": 1, "code": code }), None);
+            reported.map(|_| ()).map_err(|error| describe(&error))
+        });
     }
 
     /// Keep the relay token fresh in the background until the process ends.

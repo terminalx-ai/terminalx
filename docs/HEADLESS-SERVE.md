@@ -131,9 +131,15 @@ later refresh is applied then):
 - The whole checkout is bounded (120 s); a timed-out git call has its process group killed.
 - The outcome goes to `/v1/cloud-workspace-bootstrap/progress` (`repository-ready` or
   `repository-clone-failed`), then to `environment-checkout.json` next to the bootstrap
-  token, where the worker and the local e2e read it. A successful record of the same
-  version is final; a failed checkout, an unreported one or a new version is applied again
-  on the next boot.
+  token, where the worker and the local e2e read it. The record is written whether or not
+  the API takes the report (it answers 401 once the operation has settled), so a
+  successful checkout of a version is final and a restart never switches a person's
+  branch back. A failed checkout or a new version is applied again on the next boot.
+- A checkout this process cannot see (`unreachable`: the directory cannot be opened, as
+  under the systemd unit's `ProtectHome=true`, which hides `/home/repos`) is not a failed
+  clone: git never ran. Nothing is reported, the record says `unreachable`, and it is
+  tried again on the next boot. A directory that is there but is not a checkout is still
+  `missing`, and reported as `repository-clone-failed`.
 
 Debug builds honour `TERMINALX_SERVE_TEST_CRASH_AT=<step>`, which SIGKILLs the process at
 that step. `serve/tests/bootstrap_crash.rs` uses it against a fake server to check each

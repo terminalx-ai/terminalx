@@ -13,9 +13,16 @@
 //! entry without one stays on the built default branch. The outcome goes to
 //! `/v1/cloud-workspace-bootstrap/progress` and then to
 //! `environment-checkout.json` next to the bootstrap token, where the worker
-//! and the local e2e read it. A successful record for the same version is
-//! never applied again; a failed one, or one for an earlier version, is
-//! retried on the next boot:
+//! and the local e2e read it. The record is written whatever the API answers:
+//! it refuses a report once the operation has settled, and a checkout that is
+//! switched again on every start would move a person's branch back. A
+//! successful record for the same version is never applied again; a failed
+//! one, or one for an earlier version, is retried on the next boot.
+//!
+//! A checkout the runtime cannot see at all (`unreachable`: the path does not
+//! exist for this process, as under a unit with `ProtectHome=true`) is not a
+//! failed clone. Nothing is reported for it, and it is tried again on the
+//! next boot:
 //!
 //! `{"versionId":"…","repositories":[{"path":"…","ref":"…","fetched":false,"state":"switched"}],"durationMs":<n>}`
 
@@ -32,6 +39,8 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
 const REPOSITORY_ROOT: &str = "/home/repos/";
 const MAX_REPOSITORIES: usize = 64;
+/// The checkout's directory cannot be opened by this process.
+const UNREACHABLE: &str = "unreachable";
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -67,16 +76,47 @@ struct Record<'a> {
 
 /// The outcome of a checkout, reported before it is recorded.
 pub struct Applied {
-    pub code: &'static str,
+    /// The progress code to report; `None` when there is nothing to say
+    /// (a checkout this process cannot see is neither ready nor failed).
+    pub code: Option<&'static str>,
     record: Vec<u8>,
 }
 
 impl Applied {
-    /// Record the reported outcome, so this version is not applied again.
+    fn of(version_id: &str, repositories: &[Checkout], duration: Duration) -> Self {
+        let record = Record { version_id, repositories, duration_ms: duration.as_millis() };
+        Applied { code: progress_code(repositories), record: serde_json::to_vec(&record).unwrap_or_default() }
+    }
+
+    /// Report the outcome, when there is one to report, then record it
+    /// whatever the API answered: a refused or lost report must not make the
+    /// next start switch the checkout again.
+    pub fn settle(&self, record_path: &Path, report: impl FnOnce(&'static str) -> Result<(), String>) {
+        if let Some(code) = self.code {
+            if let Err(error) = report(code) {
+                log::warn!("report the environment checkout: {error}");
+            }
+        }
+        self.commit(record_path);
+    }
+
+    /// Record the outcome, so a successful version is not applied again.
     pub fn commit(&self, record_path: &Path) {
         if let Err(error) = crate::cloud_bootstrap::write_durable(record_path, &self.record) {
             log::warn!("record the environment checkout at {}: {error:#}", record_path.display());
         }
+    }
+}
+
+/// What the checkouts amount to: a failure when git failed anywhere,
+/// nothing while any checkout is out of this process's sight, ready otherwise.
+fn progress_code(repositories: &[Checkout]) -> Option<&'static str> {
+    if repositories.iter().any(|item| !succeeded(item.state) && item.state != UNREACHABLE) {
+        Some("repository-clone-failed")
+    } else if repositories.iter().any(|item| item.state == UNREACHABLE) {
+        None
+    } else {
+        Some("repository-ready")
     }
 }
 
@@ -121,12 +161,7 @@ pub fn apply(environment: &Environment) -> Applied {
     for item in repositories.iter().filter(|item| !succeeded(item.state)) {
         log::warn!("environment checkout {}: {}", item.path, item.state);
     }
-    let failed = repositories.iter().any(|item| !succeeded(item.state));
-    let record = Record { version_id: &environment.version_id, repositories: &repositories, duration_ms: started.elapsed().as_millis() };
-    Applied {
-        code: if failed { "repository-clone-failed" } else { "repository-ready" },
-        record: serde_json::to_vec(&record).unwrap_or_default(),
-    }
+    Applied::of(&environment.version_id, &repositories, started.elapsed())
 }
 
 fn checkout(repository: &Repository, deadline: Instant) -> Checkout {
@@ -144,6 +179,11 @@ fn switch_in(path: &str, reference: Option<&str>, deadline: Instant) -> Checkout
     };
     if Instant::now() >= deadline {
         return result(None, "timed-out");
+    }
+    // Not there, or hidden from this process (a sandboxed unit): git never
+    // ran, so this is not a failed checkout.
+    if std::fs::read_dir(path).is_err() {
+        return result(None, UNREACHABLE);
     }
     if !git(&["rev-parse", "HEAD"], GIT_TIMEOUT).unwrap_or(false) {
         return result(None, "missing");
@@ -346,16 +386,72 @@ mod tests {
             repositories: vec![Repository { path: "/home/repos/acme/not-there".into(), reference: Some("main".into()) }],
         };
         assert!(pending(&environment("v1"), &record));
-        let failed = apply(&environment("v1"));
-        assert_eq!(failed.code, "repository-clone-failed");
+        let failed = Applied::of("v1", &[Checkout { path: "/home/repos/acme/widgets".into(), reference: Some("main".into()), fetched: Some(false), state: "switch-failed" }], Duration::ZERO);
+        assert_eq!(failed.code, Some("repository-clone-failed"));
         failed.commit(&record);
         let written: serde_json::Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
         assert_eq!(written["versionId"], "v1");
-        assert_eq!(written["repositories"][0], json!({ "path": "/home/repos/acme/not-there", "ref": "main", "state": "missing" }));
+        assert_eq!(written["repositories"][0], json!({ "path": "/home/repos/acme/widgets", "ref": "main", "fetched": false, "state": "switch-failed" }));
         assert!(pending(&environment("v1"), &record), "a failed checkout is retried");
         std::fs::write(&record, json!({ "versionId": "v1", "repositories": [{ "path": "x", "state": "switched" }] }).to_string()).unwrap();
         assert!(!pending(&environment("v1"), &record));
         assert!(pending(&environment("v2"), &record), "a new version is applied");
     }
 
+    /// A unit with `ProtectHome=true` hides `/home/repos`: the runtime never
+    /// ran git there, so it reports nothing instead of a failed clone.
+    #[test]
+    fn a_checkout_out_of_sight_is_not_reported_as_a_failed_clone() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("environment-checkout.json");
+        let hidden = dir.path().join("hidden");
+        let gone = switch_in(hidden.to_str().unwrap(), Some("main"), later());
+        assert_eq!((gone.state, gone.fetched), (UNREACHABLE, None));
+        // There, but not a checkout: git ran and failed, which is a failure.
+        std::fs::create_dir(&hidden).unwrap();
+        assert_eq!(switch_in(hidden.to_str().unwrap(), Some("main"), later()).state, "missing");
+
+        let environment = Environment {
+            version_id: "v1".into(),
+            repositories: vec![Repository { path: "/home/repos/acme/not-visible-here".into(), reference: Some("main".into()) }],
+        };
+        let applied = apply(&environment);
+        assert_eq!(applied.code, None);
+        let mut reports = 0;
+        applied.settle(&record, |_| {
+            reports += 1;
+            Ok(())
+        });
+        assert_eq!(reports, 0, "nothing is reported");
+        let written: serde_json::Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        assert_eq!(written["repositories"][0], json!({ "path": "/home/repos/acme/not-visible-here", "ref": "main", "state": "unreachable" }));
+        assert!(pending(&environment, &record), "tried again on the next boot");
+
+        let item = |state| Checkout { path: "p".into(), reference: None, fetched: None, state };
+        assert_eq!(progress_code(&[item("switched"), item("ready")]), Some("repository-ready"));
+        assert_eq!(progress_code(&[item("switched"), item(UNREACHABLE)]), None);
+        assert_eq!(progress_code(&[item(UNREACHABLE), item("fetch-failed")]), Some("repository-clone-failed"));
+    }
+
+    /// The API refuses a report once the operation has settled. The record
+    /// is written all the same, so the next start does not switch the
+    /// checkout again and move a person's branch back.
+    #[test]
+    fn a_successful_checkout_is_recorded_even_when_its_report_is_refused() {
+        let (dir, path) = fixture();
+        let record = dir.path().join("environment-checkout.json");
+        let environment = Environment { version_id: "v1".into(), repositories: vec![Repository { path: path.clone(), reference: Some("feature/x".into()) }] };
+        let applied = Applied::of("v1", &[switch_in(&path, Some("feature/x"), later())], Duration::ZERO);
+        let mut reported = Vec::new();
+        applied.settle(&record, |code| {
+            reported.push(code);
+            Err("rejected".into())
+        });
+        assert_eq!(reported, vec!["repository-ready"]);
+        assert!(!pending(&environment, &record), "the refused report does not undo the record");
+        // The person moves on; a restart leaves their branch alone.
+        run(Path::new(&path), &["switch", "-q", "main"]);
+        assert!(!pending(&environment, &record));
+        assert_eq!(current_branch(&path), "main");
+    }
 }
