@@ -27,10 +27,13 @@ Confirm the connection first:
 terminalx status --json
 ```
 
-The app listens at `$TERMINALX_HOME/run/hooks.sock` and writes its per-launch credential to
-`$TERMINALX_HOME/run/control.token`, both owner-only. Tabs launched by the app receive
-`TERMINALX_NEXT_SOCKET` and `TERMINALX_NEXT_TOKEN`; a normal shell reads the token file
-automatically. Never print, copy, or persist that token.
+Each running app listens on a socket of its own, `$TERMINALX_HOME/run/hooks-<pid>.sock`, and
+tabs launched by an app receive that path and the app's per-launch credential as
+`TERMINALX_NEXT_SOCKET` and `TERMINALX_NEXT_TOKEN`, so a command run in a tab always reaches the
+app that owns the tab. A normal shell dials the published `$TERMINALX_HOME/run/hooks.sock` and
+reads `$TERMINALX_HOME/run/control.token` automatically; both are owner-only. When two apps share
+a `TERMINALX_HOME`, only one of them answers there (`status` shows `publishesHome: true` for it,
+and its `pid`), and the other takes over when it exits. Never print, copy, or persist the token.
 
 ## Selectors
 

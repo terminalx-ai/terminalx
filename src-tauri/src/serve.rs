@@ -178,6 +178,9 @@ struct Runtime {
     host: Arc<crate::harness::host::Host>,
     terminals: Arc<crate::pty::Terminals>,
     manager: crate::session::SessionManager,
+    /// The socket this runtime listens on and its agents dial: its own, never
+    /// the data dir's published one, which another runtime may hold.
+    socket: std::path::PathBuf,
     project_root: Option<String>,
     /// Agent tabs of the project that were mid-turn when the previous
     /// runtime process ended (PRO-22), before they are reset to idle.
@@ -226,7 +229,7 @@ fn run(options: Options) -> Result<()> {
             "runtimeKind": options.runtime_kind.as_str(),
             "projectRoot": runtime.project_root,
             "dataDir": data_dir,
-            "socket": crate::hooks::socket_path().ok(),
+            "socket": runtime.socket,
             "cloudWorkspace": cloud.as_ref().map(|(cloud, _)| {
                 let session = cloud.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 json!({
@@ -394,7 +397,7 @@ fn start(options: &Options) -> Result<Runtime> {
     log::info!("hook socket at {}", socket.display());
     let interrupted = project_root.as_deref().map(crate::cloud_agents::interrupted_tabs).unwrap_or_default();
     crate::session::idle_orphaned_tabs();
-    Ok(Runtime { sink, host, terminals, manager, project_root, interrupted })
+    Ok(Runtime { sink, host, terminals, manager, socket, project_root, interrupted })
 }
 
 /// Serve the workspace through the relay in the background, and report

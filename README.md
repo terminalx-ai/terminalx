@@ -145,11 +145,21 @@ All of them, in full:
   the managed home *symlinks* to it: `auth.json`, `AGENTS.md`, `skills`,
   `prompts` and `plugins` are links, so you stay on the same account and a
   refreshed token lands in your own file.
-- **`$TERMINALX_HOME/run/hooks.sock`** — the unix control socket used by the
-  CLIs' hooks and by `terminalx`. Created `0600`, inside the `0700`
-  `$TERMINALX_HOME` directory, and removed when the app exits.
-- **`$TERMINALX_HOME/run/control.token`** — a per-launch control credential,
-  written `0600`. App-launched tabs receive the same value and socket path in
+- **`$TERMINALX_HOME/run/hooks-<pid>.sock`** — the unix socket one running
+  TerminalX serves its own tabs on: the CLIs' hooks, and `terminalx` run inside
+  a tab. Created `0600`, inside the `0700` `$TERMINALX_HOME` directory. Every
+  running TerminalX has its own, so two on the same data directory (the
+  installed app and a dev build, say) never take each other's tabs; one left
+  by a crash is removed by the next launch. If the data directory's path is
+  too long for a socket address, the socket goes in a private directory of
+  the system temp dir instead.
+- **`$TERMINALX_HOME/run/hooks.sock`** — the published socket, which is what
+  `terminalx` in a normal shell dials. One running TerminalX answers on it at
+  a time: the one holding `run/hooks.lock`. Another started beside it leaves
+  the socket alone, and takes it over within seconds once the holder exits.
+- **`$TERMINALX_HOME/run/control.token`** — the control credential of the
+  TerminalX that holds the published socket, written `0600`. App-launched
+  tabs receive their own launch's token and socket path in
   `TERMINALX_NEXT_TOKEN` and `TERMINALX_NEXT_SOCKET`; normal shells read the
   file without printing it.
 - **`~/.local/bin/terminalx` and `~/.local/bin/tnx`** — symlinks to the
