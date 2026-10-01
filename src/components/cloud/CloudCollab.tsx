@@ -279,7 +279,7 @@ export function NotesPanel({ collabKey, client, tabId, onClose }: { collabKey: s
   };
 
   return (
-    <aside className="flex w-72 shrink-0 flex-col border-l border-hairline bg-well/40" data-testid="cloud-agent-notes" aria-label="Notes for teammates">
+    <aside className="flex min-h-0 w-72 shrink-0 flex-col border-l border-hairline bg-well/40" data-testid="cloud-agent-notes" aria-label="Notes for teammates">
       <div className="flex items-center gap-2 border-b border-hairline px-3 py-1.5 text-xs">
         <StickyNote className="size-3.5 text-muted-foreground" />
         <span className="font-medium">Notes</span>
@@ -288,7 +288,7 @@ export function NotesPanel({ collabKey, client, tabId, onClose }: { collabKey: s
           <X />
         </Button>
       </div>
-      <ol className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-2 text-xs">
+      <ol className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain px-3 py-2 text-xs">
         {!tabNotes?.loaded && !tabNotes?.notes.length && <li className="text-muted-foreground">Loading notes…</li>}
         {tabNotes?.loaded && !tabNotes.notes.length && <li className="text-muted-foreground">No notes on this tab yet.</li>}
         {tabNotes?.notes.map((note) => (

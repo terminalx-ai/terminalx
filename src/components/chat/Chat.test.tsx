@@ -4,6 +4,7 @@ import { Chat } from "./Chat";
 import { buildTranscript } from "@/lib/transcript";
 import { syntheticLog } from "@/demo/synthetic";
 import type { StreamBlock } from "@/lib/agentEvents";
+import { READER_SCROLL_EVENT } from "@/lib/shellScroll";
 
 // jsdom lays nothing out, so this models the one box that matters: a scroller
 // of fixed height over content whose children stack at known heights. Like a
@@ -180,6 +181,57 @@ describe("chat scroll follow", () => {
     output();
     expect(distFromBottom()).toBe(0);
     expect(latestShown()).toBe(false);
+  });
+
+  it("takes the bottom back from a layout nudge at once, with no output to wait for", () => {
+    setup(12);
+    // An idle transcript (or one about to grow by someone else's turn): a
+    // nudge with no input left it short of the bottom until the next output.
+    setTop(top - 16);
+    frame();
+    expect(distFromBottom()).toBe(0);
+    expect(latestShown()).toBe(false);
+  });
+
+  it("follows a turn another person drives, start to finish", () => {
+    const { view, transcript, output } = setup(4);
+    // Their prompt and its output arrive as events like the reader's own: a new last turn, then growth.
+    const theirs = buildTranscript(syntheticLog(5, true), true);
+    expect(theirs.turns.length).toBeGreaterThan(transcript.turns.length);
+    view.rerender(
+      <Chat sessionId="s" transcript={theirs} stream={[]} cwd="/tmp/repo" live progressing={false} answering={false} onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={null} />,
+    );
+    frame();
+    expect(distFromBottom()).toBe(0);
+    output();
+    output();
+    expect(distFromBottom()).toBe(0);
+    expect(latestShown()).toBe(false);
+  });
+
+  it("lets go when the reader scrolls up with the keyboard, and stays where they went", () => {
+    const { output } = setup(4);
+    act(() => {
+      scroller.dispatchEvent(new KeyboardEvent("keydown", { key: "PageUp", bubbles: true }));
+    });
+    setTop(top - 300);
+    frame();
+    const kept = top;
+    output();
+    expect(top).toBe(kept);
+    expect(latestShown()).toBe(true);
+  });
+
+  it("lets go for a link that jumps within the transcript", () => {
+    const { output } = setup(4);
+    act(() => {
+      scroller.dispatchEvent(new Event(READER_SCROLL_EVENT));
+    });
+    setTop(top - 250);
+    frame();
+    const kept = top;
+    output();
+    expect(top).toBe(kept);
   });
 
   it("resumes following when the reader scrolls back down to the bottom", () => {

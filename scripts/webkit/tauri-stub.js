@@ -1,6 +1,5 @@
 // A Tauri bridge stub for WebKit layout checks: fixture answers for the sidebar;
 // every other command stays pending. `window.__PW_FIXTURE__` picks the fixture.
-// A Tauri bridge stub: fixture data for the sidebar, nothing else.
 window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3 };
 (() => {
   const f = window.__PW_FIXTURE__;
@@ -34,11 +33,59 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
     transcription_models: [],
     status_bar_settings: { visible: false },
   };
+  // `localSession`: one local session with a long transcript and a pending
+  // permission request, as a PTY-first agent tab (claude) and as one that is not.
+  if (f.localSession) {
+    const at = new Date(now).toISOString();
+    const SESSION = "local-s1";
+    const tab = (id, harness) => ({ id, harness, title: `${harness} tab`, model: "", permissionMode: "default", status: "waiting", created: at, modified: at });
+    let seq = 0;
+    const events = (tabId, harness) => {
+      const event = (payload) => ({ id: `${tabId}-e${++seq}`, seq, sessionId: SESSION, tabId, harness, ts: at, payload });
+      return [
+        event({ type: "user_message", text: "slow:30:1500", queued: false }),
+        event({ type: "turn_started" }),
+        ...Array.from({ length: 30 }, (_, i) => event({ type: "assistant_text", text: `chunk ${i + 1} of 30` })),
+        event({ type: "permission_requested", requestId: `req-${tabId}`, toolUseId: `tool-${tabId}`, toolName: "Bash", input: { command: "touch /tmp/asked" }, options: [{ id: "allow", label: "Allow", kind: "allow_once" }, { id: "deny", label: "Deny", kind: "deny" }] }),
+      ];
+    };
+    answers.list_sessions = [{ id: SESSION, projectPath: projects[0].path, cwd: projects[0].path, worktreeRemoved: false, title: "Local long session", created: at, modified: at, archived: false, pinned: false, tabs: [tab("lt-pty", "claude"), tab("lt-chat", "gemini")], activeTab: "lt-pty" }];
+    answers.list_workspaces = [{ path: projects[0].path, name: "main", branch: "main", head: "abc", isMain: true, managed: false, uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0 }];
+    answers.load_tab_events = ({ tabId }) => events(tabId, tabId === "lt-pty" ? "claude" : "gemini");
+  }
+  // Fixture scripts loaded after this one add answers (a value, or a function
+  // of the command's arguments) and emit native events through `__PW_STUB__`.
   let id = 1;
+  const callbacks = new Map();
+  const listening = new Map();
+  window.__PW_STUB__ = {
+    answers,
+    fixture: f,
+    emit(event, payload) {
+      for (const { eventId, handler } of listening.get(event) ?? []) callbacks.get(handler)?.({ event, id: eventId, payload });
+    },
+  };
   window.__TAURI_INTERNALS__ = {
-    invoke: async (cmd) => { if (cmd in answers) return answers[cmd]; if (cmd.startsWith("plugin:")) return id++; return new Promise(() => undefined); },
-    transformCallback: () => id++,
-    unregisterCallback: () => undefined,
+    invoke: async (cmd, args) => {
+      if (cmd === "plugin:event|listen") {
+        const eventId = id++;
+        listening.set(args.event, [...(listening.get(args.event) ?? []), { eventId, handler: args.handler }]);
+        return eventId;
+      }
+      if (cmd === "plugin:event|unlisten") {
+        listening.set(args.event, (listening.get(args.event) ?? []).filter((entry) => entry.eventId !== args.eventId));
+        return null;
+      }
+      if (cmd in answers) return typeof answers[cmd] === "function" ? answers[cmd](args ?? {}) : answers[cmd];
+      if (cmd.startsWith("plugin:")) return id++;
+      return new Promise(() => undefined);
+    },
+    transformCallback: (callback) => {
+      const handle = id++;
+      callbacks.set(handle, callback);
+      return handle;
+    },
+    unregisterCallback: (handle) => void callbacks.delete(handle),
     convertFileSrc: (p) => p,
     metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main", windowLabel: "main" } },
   };

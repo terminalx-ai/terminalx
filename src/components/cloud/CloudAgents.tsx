@@ -376,10 +376,15 @@ function NewAgentForm({
 }
 
 const KEY_MISSING = "cloud_agent_key_missing";
+const KEY_STORE_UNAVAILABLE = "cloud_agent_key_store_unavailable";
 
 export function commandError(e: unknown): string {
   const code = errorText(e);
   if (code === KEY_MISSING) return "Connect to this workspace once so this device can encrypt commands for it.";
+  // The key is there but could not be read: connecting again would not help.
+  if (code === KEY_STORE_UNAVAILABLE) {
+    return "This device could not read its key for this workspace from the system key store (the Keychain on a Mac), so the command was not sent. Unlock the key store or allow TerminalX to use it, then send again.";
+  }
   if (code === DEV_SCOPE_NOTICE) return DEV_SCOPE_NOTICE;
   if (code === "cloud_workspace_collaboration_forbidden") return "Your access to this workspace does not allow this. Ask an admin for driver or approver access.";
   return `Could not queue the command (${code}).`;
@@ -575,7 +580,7 @@ function CloudAgentPane({
           nameOf={nameOf}
           onSendAgain={(e) => void interactive(() => sendAgain(scope, e, connected ? client : null)).catch(() => undefined)}
         />
-        <div className="min-h-0 flex-1">
+        <div className="flex min-h-0 flex-1 flex-col">
           <Chat
             sessionId={info.sessionId}
             transcript={transcript}

@@ -307,7 +307,7 @@ export function TabView({
 
   const info = views.info[tab.id];
   const terminal = (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex h-full min-h-0 flex-1 flex-col">
       <div className="flex min-h-8 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground">
         <span className="shrink-0 text-foreground">Terminal view · {TAB_STATUS_LABEL[tab.status]}</span>
         {live && !recovery && <Button size="xs" variant="outline" disabled={recovering} onClick={stop}>Stop session</Button>}
@@ -335,6 +335,9 @@ export function TabView({
     </div>
   );
 
+  // The body sits in a flex column: the chat (`flex-1`) takes the height left
+  // under the bars above and scrolls inside it. In a plain block it grew as
+  // tall as its transcript and pushed the composer out of the window.
   const wrap = (body: React.ReactNode) => <div className="flex h-full min-h-0 flex-col">
     {collabLive && shared?.client && (
       <LeaseBar
@@ -368,11 +371,11 @@ export function TabView({
     {continueOpen && <ContinuationDialog session={session} source={tab} onClose={() => setContinueOpen(false)} />}
     {collabLive && notesOpen && shared?.client ? (
       <div className="flex min-h-0 flex-1">
-        <div className="min-h-0 min-w-0 flex-1">{body}</div>
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">{body}</div>
         <NotesPanel collabKey={shared.key} client={shared.client} tabId={tab.id} onClose={() => setNotesOpen(false)} />
       </div>
     ) : (
-      <div className="min-h-0 flex-1">{body}</div>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">{body}</div>
     )}
   </div>;
 
@@ -382,7 +385,7 @@ export function TabView({
   // rather than `hidden` because xterm needs a laid-out box to fit itself to.
   if (ptyFirst) {
     return wrap(
-      <div className="relative flex h-full min-h-0 flex-col">
+      <div className="relative flex h-full min-h-0 flex-1 flex-col">
         <div className={cn("absolute inset-0 flex min-h-0 flex-col", !terminalMode && "invisible")} aria-hidden={!terminalMode}>
           {terminal}
         </div>

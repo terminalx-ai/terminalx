@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ShieldAlert, MessageCircleQuestion } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/tooltip";
+import { revealInOwnScroller } from "@/lib/shellScroll";
 import { cn } from "@/lib/cn";
 import type { PendingAsk } from "@/lib/transcript";
 
@@ -12,7 +13,10 @@ import type { PendingAsk } from "@/lib/transcript";
 export function PermissionCard({ ask, onAnswer, busy }: { ask: PendingAsk; onAnswer: (optionId: string) => void; busy?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    ref.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    // The card is shown by its own scroller; focus alone would scroll every box above it too, the window included.
+    const first = ref.current?.querySelector<HTMLButtonElement>("button");
+    first?.focus({ preventScroll: true });
+    if (first) revealInOwnScroller(first);
   }, []);
   return (
     <div
@@ -79,7 +83,9 @@ export function QuestionCard({ ask, onAnswer, busy }: { ask: PendingAsk; onAnswe
   const [free, setFree] = useState<Record<string, string>>({});
   const ref = useRef<HTMLFormElement>(null);
   useEffect(() => {
-    ref.current?.querySelector<HTMLElement>("button[data-choice]")?.focus();
+    const first = ref.current?.querySelector<HTMLElement>("button[data-choice]");
+    first?.focus({ preventScroll: true });
+    if (first) revealInOwnScroller(first);
   }, []);
   const questions = ask.questions ?? [];
 

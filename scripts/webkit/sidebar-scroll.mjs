@@ -6,40 +6,19 @@
 // bridge stub, with cloud organizations and local-only.
 //
 //   pnpm build && npx playwright install webkit && pnpm test:webkit-layout
-import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
-import { extname, join, normalize } from "node:path";
-import { fileURLToPath } from "node:url";
-import { webkit } from "playwright";
+import { launch, open, serve } from "./harness.mjs";
 
-const root = fileURLToPath(new URL("../../dist/", import.meta.url));
-const stub = await readFile(new URL("./tauri-stub.js", import.meta.url), "utf8");
-const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2", ".wasm": "application/wasm" };
-
-const server = createServer(async (request, response) => {
-  const path = normalize(decodeURIComponent(new URL(request.url, "http://x").pathname)).replace(/^([/\\])+/, "");
-  const file = join(root, path || "index.html");
-  try {
-    const body = await readFile(file.startsWith(root) ? file : join(root, "index.html"));
-    response.writeHead(200, { "content-type": types[extname(file)] ?? "application/octet-stream" }).end(body);
-  } catch {
-    response.writeHead(200, { "content-type": "text/html" }).end(await readFile(join(root, "index.html")));
-  }
-});
-await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-const url = `http://127.0.0.1:${server.address().port}/`;
+const server = await serve();
 
 const fixtures = [
   { name: "cloud organizations", fixture: { cloud: true, localProjects: 3 }, last: "Other 9" },
   { name: "local only", fixture: { cloud: false, localProjects: 30 }, last: "local-29" },
 ];
 
-const browser = await webkit.launch();
+const browser = await launch();
 let failed = 0;
 for (const { name, fixture, last } of fixtures) {
-  const page = await browser.newPage({ viewport: { width: 1360, height: 520 } });
-  await page.addInitScript(`window.__PW_FIXTURE__ = ${JSON.stringify(fixture)};\n${stub}`);
-  await page.goto(url);
+  const page = await open(browser, server.url, fixture, { width: 1360, height: 520 });
   const tree = page.locator('[role="tree"]');
   await tree.waitFor();
   await page.getByText(last, { exact: true }).waitFor({ state: "attached" });

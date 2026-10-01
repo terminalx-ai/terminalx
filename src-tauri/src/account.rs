@@ -857,15 +857,25 @@ impl AccountManager {
     }
 }
 
-fn keychain_service_name(app_identifier: &str) -> String {
-    #[cfg(debug_assertions)]
-    if let Ok(value) = std::env::var("RACCOON_DEV_KEYCHAIN_SERVICE") {
-        let value = value.trim();
-        if value.starts_with("dev.terminalx.") && value.len() <= 120 {
-            return value.to_owned();
-        }
+const DEV_KEYCHAIN_SERVICE_ENV: &str = "RACCOON_DEV_KEYCHAIN_SERVICE";
+
+/// A debug build's own Keychain service, from `RACCOON_DEV_KEYCHAIN_SERVICE`:
+/// two development instances on one Mac give themselves different ones, so
+/// neither reads or overwrites the other's secrets. Release builds have none.
+pub(crate) fn dev_keychain_service() -> Option<String> {
+    dev_keychain_service_from(cfg!(debug_assertions), std::env::var(DEV_KEYCHAIN_SERVICE_ENV).ok().as_deref())
+}
+
+fn dev_keychain_service_from(debug_build: bool, value: Option<&str>) -> Option<String> {
+    if !debug_build {
+        return None;
     }
-    format!("{app_identifier}.account")
+    let value = value?.trim();
+    (value.starts_with("dev.terminalx.") && value.len() <= 120).then(|| value.to_owned())
+}
+
+fn keychain_service_name(app_identifier: &str) -> String {
+    dev_keychain_service().unwrap_or_else(|| format!("{app_identifier}.account"))
 }
 
 fn selection_matches(requested: &str, selected: Option<&str>) -> bool {
@@ -1486,6 +1496,16 @@ mod tests {
     #[test]
     fn default_keychain_service_is_application_scoped() {
         assert_eq!(keychain_service_name("com.example.test"), "com.example.test.account");
+    }
+
+    #[test]
+    fn dev_keychain_service_is_debug_only_and_namespaced() {
+        assert_eq!(dev_keychain_service_from(true, Some("dev.terminalx.alice")).as_deref(), Some("dev.terminalx.alice"));
+        assert_eq!(dev_keychain_service_from(true, Some("  dev.terminalx.bob \n")).as_deref(), Some("dev.terminalx.bob"));
+        assert_eq!(dev_keychain_service_from(false, Some("dev.terminalx.alice")), None, "release builds ignore it");
+        assert_eq!(dev_keychain_service_from(true, Some("com.terminalx.next")), None, "only a dev.terminalx.* service");
+        assert_eq!(dev_keychain_service_from(true, Some(&format!("dev.terminalx.{}", "x".repeat(120)))), None);
+        assert_eq!(dev_keychain_service_from(true, None), None);
     }
 
     #[test]
