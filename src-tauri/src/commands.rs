@@ -52,12 +52,14 @@ pub async fn account_refresh_roles(
     tauri::async_runtime::spawn_blocking(move || account.refresh_roles(&app, force)).await.map_err(err)
 }
 
+/// Off the main thread: the first call reads the saved session from the Keychain.
 #[tauri::command]
-pub fn account_sign_in(
+pub async fn account_sign_in(
     app: AppHandle,
     state: tauri::State<'_, crate::AppState>,
 ) -> CmdResult<crate::account::AccountStatus> {
-    state.account.clone().begin_sign_in(&app).map_err(err)
+    let account = state.account.clone();
+    tauri::async_runtime::spawn_blocking(move || account.begin_sign_in(&app)).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
@@ -684,9 +686,11 @@ pub async fn cloud_workspace_operation_cancel(
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.cancel_operation(org_id.as_deref(), &operation_id))
 }
 
+/// Off the main thread: an expired pairing removes its device token from the Keychain.
 #[tauri::command]
-pub fn pairing_status(state: tauri::State<'_, crate::AppState>) -> crate::pairing::PairingStatus {
-    state.pairing.status()
+pub async fn pairing_status(state: tauri::State<'_, crate::AppState>) -> CmdResult<crate::pairing::PairingStatus> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.status()).await.map_err(err)
 }
 
 #[tauri::command]

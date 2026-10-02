@@ -4,7 +4,7 @@
 //! receives only the identity it needs to draw the account surfaces.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -17,6 +17,9 @@ use tauri_plugin_opener::OpenerExt;
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
+use zeroize::Zeroizing;
+
+use crate::keychain::{Keychain, SecretStore};
 
 pub const STATUS_EVENT: &str = "account_status";
 
@@ -77,7 +80,7 @@ const ROLES_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 /// asks at once, unless an answer arrived this recently: a burst of refusals
 /// is one question.
 const ROLES_REFRESH_FLOOR: Duration = Duration::from_secs(2);
-const KEYCHAIN_NOT_FOUND: i32 = -25_300;
+const REFRESH_NOT_SAVED: &str = "The account session refreshed, but macOS Keychain could not save it.";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -287,6 +290,36 @@ struct Inner {
     signing_in: bool,
     generation: u64,
     last_error: Option<String>,
+    /// Sign-outs whose Keychain delete has not answered yet. Until it does
+    /// the session is out of memory but may be put back (a refused delete).
+    ending: u32,
+    /// Counts changes to `session` that the Keychain should follow.
+    revision: u64,
+    /// The `revision` the Keychain holds.
+    stored_revision: u64,
+}
+
+impl Inner {
+    /// Change the session in memory. The Keychain follows in
+    /// [`AccountManager::store`], after the account lock is released.
+    fn set_session(&mut self, session: Option<DesktopSession>) {
+        self.session = session;
+        self.revision = self.revision.wrapping_add(1);
+    }
+}
+
+/// Why [`AccountManager::store`] failed.
+enum StoreError {
+    Save(anyhow::Error),
+    Delete(anyhow::Error),
+}
+
+impl StoreError {
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Save(error) | Self::Delete(error) => error,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -296,7 +329,16 @@ pub struct AccountManager {
     /// any service call (`context()`), not only a status read, so the webview
     /// is told from here whenever what it sees changed.
     app: OnceLock<AppHandle>,
+    /// The account as held in memory. Locked only to read or change it, and
+    /// never across a Keychain or network call: the main thread and every
+    /// cheap read (`current_scope`, `is_current`, ...) take this lock, so
+    /// whatever holds it must be done at once.
     inner: Mutex<Inner>,
+    /// Where the session is kept between runs: the Keychain, unless a test set another.
+    secrets: OnceLock<Arc<dyn SecretStore>>,
+    /// Held across a read or write of the stored session, so writes land in
+    /// order. Taken before `inner`, never while holding it.
+    store_gate: Mutex<()>,
     refresh_gate: Mutex<()>,
     /// When the server last answered with organizations and roles. Held while
     /// asking, so concurrent callers share one answer.
@@ -368,6 +410,27 @@ impl AccountManager {
         inner.session.as_mut().expect("signed in").cloud.active_org_id = Some(organization_id.into());
     }
 
+    /// Tests: keep the session in `store` instead of the Keychain.
+    #[cfg(test)]
+    pub(crate) fn use_secrets_for_test(&self, store: Arc<dyn SecretStore>) {
+        let _ = self.service.set(TEST_SERVICE.into());
+        assert!(self.secrets.set(store).is_ok(), "the store is chosen before its first use");
+    }
+
+    /// Tests: sign out on this Mac; true when the Keychain let the session go.
+    #[cfg(test)]
+    pub(crate) fn sign_out_for_test(&self) -> bool {
+        self.end_session().is_some()
+    }
+
+    /// Tests: a forced role refresh the server answers with `role` in the
+    /// active organization, saved like any other.
+    #[cfg(test)]
+    pub(crate) fn refresh_roles_for_test(&self, role: &str) -> bool {
+        let body = test_session_body(role);
+        self.refresh_roles_with(true, Instant::now(), |_| Ok(body))
+    }
+
     pub fn configure(&self, app_identifier: &str) -> Result<()> {
         let wanted = keychain_service_name(app_identifier);
         if let Some(current) = self.service.get() {
@@ -409,53 +472,58 @@ impl AccountManager {
 
     /// True when the server answered with the current organizations and roles.
     fn refresh_roles_with(&self, force: bool, now: Instant, fetch: impl FnOnce(&DesktopSession) -> Result<SessionBody, CloudError>) -> bool {
-        let mut refreshed = self.roles_refreshed.lock().unwrap();
-        // A token rotation brings the same body: nothing more to ask.
-        let token = |manager: &Self| manager.inner.lock().unwrap().session.as_ref().map(|session| session.access_token.clone());
-        let before = token(self);
-        if self.refresh_if_needed() {
-            let after = token(self);
-            let rotated = after.is_some() && after != before;
-            if rotated {
-                *refreshed = Some(now);
-            }
-            return rotated;
-        }
-        if !roles_refresh_due(*refreshed, now, force) {
-            return false;
-        }
-        let Some((generation, session)) = ({
-            let inner = self.inner.lock().unwrap();
-            inner.session.clone().map(|session| (inner.generation, session))
-        }) else {
-            return false;
-        };
-        match fetch(&session) {
-            Ok(body) => {
-                let (applied, changed) = self.apply_session_body(generation, &session, body);
-                if applied {
+        let (fresh, generation, changed, save_failed) = {
+            let mut refreshed = self.roles_refreshed.lock().unwrap();
+            // A token rotation brings the same body: nothing more to ask.
+            let token = |manager: &Self| manager.inner.lock().unwrap().session.as_ref().map(|session| session.access_token.clone());
+            let before = token(self);
+            if let Some((generation, changed)) = self.rotate_if_needed() {
+                let after = token(self);
+                let rotated = after.is_some() && after != before;
+                if rotated {
                     *refreshed = Some(now);
                 }
-                if changed {
-                    if let Some(app) = self.app.get() {
-                        self.emit(app);
+                (rotated, generation, changed, Some(REFRESH_NOT_SAVED))
+            } else {
+                if !roles_refresh_due(*refreshed, now, force) {
+                    return false;
+                }
+                let Some((generation, session)) = ({
+                    let inner = self.inner.lock().unwrap();
+                    inner.session.clone().map(|session| (inner.generation, session))
+                }) else {
+                    return false;
+                };
+                match fetch(&session) {
+                    Ok(body) => {
+                        let (applied, changed) = self.apply_session_body(generation, &session, body);
+                        if applied {
+                            *refreshed = Some(now);
+                        }
+                        // A relaunch that starts from the roles at sign-in is
+                        // corrected by its first read: not an error to show.
+                        (applied, generation, changed, None)
+                    }
+                    Err(error) => {
+                        // Not a sign-out and not an error to show: the roles shown are
+                        // the last known ones, and the token refresh owns expiry.
+                        log::debug!("could not refresh TerminalX organizations and roles: {error}");
+                        return false;
                     }
                 }
-                applied
             }
-            Err(error) => {
-                // Not a sign-out and not an error to show: the roles shown are
-                // the last known ones, and the token refresh owns expiry.
-                log::debug!("could not refresh TerminalX organizations and roles: {error}");
-                false
-            }
-        }
+        };
+        // The Keychain write waits for no lock a caller of this holds: a slow
+        // one delays neither the next refresh nor any read of the account.
+        self.settle(generation, changed, save_failed);
+        fresh
     }
 
     /// Take a tokenless session body for the session it was asked with.
     /// Returns (applied, what the webview sees changed). A body for another
     /// account, or one that arrives after a sign-out or a token rotation (which
-    /// brought a newer body of its own), is dropped.
+    /// brought a newer body of its own), is dropped. In memory only: the
+    /// caller saves it with [`Self::settle`].
     fn apply_session_body(&self, generation: u64, asked_with: &DesktopSession, body: SessionBody) -> (bool, bool) {
         let mut inner = self.inner.lock().unwrap();
         let Some(current) = inner.session.as_ref() else { return (false, false) };
@@ -476,14 +544,11 @@ impl AccountManager {
         }
         let before = serde_json::to_value(snapshot(&inner)).ok();
         let stored_changed = serde_json::to_value(&candidate).ok() != serde_json::to_value(current).ok();
-        inner.session = Some(candidate);
-        let changed = serde_json::to_value(snapshot(&inner)).ok() != before;
         if stored_changed {
             // Saved so a relaunch starts from the current roles, not the ones at sign-in.
-            if let Err(error) = self.save_session(inner.session.as_ref().expect("session was just set")) {
-                log::warn!("could not save refreshed TerminalX organizations to Keychain: {error:#}");
-            }
+            inner.set_session(Some(candidate));
         }
+        let changed = serde_json::to_value(snapshot(&inner)).ok() != before;
         (true, changed)
     }
 
@@ -511,10 +576,22 @@ impl AccountManager {
 
     /// The signed-in user, profile and the Organizations cloud work may
     /// reach, as last loaded, without a Keychain load or token refresh:
-    /// cheap enough to poll.
+    /// cheap enough to poll, and never waiting on either (the account lock
+    /// is not held across them).
     pub(crate) fn current_scope(&self) -> Option<CloudScope> {
         let inner = self.inner.lock().unwrap();
         inner.session.as_ref().map(cloud_scope)
+    }
+
+    /// [`Self::current_scope`] for whoever drops what a previous identity
+    /// left behind (connections, keys, the outbox, the transcript cache):
+    /// `None` while a sign-out waits for the Keychain, because the session
+    /// is then out of memory but comes back if the Keychain refuses. Nothing
+    /// is dropped until the sign-out is confirmed. Read in one step with the
+    /// outcome, so a refused sign-out is never seen as signed out.
+    pub(crate) fn settled_scope(&self) -> Option<Option<CloudScope>> {
+        let inner = self.inner.lock().unwrap();
+        (inner.ending == 0).then(|| inner.session.as_ref().map(cloud_scope))
     }
 
     /// The context for a cloud call in `organization_id` (CS-18). The active
@@ -621,25 +698,26 @@ impl AccountManager {
         if !selection_matches(organization_id, body.cloud.active_org_id.as_deref()) {
             return Err(anyhow!("account service selected a different organization"));
         }
-        let mut inner = self.inner.lock().unwrap();
-        if inner.generation != context.generation
-            || inner.session.as_ref().map(|session| session.cloud.user_id.as_str())
-                != Some(context.user_id.as_str())
-            || inner.session.as_ref().map(|session| session.cloud.cloud_profile_id.as_str())
-                != Some(context.profile_id.as_str())
-            || inner.session.as_ref().and_then(|session| session.cloud.active_org_id.as_deref())
-                != (!context.organization_id.is_empty()).then_some(context.organization_id.as_str())
         {
-            return Err(anyhow!("account context changed while selecting organization"));
+            let mut inner = self.inner.lock().unwrap();
+            let current = inner.session.as_ref();
+            if inner.generation != context.generation
+                || current.map(|session| session.cloud.user_id.as_str()) != Some(context.user_id.as_str())
+                || current.map(|session| session.cloud.cloud_profile_id.as_str()) != Some(context.profile_id.as_str())
+                || current.and_then(|session| session.cloud.active_org_id.as_deref())
+                    != (!context.organization_id.is_empty()).then_some(context.organization_id.as_str())
+            {
+                return Err(anyhow!("account context changed while selecting organization"));
+            }
+            let mut session = inner.session.clone().ok_or_else(|| anyhow!("account is signed out"))?;
+            session.cloud.active_org_id = body.cloud.active_org_id;
+            session.cloud.active_org_name = body.cloud.active_org_name;
+            if !body.organizations.is_empty() {
+                session.organizations = body.organizations;
+            }
+            inner.set_session(Some(session));
         }
-        let session = inner.session.as_mut().ok_or_else(|| anyhow!("account is signed out"))?;
-        session.cloud.active_org_id = body.cloud.active_org_id;
-        session.cloud.active_org_name = body.cloud.active_org_name;
-        if !body.organizations.is_empty() {
-            session.organizations = body.organizations;
-        }
-        self.save_session(session).context("save selected organization")?;
-        Ok(())
+        self.store().map_err(StoreError::into_error).context("save selected organization")
     }
 
     pub(crate) fn select_organization_for_revision(&self, organization_id: &str, revision: &str) -> Result<()> {
@@ -716,22 +794,7 @@ impl AccountManager {
 
     pub fn sign_out(&self, app: &AppHandle) -> AccountStatus {
         self.ensure_loaded();
-        let session = {
-            let mut inner = self.inner.lock().unwrap();
-            inner.generation = inner.generation.wrapping_add(1);
-            inner.pending = None;
-            inner.signing_in = false;
-            inner.last_error = None;
-            if let Err(error) = self.delete_session() {
-                log::warn!("could not remove TerminalX account session from Keychain: {error:#}");
-                inner.last_error = Some(
-                    "Sign-out could not remove the account session from macOS Keychain.".into(),
-                );
-                None
-            } else {
-                inner.session.take()
-            }
-        };
+        let session = self.end_session();
         let status = self.snapshot();
         self.emit(app);
 
@@ -741,6 +804,43 @@ impl AccountManager {
             }
         }
         status
+    }
+
+    /// Sign out on this Mac: at once in memory (everything made for the
+    /// account is fenced by the new generation), then in the Keychain.
+    /// Returns the session that ended, for the server to be told. When the
+    /// Keychain keeps the session it is still signed in, as the next launch
+    /// would find: the session is put back and nothing is returned.
+    fn end_session(&self) -> Option<DesktopSession> {
+        let (generation, session) = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.generation = inner.generation.wrapping_add(1);
+            inner.pending = None;
+            inner.signing_in = false;
+            inner.last_error = None;
+            let session = inner.session.take();
+            // Counted even with no session in memory: one that could not be
+            // read is removed too. Out of memory from here, so a save or a
+            // refresh that is under way writes nothing of it back.
+            inner.set_session(None);
+            // Not confirmed until the Keychain answers (see `settled_scope`).
+            inner.ending += 1;
+            (inner.generation, session)
+        };
+        let stored = self.store();
+        let mut inner = self.inner.lock().unwrap();
+        // With the outcome, in one step: confirmed, or put back just below.
+        inner.ending -= 1;
+        let Err(error) = stored else { return session };
+        log::warn!("could not remove TerminalX account session from Keychain: {:#}", error.into_error());
+        // A sign-in begun meanwhile owns the account now.
+        if inner.generation == generation {
+            inner.last_error = Some("Sign-out could not remove the account session from macOS Keychain.".into());
+            if inner.session.is_none() && session.is_some() {
+                inner.set_session(session);
+            }
+        }
+        None
     }
 
     pub fn handle_deep_link(self: &Arc<Self>, app: &AppHandle, url: &Url) -> bool {
@@ -806,47 +906,43 @@ impl AccountManager {
         generation: u64,
         outcome: Result<DesktopSession, CloudError>,
     ) {
+        if !self.apply_exchange(generation, outcome) {
+            return;
+        }
+        // Signed in as soon as the exchange answers; the Keychain follows.
+        self.emit(app);
+        if self.persist(generation, Some("Signed in for this run, but macOS Keychain could not save the session.")) {
+            self.emit(app);
+        }
+    }
+
+    /// Take a sign-in's outcome, in memory. False when the sign-in it belongs
+    /// to is no longer the pending one.
+    fn apply_exchange(&self, generation: u64, outcome: Result<DesktopSession, CloudError>) -> bool {
         let mut inner = self.inner.lock().unwrap();
         if inner.generation != generation || !inner.signing_in {
-            return;
+            return false;
         }
         inner.signing_in = false;
         match outcome {
             Ok(session) => {
-                inner.last_error = self.save_session(&session).err().map(|error| {
-                    log::warn!("could not save TerminalX account session to Keychain: {error:#}");
-                    "Signed in for this run, but macOS Keychain could not save the session.".into()
-                });
-                inner.session = Some(session);
+                inner.last_error = None;
+                inner.set_session(Some(session));
             }
             Err(error) => {
                 inner.last_error = Some(friendly_cloud_error(&error));
             }
         }
-        drop(inner);
-        self.emit(app);
+        true
     }
 
-    fn refresh_session(&self, generation: u64, session: DesktopSession) {
-        let result = refresh(&session);
-        if self.apply_refresh(generation, &session, result) {
-            if let Some(app) = self.app.get() {
-                self.emit(app);
-            }
-        }
-    }
-
-    /// Take a refresh's outcome; true when what the webview sees changed
-    /// (organizations and their cloud capabilities, identity, sign-out, the
-    /// error, or the expiry the webview schedules its own refresh from).
+    /// Take a refresh's outcome, in memory; true when what the webview sees
+    /// changed (organizations and their cloud capabilities, identity,
+    /// sign-out, the error, or the expiry the webview schedules its own
+    /// refresh from). The caller stores it with [`Self::settle`].
     fn apply_refresh(&self, generation: u64, session: &DesktopSession, result: Result<DesktopSession, CloudError>) -> bool {
         let mut inner = self.inner.lock().unwrap();
         let before = serde_json::to_value(snapshot(&inner)).ok();
-        self.apply_refresh_locked(&mut inner, generation, session, result);
-        serde_json::to_value(snapshot(&inner)).ok() != before
-    }
-
-    fn apply_refresh_locked(&self, inner: &mut Inner, generation: u64, session: &DesktopSession, result: Result<DesktopSession, CloudError>) {
         let unchanged = inner.generation == generation
             && inner
                 .session
@@ -854,59 +950,140 @@ impl AccountManager {
                 .map(|current| current.refresh_token.as_str())
                 == Some(session.refresh_token.as_str());
         if !unchanged {
-            return;
+            return false;
         }
 
         match result {
             Ok(refreshed) => {
-                inner.last_error = self.save_session(&refreshed).err().map(|error| {
-                    log::warn!(
-                        "could not save refreshed TerminalX account session to Keychain: {error:#}"
-                    );
-                    "The account session refreshed, but macOS Keychain could not save it.".into()
-                });
-                inner.session = Some(refreshed);
+                inner.last_error = None;
+                inner.set_session(Some(refreshed));
             }
             Err(CloudError::Http(400 | 401 | 403)) => {
-                inner.session = None;
+                inner.set_session(None);
                 inner.last_error = Some("Your TerminalX session expired. Sign in again.".into());
-                if let Err(error) = self.delete_session() {
-                    log::warn!("could not remove expired TerminalX account session from Keychain: {error:#}");
-                }
             }
             Err(error) => {
                 inner.last_error = Some(friendly_cloud_error(&error));
             }
         }
+        serde_json::to_value(snapshot(&inner)).ok() != before
     }
 
+    /// Rotate the tokens when they are about to expire; true when it asked.
     fn refresh_if_needed(&self) -> bool {
+        let Some((generation, changed)) = self.rotate_if_needed() else { return false };
+        self.settle(generation, changed, Some(REFRESH_NOT_SAVED));
+        true
+    }
+
+    /// Ask for new tokens when the held ones are about to expire and take the
+    /// answer in memory. Returns the generation it was asked for and whether
+    /// what the webview sees changed; the caller stores it with
+    /// [`Self::settle`] once it holds no lock.
+    fn rotate_if_needed(&self) -> Option<(u64, bool)> {
         // Refresh tokens rotate. Serializing this section prevents two status
         // reads from submitting the same token family at once.
         let _gate = self.refresh_gate.lock().unwrap();
-        let refresh = {
+        let (generation, session) = {
             let inner = self.inner.lock().unwrap();
             inner.session.as_ref().and_then(|session| {
                 should_refresh(session.expires_at, now_ms())
                     .then(|| (inner.generation, session.clone()))
             })
+        }?;
+        let result = refresh(&session);
+        Some((generation, self.apply_refresh(generation, &session, result)))
+    }
+
+    /// After a change made in memory for `generation`: announce it, then
+    /// bring the Keychain up to date. `save_failed` is what to show when the
+    /// session could not be saved.
+    fn settle(&self, generation: u64, changed: bool, save_failed: Option<&'static str>) {
+        let announce = || {
+            if let Some(app) = self.app.get() {
+                self.emit(app);
+            }
         };
-        if let Some((generation, session)) = refresh {
-            self.refresh_session(generation, session);
-            true
-        } else {
-            false
+        if changed {
+            announce();
+        }
+        if self.persist(generation, save_failed) {
+            announce();
         }
     }
 
+    /// Bring the Keychain up to date with the session in memory. True when a
+    /// failure changed what the webview sees: `save_failed` is shown when the
+    /// session could not be saved and `generation` is still the account's.
+    fn persist(&self, generation: u64, save_failed: Option<&'static str>) -> bool {
+        match self.store() {
+            Ok(()) => false,
+            Err(StoreError::Delete(error)) => {
+                log::warn!("could not remove the TerminalX account session from Keychain: {error:#}");
+                false
+            }
+            Err(StoreError::Save(error)) => {
+                log::warn!("could not save the TerminalX account session to Keychain: {error:#}");
+                let Some(message) = save_failed else { return false };
+                let mut inner = self.inner.lock().unwrap();
+                if inner.generation != generation || inner.session.is_none() {
+                    return false;
+                }
+                let changed = inner.last_error.as_deref() != Some(message);
+                inner.last_error = Some(message.into());
+                changed
+            }
+        }
+    }
+
+    /// Write the session as it is in memory now to the Keychain (or remove it
+    /// when signed out), unless the Keychain already has it.
+    ///
+    /// Every change to the session is made in memory first, under the account
+    /// lock, and then stored from here with that lock released, so a Keychain
+    /// call that is slow or never returns holds up nothing that reads the
+    /// account. Writes are made one at a time and each writes the newest
+    /// session rather than the one its caller made: a write that was waiting
+    /// behind a slow one can therefore never put an older session back, or
+    /// bring back one that was signed out meanwhile.
+    fn store(&self) -> Result<(), StoreError> {
+        let _store = self.store_gate.lock().unwrap_or_else(PoisonError::into_inner);
+        let (revision, session) = {
+            let inner = self.inner.lock().unwrap();
+            if inner.stored_revision == inner.revision {
+                return Ok(());
+            }
+            (inner.revision, inner.session.clone())
+        };
+        match &session {
+            Some(session) => self.save_session(session).map_err(StoreError::Save)?,
+            None => self.delete_session().map_err(StoreError::Delete)?,
+        }
+        self.inner.lock().unwrap().stored_revision = revision;
+        Ok(())
+    }
+
     fn ensure_loaded(&self) {
+        if self.inner.lock().unwrap().loaded {
+            return;
+        }
+        // Read with the account lock released: until the Keychain answers the
+        // account reads as not loaded (signed out), it does not wait.
+        let _store = self.store_gate.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.inner.lock().unwrap().loaded {
+            return;
+        }
+        let stored = self.load_session();
         let mut inner = self.inner.lock().unwrap();
         if inner.loaded {
             return;
         }
         inner.loaded = true;
-        match self.load_session() {
-            Ok(session) => inner.session = session,
+        match stored {
+            // Nothing changes the session before it is loaded; if something
+            // did, that is newer than what was stored.
+            Ok(session) if inner.revision == 0 => inner.session = session,
+            Ok(_) => {}
             Err(error) => {
                 log::warn!("could not read TerminalX account session from Keychain: {error:#}");
                 inner.last_error = Some(
@@ -932,15 +1109,16 @@ impl AccountManager {
             .ok_or_else(|| anyhow!("account service is not configured"))
     }
 
-    #[cfg(target_os = "macos")]
-    fn load_session(&self) -> Result<Option<DesktopSession>> {
-        use security_framework::passwords::get_generic_password;
+    fn secrets(&self) -> &dyn SecretStore {
+        self.secrets.get_or_init(|| Arc::new(Keychain)).as_ref()
+    }
 
-        let bytes = match get_generic_password(self.service()?, KEYCHAIN_ACCOUNT) {
-            Ok(bytes) => bytes,
-            Err(error) if error.code() == KEYCHAIN_NOT_FOUND => return Ok(None),
-            Err(error) => return Err(error).context("read account session from Keychain"),
+    /// Callers hold `store_gate` and not the account lock.
+    fn load_session(&self) -> Result<Option<DesktopSession>> {
+        let Some(bytes) = self.secrets().get(self.service()?, KEYCHAIN_ACCOUNT).context("read account session from Keychain")? else {
+            return Ok(None);
         };
+        let bytes = Zeroizing::new(bytes);
         let session = serde_json::from_slice(bytes.as_slice())
             .context("decode account session from Keychain")?;
         normalize_session(session)
@@ -948,39 +1126,17 @@ impl AccountManager {
             .map_err(anyhow::Error::from)
     }
 
-    #[cfg(not(target_os = "macos"))]
-    fn load_session(&self) -> Result<Option<DesktopSession>> {
-        Ok(None)
-    }
-
-    #[cfg(target_os = "macos")]
+    /// Callers hold `store_gate` and not the account lock.
     fn save_session(&self, session: &DesktopSession) -> Result<()> {
-        use security_framework::passwords::set_generic_password;
-
-        let bytes = serde_json::to_vec(session).context("encode account session")?;
-        set_generic_password(self.service()?, KEYCHAIN_ACCOUNT, bytes.as_slice())
+        let bytes = Zeroizing::new(serde_json::to_vec(session).context("encode account session")?);
+        self.secrets()
+            .set(self.service()?, KEYCHAIN_ACCOUNT, bytes.as_slice())
             .context("save account session to Keychain")
     }
 
-    #[cfg(not(target_os = "macos"))]
-    fn save_session(&self, _session: &DesktopSession) -> Result<()> {
-        Err(anyhow!("macOS Keychain is unavailable"))
-    }
-
-    #[cfg(target_os = "macos")]
+    /// Callers hold `store_gate` and not the account lock.
     fn delete_session(&self) -> Result<()> {
-        use security_framework::passwords::delete_generic_password;
-
-        match delete_generic_password(self.service()?, KEYCHAIN_ACCOUNT) {
-            Ok(()) => Ok(()),
-            Err(error) if error.code() == KEYCHAIN_NOT_FOUND => Ok(()),
-            Err(error) => Err(error).context("delete account session from Keychain"),
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn delete_session(&self) -> Result<()> {
-        Ok(())
+        self.secrets().delete(self.service()?, KEYCHAIN_ACCOUNT).context("delete account session from Keychain")
     }
 }
 
@@ -1258,6 +1414,19 @@ fn friendly_cloud_error(error: &CloudError) -> String {
         }
         CloudError::InvalidSession => "The account service returned an invalid session.".into(),
     }
+}
+
+#[cfg(test)]
+pub(crate) const TEST_SERVICE: &str = "test.terminalx.account";
+
+#[cfg(test)]
+fn test_session_body(role: &str) -> SessionBody {
+    serde_json::from_value(json!({
+        "cloud": { "cloudProfileId": "profile", "userId": "user", "email": "a@example.com", "displayName": "A", "activeOrgId": "org-a", "activeOrgName": "Test Organization", "linkedAt": 1 },
+        "organizations": [{ "orgId": "org-a", "name": "Acme", "role": role, "isPersonal": false, "cloud": { "enabled": true, "flags": {} } }],
+        "capabilities": { "flags": { MULTI_ORG_CAPABILITY: true }, "refreshedAt": 5 }
+    }))
+    .unwrap()
 }
 
 fn now_ms() -> i64 {
@@ -1558,12 +1727,7 @@ mod tests {
     }
 
     fn body(role: &str) -> SessionBody {
-        serde_json::from_value(json!({
-            "cloud": { "cloudProfileId": "profile", "userId": "user", "email": "a@example.com", "displayName": "A", "activeOrgId": "org-a", "activeOrgName": "Test Organization", "linkedAt": 1 },
-            "organizations": [{ "orgId": "org-a", "name": "Acme", "role": role, "isPersonal": false, "cloud": { "enabled": true, "flags": {} } }],
-            "capabilities": { "flags": { MULTI_ORG_CAPABILITY: true }, "refreshedAt": 5 }
-        }))
-        .unwrap()
+        test_session_body(role)
     }
 
     fn role_of(manager: &AccountManager) -> Option<String> {
@@ -1654,6 +1818,266 @@ mod tests {
         assert_eq!(role_of(&manager).as_deref(), Some("admin"));
         // A failure does not count as an answer: the next routine read asks.
         assert!(manager.refresh_roles_with(false, start + Duration::from_secs(61), |_| Ok(body("member"))));
+    }
+
+    // ---- a slow or blocked Keychain (the freeze after a stop and wake) ----
+
+    use crate::keychain::testing::{Call, MemorySecrets};
+    use std::sync::mpsc;
+
+    /// Signed in as "user" in "org-a" (generation 7), with the session kept in a store the test controls.
+    fn signed_in_with_store() -> (Arc<AccountManager>, MemorySecrets) {
+        let store = MemorySecrets::default();
+        let manager = Arc::new(signed_in("org-a"));
+        manager.use_secrets_for_test(Arc::new(store.clone()));
+        (manager, store)
+    }
+
+    /// What `work` returns, or a failure when it does not return at once: a
+    /// read that waits for the Keychain is the bug.
+    fn promptly<T: Send + 'static>(what: &str, work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (done, result) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(work());
+        });
+        result.recv_timeout(Duration::from_secs(5)).unwrap_or_else(|_| panic!("{what} waited for the Keychain"))
+    }
+
+    fn eventually(what: &str, check: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !check() {
+            assert!(Instant::now() < deadline, "{what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn stored_session(store: &MemorySecrets) -> Option<DesktopSession> {
+        store.stored(TEST_SERVICE, KEYCHAIN_ACCOUNT).map(|bytes| serde_json::from_slice(&bytes).unwrap())
+    }
+
+    fn stored_role(store: &MemorySecrets) -> Option<String> {
+        stored_session(store).and_then(|session| session.organizations.first().map(|org| org.role.clone()))
+    }
+
+    fn rotated(from: &DesktopSession, role: &str) -> DesktopSession {
+        let mut session = from.clone();
+        session.access_token = "rotated-access".into();
+        session.refresh_token = "rotated-refresh".into();
+        session.organizations = vec![Organization { org_id: "org-a".into(), name: "Acme".into(), role: role.into(), is_personal: false, cloud: None }];
+        session
+    }
+
+    #[test]
+    fn reading_the_account_never_waits_for_a_role_refresh_that_is_stuck_saving() {
+        let (manager, store) = signed_in_with_store();
+        store.block_writes();
+        let refreshing = {
+            let manager = manager.clone();
+            std::thread::spawn(move || manager.refresh_roles_with(true, Instant::now(), |_| Ok(body("member"))))
+        };
+        // The role refresh is now inside the Keychain write and stays there.
+        store.wait_for_blocked(1);
+
+        // Everything the main thread, a cloud send or a poll reads returns at
+        // once, and already with what the server answered.
+        let scope = {
+            let manager = manager.clone();
+            promptly("current_scope", move || manager.current_scope())
+        };
+        assert!(scope.is_some_and(|scope| scope.user_id == "user" && scope.allows("org-a")));
+        let context = {
+            let manager = manager.clone();
+            promptly("context", move || manager.context())
+        }
+        .expect("signed in");
+        let reads = manager.clone();
+        assert!(promptly("is_current, is_current_in, current_revision", move || {
+            reads.is_current(&context) && reads.is_current_in(&context, OrgAccess::Member) && reads.current_revision().is_some()
+        }));
+        let status = manager.clone();
+        assert_eq!(promptly("the status", move || role_of(&status)).as_deref(), Some("member"));
+        // A second refresh (the window was focused again) does not queue up
+        // behind the stuck one's throttle lock either: it is throttled.
+        let again = manager.clone();
+        assert!(!promptly("a second role refresh", move || again.refresh_roles_with(true, Instant::now(), |_| panic!("asked twice"))));
+        assert_eq!(stored_role(&store), None, "still being written");
+
+        store.release();
+        assert!(refreshing.join().unwrap());
+        assert_eq!(stored_role(&store).as_deref(), Some("member"));
+    }
+
+    #[test]
+    fn a_sign_out_during_a_slow_save_is_not_undone_by_it() {
+        let (manager, store) = signed_in_with_store();
+        store.block_writes();
+        let start = Instant::now();
+        let stuck = {
+            let manager = manager.clone();
+            std::thread::spawn(move || manager.refresh_roles_with(true, start, |_| Ok(body("admin"))))
+        };
+        store.wait_for_blocked(1);
+        // A second refresh has its answer in memory and waits to write it.
+        let waiting = {
+            let manager = manager.clone();
+            std::thread::spawn(move || manager.refresh_roles_with(true, start + ROLES_REFRESH_FLOOR, |_| Ok(body("member"))))
+        };
+        eventually("the second answer is taken in memory", || role_of(&manager).as_deref() == Some("member"));
+
+        // Sign out while both are outstanding: at once in memory...
+        let signing_out = {
+            let manager = manager.clone();
+            std::thread::spawn(move || manager.end_session())
+        };
+        eventually("signed out in memory without waiting for the Keychain", || manager.current_scope().is_none());
+        assert!(manager.settled_scope().is_none(), "but not confirmed: nothing of the account is dropped yet");
+        assert_eq!(manager.inner.lock().unwrap().generation, 8, "and everything made for the account is fenced");
+
+        // ...and in the Keychain once it answers, whichever write goes last.
+        store.release();
+        assert!(stuck.join().unwrap());
+        assert!(waiting.join().unwrap());
+        assert!(signing_out.join().unwrap().is_some(), "the ended session is returned for the server to be told");
+        assert_eq!(manager.settled_scope(), Some(None), "confirmed");
+        assert_eq!(stored_session(&store).map(|session| session.access_token), None, "the saved session is gone, not put back by a late write");
+        let calls = store.calls();
+        assert_eq!(calls.last(), Some(&Call::Delete));
+        assert_eq!(calls.iter().filter(|call| matches!(call, Call::Set(_))).count(), 1, "the waiting write did not save its older session");
+        assert!(manager.current_scope().is_none());
+    }
+
+    #[test]
+    fn an_answer_that_arrives_after_a_sign_out_is_dropped() {
+        let (manager, store) = signed_in_with_store();
+        let (asked, was_asked) = mpsc::channel();
+        let (answer, answered) = mpsc::channel::<()>();
+        let refreshing = {
+            let manager = manager.clone();
+            std::thread::spawn(move || {
+                manager.refresh_roles_with(true, Instant::now(), |_| {
+                    asked.send(()).unwrap();
+                    answered.recv().unwrap();
+                    Ok(body("member"))
+                })
+            })
+        };
+        was_asked.recv_timeout(Duration::from_secs(10)).unwrap();
+        // The request is out; reads do not wait for it, and neither does a sign-out.
+        let reads = manager.clone();
+        assert!(promptly("current_scope", move || reads.current_scope()).is_some());
+        let signing_out = manager.clone();
+        assert!(promptly("the sign-out", move || signing_out.end_session()).is_some());
+        answer.send(()).unwrap();
+        assert!(!refreshing.join().unwrap(), "the answer was for a session that ended");
+        assert!(manager.current_scope().is_none());
+        assert_eq!(stored_session(&store).map(|session| session.access_token), None);
+        assert!(!store.calls().iter().any(|call| matches!(call, Call::Set(_))), "nothing of the ended session was saved");
+    }
+
+    #[test]
+    fn a_slow_save_of_an_older_session_does_not_replace_a_newer_one() {
+        let (manager, store) = signed_in_with_store();
+        let before = manager.inner.lock().unwrap().session.clone().unwrap();
+        store.block_writes();
+        let stuck = {
+            let manager = manager.clone();
+            std::thread::spawn(move || manager.refresh_roles_with(true, Instant::now(), |_| Ok(body("admin"))))
+        };
+        store.wait_for_blocked(1);
+        let asked_with = manager.inner.lock().unwrap().session.clone().unwrap();
+
+        // The tokens rotate meanwhile (a status read): a newer session, in
+        // memory at once, whose write waits behind the stuck one.
+        let newer = rotated(&asked_with, "owner");
+        assert!(manager.apply_refresh(7, &asked_with, Ok(newer)));
+        let saving = {
+            let manager = manager.clone();
+            std::thread::spawn(move || manager.settle(7, true, Some(REFRESH_NOT_SAVED)))
+        };
+        let reads = manager.clone();
+        assert_eq!(promptly("context", move || reads.context()).unwrap().access_token, "rotated-access");
+        // A role answer asked with the tokens from before the rotation is dropped.
+        assert_eq!(manager.apply_session_body(7, &before, body("member")), (false, false));
+
+        store.release();
+        assert!(stuck.join().unwrap());
+        saving.join().unwrap();
+        let stored = stored_session(&store).unwrap();
+        assert_eq!((stored.access_token.as_str(), stored.refresh_token.as_str()), ("rotated-access", "rotated-refresh"));
+        assert_eq!(stored_role(&store).as_deref(), Some("owner"));
+        assert_eq!(manager.snapshot().last_error, None);
+        // Nothing left to write: the Keychain has the session in memory.
+        let writes = store.calls().len();
+        manager.settle(7, false, None);
+        assert_eq!(store.calls().len(), writes);
+    }
+
+    #[test]
+    fn no_keychain_call_is_made_while_the_account_is_locked() {
+        let store = MemorySecrets::default();
+        let manager = Arc::new(AccountManager::default());
+        manager.use_secrets_for_test(Arc::new(store.clone()));
+        let watched = Arc::downgrade(&manager);
+        store.on_call(move || {
+            let manager = watched.upgrade().expect("the account outlives its store");
+            assert!(manager.inner.try_lock().is_ok(), "a Keychain call was made with the account locked");
+        });
+
+        // Launch: the saved session is read.
+        let saved = signed_in("org-a").inner.lock().unwrap().session.clone().unwrap();
+        store.set(TEST_SERVICE, KEYCHAIN_ACCOUNT, &serde_json::to_vec(&saved).unwrap()).unwrap();
+        assert!(manager.current_scope().is_none(), "not loaded yet, and not waited for");
+        manager.ensure_loaded();
+        assert!(manager.current_scope().is_some());
+        // A role refresh, a token rotation, a rotation refused as expired, a
+        // new sign-in, and a sign-out: each one writes.
+        assert!(manager.refresh_roles_with(true, Instant::now(), |_| Ok(body("admin"))));
+        let generation = manager.inner.lock().unwrap().generation;
+        let current = manager.inner.lock().unwrap().session.clone().unwrap();
+        let newer = rotated(&current, "member");
+        assert!(manager.apply_refresh(generation, &current, Ok(newer.clone())));
+        manager.settle(generation, true, Some(REFRESH_NOT_SAVED));
+        assert_eq!(stored_role(&store).as_deref(), Some("member"));
+        assert!(manager.apply_refresh(generation, &newer, Err(CloudError::Http(401))));
+        manager.settle(generation, true, Some(REFRESH_NOT_SAVED));
+        assert_eq!(stored_session(&store).map(|session| session.access_token), None, "an expired session is removed");
+        manager.inner.lock().unwrap().signing_in = true;
+        assert!(manager.apply_exchange(generation, Ok(saved)));
+        assert!(!manager.persist(generation, Some("not saved")));
+        assert!(stored_session(&store).is_some());
+        assert!(manager.end_session().is_some());
+        assert_eq!(stored_session(&store).map(|session| session.access_token), None);
+        let calls = store.calls();
+        assert_eq!(calls.iter().filter(|call| matches!(call, Call::Set(_))).count(), 4, "the seeded session, the roles, the rotation and the sign-in");
+        assert_eq!(calls.iter().filter(|call| **call == Call::Delete).count(), 2, "the expiry and the sign-out");
+        assert_eq!(calls.iter().filter(|call| **call == Call::Get).count(), 1, "the session is read once");
+    }
+
+    #[test]
+    fn a_keychain_that_refuses_is_reported_and_never_signs_out_by_itself() {
+        let (manager, store) = signed_in_with_store();
+        store.fail_writes(true);
+        // A role refresh that cannot be saved is still taken, and is not an error to show.
+        assert!(manager.refresh_roles_with(true, Instant::now(), |_| Ok(body("admin"))));
+        assert_eq!((role_of(&manager).as_deref(), manager.snapshot().last_error), (Some("admin"), None));
+        // A token rotation that cannot be saved says so.
+        let current = manager.inner.lock().unwrap().session.clone().unwrap();
+        assert!(manager.apply_refresh(7, &current, Ok(rotated(&current, "admin"))));
+        manager.settle(7, true, Some(REFRESH_NOT_SAVED));
+        assert_eq!(manager.snapshot().last_error.as_deref(), Some(REFRESH_NOT_SAVED));
+        // A sign-out that cannot remove the saved session stays signed in, as
+        // the next launch would be.
+        assert!(manager.end_session().is_none());
+        assert!(manager.settled_scope().is_some_and(|scope| scope.is_some()), "settled, and signed in");
+        let status = serde_json::to_value(manager.snapshot()).unwrap();
+        assert_eq!(status["state"], "signed-in");
+        assert_eq!(status["lastError"], "Sign-out could not remove the account session from macOS Keychain.");
+        assert_eq!(manager.context().unwrap().access_token, "rotated-access");
+        // Once the Keychain answers again the sign-out goes through.
+        store.fail_writes(false);
+        assert!(manager.end_session().is_some());
+        assert!(manager.current_scope().is_none());
+        assert_eq!(stored_session(&store).map(|session| session.access_token), None);
     }
 
     #[test]

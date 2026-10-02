@@ -86,6 +86,8 @@ pub trait KeyStore: Send + Sync {
     fn put(&self, organization_id: &str, workspace_id: &str, key_id: &str, key: &[u8; crypto::KEY_LEN]) -> Result<()>;
     fn get(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<Option<[u8; crypto::KEY_LEN]>>;
     fn delete(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<()>;
+    /// Drop whatever is held in memory (the identity changed). Stored keys stay.
+    fn forget(&self) {}
 }
 
 /// macOS keychain generic passwords under `<app identifier>.cloud-agent-keys`.
@@ -119,30 +121,23 @@ fn key_account(organization_id: &str, workspace_id: &str, key_id: &str) -> Strin
     format!("{organization_id}/{workspace_id}/{key_id}")
 }
 
+// Through `crate::keychain`, which makes Keychain calls one at a time.
 #[cfg(target_os = "macos")]
 impl KeyStore for KeychainKeys {
     fn put(&self, organization_id: &str, workspace_id: &str, key_id: &str, key: &[u8; crypto::KEY_LEN]) -> Result<()> {
-        security_framework::passwords::set_generic_password(self.service()?, &key_account(organization_id, workspace_id, key_id), key)
-            .context("save a workspace key to Keychain")
+        crate::keychain::set(self.service()?, &key_account(organization_id, workspace_id, key_id), key).context("save a workspace key to Keychain")
     }
 
     fn get(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<Option<[u8; crypto::KEY_LEN]>> {
-        match security_framework::passwords::get_generic_password(self.service()?, &key_account(organization_id, workspace_id, key_id)) {
-            Ok(bytes) => {
-                let bytes = Zeroizing::new(bytes);
-                Ok(Some(bytes.as_slice().try_into().map_err(|_| anyhow!("a stored workspace key is not 32 bytes"))?))
-            }
-            Err(error) if error.code() == -25300 => Ok(None), // errSecItemNotFound
-            Err(error) => Err(error).context("read a workspace key from Keychain"),
-        }
+        let Some(bytes) = crate::keychain::get(self.service()?, &key_account(organization_id, workspace_id, key_id)).context("read a workspace key from Keychain")? else {
+            return Ok(None);
+        };
+        let bytes = Zeroizing::new(bytes);
+        Ok(Some(bytes.as_slice().try_into().map_err(|_| anyhow!("a stored workspace key is not 32 bytes"))?))
     }
 
     fn delete(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<()> {
-        match security_framework::passwords::delete_generic_password(self.service()?, &key_account(organization_id, workspace_id, key_id)) {
-            Ok(()) => Ok(()),
-            Err(error) if error.code() == -25300 => Ok(()),
-            Err(error) => Err(error).context("delete a workspace key from Keychain"),
-        }
+        crate::keychain::delete(self.service()?, &key_account(organization_id, workspace_id, key_id)).context("delete a workspace key from Keychain")
     }
 }
 
@@ -176,6 +171,107 @@ fn secret_file(organization_id: &str, workspace_id: &str) -> Result<PathBuf> {
     let dir = crate::store::root()?.join("cloud-agent-keys");
     crate::cloud_bootstrap::ensure_private_dir(&dir)?;
     Ok(dir.join(format!("{organization_id}--{workspace_id}.json")))
+}
+
+/// A [`KeyStore`] in front of another that remembers, in this process's
+/// memory, each key it stored or read.
+///
+/// A send, a checkpoint and a receipt each need the workspace key, and every
+/// connect is answered (`keys.get`) with keys this Mac nearly always has
+/// already. Without this each of those is a Keychain call, several at once
+/// after a wake; with it a key is read from the Keychain once per run and
+/// written only when it is new or changed.
+///
+/// Nothing about where keys are kept changes: the Keychain stays the only
+/// place a key is stored, and a key already crosses this process's memory
+/// each time it is used (it arrives over the relay channel and is handed to
+/// AES-GCM here). The copies held are zeroed when dropped; a key's copy is
+/// dropped when the key is deleted, and all of them when the identity changes.
+pub struct CachedKeys {
+    store: Arc<dyn KeyStore>,
+    held: Mutex<Held>,
+}
+
+/// A held key lives in its own allocation: the map moves only the pointer
+/// when it grows, so no copy of the key is left behind un-zeroed.
+type HeldKey = Box<Zeroizing<[u8; crypto::KEY_LEN]>>;
+
+#[derive(Default)]
+struct Held {
+    keys: HashMap<String, HeldKey>,
+    /// Counts puts, deletes and forgets, so a read that was under way during
+    /// one does not keep what it read.
+    changes: u64,
+}
+
+impl CachedKeys {
+    pub fn new(store: Arc<dyn KeyStore>) -> Self {
+        Self { store, held: Mutex::new(Held::default()) }
+    }
+
+    /// Drop the held copy before the stored key changes. Never held across a
+    /// call to the store.
+    fn invalidate(&self, account: &str) -> u64 {
+        let mut held = self.held.lock().unwrap();
+        held.keys.remove(account);
+        held.changes = held.changes.wrapping_add(1);
+        held.changes
+    }
+
+    fn keep(&self, account: String, key: &[u8; crypto::KEY_LEN], as_of: u64) {
+        let mut held = self.held.lock().unwrap();
+        if held.changes == as_of {
+            held.keys.insert(account, Box::new(Zeroizing::new(*key)));
+        }
+    }
+}
+
+impl KeyStore for CachedKeys {
+    fn put(&self, organization_id: &str, workspace_id: &str, key_id: &str, key: &[u8; crypto::KEY_LEN]) -> Result<()> {
+        use subtle::ConstantTimeEq;
+        let account = key_account(organization_id, workspace_id, key_id);
+        if self.held.lock().unwrap().keys.get(&account).is_some_and(|held| bool::from(held.as_slice().ct_eq(key.as_slice()))) {
+            return Ok(());
+        }
+        let as_of = self.invalidate(&account);
+        self.store.put(organization_id, workspace_id, key_id, key)?;
+        self.keep(account, key, as_of);
+        Ok(())
+    }
+
+    fn get(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<Option<[u8; crypto::KEY_LEN]>> {
+        let account = key_account(organization_id, workspace_id, key_id);
+        let as_of = {
+            let held = self.held.lock().unwrap();
+            if let Some(key) = held.keys.get(&account) {
+                return Ok(Some(***key));
+            }
+            held.changes
+        };
+        let found = self.store.get(organization_id, workspace_id, key_id)?;
+        if let Some(key) = &found {
+            self.keep(account, key, as_of);
+        }
+        Ok(found)
+    }
+
+    fn delete(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<()> {
+        let account = key_account(organization_id, workspace_id, key_id);
+        self.invalidate(&account);
+        let deleted = self.store.delete(organization_id, workspace_id, key_id);
+        // Again once the key is gone: a read that began after the first and
+        // found the key still stored must not leave it held.
+        self.invalidate(&account);
+        deleted
+    }
+
+    fn forget(&self) {
+        let mut held = self.held.lock().unwrap();
+        held.keys.clear();
+        held.changes = held.changes.wrapping_add(1);
+        drop(held);
+        self.store.forget();
+    }
 }
 
 /// For tests.
@@ -917,6 +1013,9 @@ impl CloudAgentClient {
 
     fn retain_only(&self, keep: Option<&KeptIdentity>) {
         let _guard = self.lock.lock().unwrap();
+        // No key of the previous identity stays in memory; the ones still
+        // kept are read again when next used.
+        self.keys.forget();
         let Ok(users) = std::fs::read_dir(&self.root) else { return };
         for user in users.flatten() {
             let user_id = user.file_name().to_string_lossy().into_owned();
