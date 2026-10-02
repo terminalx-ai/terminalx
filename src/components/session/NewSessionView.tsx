@@ -18,6 +18,7 @@ import { AgentMark } from "@/components/AgentMark";
 import { DictationStatus, MicButton, NEW_SESSION_TARGET, useDictationInto } from "@/components/chat/Dictation";
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "@/components/chat/useImageAttachments";
 import { RaccoonScene } from "@/components/raccoon/Raccoon";
+import { isRoleRefusal, refreshAccountRoles } from "@/lib/accountRoles";
 import { api, errorMessage, type ImageInput } from "@/lib/api";
 import { addProject, clearNewSessionPreset, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { EFFORT_LABEL, PERMISSION_MODES, refreshModels, upgradeHint, useModels } from "@/lib/models";
@@ -165,6 +166,8 @@ export function NewSessionView({
     const atRunningLimit = code === RUNNING_LIMIT_CODE || (code === "cloud_workspace_quota_exceeded" && runningLimitReached(orgId));
     setLimitOrg(atRunningLimit ? orgId : null);
     setError(atRunningLimit ? runningLimitMessage(orgId) : cloudStartError(e));
+    // Refused for lack of role: read the roles again, so the form and the menus stop offering it.
+    if (isRoleRefusal(e)) void refreshAccountRoles(true);
   };
 
   /** Start in the cloud: reuse or wake a workspace of the project, or prepare a new one for confirmation. */
@@ -304,9 +307,10 @@ export function NewSessionView({
                     <DropdownMenuLabel>{section.orgName} cloud</DropdownMenuLabel>
                     {/* A member's cloud projects are listed but not startable: the server keeps new cloud sessions for owners and admins. */}
                     {section.mayStart === false && (
-                      <DropdownMenuLabel className="max-w-64 whitespace-normal text-[11px] font-normal text-muted-foreground" data-testid="cloud-start-locked">
-                        {NEW_SESSION_ADMIN_REASON}
-                      </DropdownMenuLabel>
+                      // Helper text, not a section header: sentence case, as the reason reads everywhere else.
+                      <div role="note" className="max-w-64 px-2 pb-1 text-[11px] leading-snug text-muted-foreground" data-testid="cloud-start-locked">
+                        {NEW_SESSION_ADMIN_REASON}.
+                      </div>
                     )}
                     {section.projects.map((choice) => (
                       <DropdownMenuItem

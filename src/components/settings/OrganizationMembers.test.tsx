@@ -157,6 +157,63 @@ it("changes a role and surfaces a server refusal", async () => {
   await screen.findByText("Only organization owners and admins can manage members.");
 });
 
+it.each([
+  [{ code: "organization_requires_pro", status: 402, retryAfterSeconds: null }, "Inviting and changing roles requires TerminalX Pro."],
+  [{ code: "forbidden", status: 403, retryAfterSeconds: null }, "Only organization owners and admins can manage members."],
+  [new Error("network"), "TerminalX could not reach the account service. Try again."],
+])("puts the role select back to the server's value when a change is refused (%#)", async (refusal, message) => {
+  let refuse!: (reason: unknown) => void;
+  api.updateRole.mockReturnValueOnce(new Promise((_resolve, reject) => (refuse = reject)));
+  await renderAs();
+  const select = () => screen.getByRole("combobox", { name: "Role for member@example.com" }) as HTMLSelectElement;
+  fireEvent.change(select(), { target: { value: "admin" } });
+  // While it saves, the select shows what was asked for.
+  await waitFor(() => expect(select().disabled).toBe(true));
+  expect(select().value).toBe("admin");
+
+  refuse(refusal);
+  await screen.findByText(message);
+  // Refused: the role shown is the one the server still holds, not the one asked for.
+  await waitFor(() => expect(select().disabled).toBe(false));
+  expect(select().value).toBe("member");
+  // And the next attempt starts from it.
+  api.updateRole.mockResolvedValueOnce(roster({ members: roster().members.map((m) => (m.userId === "member-1" ? { ...m, role: "admin" } : m)) }));
+  fireEvent.change(select(), { target: { value: "admin" } });
+  await waitFor(() => expect(api.updateRole).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(select().disabled).toBe(false));
+  expect(select().value).toBe("admin");
+});
+
+it("retries a roster read that could not reach the service once, quietly, before showing an error", async () => {
+  api.list.mockReset();
+  api.list.mockRejectedValueOnce({ code: "organization_members_unavailable", status: null, retryAfterSeconds: null }).mockResolvedValue(roster());
+  render(<OrganizationMembers accountEmail="admin@example.com" contextRevision="account-1" />);
+  // Still loading while it waits to ask again: no error and no Retry button.
+  await waitFor(() => expect(api.list).toHaveBeenCalledTimes(1));
+  expect(screen.getByText("Loading members…")).toBeTruthy();
+  expect(screen.queryByText(/could not reach the account service/)).toBeNull();
+  await screen.findByRole("list", { name: "Organization members" }, { timeout: 3000 });
+  expect(api.list).toHaveBeenCalledTimes(2);
+  expect(screen.queryByText(/could not reach the account service/)).toBeNull();
+});
+
+it("shows the error with Retry when the second read fails too, and a refusal with a reason at once", async () => {
+  api.list.mockReset();
+  api.list.mockRejectedValue({ code: "organization_members_unavailable", status: null, retryAfterSeconds: null });
+  const view = render(<OrganizationMembers accountEmail="admin@example.com" contextRevision="account-1" />);
+  await screen.findByText("TerminalX could not reach the account service. Try again.", {}, { timeout: 3000 });
+  expect(api.list).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+  view.unmount();
+
+  // A refusal that names its reason is not asked twice.
+  api.list.mockReset();
+  api.list.mockRejectedValue({ code: "account_signed_out", status: null, retryAfterSeconds: null });
+  render(<OrganizationMembers accountEmail="admin@example.com" contextRevision="account-2" />);
+  await screen.findByText("Sign in to manage organization members.");
+  expect(api.list).toHaveBeenCalledTimes(1);
+});
+
 it("removes a member only after confirmation", async () => {
   api.remove.mockResolvedValue(roster({ members: roster().members.filter((m) => m.userId !== "member-1") }));
   await renderAs();

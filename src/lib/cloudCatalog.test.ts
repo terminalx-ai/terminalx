@@ -44,6 +44,8 @@ import {
   flushCloudCatalogSave,
   getCloudCatalog,
   ingestCloudList,
+  lastKnownWorkspace,
+  listedOrgManages,
   liveCloudOrgIds,
   parseCatalog,
   placeCloudProjects,
@@ -54,12 +56,14 @@ import {
   POLL_FOCUSED_MS,
   REFRESH_ON_RETURN_FLOOR_MS,
   refreshCloudCatalog,
+  refreshCloudWorkspaces,
   rememberCreatedWorkspace,
   resetCloudCatalog,
   serializeCatalog,
   type OrgCatalog,
 } from "./cloudCatalog";
 import { resetPurged } from "./cloudLifecycle";
+import { registerAccountRoles } from "./accountRoles";
 import { notifyAccessChanged } from "./cloudCollab";
 import { createWorkspace, type CreateApi } from "./cloudCreate";
 // What the Rust `cloud_workspaces` command hands the webview for a saas #137/#139
@@ -628,5 +632,84 @@ describe("every organization live (CS-18)", () => {
     bootCloudCatalog();
     await vi.waitFor(() => expect(getCloudCatalog().orgs[ORG_B]?.error).toBe("cloud_workspace_invalid_response"));
     expect(mocks.refreshAccount).not.toHaveBeenCalled();
+  });
+});
+
+describe("the account's role, as the workspace list reports it", () => {
+  const roles = { refresh: vi.fn(async () => undefined), listed: vi.fn() };
+  beforeEach(() => {
+    roles.refresh.mockClear();
+    roles.listed.mockClear();
+    registerAccountRoles(roles);
+  });
+  afterEach(() => registerAccountRoles(null));
+  const you = (role: string) => ({ you: { role, canApprove: role === "manager" } });
+
+  it("reads manager as an owner or admin, anything else as a member, and nothing from a list that does not say", () => {
+    expect(listedOrgManages({ workspaces: [item("w1", you("manager")), item("w2", you("manager"))] })).toBe(true);
+    expect(listedOrgManages({ workspaces: [item("w1", you("driver")), item("w2", you("none"))] })).toBe(false);
+    // A server that reports no roles still says what opening would grant.
+    expect(listedOrgManages({ workspaces: [item("w1", { authority: "manage" })] })).toBe(true);
+    expect(listedOrgManages({ workspaces: [item("w1", { authority: "participate" })] })).toBe(false);
+    // The role wins over the authority.
+    expect(listedOrgManages({ workspaces: [item("w1", { ...you("viewer"), authority: "manage" })] })).toBe(false);
+    expect(listedOrgManages({ workspaces: [] })).toBeNull();
+    expect(listedOrgManages({ workspaces: [item("w1")] })).toBeNull();
+    expect(listedOrgManages({ workspaces: [item("w1", you("manager")), item("w2", you("driver"))] })).toBeNull();
+  });
+
+  it("tells the account what each list says, with when the list was asked for", async () => {
+    signIn();
+    let now = 1_000;
+    mocks.api.cloudWorkspaces.mockResolvedValueOnce({ workspaces: [item("w1", you("driver"))] });
+    bootCloudCatalog();
+    await refreshCloudCatalog(ORG, () => now++);
+    await vi.waitFor(() => expect(roles.listed).toHaveBeenCalled());
+    const [orgId, manages, askedAt] = roles.listed.mock.calls.at(-1)!;
+    expect([orgId, manages]).toEqual([ORG, false]);
+    expect(askedAt).toBeGreaterThan(0);
+    // A list alone never asks the account service; the account store decides.
+    expect(roles.refresh).not.toHaveBeenCalled();
+  });
+
+  it("a list refused as not found means this account is not a member: the organizations are read again", async () => {
+    signIn();
+    bootCloudCatalog();
+    await refreshCloudCatalog(ORG);
+    roles.refresh.mockClear();
+    mocks.api.cloudWorkspaces.mockRejectedValueOnce({ code: "cloud_workspace_not_found", status: 404 });
+    await refreshCloudCatalog(ORG);
+    expect(roles.refresh).toHaveBeenCalledExactlyOnceWith(true);
+    // An ordinary failure does not.
+    roles.refresh.mockClear();
+    mocks.api.cloudWorkspaces.mockRejectedValueOnce({ code: "cloud_workspace_unavailable" });
+    await refreshCloudCatalog(ORG);
+    expect(roles.refresh).not.toHaveBeenCalled();
+  });
+
+  it("Refresh cloud workspaces reads the roles from the server and lists", async () => {
+    signIn();
+    bootCloudCatalog();
+    await refreshCloudCatalog(ORG);
+    roles.refresh.mockClear();
+    mocks.api.cloudWorkspaces.mockClear();
+    await refreshCloudWorkspaces(ORG);
+    expect(roles.refresh).toHaveBeenCalledExactlyOnceWith(true);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a workspace no longer in this person's list", () => {
+  it("keeps the names their sidebar showed for it, for this launch only", async () => {
+    signIn();
+    expect(lastKnownWorkspace("never-listed")).toBeNull();
+    await ingestCloudList({ workspaces: [item("w-repo", { name: "api work", repositories: [{ identity: "github.com/acme/api", fullName: "acme/api", cloneUrl: null, primary: true }] }), item("w-blank", { name: "share-demo", repositories: [] })] }, ORG, 10, 10);
+    // Made private again: the next list no longer has them.
+    await ingestCloudList({ workspaces: [] }, ORG, 20, 20);
+    expect(getCloudCatalog().orgs[ORG].workspaces).toEqual([]);
+    expect(lastKnownWorkspace("w-repo")).toEqual({ name: "api work", project: "acme/api" });
+    expect(lastKnownWorkspace("w-blank")).toEqual({ name: "share-demo", project: "share-demo" });
+    // Nothing of it is saved for the next launch.
+    expect(JSON.stringify(serializeCatalog(getCloudCatalog()))).not.toContain("share-demo");
   });
 });

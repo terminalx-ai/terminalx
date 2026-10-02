@@ -41,6 +41,17 @@ pub async fn account_status(
     tauri::async_runtime::spawn_blocking(move || account.status(&app)).await.map_err(err)
 }
 
+/// Read the organizations and the role in each again from the account service.
+#[tauri::command]
+pub async fn account_refresh_roles(
+    app: AppHandle,
+    force: bool,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::account::RolesRefresh> {
+    let account = state.account.clone();
+    tauri::async_runtime::spawn_blocking(move || account.refresh_roles(&app, force)).await.map_err(err)
+}
+
 #[tauri::command]
 pub fn account_sign_in(
     app: AppHandle,

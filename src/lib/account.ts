@@ -1,7 +1,8 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, closeWorkspaceConnections, closeWorkspaceConnectionsIn, errorMessage, type AccountStatus } from "@/lib/api";
-import { isMultiOrg, keptCloudOrgs } from "@/lib/multiOrg";
+import { registerAccountRoles } from "@/lib/accountRoles";
+import { isMultiOrg, keptCloudOrgs, mayStartCloudSessions } from "@/lib/multiOrg";
 import { dropCloudAgentsIn } from "@/lib/cloudAgents";
 import { closeCloudConnectionsIn, resetCloudConnections } from "@/lib/cloudConnections";
 import { dropCloudTerminalsIn, resetCloudTerminals } from "@/lib/cloudTerminals";
@@ -34,7 +35,14 @@ function set(patch: Partial<AccountState>) {
   for (const listener of listeners) listener();
 }
 
+/** The status as the native side last reported it; `state.status` is this with newer role signals applied. */
+let reported: AccountStatus = signedOut;
+
 function applyStatus(status: AccountStatus) {
+  // What a list implied about one account's role says nothing about another's.
+  if (status.identity?.email !== reported.identity?.email) roleHints.clear();
+  reported = status;
+  status = withRoleHints(status);
   const change = cloudChange(state.status, status);
   if (change.kind === "all") {
     // A new account (or, without every organization live, a new default
@@ -194,6 +202,9 @@ export function bootAccount(): Promise<void> {
     try {
       await listen<AccountStatus>("account_status", (event) => applyStatus(event.payload));
       applyStatus(await api.accountStatus());
+      // The saved session's organizations and roles are as old as its last
+      // token refresh (or the last launch): read them again, without holding up the first paint.
+      void refreshAccountRoles(true);
       // A silent token refresh can bring new organizations, capabilities or a
       // new active organization; the native side announces it, and a focus
       // re-reads it too, in case an announcement was missed.
@@ -210,8 +221,87 @@ function refreshOnFocus() {
   const now = Date.now();
   if (now - lastFocusRefresh < FOCUS_REFRESH_MS) return;
   lastFocusRefresh = now;
-  void refreshAccount();
+  // The status, and (at most once a minute, throttled natively) the
+  // organizations and roles from the server.
+  void refreshAccountRoles();
 }
+
+// ---- Organizations and roles ------------------------------------------------
+
+/** When the roles the server last answered with were asked for. */
+let rolesAskedAt = 0;
+let rolesFlight: Promise<void> | null = null;
+let rolesFlightFresh = false;
+
+export function refreshAccountRoles(force = false, now: () => number = Date.now): Promise<void> {
+  if (rolesFlight) {
+    // A forced read that found a throttled one running asks again after it.
+    const running = rolesFlight;
+    return force ? running.then(() => (rolesFlightFresh ? undefined : refreshAccountRoles(true, now))) : running;
+  }
+  const askedAt = now();
+  const flight: Promise<void> = api
+    .accountRefreshRoles(force)
+    .then((result) => {
+      rolesFlightFresh = result?.fresh === true;
+      if (!result?.status) return;
+      if (rolesFlightFresh) {
+        rolesAskedAt = askedAt;
+        // The server's answer is newer than what any earlier list implied.
+        for (const [orgId, hint] of roleHints) if (hint.at <= askedAt) roleHints.delete(orgId);
+      }
+      applyStatus(result.status);
+    })
+    .catch(() => {
+      // The roles shown stay the last known ones; the next trigger asks again.
+      rolesFlightFresh = false;
+    })
+    .finally(() => {
+      if (rolesFlight === flight) rolesFlight = null;
+    });
+  rolesFlight = flight;
+  return flight;
+}
+
+/** Per organization, what a workspace list newer than the account's roles says: whether this person manages it. */
+const roleHints = new Map<string, { manages: boolean; at: number }>();
+
+/** The status with the role a newer workspace list implies, until the account service is read again. */
+function withRoleHints(status: AccountStatus): AccountStatus {
+  if (status.state !== "signed-in" || !status.organizations || !roleHints.size) return status;
+  let changed = false;
+  const organizations = status.organizations.map((org) => {
+    const hint = roleHints.get(org.id);
+    if (!hint || hint.at <= rolesAskedAt) return org;
+    const manages = org.role === "owner" || org.role === "admin";
+    if (manages === hint.manages) return org;
+    changed = true;
+    // Which of owner or admin a promotion made is the account service's to say; admin until it answers.
+    return { ...org, role: hint.manages ? "admin" : "member" };
+  });
+  return changed ? { ...status, organizations } : status;
+}
+
+/**
+ * What a workspace list says about this person's role (see `accountRoles`).
+ * `askedAt` is when the list was asked for: a list older than the roles' own
+ * answer says nothing new.
+ */
+export function noteListedOrgRole(orgId: string, manages: boolean | null, askedAt: number) {
+  if (manages === null || askedAt <= rolesAskedAt) return;
+  const known = mayStartCloudSessions(reported, orgId);
+  if (known === null) return;
+  if (known === manages) {
+    if (roleHints.delete(orgId)) set({ status: withRoleHints(reported) });
+    return;
+  }
+  roleHints.set(orgId, { manages, at: askedAt });
+  set({ status: withRoleHints(reported) });
+  void refreshAccountRoles(true);
+}
+
+// How the API layer (a refused call) and the catalog (a list) reach this store; see `accountRoles`.
+registerAccountRoles({ refresh: (force) => refreshAccountRoles(force), listed: noteListedOrgRole });
 
 let statusFlight: Promise<void> | null = null;
 export function refreshAccount(): Promise<void> {

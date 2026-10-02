@@ -24,7 +24,7 @@ import {
   watchLiveTabs,
   type CloudAgentTab,
 } from "@/lib/cloudAgents";
-import { refreshCloudCatalog, repositoryOf, useCloudCatalog } from "@/lib/cloudCatalog";
+import { lastKnownWorkspace, refreshCloudCatalog, repositoryOf, useCloudCatalog } from "@/lib/cloudCatalog";
 import { phaseOf, settled } from "@/lib/cloudCreate";
 import { isOpen } from "@/lib/cloudLifecycle";
 import {
@@ -42,7 +42,7 @@ import {
   useCollab,
   type AccessLoss,
 } from "@/lib/cloudCollab";
-import { cloudAgentLabel } from "@/lib/cloudRowState";
+import { cloudAgentLabel, cloudTabTitle } from "@/lib/cloudRowState";
 import { createCloudTerminal, detachCloudTerminals, followCloudTerminals, sessionTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
 import { cloudGitSource, desktopGitIdentity, type GitSource } from "@/lib/gitSource";
 import { clearCloudWake, cloudAsleep, cloudSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
@@ -533,8 +533,11 @@ export function useCloudSession(key: string): CloudSessionModel | null {
 
   const root = cloudWorkspaceRoot(orgId, workspaceId);
   const repo = item ? repositoryOf(item, catalog.createMemory) : null;
-  const workspaceName = item?.workspace.name ?? "Cloud workspace";
-  const projectName = repo?.fullName ?? repo?.identity.split("/").slice(1).join("/") ?? workspaceName;
+  // A workspace gone from this person's list (made private again, unshared)
+  // keeps the names their sidebar showed for it; one never listed has a neutral one.
+  const lastKnown = item ? null : lastKnownWorkspace(workspaceId);
+  const workspaceName = item?.workspace.name ?? lastKnown?.name ?? "Cloud workspace";
+  const projectName = repo?.fullName ?? repo?.identity.split("/").slice(1).join("/") ?? lastKnown?.project ?? workspaceName;
   const firstTitle = ownTabs.find((tab) => tab.info.title)?.info.title;
   // "Removed" needs a real transition: a role the runtime gave in this view, or the
   // session's conversation kept on this desktop. A first connect is never one.
@@ -583,7 +586,13 @@ export function useCloudSession(key: string): CloudSessionModel | null {
       modified: runtimeSession?.modified ?? ownTabs[0]?.info.modified ?? "",
       archived: runtimeSession?.archived ?? false,
       pinned: runtimeSession?.pinned ?? false,
-      tabs: locked ? NO_TABS : ownTabs.map((tab) => tabEntry(tab, asleep)),
+      // A tab added to the session has no title of its own until its first message: it reads as its agent.
+      tabs: locked
+        ? NO_TABS
+        : ownTabs.map((tab, index) => ({
+            ...tabEntry(tab, asleep),
+            title: cloudTabTitle(tab.info.title, runtimeSession?.title, runtimeSession?.tabs.length ? runtimeSession.tabs[0].id === tab.tabId : index === 0),
+          })),
       activeTab: locked ? null : (runtimeSession?.activeTab ?? null),
     }),
     [key, repo?.identity, orgId, workspaceKey, root, runtimeSession, item?.workspace.launch?.workBranch, firstTitle, ownTabs, asleep, locked, workspaceName],

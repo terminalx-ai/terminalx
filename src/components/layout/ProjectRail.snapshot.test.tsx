@@ -197,12 +197,13 @@ describe("sidebar rail DOM", () => {
     expect(active()).toEqual([]);
   });
 
-  it("Refresh all also re-reads the account, so organizations from a silent token refresh appear", async () => {
+  it("Refresh all also re-reads the account, so organizations and a changed role appear", async () => {
     const { getByRole } = mount();
     mocks.invoke.mockClear();
     await act(async () => {
       fireEvent.click(getByRole("button", { name: "Refresh all" }));
     });
-    expect(mocks.invoke.mock.calls.map(([command]) => command)).toContain("account_status");
+    // Its organizations and roles are asked of the account service at once, not left to the throttle.
+    expect(mocks.invoke.mock.calls).toContainEqual(["account_refresh_roles", { force: true }]);
   });
 });
