@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { PtyAttachment, PtyControl, PtyCursor, PtyInfo, WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { agentPtyId, type PtyAttachment, type PtyControl, type PtyCursor, type PtyInfo, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { disposeInstance, getInstance, type TerminalInstance } from "@/lib/terminal";
 import { countTerminalData } from "@/lib/terminalCounters";
 
@@ -14,6 +14,11 @@ import { countTerminalData } from "@/lib/terminalCounters";
  * Input goes through the workspace client's ordered queue: a refusal (the
  * terminal exited, another device controls it, its runtime restarted) is
  * shown on the tab, never dropped quietly.
+ *
+ * An agent tab's own terminal (PRO-86, `agent-pty/1`) is kept here too, apart
+ * from the shells (`agents`): the same xterm, stream, cursor, input queue and
+ * controller, but it belongs to its tab, is never listed by the runtime, and
+ * is attached only while its terminal view shows.
  */
 export interface CloudTerminal {
   /** Also the xterm instance id; distinct from every local pane id. */
@@ -37,10 +42,16 @@ export interface CloudTerminal {
   inputError: string | null;
   /** The runtime session it was opened for (`pty/2`); null for a workspace terminal or an older runtime. */
   sessionId: string | null;
+  /** The agent tab whose own terminal this is (PRO-86); null for a shell. */
+  tabId: string | null;
+  /** Its output is streaming to this window now, so `control` and the size are the runtime's word. */
+  live: boolean;
 }
 
 interface WorkspaceTerminals {
   terminals: CloudTerminal[];
+  /** Agent tabs' own terminals this window has shown, by tab: never shell tabs, never synced from `pty.list`. */
+  agents?: CloudTerminal[];
   selected: string | null;
   /** The workspace view is showing the selected terminal (not its agent, files or Git view). */
   shown?: boolean;
@@ -65,10 +76,18 @@ function update(workspace: string, change: (current: WorkspaceTerminals) => Work
 }
 
 function patch(workspace: string, id: string, fields: Partial<CloudTerminal>) {
-  update(workspace, (current) => ({
-    ...current,
-    terminals: current.terminals.map((terminal) => (terminal.id === id ? { ...terminal, ...fields } : terminal)),
-  }));
+  update(workspace, (current) => {
+    const apply = (terminal: CloudTerminal) => (terminal.id === id ? { ...terminal, ...fields } : terminal);
+    if (current.terminals.some((terminal) => terminal.id === id)) return { ...current, terminals: current.terminals.map(apply) };
+    if (current.agents?.some((terminal) => terminal.id === id)) return { ...current, agents: current.agents.map(apply) };
+    return current;
+  });
+}
+
+/** A terminal by its id: a shell, or an agent tab's own terminal. */
+function terminalOf(workspace: string, id: string): CloudTerminal | undefined {
+  const current = state[workspace];
+  return current?.terminals.find((item) => item.id === id) ?? current?.agents?.find((item) => item.id === id);
 }
 
 export function useCloudTerminals(workspace: string): WorkspaceTerminals {
@@ -124,6 +143,8 @@ function fromInfo(workspace: string, info: PtyInfo): CloudTerminal {
     gone: null,
     inputError: null,
     sessionId: info.sessionId ?? null,
+    tabId: null,
+    live: false,
   };
 }
 
@@ -141,22 +162,8 @@ export function errorCode(error: unknown): string {
 export function cloudTerminalFactory(workspace: string, terminal: CloudTerminal, base: () => TerminalInstance): () => TerminalInstance {
   return () => {
     const instance = base();
-    const current = () => cloudTerminalsOf(workspace).terminals.find((item) => item.id === terminal.id);
-    const send = (data: string) => {
-      const binding = bindings.get(terminal.id);
-      const now = current();
-      if (!now || now.gone || now.exited) return;
-      if (!binding) {
-        patch(workspace, terminal.id, { inputError: "not connected" });
-        return;
-      }
-      binding.client
-        .write(terminal.ptyId, data)
-        .then(() => {
-          if (current()?.inputError) patch(workspace, terminal.id, { inputError: null });
-        })
-        .catch((error: unknown) => patch(workspace, terminal.id, { inputError: errorCode(error) }));
-    };
+    const current = () => terminalOf(workspace, terminal.id);
+    const send = (data: string) => void typeIntoCloudTerminal(workspace, terminal.id, data);
     instance.term.onData(send);
     instance.term.onBinary(send);
     instance.term.onResize(({ cols, rows }) => {
@@ -168,6 +175,60 @@ export function cloudTerminalFactory(workspace: string, terminal: CloudTerminal,
     });
     return instance;
   };
+}
+
+/**
+ * Asked before a terminal's input is sent. False drops it; the gate says why
+ * elsewhere. An agent tab's terminal view uses it to wake a stopped workspace
+ * instead of typing blind, to refuse a viewer, and to take control first.
+ */
+export type CloudTerminalInputGate = (data: string) => boolean | Promise<boolean>;
+const inputGates = new Map<string, CloudTerminalInputGate>();
+/** Keeps gated input in the order it was typed. */
+const inputChains = new Map<string, Promise<void>>();
+
+export function setCloudTerminalInputGate(id: string, gate: CloudTerminalInputGate | null) {
+  if (gate) inputGates.set(id, gate);
+  else inputGates.delete(id);
+}
+
+function deliver(workspace: string, id: string, data: string) {
+  const binding = bindings.get(id);
+  const now = terminalOf(workspace, id);
+  if (!now || now.gone || now.exited) return;
+  if (!binding) {
+    patch(workspace, id, { inputError: "not connected" });
+    return;
+  }
+  binding.client
+    .write(now.ptyId, data)
+    .then(() => {
+      if (terminalOf(workspace, id)?.inputError) patch(workspace, id, { inputError: null });
+    })
+    .catch((error: unknown) => patch(workspace, id, { inputError: errorCode(error) }));
+}
+
+/**
+ * What a terminal's xterm calls with every keystroke or paste. It goes to the
+ * runtime over the workspace connection (`pty.write`, end-to-end encrypted,
+ * the same call for a shell and for an agent's terminal) and nowhere else:
+ * nothing typed is queued in the API mailbox or kept on this desktop.
+ */
+export function typeIntoCloudTerminal(workspace: string, id: string, data: string): Promise<void> {
+  const gate = inputGates.get(id);
+  if (!gate) {
+    deliver(workspace, id, data);
+    return Promise.resolve();
+  }
+  const run = async () => {
+    // The gate of now: the view may have changed while earlier input waited.
+    const allow = inputGates.get(id);
+    if (allow && !(await allow(data))) return;
+    deliver(workspace, id, data);
+  };
+  const next = (inputChains.get(id) ?? Promise.resolve()).then(run).catch(() => undefined);
+  inputChains.set(id, next);
+  return next;
 }
 
 /** Start (or resume) the output stream of one terminal on `client`. */
@@ -189,25 +250,34 @@ async function attach(workspace: string, client: WorkspaceRpcClient, terminal: C
     },
     onTruncated: () => instance.term.write("\r\n\x1b[2m[earlier output was dropped while this view was away]\x1b[0m\r\n"),
     onExit: (code) => {
-      const current = cloudTerminalsOf(workspace).terminals.find((item) => item.id === terminal.id);
+      const current = terminalOf(workspace, terminal.id);
       if (current && !current.exited) patch(workspace, terminal.id, { exited: true, exitCode: code });
     },
     onControl: (control, controllerId) => {
       patch(workspace, terminal.id, { control, ...(controllerId !== undefined ? { controllerId } : {}) });
       // A viewer shows the program at the controller's size.
-      const current = cloudTerminalsOf(workspace).terminals.find((item) => item.id === terminal.id);
+      const current = terminalOf(workspace, terminal.id);
       if (control !== "you" && current && (instance.term.cols !== current.cols || instance.term.rows !== current.rows)) {
         instance.term.resize(current.cols, current.rows);
       }
     },
     onResize: (cols, rows) => {
       patch(workspace, terminal.id, { cols, rows });
-      const current = cloudTerminalsOf(workspace).terminals.find((item) => item.id === terminal.id);
+      const current = terminalOf(workspace, terminal.id);
       if (current?.control !== "you" && (instance.term.cols !== cols || instance.term.rows !== rows)) instance.term.resize(cols, rows);
     },
     onGone: (gone) => {
       cursors.delete(terminal.id);
-      patch(workspace, terminal.id, { gone });
+      if (terminal.tabId && gone === "runtime-restarted") {
+        // A tab outlives its runtime process: its terminal starts over on the
+        // new one (nothing of the old screen is there), instead of ending.
+        if (bindings.get(terminal.id) === binding) bindings.delete(terminal.id);
+        instance.term.reset();
+        patch(workspace, terminal.id, { control: "none", controllerId: null, inputError: null, live: false });
+        if (wantedAgents.has(terminal.id)) queueMicrotask(() => void attach(workspace, client, terminal, create).catch(() => undefined));
+        return;
+      }
+      patch(workspace, terminal.id, { gone, live: false });
     },
   })
     .catch((error: unknown) => {
@@ -221,6 +291,78 @@ async function attach(workspace: string, client: WorkspaceRpcClient, terminal: C
     return;
   }
   binding.attachment = attachment;
+  // Attached: who controls it and its size are now the runtime's word.
+  if (terminal.tabId && !terminalOf(workspace, terminal.id)?.gone) patch(workspace, terminal.id, { live: true });
+}
+
+// ---- an agent tab's own terminal (PRO-86) --------------------------------------
+
+/** Agent terminals whose view is showing: only these stream. */
+const wantedAgents = new Set<string>();
+
+export function agentTerminalId(workspace: string, tabId: string): string {
+  return terminalId(workspace, agentPtyId(tabId));
+}
+
+export function agentTerminalOf(workspace: string, tabId: string): CloudTerminal | undefined {
+  return state[workspace]?.agents?.find((item) => item.tabId === tabId);
+}
+
+/**
+ * The view record of an agent tab's terminal, made here without asking the
+ * runtime anything: a stopped workspace's terminal view has one too. Until it
+ * is attached nobody is known to control it, at the size every CLI starts at.
+ */
+export function ensureAgentTerminal(workspace: string, tabId: string): CloudTerminal {
+  const known = agentTerminalOf(workspace, tabId);
+  if (known) return known;
+  const terminal: CloudTerminal = {
+    id: agentTerminalId(workspace, tabId),
+    ptyId: agentPtyId(tabId),
+    number: 0,
+    title: "Agent",
+    epoch: "",
+    pid: null,
+    exited: false,
+    exitCode: null,
+    control: "none",
+    controllerId: null,
+    cols: 120,
+    rows: 30,
+    gone: null,
+    inputError: null,
+    sessionId: null,
+    tabId,
+    live: false,
+  };
+  update(workspace, (current) => ({ ...current, agents: [...(current.agents ?? []), terminal] }));
+  return terminal;
+}
+
+/**
+ * Stream an agent tab's terminal on `client` while its view shows: recent
+ * output is replayed (from where this view left off, when it was here
+ * before), then it is live. Attaching starts nothing and takes nothing over.
+ */
+export async function attachAgentTerminal(workspace: string, client: WorkspaceRpcClient, tabId: string, create: () => TerminalInstance): Promise<void> {
+  const terminal = ensureAgentTerminal(workspace, tabId);
+  wantedAgents.add(terminal.id);
+  if (terminal.gone) patch(workspace, terminal.id, { gone: null });
+  await attach(workspace, client, terminal, create);
+}
+
+/** The terminal view went away: stop streaming, keeping the view and where it left off. */
+export function detachAgentTerminal(workspace: string, tabId: string) {
+  const id = agentTerminalId(workspace, tabId);
+  wantedAgents.delete(id);
+  const binding = bindings.get(id);
+  if (binding) {
+    const cursor = binding.attachment?.cursor();
+    if (cursor) cursors.set(id, cursor);
+    binding.attachment?.detach();
+    bindings.delete(id);
+  }
+  if (agentTerminalOf(workspace, tabId)?.live) patch(workspace, id, { live: false });
 }
 
 /** `next` when it says something new about the terminal, else the object the views already hold. */
@@ -245,7 +387,7 @@ export async function syncCloudTerminals(
     const known = new Set(current.terminals.map((terminal) => terminal.ptyId));
     const terminals = current.terminals.map((terminal): CloudTerminal => {
       const info = byPty.get(terminal.ptyId);
-      if (info) return unchanged(terminal, { ...fromInfo(workspace, info), title: terminal.title, inputError: terminal.inputError });
+      if (info) return unchanged(terminal, { ...fromInfo(workspace, info), title: terminal.title, inputError: terminal.inputError, live: terminal.live });
       // Gone already, or opened here after this list was asked for.
       if (terminal.gone || (openedAt.get(terminal.id) ?? 0) > asked) return terminal;
       return { ...terminal, gone: terminal.epoch === listed.epoch ? "closed" : "runtime-restarted" };
@@ -368,11 +510,21 @@ export async function closeCloudTerminal(workspace: string, client: WorkspaceRpc
   });
 }
 
-/** Take over input and size, at this view's size. */
-export async function takeControl(workspace: string, client: WorkspaceRpcClient, id: string, size: { cols: number; rows: number } | null) {
-  const terminal = cloudTerminalsOf(workspace).terminals.find((item) => item.id === id);
+/**
+ * Take over input and size, at this view's size. `start` (an agent tab's
+ * terminal) also starts the tab's CLI when it is not running.
+ */
+export async function takeControl(
+  workspace: string,
+  client: WorkspaceRpcClient,
+  id: string,
+  size: { cols: number; rows: number } | null,
+  options: { start?: boolean } = {},
+) {
+  const terminal = terminalOf(workspace, id);
   if (!terminal) return;
-  const info = await client.controlPty(terminal.ptyId, size?.cols, size?.rows);
+  // A shell is taken exactly as before; only an agent's terminal is ever asked to start.
+  const info = options.start ? await client.controlPty(terminal.ptyId, size?.cols, size?.rows, { start: true }) : await client.controlPty(terminal.ptyId, size?.cols, size?.rows);
   patch(workspace, id, { control: info.control, controllerId: info.controllerId ?? null, cols: info.cols, rows: info.rows, inputError: null });
 }
 
@@ -389,6 +541,10 @@ export function detachCloudTerminals(workspace: string) {
     binding.attachment?.detach();
     bindings.delete(id);
   }
+  // Nothing streams any more; an agent terminal's view attaches again when it next shows over a connection.
+  if (state[workspace]?.agents?.some((terminal) => terminal.live)) {
+    update(workspace, (current) => ({ ...current, agents: current.agents?.map((terminal) => (terminal.live ? { ...terminal, live: false } : terminal)) }));
+  }
 }
 
 /** Forget one workspace's terminals and views: it was deleted. */
@@ -400,7 +556,11 @@ export function dropCloudTerminals(workspace: string) {
     bindings.delete(id);
   }
   for (const id of [...cursors.keys()]) if (id.startsWith(prefix)) cursors.delete(id);
-  for (const terminal of state[workspace]?.terminals ?? []) disposeInstance(terminal.id);
+  for (const terminal of [...(state[workspace]?.terminals ?? []), ...(state[workspace]?.agents ?? [])]) {
+    disposeInstance(terminal.id);
+    wantedAgents.delete(terminal.id);
+    inputChains.delete(terminal.id);
+  }
   if (!(workspace in state)) return;
   const next = { ...state };
   delete next[workspace];
@@ -421,9 +581,12 @@ export function dropCloudTerminalsIn(orgId: string) {
 /** Forget every workspace's terminals and views (sign-out, organization switch). */
 export function resetCloudTerminals() {
   for (const binding of bindings.values()) binding.attachment?.detach();
-  for (const workspace of Object.values(state)) for (const terminal of workspace.terminals) disposeInstance(terminal.id);
+  for (const workspace of Object.values(state)) for (const terminal of [...workspace.terminals, ...(workspace.agents ?? [])]) disposeInstance(terminal.id);
   bindings.clear();
   cursors.clear();
   openedAt.clear();
+  wantedAgents.clear();
+  inputGates.clear();
+  inputChains.clear();
   publish({});
 }

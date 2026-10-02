@@ -22,11 +22,13 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * - `session/2`: `session.update`, `session.addTab`, `session.delete` and the
  *   `session.sessions` notification;
  * - `pty/2`: `pty.create` takes a `sessionId`, and `pty.list` returns it;
- * - `agents/1`: `runtime.agents`.
+ * - `agents/1`: `runtime.agents`;
+ * - `agent-pty/1` (PRO-86): the terminal an agent tab's CLI runs in answers
+ *   the `pty.*` methods as `agentPtyId(tabId)`. It adds no method.
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 
 /**
@@ -47,6 +49,17 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "lease.release": "collab/1",
   "lease.takeOver": "collab/1",
 };
+
+/**
+ * The terminal an agent tab's own CLI runs in, on a runtime that granted
+ * `agent-pty/1`. It is attached, typed into, sized and controlled like a
+ * shell (`attachPty`, `write`, `resizePty`, `controlPty`), is never in
+ * `pty.list`, and cannot be killed: it closes with its tab. Typing and sizing
+ * also need the tab's lease to be free or this person's.
+ */
+export function agentPtyId(tabId: string): string {
+  return `tab:${tabId}`;
+}
 
 /** How much a caller may cost: only an interactive action may wake compute. */
 export type Activation = "cache-only" | "sync" | "connect" | "wake";
@@ -233,6 +246,9 @@ export interface PtyInfo {
   controllerId?: string | null;
   /** The session the terminal was opened for (`pty/2`); absent otherwise and from older runtimes. */
   sessionId?: string;
+  /** An agent tab's own terminal (`agent-pty/1`): the tab, and whether its CLI runs now. */
+  tabId?: string;
+  running?: boolean;
 }
 
 /** Where a terminal view left off, to resume without replaying what it shows. */
@@ -464,9 +480,13 @@ export class WorkspaceRpcClient {
     return this.call("pty.resize", this.withEpoch(ptyId, { ptyId, cols, rows }));
   }
 
-  /** Take over a terminal's input and size explicitly, at this view's size. */
-  controlPty(ptyId: string, cols?: number, rows?: number): Promise<PtyInfo> {
-    return this.call<PtyInfo>("pty.control", this.withEpoch(ptyId, { ptyId, ...(cols && rows ? { cols, rows } : {}) }));
+  /**
+   * Take over a terminal's input and size explicitly, at this view's size.
+   * `start` (an agent tab's terminal only) also starts the tab's CLI when it
+   * is not running; without it nothing is ever started.
+   */
+  controlPty(ptyId: string, cols?: number, rows?: number, options: { start?: boolean } = {}): Promise<PtyInfo> {
+    return this.call<PtyInfo>("pty.control", this.withEpoch(ptyId, { ptyId, ...(cols && rows ? { cols, rows } : {}), ...(options.start ? { start: true } : {}) }));
   }
 
   async killPty(ptyId: string): Promise<void> {

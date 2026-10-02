@@ -39,6 +39,12 @@ pub const MAX_PTYS: usize = 16;
 const MAX_EXITED_PTYS: usize = 8;
 const PTY_RING_BYTES: usize = 1024 * 1024;
 const PTY_PREFIX: &str = "remote-pty-";
+/// An agent tab's own terminal (`agent-pty/1`, PRO-86) is the pane its CLI
+/// runs in, `tab:<tabId>` ([`SessionManager::pane_id`]).
+const AGENT_PTY_PREFIX: &str = "tab:";
+/// Typing into an agent's terminal extends the typist's tab lease once it
+/// has less than the full idle time minus this left, not on every keystroke.
+const AGENT_LEASE_REFRESH_MS: u64 = 15_000;
 /// Largest single `pty.write`; a paste is split by the client.
 pub const MAX_WRITE_BYTES: usize = 64 * 1024;
 /// Input accepted but not yet read by the program. Past it a write is
@@ -184,6 +190,17 @@ struct PtyState {
     input: std::sync::mpsc::Sender<Vec<u8>>,
     input_pending: Arc<AtomicUsize>,
     subscribers: HashMap<String, Arc<Peer>>,
+    /// Set for an agent tab's own terminal (`agent-pty/1`): the pane the
+    /// tab's CLI runs in. The session manager owns its process, so it is
+    /// never listed, killed or evicted as a shell is, and it stays through
+    /// every CLI the tab starts in it.
+    agent: Option<AgentPty>,
+}
+
+struct AgentPty {
+    tab_id: String,
+    /// The tab's session, once a caller's access to the tab was checked.
+    session_id: Option<String>,
 }
 
 impl PtyState {
@@ -1006,6 +1023,133 @@ impl WorkspaceRpc {
 
     // ---- terminals -------------------------------------------------------
 
+    /// The entry of an agent tab's terminal, made on its first output or its
+    /// first caller. Its input goes to whichever CLI the tab runs in the pane
+    /// at that moment. Called with the terminals locked.
+    fn agent_entry<'a>(&self, ptys: &'a mut HashMap<String, PtyState>, pty_id: &str) -> Result<&'a mut PtyState, RpcError> {
+        if !ptys.contains_key(pty_id) {
+            let tab_id = pty_id.strip_prefix(AGENT_PTY_PREFIX).ok_or_else(|| RpcError::not_found("no such terminal"))?;
+            let (input, queue) = std::sync::mpsc::channel::<Vec<u8>>();
+            let input_pending = Arc::new(AtomicUsize::new(0));
+            let terminals = self.terminals.clone();
+            let pending = input_pending.clone();
+            let pane = pty_id.to_string();
+            std::thread::Builder::new()
+                .name(format!("agent-pty-input-{tab_id}"))
+                .spawn(move || {
+                    // Ends when the entry (the sender) is dropped with its tab.
+                    for data in queue {
+                        // Between two CLIs there is nothing to type into.
+                        let _ = terminals.write(&pane, &data);
+                        pending.fetch_sub(data.len(), Ordering::SeqCst);
+                    }
+                })
+                .map_err(RpcError::internal)?;
+            let (cols, rows) = crate::session::CLI_PANE_SIZE;
+            ptys.insert(
+                pty_id.to_string(),
+                PtyState {
+                    number: 0,
+                    cwd: String::new(),
+                    session_id: None,
+                    created_at_ms: crate::cloud_agents::now_ms(),
+                    pid: None,
+                    cols,
+                    rows,
+                    controller: None,
+                    controller_user: None,
+                    ring: VecDeque::new(),
+                    end: 0,
+                    exit: None,
+                    exited_at: None,
+                    closed: false,
+                    applied_seq: HashMap::new(),
+                    input,
+                    input_pending,
+                    subscribers: HashMap::new(),
+                    agent: Some(AgentPty { tab_id: tab_id.to_string(), session_id: None }),
+                },
+            );
+        }
+        Ok(ptys.get_mut(pty_id).expect("the entry was just made"))
+    }
+
+    /// `params.ptyId` as an agent tab's terminal: `None` for a shell,
+    /// otherwise the tab's `(sessionId, tabId)`. The caller must have been
+    /// granted `agent-pty/1` and must see the tab: an agent's screen is its
+    /// conversation, so only people the workspace is shared with reach it.
+    fn agent_pty(&self, peer: &Peer, params: &Value) -> Result<Option<(String, String)>, RpcError> {
+        let Some(pty_id) = params.get("ptyId").and_then(Value::as_str).filter(|id| id.starts_with(AGENT_PTY_PREFIX)) else { return Ok(None) };
+        let tab_id = &pty_id[AGENT_PTY_PREFIX.len()..];
+        if !peer.granted(protocol::AGENT_PTY) {
+            return Err(RpcError::new("capability_not_granted", format!("{} was not granted", protocol::AGENT_PTY)));
+        }
+        if !self.access(peer).can_view() {
+            return Err(RpcError::not_found("no such terminal"));
+        }
+        let known = self.ptys.lock().unwrap().get(pty_id).and_then(|pty| pty.agent.as_ref()).and_then(|agent| agent.session_id.clone());
+        let session_id = match known {
+            Some(session_id) => session_id,
+            None => {
+                // Named by exact id, and only a tab whose agent runs in a terminal.
+                let tab = self
+                    .agents()?
+                    .ops
+                    .tabs()
+                    .into_iter()
+                    .find(|tab| tab.tab_id == tab_id)
+                    .ok_or_else(|| RpcError::not_found("no such terminal"))?;
+                if crate::session::pty_first(&tab.harness).is_none() {
+                    return Err(RpcError::new("unavailable", "this agent does not run in a terminal"));
+                }
+                let mut ptys = self.ptys.lock().unwrap();
+                if let Some(agent) = &mut self.agent_entry(&mut ptys, pty_id)?.agent {
+                    agent.session_id = Some(tab.session_id.clone());
+                }
+                tab.session_id
+            }
+        };
+        Ok(Some((session_id, tab_id.to_string())))
+    }
+
+    /// Typing into an agent's terminal, or sizing it, is driving its tab:
+    /// refused while someone else holds the tab's lease, exactly as a send
+    /// is (managers included; they take the tab over explicitly).
+    ///
+    /// It also needs the right to approve. The agent's own screen answers
+    /// its permission prompts and changes its mode and model, which a send
+    /// from a plain driver never does (their settings are ignored and their
+    /// decisions refused): a driver who may not approve watches.
+    fn agent_input_refusal(&self, peer: &Peer, session_id: &str, tab_id: &str) -> Option<RpcError> {
+        let access = self.access(peer);
+        if self.authority(peer) == Authority::Participate && !access.can_drive() {
+            return Some(RpcError::forbidden("typing needs driver access to the workspace"));
+        }
+        if access.role != Role::Manager && !access.can_approve {
+            return Some(
+                RpcError::forbidden("typing into an agent's terminal can approve its permission requests: it needs approval rights")
+                    .with_data(json!({ "role": access.role, "needs": "canApprove" })),
+            );
+        }
+        match peer.user_id.as_deref() {
+            Some(user) => self
+                .collab
+                .held_by_other(tab_id, user, crate::cloud_agents::now_ms(), agents_busy(&self.agents, session_id, tab_id))
+                .map(|held| lease_refusal(LeaseRefusal::Held(held))),
+            None if self.authority(peer) == Authority::Participate => Some(RpcError::forbidden("typing needs a signed-in person")),
+            None => None,
+        }
+    }
+
+    /// The terminals of tabs that are gone go with them.
+    fn close_agent_ptys<'a>(&self, tab_ids: impl Iterator<Item = &'a String>) {
+        let ended: Vec<String> = {
+            let mut ptys = self.ptys.lock().unwrap();
+            tab_ids.flat_map(|tab_id| Self::remove_pty(&mut ptys, &format!("{AGENT_PTY_PREFIX}{tab_id}"))).collect()
+        };
+        self.forget_subscriptions(ended);
+    }
+
     /// The sessions whose terminals `peer` may see tied to them: `None`
     /// without `pty/2`, otherwise its `visible_sessions`. Read before the
     /// terminals are locked.
@@ -1034,6 +1178,11 @@ impl WorkspaceRpc {
             "control": pty.control_for(peer),
             "controllerId": pty.controller_user.as_ref().and_then(|(user, _)| user.clone()),
         });
+        if let Some(agent) = &pty.agent {
+            // The tab whose CLI this is, and whether one runs in it now.
+            described["tabId"] = json!(agent.tab_id);
+            described["running"] = json!(self.terminals.is_running(pty_id));
+        }
         // `pty/2`, and only a session this peer may see; absent for a
         // terminal that belongs to no session.
         if let Some(session_id) = pty.session_id.as_ref().filter(|id| scope.is_some_and(|visible| visible.contains(*id))) {
@@ -1084,7 +1233,7 @@ impl WorkspaceRpc {
         let input_pending = Arc::new(AtomicUsize::new(0));
         {
             let mut ptys = self.ptys.lock().unwrap();
-            if ptys.values().filter(|pty| pty.exit.is_none() && !pty.closed).count() >= MAX_PTYS {
+            if ptys.values().filter(|pty| pty.agent.is_none() && pty.exit.is_none() && !pty.closed).count() >= MAX_PTYS {
                 return Err(RpcError::new("unavailable", format!("at most {MAX_PTYS} terminals may run at once")));
             }
             ptys.insert(
@@ -1111,6 +1260,7 @@ impl WorkspaceRpc {
                     input,
                     input_pending: input_pending.clone(),
                     subscribers: HashMap::new(),
+                    agent: None,
                 },
             );
         }
@@ -1151,7 +1301,8 @@ impl WorkspaceRpc {
         let ptys = self.ptys.lock().unwrap();
         let mut listed: Vec<(u64, Value)> = ptys
             .iter()
-            .filter(|(_, pty)| !pty.closed)
+            // An agent tab's terminal is reached from its tab, never listed as a shell.
+            .filter(|(_, pty)| !pty.closed && pty.agent.is_none())
             .map(|(id, pty)| (pty.number, self.describe_pty(id, pty, peer, scope.as_ref())))
             .collect();
         listed.sort_by_key(|(number, _)| *number);
@@ -1188,8 +1339,9 @@ impl WorkspaceRpc {
         if writer.len() > 128 {
             return Err(RpcError::invalid("writerId is too long"));
         }
+        let agent = self.agent_pty(peer, &params)?;
         let mut ptys = self.ptys.lock().unwrap();
-        let (_, pty) = self.live_pty(&mut ptys, &params)?;
+        let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
         let key = (peer.device_id.clone(), writer.to_string());
         let applied = pty.applied_seq.get(&key).map(|(seq, _)| *seq).unwrap_or(0);
         // A resend of what was applied is answered, never typed again, even
@@ -1202,6 +1354,14 @@ impl WorkspaceRpc {
         }
         if pty.exit.is_some() {
             return Err(RpcError::new("unavailable", "the terminal has exited"));
+        }
+        if let Some((session_id, tab_id)) = &agent {
+            if let Some(refusal) = self.agent_input_refusal(peer, session_id, tab_id) {
+                return Err(refusal);
+            }
+            if !self.terminals.is_running(&pty_id) {
+                return Err(RpcError::new("unavailable", "the agent is not running"));
+            }
         }
         if pty.controller.as_deref() != Some(peer.device_id.as_str()) {
             return Err(RpcError::new("not_controller", "another device controls this terminal's input"));
@@ -1222,6 +1382,19 @@ impl WorkspaceRpc {
         }
         // Accepted input is use of the workspace (a resend or refusal is not).
         crate::cloud_activity::note(crate::cloud_activity::Kind::TerminalInput);
+        drop(ptys);
+        // Only what reached the agent claims its tab, as with a send.
+        if let (Some((session_id, tab_id)), Some(user)) = (&agent, peer.user_id.as_deref()) {
+            let now = crate::cloud_agents::now_ms();
+            let busy = agents_busy(&self.agents, session_id, tab_id);
+            let fresh = self
+                .collab
+                .lease(tab_id, now, busy)
+                .is_some_and(|lease| lease.holder_id == user && lease.expires_at + AGENT_LEASE_REFRESH_MS >= now + collab::LEASE_IDLE_MS);
+            if !fresh {
+                let _ = self.collab.claim(tab_id, user, now, busy, false);
+            }
+        }
         Ok(json!({ "applied": true, "seq": seq }))
     }
 
@@ -1244,7 +1417,11 @@ impl WorkspaceRpc {
         if (pty.cols, pty.rows) == (cols, rows) {
             return Ok(());
         }
-        self.terminals.resize(pty_id, cols, rows).map_err(RpcError::internal)?;
+        match self.terminals.resize(pty_id, cols, rows) {
+            // An agent's terminal between two CLIs: the next one starts at this size.
+            Err(_) if pty.agent.is_some() => {}
+            other => other.map_err(RpcError::internal)?,
+        }
         pty.cols = cols;
         pty.rows = rows;
         for (subscription_id, subscriber) in &pty.subscribers {
@@ -1255,6 +1432,11 @@ impl WorkspaceRpc {
 
     fn pty_resize(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
         let (cols, rows) = Self::size_params(&params)?.ok_or_else(|| RpcError::invalid("cols and rows must be between 1 and 1000"))?;
+        if let Some((session_id, tab_id)) = self.agent_pty(peer, &params)? {
+            if let Some(refusal) = self.agent_input_refusal(peer, &session_id, &tab_id) {
+                return Err(refusal);
+            }
+        }
         let mut ptys = self.ptys.lock().unwrap();
         let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
         // A viewer's window size never reshapes the controller's program.
@@ -1271,6 +1453,19 @@ impl WorkspaceRpc {
     fn pty_control(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
         let size = Self::size_params(&params)?;
         let scope = self.pty_session_scope(peer);
+        let agent = self.agent_pty(peer, &params)?;
+        if let Some((session_id, tab_id)) = &agent {
+            match self.agent_input_refusal(peer, session_id, tab_id) {
+                // Taking the terminal is how a manager takes the tab over.
+                Some(refusal) if refusal.code == "lease_held" && self.access(peer).role == Role::Manager => {
+                    let user = peer.user_id.as_deref().unwrap_or_default();
+                    let busy = agents_busy(&self.agents, session_id, tab_id);
+                    self.collab.claim(tab_id, user, crate::cloud_agents::now_ms(), busy, true).map_err(lease_refusal)?;
+                }
+                Some(refusal) => return Err(refusal),
+                None => {}
+            }
+        }
         let mut ptys = self.ptys.lock().unwrap();
         let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
         let changed = pty.controller.as_deref() != Some(peer.device_id.as_str());
@@ -1294,10 +1489,32 @@ impl WorkspaceRpc {
         if let (Some((cols, rows)), None) = (size, pty.exit) {
             self.apply_size(&pty_id, pty, cols, rows)?;
         }
+        // `start`: the controller asks for the tab's CLI to run (a keystroke
+        // or "Start" in the terminal view), as opening a local tab does.
+        // Watching, or taking control without it, never starts a process.
+        let start = match &agent {
+            Some(tab) if params.get("start").and_then(Value::as_bool) == Some(true) && !self.terminals.is_running(&pty_id) => Some(tab),
+            _ => None,
+        };
+        let Some((session_id, tab_id)) = start else { return Ok(self.describe_pty(&pty_id, pty, peer, scope.as_ref())) };
+        // Outside the lock: the CLI's first output is recorded under it.
+        drop(ptys);
+        self.manager()?
+            .ensure_started(session_id, tab_id)
+            .map_err(|error| RpcError::new("unavailable", format!("the agent did not start: {error:#}")))?;
+        self.tabs_changed.notify_one();
+        let mut ptys = self.ptys.lock().unwrap();
+        let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
+        // The CLI starts at its default size; the controller's applies from here.
+        let _ = self.terminals.resize(&pty_id, pty.cols, pty.rows);
+        pty.pid = self.terminals.pid(&pty_id);
         Ok(self.describe_pty(&pty_id, pty, peer, scope.as_ref()))
     }
 
     fn pty_kill(&self, params: Value) -> Result<Value, RpcError> {
+        if params.get("ptyId").and_then(Value::as_str).is_some_and(|id| id.starts_with(AGENT_PTY_PREFIX)) {
+            return Err(RpcError::forbidden("an agent's terminal closes with its tab"));
+        }
         let (pty_id, exited) = {
             let mut ptys = self.ptys.lock().unwrap();
             let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
@@ -1342,6 +1559,8 @@ impl WorkspaceRpc {
                 return Err(RpcError::new("cursor_expired", "the offset belongs to another runtime generation or process"));
             }
         }
+        // An agent tab's terminal exists from here on, even before its CLI runs.
+        self.agent_pty(peer, &params)?;
         let subscription_id = Self::subscription_id();
         let scope = self.pty_session_scope(peer);
         let mut ptys = self.ptys.lock().unwrap();
@@ -1378,14 +1597,37 @@ impl WorkspaceRpc {
     }
 
     fn on_pty_data(&self, data: PtyData) {
-        if !data.id.starts_with(PTY_PREFIX) {
+        let agent = data.id.starts_with(AGENT_PTY_PREFIX);
+        if !agent && !data.id.starts_with(PTY_PREFIX) {
             return;
         }
         let Ok(bytes) = STANDARD.decode(&data.data) else { return };
+        // Read before the terminals are locked.
+        let pid = if agent { self.terminals.pid(&data.id) } else { None };
         let mut lagged = Vec::new();
         {
             let mut ptys = self.ptys.lock().unwrap();
-            let Some(pty) = ptys.get_mut(&data.id) else { return };
+            let pty = if agent {
+                // Recorded from the CLI's first byte, so whoever attaches
+                // later is replayed the screen it drew.
+                match self.agent_entry(&mut ptys, &data.id) {
+                    Ok(pty) => pty,
+                    Err(error) => return log::warn!("an agent terminal's output is not kept: {}", error.message),
+                }
+            } else {
+                let Some(pty) = ptys.get_mut(&data.id) else { return };
+                pty
+            };
+            if agent && pid.is_some() && pty.pid != pid {
+                // Another CLI in the same pane (a restart for a setting, or a
+                // resume): it starts at the default size, so the controller's
+                // is applied again, and the tab's process state is sent.
+                pty.pid = pid;
+                if (pty.cols, pty.rows) != crate::session::CLI_PANE_SIZE {
+                    let _ = self.terminals.resize(&data.id, pty.cols, pty.rows);
+                }
+                self.tabs_changed.notify_one();
+            }
             let offset = pty.end;
             pty.end += bytes.len() as u64;
             pty.ring.extend(bytes.iter().copied());
@@ -1419,6 +1661,12 @@ impl WorkspaceRpc {
     }
 
     fn on_pty_exit(&self, exit: PtyExit) {
+        if exit.id.starts_with(AGENT_PTY_PREFIX) {
+            // The terminal stays for the tab's next CLI; that this one ended
+            // is the tab's process state (`session.tabs`).
+            self.tabs_changed.notify_one();
+            return;
+        }
         let mut ended = Vec::new();
         let evicted = {
             let mut ptys = self.ptys.lock().unwrap();
@@ -1510,7 +1758,8 @@ impl WorkspaceRpc {
             .filter(|tab| matches!(tab.status, crate::store::index::TabStatus::InProgress | crate::store::index::TabStatus::Waiting))
             .map(|tab| json!({ "sessionId": tab.session_id, "tabId": tab.tab_id, "kind": "agent-turn", "startedAt": tab.modified }))
             .collect();
-        let running_processes = self.ptys.lock().unwrap().values().filter(|pty| pty.exit.is_none() && !pty.closed).count();
+        // Shells only: an agent's own terminal is its turn, counted above.
+        let running_processes = self.ptys.lock().unwrap().values().filter(|pty| pty.agent.is_none() && pty.exit.is_none() && !pty.closed).count();
         Ok(json!({
             "v": 1,
             "repositories": repositories,
@@ -1784,6 +2033,7 @@ impl WorkspaceRpc {
             agents.changed(None, false);
         }
         self.close_session_ptys(&removed_ids);
+        self.close_agent_ptys(removed.iter().flat_map(|session| &session.tabs).map(|tab| &tab.id));
         let mut deleted: Vec<String> = removed_ids.into_iter().collect();
         deleted.sort();
         Ok(json!({ "sessionId": session.id, "deleted": deleted }))
@@ -1847,10 +2097,11 @@ impl WorkspaceRpc {
                     agents.checkpoints.remove(tab_id);
                 }
             }
-            // A removed tab's notes and lease go with it.
+            // A removed tab's notes, lease and terminal go with it.
             for tab_id in &closing {
                 self.collab.forget_tab(tab_id);
             }
+            self.close_agent_ptys(closing.iter());
             match index::get(&session.id) {
                 Ok(remaining) => self.sink.emit("session_updated", &remaining),
                 Err(_) => {

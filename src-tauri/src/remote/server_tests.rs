@@ -10,6 +10,7 @@ struct Fixture {
     root: PathBuf,
     rpc: Arc<WorkspaceRpc>,
     terminals: Arc<Terminals>,
+    sink: Arc<BroadcastSink>,
 }
 
 impl Drop for Fixture {
@@ -23,8 +24,9 @@ fn fixture() -> Fixture {
     let root = std::fs::canonicalize(dir.path()).unwrap().join("workspace");
     std::fs::create_dir(&root).unwrap();
     let terminals = Arc::new(Terminals::new());
-    let rpc = WorkspaceRpc::new(&root, 7, Arc::new(BroadcastSink::new(64)), terminals.clone(), None).unwrap();
-    Fixture { _dir: dir, root, rpc, terminals }
+    let sink = Arc::new(BroadcastSink::new(64));
+    let rpc = WorkspaceRpc::new(&root, 7, sink.clone(), terminals.clone(), None).unwrap();
+    Fixture { _dir: dir, root, rpc, terminals, sink }
 }
 
 async fn call(rpc: &Arc<WorkspaceRpc>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, (String, String)> {
@@ -1331,4 +1333,315 @@ async fn closing_a_sessions_last_tab_with_remove_closes_its_terminals() {
     let listed = call(&f.rpc, &manager, "pty.list", json!({})).await.unwrap();
     let ids: Vec<Option<&str>> = listed["terminals"].as_array().unwrap().iter().map(|t| t["sessionId"].as_str()).collect();
     assert_eq!(ids, vec![Some(kept.id.as_str())], "the removed session's terminal is closed, others stay");
+}
+
+// ---- an agent tab's own terminal (PRO-86, `agent-pty/1`) -----------------------
+
+const AGENT_TERMINAL: &str = "tab:tab-1";
+const WITH_AGENT_PTY: [&str; 7] = ["pty/1", "fs/1", "session/1", "keys/1", "collab/1", "lifecycle/1", protocol::AGENT_PTY];
+
+/// Stands in for the tab's CLI: a shell in the pane the session manager
+/// starts it in. Nothing here goes through the RPC: the agent runs whether
+/// or not anyone looks at its terminal.
+fn start_agent_cli(f: &Fixture) -> u32 {
+    let cwd = f.root.to_string_lossy().into_owned();
+    let (cols, rows) = crate::session::CLI_PANE_SIZE;
+    f.terminals.spawn(f.sink.clone(), AGENT_TERMINAL, PaneSpec { cwd: &cwd, cols, rows, command: None, env: &[] }).unwrap();
+    f.terminals.pid(AGENT_TERMINAL).expect("the CLI has a process")
+}
+
+async fn agent_person(rpc: &Arc<WorkspaceRpc>, device: &str, authority: Authority, user: &str) -> (Arc<Peer>, Notifications) {
+    let (peer, events) = Peer::for_user(device.into(), authority, Some(user.into()));
+    call(rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": WITH_AGENT_PTY })).await.unwrap();
+    (peer, events)
+}
+
+/// Everything under the fixture's directory, with sizes: what the runtime has on disk.
+fn files_on_disk(dir: &Path) -> Vec<(String, u64)> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                found.push((path.to_string_lossy().into_owned(), entry.metadata().map(|meta| meta.len()).unwrap_or(0)));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+fn shared(f: &Fixture) {
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager", "canApprove": true },
+        { "userId": "alice", "role": "driver", "canApprove": true },
+        { "userId": "dave", "role": "driver", "canApprove": true },
+        // Drives from the chat, but may not approve what the agent asks.
+        { "userId": "erin", "role": "driver", "canApprove": false },
+        // Approves from the chat's cards, but does not drive.
+        { "userId": "bob", "role": "viewer", "canApprove": true },
+    ])));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_terminal_needs_its_capability_and_is_never_a_shell() {
+    let f = fixture();
+    with_tab(&f);
+    start_agent_cli(&f);
+    // A client that never asked for it (an older desktop) cannot reach it.
+    let (old, _events) = Peer::new("device-old".into(), Authority::Manage);
+    let hello = call(&f.rpc, &old, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ALL })).await.unwrap();
+    assert!(!hello["capabilities"].as_array().unwrap().iter().any(|capability| capability == protocol::AGENT_PTY));
+    for method in ["pty.attach", "pty.control", "pty.resize"] {
+        assert_eq!(
+            code(call(&f.rpc, &old, method, json!({ "ptyId": AGENT_TERMINAL, "cols": 80, "rows": 24 })).await),
+            "capability_not_granted",
+            "{method}"
+        );
+    }
+    assert_eq!(
+        code(call(&f.rpc, &old, "pty.write", json!({ "ptyId": AGENT_TERMINAL, "data": "x", "seq": 1 })).await),
+        "capability_not_granted"
+    );
+
+    let (desk, _events) = Peer::new("device-desk".into(), Authority::Manage);
+    let hello = call(&f.rpc, &desk, "rpc.hello", json!({ "protocol": PROTOCOL, "want": WITH_AGENT_PTY })).await.unwrap();
+    assert!(hello["capabilities"].as_array().unwrap().iter().any(|capability| capability == protocol::AGENT_PTY), "advertised when asked for");
+    let attached = call(&f.rpc, &desk, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    assert_eq!((attached["tabId"].as_str(), attached["running"].as_bool()), (Some("tab-1"), Some(true)));
+    // It is the tab's, not a shell tab: not listed, not counted, not killable.
+    assert_eq!(call(&f.rpc, &desk, "pty.list", json!({})).await.unwrap()["terminals"], json!([]));
+    assert_eq!(call(&f.rpc, &desk, "lifecycle.dispositionFacts", json!({})).await.unwrap()["runningProcesses"], 0);
+    assert_eq!(code(call(&f.rpc, &desk, "pty.kill", json!({ "ptyId": AGENT_TERMINAL })).await), "forbidden");
+    assert!(f.terminals.is_running(AGENT_TERMINAL));
+    // Only tabs the runtime has, by exact id.
+    assert_eq!(code(call(&f.rpc, &desk, "pty.attach", json!({ "ptyId": "tab:tab-9" })).await), "not_found");
+    assert_eq!(code(call(&f.rpc, &desk, "pty.attach", json!({ "ptyId": "tab:" })).await), "not_found");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn attaching_to_an_agent_terminal_replays_its_screen_and_never_restarts_the_cli() {
+    let f = fixture();
+    with_tab(&f);
+    let pid = start_agent_cli(&f);
+    // The agent draws before anyone looks.
+    f.terminals.write(AGENT_TERMINAL, b"echo agent-$((40+2))-screen\n").unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while !f.terminals.read_output(AGENT_TERMINAL).is_some_and(|out| String::from_utf8_lossy(&out).contains("agent-42-screen")) {
+        assert!(std::time::Instant::now() < deadline, "the shell never answered");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (desk, mut events) = Peer::new("device-desk".into(), Authority::Manage);
+    call(&f.rpc, &desk, "rpc.hello", json!({ "protocol": PROTOCOL, "want": WITH_AGENT_PTY })).await.unwrap();
+    let attached = call(&f.rpc, &desk, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    let replay = String::from_utf8_lossy(&STANDARD.decode(attached["data"].as_str().unwrap()).unwrap()).into_owned();
+    assert!(replay.contains("agent-42-screen"), "recent output is replayed on attach: {replay}");
+    assert_eq!(attached["offset"], 0);
+    assert_eq!(attached["control"], "none", "nobody controls it until someone asks");
+    let (cols, rows) = crate::session::CLI_PANE_SIZE;
+    assert_eq!((attached["cols"].as_u64(), attached["rows"].as_u64()), (Some(cols as u64), Some(rows as u64)));
+
+    // Watching types nothing; the controller's input reaches the same process.
+    assert_eq!(code(call(&f.rpc, &desk, "pty.write", json!({ "ptyId": AGENT_TERMINAL, "data": "x", "seq": 1, "writerId": "w" })).await), "not_controller");
+    let taken = call(&f.rpc, &desk, "pty.control", json!({ "ptyId": AGENT_TERMINAL, "cols": 100, "rows": 40 })).await.unwrap();
+    assert_eq!((taken["control"].as_str(), taken["cols"].as_u64(), taken["rows"].as_u64()), (Some("you"), Some(100), Some(40)));
+    call(&f.rpc, &desk, "pty.write", json!({ "ptyId": AGENT_TERMINAL, "data": "echo typed-$$-here\n", "seq": 1, "writerId": "w" })).await.unwrap();
+    let (_, end) = output_until(&mut events, &format!("typed-{pid}-here")).await;
+    assert_eq!(f.terminals.pid(AGENT_TERMINAL), Some(pid), "attach, control and input never restart the agent");
+
+    // Leaving the view (detach) and coming back resumes after the last byte.
+    call(&f.rpc, &desk, "pty.detach", json!({ "subscriptionId": attached["subscriptionId"] })).await.unwrap();
+    let resumed = call(&f.rpc, &desk, "pty.attach", json!({ "ptyId": AGENT_TERMINAL, "sinceOffset": end, "runtimeGeneration": 7 })).await.unwrap();
+    assert_eq!(resumed["offset"].as_u64(), Some(end));
+    assert_eq!(resumed["control"], "you");
+    assert_eq!(f.terminals.pid(AGENT_TERMINAL), Some(pid));
+    // `start` on a running CLI starts nothing.
+    call(&f.rpc, &desk, "pty.control", json!({ "ptyId": AGENT_TERMINAL, "start": true })).await.unwrap();
+    assert_eq!(f.terminals.pid(AGENT_TERMINAL), Some(pid));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_lease_holder_types_into_an_agent_terminal_and_a_manager_takes_it_over() {
+    let f = fixture();
+    with_tab(&f);
+    shared(&f);
+    let pid = start_agent_cli(&f);
+    let (admin, _admin_events) = agent_person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    let (alice, mut alice_events) = agent_person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (dave, _dave_events) = agent_person(&f.rpc, "d-dave", Authority::Participate, "dave").await;
+    let (bob, mut bob_events) = agent_person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
+    let (carol, _carol_events) = agent_person(&f.rpc, "d-carol", Authority::Participate, "carol").await;
+    let write = |seq: u64, data: &str| json!({ "ptyId": AGENT_TERMINAL, "data": data, "seq": seq, "writerId": "w" });
+
+    // Not shared with carol: the agent's screen is not hers to see.
+    assert_eq!(code(call(&f.rpc, &carol, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await), "forbidden");
+    // A viewer watches, read-only.
+    call(&f.rpc, &bob, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    for (method, params) in [
+        ("pty.control", json!({ "ptyId": AGENT_TERMINAL })),
+        ("pty.write", write(1, "x")),
+        ("pty.resize", json!({ "ptyId": AGENT_TERMINAL, "cols": 10, "rows": 10 })),
+    ] {
+        assert_eq!(code(call(&f.rpc, &bob, method, params).await), "forbidden", "{method}");
+    }
+
+    // A driver who may not approve watches too: the agent's own screen
+    // answers its permission prompts and changes its mode.
+    let (erin, _erin_events) = agent_person(&f.rpc, "d-erin", Authority::Participate, "erin").await;
+    call(&f.rpc, &erin, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    let refused = f.rpc.handle(&erin, &json!({ "id": "1", "method": "pty.control", "params": { "ptyId": AGENT_TERMINAL } })).await;
+    assert_eq!((refused["error"]["code"].as_str(), refused["error"]["data"]["needs"].as_str()), (Some("forbidden"), Some("canApprove")));
+    assert_eq!(code(call(&f.rpc, &erin, "pty.write", write(1, "x")).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &erin, "pty.resize", json!({ "ptyId": AGENT_TERMINAL, "cols": 10, "rows": 10 })).await), "forbidden");
+
+    // A driver takes control and types; what she types claims the tab.
+    call(&f.rpc, &alice, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    let taken = call(&f.rpc, &alice, "pty.control", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    assert_eq!((taken["control"].as_str(), taken["controllerId"].as_str()), (Some("you"), Some("alice")));
+    let told = next_event(&mut bob_events, "pty.control").await;
+    assert_eq!((told["control"].as_str(), told["controllerId"].as_str()), (Some("other"), Some("alice")), "watchers see who controls it");
+    assert_eq!(call(&f.rpc, &bob, "collab.state", json!({})).await.unwrap()["leases"], json!([]), "control alone drives nothing");
+    call(&f.rpc, &alice, "pty.write", write(1, "echo alice-$$-typed\n")).await.unwrap();
+    output_until(&mut bob_events, &format!("alice-{pid}-typed")).await;
+    assert_eq!(call(&f.rpc, &bob, "collab.state", json!({})).await.unwrap()["leases"][0]["holderId"], "alice");
+
+    // A driver without the lease cannot type, size or take the terminal.
+    let refused = f.rpc.handle(&dave, &json!({ "id": "1", "method": "pty.control", "params": { "ptyId": AGENT_TERMINAL } })).await;
+    assert_eq!(refused["error"]["code"], "lease_held");
+    assert_eq!(refused["error"]["data"]["lease"]["holderId"], "alice");
+    assert_eq!(code(call(&f.rpc, &dave, "pty.write", write(1, "x")).await), "lease_held");
+    assert_eq!(code(call(&f.rpc, &dave, "pty.resize", json!({ "ptyId": AGENT_TERMINAL, "cols": 10, "rows": 10 })).await), "lease_held");
+    // Nor a manager, until they take the tab over by taking the terminal.
+    assert_eq!(code(call(&f.rpc, &admin, "pty.write", write(1, "x")).await), "lease_held");
+    let taken = call(&f.rpc, &admin, "pty.control", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    assert_eq!((taken["control"].as_str(), taken["controllerId"].as_str()), (Some("you"), Some("admin")));
+    assert_eq!(call(&f.rpc, &bob, "collab.state", json!({})).await.unwrap()["leases"][0]["holderId"], "admin");
+    // Her own view was told she had it, then that the admin took it.
+    assert_eq!(next_event(&mut alice_events, "pty.control").await["control"], "you");
+    let told = next_event(&mut alice_events, "pty.control").await;
+    assert_eq!((told["control"].as_str(), told["controllerId"].as_str()), (Some("other"), Some("admin")));
+    assert_eq!(code(call(&f.rpc, &alice, "pty.write", write(2, "x")).await), "lease_held");
+    call(&f.rpc, &admin, "pty.write", write(1, "echo admin-$$-typed\n")).await.unwrap();
+    output_until(&mut bob_events, &format!("admin-{pid}-typed")).await;
+    assert_eq!(f.terminals.pid(AGENT_TERMINAL), Some(pid));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_viewer_never_resizes_the_controllers_agent_terminal() {
+    let f = fixture();
+    with_tab(&f);
+    shared(&f);
+    start_agent_cli(&f);
+    let (alice, _alice_events) = agent_person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (dave, mut dave_events) = agent_person(&f.rpc, "d-dave", Authority::Participate, "dave").await;
+    let (bob, _bob_events) = agent_person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
+    call(&f.rpc, &dave, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    call(&f.rpc, &alice, "pty.control", json!({ "ptyId": AGENT_TERMINAL, "cols": 100, "rows": 40 })).await.unwrap();
+    let told = next_event(&mut dave_events, "pty.resized").await;
+    assert_eq!((told["cols"].as_u64(), told["rows"].as_u64()), (Some(100), Some(40)), "a watcher is told the controller's size");
+    // Another driver's window (the lease is free) and a viewer's: neither resizes it.
+    assert_eq!(code(call(&f.rpc, &dave, "pty.resize", json!({ "ptyId": AGENT_TERMINAL, "cols": 60, "rows": 20 })).await), "not_controller");
+    assert_eq!(code(call(&f.rpc, &bob, "pty.resize", json!({ "ptyId": AGENT_TERMINAL, "cols": 60, "rows": 20 })).await), "forbidden");
+    let seen = call(&f.rpc, &bob, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    assert_eq!((seen["cols"].as_u64(), seen["rows"].as_u64()), (Some(100), Some(40)));
+    // The program really is that size.
+    call(&f.rpc, &alice, "pty.write", json!({ "ptyId": AGENT_TERMINAL, "data": "echo size-$(stty size | tr ' ' x)-ok\n", "seq": 1, "writerId": "w" })).await.unwrap();
+    output_until(&mut dave_events, "size-40x100-ok").await;
+    let resized = call(&f.rpc, &alice, "pty.resize", json!({ "ptyId": AGENT_TERMINAL, "cols": 90, "rows": 30 })).await.unwrap();
+    assert_eq!((resized["cols"].as_u64(), resized["rows"].as_u64()), (Some(90), Some(30)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revoked_access_ends_an_agent_terminal_stream() {
+    let f = fixture();
+    with_tab(&f);
+    shared(&f);
+    let pid = start_agent_cli(&f);
+    let (alice, mut alice_events) = agent_person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (bob, mut bob_events) = agent_person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
+    call(&f.rpc, &alice, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    call(&f.rpc, &bob, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    call(&f.rpc, &alice, "pty.control", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    assert_eq!(next_event(&mut bob_events, "pty.control").await["controllerId"], "alice");
+    // Downgraded to a viewer: control goes, announced, and the next keystroke is refused.
+    // Approval rights taken back: her next keystroke is refused, at once.
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager" },
+        { "userId": "alice", "role": "driver", "canApprove": false },
+        { "userId": "bob", "role": "viewer" },
+    ])));
+    assert_eq!(
+        code(call(&f.rpc, &alice, "pty.write", json!({ "ptyId": AGENT_TERMINAL, "data": "x", "seq": 1, "writerId": "w" })).await),
+        "forbidden"
+    );
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager" },
+        { "userId": "alice", "role": "viewer" },
+        { "userId": "bob", "role": "viewer" },
+    ])));
+    let told = next_event(&mut bob_events, "pty.control").await;
+    assert_eq!((told["control"].as_str(), told["controllerId"].clone()), (Some("none"), Value::Null));
+    assert_eq!(
+        code(call(&f.rpc, &alice, "pty.write", json!({ "ptyId": AGENT_TERMINAL, "data": "x", "seq": 1, "writerId": "w" })).await),
+        "forbidden"
+    );
+    // Revoked: her connection is closed, and no output is sent to it any more.
+    f.rpc.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }, { "userId": "bob", "role": "viewer" }])));
+    tokio::time::timeout(Duration::from_secs(5), alice.closed()).await.expect("alice's connection is closed");
+    f.rpc.disconnect(&alice);
+    while tokio::time::timeout(Duration::from_millis(200), alice_events.recv()).await.is_ok() {}
+    f.terminals.write(AGENT_TERMINAL, b"echo after-$$-revocation\n").unwrap();
+    output_until(&mut bob_events, &format!("after-{pid}-revocation")).await;
+    assert!(tokio::time::timeout(Duration::from_millis(200), alice_events.recv()).await.is_err(), "nothing streams to a revoked person");
+    assert_eq!(code(call(&f.rpc, &alice, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await), "forbidden");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_terminal_outlives_its_cli_and_keeps_nothing_on_disk() {
+    let f = fixture();
+    with_tab(&f);
+    let (desk, mut events) = Peer::new("device-desk".into(), Authority::Manage);
+    call(&f.rpc, &desk, "rpc.hello", json!({ "protocol": PROTOCOL, "want": WITH_AGENT_PTY })).await.unwrap();
+    // Before the tab's CLI ever ran: there is a terminal to watch, and nothing in it.
+    let attached = call(&f.rpc, &desk, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    assert_eq!((attached["running"].as_bool(), attached["data"].as_str()), (Some(false), Some("")));
+    let taken = call(&f.rpc, &desk, "pty.control", json!({ "ptyId": AGENT_TERMINAL, "cols": 100, "rows": 40 })).await.unwrap();
+    assert_eq!((taken["control"].as_str(), taken["running"].as_bool()), (Some("you"), Some(false)), "taking control starts nothing");
+    assert!(!f.terminals.is_live(AGENT_TERMINAL));
+    assert_eq!(
+        code(call(&f.rpc, &desk, "pty.write", json!({ "ptyId": AGENT_TERMINAL, "data": "x", "seq": 1, "writerId": "w" })).await),
+        "unavailable",
+        "there is no agent to type into"
+    );
+    let before = files_on_disk(f._dir.path());
+
+    // The CLI starts (a send, or `start`): the view already attached shows
+    // it, at the controller's size.
+    let first = start_agent_cli(&f);
+    call(&f.rpc, &desk, "pty.write", json!({ "ptyId": AGENT_TERMINAL, "data": "echo first-$$-$(stty size | tr ' ' x)\n", "seq": 1, "writerId": "w" }))
+        .await
+        .unwrap();
+    let (_, end) = output_until(&mut events, &format!("first-{first}-40x100")).await;
+    // It exits and the tab resumes in the same pane: the same stream carries on.
+    f.terminals.kill_and_wait(AGENT_TERMINAL, Duration::from_secs(10));
+    let second = start_agent_cli(&f);
+    assert_ne!(first, second);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let sent = call(&f.rpc, &desk, "pty.write", json!({ "ptyId": AGENT_TERMINAL, "data": "echo second-$$-$(stty size | tr ' ' x)\n", "seq": 2, "writerId": "w" })).await;
+        match sent {
+            Ok(_) => break,
+            // The new CLI's pane is not up for a moment.
+            Err((code, _)) if code == "unavailable" && tokio::time::Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(20)).await,
+            Err(error) => panic!("{error:?}"),
+        }
+    }
+    let (_, later) = output_until(&mut events, &format!("second-{second}-40x100")).await;
+    assert!(later > end, "one stream of offsets across both CLIs");
+
+    // Screen and keystrokes live in memory only: nothing was written under the runtime's data.
+    assert_eq!(files_on_disk(f._dir.path()), before);
 }

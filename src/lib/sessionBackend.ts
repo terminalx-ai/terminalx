@@ -1,4 +1,4 @@
-import type { WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
+import type { AgentProcessState, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { agent, type ImageInput } from "@/lib/api";
 import { loadTab, setTabStatus } from "@/lib/agentEvents";
 import { patchTab } from "@/lib/sessions";
@@ -18,6 +18,8 @@ import {
 } from "@/lib/cloudAgents";
 import type { CloudAgentScope, OutboxEntry } from "@/lib/cloudAgentApi";
 import { APPROVE_BLOCKED_REASON, canApprove, mayConfigure, roleBlockReason } from "@/lib/cloudCollab";
+import { isPtyFirst } from "@/lib/tabViews";
+import type { TerminalInstance } from "@/lib/terminal";
 import type { AgentEvent } from "@/types/events";
 import type { TabEntry, TabStatus } from "@/types/session";
 
@@ -42,6 +44,38 @@ export interface SessionBackendCaps {
   images: boolean;
   /** The local recovery flows (retry safely, resume after a stop). */
   recovery: boolean;
+}
+
+/** Whether a tab's terminal view is offered, and why not when it is not. */
+export interface TerminalViewOffer {
+  available: boolean;
+  /** Shown on the switch instead of offering it. Null while it is offered. */
+  reason: string | null;
+}
+
+/** An agent that has no terminal to show (it is driven headless on the VM). */
+export const TERMINAL_VIEW_NO_TERMINAL = "This agent does not run in a terminal, so it has no terminal view.";
+/** A runtime from before `agent-pty/1`. */
+export const TERMINAL_VIEW_OLD_RUNTIME = "Terminal view needs a newer workspace runtime. It appears here once this workspace's runtime is updated.";
+
+/**
+ * What the terminal view of a cloud agent tab attaches to (PRO-86): the
+ * terminal the tab's own CLI runs in on the VM, through the runtime
+ * (`agent-pty/1`). Looking at it never wakes or starts anything.
+ */
+export interface AgentTerminalTarget {
+  /** `cloud:<orgId>:<workspaceId>`: where the terminal's view and stream are kept. */
+  workspaceKey: string;
+  /** The live connection, while the runtime serves `agent-pty/1`; null while not connected. */
+  client: WorkspaceRpcClient | null;
+  /** Stopped as far as this client knows. */
+  asleep: boolean;
+  /** Makes the terminal's xterm, styled like every other terminal. */
+  base: () => TerminalInstance;
+  /** Whether the tab's CLI runs, as the runtime last said. */
+  process(tabId: string): AgentProcessState | null;
+  /** Typing on a stopped workspace: wake it, once, exactly as sending a message does. */
+  wake(): void;
 }
 
 export interface SendResult {
@@ -90,6 +124,13 @@ export interface SessionBackend {
    * an older runtime), and the connection while it is live with `collab/1`.
    */
   collab?: { key: string; you: WorkspaceYou | null; client: WorkspaceRpcClient | null };
+  /**
+   * Whether `tab` can switch between its chat and its terminal view here.
+   * Absent on a backend made before PRO-86: then only a local session can.
+   */
+  terminalView?(tab: Pick<TabEntry, "harness">): TerminalViewOffer;
+  /** Cloud only: what a tab's terminal view attaches to. */
+  agentTerminal?: AgentTerminalTarget;
   /** Cloud only: commands on their way for a tab, the runtime's queued follow-ups, and resending an unconfirmed one. */
   outbox?: {
     entries(tabId: string): OutboxEntry[];
@@ -100,6 +141,12 @@ export interface SessionBackend {
 }
 
 const LOCAL_CAPS: SessionBackendCaps = { local: true, write: true, steer: false, images: true, recovery: true };
+const OFFERED: TerminalViewOffer = { available: true, reason: null };
+
+/** The terminal view switch for `tab` on `backend`: every local tab has one. */
+export function terminalViewOf(backend: SessionBackend, tab: Pick<TabEntry, "harness">): TerminalViewOffer {
+  return backend.terminalView?.(tab) ?? (backend.caps.local ? OFFERED : { available: false, reason: TERMINAL_VIEW_OLD_RUNTIME });
+}
 
 const localBackends = new Map<string, SessionBackend>();
 
@@ -128,6 +175,7 @@ export function localSessionBackend(sessionId: string): SessionBackend {
     markRead: (tabId) => agent.markRead(sessionId, tabId),
     patchTab: (tabId, patch) => patchTab(sessionId, tabId, patch),
     setTabStatus: (tabId, status) => setTabStatus(sessionId, tabId, status),
+    terminalView: () => OFFERED,
   };
   if (localBackends.size > 256) localBackends.clear();
   localBackends.set(sessionId, backend);
@@ -184,6 +232,20 @@ export function clearCloudWake(workspaceKey: string) {
 /** Tests only. */
 export function resetCloudWakes() {
   waking.clear();
+  agentPtySeen.clear();
+}
+
+/**
+ * Whether each workspace's runtime served `agent-pty/1` when this desktop
+ * was last connected to it (PRO-86). A stopped workspace's terminal view
+ * switch follows it; nothing is asked of the server to find out.
+ */
+const agentPtySeen = new Map<string, boolean>();
+
+/** `served` when connected (and remembered); else the last word, or null when there is none. */
+export function agentPtyServed(workspaceKey: string, served: boolean | null): boolean | null {
+  if (served !== null) agentPtySeen.set(workspaceKey, served);
+  return served ?? agentPtySeen.get(workspaceKey) ?? null;
 }
 
 export interface CloudSessionContext {
@@ -212,6 +274,17 @@ export interface CloudSessionContext {
   collabClient?: WorkspaceRpcClient | null;
   /** How many times the connection connected: a tab attaches again after each (a reconnect, a new attachment). */
   connects?: number;
+  /**
+   * PRO-86: whether the runtime serves `agent-pty/1`. While not connected,
+   * what it last said; null when it never said (a stopped workspace this
+   * desktop has not been connected to): the switch is then offered, and the
+   * terminal view only says Stopped.
+   */
+  agentPty?: boolean | null;
+  /** Makes a terminal view's xterm. Without it no terminal view is offered. */
+  terminalBase?: () => TerminalInstance;
+  /** Whether a tab's CLI runs, as the runtime last said. */
+  agentProcess?: (tabId: string) => AgentProcessState | null;
 }
 
 /** Whether a cloud workspace's compute is asleep as far as this client knows. */
@@ -247,6 +320,8 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     await run();
     followWake();
   };
+  const agentPty = ctx.agentPty ?? null;
+  const terminalBase = ctx.terminalBase;
   return {
     kind: "cloud",
     key: ctx.key,
@@ -315,6 +390,25 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     markRead: (tabId) => markCloudAgentRead(scope, tabId, client),
     patchTab: () => undefined,
     setTabStatus: () => undefined,
+    terminalView: (tab) => {
+      if (!terminalBase) return { available: false, reason: TERMINAL_VIEW_OLD_RUNTIME };
+      if (!isPtyFirst(tab.harness)) return { available: false, reason: TERMINAL_VIEW_NO_TERMINAL };
+      // A connected runtime decides. Not connected and never told: offered, and the view says Stopped.
+      const served = connected ? !!ctx.client?.hasCapability("agent-pty/1") : agentPty;
+      return served === false ? { available: false, reason: TERMINAL_VIEW_OLD_RUNTIME } : OFFERED;
+    },
+    agentTerminal: terminalBase && {
+      workspaceKey: ctx.workspaceKey,
+      client: client?.hasCapability("agent-pty/1") ? client : null,
+      asleep: cloudAsleep(ctx.state, ctx.workspaceState),
+      base: terminalBase,
+      process: (tabId) => ctx.agentProcess?.(tabId) ?? null,
+      // The same single wake a send asks for; only ever from a keystroke of someone who may type.
+      wake: () => {
+        if (readOnlyReason) return;
+        followWake();
+      },
+    },
     outbox: {
       entries: (tabId) => ctx.outbox.filter((entry) => entry.tabId === tabId),
       followUps: ctx.followUps,
