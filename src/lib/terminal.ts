@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import { pty } from "@/lib/api";
+import { countTerminalData, dataRate, rendererOf, webglContexts, type DataRate } from "@/lib/terminalCounters";
 
 /**
  * Terminal panes per session, and one bridge for the PTY events.
@@ -99,6 +100,43 @@ export function getInstance(id: string, create: () => TerminalInstance): Termina
   return inst;
 }
 
+export interface TerminalCounters {
+  /** Live xterm instances, local and cloud, and how many are in the document. */
+  instances: number;
+  attached: number;
+  /** Live instances by the renderer they are on now. `dom` is the slow fallback. */
+  webgl: number;
+  dom: number;
+  webglContexts: typeof webglContexts;
+  /** Lines held across every live instance's buffers. */
+  bufferLines: number;
+  /** Output kept for panes that have no instance yet. */
+  replayBuffers: number;
+  replayBytes: number;
+  panes: number;
+  data: { local: DataRate; cloud: DataRate };
+}
+
+/** What this window's terminals hold right now, for `terminalx status --json`. */
+export function terminalCounters(): TerminalCounters {
+  const live = [...instances.values()];
+  const webgl = live.filter((inst) => rendererOf(inst.term) === "webgl").length;
+  let replayBytes = 0;
+  for (const r of replay.values()) replayBytes += r.size;
+  return {
+    instances: live.length,
+    attached: live.filter((inst) => inst.el.isConnected).length,
+    webgl,
+    dom: live.length - webgl,
+    webglContexts: { ...webglContexts },
+    bufferLines: live.reduce((lines, inst) => lines + inst.term.buffer.normal.length + inst.term.buffer.alternate.length, 0),
+    replayBuffers: replay.size,
+    replayBytes,
+    panes: state.panes.length,
+    data: { local: dataRate("local"), cloud: dataRate("cloud") },
+  };
+}
+
 /** Drop a live instance and its element; its process is the caller's to end. */
 export function disposeInstance(id: string) {
   const inst = instances.get(id);
@@ -122,6 +160,7 @@ async function register() {
     await listen<{ id: string; data: string }>("pty_data", (e) => {
       const { id, data } = e.payload;
       const bytes = decode(data);
+      countTerminalData("local", bytes.length);
       const inst = instances.get(id);
       if (inst) {
         inst.term.write(bytes);

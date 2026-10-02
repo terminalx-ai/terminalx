@@ -8,7 +8,8 @@ const pty = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/api", () => ({ pty }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
+const listen = vi.hoisted(() => vi.fn());
+vi.mock("@tauri-apps/api/event", () => ({ listen }));
 
 async function loadTerminalStore() {
   vi.resetModules();
@@ -17,6 +18,7 @@ async function loadTerminalStore() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  listen.mockResolvedValue(() => {});
 });
 
 describe("session shell tabs", () => {
@@ -70,5 +72,36 @@ describe("session shell tabs", () => {
 
     expect(terminal.getTerminalState().panes).toEqual([]);
     expect(terminal.getTerminalState().selected.s1).toBeUndefined();
+  });
+});
+
+describe("terminal counters", () => {
+  it("counts output, the replay buffers it waits in, and live instances by renderer", async () => {
+    const handlers = new Map<string, (event: { payload: unknown }) => void>();
+    listen.mockImplementation(async (event: string, handler: (event: { payload: unknown }) => void) => {
+      handlers.set(event, handler);
+      return () => {};
+    });
+    const terminal = await loadTerminalStore();
+    const { setRenderer } = await import("./terminalCounters");
+    await terminal.subscribeTerminals();
+
+    // No view has asked for this pane yet: its output waits in a replay buffer.
+    handlers.get("pty_data")!({ payload: { id: "p1", data: btoa("hello") } });
+    expect(terminal.terminalCounters()).toMatchObject({ instances: 0, replayBuffers: 1, replayBytes: 5, data: { local: { events: 1, bytes: 5 }, cloud: { events: 0, bytes: 0 } } });
+
+    const term = { write: vi.fn(), dispose: vi.fn(), buffer: { normal: { length: 40 }, alternate: { length: 24 } } };
+    const el = document.createElement("div");
+    terminal.getInstance("p1", () => ({ el, term, fit: {} }) as never);
+    expect(term.write).toHaveBeenCalledTimes(1);
+    expect(terminal.terminalCounters()).toMatchObject({ instances: 1, attached: 0, webgl: 0, dom: 1, bufferLines: 64, replayBuffers: 0, replayBytes: 0 });
+
+    setRenderer(term as never, "webgl");
+    document.body.appendChild(el);
+    handlers.get("pty_data")!({ payload: { id: "p1", data: btoa("more") } });
+    expect(terminal.terminalCounters()).toMatchObject({ instances: 1, attached: 1, webgl: 1, dom: 0, data: { local: { events: 2, bytes: 9 } } });
+
+    terminal.disposeInstance("p1");
+    expect(terminal.terminalCounters()).toMatchObject({ instances: 0, webgl: 0, dom: 0 });
   });
 });

@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import type { PtyAttachment, PtyControl, PtyCursor, PtyInfo, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { disposeInstance, getInstance, type TerminalInstance } from "@/lib/terminal";
+import { countTerminalData } from "@/lib/terminalCounters";
 
 /**
  * Shell tabs of cloud workspaces (PRO-26). The shells run on the workspace
@@ -182,7 +183,10 @@ async function attach(workspace: string, client: WorkspaceRpcClient, terminal: C
   const attachment = await client
     .attachPty(terminal.ptyId, {
     since: cursors.get(terminal.id),
-    onData: (bytes) => instance.term.write(bytes),
+    onData: (bytes) => {
+      countTerminalData("cloud", bytes.length);
+      instance.term.write(bytes);
+    },
     onTruncated: () => instance.term.write("\r\n\x1b[2m[earlier output was dropped while this view was away]\x1b[0m\r\n"),
     onExit: (code) => {
       const current = cloudTerminalsOf(workspace).terminals.find((item) => item.id === terminal.id);

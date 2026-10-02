@@ -344,7 +344,27 @@ impl ControlService {
                 if let Some(config) = crate::cloud_config::status_json() {
                     status["workspaceConfig"] = config;
                 }
+                status["terminals"] = self.terminal_status();
                 Ok(status)
+            }
+            "perf.terminal.start" => {
+                if !self.has_webview() || !crate::terminal_perf::bench_enabled() {
+                    return Err(ControlError::new(
+                        "unsupported",
+                        "The terminal benchmark is off in this app.",
+                        Some(format!("Launch a Dev build with {}=1; see docs/TERMINAL-PERFORMANCE.md.", crate::terminal_perf::BENCH_ENV)),
+                    ));
+                }
+                let id = crate::terminal_perf::ask(self.sink.as_ref(), "bench", params);
+                Ok(json!({ "requestId": id }))
+            }
+            "perf.terminal.poll" => {
+                let id = required_string(&params, "requestId")?;
+                match crate::terminal_perf::poll(&id) {
+                    Ok(Some(result)) => Ok(json!({ "done": true, "result": result })),
+                    Ok(None) => Ok(json!({ "done": false })),
+                    Err(()) => Err(ControlError::not_found(format!("No terminal benchmark request {id}."))),
+                }
             }
             "projects.list" => {
                 let (projects, last_selected) = projects::list().map_err(ControlError::internal)?;
@@ -384,6 +404,24 @@ impl ControlService {
                 "Unknown control command {other}."
             ))),
         }
+    }
+
+    fn has_webview(&self) -> bool {
+        #[cfg(feature = "desktop")]
+        return self.desktop.is_some();
+        #[cfg(not(feature = "desktop"))]
+        false
+    }
+
+    /// What the terminals hold: the PTY side from here, and the xterm side
+    /// from the webview when there is one and it answers in time.
+    fn terminal_status(&self) -> Value {
+        let mut terminals = json!({ "backend": self.manager.terminals().stats() });
+        if self.has_webview() {
+            let id = crate::terminal_perf::ask(self.sink.as_ref(), "counters", json!({}));
+            terminals["webview"] = crate::terminal_perf::wait(&id, crate::terminal_perf::COUNTERS_TIMEOUT).unwrap_or(Value::Null);
+        }
+        terminals
     }
 
     fn sessions_list(&self, params: Value) -> Result<Value, ControlError> {
