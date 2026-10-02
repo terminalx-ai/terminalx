@@ -302,4 +302,24 @@ one prints an agent-style stream for 10 s):
 - 200 session switches created 3 contexts, so switching between recently
   used terminals does not pay for a new context.
 
-Still open from the baseline: findings 3 to 6 and 8.
+### A deleted session's terminals are closed; stray output is dropped
+
+- Deleting a session, or the workspace it ran in, now closes its terminals:
+  the window drops their panes and xterm instances, and the backend kills the
+  session's shells (it already stopped the agent tabs). Before, the shells
+  kept running and their buffers stayed in the window until it was reloaded.
+- When a session's worktree is removed and the session stays listed, its
+  shells are closed; its agent panes are left to their tabs.
+- Output that arrives within 5 s after a pane was closed is dropped instead of
+  starting a replay buffer. Opening a pane under the same id again keeps its
+  output from that moment.
+
+| Soak | Before | After |
+| --- | --- | --- |
+| Panes and xterm instances still held right after the sessions were deleted | 8 and 8 | 0 and 0 |
+| Replay buffers left after 50 tabs were closed | 45–48 | 0 |
+| Replay buffers left at the end of the run | 48–51 | 0 |
+
+Memory is as in the entry above (344 MB baseline, 320 MB after the soak).
+
+Still open from the baseline: findings 5, 6 and 8.

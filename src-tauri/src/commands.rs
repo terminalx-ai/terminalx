@@ -948,6 +948,7 @@ pub async fn delete_session(app: AppHandle, session_id: String, remove_worktree:
             for tab in &session.tabs {
                 kill_tab(&state, &session.id, &tab.id);
             }
+            state.terminals.kill_session_shells(&session.id);
         };
         crate::session_ops::delete_session_blocking(&app, &session_id, remove_worktree, &stop).map(|_| ())
     })
@@ -2445,6 +2446,7 @@ pub async fn delete_workspace(app: AppHandle, project_path: String, path: String
             for t in &s.tabs {
                 kill_tab(&state, &s.id, &t.id);
             }
+            state.terminals.kill_session_shells(&s.id);
         }
         state.browser.forget_workspace(&crate::browser::control::canonical(&path));
         let removed = delete_workspace_entries(&project_path, &path, delete_branch)?;
