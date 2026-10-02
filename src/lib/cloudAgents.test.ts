@@ -485,6 +485,30 @@ describe("cloud agent tabs store", () => {
       expect(getCloudAgents(scope).tabs[0]!.info.status).toBe("in_progress");
     });
 
+    it("never takes the status of an empty checkpoint, or of one behind the transcript held here", async () => {
+      // The runtime's tab list said seq 2; the transcript streamed here went on to seq 6.
+      applyLiveTabs(scope, [tabInfo({ status: "in_progress", lastSeq: 2 })]);
+      const client = fakeClient();
+      client.subscribeSession.mockImplementation(async (_s, _t, onEvent) => {
+        for (const seq of [3, 4, 5, 6]) onEvent(ev(seq, { type: "assistant_text", text: `chunk ${seq}` }));
+        return () => undefined;
+      });
+      (await attachCloudAgentTab(scope, "t-1", client))();
+      markCloudAgentsOffline(scope);
+      // No events to tell by: its "completed" may be any turn's.
+      backend.checkpoints["t-1"] = { epoch: 7, version: 5, projection: projection("completed", []) };
+      await refreshFromCheckpoint(scope, "t-1");
+      expect(getCloudAgents(scope).tabs[0]!.info.status).toBe("in_progress");
+      // Past the tab list's seq (2) but behind the transcript (6): still older than what was seen.
+      backend.checkpoints["t-1"] = { epoch: 7, version: 6, projection: projection("completed", [ev(4, { type: "assistant_text", text: "chunk 4" })]) };
+      await refreshFromCheckpoint(scope, "t-1");
+      expect(getCloudAgents(scope).tabs[0]!.info.status).toBe("in_progress");
+      // As far as the transcript: its status is the newer one.
+      backend.checkpoints["t-1"] = { epoch: 7, version: 7, projection: projection("completed", [ev(6, { type: "assistant_text", text: "chunk 6" }), ev(7, { type: "assistant_text", text: "chunk 7" })]) };
+      await refreshFromCheckpoint(scope, "t-1");
+      expect(getCloudAgents(scope).tabs[0]!.info.status).toBe("completed");
+    });
+
     it("on a connect, takes each tab's status from the runtime and the tail of a tab nothing streams from its checkpoint", async () => {
       applyLiveTabs(scope, [tabInfo({ status: "in_progress", lastSeq: 2 }), tabInfo({ tabId: "t-2", status: "in_progress", lastSeq: 1 })]);
       markCloudAgentsOffline(scope);

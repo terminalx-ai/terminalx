@@ -1,10 +1,8 @@
-import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { dispositionFacts, hasUnpublishedWork, type DispositionFacts, type RepositoryFacts } from "@terminalx/portable/workspaceGit";
 import {
   api,
   closeWorkspaceConnection,
-  hasWorkspaceConnection,
-  workspaceConnection,
   workspaceTargetKey,
   type CloudWorkspace,
   type CloudWorkspaceCleanup,
@@ -13,7 +11,7 @@ import {
   type CloudWorkspaceOperation,
   type CloudWorkspaceTombstone,
 } from "@/lib/api";
-import { closeCloudConnection } from "@/lib/cloudConnections";
+import { closeCloudConnection, retainCloudConnection, waitCloudConnected, type CloudLease } from "@/lib/cloudConnections";
 import { dropCloudAgents } from "@/lib/cloudAgents";
 import { dropCloudTerminals } from "@/lib/cloudTerminals";
 import { dropEditors, getEditors } from "@/lib/editors";
@@ -230,65 +228,38 @@ export function repositoryRiskLines(repo: RepositoryFacts): string[] {
   return lines;
 }
 
-type WaitResult = "connected" | "suspended" | "unreachable";
-
-/**
- * Wait for a connection to be up. `suspended` is the native side's answer
- * from the API that compute is not running (a `connect` never wakes it);
- * anything else that does not end connected in time is `unreachable`.
- */
-function waitConnected(client: WorkspaceRpcClient, withinMs: number): Promise<WaitResult> {
-  const now = (state: WorkspaceConnectionState["state"]): WaitResult | null =>
-    state === "connected" ? "connected" : state === "suspended" ? "suspended" : state === "stopped" || state === "updateRequired" ? "unreachable" : null;
-  const first = now(client.connection.state);
-  if (first) return Promise.resolve(first);
-  return new Promise((resolve) => {
-    let settled = false;
-    let stop: (() => void) | null = null;
-    const done = (value: WaitResult) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      stop?.();
-      resolve(value);
-    };
-    const timer = setTimeout(() => done("unreachable"), withinMs);
-    // `onState` reports the current state at once, before it returns.
-    stop = client.onState((state) => {
-      const result = now(state.state);
-      if (result) done(result);
-    });
-    if (settled) stop();
-  });
-}
-
 /**
  * Ask a running workspace's runtime what an archive or delete would lose
  * (`lifecycle.dispositionFacts`). Looking never wakes compute: only a
- * workspace the server reports ready is connected to, with `connect`,
- * reusing a connection the desktop already holds. A workspace that is not
- * running is reported `offline`; one that is running but could not be
- * reached in time is `unreachable`, never "not running".
+ * workspace the server reports ready is connected to, with `connect`. A
+ * workspace that is not running is reported `offline`; one that is running
+ * but could not be reached in time is `unreachable`, never "not running".
+ *
+ * The connection is a lease from the connection manager, given back after
+ * the check: it shares the one an open session holds and never closes it
+ * underneath that session (closing the api's connection here left the
+ * session on a dead client that still read connected).
  */
 export async function checkRuntime(workspace: CloudWorkspace, server: CloudWorkspaceDisposition | null, withinMs = 15_000): Promise<RuntimeCheck> {
   if (server && !server.runtimeFacts.available) return { kind: "unsupported" };
   // The server's just-read state is fresher than the list row's.
   if ((server?.state ?? workspace.state) !== "ready") return { kind: "offline" };
-  const target = { kind: "cloud" as const, organizationId: workspace.orgId, workspaceId: workspace.id };
-  // Only a connection made for this check is closed after it.
-  const owned = !hasWorkspaceConnection(target);
+  let lease: CloudLease | null = null;
   try {
-    const connection = await workspaceConnection(target, "connect");
-    if (!connection) return { kind: "unreachable" };
-    const reached = await waitConnected(connection.client, withinMs);
-    if (reached === "suspended") return { kind: "offline" };
-    if (reached === "unreachable") return { kind: "unreachable" };
-    const facts = await dispositionFacts(connection.client);
+    lease = await retainCloudConnection({ orgId: workspace.orgId, workspaceId: workspace.id }, "connect");
+    let client: WorkspaceRpcClient;
+    try {
+      client = await waitCloudConnected(lease, withinMs, { stoppedIsError: true });
+    } catch (error) {
+      // `suspended` is the native side's answer from the API that compute is not running; anything else never got there.
+      return error instanceof Error && error.message === "cloud_workspace_stopped" ? { kind: "offline" } : { kind: "unreachable" };
+    }
+    const facts = await dispositionFacts(client);
     return facts ? { kind: "checked", facts } : { kind: "unsupported" };
   } catch (error) {
     return { kind: "error", message: error instanceof Error ? error.message : String(error) };
   } finally {
-    if (owned) closeWorkspaceConnection(target);
+    lease?.release();
   }
 }
 

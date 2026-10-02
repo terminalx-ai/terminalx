@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { Activation, WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { WorkspaceRpcError, type Activation, type WorkspaceConnectionState, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { hasWorkspaceConnection, workspaceConnection, type CloudWorkspaceConnection } from "@/lib/api";
 import { detachCloudTerminals } from "@/lib/cloudTerminals";
 import { cloudWorkspaceKey } from "@/types/target";
@@ -35,6 +35,8 @@ export const MAX_CONNECTIONS = 4;
 /** Attaching again after an attach that did not connect waits this long, doubling up to the ceiling. */
 export const REATTACH_FIRST_MS = 1_000;
 export const REATTACH_MAX_MS = 30_000;
+/** How long a connection that reads connected has to answer before it is taken for dead. */
+export const PROBE_WITHIN_MS = 8_000;
 
 export interface CloudTarget {
   orgId: string;
@@ -56,6 +58,8 @@ export interface CloudLease {
   current(): CloudWorkspaceConnection | null;
   /** The transport state of `current()`: never `connected` for a connection that was closed or replaced. */
   state(): WorkspaceConnectionState;
+  /** The connection was closed for good (deleted, signed out, access refused): nothing will come back on this lease. */
+  ended(): boolean;
   /** Give the lease back; the connection closes after `IDLE_CLOSE_MS` once no lease holds it. Idempotent. */
   release(): void;
 }
@@ -106,6 +110,8 @@ interface Entry {
   /** The last list that said the machine is not running was asked for then. */
   downAt: number | null;
   listed: CloudWorkspaceListed | null;
+  /** The connection being asked whether it still answers (it read connected through a stop). */
+  probing: CloudWorkspaceConnection | null;
   /** A fresh attach waiting for its turn. */
   retry: ReturnType<typeof setTimeout> | null;
   /** No fresh attach before this, and how long the next one waits after it. */
@@ -154,6 +160,7 @@ function entryFor(target: CloudTarget): Entry {
       connectedAt: null,
       downAt: null,
       listed: null,
+      probing: null,
       retry: null,
       retryAt: 0,
       retryDelay: 0,
@@ -231,22 +238,78 @@ function parked(entry: Entry): boolean {
 }
 
 /**
- * Whether the workspace came back under this entry, so that its connection
- * must be replaced:
- * - parked, and a list asked for after it parked says the machine runs;
- * - or connected since before the machine was last seen down: that transport
- *   belongs to the runtime generation that was stopped.
+ * Whether the workspace came back under a parked entry, so that its
+ * connection must be replaced: a list asked for after it parked says the
+ * machine runs.
  */
 function cameBack(entry: Entry): boolean {
   const listed = entry.listed;
-  if (!listed?.running) return false;
-  if (parked(entry)) return entry.parkedAt === null || listed.at > entry.parkedAt;
-  return entry.state.state === "connected" && entry.downAt !== null && listed.at > entry.downAt && (entry.connectedAt ?? 0) <= entry.downAt;
+  if (!listed?.running || !parked(entry)) return false;
+  return entry.parkedAt === null || listed.at > entry.parkedAt;
+}
+
+/**
+ * Connected since before the machine was last seen down, and a later list
+ * says it runs again. That transport may belong to the runtime that was
+ * stopped, or the machine may never have gone down (a stop that failed or
+ * was cancelled, a moment of attention-required): only asking it tells.
+ */
+function suspect(entry: Entry): boolean {
+  const listed = entry.listed;
+  return (
+    !!listed?.running &&
+    !!entry.connection &&
+    entry.state.state === "connected" &&
+    entry.downAt !== null &&
+    listed.at > entry.downAt &&
+    (entry.connectedAt ?? 0) <= entry.downAt
+  );
+}
+
+/**
+ * Ask a connection that reads connected whether its runtime still answers,
+ * with the cheapest read every runtime serves. An answer (a refusal is one)
+ * keeps it: a working connection is never torn down. Silence, or a transport
+ * that refuses the frame, is a dead one, and it is replaced.
+ */
+function probe(entry: Entry) {
+  const connection = entry.connection;
+  if (!connection || entry.probing === connection) return;
+  entry.probing = connection;
+  const downAt = entry.downAt;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const answered = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), PROBE_WITHIN_MS);
+    Promise.resolve()
+      .then(() => connection.client.call("session.tabs"))
+      .then(
+        () => resolve(true),
+        // The runtime's own refusal is an answer; anything else never reached it.
+        (error: unknown) => resolve(error instanceof WorkspaceRpcError),
+      );
+  });
+  void answered.then((alive) => {
+    if (timer) clearTimeout(timer);
+    if (entry.probing === connection) entry.probing = null;
+    if (entries.get(entry.key) !== entry || entry.connection !== connection) return;
+    if (alive) {
+      // It answers after the stop: this connection is the running machine's.
+      if (entry.downAt === downAt) entry.downAt = null;
+      return;
+    }
+    if (entry.state.state !== "connected") return;
+    if (entry.refs === 0) drop(entry);
+    else reattach(entry);
+  });
 }
 
 /** Bring a connection in line with what the list says of its workspace. */
 function settle(entry: Entry) {
   if (entries.get(entry.key) !== entry) return;
+  if (suspect(entry)) {
+    probe(entry);
+    return;
+  }
   if (!cameBack(entry)) {
     if (!entry.listed?.running) cancelRetry(entry);
     return;
@@ -281,6 +344,7 @@ function reattach(entry: Entry) {
   entry.state = IDLE_STATE;
   entry.parkedAt = null;
   entry.downAt = null;
+  entry.probing = null;
   entry.retryDelay = Math.min(REATTACH_MAX_MS, Math.max(REATTACH_FIRST_MS, entry.retryDelay * 2));
   entry.retryAt = clock() + entry.retryDelay;
   detachCloudTerminals(entry.key);
@@ -433,6 +497,7 @@ export async function retainCloudConnection(target: CloudTarget, activation: Lea
     client: connection.client,
     current: () => (entries.get(entry.key) === entry ? entry.connection : null),
     state: () => (entries.get(entry.key) !== entry ? IDLE_STATE : entry.connection ? entry.state : entry.pending ? OPENING_STATE : IDLE_STATE),
+    ended: () => entries.get(entry.key) !== entry,
     release: () => {
       if (released) return;
       released = true;
@@ -486,29 +551,41 @@ export async function wakeCloudConnection(target: CloudTarget): Promise<CloudLea
 }
 
 /**
- * Resolve once the client is connected; reject when the runtime cannot be
- * reached in time, needs an update, or (with `stoppedIsError`) the workspace
- * is stopped. A wake passes through a stopped state, so it is not an error by default.
+ * Resolve with the lease's client once it is connected; reject when the
+ * runtime cannot be reached in time, needs an update, the connection was
+ * closed for good, or (with `stoppedIsError`) the workspace is stopped. A
+ * wake passes through a stopped state, so it is not an error by default.
+ *
+ * It follows the lease, not one client: when the manager replaces the
+ * connection (the workspace stopped and came back), the wait continues on
+ * the new one and resolves with its client. It never waits out the timeout
+ * on a client that was closed.
  */
-export function waitCloudConnected(client: WorkspaceRpcClient, withinMs = 5 * 60 * 1000, options: { stoppedIsError?: boolean } = {}): Promise<void> {
+export function waitCloudConnected(lease: CloudLease, withinMs = 5 * 60 * 1000, options: { stoppedIsError?: boolean } = {}): Promise<WorkspaceRpcClient> {
   return new Promise((resolve, reject) => {
     let stop: (() => void) | null = null;
     let settled = false;
-    const finish = (error: Error | null) => {
+    const finish = (error: Error | null, client?: WorkspaceRpcClient) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       stop?.();
       if (error) reject(error);
-      else resolve();
+      else resolve(client!);
     };
     const timer = setTimeout(() => finish(new Error("cloud_workspace_unreachable")), withinMs);
-    stop = client.onState((state) => {
-      if (state.state === "connected") finish(null);
+    const check = () => {
+      if (lease.ended()) return finish(new Error("cloud_connection_closed"));
+      const connection = lease.current();
+      const state = lease.state();
+      if (state.state === "connected" && connection) finish(null, connection.client);
       else if (state.state === "updateRequired") finish(new Error("cloud_runtime_update_required"));
       else if (state.state === "stopped") finish(new Error("cloud_connection_closed"));
       else if (state.state === "suspended" && options.stoppedIsError) finish(new Error("cloud_workspace_stopped"));
-    });
+    };
+    // Every state change of every connection, a replacement and a close included, is published by the manager.
+    stop = subscribeCloudConnections(check);
+    check();
     if (settled) stop();
   });
 }

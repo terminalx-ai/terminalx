@@ -684,8 +684,8 @@ export function useCloudSession(key: string): CloudSessionModel | null {
         // Chosen explicitly on a stopped workspace: one wake, then the terminal once it runs.
         const lease = await wakeCloudConnection({ orgId, workspaceId });
         try {
-          await waitCloudConnected(lease.client);
-          target = lease.client;
+          // The lease's client of now: a workspace that came back has a new one.
+          target = await waitCloudConnected(lease);
         } finally {
           lease.release();
         }

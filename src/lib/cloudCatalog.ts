@@ -345,8 +345,14 @@ export async function ingestCloudList(
   return { workspaces, notices };
 }
 
-/** A snapshot from a create, lifecycle or operation poll replaces its row at once. */
-export function applyCloudSnapshot(snapshot: CloudWorkspaceSnapshot) {
+/**
+ * A snapshot from a create, lifecycle or operation poll replaces its row at
+ * once. `requestedAt` is when the call that answered with it was made: only
+ * with it are the workspace's connections told, as by a list asked for then
+ * (a snapshot is no newer than its request, so it never passes for a list
+ * asked for after a stop).
+ */
+export function applyCloudSnapshot(snapshot: CloudWorkspaceSnapshot, requestedAt?: number) {
   const orgId = snapshot.workspace.orgId;
   const current = state.orgs[orgId];
   if (!current) return;
@@ -354,8 +360,7 @@ export function applyCloudSnapshot(snapshot: CloudWorkspaceSnapshot) {
   const known = current.workspaces.some((row) => row.workspace.id === item.workspace.id);
   const workspaces = known ? current.workspaces.map((row) => (row.workspace.id === item.workspace.id ? item : row)) : [item, ...current.workspaces];
   set({ ...state, orgs: { ...state.orgs, [orgId]: { ...current, workspaces } } });
-  // The server's answer to a call made just now: as fresh as a list asked for now.
-  tellConnections([item], Date.now());
+  if (requestedAt !== undefined) tellConnections([item], requestedAt);
   schedulePoll(orgId);
 }
 
@@ -403,14 +408,16 @@ export function dismissCloudNotice(notice: PurgeNotice) {
  * which reports its snapshot to `applyCloudSnapshot`. None of these resume.
  */
 export async function unarchiveCloudWorkspace(item: CloudWorkspaceListItem): Promise<void> {
+  const requestedAt = Date.now();
   const snapshot = await api.cloudWorkspaceUnarchive(item.workspace.id, cloudOrgArg(item.workspace.orgId));
-  if (snapshot?.workspace) applyCloudSnapshot(snapshot);
+  if (snapshot?.workspace) applyCloudSnapshot(snapshot, requestedAt);
 }
 
 /** Resume, asked for explicitly from a workspace's menu. Nothing that only looks calls this. */
 export async function resumeCloudWorkspace(item: CloudWorkspaceListItem): Promise<void> {
+  const requestedAt = Date.now();
   const snapshot = await api.cloudWorkspaceResume(item.workspace.id, cloudOrgArg(item.workspace.orgId));
-  if (snapshot?.workspace) applyCloudSnapshot(snapshot);
+  if (snapshot?.workspace) applyCloudSnapshot(snapshot, requestedAt);
 }
 
 /** The workspace a `cloud:<orgId>:<workspaceId>` key names, from the catalog. */

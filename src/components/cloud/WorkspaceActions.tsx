@@ -129,9 +129,10 @@ export function WorkspaceLifecycleDialog({ request, onClose }: { request: Lifecy
       item={request.item}
       initial={request.action}
       onClose={onClose}
-      onDone={(snapshot) => {
+      onDone={(snapshot, done) => {
         onClose();
-        if (request.action === "delete") {
+        // The action performed, not the one the dialog was opened for: the person may have switched.
+        if (done.action === "delete") {
           // Deleted: nothing is left to connect to.
           closeCloudConnection({ orgId: request.item.workspace.orgId, workspaceId: request.item.workspace.id });
         } else if (snapshot?.workspace) {
@@ -139,7 +140,7 @@ export function WorkspaceLifecycleDialog({ request, onClose }: { request: Lifecy
           // session keeps its connection, which follows the machine down and, when
           // someone wakes the workspace again, back up (closing it here left that
           // session on a dead client for good).
-          applyCloudSnapshot(snapshot);
+          applyCloudSnapshot(snapshot, done.requestedAt);
         }
         void refreshCloudCatalog(request.item.workspace.orgId);
       }}

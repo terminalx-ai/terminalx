@@ -244,6 +244,16 @@ function newer(a: { epoch: number; version: number }, b: { epoch: number; versio
   return a.epoch > b.epoch || (a.epoch === b.epoch && a.version > b.version);
 }
 
+/**
+ * How far this desktop knows a tab: the last event the runtime reported for
+ * it, or the last one in the transcript held here, whichever is later. The
+ * one seq a checkpoint is compared with, and that decides whether the
+ * transcript is behind.
+ */
+function knownSeq(tab: CloudAgentTab): number {
+  return Math.max(tab.info.lastSeq, tab.info.sessionId ? lastSeq(tab.info.sessionId, tab.tabId) : 0);
+}
+
 /** A status change: a finished turn is unread until someone looks at it. */
 function noteStatus(tab: CloudAgentTab, status: AgentTabStatus) {
   if (status === "completed" && tab.info.status !== "completed") {
@@ -367,9 +377,12 @@ export async function refreshFromCheckpoint(scope: CloudAgentScope, tabId: strin
   const p = checkpoint.projection;
   if (p.tabId !== tabId) return false;
   current.checkpoint = { epoch: checkpoint.epoch, version: checkpoint.version };
-  // A checkpoint taken before the last event this desktop saw says nothing newer about the turn.
-  const behind = p.events.length > 0 && p.events[p.events.length - 1].seq < current.info.lastSeq;
-  if (current.placeholder || (current.source !== "live" && !behind)) {
+  // Its status is taken only when it is at least as far as what this desktop
+  // knows of the tab: a checkpoint from before that, or one with no events to
+  // tell by, says nothing newer about the turn. A placeholder knows nothing yet.
+  const upTo = p.events.length ? p.events[p.events.length - 1].seq : null;
+  const upToDate = upTo !== null && upTo >= knownSeq(current);
+  if (current.placeholder || (current.source !== "live" && upToDate)) {
     noteStatus(current, p.status);
     current.info = {
       ...current.info,
@@ -382,7 +395,7 @@ export async function refreshFromCheckpoint(scope: CloudAgentScope, tabId: strin
       status: p.status,
       process: p.process,
       followUps: p.followUps ?? [],
-      lastSeq: p.events.length ? p.events[p.events.length - 1].seq : current.info.lastSeq,
+      lastSeq: upTo ?? current.info.lastSeq,
       created: current.info.created || new Date(p.updatedAt || 0).toISOString(),
       modified: new Date(p.updatedAt || 0).toISOString(),
     };
@@ -454,7 +467,7 @@ export async function reconcileCloudAgents(scope: CloudAgentScope, client: Works
   const s = store(scope);
   const behind = tabs.filter((info) => {
     const tab = s.tabs.get(info.tabId);
-    return !!tab && !tab.live && !!info.sessionId && info.lastSeq > lastSeq(info.sessionId, info.tabId);
+    return !!tab && !tab.live && !!info.sessionId && knownSeq(tab) > lastSeq(info.sessionId, info.tabId);
   });
   await Promise.all(behind.slice(0, RECONCILE_CHECKPOINTS).map((info) => refreshFromCheckpoint(scope, info.tabId).catch(() => false)));
 }

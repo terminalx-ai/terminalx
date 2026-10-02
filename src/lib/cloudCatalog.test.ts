@@ -315,6 +315,51 @@ describe("merging and tombstones", () => {
     }
   });
 
+  it("a snapshot is as old as its request: one asked for before a stop never makes a connection attach", async () => {
+    const { retainCloudConnection, resetCloudConnections } = await import("./cloudConnections");
+    const attached: { emit(state: unknown): void; close: ReturnType<typeof vi.fn> }[] = [];
+    mocks.workspaceConnection.mockReset().mockImplementation(async () => {
+      const listeners = new Set<(state: unknown) => void>();
+      let current: unknown = { state: "connecting", attempt: 1 };
+      const connection = {
+        client: { onState: (listener: (state: unknown) => void) => (listeners.add(listener), listener(current), () => listeners.delete(listener)) },
+        activate: vi.fn(async () => undefined),
+        close: vi.fn(),
+        emit(state: unknown) {
+          current = state;
+          for (const listener of [...listeners]) listener(state);
+        },
+      };
+      attached.push(connection);
+      return connection;
+    });
+    try {
+      signIn();
+      mocks.api.cloudWorkspaces.mockResolvedValueOnce({ workspaces: [item("w1")] });
+      bootCloudCatalog();
+      await refreshCloudCatalog(ORG);
+      const lease = await retainCloudConnection({ orgId: ORG, workspaceId: "w1" });
+      attached[0]!.emit({ state: "connected", runtimeGeneration: 1, runtimeVersion: "1", capabilities: [], authority: "manage" });
+      const before = Date.now() - 5_000;
+      attached[0]!.emit({ state: "suspended" });
+      // A resume answered "ready" to a call made before the transport stopped, applied only now.
+      applyCloudSnapshot({ workspace: item("w1").workspace, operation: { id: "op", action: "resume", state: "succeeded" } as never }, before);
+      // A snapshot with no request time (a create poll) says nothing to connections.
+      applyCloudSnapshot({ workspace: item("w1").workspace, operation: { id: "op", action: "resume", state: "succeeded" } as never });
+      // The old page's list, asked for before the stop and arriving after it.
+      await ingestCloudList({ workspaces: [item("w1")] }, ORG, Date.now(), before + 1);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(attached).toHaveLength(1);
+      expect(lease.state()).toEqual({ state: "suspended" });
+      // Asked for after it: this one counts.
+      applyCloudSnapshot({ workspace: item("w1").workspace, operation: { id: "op", action: "resume", state: "succeeded" } as never }, Date.now() + 1_000);
+      await vi.waitFor(() => expect(attached).toHaveLength(2));
+      lease.release();
+    } finally {
+      resetCloudConnections();
+    }
+  });
+
   it("keeps cached rows when a refresh fails, and says so", async () => {
     signIn();
     mocks.api.cloudWorkspaces.mockResolvedValueOnce({ workspaces: [item("w1")] });
