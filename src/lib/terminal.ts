@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import { pty } from "@/lib/api";
-import { countTerminalData, dataRate, rendererOf, webglContexts, type DataRate } from "@/lib/terminalCounters";
+import { countTerminalData, dataRate, isOnScreen, rendererOf, webglContexts, type DataRate } from "@/lib/terminalCounters";
 
 /**
  * Terminal panes per session, and one bridge for the PTY events.
@@ -104,9 +104,12 @@ export interface TerminalCounters {
   /** Live xterm instances, local and cloud, and how many are in the document. */
   instances: number;
   attached: number;
-  /** Live instances by the renderer they are on now. `dom` is the slow fallback. */
+  /** Live instances by the renderer they are on now. A hidden terminal needs none, so `dom` counts those too. */
   webgl: number;
   dom: number;
+  /** Terminals a view is showing, and how many of those are on the DOM fallback: should be none. */
+  onScreen: number;
+  domOnScreen: number;
   webglContexts: typeof webglContexts;
   /** Lines held across every live instance's buffers. */
   bufferLines: number;
@@ -128,6 +131,8 @@ export function terminalCounters(): TerminalCounters {
     attached: live.filter((inst) => inst.el.isConnected).length,
     webgl,
     dom: live.length - webgl,
+    onScreen: live.filter((inst) => isOnScreen(inst.term)).length,
+    domOnScreen: live.filter((inst) => isOnScreen(inst.term) && rendererOf(inst.term) === "dom").length,
     webglContexts: { ...webglContexts },
     bufferLines: live.reduce((lines, inst) => lines + inst.term.buffer.normal.length + inst.term.buffer.alternate.length, 0),
     replayBuffers: replay.size,
@@ -137,11 +142,18 @@ export function terminalCounters(): TerminalCounters {
   };
 }
 
+const disposals = new Set<(inst: TerminalInstance) => void>();
+/** Call `listener` with each instance right after its xterm is disposed (the renderer releases what it holds). */
+export function onInstanceDisposed(listener: (inst: TerminalInstance) => void) {
+  disposals.add(listener);
+}
+
 /** Drop a live instance and its element; its process is the caller's to end. */
 export function disposeInstance(id: string) {
   const inst = instances.get(id);
   if (inst) {
     inst.term.dispose();
+    for (const listener of disposals) listener(inst);
     inst.el.remove();
     instances.delete(id);
   }

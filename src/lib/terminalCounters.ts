@@ -70,3 +70,15 @@ export function setRenderer(term: Terminal, renderer: TerminalRenderer) {
 export function rendererOf(term: Terminal): TerminalRenderer {
   return renderers.get(term) ?? "dom";
 }
+
+const onScreen = new WeakSet<Terminal>();
+
+/** Whether a view is showing the terminal now. Only those need WebGL. */
+export function setOnScreen(term: Terminal, shown: boolean) {
+  if (shown) onScreen.add(term);
+  else onScreen.delete(term);
+}
+
+export function isOnScreen(term: Terminal): boolean {
+  return onScreen.has(term);
+}

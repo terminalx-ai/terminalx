@@ -7,7 +7,7 @@
 // writes the workload files, builds the commands and prints the results.
 //
 //   node scripts/perf/terminal-bench.mjs --home ~/.txperf --pid 12345 \
-//     [--scenarios yes,cat,tui,echo,interrupt,soak] [--terminals 1,8,20] [--out results.json]
+//     [--scenarios yes,cat,tui,echo,interrupt,soak,churn] [--terminals 1,8,20] [--out results.json]
 //     [--interrupt-after 2000] [--soak sessions,tabs,switches] [--work dir] [--label text]
 import { execFileSync } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -16,7 +16,7 @@ import { cpus, homedir, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
 
-const SCENARIOS = ["yes", "cat", "tui", "echo", "interrupt", "soak"];
+const SCENARIOS = ["yes", "cat", "tui", "echo", "interrupt", "soak", "churn"];
 const LOG_BYTES = 50 * 1024 * 1024;
 const TUI_FRAMES = 4000;
 const YES_LINES = 2_000_000;
@@ -249,12 +249,20 @@ function markdown(results) {
     for (const { request, result: r, memory: m } of interrupts) lines.push(`| ${r.terminals} | ${r.renderer} | ${request.afterMs / 1000} | ${r.exitMs} | ${r.outputStoppedMs} | ${(r.bytesAfter / 1024 / 1024).toFixed(1)} | ${r.mainThread.longTasks} | ${r.mainThread.longestMs} | ${r.mainThread.framesPerSecond} | ${web(m.before)} → ${web(m.peak)} → ${web(m.after)} |`);
     lines.push("");
   }
+  const churns = results.filter((r) => r.result.scenario === "churn");
+  if (churns.length) {
+    lines.push("| Run | Collected | WebContent before → after (MB) | GPU before → after (MB) | Contexts created / lost |", "| --- | --- | --- | --- | --- |");
+    for (const { name, result: r, memory: m } of churns) {
+      lines.push(`| ${name} | ${r.collected} of ${r.count} | ${mb(m.before?.WebContent)} → ${mb(m.after?.WebContent)} | ${mb(m.before?.GPU)} → ${mb(m.after?.GPU)} | ${r.counters.webglContexts.created - r.before.webglContexts.created} / ${r.counters.webglContexts.lost - r.before.webglContexts.lost} |`);
+    }
+    lines.push("");
+  }
   const soak = results.filter((r) => r.result.scenario === "soak");
   if (soak.length) {
-    lines.push("| After | WebContent (MB) | GPU (MB) | Main (MB) | xterm instances | WebGL / DOM | Contexts created / lost | Buffer lines | Replay buffers (bytes) | Panes |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    lines.push("| After | WebContent (MB) | GPU (MB) | Main (MB) | xterm instances | WebGL / DOM | On screen (on DOM) | Contexts created / lost | Buffer lines | Replay buffers (bytes) | Panes | Closed terminals collected |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
     for (const { name, result: r, memory: m } of soak) {
       const c = r.counters;
-      lines.push(`| ${name} | ${mb(m.after?.WebContent)} | ${mb(m.after?.GPU)} | ${mb(m.after?.main)} | ${c.instances} | ${c.webgl} / ${c.dom} | ${c.webglContexts.created} / ${c.webglContexts.lost} | ${c.bufferLines} | ${c.replayBuffers} (${c.replayBytes}) | ${c.panes} |`);
+      lines.push(`| ${name} | ${mb(m.after?.WebContent)} | ${mb(m.after?.GPU)} | ${mb(m.after?.main)} | ${c.instances} | ${c.webgl} / ${c.dom} | ${c.onScreen} (${c.domOnScreen}) | ${c.webglContexts.created} / ${c.webglContexts.lost} | ${c.bufferLines} | ${c.replayBuffers} (${c.replayBytes}) | ${c.panes} | ${r.closed.collected} of ${r.closed.tracked}${r.stepClosed ? ` (this step: ${r.stepClosed.collected} of ${r.stepClosed.tracked})` : ""} |`);
     }
     const left = soak.find((r) => r.result.leftAfterDelete)?.result.leftAfterDelete;
     if (left) lines.push("", `Right after deleting the sessions, ${left.panes} of their panes and ${left.counters.instances} xterm instances were still held.`);
@@ -286,6 +294,16 @@ const record = async (name, bytes, request) => {
 };
 
 for (const scenario of options.scenarios) {
+  if (scenario === "churn") {
+    // No process and no view: what xterm and its renderer alone give back.
+    const churn = { scenario: "churn", count: 30, lines: 10_000 };
+    await record("never shown", null, { ...churn, attach: false, webgl: false });
+    await record("on screen, DOM renderer", null, { ...churn, attach: true, webgl: false });
+    await record("on screen, WebGL", null, { ...churn, attach: true, webgl: true });
+    await record("on screen, WebGL, focused", null, { ...churn, attach: true, webgl: true, focus: true });
+    await record("on screen, WebGL, with a process, closed through the store", null, { ...churn, attach: true, webgl: true, pty: { cwd: options.work, command: sh("seq 1 2000; exec cat") } });
+    continue;
+  }
   if (scenario === "soak") {
     const project = join(options.work, "soak-project");
     if (!existsSync(join(project, ".git"))) {

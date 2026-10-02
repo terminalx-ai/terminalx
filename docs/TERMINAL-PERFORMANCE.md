@@ -26,8 +26,10 @@ it is created (`src/components/terminal/TerminalView.tsx`).
 - `backend`: PTY panes, how many are running, scrollback bytes held, and the
   `pty_data` events and bytes sent since launch.
 - `webview`: live xterm instances and how many are in the document, how many
-  are on WebGL and how many fell back to the DOM renderer, WebGL contexts
-  created / lost / refused since the window loaded, buffer lines held, replay
+  are on WebGL and how many on the DOM renderer, how many a view is showing
+  (`onScreen`) and how many of those are on the DOM fallback (`domOnScreen`,
+  which should be 0), WebGL contexts created / lost / refused since the window
+  loaded, buffer lines held, replay
   buffers and their bytes, and output events and bytes per second (local and
   cloud). It is `null` when the window did not answer within 500 ms.
 
@@ -81,10 +83,17 @@ What a run does:
   500 ms samples) and 5 s after each run. WebKit's processes are children of
   launchd, so the script finds them by asking which app each is responsible
   to. There is no JavaScript heap figure: WKWebView does not expose one.
+- **Churn** (`--scenarios churn`). 30 terminals are created, filled with
+  10,000 lines and disposed, with no process and no view, in five variants
+  (never shown; on screen; with WebGL; focused; with a process and closed
+  through the store). A `FinalizationRegistry` counts how many the garbage
+  collector takes back. This is what separates a leak in xterm or its renderer
+  from one in the app.
 - **Soak.** Through the app's own stores and views: open 4 sessions, each with
   a terminal that fills its 10,000-line scrollback; open and close 50 terminal
   tabs; switch sessions 200 times; delete the sessions. The same terminals are
-  open after the first three steps, so memory should be flat across them.
+  open after the first three steps, so memory should be flat across them. The
+  terminals the tab step closes are tracked the same way as in the churn.
 
 ## Baseline
 
@@ -202,3 +211,64 @@ rather than a heap snapshot, so memory that WebKit would give back under
 pressure counts as held; the soak uses shell terminals, not agent CLIs; cloud
 terminals are counted (`data.cloud`) but no cloud scenario was run, because
 the local cloud stack was in use by another session.
+
+## Changes since the baseline
+
+Each entry is one pull request, measured with the same benchmark on the same
+machine, with the matrix and the soak each on a fresh app.
+
+### WebGL contexts are budgeted and released; closed terminals are freed
+
+**Cause of the memory growth.** `@xterm/addon-webgl` 0.19.0 never disposes its
+cursor-blink timer: the field that holds it is not registered with the
+renderer's disposables. A terminal that has focus when it is closed, which is
+the usual way to close one, leaves an interval running for good. The interval
+keeps the renderer, its WebGL context and the terminal with its whole
+scrollback reachable. The churn scenario isolates it: every variant gave its
+terminals back except the focused one.
+
+| Churn variant (30 terminals) | Collected before | Collected after |
+| --- | --- | --- |
+| Never shown | 24 of 30 | 24 of 30 |
+| On screen, DOM renderer | 29 of 30 | 29 of 30 |
+| On screen, WebGL | 29 of 30 | 29 of 30 |
+| On screen, WebGL, focused | **0 of 30** (WebContent 344 → 1,222 MB) | 29 of 30 (161 → 171 MB) |
+| On screen, WebGL, with a process, closed through the store | 29 of 30 | 29 of 30 |
+
+**What changed** (`src/lib/terminalWebgl.ts`):
+
+- The blink timer is stopped when a terminal lets go of its renderer.
+- A terminal gets a WebGL context when a view shows it, not when it is
+  created. The 6 most recently shown hidden terminals keep theirs; the rest
+  draw with the DOM renderer, which does nothing while hidden.
+- A context is released (`WEBGL_lose_context`) when its terminal is closed or
+  goes over the budget.
+- When WebKit takes a context from a terminal that is on screen, it gets a new
+  one at once, on the `webglcontextlost` event, instead of staying on the DOM
+  renderer. A hidden one gets a new one when it is next shown.
+
+**Soak, before → after:**
+
+| After | WebContent (MB) | Terminals on screen that are on the DOM renderer | Live terminals on WebGL / DOM | Closed terminals collected |
+| --- | --- | --- | --- | --- |
+| 4 sessions open (baseline) | 347 → 345 | 0 → 0 | 8 / 0 → 6 / 2 | |
+| 50 tabs opened and closed | 1,209 → 1,153 | 1 → 0 | 0 / 8 → 1 / 7 | not measured → 2 of 50 |
+| 200 session switches | 1,231 → **323** | 1 → 0 | 0 / 8 → 4 / 4 | not measured → 50 of 50 |
+| Sessions deleted, terminals closed | 1,247 → 329 | | | 50 of 50 |
+
+- Memory after the soak is now 0.94 times the baseline (was 3.5 times). The
+  1,153 MB right after the tab step is garbage that WebKit had not collected
+  yet (2 of 50 terminals at that point); it is gone by the next reading.
+- No terminal on screen is on the DOM renderer at any point, in the soak or
+  with 20 terminals open (was 4 of 20, and 8 of 8 after the soak).
+- WebKit still took 6 contexts during the tab step, all from hidden
+  terminals: `loseContext()` does not free WebKit's slot, only collecting the
+  context does, and that lags. The terminals affected get a new context when
+  shown.
+- Throughput, typing echo and Ctrl+C are unchanged, as expected: `cat` of
+  50 MB in 0.55–0.69 s, echo p95 31–32 ms under a flood, output for about
+  630 ms after Ctrl+C.
+- 200 session switches created 3 contexts, so switching between recently
+  used terminals does not pay for a new context.
+
+Still open from the baseline: findings 3 to 6 and 8.

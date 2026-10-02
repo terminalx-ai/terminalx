@@ -1,11 +1,10 @@
 import { useEffect, useRef } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { pty } from "@/lib/api";
 import { getInstance, type TerminalInstance } from "@/lib/terminal";
-import { setRenderer, webglContexts } from "@/lib/terminalCounters";
+import { hideWebgl, showWebgl } from "@/lib/terminalWebgl";
 import { useTheme } from "@/lib/theme";
 
 function cssVar(name: string): string {
@@ -86,7 +85,10 @@ export function themeFor(mode: "dark" | "light") {
       };
 }
 
-/** An xterm in its own element, styled like every TerminalX terminal, not yet wired to a process. */
+/**
+ * An xterm in its own element, styled like every TerminalX terminal, not yet
+ * wired to a process. It draws with WebGL once a view shows it (`terminalWebgl.ts`).
+ */
 export function createTerminal(mode: "dark" | "light"): TerminalInstance {
   const el = document.createElement("div");
   el.className = "h-full w-full";
@@ -103,20 +105,6 @@ export function createTerminal(mode: "dark" | "light"): TerminalInstance {
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.open(el);
-  try {
-    const webgl = new WebglAddon();
-    webgl.onContextLoss(() => {
-      webglContexts.lost++;
-      setRenderer(term, "dom");
-      webgl.dispose();
-    });
-    term.loadAddon(webgl);
-    webglContexts.created++;
-    setRenderer(term, "webgl");
-  } catch {
-    /* canvas renderer stays */
-    webglContexts.failed++;
-  }
   return { el, term, fit };
 }
 
@@ -185,6 +173,13 @@ export function TerminalView({
     const inst = getInstance(id, make);
     inst.term.options.theme = themeFor(resolvedMode);
   }, [id, resolvedMode]);
+
+  useEffect(() => {
+    if (!visible) return;
+    const { term } = getInstance(id, make);
+    showWebgl(term);
+    return () => hideWebgl(term);
+  }, [id, visible]);
 
   useEffect(() => {
     if (!visible) return;
