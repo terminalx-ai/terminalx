@@ -63,6 +63,8 @@ pub mod hooks;
 mod issues;
 #[cfg(feature = "desktop")]
 mod installation;
+#[cfg(feature = "desktop")]
+mod keychain;
 mod memory_baseline;
 mod models;
 mod names;
@@ -146,7 +148,7 @@ pub fn run() {
     let organization_members = Arc::new(organization_members::OrganizationMembersService::new(account.clone()));
     let agent_keys = Arc::new(cloud_agent_client::KeychainKeys::default());
     let cloud_agents = Arc::new(
-        cloud_agent_client::CloudAgentClient::new(account.clone(), agent_keys.clone()).expect("open the cloud agent store under TERMINALX_HOME"),
+        cloud_agent_client::CloudAgentClient::new(account.clone(), Arc::new(cloud_agent_client::CachedKeys::new(agent_keys.clone()))).expect("open the cloud agent store under TERMINALX_HOME"),
     );
     let organization_compute = Arc::new(organization_compute::OrganizationComputeService::new(account.clone()));
     let organization_github_app = Arc::new(organization_github_app::OrganizationGithubAppService::new(account.clone()));

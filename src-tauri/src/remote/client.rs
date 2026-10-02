@@ -316,6 +316,15 @@ impl Supervisor {
         supervisor
     }
 
+    /// Tests: a supervisor that is connected and runs nothing, and where its frames go.
+    #[cfg(test)]
+    pub(crate) fn connected_for_test() -> (Self, mpsc::UnboundedReceiver<Value>) {
+        let (outbound, frames) = mpsc::unbounded_channel();
+        let (activation, _) = watch::channel(Activation::Connect);
+        let (stopped, _) = watch::channel(false);
+        (Self { shared: Arc::new(Shared { outbound: Mutex::new(Some(outbound)), activation, stopped }) }, frames)
+    }
+
     /// Forward one frame (`{ id, method, params }`) to the runtime. False when
     /// not connected: the caller keeps its `clientRequestId` and resends
     /// after the next `connected` state.
