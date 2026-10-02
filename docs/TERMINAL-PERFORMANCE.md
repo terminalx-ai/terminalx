@@ -504,8 +504,8 @@ about 10,000 lines of scrollback in each engine.
   which parses for 12 ms and then waits for a frame; its parser ran at 81 and
   45 MB/s in those runs too. Drawing the changed rows took 1.1–1.3 ms per
   frame on average and 5 ms at most.
-- libghostty-vt loads in 4–7 ms. Its memory for 10,000 lines at 190 columns
-  is about 24 MB, which is what xterm.js needs for the same (about 23 MB).
+- libghostty-vt loads in 4–7 ms. With about 10,000 lines at 190 columns its
+  WebAssembly memory was 31 MB; xterm.js holds about 23 MB for the same.
   WebAssembly memory never shrinks: what a closed terminal used can be reused
   by the next one but is not returned to the system.
 - With `alacritty_terminal`, every 32 KB batch of a flood damages the whole
