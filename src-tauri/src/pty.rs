@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -40,12 +41,32 @@ struct Pane {
 pub struct Terminals {
     panes: Mutex<HashMap<String, Pane>>,
     sink: Mutex<Option<Arc<dyn EventSink>>>,
+    /// Output sent to the webview since launch, for `terminalx status`.
+    emitted: Arc<Emitted>,
+}
+
+#[derive(Default)]
+struct Emitted {
+    events: AtomicU64,
+    bytes: AtomicU64,
 }
 
 impl Default for Terminals {
     fn default() -> Self {
-        Self { panes: Mutex::new(HashMap::new()), sink: Mutex::new(None) }
+        Self { panes: Mutex::new(HashMap::new()), sink: Mutex::new(None), emitted: Arc::default() }
     }
+}
+
+/// What the terminals hold and have sent, for `terminalx status` (issue #232).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalStats {
+    pub panes: usize,
+    pub running: usize,
+    pub scrollback_bytes: usize,
+    /// `pty_data` events and their raw bytes since launch.
+    pub data_events: u64,
+    pub data_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -179,6 +200,7 @@ impl Terminals {
             let alive = alive.clone();
             let last_output = last_output.clone();
             let scrollback = scrollback.clone();
+            let emitted = self.emitted.clone();
             // Reading blocks until the program writes again, so it gets a
             // thread of its own: the emitter below must be able to send what
             // it gathered when the window closes even if the program has
@@ -201,6 +223,8 @@ impl Terminals {
                 let flush = |acc: &mut Vec<u8>| {
                     let data = base64::engine::general_purpose::STANDARD.encode(&*acc);
                     append_scrollback(&scrollback, acc);
+                    emitted.events.fetch_add(1, Ordering::Relaxed);
+                    emitted.bytes.fetch_add(acc.len() as u64, Ordering::Relaxed);
                     *last_output.lock().unwrap() = Some(Instant::now());
                     sink.emit("pty_data", &PtyData { id: id.clone(), data });
                     acc.clear();
@@ -357,6 +381,17 @@ impl Terminals {
             .collect()
     }
 
+    pub fn stats(&self) -> TerminalStats {
+        let panes = self.panes.lock().unwrap();
+        TerminalStats {
+            panes: panes.len(),
+            running: panes.values().filter(|pane| *pane.alive.lock().unwrap()).count(),
+            scrollback_bytes: panes.values().map(|pane| pane.scrollback.lock().unwrap().len()).sum(),
+            data_events: self.emitted.events.load(Ordering::Relaxed),
+            data_bytes: self.emitted.bytes.load(Ordering::Relaxed),
+        }
+    }
+
     fn changed(&self) {
         if let Some(sink) = self.sink.lock().unwrap().as_ref() {
             sink.emit(crate::status::resources::CHANGED_EVENT, &());
@@ -396,7 +431,13 @@ mod tests {
                 .unwrap_or_else(|_| panic!("output held back while the program is quiet: {:?}", String::from_utf8_lossy(&output)));
             output.extend(chunk);
         }
+        let stats = terminals.stats();
+        assert_eq!((stats.panes, stats.running), (1, 1));
+        assert_eq!(stats.data_bytes as usize, output.len());
+        assert_eq!(stats.scrollback_bytes, output.len());
+        assert!(stats.data_events >= 3, "{stats:?}");
         terminals.kill_all();
+        assert_eq!(terminals.stats().panes, 0);
     }
 
     #[test]

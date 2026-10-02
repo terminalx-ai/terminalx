@@ -5,6 +5,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { pty } from "@/lib/api";
 import { getInstance, type TerminalInstance } from "@/lib/terminal";
+import { setRenderer, webglContexts } from "@/lib/terminalCounters";
 import { useTheme } from "@/lib/theme";
 
 function cssVar(name: string): string {
@@ -104,15 +105,23 @@ export function createTerminal(mode: "dark" | "light"): TerminalInstance {
   term.open(el);
   try {
     const webgl = new WebglAddon();
-    webgl.onContextLoss(() => webgl.dispose());
+    webgl.onContextLoss(() => {
+      webglContexts.lost++;
+      setRenderer(term, "dom");
+      webgl.dispose();
+    });
     term.loadAddon(webgl);
+    webglContexts.created++;
+    setRenderer(term, "webgl");
   } catch {
     /* canvas renderer stays */
+    webglContexts.failed++;
   }
   return { el, term, fit };
 }
 
-function createInstance(id: string, mode: "dark" | "light"): TerminalInstance {
+/** A terminal wired to the local pane `id`. */
+export function createInstance(id: string, mode: "dark" | "light"): TerminalInstance {
   const { el, term, fit } = createTerminal(mode);
   term.onData((d) => void pty.write(id, d).catch(() => {}));
   term.onBinary((d) => void pty.write(id, d).catch(() => {}));

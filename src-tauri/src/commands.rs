@@ -1674,6 +1674,12 @@ pub fn pty_kill(state: State<'_, AppState>, id: String) {
     state.terminals.kill(&id);
 }
 
+/// The webview's answer to a `terminal_perf_request` event.
+#[tauri::command]
+pub fn terminal_perf_reply(id: String, result: serde_json::Value) {
+    crate::terminal_perf::reply(&id, result);
+}
+
 // ------------------------------------------------------------------ files & editor
 
 #[tauri::command]

@@ -158,6 +158,8 @@ you make one:
   checkpoint delivered.
 - [docs/PTY-FIRST.md](docs/PTY-FIRST.md) — why a tab is one process, and how
   the chat, the terminal view, the transcript and the hooks fit together.
+- [docs/TERMINAL-PERFORMANCE.md](docs/TERMINAL-PERFORMANCE.md) — how terminal
+  speed and memory are measured, the benchmark, and the current numbers.
 - [docs/RELEASING.md](docs/RELEASING.md) — dev vs release builds, signing, the
   updater feed, and the macOS entitlement traps.
 - [docs/COMPUTER-USE.md](docs/COMPUTER-USE.md) — how agents drive desktop

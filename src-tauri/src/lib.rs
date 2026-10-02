@@ -84,6 +84,7 @@ mod stats;
 #[cfg(feature = "desktop")]
 mod star_nag;
 mod summaries;
+mod terminal_perf;
 mod workspaces;
 
 #[cfg(feature = "desktop")]
@@ -442,6 +443,7 @@ pub fn run() {
             commands::pty_resize,
             commands::mobile_terminal_drivers,
             commands::pty_kill,
+            commands::terminal_perf_reply,
             commands::list_dir,
             media::open_media_file,
             media::close_media_file,
