@@ -13,6 +13,7 @@ import {
   type CloudWorkspaceOperation,
   type CloudWorkspaceTombstone,
 } from "@/lib/api";
+import { roleRefusedMessage } from "@/lib/accountRoles";
 import { closeCloudConnection } from "@/lib/cloudConnections";
 import { dropCloudAgents } from "@/lib/cloudAgents";
 import { dropCloudTerminals } from "@/lib/cloudTerminals";
@@ -136,7 +137,9 @@ const MESSAGES: Record<string, string> = {
   provider_cleanup_pending: "The provider is still removing resources.",
   cloud_workspace_request_outcome_unknown: "No answer arrived. The action may have been applied; the list below is the source of truth.",
   cloud_workspace_not_found: "This workspace no longer exists.",
-  organization_admin_required: "Only an organization admin can do this.",
+  // Offered because the app still held an owner's or admin's role: it changed since.
+  organization_admin_required: roleRefusedMessage("stop, resume, archive or delete a cloud workspace"),
+  forbidden: roleRefusedMessage("stop, resume, archive or delete a cloud workspace"),
 };
 
 export function lifecycleErrorMessage(code: string): string {

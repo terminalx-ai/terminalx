@@ -10,6 +10,8 @@
 // - a terminal someone else opens gets a sidebar row under its session
 //   without reopening it, and the selected row is the tab that shows;
 // - a session row's title keeps its first 12 characters next to its chips;
+// - the session header at 960 px with the side panel open: the title keeps
+//   its first 12 characters and the chips give way to their icons;
 // - the composer's toolbar at 1000x520 and 1280x760, with the Notes drawer
 //   open and a turn running: no control overlaps another or leaves the
 //   composer, and each keeps its icons;
@@ -458,6 +460,97 @@ for (const viewport of [{ width: 1000, height: 520 }, { width: 1280, height: 760
       layout,
     );
   }
+  await page.close();
+}
+
+// The session header in a narrow window with the side panel open (the live
+// test at about 960 px read "s.. / s.. te… C…"): the title keeps its first 12
+// characters, the branch and location chips give way to their icons first
+// (each still with its tooltip), and nothing in the header overlaps.
+const headerLayout = (page) =>
+  page.evaluate(() => {
+    const round = (rect) => ({ left: Math.round(rect.left * 10) / 10, right: Math.round(rect.right * 10) / 10, top: Math.round(rect.top * 10) / 10, bottom: Math.round(rect.bottom * 10) / 10, width: Math.round(rect.width * 10) / 10 });
+    const header = document.querySelector("main header");
+    const title = header.querySelector('[data-testid="session-title"]');
+    const probe = document.createElement("span");
+    probe.textContent = title.textContent.slice(0, 12);
+    probe.style.cssText = `position:fixed;left:-9999px;top:0;white-space:pre;font:${getComputedStyle(title).font}`;
+    document.body.append(probe);
+    const needed = probe.getBoundingClientRect().width;
+    probe.remove();
+    const crumb = header.querySelector('[data-testid="session-breadcrumb"]');
+    const status = [...header.querySelectorAll('[data-testid="session-connection"], [data-testid="cloud-access-chip"]')].map((chip) => ({ id: chip.dataset.testid, text: chip.textContent.trim(), ...round(chip.getBoundingClientRect()) }));
+    const shown = (element) => element.getClientRects().length > 0;
+    const chips = [...header.querySelectorAll('[data-testid="session-location"], [data-testid="session-branch"]')].filter(shown).map((chip) => {
+      const rect = chip.getBoundingClientRect();
+      const icon = chip.querySelector("svg").getBoundingClientRect();
+      const label = chip.querySelector("span.truncate").getBoundingClientRect();
+      return {
+        id: chip.dataset.testid,
+        ...round(rect),
+        tooltip: chip.title.length > 0,
+        iconInside: icon.width > 0 && icon.left >= rect.left - 0.5 && icon.right <= rect.right + 0.5 && icon.top >= rect.top - 0.5 && icon.bottom <= rect.bottom + 0.5,
+        // The label is either on the chip's one line, or wrapped out of sight below it.
+        labelShown: label.top < rect.top + rect.height / 2 ? Math.round(label.width) : 0,
+      };
+    });
+    // Everything the header paints on its one line: the crumbs, the chips and the buttons on the right.
+    const parts = [...crumb.children, ...crumb.nextElementSibling.children].filter((part) => part.getClientRects().length > 0).map((part) => ({ name: (part.dataset.testid || part.getAttribute("aria-label") || part.textContent || "").trim().slice(0, 30), ...round(part.getBoundingClientRect()) }));
+    return {
+      viewport: innerWidth,
+      panel: !!document.querySelector("main aside") && header.getBoundingClientRect().right < innerWidth - 100,
+      header: round(header.getBoundingClientRect()),
+      crumb: round(crumb.getBoundingClientRect()),
+      right: round(crumb.nextElementSibling.getBoundingClientRect()),
+      title: { text: title.textContent, shown: Math.round(title.getBoundingClientRect().width), needed: Math.round(needed), ...round(title.getBoundingClientRect()) },
+      project: shown(header.querySelector('[data-testid="session-project"]')) ? Math.round(header.querySelector('[data-testid="session-project"]').getBoundingClientRect().width) : null,
+      chips,
+      status,
+      parts,
+    };
+  });
+
+function headerChecks(measured, { collapsed }) {
+  const overlapping = [];
+  const { parts } = measured;
+  for (let i = 0; i < parts.length; i++) {
+    for (let j = i + 1; j < parts.length; j++) {
+      if (Math.min(parts[i].right, parts[j].right) - Math.max(parts[i].left, parts[j].left) > 0.5) overlapping.push(`${parts[i].name} / ${parts[j].name}`);
+    }
+  }
+  measured.overlapping = overlapping;
+  const checks = {
+    "the session title shows at least its first 12 characters": measured.title.text.length >= 12 && measured.title.shown >= measured.title.needed,
+    "the title is inside the breadcrumb, which stops before the buttons on the right": measured.title.right <= measured.crumb.right + SLACK && measured.crumb.right <= measured.right.left + SLACK,
+    "the location chip is there, and every chip shown keeps its icon and tooltip, wide enough to press": measured.chips.some((chip) => chip.id === "session-location") && measured.chips.every((chip) => chip.tooltip && chip.iconInside && chip.width >= 20),
+    "the connection and role chips are whole: Live and Driver, inside the breadcrumb": measured.status.map((chip) => chip.text).join(",") === "Live,Driver" && measured.status.every((chip) => chip.width > 20 && chip.right <= measured.crumb.right + SLACK),
+    "nothing in the header overlaps": overlapping.length === 0,
+    "the header is inside the window": measured.header.right <= measured.viewport + SLACK && measured.right.right <= measured.viewport + SLACK,
+  };
+  if (collapsed) checks["the chips gave way to the title: no chip shows a clipped stub of its label"] = measured.chips.every((chip) => chip.labelShown === 0 || chip.labelShown >= 14);
+  else checks["with room, the project and both chips show, with their labels"] = measured.project > 20 && measured.chips.length === 2 && measured.chips.every((chip) => chip.labelShown >= 30);
+  return checks;
+}
+
+for (const { viewport, collapsed } of [
+  { viewport: { width: 960, height: 700 }, collapsed: true },
+  { viewport: { width: 1100, height: 700 }, collapsed: true },
+  { viewport: { width: 1680, height: 800 }, collapsed: false },
+]) {
+  const name = `session header (${viewport.width}x${viewport.height}, side panel open)`;
+  const page = await open(browser, server.url, { cloud: true, localProjects: 0, session: { role: "driver", canApprove: true, lines: 4, branch: "terminalx/share-demo-57f2a9c0" } }, viewport);
+  const title = await page.evaluate(() => window.__PW_RUNTIME__.sessionTitle);
+  const row = page.locator('[data-testid="cloud-session-node"]');
+  await row.waitFor();
+  await row.getByRole("button", { name: title, exact: true }).click();
+  await page.locator('[data-testid="cloud-agent-lease"]').waitFor();
+  // The side panel is the one `aside` inside the main slot, next to the header.
+  if (!(await page.locator("main aside").count())) await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.locator("main aside").first().waitFor();
+  await page.waitForTimeout(300);
+  const measured = await headerLayout(page);
+  failed += report(name, { "the side panel is open": measured.panel, ...headerChecks(measured, { collapsed }) }, measured);
+  if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/cloud-header-${viewport.width}.png` });
   await page.close();
 }
 

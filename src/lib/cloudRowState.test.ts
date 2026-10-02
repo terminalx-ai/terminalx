@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CloudWorkspaceListItem } from "@/lib/api";
-import { deriveCloudActivity, mostUrgent } from "./cloudRowState";
+import { cloudAgentLabel, cloudTabTitle, deriveCloudActivity, mostUrgent } from "./cloudRowState";
 
 // The row-state table (PRO-23, CS-7): the first matching condition wins.
 
@@ -64,5 +64,22 @@ describe("deriveCloudActivity", () => {
   it("picks the most urgent state for a parent row", () => {
     const states = [deriveCloudActivity(item({ state: "suspended" })), deriveCloudActivity(item(), { connection: "connected", tabs: [{ status: "waiting" }] })];
     expect(mostUrgent(states)?.label).toBe("Needs you");
+  });
+});
+
+describe("a new agent tab's name", () => {
+  it("is its agent until its first message gives it a title, never a second copy of the session's", () => {
+    const session = "echo:hello from alice";
+    // The first tab goes by the session's title, then by its own.
+    expect(cloudTabTitle(session, session, true)).toBe(session);
+    expect(cloudTabTitle("Echo:hello from alice", session, true)).toBe("Echo:hello from alice");
+    // A tab added later: a runtime that reports the session's title for it is not believed.
+    expect(cloudTabTitle(session, session, false)).toBeNull();
+    expect(cloudTabTitle(null, session, false)).toBeNull();
+    expect(cloudTabTitle("  ", session, false)).toBeNull();
+    // What the sidebar and the tab strip then show.
+    expect(cloudTabTitle(session, session, false) ?? cloudAgentLabel("claude")).toBe("Claude Code");
+    // Its own title, once it has one.
+    expect(cloudTabTitle("Echo:erin tab", session, false)).toBe("Echo:erin tab");
   });
 });

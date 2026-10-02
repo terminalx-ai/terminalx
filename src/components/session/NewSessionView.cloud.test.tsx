@@ -158,6 +158,46 @@ describe("new session in a cloud project", () => {
   });
 });
 
+describe("a start refused for lack of role (a demoted admin with the form still open)", () => {
+  it.each([
+    // The runtime's refusal of a session this connection may no longer start, an Error from the RPC client, and the server's own code.
+    ["the runtime's forbidden", () => Object.assign(new Error("forbidden"), { code: "forbidden" }), "wake"],
+    ["the server's organization_admin_required", () => ({ code: "organization_admin_required", status: 403 }), "create"],
+  ] as const)("says who may and that the role changed, never the bare code, and reads the roles again (%s)", async (_name, refusal, kind) => {
+    const roles = await import("@/lib/accountRoles");
+    const refresh = vi.fn(async () => undefined);
+    roles.registerAccountRoles({ refresh, listed: vi.fn() });
+    if (kind === "wake") {
+      flow.planCloudStart.mockReturnValue({ kind: "wake", node });
+      flow.startInWorkspace.mockRejectedValue(refusal());
+    } else {
+      flow.planCloudStart.mockReturnValue({ kind: "create" });
+      flow.prepareCloudCreate.mockRejectedValue(refusal());
+    }
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    type("echo:erin after demotion");
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    expect(await screen.findByText("Only an organization owner or admin can start a new cloud session (your role changed).")).toBeTruthy();
+    expect(screen.queryByText(/forbidden|could not be created|organization_admin_required/)).toBeNull();
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(true);
+    roles.registerAccountRoles(null);
+  });
+
+  it("asks nothing of the account for any other refusal", async () => {
+    const roles = await import("@/lib/accountRoles");
+    const refresh = vi.fn(async () => undefined);
+    roles.registerAccountRoles({ refresh, listed: vi.fn() });
+    flow.planCloudStart.mockReturnValue({ kind: "wake", node });
+    flow.startInWorkspace.mockRejectedValue({ code: "cloud_workspace_unreachable" });
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    type("Fix the login redirect");
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    expect(await screen.findByText("The cloud workspace did not come up in time. Try again.")).toBeTruthy();
+    expect(refresh).not.toHaveBeenCalled();
+    roles.registerAccountRoles(null);
+  });
+});
+
 describe("the running limit (saas PRO-76)", () => {
   it("explains a resume refused at the running limit and offers to stop a running workspace", async () => {
     flow.planCloudStart.mockReturnValue({ kind: "wake", node });
@@ -232,7 +272,11 @@ describe("a member, who may not start cloud sessions", () => {
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: /acme\/api/ }));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getByTestId("cloud-start-locked").textContent).toBe("Only an organization owner or admin can start a new cloud session");
+    const reason = within(menu).getByTestId("cloud-start-locked");
+    expect(reason.textContent).toBe("Only an organization owner or admin can start a new cloud session.");
+    // Helper text in sentence case, not a section header (those are upper case).
+    expect(reason.getAttribute("role")).toBe("note");
+    expect(reason.className).not.toMatch(/\buppercase\b|tracking-wide/);
     for (const name of [/acme\/api/, /scratch/]) {
       const entry = within(menu).getByRole("menuitem", { name });
       expect(entry.getAttribute("aria-disabled")).toBe("true");

@@ -107,3 +107,17 @@ const AGENT_LABELS: Record<string, string> = { claude: "Claude Code", codex: "Co
 export function cloudAgentLabel(harness: string): string {
   return AGENT_LABELS[harness.toLowerCase()] ?? (harness.trim() || "Agent");
 }
+
+/**
+ * A cloud tab's own title, or null while it has none. A session's first tab
+ * goes by the session's title until its conversation names it. A tab added
+ * later has no title until its first message; a runtime that still reports
+ * the session's title for it is not believed, so the new tab reads as its
+ * agent ("Claude Code") and not as a second copy of the first tab.
+ */
+export function cloudTabTitle(title: string | null | undefined, sessionTitle: string | null | undefined, firstInSession: boolean): string | null {
+  const own = title?.trim();
+  if (!own) return null;
+  if (!firstInSession && own === sessionTitle?.trim()) return null;
+  return own;
+}

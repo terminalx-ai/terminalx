@@ -40,7 +40,7 @@ import {
   defaultOrgId,
   liveCloudOrgIds,
   placeCloudProjects,
-  refreshCloudCatalog,
+  refreshCloudWorkspaces,
   useCloudCatalog,
   type OrgCatalog,
 } from "@/lib/cloudCatalog";
@@ -282,7 +282,7 @@ function OrgSection({
             <DropdownMenuContent align="end">
               {live ? (
                 <>
-                  <DropdownMenuItem onSelect={() => void refreshCloudCatalog(org.id)}>
+                  <DropdownMenuItem onSelect={() => void refreshCloudWorkspaces(org.id)}>
                     <RefreshCw /> Refresh cloud workspaces
                   </DropdownMenuItem>
                   {/* The full-window page works in the default organization. */}
@@ -310,14 +310,22 @@ function OrgSection({
       )}
       {live && (
         <TreeGroup expanded={!collapsed} className={cn("min-w-0", offline && "opacity-70")}>
-          <OrgTree org={cached} orgId={org.id} onLifecycle={onLifecycle} />
+          <OrgTree org={cached} orgId={org.id} mayCreate={mayCreate} onLifecycle={onLifecycle} />
         </TreeGroup>
       )}
     </div>
   );
 }
 
-function OrgTree({ org, orgId, onLifecycle }: { org: OrgCatalog | undefined; orgId: string; onLifecycle: (dialog: Dialog) => void }) {
+/** What an organization with no cloud projects says: only someone who can create one is pointed at "+". */
+export function emptyOrgText(mayCreate: boolean | null): string {
+  if (mayCreate === true) return "No cloud projects yet. Add one with +.";
+  // A member sees the workspaces shared with them, and cannot create one.
+  if (mayCreate === false) return "No cloud projects shared with you yet.";
+  return "No cloud projects yet.";
+}
+
+function OrgTree({ org, orgId, mayCreate, onLifecycle }: { org: OrgCatalog | undefined; orgId: string; mayCreate: boolean | null; onLifecycle: (dialog: Dialog) => void }) {
   const catalog = useCloudCatalog();
   const prefs = usePrefs();
   const placed = useMemo(
@@ -341,7 +349,11 @@ function OrgTree({ org, orgId, onLifecycle }: { org: OrgCatalog | undefined; org
   const empty = !placed.projects.length && !placed.archived.length;
   return (
     <>
-      {empty && <div className="pl-5 text-[11px] text-faint">No cloud projects yet. Add one with +.</div>}
+      {empty && (
+        <div className="pl-5 text-[11px] text-faint" data-testid="cloud-org-empty">
+          {emptyOrgText(mayCreate)}
+        </div>
+      )}
       {placed.projects.map((project) => (
         <CloudProjectNode key={project.key} project={project} onLifecycle={onLifecycle} />
       ))}
@@ -488,7 +500,7 @@ function CloudProjectNode({ project, onLifecycle }: { project: CloudProject; onL
               >
                 {project.pinned ? <PinOff /> : <Pin />} {project.pinned ? "Unpin project" : "Pin project"}
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => void refreshCloudCatalog(project.orgId)}>
+              <DropdownMenuItem onSelect={() => void refreshCloudWorkspaces(project.orgId)}>
                 <RefreshCw /> Refresh
               </DropdownMenuItem>
               {/* The organization's report, for its owners and admins; one workspace is marked when the project has just one. */}
