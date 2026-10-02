@@ -173,3 +173,38 @@ describe("cloud workspace selection (PRO-58)", () => {
     expect(sessions.getSessionStore().selectedCloudWorkspace).toBe("cloud:org-a:ws-1");
   });
 });
+
+describe("a session's terminals", () => {
+  async function withTerminals() {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (["pty_spawn", "pty_kill", "list_harnesses"].includes(command)) return command === "list_harnesses" ? [] : undefined;
+      if (command === "list_workspaces") return [main, worktree];
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const terminal = await import("./terminal");
+    const shell = await terminal.openTerminal(attached.id, worktreePath);
+    await terminal.adoptPane({ id: "tab:tab-with-transcript", sessionId: attached.id, title: "Agent", hidden: true, owned: true });
+    const other = await terminal.openTerminal("another-session", projectPath);
+    const killed = () => mocks.invoke.mock.calls.filter(([command]) => command === "pty_kill").map(([, args]) => (args as { id: string }).id);
+    const panes = () => terminal.getTerminalState().panes.map((pane) => pane.id);
+    return { shell, other, killed, panes };
+  }
+
+  it("are closed when the backend says the session was deleted", async () => {
+    const { shell, other, killed, panes } = await withTerminals();
+    mocks.listeners.get("session_deleted")?.({ payload: attached.id });
+    expect(panes()).toEqual([other.id]);
+    expect(killed().sort()).toEqual([shell.id, "tab:tab-with-transcript"].sort());
+  });
+
+  it("lose the shells, and keep the agent's pane, when the session's worktree is removed", async () => {
+    const { shell, other, killed, panes } = await withTerminals();
+    mocks.listeners.get("session_updated")?.({ payload: { ...attached, worktreeRemoved: true } });
+    await vi.waitFor(() => expect(panes()).toEqual(["tab:tab-with-transcript", other.id]));
+    expect(killed()).toEqual([shell.id]);
+    // Said again (any later update of the same session): nothing more to close.
+    mocks.listeners.get("session_updated")?.({ payload: { ...attached, worktreeRemoved: true, title: "Renamed" } });
+    await Promise.resolve();
+    expect(killed()).toEqual([shell.id]);
+  });
+});

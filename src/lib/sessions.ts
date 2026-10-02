@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { api } from "@/lib/api";
 import { getAccount } from "@/lib/account";
 import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
-import { setSelectedAgent } from "@/lib/terminal";
+import { closeSessionShells, dropSessionTerminals, setSelectedAgent } from "@/lib/terminal";
 import { buildPaletteIndex, type PaletteIndex } from "@/lib/commandPalette";
 import type {
   ProjectPatch,
@@ -142,6 +142,8 @@ export async function refreshSessions() {
 
 export function upsertSession(s: SessionEntry) {
   const i = state.sessions.findIndex((x) => x.id === s.id);
+  // Its checkout was just removed: a shell left running there has no directory.
+  if (s.worktreeRemoved && i >= 0 && !state.sessions[i].worktreeRemoved) void closeSessionShells(s.id);
   const sessions = i >= 0 ? state.sessions.map((x) => (x.id === s.id ? s : x)) : [...state.sessions, s];
   set({ sessions });
   // A session that just cut its own worktree is ahead of the cached workspace
@@ -154,6 +156,7 @@ export function upsertSession(s: SessionEntry) {
 
 /** Forget sessions the backend has deleted, dropping the selection if it was one of them. */
 export function removeSessions(ids: string[]) {
+  dropSessionTerminals(ids);
   const gone = new Set(ids);
   const selectedGone = !!state.selectedSessionId && gone.has(state.selectedSessionId);
   if (!selectedGone && !state.sessions.some((s) => gone.has(s.id))) return;

@@ -335,6 +335,17 @@ impl Terminals {
         log::warn!("pane {id} did not exit within {timeout:?}");
     }
 
+    /// Kill the shells opened for a session, whose pane ids are
+    /// `<session id>:<suffix>`. An agent tab's pane (`tab:<tab id>`) is its
+    /// tab's to stop.
+    pub fn kill_session_shells(&self, session_id: &str) {
+        let prefix = format!("{session_id}:");
+        let ids: Vec<String> = self.panes.lock().unwrap().keys().filter(|id| id.starts_with(&prefix)).cloned().collect();
+        for id in ids {
+            self.kill(&id);
+        }
+    }
+
     pub fn kill_all(&self) {
         let ids: Vec<String> = self.panes.lock().unwrap().keys().cloned().collect();
         for id in ids {
@@ -438,6 +449,22 @@ mod tests {
         assert!(stats.data_events >= 3, "{stats:?}");
         terminals.kill_all();
         assert_eq!(terminals.stats().panes, 0);
+    }
+
+    #[test]
+    fn deleting_a_session_kills_its_shells_and_no_one_elses() {
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let terminals = Terminals::new();
+        let dir = tempfile::tempdir().unwrap();
+        for id in ["s1:a", "s1:b", "s10:a", "tab:s1"] {
+            let spec = PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 600"), env: &[] };
+            terminals.spawn(sink.clone(), id, spec).unwrap();
+        }
+        terminals.kill_session_shells("s1");
+        let mut left: Vec<String> = terminals.panes().into_iter().map(|pane| pane.id).collect();
+        left.sort();
+        assert_eq!(left, ["s10:a", "tab:s1"]);
+        terminals.kill_all();
     }
 
     #[test]
