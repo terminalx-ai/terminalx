@@ -62,11 +62,116 @@ describe("account status after a silent token refresh", () => {
     mocks.listeners.get("account_status")!({ payload: signedIn(true) });
     expect(account.getAccount().status.organizations?.[0].cloud?.enabled).toBe(true);
 
-    // A missed announcement is caught on focus: the status is read again.
-    mocks.invoke.mockClear().mockResolvedValue(signedIn(true, "org-b"));
+    // A missed announcement is caught on focus: the status is read again,
+    // with the organizations and roles (throttled natively, so not forced).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    mocks.invoke.mockClear().mockResolvedValue({ status: signedIn(true, "org-b"), fresh: false });
     window.dispatchEvent(new Event("focus"));
     await vi.waitFor(() => expect(account.getAccount().status.identity?.organizationId).toBe("org-b"));
-    expect(mocks.invoke.mock.calls[0][0]).toBe("account_status");
+    expect(mocks.invoke.mock.calls[0]).toEqual(["account_refresh_roles", { force: false }]);
+  });
+});
+
+describe("a role changed elsewhere (an owner demotes this admin)", () => {
+  const as = (role: string, extra: Record<string, unknown> = {}) => ({
+    state: "signed-in" as const,
+    identity: { name: "Erin", email: "erin@example.com", organization: "org-a", organizationId: "org-a" },
+    expiresAt: null,
+    lastError: null,
+    context: { scope: "erin", revision: "erin:1", account: "erin" },
+    organizations: [{ id: "org-a", name: "Share Lab", role, isPersonal: false, cloud: { enabled: true, flags: {} } }],
+    multiOrg: true,
+    ...extra,
+  });
+  /** What the native side answers, per command; `roles` is the account service's current word. */
+  const native = (held: string, roles: { role: string; fresh?: boolean } | Error) =>
+    mocks.invoke.mockReset().mockImplementation(async (command: string) => {
+      if (command === "account_status") return as(held);
+      if (command === "account_refresh_roles") {
+        if (roles instanceof Error) throw roles;
+        return { status: as(roles.role), fresh: roles.fresh ?? true };
+      }
+      throw { code: "organization_admin_required", status: 403 };
+    });
+  const roleCalls = () => mocks.invoke.mock.calls.filter(([command]) => command === "account_refresh_roles").map(([, args]) => args);
+  const role = (account: typeof import("./account")) => account.getAccount().status.organizations?.[0].role;
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it("is read from the account service on launch, without waiting for the token to near its expiry", async () => {
+    vi.resetModules();
+    // The saved session still says admin (it did even after a restart); the server says member.
+    native("admin", { role: "member" });
+    const account = await import("./account");
+    const { mayStartCloudSessions } = await import("./multiOrg");
+    await account.bootAccount();
+    await vi.waitFor(() => expect(role(account)).toBe("member"));
+    expect(roleCalls()).toEqual([{ force: true }]);
+    // What every menu derives from: "+", New session, New project… and New cloud workspace… are no longer offered.
+    expect(mayStartCloudSessions(account.getAccount().status, "org-a")).toBe(false);
+  });
+
+  it("is read again at once when a cloud call is refused for lack of role", async () => {
+    vi.resetModules();
+    native("admin", { role: "admin" });
+    const account = await import("./account");
+    // Every native call's failure passes through this (see accountRoles.test.ts).
+    const { noteCallFailure } = await import("./accountRoles");
+    await account.bootAccount();
+    await vi.waitFor(() => expect(roleCalls()).toHaveLength(1));
+    await settle();
+    native("admin", { role: "member" });
+    noteCallFailure({ code: "cloud_workspace_quota_exceeded", status: 409 });
+    expect(roleCalls()).toEqual([]);
+    noteCallFailure({ code: "organization_admin_required", status: 403 });
+    await vi.waitFor(() => expect(role(account)).toBe("member"));
+    expect(roleCalls()).toEqual([{ force: true }]);
+  });
+
+  it("follows a workspace list that says otherwise at once, and asks the account service", async () => {
+    vi.resetModules();
+    native("admin", { role: "admin" });
+    const account = await import("./account");
+    await account.bootAccount();
+    await vi.waitFor(() => expect(roleCalls()).toHaveLength(1));
+    await settle();
+
+    // The account service cannot be reached; the list (read every 30 s) says this person no longer manages.
+    native("admin", new Error("offline"));
+    account.noteListedOrgRole("org-a", false, Date.now() + 1);
+    expect(role(account)).toBe("member");
+    expect(roleCalls()).toEqual([{ force: true }]);
+    await settle();
+    // A status announced meanwhile with the old role does not bring the old menus back.
+    mocks.listeners.get("account_status")!({ payload: as("admin") });
+    expect(role(account)).toBe("member");
+
+    // Once the account service answers, its word is the one shown: promoted to owner meanwhile.
+    native("admin", { role: "owner" });
+    await account.refreshAccountRoles(true);
+    expect(role(account)).toBe("owner");
+    // A list asked for before that answer says nothing new.
+    account.noteListedOrgRole("org-a", false, 1);
+    expect(role(account)).toBe("owner");
+  });
+
+  it("takes a promotion from the list too, and nothing from a list that does not say", async () => {
+    vi.resetModules();
+    native("member", { role: "member" });
+    const account = await import("./account");
+    await account.bootAccount();
+    await vi.waitFor(() => expect(roleCalls()).toHaveLength(1));
+    await settle();
+    native("member", { role: "member", fresh: false });
+    account.noteListedOrgRole("org-a", null, Date.now() + 1);
+    account.noteListedOrgRole("org-a", false, Date.now() + 1);
+    expect(roleCalls()).toEqual([]);
+    account.noteListedOrgRole("org-a", true, Date.now() + 1);
+    expect(role(account)).toBe("admin");
+    expect(roleCalls()).toEqual([{ force: true }]);
+    await settle();
+    // The list agrees with the account again: nothing is overridden.
+    account.noteListedOrgRole("org-a", false, Date.now() + 2);
+    expect(role(account)).toBe("member");
   });
 });
 

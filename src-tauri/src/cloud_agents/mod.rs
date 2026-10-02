@@ -180,6 +180,18 @@ impl ManagerOps {
     }
 }
 
+/// What a tab is called before it has a title of its own. A session's first
+/// tab goes by the session's title (it is the conversation the session was
+/// started with). A tab added later has none until its first message names
+/// it, so it reads as its agent and never as a second copy of the first tab.
+fn tab_title(first_in_session: bool, own: Option<&str>, session_title: &str) -> Option<String> {
+    match own {
+        Some(own) => Some(own.to_string()),
+        None if first_in_session && !session_title.is_empty() => Some(session_title.to_string()),
+        None => None,
+    }
+}
+
 impl AgentOps for ManagerOps {
     fn tabs(&self) -> Vec<AgentTabInfo> {
         let pending = self.manager.pending_permissions();
@@ -191,7 +203,7 @@ impl AgentOps for ManagerOps {
                 out.push(AgentTabInfo {
                     session_id: entry.id.clone(),
                     tab_id: tab.id.clone(),
-                    title: tab.title.clone().or_else(|| Some(entry.title.clone()).filter(|title| !title.is_empty())),
+                    title: tab_title(entry.tabs.first().is_some_and(|first| first.id == tab.id), tab.title.as_deref(), &entry.title),
                     harness: tab.harness.clone(),
                     model: tab.model.clone(),
                     effort: tab.effort.clone(),
@@ -747,4 +759,21 @@ pub fn interrupted_tabs(root: &str) -> Vec<(String, String)> {
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|elapsed| elapsed.as_millis() as u64).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tab_title_tests {
+    use super::tab_title;
+
+    #[test]
+    fn only_a_sessions_first_tab_goes_by_the_sessions_title() {
+        // The first tab, before its conversation names it.
+        assert_eq!(tab_title(true, None, "echo:hello from alice").as_deref(), Some("echo:hello from alice"));
+        // A tab added later is not a second copy of the first: no title until its first message.
+        assert_eq!(tab_title(false, None, "echo:hello from alice"), None);
+        // A title of its own always wins.
+        assert_eq!(tab_title(false, Some("Fix the build"), "echo:hello from alice").as_deref(), Some("Fix the build"));
+        assert_eq!(tab_title(true, Some("Echo:hello from alice"), "echo:hello from alice").as_deref(), Some("Echo:hello from alice"));
+        assert_eq!(tab_title(true, None, ""), None);
+    }
 }

@@ -35,7 +35,7 @@ import { AccessChip, NotSharedNotice, PresenceAvatars } from "@/components/cloud
 import { presenceTab } from "@/lib/cloudCollab";
 import { resolveSessionTab, setVisibleSessionTab } from "@/lib/visibleTab";
 import { WorkspaceActionItems, WorkspaceLifecycleDialog, useLifecycleRun, type LifecycleRequest } from "@/components/cloud/WorkspaceActions";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CloudDiagnosticsDialog, CloudDiagnosticsMenuItem, offersCloudDiagnostics } from "@/components/cloud/CloudDiagnosticsDialog";
@@ -115,6 +115,31 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
   );
 }
 
+/**
+ * A cloud session's header in a narrow window (about 960 px with the side
+ * panel open) gives way in order, so the title stays readable: it keeps about
+ * its first 12 characters while everything else has given all it can.
+ *
+ * 1. The branch and location chips shrink to their icons (`HEADER_CHIP_YIELDS`):
+ *    the label truncates, and with no room left for even an ellipsis it wraps
+ *    out of sight. The chip is one line high, so the wrapped label is clipped,
+ *    and its tooltip still says what it is.
+ * 2. The project name shrinks away.
+ * 3. Only then the title truncates.
+ * 4. In a header too narrow for all of that (`HEADER_TIGHT`), the project and
+ *    the branch chip are left out: the sidebar row shows both.
+ *
+ * The connection and role chips never shrink. The shrink factors do the
+ * ordering: a larger one takes (nearly) all the squeeze until it is at its
+ * minimum.
+ */
+const HEADER_CHIP_YIELDS = "h-5 min-w-[24px] shrink-[1000] flex-wrap content-start gap-x-1 whitespace-nowrap py-0 leading-5";
+/** The chip's icon fills its one line, so a wrapped label starts below the chip and none of it shows. */
+const HEADER_CHIP_ICON = "my-1 size-3 shrink-0";
+const HEADER_CHIP_LABEL = "min-w-[2ch] grow basis-0";
+const HEADER_PROJECT_YIELDS = "min-w-0 shrink-[40]";
+const HEADER_TIGHT = "@max-[360px]/session-header:hidden";
+
 /** What a presence tab id names in this session: an agent tab's title or a terminal. */
 function tabLabelOf(cloud: CloudSessionModel, tabId: string): string | null {
   const tab = cloud.session.tabs.find((candidate) => candidate.id === tabId);
@@ -134,32 +159,46 @@ function CloudLocation({ cloud }: { cloud: CloudSessionModel }) {
   const { status } = useAccount();
   const [error, run] = useLifecycleRun();
   const title = `Runs in the cloud workspace ${cloud.workspaceName} (${location.provider}, ${location.org}), not on this computer.`;
+  const chipClass = cn("ml-1 flex max-w-[30%] items-center overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground", HEADER_CHIP_YIELDS);
+  const chip = (
+    <>
+      <Cloud className={HEADER_CHIP_ICON} />
+      <span className={cn("truncate", HEADER_CHIP_LABEL)}>Cloud · {location.provider} · {location.org}</span>
+    </>
+  );
+  const diagnosticsOffered = offersCloudDiagnostics(status, cloud.orgId);
   return (
     <>
-      <DropdownMenu {...menu.root}>
-        <DropdownMenuTrigger asChild {...menu.trigger}>
-          <button
-            type="button"
-            className="ml-1 flex min-w-0 max-w-[30%] items-center gap-1 overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
-            data-testid="session-location"
-            title={title}
-            aria-label={`Cloud workspace ${cloud.workspaceName}: actions`}
-          >
-            <Cloud className="size-3 shrink-0" />
-            <span className="truncate">Cloud · {location.provider} · {location.org}</span>
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-[17rem]">
-          <DropdownMenuLabel className="truncate">Workspace · {cloud.workspaceName}</DropdownMenuLabel>
-          {item ? <WorkspaceActionItems item={item} onLifecycle={setRequest} run={run} archived={item.workspace.state === "archived"} /> : <DropdownMenuItem disabled>Not in the workspace list</DropdownMenuItem>}
-          {offersCloudDiagnostics(status, cloud.orgId) && (
-            <>
-              <DropdownMenuSeparator />
-              <CloudDiagnosticsMenuItem onSelect={() => setDiagnostics(true)} />
-            </>
-          )}
-        </DropdownMenuContent>
-      </DropdownMenu>
+      {item || diagnosticsOffered ? (
+        <DropdownMenu {...menu.root}>
+          <DropdownMenuTrigger asChild {...menu.trigger}>
+            <button
+              type="button"
+              className={cn(chipClass, "outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40")}
+              data-testid="session-location"
+              title={title}
+              aria-label={`Cloud workspace ${cloud.workspaceName}: actions`}
+            >
+              {chip}
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-[17rem]">
+            <DropdownMenuLabel className="truncate">Workspace · {cloud.workspaceName}</DropdownMenuLabel>
+            {item && <WorkspaceActionItems item={item} onLifecycle={setRequest} run={run} archived={item.workspace.state === "archived"} />}
+            {diagnosticsOffered && (
+              <>
+                {item && <DropdownMenuSeparator />}
+                <CloudDiagnosticsMenuItem onSelect={() => setDiagnostics(true)} />
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ) : (
+        // Not in this person's workspace list (no longer shared with them): there is nothing to act on, so the chip only says where it ran.
+        <span className={chipClass} data-testid="session-location" title={title}>
+          {chip}
+        </span>
+      )}
       {error && (
         <span className="ml-1 truncate text-[11px] text-destructive" role="alert">
           {error}
@@ -277,7 +316,7 @@ export function SessionView({
       <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
         <header
           data-tauri-drag-region="deep"
-          className="flex h-(--titlebar-h) shrink-0 items-center gap-1 px-2"
+          className={cn("flex h-(--titlebar-h) shrink-0 items-center gap-1 px-2", cloud && "@container/session-header")}
           style={{ paddingLeft: sidebarOpen ? 8 : TITLEBAR_INSET }}
         >
           {!sidebarOpen && (
@@ -287,10 +326,18 @@ export function SessionView({
               </Button>
             </WithTooltip>
           )}
-          <div className="flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm">
-            <span className="max-w-[30%] truncate text-muted-foreground" title={cloud ? cloud.projectName : project?.name}>{cloud ? cloud.projectName : (project?.name ?? "project")}</span>
-            <span className="text-faint">/</span>
-            <span className="truncate text-foreground" title={session.title}>
+          {/* A cloud header in a narrow window gives way in order (see HEADER_CHIP_YIELDS), and clips rather than run under the buttons on the right. */}
+          <div className={cn("flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm", cloud && "overflow-hidden")} data-testid="session-breadcrumb">
+            {/* A cloud session that goes by its project's name (untitled, or locked with nothing else to name) has one title, not the same one twice. */}
+            {!(cloud && cloud.projectName === session.title) && (
+              <>
+                <span className={cn("max-w-[30%] truncate text-muted-foreground", cloud && HEADER_PROJECT_YIELDS, cloud && HEADER_TIGHT)} title={cloud ? cloud.projectName : project?.name} data-testid="session-project">
+                  {cloud ? cloud.projectName : (project?.name ?? "project")}
+                </span>
+                <span className={cn("text-faint", cloud && HEADER_TIGHT)}>/</span>
+              </>
+            )}
+            <span className="truncate text-foreground" title={session.title} data-testid="session-title">
               {session.title}
             </span>
             {session.issue && (
@@ -318,8 +365,12 @@ export function SessionView({
               </WithTooltip>
             )}
             {workspaceLabel && (
-              <span className="ml-1 flex min-w-0 max-w-[35%] items-center gap-1 overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground" title={workspaceTitle}>
-                <GitBranch className="size-3 shrink-0" />
+              <span
+                className={cn("ml-1 flex max-w-[35%] items-center overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground", cloud ? cn(HEADER_CHIP_YIELDS, HEADER_TIGHT) : "min-w-0 gap-1")}
+                title={workspaceTitle}
+                data-testid="session-branch"
+              >
+                <GitBranch className={cloud ? HEADER_CHIP_ICON : "size-3 shrink-0"} />
                 {local && session.worktreeName && !session.worktreeRemoved ? (
                   <WorkspaceNameEditor
                     value={session.worktreeName}
@@ -331,7 +382,7 @@ export function SessionView({
                     className="max-w-52 text-muted-foreground hover:text-foreground"
                   />
                 ) : (
-                  <span className="truncate">{workspaceLabel}</span>
+                  <span className={cn("truncate", cloud && HEADER_CHIP_LABEL)}>{workspaceLabel}</span>
                 )}
                 {session.worktreeRemoved && <span className="text-faint">· workspace removed</span>}
               </span>

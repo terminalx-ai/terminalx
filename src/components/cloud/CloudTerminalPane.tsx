@@ -84,7 +84,7 @@ export function CloudTerminalPane({
   );
 }
 
-/** Why this view only watches the terminal, and who is typing in it. */
+/** Why this view only watches the terminal, and who controls it. */
 export function viewerText(
   terminal: CloudTerminal,
   manage: boolean,
@@ -96,7 +96,8 @@ export function viewerText(
   if (controller && controller === you?.userId) return "You control this terminal from another window or device; you are watching here.";
   if (controller) {
     const who = nameOf(controller);
-    return mayControl ? `${who} is typing in this terminal; you are watching.` : `${who} is typing in this terminal. View only: you can watch; ask an admin for driver access to type.`;
+    // Holding control is not typing: the banner says who has the input, not what they are doing with it.
+    return mayControl ? `${who} controls this terminal; you are watching.` : `${who} controls this terminal. View only: you can watch; ask an admin for driver access to type.`;
   }
   if (you && !mayControl) return "View only: you can watch this terminal; ask an admin for driver access to type.";
   if (manage || mayControl) return "Another device controls this terminal's input and size; you are watching.";

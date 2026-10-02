@@ -13,6 +13,7 @@ import {
   type OrganizationSummary,
 } from "@/lib/api";
 import { getAccount, refreshAccount, subscribeAccount } from "@/lib/account";
+import { noteListedOrgRole, refreshAccountRoles } from "@/lib/accountRoles";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { phaseOf, settled } from "@/lib/cloudCreate";
 import { isArchived, isOpen, machineRunning, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
@@ -287,6 +288,19 @@ function emptyOrg(orgId: string): OrgCatalog {
 
 /** Names seen in earlier lists, so a tombstone's notice can say which workspace went. */
 const names = new Map<string, string>();
+/** The project each workspace was last listed under, by workspace id (this launch only). */
+const projectNames = new Map<string, string>();
+
+/**
+ * What a workspace no longer in this person's list was last called here: its
+ * name and its project, as their own sidebar showed them earlier in this
+ * launch. Nothing is read from the server for it and nothing is saved, so
+ * after a relaunch there is no name to show. Null when it was never listed.
+ */
+export function lastKnownWorkspace(workspaceId: string): { name: string; project: string } | null {
+  const name = names.get(workspaceId);
+  return name ? { name, project: projectNames.get(workspaceId) ?? name } : null;
+}
 /** Per organization, when the list now shown was asked for. */
 const listedAt = new Map<string, number>();
 
@@ -318,7 +332,11 @@ export async function ingestCloudList(
   const tombstones = list.tombstones ?? [];
   const deleted = new Set(tombstones.map((tombstone) => tombstone.id));
   const workspaces = list.workspaces.filter((item) => !deleted.has(item.workspace.id));
-  for (const item of list.workspaces) names.set(item.workspace.id, item.workspace.name);
+  for (const item of list.workspaces) {
+    names.set(item.workspace.id, item.workspace.name);
+    const repository = repositoryOf(item, state.createMemory);
+    projectNames.set(item.workspace.id, repository ? (repository.fullName ?? nameOfIdentity(repository.identity)) : item.workspace.name);
+  }
   const org = orgId ?? defaultOrgId(getAccount().status) ?? list.workspaces[0]?.workspace.orgId ?? null;
   const newer = org !== null && (listedAt.get(org) ?? -Infinity) > requestedAt;
   if (org && !newer) {
@@ -478,8 +496,15 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
         return;
       }
       await ingestCloudList(list.value, orgId, now(), requestedAt);
+      // The list is read every 30 s and names this person's role on every
+      // workspace: a role changed by an owner shows here before the account
+      // session is next renewed.
+      noteListedOrgRole(orgId, listedOrgManages(list.value), requestedAt);
     } else {
       patchOrg(orgId, { error: errorText(list.reason) });
+      // A list answers "not found" only to someone who is not a member of the
+      // organization: the organizations held are older than the server's.
+      if (errorText(list.reason) === "cloud_workspace_not_found") void refreshAccountRoles(true);
     }
   })().finally(() => {
     flights.delete(orgId);
@@ -487,6 +512,30 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
   });
   flights.set(orgId, flight);
   return flight;
+}
+
+/**
+ * What a workspace list says about this person's role in its organization:
+ * true for an owner or admin (the API's `manager`, or a `manage` authority on
+ * a server that does not report roles), false for a member, and null when the
+ * list does not say (no workspaces, an older server, or rows that disagree).
+ */
+export function listedOrgManages(list: Pick<CloudWorkspaceList, "workspaces">): boolean | null {
+  const signals = list.workspaces
+    .map(({ workspace }) => (workspace.you ? workspace.you.role === "manager" : workspace.authority === "manage" ? true : workspace.authority === "participate" ? false : null))
+    .filter((signal): signal is boolean => signal !== null);
+  if (!signals.length) return null;
+  const manages = signals[0];
+  return signals.every((signal) => signal === manages) ? manages : null;
+}
+
+/**
+ * "Refresh cloud workspaces" and "Refresh all": the organization's list, and
+ * the account's organizations and roles from the server, which decide what
+ * the menus offer.
+ */
+export function refreshCloudWorkspaces(orgId: string | null = defaultOrgId(getAccount().status)): Promise<void> {
+  return Promise.all([refreshAccountRoles(true), refreshCloudCatalog(orgId)]).then(() => undefined);
 }
 
 // ---- Poll policy -----------------------------------------------------------
@@ -730,6 +779,8 @@ function syncAccount() {
     saveTimer = null;
     flights.clear();
     listedAt.clear();
+    names.clear();
+    projectNames.clear();
     set({ ...EMPTY, owner, revision }, false);
     if (owner && revision) void loadSaved(owner, revision);
   } else if (revision !== state.revision) {
@@ -803,6 +854,7 @@ export function resetCloudCatalog() {
   booted = false;
   flights.clear();
   names.clear();
+  projectNames.clear();
   listedAt.clear();
   state = EMPTY;
   for (const listener of listeners) listener();

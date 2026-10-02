@@ -1341,6 +1341,55 @@ describe("sharing states found in the live two-user test", () => {
     expect(screen.queryByTestId("session-connection")).toBeNull();
   });
 
+  it("names a workspace gone from this person's list once, and offers no empty menu on its chip", async () => {
+    names();
+    const item = shared("viewer");
+    // A blank project: the workspace, its project and an untitled session all go by one name.
+    item.workspace.repositories = [];
+    item.workspace.name = "share-demo";
+    setCatalog(item);
+    const catalogModule = await import("@/lib/cloudCatalog");
+    catalogModule.resetCloudCatalog();
+    runtime.collab = { you: { ...ME, role: "viewer" }, participants: [], leases: [] };
+    await openShared({ ...ME, role: "viewer" });
+
+    // Made private again before this launch ever listed it: there is no name to show.
+    mocks.catalog.orgs = { [ORG]: { orgId: ORG, workspaces: [], repositories: null, repositoriesAt: null, quota: null, fetchedAt: 2, source: "live", error: null } };
+    await act(async () => runtime.emit({ state: "reconnecting", attempt: 1, reason: "cloud_workspace_not_found", retryInMs: 250 }));
+    await screen.findByTestId("cloud-access-removed");
+    const crumb = screen.getByTestId("session-breadcrumb");
+    // One neutral title, not "Cloud workspace / Cloud workspace".
+    expect(screen.getByTestId("session-title").textContent).toBe("Cloud workspace");
+    expect(screen.queryByTestId("session-project")).toBeNull();
+    expect(crumb.textContent?.match(/Cloud workspace/g)).toHaveLength(1);
+    // The chip says where it ran; with nothing to act on it is not a menu.
+    const chip = screen.getByTestId("session-location");
+    expect(chip.tagName).toBe("SPAN");
+    expect(chip.getAttribute("aria-haspopup")).toBeNull();
+    fireEvent.click(chip);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.queryByText("Not in the workspace list")).toBeNull();
+  });
+
+  it("keeps the names the sidebar last showed for a workspace that left the list", async () => {
+    names();
+    const item = shared("viewer");
+    const catalogModule = await import("@/lib/cloudCatalog");
+    catalogModule.resetCloudCatalog();
+    await catalogModule.ingestCloudList({ workspaces: [item] }, ORG);
+    setCatalog(item);
+    runtime.collab = { you: { ...ME, role: "viewer" }, participants: [], leases: [] };
+    await openShared({ ...ME, role: "viewer" });
+    mocks.catalog.orgs = { [ORG]: { orgId: ORG, workspaces: [], repositories: null, repositoriesAt: null, quota: null, fetchedAt: 2, source: "live", error: null } };
+    await act(async () => runtime.emit({ state: "reconnecting", attempt: 1, reason: "cloud_workspace_not_found", retryInMs: 250 }));
+    await screen.findByTestId("cloud-access-removed");
+    // Project and workspace as this person already saw them; the session's own title is not shown to someone locked out.
+    expect(screen.getByTestId("session-project").textContent).toBe("acme/api");
+    expect(screen.getByTestId("session-title").textContent).toBe("login-fix");
+    expect(screen.getByTestId("session-location").tagName).toBe("SPAN");
+    catalogModule.resetCloudCatalog();
+  });
+
   it("keeps a plain network drop as a reconnect, never as lost access", async () => {
     names();
     setCatalog(shared("driver"));

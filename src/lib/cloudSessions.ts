@@ -4,6 +4,7 @@ import type { CloudWorkspaceListItem } from "@/lib/api";
 import { applyLiveTabs, closeCloudAgentTab, loadCloudAgents, useCloudAgents, watchLiveTabs, type CloudAgentTab } from "@/lib/cloudAgents";
 import { cacheCloudSessions, dropCachedCloudSessions, useCloudCatalog, type CachedWorkspaceSessions } from "@/lib/cloudCatalog";
 import { onWorkspaceAccess } from "@/lib/cloudCollab";
+import { cloudTabTitle } from "@/lib/cloudRowState";
 import { onCloudConnected, retainCloudConnection, waitCloudConnected, type CloudTarget } from "@/lib/cloudConnections";
 import { closeCloudTerminal, cloudTerminalsOf, dropCloudTerminals } from "@/lib/cloudTerminals";
 import { clearSessionTabsUnder } from "@/lib/terminal";
@@ -246,13 +247,15 @@ export function buildCloudSessions(input: {
   const source: CloudSessionRow["source"] = input.live ? "live" : "cache";
   const listed = input.live ?? input.cached?.sessions ?? [];
 
-  const tabOf = (tabId: string, fallback: { harness: string; title?: string | null; status: TabStatus }): CloudSessionTab => {
+  const tabOf = (tabId: string, fallback: { harness: string; title?: string | null; status: TabStatus }, session?: { title: string | null | undefined; first: boolean }): CloudSessionTab => {
     const known = agentTabs.get(tabId);
     const status = known ? known.info.status : fallback.status;
+    const title = known?.info.title ?? fallback.title ?? null;
     return {
       tabId,
       harness: known?.info.harness || fallback.harness,
-      title: known?.info.title ?? fallback.title ?? null,
+      // A tab added to a session has no title of its own until its first message.
+      title: session ? cloudTabTitle(title, session.title, session.first) : title,
       status: tabStatus(status, stopped),
       unread: known ? known.unread : status === "completed",
       pendingApprovals: known?.info.pendingPermissions.length ?? 0,
@@ -273,7 +276,7 @@ export function buildCloudSessions(input: {
       modified: session.modified,
       pinned: session.pinned,
       archived: session.archived,
-      tabs: session.tabs.map((tab) => tabOf(tab.id, { harness: tab.harness, title: tab.title, status: tab.status })),
+      tabs: session.tabs.map((tab, index) => tabOf(tab.id, { harness: tab.harness, title: tab.title, status: tab.status }, { title: session.title, first: index === 0 })),
       activeTab: session.activeTab ?? null,
       source,
     });

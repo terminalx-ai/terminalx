@@ -3,6 +3,7 @@ import { Check, Copy, Loader2, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   isInvitableEmail,
+  isTransientMembersError,
   membersErrorMessage,
   organizationMembers,
   type AssignableRole,
@@ -14,6 +15,8 @@ import {
 
 const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", member: "Member" };
 const roleLabel = (role: string) => ROLE_LABEL[role] ?? role;
+/** How long after a failed roster read the one automatic retry is made. */
+const MEMBERS_RETRY_DELAY_MS = 400;
 const selectClass = "h-7 rounded-md border border-hairline bg-background px-1.5 text-xs disabled:opacity-60";
 
 export function OrganizationMembers({
@@ -45,7 +48,18 @@ export function OrganizationMembers({
     const fresh = () => current === loadSeq.current && context === contextEpoch.current;
     setLoading(true);
     try {
-      const next = await organizationMembers.list();
+      let next: OrganizationRoster;
+      try {
+        next = await organizationMembers.list();
+      } catch (failure) {
+        // The first read after Settings opens often races the account
+        // session's own refresh. Ask once more, shortly after, before saying
+        // the service could not be reached; a refusal with a reason is not retried.
+        if (!isTransientMembersError(failure) || !fresh()) throw failure;
+        await new Promise((resolve) => setTimeout(resolve, MEMBERS_RETRY_DELAY_MS));
+        if (!fresh()) return;
+        next = await organizationMembers.list();
+      }
       if (fresh()) {
         setRoster(next);
         if (!keepError) setError(null);
@@ -152,7 +166,7 @@ export function OrganizationMembers({
             manage={manage}
             busy={busy}
             confirming={confirmRemove === member.userId}
-            onRole={(next) => void mutate(`role:${member.userId}`, (revision) => organizationMembers.updateRole(member.userId, next, revision))}
+            onRole={(next) => mutate(`role:${member.userId}`, (revision) => organizationMembers.updateRole(member.userId, next, revision)).then((roster) => roster !== null)}
             onRemove={() => setConfirmRemove(member.userId)}
             onCancelRemove={() => setConfirmRemove(null)}
             onConfirmRemove={() =>
@@ -253,12 +267,30 @@ function MemberRow({
   manage: boolean;
   busy: string | null;
   confirming: boolean;
-  onRole: (role: AssignableRole) => void;
+  /** Resolves true when the server took the change. */
+  onRole: (role: AssignableRole) => Promise<boolean>;
   onRemove: () => void;
   onCancelRemove: () => void;
   onConfirmRemove: () => void;
 }) {
   const name = member.displayName ?? member.email;
+  // The role being saved, shown while the request runs. Whatever the outcome
+  // the select then shows the server's value again: a refused change (no
+  // permission, a plan that does not allow it, an error) must not leave the
+  // role that was asked for beside the error. The select is remounted after a
+  // refusal, so the control itself cannot keep the refused choice either.
+  const [saving, setSaving] = useState<AssignableRole | null>(null);
+  const [refusals, setRefusals] = useState(0);
+  const changeRole = (next: AssignableRole) => {
+    if (next === member.role) return;
+    setSaving(next);
+    void onRole(next)
+      .then((taken) => {
+        if (!taken) setRefusals((count) => count + 1);
+      })
+      .catch(() => setRefusals((count) => count + 1))
+      .finally(() => setSaving(null));
+  };
   // The owner is immutable here and nobody edits themselves; the server
   // enforces both, so the controls only mirror it.
   const editable = manage && !isSelf && member.role !== "owner";
@@ -279,9 +311,10 @@ function MemberRow({
             <select
               aria-label={`Role for ${member.email}`}
               className={selectClass}
-              value={member.role}
+              key={refusals}
+              value={saving ?? member.role}
               disabled={Boolean(busy)}
-              onChange={(event) => onRole(event.target.value === "admin" ? "admin" : "member")}
+              onChange={(event) => changeRole(event.target.value === "admin" ? "admin" : "member")}
             >
               <option value="member">Member</option>
               <option value="admin">Admin</option>

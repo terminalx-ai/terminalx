@@ -208,3 +208,23 @@ describe("losing access to a cloud workspace", () => {
     expect(held.activate).not.toHaveBeenCalled();
   });
 });
+
+describe("a tab added to a session (live test: two rows named after the session)", () => {
+  it("reads as its agent until its first message, while the first tab keeps the session's title", async () => {
+    const { buildCloudSessions } = await import("@/lib/cloudSessions");
+    const title = "echo:hello from alice";
+    const tab = (id: string, own: string | null) => ({ id, harness: "claude", title: own, model: "opus", permissionMode: "default", status: "idle", created: "", modified: "" });
+    const live = [{ ...session("s1", title), tabs: [tab("t1", "Echo:hello from alice"), tab("t2", null)], activeTab: "t2" }] as unknown as RuntimeSession[];
+    // The runtime's agent list reports the session's title for a tab without one of its own.
+    const info = (tabId: string, reported: string) => ({ tabId, info: { sessionId: "s1", tabId, title: reported, harness: "claude", status: "idle", pendingPermissions: [] }, unread: false, live: true, placeholder: false });
+    const rows = buildCloudSessions({ item: item({ role: "manager", canApprove: true }), live, agentTabs: [info("t1", "Echo:hello from alice"), info("t2", title)] as never });
+    expect(rows[0].title).toBe(title);
+    expect(rows[0].tabs.map((row) => row.title)).toEqual(["Echo:hello from alice", null]);
+    // After its first message it has its own title.
+    const named = buildCloudSessions({ item: item({ role: "manager", canApprove: true }), live, agentTabs: [info("t1", "Echo:hello from alice"), info("t2", "Echo:erin tab")] as never });
+    expect(named[0].tabs.map((row) => row.title)).toEqual(["Echo:hello from alice", "Echo:erin tab"]);
+    // A first tab with no title yet goes by the session's.
+    const first = buildCloudSessions({ item: item({ role: "manager", canApprove: true }), live: [{ ...live[0], tabs: [tab("t1", null)] }] as never, agentTabs: [info("t1", title)] as never });
+    expect(first[0].tabs.map((row) => row.title)).toEqual([title]);
+  });
+});
