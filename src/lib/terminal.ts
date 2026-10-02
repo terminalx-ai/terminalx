@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import { pty } from "@/lib/api";
-import { countTerminalData, dataRate, rendererOf, webglContexts, type DataRate } from "@/lib/terminalCounters";
+import { countTerminalData, dataRate, isOnScreen, rendererOf, webglContexts, type DataRate } from "@/lib/terminalCounters";
 
 /**
  * Terminal panes per session, and one bridge for the PTY events.
@@ -78,6 +78,27 @@ export interface TerminalInstance {
 const instances = new Map<string, TerminalInstance>();
 const REPLAY_MAX = 256 * 1024;
 const replay = new Map<string, { chunks: Uint8Array[]; size: number }>();
+/**
+ * Panes closed a moment ago. The last output of a pane that was just killed
+ * is still on its way, and with no pane to show it, it would start a replay
+ * buffer that nothing ever reads or drops.
+ */
+const closing = new Map<string, ReturnType<typeof setTimeout>>();
+const CLOSING_MS = 5_000;
+
+/** Let go of everything this window holds for a pane that is gone. */
+function forgetPane(id: string) {
+  clearTimeout(closing.get(id));
+  closing.set(id, setTimeout(() => closing.delete(id), CLOSING_MS));
+  replay.delete(id);
+  disposeInstance(id);
+}
+
+/** A pane with this id is (again) wanted: its output is kept from here on. */
+function expectPane(id: string) {
+  clearTimeout(closing.get(id));
+  closing.delete(id);
+}
 
 function decode(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -104,9 +125,14 @@ export interface TerminalCounters {
   /** Live xterm instances, local and cloud, and how many are in the document. */
   instances: number;
   attached: number;
-  /** Live instances by the renderer they are on now. `dom` is the slow fallback. */
+  /** Live instances by the renderer they are on now. A hidden terminal needs none, so `dom` counts those too. */
   webgl: number;
   dom: number;
+  /** Terminals a view is showing, and how many of those are on the DOM fallback: should be none. */
+  onScreen: number;
+  domOnScreen: number;
+  /** Terminals in the document that no view is showing. They would draw every frame of output for nobody: should be none. */
+  hiddenInDocument: number;
   webglContexts: typeof webglContexts;
   /** Lines held across every live instance's buffers. */
   bufferLines: number;
@@ -128,6 +154,9 @@ export function terminalCounters(): TerminalCounters {
     attached: live.filter((inst) => inst.el.isConnected).length,
     webgl,
     dom: live.length - webgl,
+    onScreen: live.filter((inst) => isOnScreen(inst.term)).length,
+    domOnScreen: live.filter((inst) => isOnScreen(inst.term) && rendererOf(inst.term) === "dom").length,
+    hiddenInDocument: live.filter((inst) => inst.el.isConnected && !isOnScreen(inst.term)).length,
     webglContexts: { ...webglContexts },
     bufferLines: live.reduce((lines, inst) => lines + inst.term.buffer.normal.length + inst.term.buffer.alternate.length, 0),
     replayBuffers: replay.size,
@@ -137,11 +166,18 @@ export function terminalCounters(): TerminalCounters {
   };
 }
 
+const disposals = new Set<(inst: TerminalInstance) => void>();
+/** Call `listener` with each instance right after its xterm is disposed (the renderer releases what it holds). */
+export function onInstanceDisposed(listener: (inst: TerminalInstance) => void) {
+  disposals.add(listener);
+}
+
 /** Drop a live instance and its element; its process is the caller's to end. */
 export function disposeInstance(id: string) {
   const inst = instances.get(id);
   if (inst) {
     inst.term.dispose();
+    for (const listener of disposals) listener(inst);
     inst.el.remove();
     instances.delete(id);
   }
@@ -166,6 +202,7 @@ async function register() {
         inst.term.write(bytes);
         return;
       }
+      if (closing.has(id)) return;
       let r = replay.get(id);
       if (!r) replay.set(id, (r = { chunks: [], size: 0 }));
       r.chunks.push(bytes);
@@ -191,6 +228,7 @@ export async function openTerminal(sessionId: string, cwd: string, cols = 100, r
   counter++;
   const id = opts.id ?? `${sessionId}:${Date.now().toString(36)}${counter}`;
   if (state.panes.some((p) => p.id === id)) await closeTerminal(id);
+  expectPane(id);
   const number = (terminalNumbers.get(sessionId) ?? 0) + 1;
   if (!opts.hidden && !opts.title) terminalNumbers.set(sessionId, number);
   const pane: TerminalPane = {
@@ -233,8 +271,7 @@ export async function closeTerminal(id: string) {
   await pty.kill(id).catch(() => {});
   if (pane.hidden) {
     set({ panes: state.panes.filter((p) => p.id !== id) });
-    replay.delete(id);
-    disposeInstance(id);
+    forgetPane(id);
     return;
   }
   const visibleBefore = state.panes.filter((p) => p.sessionId === pane.sessionId && !p.hidden);
@@ -252,8 +289,31 @@ export async function closeTerminal(id: string) {
     active: { ...state.active, [pane.sessionId]: nextTerminal?.id ?? "" },
     selected,
   });
-  replay.delete(id);
-  disposeInstance(id);
+  forgetPane(id);
+}
+
+/**
+ * The sessions are gone (deleted, or their workspace was): close every
+ * terminal they had, shells and agent panes alike. Nothing else would: a
+ * session that is no longer listed has no tab strip to close them from.
+ */
+export function dropSessionTerminals(sessionIds: readonly string[]) {
+  const gone = new Set(sessionIds);
+  const doomed = state.panes.filter((pane) => gone.has(pane.sessionId));
+  for (const id of gone) terminalNumbers.delete(id);
+  const remembered = (record: Record<string, unknown>) => Object.keys(record).some((id) => gone.has(id));
+  if (!doomed.length && !remembered(state.active) && !remembered(state.selected)) return;
+  const without = <T,>(record: Record<string, T>) => Object.fromEntries(Object.entries(record).filter(([id]) => !gone.has(id)));
+  set({ panes: state.panes.filter((pane) => !gone.has(pane.sessionId)), active: without(state.active), selected: without(state.selected) });
+  for (const pane of doomed) {
+    void pty.kill(pane.id).catch(() => {});
+    forgetPane(pane.id);
+  }
+}
+
+/** Close a session's shells and leave its agent panes: its checkout was removed, so a shell there has nowhere to be. */
+export async function closeSessionShells(sessionId: string) {
+  for (const pane of state.panes.filter((item) => item.sessionId === sessionId && !item.hidden)) await closeTerminal(pane.id);
 }
 
 export function setActiveTerminal(sessionId: string, id: string) {
@@ -306,6 +366,7 @@ export function clearSelectedBrowser(sessionId: string, id: string) {
  * the replay buffer is kept for ids no pane claims yet.
  */
 export async function adoptPane(pane: Omit<TerminalPane, "created" | "exited" | "exitCode">) {
+  expectPane(pane.id);
   await subscribeTerminals();
   const live = { ...pane, created: new Date().toISOString(), exited: false, exitCode: null };
   // The same pane can be adopted twice: a tab whose CLI is replaced in place
