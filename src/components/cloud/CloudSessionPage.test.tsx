@@ -602,7 +602,9 @@ describe("shared cloud workspaces (PRO-30)", () => {
     await openReady();
     act(() => emit(shared({ userId: "u-me", role: "driver", canApprove: false }, { authority: "participate" })));
     const viewer = await screen.findByTestId("cloud-terminal-viewer");
-    await waitFor(() => expect(viewer.textContent).toContain("Alice is typing in this terminal"));
+    // Holding control is not typing: the banner says who has the input.
+    await waitFor(() => expect(viewer.textContent).toContain("Alice controls this terminal; you are watching."));
+    expect(viewer.textContent).not.toContain("typing");
     fireEvent.click(screen.getByRole("button", { name: "Take control" }));
     await waitFor(() => expect(client.controlPty).toHaveBeenCalledWith("remote-pty-1", 132, 40));
     // Creating terminals stays with manage attachments.
@@ -614,7 +616,7 @@ describe("shared cloud workspaces (PRO-30)", () => {
     await openReady();
     act(() => emit(shared({ userId: "u-me", role: "viewer", canApprove: true }, { authority: "participate" })));
     const viewer = await screen.findByTestId("cloud-terminal-viewer");
-    await waitFor(() => expect(viewer.textContent).toContain("Alice is typing in this terminal"));
+    await waitFor(() => expect(viewer.textContent).toContain("Alice controls this terminal"));
     expect(viewer.textContent).toContain("ask an admin for driver access");
     expect(screen.queryByRole("button", { name: "Take control" })).toBeNull();
   });

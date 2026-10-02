@@ -15,6 +15,7 @@ import {
   type CreateForm,
   type PendingCreate,
 } from "@/lib/cloudCreate";
+import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { retainCloudConnection, waitCloudConnected, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
 import { archiving, deletion, isOpen } from "@/lib/cloudLifecycle";
 import { bootCloudSessions, refreshCloudSessions } from "@/lib/cloudSessions";
@@ -87,14 +88,16 @@ export async function startInWorkspace(plan: Extract<CloudStartPlan, { kind: "re
   const target = { orgId, workspaceId };
   let lease: CloudLease = plan.kind === "reuse" ? await retainCloudConnection(target, "connect") : await wakeCloudConnection(target);
   try {
+    // The lease's client of now: the connection is replaced when the workspace stopped and came back.
+    let client: WorkspaceRpcClient;
     try {
-      await waitCloudConnected(lease.client, WAKE_WITHIN_MS, { stoppedIsError: plan.kind === "reuse" });
+      client = await waitCloudConnected(lease, WAKE_WITHIN_MS, { stoppedIsError: plan.kind === "reuse" });
     } catch (error) {
       // The list said running, the runtime says stopped: starting a session is an action, so wake it (once).
       if (!(error instanceof Error) || error.message !== "cloud_workspace_stopped") throw error;
       lease.release();
       lease = await wakeCloudConnection(target);
-      await waitCloudConnected(lease.client, WAKE_WITHIN_MS);
+      client = await waitCloudConnected(lease, WAKE_WITHIN_MS);
     }
     const scope = { organizationId: orgId, workspaceId };
     const params = {
@@ -108,16 +111,16 @@ export async function startInWorkspace(plan: Extract<CloudStartPlan, { kind: "re
     };
     let tabId: string;
     try {
-      tabId = await createCloudAgentTab(scope, lease.client, params);
+      tabId = await createCloudAgentTab(scope, client, params);
     } catch (error) {
       // A workspace whose folder has no Git repository cannot cut a worktree; the session works in the folder.
       if (!request.useWorktree || !worktreeRefused(error)) throw error;
-      tabId = await createCloudAgentTab(scope, lease.client, { ...params, useWorktree: false });
+      tabId = await createCloudAgentTab(scope, client, { ...params, useWorktree: false });
     }
     const sessionId = getCloudAgents(scope).tabs.find((tab) => tab.tabId === tabId)?.info.sessionId;
     if (!sessionId) throw new Error("cloud_session_not_created");
     // The list follows `session.sessions` on session/2 runtimes; read it now either way so the row is there.
-    void refreshCloudSessions(target, lease.client).catch(() => undefined);
+    void refreshCloudSessions(target, client).catch(() => undefined);
     const key = cloudSessionKey(orgId, workspaceId, sessionId);
     selectCloudSession(key);
     return key;

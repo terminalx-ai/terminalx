@@ -44,6 +44,8 @@ import {
   flushCloudCatalogSave,
   getCloudCatalog,
   ingestCloudList,
+  lastKnownWorkspace,
+  listedOrgManages,
   liveCloudOrgIds,
   parseCatalog,
   placeCloudProjects,
@@ -54,12 +56,14 @@ import {
   POLL_FOCUSED_MS,
   REFRESH_ON_RETURN_FLOOR_MS,
   refreshCloudCatalog,
+  refreshCloudWorkspaces,
   rememberCreatedWorkspace,
   resetCloudCatalog,
   serializeCatalog,
   type OrgCatalog,
 } from "./cloudCatalog";
 import { resetPurged } from "./cloudLifecycle";
+import { registerAccountRoles } from "./accountRoles";
 import { notifyAccessChanged } from "./cloudCollab";
 import { createWorkspace, type CreateApi } from "./cloudCreate";
 // What the Rust `cloud_workspaces` command hands the webview for a saas #137/#139
@@ -270,6 +274,94 @@ describe("merging and tombstones", () => {
     expect(mocks.closeWorkspaceConnection).toHaveBeenCalledWith({ kind: "cloud", organizationId: ORG, workspaceId: "gone" });
     expect(result.notices).toEqual([{ workspaceId: "gone", name: "ws gone", unsentCommands: 0, unsavedFiles: 0 }]);
     expect(getCloudCatalog().notices).toHaveLength(1);
+  });
+
+  it("tells the connection manager what each list says, so a held connection follows its workspace back with connect", async () => {
+    const { retainCloudConnection, resetCloudConnections } = await import("./cloudConnections");
+    const attached: { emit(state: { state: string }): void; close: ReturnType<typeof vi.fn>; activate: ReturnType<typeof vi.fn> }[] = [];
+    mocks.workspaceConnection.mockReset().mockImplementation(async () => {
+      const listeners = new Set<(state: unknown) => void>();
+      let current: unknown = { state: "connecting", attempt: 1 };
+      const connection = {
+        client: { onState: (listener: (state: unknown) => void) => (listeners.add(listener), listener(current), () => listeners.delete(listener)) },
+        activate: vi.fn(async () => undefined),
+        close: vi.fn(),
+        emit(state: { state: string }) {
+          current = state;
+          for (const listener of [...listeners]) listener(state);
+        },
+      };
+      attached.push(connection);
+      return connection;
+    });
+    try {
+      const lease = await retainCloudConnection({ orgId: ORG, workspaceId: "w1" });
+      attached[0]!.emit({ state: "connected", runtimeGeneration: 1, runtimeVersion: "1", capabilities: [], authority: "manage" } as never);
+      const asked = Date.now();
+      // Stopped from here: the list has the suspend operation, then the stopped workspace.
+      await ingestCloudList({ workspaces: [item("w1", {}, { id: "op", action: "suspend", state: "running" })] }, ORG, asked, asked);
+      attached[0]!.emit({ state: "suspended" });
+      await ingestCloudList({ workspaces: [item("w1", { state: "suspended" })] }, ORG, asked + 1, asked + 1);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(attached).toHaveLength(1);
+      // Someone else woke it: the next list says ready.
+      const later = Date.now() + 1_000;
+      await ingestCloudList({ workspaces: [item("w1")] }, ORG, later, later);
+      await vi.waitFor(() => expect(attached).toHaveLength(2));
+      expect(attached[0]!.close).toHaveBeenCalledTimes(1);
+      expect(lease.current()).toBe(attached[1]);
+      expect(mocks.workspaceConnection.mock.calls.map((call) => call[1])).toEqual(["connect", "connect"]);
+      expect(attached.flatMap((connection) => connection.activate.mock.calls)).toEqual([]);
+      expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+      lease.release();
+    } finally {
+      resetCloudConnections();
+    }
+  });
+
+  it("a snapshot is as old as its request: one asked for before a stop never makes a connection attach", async () => {
+    const { retainCloudConnection, resetCloudConnections } = await import("./cloudConnections");
+    const attached: { emit(state: unknown): void; close: ReturnType<typeof vi.fn> }[] = [];
+    mocks.workspaceConnection.mockReset().mockImplementation(async () => {
+      const listeners = new Set<(state: unknown) => void>();
+      let current: unknown = { state: "connecting", attempt: 1 };
+      const connection = {
+        client: { onState: (listener: (state: unknown) => void) => (listeners.add(listener), listener(current), () => listeners.delete(listener)) },
+        activate: vi.fn(async () => undefined),
+        close: vi.fn(),
+        emit(state: unknown) {
+          current = state;
+          for (const listener of [...listeners]) listener(state);
+        },
+      };
+      attached.push(connection);
+      return connection;
+    });
+    try {
+      signIn();
+      mocks.api.cloudWorkspaces.mockResolvedValueOnce({ workspaces: [item("w1")] });
+      bootCloudCatalog();
+      await refreshCloudCatalog(ORG);
+      const lease = await retainCloudConnection({ orgId: ORG, workspaceId: "w1" });
+      attached[0]!.emit({ state: "connected", runtimeGeneration: 1, runtimeVersion: "1", capabilities: [], authority: "manage" });
+      const before = Date.now() - 5_000;
+      attached[0]!.emit({ state: "suspended" });
+      // A resume answered "ready" to a call made before the transport stopped, applied only now.
+      applyCloudSnapshot({ workspace: item("w1").workspace, operation: { id: "op", action: "resume", state: "succeeded" } as never }, before);
+      // A snapshot with no request time (a create poll) says nothing to connections.
+      applyCloudSnapshot({ workspace: item("w1").workspace, operation: { id: "op", action: "resume", state: "succeeded" } as never });
+      // The old page's list, asked for before the stop and arriving after it.
+      await ingestCloudList({ workspaces: [item("w1")] }, ORG, Date.now(), before + 1);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(attached).toHaveLength(1);
+      expect(lease.state()).toEqual({ state: "suspended" });
+      // Asked for after it: this one counts.
+      applyCloudSnapshot({ workspace: item("w1").workspace, operation: { id: "op", action: "resume", state: "succeeded" } as never }, Date.now() + 1_000);
+      await vi.waitFor(() => expect(attached).toHaveLength(2));
+      lease.release();
+    } finally {
+      resetCloudConnections();
+    }
   });
 
   it("keeps cached rows when a refresh fails, and says so", async () => {
@@ -628,5 +720,84 @@ describe("every organization live (CS-18)", () => {
     bootCloudCatalog();
     await vi.waitFor(() => expect(getCloudCatalog().orgs[ORG_B]?.error).toBe("cloud_workspace_invalid_response"));
     expect(mocks.refreshAccount).not.toHaveBeenCalled();
+  });
+});
+
+describe("the account's role, as the workspace list reports it", () => {
+  const roles = { refresh: vi.fn(async () => undefined), listed: vi.fn() };
+  beforeEach(() => {
+    roles.refresh.mockClear();
+    roles.listed.mockClear();
+    registerAccountRoles(roles);
+  });
+  afterEach(() => registerAccountRoles(null));
+  const you = (role: string) => ({ you: { role, canApprove: role === "manager" } });
+
+  it("reads manager as an owner or admin, anything else as a member, and nothing from a list that does not say", () => {
+    expect(listedOrgManages({ workspaces: [item("w1", you("manager")), item("w2", you("manager"))] })).toBe(true);
+    expect(listedOrgManages({ workspaces: [item("w1", you("driver")), item("w2", you("none"))] })).toBe(false);
+    // A server that reports no roles still says what opening would grant.
+    expect(listedOrgManages({ workspaces: [item("w1", { authority: "manage" })] })).toBe(true);
+    expect(listedOrgManages({ workspaces: [item("w1", { authority: "participate" })] })).toBe(false);
+    // The role wins over the authority.
+    expect(listedOrgManages({ workspaces: [item("w1", { ...you("viewer"), authority: "manage" })] })).toBe(false);
+    expect(listedOrgManages({ workspaces: [] })).toBeNull();
+    expect(listedOrgManages({ workspaces: [item("w1")] })).toBeNull();
+    expect(listedOrgManages({ workspaces: [item("w1", you("manager")), item("w2", you("driver"))] })).toBeNull();
+  });
+
+  it("tells the account what each list says, with when the list was asked for", async () => {
+    signIn();
+    let now = 1_000;
+    mocks.api.cloudWorkspaces.mockResolvedValueOnce({ workspaces: [item("w1", you("driver"))] });
+    bootCloudCatalog();
+    await refreshCloudCatalog(ORG, () => now++);
+    await vi.waitFor(() => expect(roles.listed).toHaveBeenCalled());
+    const [orgId, manages, askedAt] = roles.listed.mock.calls.at(-1)!;
+    expect([orgId, manages]).toEqual([ORG, false]);
+    expect(askedAt).toBeGreaterThan(0);
+    // A list alone never asks the account service; the account store decides.
+    expect(roles.refresh).not.toHaveBeenCalled();
+  });
+
+  it("a list refused as not found means this account is not a member: the organizations are read again", async () => {
+    signIn();
+    bootCloudCatalog();
+    await refreshCloudCatalog(ORG);
+    roles.refresh.mockClear();
+    mocks.api.cloudWorkspaces.mockRejectedValueOnce({ code: "cloud_workspace_not_found", status: 404 });
+    await refreshCloudCatalog(ORG);
+    expect(roles.refresh).toHaveBeenCalledExactlyOnceWith(true);
+    // An ordinary failure does not.
+    roles.refresh.mockClear();
+    mocks.api.cloudWorkspaces.mockRejectedValueOnce({ code: "cloud_workspace_unavailable" });
+    await refreshCloudCatalog(ORG);
+    expect(roles.refresh).not.toHaveBeenCalled();
+  });
+
+  it("Refresh cloud workspaces reads the roles from the server and lists", async () => {
+    signIn();
+    bootCloudCatalog();
+    await refreshCloudCatalog(ORG);
+    roles.refresh.mockClear();
+    mocks.api.cloudWorkspaces.mockClear();
+    await refreshCloudWorkspaces(ORG);
+    expect(roles.refresh).toHaveBeenCalledExactlyOnceWith(true);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a workspace no longer in this person's list", () => {
+  it("keeps the names their sidebar showed for it, for this launch only", async () => {
+    signIn();
+    expect(lastKnownWorkspace("never-listed")).toBeNull();
+    await ingestCloudList({ workspaces: [item("w-repo", { name: "api work", repositories: [{ identity: "github.com/acme/api", fullName: "acme/api", cloneUrl: null, primary: true }] }), item("w-blank", { name: "share-demo", repositories: [] })] }, ORG, 10, 10);
+    // Made private again: the next list no longer has them.
+    await ingestCloudList({ workspaces: [] }, ORG, 20, 20);
+    expect(getCloudCatalog().orgs[ORG].workspaces).toEqual([]);
+    expect(lastKnownWorkspace("w-repo")).toEqual({ name: "api work", project: "acme/api" });
+    expect(lastKnownWorkspace("w-blank")).toEqual({ name: "share-demo", project: "share-demo" });
+    // Nothing of it is saved for the next launch.
+    expect(JSON.stringify(serializeCatalog(getCloudCatalog()))).not.toContain("share-demo");
   });
 });

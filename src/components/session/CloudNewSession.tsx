@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { Cloud, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
+import { isRoleRefusal, roleRefusedMessage } from "@/lib/accountRoles";
 import { useAccount } from "@/lib/account";
 import { cloudOrganizations, defaultOrgId, liveCloudOrgIds, placeCloudProjects, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CreateRefused, createErrorMessage, isClientError } from "@/lib/cloudCreate";
@@ -74,6 +75,10 @@ export function useCloudDraft(): { project: CloudProject | null; orgName: string
 }
 
 export function cloudStartError(error: unknown): string {
+  // Refused for lack of role (the server's code, or the runtime's `forbidden`
+  // for a session this connection may not start): the form was offered on a
+  // role that has changed since.
+  if (isRoleRefusal(error)) return roleRefusedMessage("start a new cloud session");
   if (error instanceof CreateRefused) return createErrorMessage(error.code, error.detail);
   if (isClientError(error)) return createErrorMessage(error.code);
   const code = error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : error instanceof Error ? error.message : null;

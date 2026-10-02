@@ -25,6 +25,7 @@ import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
 import type { PairingConnectionMode, PairingStatus } from "@/types/pairing";
 import type { CloudDiagnostics, ConnectionClose } from "@/lib/cloudDiagnostics";
+import { noteCallFailure } from "@/lib/accountRoles";
 import { assertLocal } from "@/types/target";
 
 /**
@@ -47,7 +48,10 @@ function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
       return Promise.reject(error);
     }
   }
-  return args === undefined ? tauriInvoke<T>(command) : tauriInvoke<T>(command, args);
+  const call = args === undefined ? tauriInvoke<T>(command) : tauriInvoke<T>(command, args);
+  // A refusal for lack of role or membership means the roles held are stale: they are read again.
+  if (call && typeof (call as Promise<T>).then === "function") call.then(undefined, noteCallFailure);
+  return call;
 }
 
 export interface NewTab {
@@ -149,6 +153,12 @@ export interface WorkspaceRename {
 export const api = {
   // optional TerminalX account
   accountStatus: () => invoke<AccountStatus>("account_status"),
+  /**
+   * Read the organizations and the role in each again from the account
+   * service (no token rotates). A routine call is throttled natively; `force`
+   * asks at once. `fresh` says the server answered for this call.
+   */
+  accountRefreshRoles: (force: boolean) => invoke<{ status: AccountStatus; fresh: boolean }>("account_refresh_roles", { force }),
   accountSignIn: () => invoke<AccountStatus>("account_sign_in"),
   accountSignOut: () => invoke<AccountStatus>("account_sign_out"),
   organizationCreate: (name: string, idempotencyKey: string) =>

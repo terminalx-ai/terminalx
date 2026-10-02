@@ -117,6 +117,17 @@ export function membersErrorMessage(error: unknown): string {
     case "unauthorized":
       return "Your session expired. Sign in again.";
     default:
-      return "TerminalX could not reach the account service. Try again.";
+      return UNREACHABLE;
   }
+}
+
+const UNREACHABLE = "TerminalX could not reach the account service. Try again.";
+
+/**
+ * A failure that says nothing about the request itself (no answer, a server
+ * error, a code this app does not know): worth one quiet retry before it is
+ * shown. A refusal with a known reason is shown as it is.
+ */
+export function isTransientMembersError(error: unknown): boolean {
+  return membersErrorMessage(error) === UNREACHABLE;
 }

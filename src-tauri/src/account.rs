@@ -55,6 +55,10 @@ fn dev_api_base_url(debug_build: bool, value: Option<&str>) -> Option<String> {
 const AUTHORIZE_PATH: &str = "/v1/desktop/auth/authorize";
 const SESSION_PATH: &str = "/v1/desktop/auth/session";
 const REFRESH_PATH: &str = "/v1/desktop/auth/refresh";
+/// The session body (identity, organizations with roles, capabilities) with no
+/// tokens: what keeps a role or membership change from waiting for the access
+/// token to near its expiry.
+const CAPABILITIES_PATH: &str = "/v1/desktop/auth/capabilities";
 const LOGOUT_PATH: &str = "/v1/desktop/auth/logout";
 const ORGANIZATIONS_PATH: &str = "/v1/desktop/orgs";
 const ACTIVE_ORGANIZATION_PATH: &str = "/v1/desktop/auth/org";
@@ -66,6 +70,13 @@ const KEYCHAIN_ACCOUNT: &str = "desktop-session";
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const REFRESH_SKEW_MS: i64 = 60_000;
+/// A routine re-read of organizations and roles (window focus) asks the server
+/// at most this often.
+const ROLES_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+/// A forced re-read (launch, an explicit refresh, a refusal for lack of role)
+/// asks at once, unless an answer arrived this recently: a burst of refusals
+/// is one question.
+const ROLES_REFRESH_FLOOR: Duration = Duration::from_secs(2);
 const KEYCHAIN_NOT_FOUND: i32 = -25_300;
 
 #[derive(Clone, Serialize)]
@@ -241,6 +252,25 @@ struct Capabilities {
     refreshed_at: i64,
 }
 
+/// What `POST /v1/desktop/auth/capabilities` answers: a session without tokens.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionBody {
+    cloud: CloudIdentity,
+    #[serde(default)]
+    organizations: Vec<Organization>,
+    capabilities: Capabilities,
+}
+
+/// The account status after [`AccountManager::refresh_roles`], and whether the
+/// server answered for it just now (false when throttled, signed out or unreachable).
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RolesRefresh {
+    status: AccountStatus,
+    fresh: bool,
+}
+
 struct PendingAuth {
     generation: u64,
     code_verifier: String,
@@ -268,6 +298,9 @@ pub struct AccountManager {
     app: OnceLock<AppHandle>,
     inner: Mutex<Inner>,
     refresh_gate: Mutex<()>,
+    /// When the server last answered with organizations and roles. Held while
+    /// asking, so concurrent callers share one answer.
+    roles_refreshed: Mutex<Option<Instant>>,
 }
 
 enum CallbackAction {
@@ -358,6 +391,100 @@ impl AccountManager {
         self.ensure_loaded();
         self.refresh_if_needed();
         self.snapshot()
+    }
+
+    /// Read the organizations, the role in each and the capabilities again
+    /// from the account service, so a role or membership changed elsewhere (an
+    /// owner demoting this admin) shows here without waiting for the access
+    /// token to near its expiry. The answer is saved, so the next launch
+    /// starts from it, and announced when it changes what the webview sees.
+    ///
+    /// A routine call is throttled; `force` asks at once. No token rotates.
+    pub fn refresh_roles(&self, app: &AppHandle, force: bool) -> RolesRefresh {
+        self.attach_app(app);
+        self.ensure_loaded();
+        let fresh = self.refresh_roles_with(force, Instant::now(), fetch_session_body);
+        RolesRefresh { status: self.snapshot(), fresh }
+    }
+
+    /// True when the server answered with the current organizations and roles.
+    fn refresh_roles_with(&self, force: bool, now: Instant, fetch: impl FnOnce(&DesktopSession) -> Result<SessionBody, CloudError>) -> bool {
+        let mut refreshed = self.roles_refreshed.lock().unwrap();
+        // A token rotation brings the same body: nothing more to ask.
+        let token = |manager: &Self| manager.inner.lock().unwrap().session.as_ref().map(|session| session.access_token.clone());
+        let before = token(self);
+        if self.refresh_if_needed() {
+            let after = token(self);
+            let rotated = after.is_some() && after != before;
+            if rotated {
+                *refreshed = Some(now);
+            }
+            return rotated;
+        }
+        if !roles_refresh_due(*refreshed, now, force) {
+            return false;
+        }
+        let Some((generation, session)) = ({
+            let inner = self.inner.lock().unwrap();
+            inner.session.clone().map(|session| (inner.generation, session))
+        }) else {
+            return false;
+        };
+        match fetch(&session) {
+            Ok(body) => {
+                let (applied, changed) = self.apply_session_body(generation, &session, body);
+                if applied {
+                    *refreshed = Some(now);
+                }
+                if changed {
+                    if let Some(app) = self.app.get() {
+                        self.emit(app);
+                    }
+                }
+                applied
+            }
+            Err(error) => {
+                // Not a sign-out and not an error to show: the roles shown are
+                // the last known ones, and the token refresh owns expiry.
+                log::debug!("could not refresh TerminalX organizations and roles: {error}");
+                false
+            }
+        }
+    }
+
+    /// Take a tokenless session body for the session it was asked with.
+    /// Returns (applied, what the webview sees changed). A body for another
+    /// account, or one that arrives after a sign-out or a token rotation (which
+    /// brought a newer body of its own), is dropped.
+    fn apply_session_body(&self, generation: u64, asked_with: &DesktopSession, body: SessionBody) -> (bool, bool) {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(current) = inner.session.as_ref() else { return (false, false) };
+        if inner.generation != generation || current.access_token != asked_with.access_token || current.refresh_token != asked_with.refresh_token {
+            return (false, false);
+        }
+        let candidate = DesktopSession {
+            access_token: current.access_token.clone(),
+            refresh_token: current.refresh_token.clone(),
+            expires_at: current.expires_at,
+            cloud: body.cloud,
+            organizations: body.organizations,
+            capabilities: body.capabilities,
+        };
+        let Ok(candidate) = normalize_session(candidate) else { return (false, false) };
+        if candidate.cloud.user_id != current.cloud.user_id || candidate.cloud.cloud_profile_id != current.cloud.cloud_profile_id {
+            return (false, false);
+        }
+        let before = serde_json::to_value(snapshot(&inner)).ok();
+        let stored_changed = serde_json::to_value(&candidate).ok() != serde_json::to_value(current).ok();
+        inner.session = Some(candidate);
+        let changed = serde_json::to_value(snapshot(&inner)).ok() != before;
+        if stored_changed {
+            // Saved so a relaunch starts from the current roles, not the ones at sign-in.
+            if let Err(error) = self.save_session(inner.session.as_ref().expect("session was just set")) {
+                log::warn!("could not save refreshed TerminalX organizations to Keychain: {error:#}");
+            }
+        }
+        (true, changed)
     }
 
     /// Return a native-only snapshot suitable for account-bound services.
@@ -1009,6 +1136,16 @@ fn refresh(session: &DesktopSession) -> Result<DesktopSession, CloudError> {
     .and_then(normalize_session)
 }
 
+fn fetch_session_body(session: &DesktopSession) -> Result<SessionBody, CloudError> {
+    post_json(CAPABILITIES_PATH, json!({}), Some(&session.access_token))
+}
+
+/// Whether to ask the server for organizations and roles now.
+fn roles_refresh_due(last: Option<Instant>, now: Instant, force: bool) -> bool {
+    let Some(last) = last else { return true };
+    now.saturating_duration_since(last) >= if force { ROLES_REFRESH_FLOOR } else { ROLES_REFRESH_INTERVAL }
+}
+
 fn logout(session: &DesktopSession) -> Result<(), CloudError> {
     post_json::<serde_json::Value>(
         LOGOUT_PATH,
@@ -1418,6 +1555,105 @@ mod tests {
         let scope = manager.current_scope().unwrap();
         assert_eq!(scope.kept_orgs(), with, "nothing of a still-member organization is purged");
         assert!(!scope.allows("org-b"), "but it is inactive: nothing reaches it");
+    }
+
+    fn body(role: &str) -> SessionBody {
+        serde_json::from_value(json!({
+            "cloud": { "cloudProfileId": "profile", "userId": "user", "email": "a@example.com", "displayName": "A", "activeOrgId": "org-a", "activeOrgName": "Test Organization", "linkedAt": 1 },
+            "organizations": [{ "orgId": "org-a", "name": "Acme", "role": role, "isPersonal": false, "cloud": { "enabled": true, "flags": {} } }],
+            "capabilities": { "flags": { MULTI_ORG_CAPABILITY: true }, "refreshedAt": 5 }
+        }))
+        .unwrap()
+    }
+
+    fn role_of(manager: &AccountManager) -> Option<String> {
+        snapshot(&manager.inner.lock().unwrap()).organizations.first().map(|org| org.role.clone())
+    }
+
+    #[test]
+    fn a_demoted_admins_role_is_read_again_without_rotating_the_token() {
+        let manager = signed_in("org-a");
+        let start = Instant::now();
+        assert!(manager.refresh_roles_with(true, start, |session| {
+            assert_eq!(session.access_token, "a", "asked with the access token");
+            Ok(body("admin"))
+        }));
+        assert_eq!(role_of(&manager).as_deref(), Some("admin"));
+
+        // The owner demotes this admin: the next forced read says so, and the
+        // tokens and their expiry are the ones already held.
+        let before = manager.inner.lock().unwrap().session.clone().unwrap();
+        assert!(manager.refresh_roles_with(true, start + ROLES_REFRESH_FLOOR, |_| Ok(body("member"))));
+        assert_eq!(role_of(&manager).as_deref(), Some("member"));
+        let after = manager.inner.lock().unwrap().session.clone().unwrap();
+        assert_eq!((after.access_token, after.refresh_token, after.expires_at), (before.access_token, before.refresh_token, before.expires_at));
+        assert_eq!(serde_json::to_value(manager.snapshot()).unwrap()["multiOrg"], true);
+        // The generation is the same account's: nothing built on it is torn down.
+        assert_eq!(manager.inner.lock().unwrap().generation, 7);
+    }
+
+    #[test]
+    fn a_role_refresh_is_announced_only_when_what_the_webview_sees_changed() {
+        let manager = signed_in("org-a");
+        let session = manager.inner.lock().unwrap().session.clone().unwrap();
+        assert_eq!(manager.apply_session_body(7, &session, body("admin")), (true, true));
+        assert_eq!(manager.apply_session_body(7, &session, body("admin")), (true, false));
+        assert_eq!(manager.apply_session_body(7, &session, body("member")), (true, true));
+    }
+
+    #[test]
+    fn a_role_refresh_for_another_account_or_an_older_session_is_dropped() {
+        let manager = signed_in("org-a");
+        let session = manager.inner.lock().unwrap().session.clone().unwrap();
+        // Signed out and in again while the request ran.
+        assert_eq!(manager.apply_session_body(6, &session, body("member")), (false, false));
+        // The token rotated while the request ran: the rotation's body is newer.
+        let mut older = session.clone();
+        older.access_token = "previous".into();
+        assert_eq!(manager.apply_session_body(7, &older, body("member")), (false, false));
+        // A body for someone else.
+        let mut other = body("member");
+        other.cloud.user_id = "someone-else".into();
+        assert_eq!(manager.apply_session_body(7, &session, other), (false, false));
+        // A body that is not a valid session.
+        let mut invalid = body("member");
+        invalid.capabilities.refreshed_at = 0;
+        assert_eq!(manager.apply_session_body(7, &session, invalid), (false, false));
+        assert_eq!(role_of(&manager), None, "nothing was taken");
+        // Signed out: nothing to refresh, and nothing is asked.
+        manager.set_context_for_test(None);
+        assert!(!manager.refresh_roles_with(true, Instant::now(), |_| panic!("signed out")));
+    }
+
+    #[test]
+    fn a_routine_role_refresh_is_throttled_and_a_forced_one_is_not() {
+        let start = Instant::now();
+        assert!(roles_refresh_due(None, start, false), "the first read (launch) always asks");
+        assert!(!roles_refresh_due(Some(start), start + Duration::from_secs(59), false));
+        assert!(roles_refresh_due(Some(start), start + Duration::from_secs(60), false));
+        assert!(roles_refresh_due(Some(start), start + Duration::from_secs(2), true));
+        assert!(!roles_refresh_due(Some(start), start + Duration::from_secs(1), true), "a burst of refusals is one question");
+
+        let manager = signed_in("org-a");
+        assert!(manager.refresh_roles_with(false, start, |_| Ok(body("admin"))));
+        assert!(!manager.refresh_roles_with(false, start + Duration::from_secs(30), |_| panic!("throttled")));
+        assert!(manager.refresh_roles_with(true, start + Duration::from_secs(30), |_| Ok(body("member"))));
+        assert_eq!(role_of(&manager).as_deref(), Some("member"));
+    }
+
+    #[test]
+    fn a_failed_role_refresh_keeps_the_session_and_is_asked_again() {
+        let manager = signed_in("org-a");
+        let start = Instant::now();
+        assert!(manager.refresh_roles_with(true, start, |_| Ok(body("admin"))));
+        // Unreachable, or even refused: not a sign-out and not an error to show.
+        assert!(!manager.refresh_roles_with(true, start + Duration::from_secs(5), |_| Err(CloudError::Http(401))));
+        assert!(!manager.refresh_roles_with(true, start + Duration::from_secs(6), |_| Err(CloudError::Transport)));
+        let status = serde_json::to_value(manager.snapshot()).unwrap();
+        assert_eq!((status["state"].as_str(), status["lastError"].as_str()), (Some("signed-in"), None));
+        assert_eq!(role_of(&manager).as_deref(), Some("admin"));
+        // A failure does not count as an answer: the next routine read asks.
+        assert!(manager.refresh_roles_with(false, start + Duration::from_secs(61), |_| Ok(body("member"))));
     }
 
     #[test]

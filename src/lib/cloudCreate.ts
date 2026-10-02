@@ -12,6 +12,7 @@ import type {
   CloudWorkspaceSetup,
   CloudWorkspaceSnapshot,
 } from "@/lib/api";
+import { roleRefusedMessage } from "@/lib/accountRoles";
 
 /**
  * Creating a cloud workspace from repositories and a first prompt (PRO-21,
@@ -348,12 +349,17 @@ export function launchLatency(item: CloudWorkspaceListItem | CloudWorkspaceSnaps
 
 // ---- Words -----------------------------------------------------------------
 
+// Offered only to an owner or admin: a refusal means the role this app held has changed.
+const ROLE_REFUSED_WORKSPACE = roleRefusedMessage("create a cloud workspace");
+
 const MESSAGES: Record<string, string> = {
   cloud_workspace_quota_exceeded: "Your organization is at its cloud workspace limit. Suspend or delete a workspace, or ask an admin to raise the limit.",
   cloud_workspace_concurrency_exceeded: "Your organization is running as many cloud workspaces as its limit allows. Stop one to start another.",
   cloud_workspace_policy_denied: "Your organization's compute policy does not allow this provider, location or machine size.",
   cloud_provisioning_paused: "An admin has paused new cloud workspaces for this organization.",
-  organization_admin_required: "Only organization owners and admins can create cloud workspaces.",
+  // Offered because the app still held an owner's or admin's role: it changed since.
+  organization_admin_required: ROLE_REFUSED_WORKSPACE,
+  forbidden: ROLE_REFUSED_WORKSPACE,
   cloud_provider_connection_required: "Connect a compute provider in Settings first.",
   cloud_provider_connection_attention_required: "The compute provider connection needs attention in Settings.",
   cloud_provider_billing_required: "The compute provider account needs billing set up.",

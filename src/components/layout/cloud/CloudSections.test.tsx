@@ -548,6 +548,57 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
     expect(screen.getByRole("button", { name: "New session in acme/api" })).toBeTruthy();
   });
 
+  it("tells a member with no cloud projects that none is shared with them, and points only a creator at +", async () => {
+    const asRole = (role: string | undefined) => {
+      mocks.status = { ...mocks.status, organizations: mocks.status.organizations!.map((org) => (org.id === ORG ? ({ ...org, role } as typeof org) : org)) };
+    };
+    await catalog.ingestCloudList({ workspaces: [] }, ORG, Date.now() + 1, Date.now() + 1);
+    asRole("member");
+    const view = mount();
+    expect(screen.getByTestId("cloud-org-empty").textContent).toBe("No cloud projects shared with you yet.");
+    view.unmount();
+    asRole("admin");
+    mount();
+    expect(screen.getByTestId("cloud-org-empty").textContent).toBe("No cloud projects yet. Add one with +.");
+    cleanup();
+    // Not known yet: no "+" is offered, so none is mentioned.
+    asRole(undefined);
+    mount();
+    expect(screen.getByTestId("cloud-org-empty").textContent).toBe("No cloud projects yet.");
+  });
+
+  it("re-derives the menus when the account's role changes: a demoted admin is no longer offered New project… or New cloud workspace…", async () => {
+    const asRole = (role: string) => {
+      mocks.status = { ...mocks.status, organizations: mocks.status.organizations!.map((org) => (org.id === ORG ? { ...org, role } : org)) };
+    };
+    const openCloudPage = vi.fn();
+    const tree = () => (
+      <TooltipProvider>
+        <div role="tree">
+          <CloudSections onOpenCloudPage={openCloudPage} />
+        </div>
+      </TooltipProvider>
+    );
+    const header = () => screen.getAllByTestId("cloud-org-header")[0];
+    const view = render(tree());
+    expect(within(header()).getByTestId("cloud-org-role").textContent).toBe("admin");
+    mouseClick(screen.getByRole("button", { name: "Add project to Acme" }));
+    expect((await screen.findByTestId("cloud-add-blank-project")).getAttribute("aria-disabled")).not.toBe("true");
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+    // The role refresh announced the demotion (account_status): the same tree, rendered again.
+    asRole("member");
+    view.rerender(tree());
+    expect(within(header()).getByTestId("cloud-org-role").textContent).toBe("member");
+    mouseClick(screen.getByRole("button", { name: "Add project to Acme" }));
+    expect((await screen.findByTestId("cloud-add-blank-project")).getAttribute("aria-disabled")).toBe("true");
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    mouseClick(screen.getByRole("button", { name: "Menu for Acme" }));
+    expect((await screen.findByTestId("cloud-new-workspace")).getAttribute("aria-disabled")).toBe("true");
+  });
+
   it("offers a member no way to create a workspace from the organization header, and says who can", async () => {
     const asRole = (role: string | undefined) => {
       mocks.status = { ...mocks.status, organizations: mocks.status.organizations!.map((org) => (org.id === ORG ? ({ ...org, role } as typeof org) : org)) };

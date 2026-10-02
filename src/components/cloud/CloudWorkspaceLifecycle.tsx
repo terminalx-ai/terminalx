@@ -60,7 +60,12 @@ export function CloudWorkspaceLifecycleDialog({
   item: CloudWorkspaceListItem;
   initial: LifecycleAction;
   onClose: () => void;
-  onDone: (snapshot: CloudWorkspaceSnapshot) => void;
+  /**
+   * The action went through. `done.action` is the one performed, which need
+   * not be `initial` (the dialog lets the person switch), and
+   * `done.requestedAt` is when it was asked for.
+   */
+  onDone: (snapshot: CloudWorkspaceSnapshot, done: { action: LifecycleAction; requestedAt: number }) => void;
   /** Open the workspace (its Git view) to push or copy files out first. */
   onExport: () => void;
   check?: typeof checkRuntime;
@@ -118,6 +123,7 @@ export function CloudWorkspaceLifecycleDialog({
   const run = async () => {
     setBusy(true);
     setError(null);
+    const requestedAt = Date.now();
     try {
       const snapshot =
         action === "stop"
@@ -125,7 +131,7 @@ export function CloudWorkspaceLifecycleDialog({
           : action === "archive"
             ? await api.cloudWorkspaceArchive(workspace.id, needsForce && force, cloudOrgArg(workspace.orgId))
             : await api.cloudWorkspaceDelete(workspace.id, needsForce && force, cloudOrgArg(workspace.orgId));
-      onDone(snapshot);
+      onDone(snapshot, { action, requestedAt });
     } catch (e) {
       const code = errorCode(e);
       if (code === "cloud_workspace_active_work") {
