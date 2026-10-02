@@ -1,5 +1,36 @@
 # TerminalX changelog
 
+## 0.2.6
+
+Cloud sessions stay connected after a workspace stops and restarts, and
+organization role changes reach the app without a restart.
+
+### Cloud sessions
+
+- An open cloud session attaches to the workspace again after someone else
+  stops and wakes it: the view reconnects, subscribes to sessions, tabs,
+  terminals and the transcript again, and driver controls work on the new
+  runtime. Looking at a workspace never wakes it. (#238)
+- The session chip reads "Live" only while the transport is connected, shows
+  "Stopping…" while a stop runs, then "Stopped", and "Reconnecting…" while a
+  new attach is in progress. A turn that finished while the desktop was away
+  no longer stays "Working". (#238)
+- Stopping or archiving a workspace from the sidebar no longer closes a
+  connection a session view still holds; the row reads Stopping at once. (#238)
+
+### Organizations and sharing
+
+- A demoted admin's role updates in the app: roles are re-read on launch, on
+  focus, on refresh and whenever a cloud request is refused for lack of role.
+  Menus, the "+" button and new-session actions follow the current role, and
+  refusals explain that the role changed. (#239)
+- The Members role select shows the saved role after a refused change, and
+  the roster read is retried once after a transient failure. (#239)
+- A member's empty organization explains that no cloud projects are shared
+  yet. Workspaces that leave the list keep their last known names, new tabs
+  are named by their agent until the first message, and narrow cloud session
+  headers give way in a predictable order. (#239)
+
 ## 0.2.5
 
 Cloud projects and agent sessions now live alongside local work in the desktop,
