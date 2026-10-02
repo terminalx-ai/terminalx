@@ -11,10 +11,11 @@ import {
   type CloudWorkspaceOperation,
   type CloudWorkspaceTombstone,
 } from "@/lib/api";
-import { closeCloudConnection, retainCloudConnection, waitCloudConnected, type CloudLease } from "@/lib/cloudConnections";
+import { closeCloudConnection } from "@/lib/cloudConnections";
 import { dropCloudAgents } from "@/lib/cloudAgents";
 import { dropCloudTerminals } from "@/lib/cloudTerminals";
 import { dropEditors, getEditors } from "@/lib/editors";
+import { retainCloudConnection, waitCloudConnected, type CloudLease } from "@/lib/cloudConnections";
 
 /**
  * Stop, archive and delete of a cloud workspace (terminalx-saas contract
