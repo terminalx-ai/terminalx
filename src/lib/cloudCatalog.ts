@@ -16,7 +16,8 @@ import { getAccount, refreshAccount, subscribeAccount } from "@/lib/account";
 import { noteListedOrgRole, refreshAccountRoles } from "@/lib/accountRoles";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { phaseOf, settled } from "@/lib/cloudCreate";
-import { isArchived, isOpen, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
+import { isArchived, isOpen, machineRunning, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
+import { noteCloudWorkspaceListed } from "@/lib/cloudConnections";
 import { onAccessChanged } from "@/lib/cloudCollab";
 import { cloudProjectKey, cloudWorkspaceKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
 
@@ -304,6 +305,17 @@ export function lastKnownWorkspace(workspaceId: string): { name: string; project
 const listedAt = new Map<string, number>();
 
 /**
+ * Tell the connection manager what a list says of each workspace's machine,
+ * so a connection whose workspace stopped and came back (woken by someone
+ * else, resumed from another surface) attaches again. Only ever a `connect`.
+ */
+function tellConnections(workspaces: readonly CloudWorkspaceListItem[], at: number) {
+  for (const item of workspaces) {
+    noteCloudWorkspaceListed({ orgId: item.workspace.orgId, workspaceId: item.workspace.id }, { running: machineRunning(item), at });
+  }
+}
+
+/**
  * Take a workspace list: tombstoned workspaces leave the rows, and what this
  * desktop kept of them is purged (their agent data, keys, outbox, terminals,
  * editors and connection). `orgId` is the organization the list is for; the
@@ -344,14 +356,21 @@ export async function ingestCloudList(
       orgs: { ...state.orgs, [org]: { ...current, workspaces, quota: list.quota ?? current.quota, fetchedAt: now, requestedAt, source: "live", error: null, sessions } },
       createMemory,
     });
+    tellConnections(workspaces, requestedAt);
   }
   const notices = await purgeTombstones(tombstones, names);
   if (notices.length) set({ ...state, notices: [...state.notices, ...notices] }, false);
   return { workspaces, notices };
 }
 
-/** A snapshot from a create, lifecycle or operation poll replaces its row at once. */
-export function applyCloudSnapshot(snapshot: CloudWorkspaceSnapshot) {
+/**
+ * A snapshot from a create, lifecycle or operation poll replaces its row at
+ * once. `requestedAt` is when the call that answered with it was made: only
+ * with it are the workspace's connections told, as by a list asked for then
+ * (a snapshot is no newer than its request, so it never passes for a list
+ * asked for after a stop).
+ */
+export function applyCloudSnapshot(snapshot: CloudWorkspaceSnapshot, requestedAt?: number) {
   const orgId = snapshot.workspace.orgId;
   const current = state.orgs[orgId];
   if (!current) return;
@@ -359,6 +378,7 @@ export function applyCloudSnapshot(snapshot: CloudWorkspaceSnapshot) {
   const known = current.workspaces.some((row) => row.workspace.id === item.workspace.id);
   const workspaces = known ? current.workspaces.map((row) => (row.workspace.id === item.workspace.id ? item : row)) : [item, ...current.workspaces];
   set({ ...state, orgs: { ...state.orgs, [orgId]: { ...current, workspaces } } });
+  if (requestedAt !== undefined) tellConnections([item], requestedAt);
   schedulePoll(orgId);
 }
 
@@ -406,14 +426,16 @@ export function dismissCloudNotice(notice: PurgeNotice) {
  * which reports its snapshot to `applyCloudSnapshot`. None of these resume.
  */
 export async function unarchiveCloudWorkspace(item: CloudWorkspaceListItem): Promise<void> {
+  const requestedAt = Date.now();
   const snapshot = await api.cloudWorkspaceUnarchive(item.workspace.id, cloudOrgArg(item.workspace.orgId));
-  if (snapshot?.workspace) applyCloudSnapshot(snapshot);
+  if (snapshot?.workspace) applyCloudSnapshot(snapshot, requestedAt);
 }
 
 /** Resume, asked for explicitly from a workspace's menu. Nothing that only looks calls this. */
 export async function resumeCloudWorkspace(item: CloudWorkspaceListItem): Promise<void> {
+  const requestedAt = Date.now();
   const snapshot = await api.cloudWorkspaceResume(item.workspace.id, cloudOrgArg(item.workspace.orgId));
-  if (snapshot?.workspace) applyCloudSnapshot(snapshot);
+  if (snapshot?.workspace) applyCloudSnapshot(snapshot, requestedAt);
 }
 
 /** The workspace a `cloud:<orgId>:<workspaceId>` key names, from the catalog. */

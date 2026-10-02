@@ -17,6 +17,7 @@ vi.mock("@/lib/api", () => ({
 import { applyLiveTabs, getCloudAgents, resetCloudAgents } from "./cloudAgents";
 import { dropEditors, getEditors, openFile, setEditorDirty } from "./editors";
 import { hasWorkspaceConnection, workspaceConnection, type CloudWorkspace, type CloudWorkspaceDisposition } from "@/lib/api";
+import { cloudConnectionInfo, resetCloudConnections, retainCloudConnection } from "./cloudConnections";
 import {
   checkRuntime,
   cleanupStateText,
@@ -187,14 +188,16 @@ describe("checkRuntime", () => {
         for (const listener of [...listeners]) listener(next);
       }
     })();
-    vi.mocked(workspaceConnection).mockResolvedValue({ client } as never);
-    return client;
+    const close = vi.fn();
+    vi.mocked(workspaceConnection).mockResolvedValue({ client, close, activate: vi.fn(async () => undefined) } as never);
+    return Object.assign(client, { close });
   }
 
   beforeEach(() => {
     vi.mocked(workspaceConnection).mockReset();
-    vi.mocked(hasWorkspaceConnection).mockReturnValue(false);
+    vi.mocked(hasWorkspaceConnection).mockReturnValue(true);
   });
+  afterEach(() => resetCloudConnections());
 
   it("never connects to a workspace the server reports stopped, even if the list row still says ready", async () => {
     expect(await checkRuntime(workspace("ready"), server("suspended"))).toEqual({ kind: "offline" });
@@ -207,8 +210,23 @@ describe("checkRuntime", () => {
     expect(await checkRuntime(workspace("ready"), server("ready"))).toEqual({ kind: "checked", facts });
     expect(workspaceConnection).toHaveBeenCalledWith({ kind: "cloud", organizationId: "org-1", workspaceId: "ws-1" }, "connect");
     expect(client.call).toHaveBeenCalledWith("lifecycle.dispositionFacts");
-    // The connection was made for the check, so it is closed after it.
-    expect(mocks.close).toHaveBeenCalled();
+    // A lease from the connection manager, given back after the check: nothing is closed underneath anyone.
+    expect(cloudConnectionInfo("cloud:org-1:ws-1")).toMatchObject({ state: "connected", refs: 0 });
+    expect(client.close).not.toHaveBeenCalled();
+    expect(mocks.close).not.toHaveBeenCalled();
+  });
+
+  it("shares the connection an open session holds, and leaves it connected", async () => {
+    const client = connectWith("connected");
+    const session = await retainCloudConnection({ orgId: "org-1", workspaceId: "ws-1" });
+    expect(await checkRuntime(workspace("ready"), server("ready"))).toEqual({ kind: "checked", facts });
+    expect(workspaceConnection).toHaveBeenCalledTimes(1);
+    expect(client.close).not.toHaveBeenCalled();
+    expect(mocks.close).not.toHaveBeenCalled();
+    // The session's lease still reads the live transport.
+    expect(session.state().state).toBe("connected");
+    expect(session.current()?.client).toBe(client);
+    session.release();
   });
 
   it("goes by the server's fresh state over a stale list row", async () => {
@@ -219,6 +237,8 @@ describe("checkRuntime", () => {
   it("says a running workspace it could not reach in time is unreachable, not offline", async () => {
     connectWith("opening", [{ state: "reconnecting", attempt: 1, reason: "relay timed out", retryInMs: 1000 }]);
     expect(await checkRuntime(workspace("ready"), server("ready"), 20)).toEqual({ kind: "unreachable" });
+    resetCloudConnections();
+    // Closed for good (an identity change): the wait ends at once, never at its timeout.
     connectWith("stopped");
     expect(await checkRuntime(workspace("ready"), server("ready"))).toEqual({ kind: "unreachable" });
   });
@@ -229,7 +249,6 @@ describe("checkRuntime", () => {
   });
 
   it("keeps a connection it reused, and handles one already suspended", async () => {
-    vi.mocked(hasWorkspaceConnection).mockReturnValue(true);
     connectWith("suspended");
     expect(await checkRuntime(workspace("ready"), server("ready"))).toEqual({ kind: "offline" });
     expect(mocks.close).not.toHaveBeenCalled();

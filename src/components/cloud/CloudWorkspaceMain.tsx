@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Cloud, Loader2, PanelLeft, Play } from "lucide-react";
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { Button } from "@/components/ui/button";
@@ -9,13 +9,15 @@ import { useCloudSections } from "@/components/layout/cloud/CloudSections";
 import { DeletionProgress } from "./CloudWorkspaceLifecycle";
 import { ExecutionLocation, WorkspaceView, describe, describeWorkspace, type OpenedWorkspace } from "./CloudSessionPage";
 import { workspaceTargetKey, type CloudWorkspaceListItem } from "@/lib/api";
-import { retainCloudConnection, setSelectedCloudConnection, type CloudLease } from "@/lib/cloudConnections";
+import { retainCloudConnection, setSelectedCloudConnection, subscribeCloudConnections, type CloudLease } from "@/lib/cloudConnections";
 import { findCloudWorkspace, refreshCloudCatalog, resumeCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { archiving, deletion, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 import { errorCode } from "@/lib/cloudTerminals";
 import { keycaps } from "@/lib/hotkeys";
 import { selectSession } from "@/lib/sessions";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
+
+const NOT_CONNECTED: WorkspaceConnectionState = { state: "idle" };
 
 /** What selecting a workspace may do: connect to one that is running or stopped, never wake it; nothing while it starts, is deleted or needs attention. */
 function openable(item: CloudWorkspaceListItem): boolean {
@@ -44,8 +46,15 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   const canOpen = !!item && openable(item);
   // A stopped workspace that was resumed is reconnected, so the view follows it to running.
   const running = item?.workspace.state === "ready";
-  const [opened, setOpened] = useState<OpenedWorkspace | null>(null);
-  const [state, setState] = useState<WorkspaceConnectionState>({ state: "idle" });
+  // The lease, and through it the workspace's connection of now: the manager
+  // replaces it when the workspace stops and comes back, and the view follows.
+  const [held, setHeld] = useState<{ lease: CloudLease; name: string; provider: OpenedWorkspace["provider"]; workspaceState: OpenedWorkspace["workspaceState"] } | null>(null);
+  const connection = useSyncExternalStore(subscribeCloudConnections, () => held?.lease.current() ?? null, () => null);
+  const state = useSyncExternalStore<WorkspaceConnectionState>(subscribeCloudConnections, () => held?.lease.state() ?? NOT_CONNECTED, () => NOT_CONNECTED);
+  const opened = useMemo<OpenedWorkspace | null>(
+    () => (held && connection ? { connection, name: held.name, provider: held.provider, workspaceState: held.workspaceState } : null),
+    [held, connection],
+  );
   const [error, setError] = useState<string | null>(null);
   const [resuming, setResuming] = useState(false);
 
@@ -60,23 +69,17 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
       .then((next) => {
         if (!live) return next.release();
         lease = next;
-        setOpened({ connection: next.connection, name: item.workspace.name, provider: item.workspace.provider, workspaceState: item.workspace.state });
+        setHeld({ lease: next, name: item.workspace.name, provider: item.workspace.provider, workspaceState: item.workspace.state });
       })
       .catch((e: unknown) => live && setError(errorCode(e)));
     return () => {
       live = false;
-      setOpened(null);
-      setState({ state: "idle" });
+      setHeld(null);
       setSelectedCloudConnection(null);
       lease?.release();
     };
     // The workspace's identity and whether it runs decide the connection; row refreshes do not.
   }, [workspaceKey, canOpen, running]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!opened) return;
-    return opened.connection.client.onState(setState);
-  }, [opened]);
 
   const resume = async () => {
     if (!item) return;

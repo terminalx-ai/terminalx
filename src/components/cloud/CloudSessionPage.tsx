@@ -90,6 +90,8 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
     // and filed under it only, so a default change while it is in flight
     // never files one organization's rows under another.
     const asked = defaultOrgId(getAccount().status);
+    // When the list was asked for: what it says of each machine is no newer than this.
+    const requestedAt = Date.now();
     api
       .cloudWorkspaces(cloudOrgArg(asked))
       .then(async (list) => {
@@ -101,7 +103,7 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
         const own = !!orgId && [...named].every((id) => id === orgId);
         // The catalog drops tombstoned rows, purges what this Mac kept of
         // them, and keeps the sidebar's copy of the list current.
-        const ingest = own ? ingestCloudList(list, orgId) : Promise.resolve({ notices: [] as PurgeNotice[] });
+        const ingest = own ? ingestCloudList(list, orgId, Date.now(), requestedAt) : Promise.resolve({ notices: [] as PurgeNotice[] });
         const deleted = new Set((list.tombstones ?? []).map((tombstone) => tombstone.id));
         setWorkspaces(list.workspaces.filter((item) => !deleted.has(item.workspace.id) && (!asked || item.workspace.orgId === asked)));
         setListError(null);

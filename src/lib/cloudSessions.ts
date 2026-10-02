@@ -414,8 +414,8 @@ const CONNECT_WITHIN_MS = 30_000;
 async function onRuntime<T>(row: Pick<CloudSessionRow, "orgId" | "workspaceId">, work: (client: WorkspaceRpcClient) => Promise<T>): Promise<T> {
   const lease = await retainCloudConnection({ orgId: row.orgId, workspaceId: row.workspaceId }, "connect");
   try {
-    await waitCloudConnected(lease.client, CONNECT_WITHIN_MS, { stoppedIsError: true });
-    return await work(lease.client);
+    // The lease's client of now, never one that was replaced since the lease was taken.
+    return await work(await waitCloudConnected(lease, CONNECT_WITHIN_MS, { stoppedIsError: true }));
   } finally {
     lease.release();
   }
