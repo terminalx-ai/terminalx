@@ -608,3 +608,113 @@ fn a_deleted_workspace_loses_its_outbox_cache_and_keys_and_only_its_own() {
     // Only the signed-in organization's workspaces can be purged.
     assert_eq!(fixture.client.purge_workspace("org_2", WS).unwrap_err(), "cloud_remote_organization_mismatch");
 }
+
+// ---- the in-memory key cache (a wake no longer makes several Keychain calls at once) ----
+
+type DuringGet = Box<dyn FnOnce() + Send>;
+
+/// A key store that counts what reaches it, and can run something in the
+/// middle of a read.
+#[derive(Default)]
+struct Counted {
+    keys: MemoryKeys,
+    puts: AtomicUsize,
+    gets: AtomicUsize,
+    deletes: AtomicUsize,
+    during_get: Mutex<Option<DuringGet>>,
+}
+
+impl KeyStore for Counted {
+    fn put(&self, organization_id: &str, workspace_id: &str, key_id: &str, key: &[u8; crypto::KEY_LEN]) -> Result<()> {
+        self.puts.fetch_add(1, Ordering::SeqCst);
+        self.keys.put(organization_id, workspace_id, key_id, key)
+    }
+    fn get(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<Option<[u8; crypto::KEY_LEN]>> {
+        self.gets.fetch_add(1, Ordering::SeqCst);
+        let found = self.keys.get(organization_id, workspace_id, key_id);
+        let during = self.during_get.lock().unwrap().take();
+        if let Some(during) = during {
+            during();
+        }
+        found
+    }
+    fn delete(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<()> {
+        self.deletes.fetch_add(1, Ordering::SeqCst);
+        self.keys.delete(organization_id, workspace_id, key_id)
+    }
+}
+
+fn counts(store: &Counted) -> (usize, usize, usize) {
+    (store.puts.load(Ordering::SeqCst), store.gets.load(Ordering::SeqCst), store.deletes.load(Ordering::SeqCst))
+}
+
+#[test]
+fn a_key_is_read_from_the_store_once_and_written_only_when_it_changes() {
+    let store = Arc::new(Counted::default());
+    store.keys.put(ORG, WS, KEY_ID, &key()).unwrap();
+    let cached = CachedKeys::new(store.clone());
+
+    // A send, a checkpoint, a receipt: one read between them.
+    for _ in 0..5 {
+        assert_eq!(cached.get(ORG, WS, KEY_ID).unwrap(), Some(key()));
+    }
+    assert_eq!(counts(&store), (0, 1, 0));
+    // Every connect is answered with the key this Mac already has: no write.
+    cached.put(ORG, WS, KEY_ID, &key()).unwrap();
+    assert_eq!(counts(&store), (0, 1, 0));
+    // A rotated key is written, and is the one held from then on.
+    cached.put(ORG, WS, KEY_ID, &[9u8; 32]).unwrap();
+    assert_eq!(cached.get(ORG, WS, KEY_ID).unwrap(), Some([9u8; 32]));
+    assert_eq!(store.keys.get(ORG, WS, KEY_ID).unwrap(), Some([9u8; 32]));
+    assert_eq!(counts(&store), (1, 1, 0));
+    // A missing key is asked for each time: it may arrive.
+    assert_eq!(cached.get(ORG, WS, "key-other").unwrap(), None);
+    assert_eq!(cached.get(ORG, WS, "key-other").unwrap(), None);
+    assert_eq!(counts(&store), (1, 3, 0));
+}
+
+#[test]
+fn a_deleted_or_forgotten_key_does_not_stay_in_memory() {
+    let store = Arc::new(Counted::default());
+    let cached = Arc::new(CachedKeys::new(store.clone()));
+    cached.put(ORG, WS, KEY_ID, &key()).unwrap();
+    cached.delete(ORG, WS, KEY_ID).unwrap();
+    assert_eq!(cached.get(ORG, WS, KEY_ID).unwrap(), None, "gone from memory and from the store");
+
+    // The identity changed: nothing is held, and what is still stored is read again.
+    cached.put(ORG, WS, KEY_ID, &key()).unwrap();
+    let reads = counts(&store).1;
+    cached.forget();
+    assert!(cached.held.lock().unwrap().keys.is_empty());
+    assert_eq!(cached.get(ORG, WS, KEY_ID).unwrap(), Some(key()));
+    assert_eq!(counts(&store).1, reads + 1);
+
+    // A key deleted while a read of it was under way is not kept by that read.
+    cached.forget();
+    let deleting = cached.clone();
+    *store.during_get.lock().unwrap() = Some(Box::new(move || deleting.delete(ORG, WS, KEY_ID).unwrap()));
+    assert_eq!(cached.get(ORG, WS, KEY_ID).unwrap(), Some(key()), "the read itself was before the delete");
+    assert!(cached.held.lock().unwrap().keys.is_empty());
+    assert_eq!(cached.get(ORG, WS, KEY_ID).unwrap(), None);
+}
+
+#[test]
+fn reconnecting_writes_no_key_again_and_checking_for_one_reads_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Counted::default());
+    let account = Arc::new(Fixed(Mutex::new(Some((USER.into(), ORG.into()))), Mutex::new(Vec::new())));
+    let client = CloudAgentClient::with(account, Arc::new(CachedKeys::new(store.clone())), Url::parse("http://127.0.0.1:9/").unwrap(), dir.path().join("cloud-agent"));
+    let answer = json!({ "currentKeyId": KEY_ID, "keys": [{ "keyId": KEY_ID, "key": crypto::b64(&key()), "createdAt": 1 }] });
+    // The first connect stores the key; each wake after it answers the same.
+    for _ in 0..4 {
+        client.store_keys(USER, ORG, WS, &answer).unwrap();
+        assert!(client.has_key(ORG, WS).unwrap());
+    }
+    assert_eq!(counts(&store), (1, 0, 0), "one Keychain write, and no read");
+
+    // Signing out drops the key from memory and from the store.
+    client.observe_identity(kept(&[ORG]));
+    client.observe_identity(None);
+    assert_eq!(counts(&store).2, 1);
+    assert_eq!(store.keys.get(ORG, WS, KEY_ID).unwrap(), None);
+}

@@ -68,9 +68,21 @@ pub struct CloudRemote {
     account: Arc<AccountManager>,
     service: Arc<CloudWorkspaceService>,
     agents: Arc<CloudAgentClient>,
+    /// Never held across a call into the account or anything that can wait.
     connections: Mutex<HashMap<String, Attached>>,
     /// Typed relay closes (4100-4104) met by any connection; memory only.
     closes: Arc<ConnectionCloseLog>,
+    /// What the web view asked of its connections, in the order it asked.
+    /// `cloud_remote_send` runs on the main thread and only puts the frame
+    /// here; one thread takes them out and does the work, so the window never
+    /// waits on a lock and frames (keystrokes) keep their order.
+    outgoing: std::sync::mpsc::Sender<Outgoing>,
+}
+
+enum Outgoing {
+    Frame { connection_id: String, frame: Value },
+    /// After every frame sent before it.
+    Detach { connection_id: String, done: tokio::sync::oneshot::Sender<()> },
 }
 
 /// Request ids the desktop itself sends; their answers never reach the web view.
@@ -78,7 +90,50 @@ const KEYS_REQUEST_PREFIX: &str = "keys-";
 
 impl CloudRemote {
     pub fn new(account: Arc<AccountManager>, service: Arc<CloudWorkspaceService>, agents: Arc<CloudAgentClient>) -> Arc<Self> {
-        Arc::new(Self { account, service, agents, connections: Mutex::new(HashMap::new()), closes: ConnectionCloseLog::new() })
+        let (outgoing, queued) = std::sync::mpsc::channel();
+        let remote = Arc::new(Self { account, service, agents, connections: Mutex::new(HashMap::new()), closes: ConnectionCloseLog::new(), outgoing });
+        // Ends when the last `CloudRemote` handle (and so the sender) is gone.
+        let weak = Arc::downgrade(&remote);
+        std::thread::Builder::new()
+            .name("cloud-remote-send".into())
+            .spawn(move || {
+                while let Ok(next) = queued.recv() {
+                    let Some(remote) = weak.upgrade() else { break };
+                    remote.deliver(next);
+                }
+            })
+            .expect("start the cloud send thread");
+        remote
+    }
+
+    /// Hand a frame over for delivery. Takes no lock and never waits; false
+    /// only when nothing delivers any more.
+    fn queue_frame(&self, connection_id: String, frame: Value) -> bool {
+        self.outgoing.send(Outgoing::Frame { connection_id, frame }).is_ok()
+    }
+
+    fn deliver(&self, next: Outgoing) {
+        match next {
+            // A frame for a connection that is gone, not connected or made for
+            // another identity is dropped; the web view resends what matters
+            // after the next `connected` state.
+            Outgoing::Frame { connection_id, frame } => {
+                if let Ok(supervisor) = self.supervisor(&connection_id) {
+                    supervisor.send(frame);
+                }
+            }
+            Outgoing::Detach { connection_id, done } => {
+                self.detach(&connection_id);
+                let _ = done.send(());
+            }
+        }
+    }
+
+    fn detach(&self, connection_id: &str) {
+        let attached = self.connections.lock().unwrap().remove(connection_id);
+        if let Some(attached) = attached {
+            attached.supervisor.stop();
+        }
     }
 
     pub fn close_log(&self) -> Arc<ConnectionCloseLog> {
@@ -104,20 +159,22 @@ impl CloudRemote {
                 if remote.connections.lock().unwrap().is_empty() {
                     continue;
                 }
-                let stale: Vec<String> = {
+                let stopped: Vec<(String, Attached)> = {
                     let mut connections = remote.connections.lock().unwrap();
                     let ids: Vec<String> = connections
                         .iter()
                         .filter(|(_, attached)| attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref())))
                         .map(|(id, _)| id.clone())
                         .collect();
-                    for id in &ids {
-                        if let Some(attached) = connections.remove(id) {
-                            attached.supervisor.stop();
-                        }
-                    }
-                    ids
+                    ids.into_iter().filter_map(|id| connections.remove(&id).map(|attached| (id, attached))).collect()
                 };
+                let stale: Vec<String> = stopped
+                    .into_iter()
+                    .map(|(id, attached)| {
+                        attached.supervisor.stop();
+                        id
+                    })
+                    .collect();
                 if !stale.is_empty() {
                     let _ = app.emit(EVENT, RemoteEvent::IdentityChanged { connection_ids: stale });
                 }
@@ -199,11 +256,13 @@ impl CloudRemote {
     }
 
     fn supervisor(&self, connection_id: &str) -> Result<Supervisor, String> {
+        // Read before the connections are locked: one lock at a time.
+        let scope = self.scope();
         let connections = self.connections.lock().unwrap();
         let attached = connections.get(connection_id).ok_or("cloud_remote_connection_unknown")?;
         // A connection made for another identity is never used, even before
         // the watcher has stopped it.
-        if attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(self.scope().as_ref())) {
+        if attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref())) {
             return Err("cloud_remote_identity_changed".into());
         }
         Ok(attached.supervisor.clone())
@@ -341,24 +400,31 @@ pub async fn cloud_remote_attach_dev(
     Ok(remote.start(&app, None, None, Arc::new(DevSource(grant)), Activation::Connect))
 }
 
+/// Runs on the main thread, in the order the web view sent: it checks the
+/// frame's shape and hands it over (see [`CloudRemote::outgoing`]), touching
+/// no lock. True means accepted for delivery, not delivered: a frame for a
+/// connection that is gone or not connected is dropped, as it was before
+/// (the web view never waited for this answer).
 #[tauri::command]
 pub fn cloud_remote_send(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String, frame: Value) -> Result<bool, String> {
     if frame.get("id").and_then(Value::as_str).is_none() || frame.get("method").and_then(Value::as_str).is_none() {
         return Err("cloud_remote_frame_invalid".into());
     }
-    Ok(remote.supervisor(&connection_id)?.send(frame))
+    Ok(remote.queue_frame(connection_id, frame))
 }
 
 #[tauri::command]
-pub fn cloud_remote_activate(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String, activation: Activation) -> Result<(), String> {
+pub async fn cloud_remote_activate(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String, activation: Activation) -> Result<(), String> {
     remote.supervisor(&connection_id)?.set_activation(activation);
     Ok(())
 }
 
 #[tauri::command]
-pub fn cloud_remote_detach(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String) -> Result<(), String> {
-    if let Some(attached) = remote.connections.lock().unwrap().remove(&connection_id) {
-        attached.supervisor.stop();
+pub async fn cloud_remote_detach(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String) -> Result<(), String> {
+    // Behind the frames already handed over, so none of them is lost.
+    let (done, detached) = tokio::sync::oneshot::channel();
+    if remote.outgoing.send(Outgoing::Detach { connection_id: connection_id.clone(), done }).is_err() || detached.await.is_err() {
+        remote.detach(&connection_id);
     }
     Ok(())
 }
@@ -504,6 +570,76 @@ mod intercept_tests {
         assert!(!may_hold_keys("participate", None));
         assert!(!may_hold_keys("participate", Some(&json!({ "role": "none" }))));
         assert!(may_hold_keys("participate", Some(&json!({ "role": "viewer" }))));
+    }
+
+    /// The freeze after a stop and wake: a role refresh was inside a Keychain
+    /// write that never returned, and the next send from the window waited
+    /// for the account behind it, on the main thread.
+    #[test]
+    fn a_send_returns_at_once_and_is_delivered_in_order_while_a_role_refresh_is_stuck_saving() {
+        use crate::account::AccountContext;
+        use crate::keychain::testing::MemorySecrets;
+        use std::time::Instant;
+
+        let account = Arc::new(AccountManager::default());
+        account.set_context_for_test(Some(AccountContext {
+            access_token: "a".into(),
+            user_id: "user".into(),
+            email: "a@example.com".into(),
+            display_name: "A".into(),
+            profile_id: "profile".into(),
+            organization_id: "org-a".into(),
+            relay_entitled: false,
+            generation: 1,
+        }));
+        let store = MemorySecrets::default();
+        account.use_secrets_for_test(Arc::new(store.clone()));
+        let dir = tempfile::tempdir().unwrap();
+        let agents = Arc::new(CloudAgentClient::with(
+            account.clone(),
+            Arc::new(crate::cloud_agent_client::MemoryKeys::default()),
+            url::Url::parse("http://127.0.0.1:9/").unwrap(),
+            dir.path().join("cloud-agent"),
+        ));
+        let remote = CloudRemote::new(account.clone(), Arc::new(CloudWorkspaceService::new(account.clone())), agents);
+        let (supervisor, mut frames) = Supervisor::connected_for_test();
+        remote.connections.lock().unwrap().insert("cloud-1".into(), Attached { supervisor, identity: Some(made_in("org-a")) });
+
+        store.block_writes();
+        let refreshing = {
+            let account = account.clone();
+            std::thread::spawn(move || account.refresh_roles_for_test("member"))
+        };
+        store.wait_for_blocked(1);
+
+        // What the main thread does for `cloud_remote_send`.
+        let started = Instant::now();
+        for n in 0..50 {
+            assert!(remote.queue_frame("cloud-1".into(), json!({ "id": format!("r{n}"), "method": "session.input" })));
+        }
+        assert!(started.elapsed() < Duration::from_secs(1), "the main thread waited");
+        // Delivered, in the order sent, with the Keychain still not answering.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut delivered = Vec::new();
+        while delivered.len() < 50 {
+            match frames.try_recv() {
+                Ok(frame) => delivered.push(frame["id"].as_str().unwrap().to_string()),
+                Err(_) => {
+                    assert!(Instant::now() < deadline, "a send waited for the Keychain: {} of 50 delivered", delivered.len());
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+        }
+        assert_eq!(delivered, (0..50).map(|n| format!("r{n}")).collect::<Vec<_>>());
+        // A frame for a connection that is not there is dropped, not an error to wait for.
+        assert!(remote.queue_frame("cloud-gone".into(), json!({ "id": "x", "method": "session.input" })));
+
+        // A sign-out stops the connection being used at once, Keychain or not.
+        account.set_context_for_test(None);
+        assert_eq!(remote.supervisor("cloud-1").err().as_deref(), Some("cloud_remote_identity_changed"));
+
+        store.release();
+        refreshing.join().unwrap();
     }
 
     /// The exact shape `NativeWorkspaceTransport.route` (src/lib/api.ts) reads;
