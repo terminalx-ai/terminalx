@@ -21,10 +21,20 @@ import { cloudWorkspaceKey } from "@/types/target";
  *   nobody holds (or, failing that, the oldest), never the selected one.
  * - **Looking never costs money.** Nothing here runs on render: a lease is
  *   taken only when a surface asks for one.
+ * - **Follows the workspace back.** A connection whose workspace stopped is
+ *   parked: its supervisor waits for an interactive wake and reads nothing.
+ *   When the workspace list says the machine runs again (someone else woke
+ *   it, or it was resumed from another surface), a held connection is torn
+ *   down and attached fresh with `connect`, never `wake`; one nobody holds is
+ *   closed, so the next lease attaches fresh. A lease follows its workspace
+ *   through that: `current()` and `state()` are the connection of now.
  */
 
 export const IDLE_CLOSE_MS = 5 * 60 * 1000;
 export const MAX_CONNECTIONS = 4;
+/** Attaching again after an attach that did not connect waits this long, doubling up to the ceiling. */
+export const REATTACH_FIRST_MS = 1_000;
+export const REATTACH_MAX_MS = 30_000;
 
 export interface CloudTarget {
   orgId: string;
@@ -37,6 +47,15 @@ export interface CloudLease {
   key: string;
   connection: CloudWorkspaceConnection;
   client: WorkspaceRpcClient;
+  /**
+   * The workspace's connection now. It is replaced when the workspace stopped
+   * and came back, so a surface that stays open reads this (with
+   * `subscribeCloudConnections`) instead of keeping `connection`. Null while
+   * a new one opens, and once the connection was closed for good.
+   */
+  current(): CloudWorkspaceConnection | null;
+  /** The transport state of `current()`: never `connected` for a connection that was closed or replaced. */
+  state(): WorkspaceConnectionState;
   /** Give the lease back; the connection closes after `IDLE_CLOSE_MS` once no lease holds it. Idempotent. */
   release(): void;
 }
@@ -51,6 +70,18 @@ export interface CloudConnectionInfo {
   waking: boolean;
   /** Raised to `wake` since it was opened: an interactive action asked for compute. */
   woke: boolean;
+  /** Attached again because its workspace came back (or its attach failed), and not connected yet. */
+  reattaching: boolean;
+  /** How many times it connected, reconnects and new attachments included: what was read before may be stale after each. */
+  connects: number;
+}
+
+/** What the workspace list says about a workspace's machine. */
+export interface CloudWorkspaceListed {
+  /** Ready, with no stop, archive or delete in flight. */
+  running: boolean;
+  /** When that list was asked for (ms): only a list asked for after a connection stopped can say it runs again. */
+  at: number;
 }
 
 interface Entry {
@@ -66,6 +97,20 @@ interface Entry {
   wake: Promise<void> | null;
   unwatch: (() => void) | null;
   info: CloudConnectionInfo;
+  /** The transport state of `connection`, as its client last reported it. */
+  state: WorkspaceConnectionState;
+  /** When the transport said the workspace is stopped (its supervisor waits for a wake from then on). */
+  parkedAt: number | null;
+  /** When it last connected. */
+  connectedAt: number | null;
+  /** The last list that said the machine is not running was asked for then. */
+  downAt: number | null;
+  listed: CloudWorkspaceListed | null;
+  /** A fresh attach waiting for its turn. */
+  retry: ReturnType<typeof setTimeout> | null;
+  /** No fresh attach before this, and how long the next one waits after it. */
+  retryAt: number;
+  retryDelay: number;
 }
 
 type ConnectedListener = (target: CloudTarget, client: WorkspaceRpcClient) => void | (() => void);
@@ -79,7 +124,9 @@ let selectedKey: string | null = null;
 let clock: () => number = () => Date.now();
 let version = 0;
 
-const IDLE_INFO: CloudConnectionInfo = { state: "idle", capabilities: null, authority: null, refs: 0, waking: false, woke: false };
+const IDLE_INFO: CloudConnectionInfo = { state: "idle", capabilities: null, authority: null, refs: 0, waking: false, woke: false, reattaching: false, connects: 0 };
+const IDLE_STATE: WorkspaceConnectionState = { state: "idle" };
+const OPENING_STATE: WorkspaceConnectionState = { state: "opening" };
 
 function notify() {
   version++;
@@ -102,6 +149,14 @@ function entryFor(target: CloudTarget): Entry {
       wake: null,
       unwatch: null,
       info: IDLE_INFO,
+      state: IDLE_STATE,
+      parkedAt: null,
+      connectedAt: null,
+      downAt: null,
+      listed: null,
+      retry: null,
+      retryAt: 0,
+      retryDelay: 0,
     };
     entries.set(key, entry);
   }
@@ -129,8 +184,13 @@ function watch(entry: Entry, connection: CloudWorkspaceConnection) {
   entry.unwatch?.();
   let wasConnected = false;
   entry.unwatch = connection.client.onState((state) => {
+    entry.state = state;
     if (state.state === "connected") {
-      setInfo(entry, { state: state.state, capabilities: state.capabilities, authority: state.authority });
+      entry.parkedAt = null;
+      entry.connectedAt = clock();
+      entry.retryAt = 0;
+      entry.retryDelay = 0;
+      setInfo(entry, { state: state.state, capabilities: state.capabilities, authority: state.authority, reattaching: false, connects: entry.info.connects + 1 });
       // Every connect, reconnects included: lists are re-read after time away.
       runDisconnected(entry.key);
       const cleanups: (() => void)[] = [];
@@ -151,14 +211,65 @@ function watch(entry: Entry, connection: CloudWorkspaceConnection) {
       if (wasConnected && state.state !== "reconnecting") runDisconnected(entry.key);
       // Stopped for an identity change: the api layer closed it; forget it.
       if (state.state === "stopped") drop(entry);
+      else if (state.state === "suspended") {
+        // Parked: its supervisor reads nothing more until a wake. A list asked for from now on may say it runs again.
+        entry.parkedAt = clock();
+        settle(entry);
+      }
     }
   });
 }
 
-/** Close a connection now, whoever holds it. */
-function drop(entry: Entry) {
-  if (entry.idle) clearTimeout(entry.idle);
-  entry.idle = null;
+function cancelRetry(entry: Entry) {
+  if (entry.retry) clearTimeout(entry.retry);
+  entry.retry = null;
+}
+
+/** Whether this entry's transport is going nowhere on its own: stopped as its supervisor last read it, or never attached. */
+function parked(entry: Entry): boolean {
+  return entry.connection ? entry.state.state === "suspended" : !entry.pending;
+}
+
+/**
+ * Whether the workspace came back under this entry, so that its connection
+ * must be replaced:
+ * - parked, and a list asked for after it parked says the machine runs;
+ * - or connected since before the machine was last seen down: that transport
+ *   belongs to the runtime generation that was stopped.
+ */
+function cameBack(entry: Entry): boolean {
+  const listed = entry.listed;
+  if (!listed?.running) return false;
+  if (parked(entry)) return entry.parkedAt === null || listed.at > entry.parkedAt;
+  return entry.state.state === "connected" && entry.downAt !== null && listed.at > entry.downAt && (entry.connectedAt ?? 0) <= entry.downAt;
+}
+
+/** Bring a connection in line with what the list says of its workspace. */
+function settle(entry: Entry) {
+  if (entries.get(entry.key) !== entry) return;
+  if (!cameBack(entry)) {
+    if (!entry.listed?.running) cancelRetry(entry);
+    return;
+  }
+  if (entry.refs === 0) {
+    // Nobody holds it: the next lease attaches fresh.
+    drop(entry);
+    return;
+  }
+  if (entry.retry) return;
+  // Never from inside a client's state callback, and never faster than the backoff.
+  entry.retry = setTimeout(() => {
+    entry.retry = null;
+    if (entries.get(entry.key) === entry && entry.refs > 0 && cameBack(entry)) reattach(entry);
+  }, Math.max(0, entry.retryAt - clock()));
+}
+
+/**
+ * Tear the connection down and attach fresh, for the surfaces still holding
+ * it. Always `connect`: a workspace that is stopped after all stays stopped.
+ */
+function reattach(entry: Entry) {
+  cancelRetry(entry);
   entry.unwatch?.();
   entry.unwatch = null;
   runDisconnected(entry.key);
@@ -167,6 +278,58 @@ function drop(entry: Entry) {
   entry.connection = null;
   entry.pending = null;
   entry.activation = null;
+  entry.state = IDLE_STATE;
+  entry.parkedAt = null;
+  entry.downAt = null;
+  entry.retryDelay = Math.min(REATTACH_MAX_MS, Math.max(REATTACH_FIRST_MS, entry.retryDelay * 2));
+  entry.retryAt = clock() + entry.retryDelay;
+  detachCloudTerminals(entry.key);
+  if (connection) connection.close();
+  else if (pending) void pending.then((late) => late.close()).catch(() => undefined);
+  setInfo(entry, { woke: false, reattaching: true });
+  // Its failure leaves the entry without a connection: tried again after the backoff while the list says it runs.
+  void open(entry, "connect").then(
+    () => undefined,
+    () => settle(entry),
+  );
+}
+
+/**
+ * What the workspace list says about a workspace. A list is only ever read,
+ * so nothing here wakes compute: a connection that must follow its workspace
+ * back attaches with `connect`.
+ */
+export function noteCloudWorkspaceListed(target: CloudTarget, listed: CloudWorkspaceListed) {
+  const entry = entries.get(cloudWorkspaceKey(target.orgId, target.workspaceId));
+  if (!entry) return;
+  const before = entry.listed;
+  // An older list than the one already taken says nothing new.
+  if (before && listed.at < before.at) return;
+  entry.listed = listed;
+  if (!listed.running) {
+    entry.downAt = Math.max(entry.downAt ?? 0, listed.at);
+    // It was running and is stopped (or stopping) now: the wake that started it is spent, the next action asks anew.
+    const spent = !!before?.running;
+    if (spent && entry.activation === "wake") entry.activation = "connect";
+    if (entry.info.reattaching || (spent && entry.info.woke)) setInfo(entry, { reattaching: false, ...(spent ? { woke: false } : {}) });
+  }
+  settle(entry);
+}
+
+/** Close a connection now, whoever holds it. */
+function drop(entry: Entry) {
+  if (entry.idle) clearTimeout(entry.idle);
+  entry.idle = null;
+  cancelRetry(entry);
+  entry.unwatch?.();
+  entry.unwatch = null;
+  runDisconnected(entry.key);
+  const connection = entry.connection;
+  const pending = entry.pending;
+  entry.connection = null;
+  entry.pending = null;
+  entry.activation = null;
+  entry.state = IDLE_STATE;
   entry.refs = 0;
   entries.delete(entry.key);
   detachCloudTerminals(entry.key);
@@ -202,6 +365,8 @@ async function open(entry: Entry, activation: LeaseActivation): Promise<CloudWor
     entry.connection = null;
     entry.pending = null;
     entry.activation = null;
+    entry.state = IDLE_STATE;
+    entry.parkedAt = null;
   }
   if (!entry.pending) {
     const target = { kind: "cloud" as const, organizationId: entry.target.orgId, workspaceId: entry.target.workspaceId };
@@ -266,6 +431,8 @@ export async function retainCloudConnection(target: CloudTarget, activation: Lea
     key: entry.key,
     connection,
     client: connection.client,
+    current: () => (entries.get(entry.key) === entry ? entry.connection : null),
+    state: () => (entries.get(entry.key) !== entry ? IDLE_STATE : entry.connection ? entry.state : entry.pending ? OPENING_STATE : IDLE_STATE),
     release: () => {
       if (released) return;
       released = true;
@@ -281,6 +448,7 @@ function releaseEntry(entry: Entry) {
   setInfo(entry, { refs: entry.refs });
   if (entry.refs > 0) return;
   if (!entry.connection && !entry.pending) {
+    cancelRetry(entry);
     entries.delete(entry.key);
     notify();
     return;

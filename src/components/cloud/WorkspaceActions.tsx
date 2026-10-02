@@ -4,7 +4,7 @@ import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/menu";
 import { CloudWorkspaceLifecycleDialog, actionsFor, type LifecycleAction } from "@/components/cloud/CloudWorkspaceLifecycle";
 import { openShareDialog } from "@/components/cloud/CloudShareDialog";
 import type { CloudWorkspaceListItem } from "@/lib/api";
-import { refreshCloudCatalog, resumeCloudWorkspace, unarchiveCloudWorkspace } from "@/lib/cloudCatalog";
+import { applyCloudSnapshot, refreshCloudCatalog, resumeCloudWorkspace, unarchiveCloudWorkspace } from "@/lib/cloudCatalog";
 import { LIFECYCLE_ADMIN_REASON, VISIBILITY_ADMIN_REASON, workspaceAuthority } from "@/lib/cloudCollab";
 import { closeCloudConnection } from "@/lib/cloudConnections";
 import { lifecycleErrorMessage } from "@/lib/cloudLifecycle";
@@ -122,17 +122,25 @@ export function WorkspaceActionItems({
   );
 }
 
-/** The confirmation dialog for a requested action; a stopped or archived workspace's connection is closed after. */
+/** The confirmation dialog for a requested action; a deleted workspace's connection is closed after. */
 export function WorkspaceLifecycleDialog({ request, onClose }: { request: LifecycleRequest; onClose: () => void }) {
   return (
     <CloudWorkspaceLifecycleDialog
       item={request.item}
       initial={request.action}
       onClose={onClose}
-      onDone={() => {
+      onDone={(snapshot) => {
         onClose();
-        // Stopped, archived or deleted: nothing may keep reading it as live.
-        closeCloudConnection({ orgId: request.item.workspace.orgId, workspaceId: request.item.workspace.id });
+        if (request.action === "delete") {
+          // Deleted: nothing is left to connect to.
+          closeCloudConnection({ orgId: request.item.workspace.orgId, workspaceId: request.item.workspace.id });
+        } else if (snapshot?.workspace) {
+          // Stopping or archiving: the row and the header say so at once. An open
+          // session keeps its connection, which follows the machine down and, when
+          // someone wakes the workspace again, back up (closing it here left that
+          // session on a dead client for good).
+          applyCloudSnapshot(snapshot);
+        }
         void refreshCloudCatalog(request.item.workspace.orgId);
       }}
       onExport={() => {

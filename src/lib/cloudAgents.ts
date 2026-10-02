@@ -367,7 +367,9 @@ export async function refreshFromCheckpoint(scope: CloudAgentScope, tabId: strin
   const p = checkpoint.projection;
   if (p.tabId !== tabId) return false;
   current.checkpoint = { epoch: checkpoint.epoch, version: checkpoint.version };
-  if (current.source !== "live" || current.placeholder) {
+  // A checkpoint taken before the last event this desktop saw says nothing newer about the turn.
+  const behind = p.events.length > 0 && p.events[p.events.length - 1].seq < current.info.lastSeq;
+  if (current.placeholder || (current.source !== "live" && !behind)) {
     noteStatus(current, p.status);
     current.info = {
       ...current.info,
@@ -432,6 +434,40 @@ function forgetTab(s: Store, tab: CloudAgentTab) {
 
 export async function syncLiveTabs(scope: CloudAgentScope, client: WorkspaceRpcClient) {
   applyLiveTabs(scope, await client.listAgentTabs());
+}
+
+/** Tabs brought up to date from their checkpoints at one connect, at most. */
+const RECONCILE_CHECKPOINTS = 20;
+
+/**
+ * Bring every tab in line with the runtime after a connect (the first, a
+ * reconnect, a new runtime generation, or access given back): its own tab
+ * list decides each tab's status, so a turn that finished while this desktop
+ * was away never stays "Working"; and a tab nothing streams here whose
+ * transcript is behind the runtime's catches its tail up from the checkpoint.
+ * The tab being looked at streams live and replays from its cursor instead.
+ */
+export async function reconcileCloudAgents(scope: CloudAgentScope, client: WorkspaceRpcClient) {
+  const tabs = await client.listAgentTabs();
+  applyLiveTabs(scope, tabs);
+  if (isDevScope(scope)) return;
+  const s = store(scope);
+  const behind = tabs.filter((info) => {
+    const tab = s.tabs.get(info.tabId);
+    return !!tab && !tab.live && !!info.sessionId && info.lastSeq > lastSeq(info.sessionId, info.tabId);
+  });
+  await Promise.all(behind.slice(0, RECONCILE_CHECKPOINTS).map((info) => refreshFromCheckpoint(scope, info.tabId).catch(() => false)));
+}
+
+/**
+ * The connection went away: what the runtime said of each tab is the last
+ * known state from here on, not the live one, so a newer checkpoint may say
+ * that a turn finished (`refreshFromCheckpoint`).
+ */
+export function markCloudAgentsOffline(scope: CloudAgentScope) {
+  const s = stores.get(cloudAgentsKey(scope));
+  if (!s) return;
+  for (const tab of s.tabs.values()) if (tab.source === "live") tab.source = "cache";
 }
 
 /** Follow `session.tabs` broadcasts from the runtime. */

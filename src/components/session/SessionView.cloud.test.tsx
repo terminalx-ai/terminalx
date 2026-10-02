@@ -84,8 +84,9 @@ import { CloudSessionHost } from "./CloudSessionHost";
 import { cloudConnectionChip, useCloudSession, workspaceStarting } from "@/lib/cloudSession";
 import { resetCloudAgents } from "@/lib/cloudAgents";
 import { TERMINAL_POLL_MS, cloudTerminalsOf, resetCloudTerminals, sessionTerminals } from "@/lib/cloudTerminals";
-import { resetCloudConnections } from "@/lib/cloudConnections";
+import { closeCloudConnection, resetCloudConnections } from "@/lib/cloudConnections";
 import { resetCollab } from "@/lib/cloudCollab";
+import { resetPeople } from "@/lib/cloudPeople";
 import { selectSessionTab } from "@/lib/terminal";
 import { resetCloudWakes } from "@/lib/sessionBackend";
 import { getSessionStore, selectCloudSession, upsertSession } from "@/lib/sessions";
@@ -170,9 +171,14 @@ class FakeRuntime implements WorkspaceTransport {
     { ptyId: "p1", number: 1, epoch: "e1", pid: 1, cwd: "/workspace/api", cols: 80, rows: 24, createdAt: 1, offset: 0, exited: false, exitCode: null, control: "you", sessionId: "s-1" },
     { ptyId: "p2", number: 2, epoch: "e1", pid: 2, cwd: "/workspace", cols: 80, rows: 24, createdAt: 1, offset: 0, exited: false, exitCode: null, control: "you" },
   ];
+  /** The runtime generation and process this fake is: a woken workspace is a new one of each. */
+  generation = 3;
+  epoch = "e1";
   private messages = new Set<(message: unknown) => void>();
   private states = new Set<(state: WorkspaceConnectionState) => void>();
   private subscription = 0;
+  /** The newest `session.subscribe` this runtime answered. */
+  private sessionSubscription: string | null = null;
 
   send(frame: RpcWireRequest): boolean {
     if (!this.up) return false;
@@ -199,8 +205,8 @@ class FakeRuntime implements WorkspaceTransport {
   connect(authority: "manage" | "participate" = "manage") {
     this.emit({
       state: "connected",
-      runtimeGeneration: 3,
-      runtimeEpoch: "e1",
+      runtimeGeneration: this.generation,
+      runtimeEpoch: this.epoch,
       runtimeVersion: "0.3.0",
       capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1"],
       authority,
@@ -213,8 +219,8 @@ class FakeRuntime implements WorkspaceTransport {
     this.collab.you = you;
     this.emit({
       state: "connected",
-      runtimeGeneration: 3,
-      runtimeEpoch: "e1",
+      runtimeGeneration: this.generation,
+      runtimeEpoch: this.epoch,
       runtimeVersion: "0.3.0",
       capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "collab/1"],
       authority,
@@ -228,6 +234,10 @@ class FakeRuntime implements WorkspaceTransport {
   notify(event: string, params: Record<string, unknown>) {
     for (const listener of this.messages) listener({ event, params });
   }
+  /** A live transcript event on the newest session subscription. */
+  stream(event: AgentEvent) {
+    this.notify("session.event", { subscriptionId: this.sessionSubscription, cursor: `${this.generation}:${event.seq}`, event });
+  }
   private answer(frame: RpcWireRequest) {
     const params = (frame.params ?? {}) as Record<string, unknown>;
     const ok = (result: unknown) => ({ id: frame.id, ok: true, result });
@@ -237,7 +247,8 @@ class FakeRuntime implements WorkspaceTransport {
       case "session.list":
         return ok({ sessions: [runtimeSession()] });
       case "session.subscribe":
-        return ok({ subscriptionId: `sub-${++this.subscription}`, events: this.events.map((event) => ({ cursor: `3:${event.seq}`, event })), cursor: `3:${this.events.at(-1)?.seq ?? 0}` });
+        this.sessionSubscription = `sub-${++this.subscription}`;
+        return ok({ subscriptionId: this.sessionSubscription, events: this.events.map((event) => ({ cursor: `${this.generation}:${event.seq}`, event })), cursor: `${this.generation}:${this.events.at(-1)?.seq ?? 0}` });
       case "session.nudge":
       case "session.markRead":
       case "session.unsubscribe":
@@ -248,14 +259,20 @@ class FakeRuntime implements WorkspaceTransport {
         return this.collab ? ok(this.collab) : { id: frame.id, ok: false, error: { code: "method_not_found", message: frame.method } };
       case "presence.update":
         return ok({});
+      case "lease.acquire":
+      case "lease.takeOver": {
+        const lease = { tabId: String(params.tabId), holderId: String(this.collab?.you.userId), acquiredAt: 1, expiresAt: Date.now() + 60_000 };
+        if (this.collab) this.collab.leases = [lease];
+        return ok({ lease });
+      }
       case "notes.list":
         return ok({ notes: [], more: false });
       case "runtime.agents":
         return ok({ agents: [{ id: "claude", name: "Claude Code", caps: {}, models: [], modes: [], defaultMode: "bypassPermissions" }] });
       case "pty.list":
-        return ok({ epoch: "e1", terminals: this.terminals });
+        return ok({ epoch: this.epoch, terminals: this.terminals });
       case "pty.attach":
-        return ok({ subscriptionId: `sub-${++this.subscription}`, epoch: "e1", offset: 0, data: "", truncated: false, exited: false, control: "you", cols: 80, rows: 24 });
+        return ok({ subscriptionId: `sub-${++this.subscription}`, epoch: this.epoch, offset: 0, data: "", truncated: false, exited: false, control: "you", cols: 80, rows: 24 });
       case "git.repositories":
         return ok({ repositories: this.repositories });
       case "git.status":
@@ -703,7 +720,9 @@ describe("the session header's location and connection chips", () => {
     expect(screen.getByTestId("session-connection").textContent).toBe("Starting");
     expect(cloudConnectionChip({ state: "waitingForRuntime" }, "ready").label).toBe("Connecting…");
     expect(cloudConnectionChip({ state: "waitingForRuntime" }, null).label).toBe("Connecting…");
-    expect(cloudConnectionChip({ state: "waitingForRuntime" }, "suspended").label).toBe("Starting");
+    // Stopped by the list and nothing resumes it: the transport is still finding out. Nothing is starting.
+    expect(cloudConnectionChip({ state: "waitingForRuntime" }, "suspended").label).toBe("Stopped");
+    expect(cloudConnectionChip({ state: "waitingForRuntime" }, "suspended", { starting: true }).label).toBe("Starting");
     expect(cloudConnectionChip({ state: "waitingForRuntime" }, "ready", { starting: true }).label).toBe("Starting");
     const resuming = { ...workspaceItem("suspended"), latestOperation: { state: "running", action: "resume" } } as CloudWorkspaceListItem;
     const stopping = { ...workspaceItem("ready"), latestOperation: { state: "running", action: "suspend" } } as CloudWorkspaceListItem;
@@ -711,6 +730,298 @@ describe("the session header's location and connection chips", () => {
     expect(workspaceStarting(stopping)).toBe(false);
     expect(workspaceStarting(workspaceItem("ready"))).toBe(false);
     expect(workspaceStarting(null)).toBe(false);
+  });
+
+  it("says Stopping… while a stop runs, whoever asked, then Stopped: never Starting or Live", async () => {
+    const stoppingItem = { ...workspaceItem("ready"), latestOperation: { state: "running", action: "suspend" } } as CloudWorkspaceListItem;
+    setCatalog(stoppingItem);
+    runtime.tabs = [tabInfo()];
+    const view = render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    const chip = () => screen.getByTestId("session-connection").textContent;
+    // Still connected to the runtime that is going down.
+    await act(async () => runtime.connect("manage"));
+    expect(chip()).toBe("Stopping…");
+    for (const state of [{ state: "reconnecting", attempt: 1, reason: "4100 runtime gone", retryInMs: 250 }, { state: "opening" }, { state: "waitingForRuntime" }, { state: "connecting", attempt: 2 }] as WorkspaceConnectionState[]) {
+      await act(async () => runtime.emit(state));
+      expect(chip()).toBe("Stopping…");
+    }
+    // The stop finished before the transport found out.
+    await act(async () => {
+      setCatalog(workspaceItem("suspended"));
+      view.rerender(wrap(<CloudHarness />));
+    });
+    expect(chip()).toBe("Stopped");
+    await act(async () => runtime.emit({ state: "suspended" }));
+    expect(chip()).toBe("Stopped");
+    expect(activate).not.toHaveBeenCalled();
+
+    // The chip itself: a stop wins over a wake this desktop asked for earlier, and over a live transport.
+    const live: WorkspaceConnectionState = { state: "connected", runtimeGeneration: 1, runtimeVersion: "1", capabilities: [], authority: "manage" };
+    expect(cloudConnectionChip(live, "ready", { stopping: true })).toEqual({ label: "Stopping…", tone: "pending" });
+    expect(cloudConnectionChip({ state: "waitingForRuntime" }, "ready", { stopping: true, woke: true }).label).toBe("Stopping…");
+    expect(cloudConnectionChip({ state: "waitingForRuntime" }, "suspended", { stopping: true }).label).toBe("Stopping…");
+    expect(cloudConnectionChip(live, "ready").label).toBe("Live");
+    // Attaching again after the workspace came back: Reconnecting… until the transport is up, then Live.
+    expect(cloudConnectionChip({ state: "idle" }, "ready", { reattaching: true }).label).toBe("Reconnecting…");
+    expect(cloudConnectionChip({ state: "opening" }, "ready", { reattaching: true }).label).toBe("Reconnecting…");
+    expect(cloudConnectionChip({ state: "suspended" }, "ready", { reattaching: true }).label).toBe("Reconnecting…");
+    expect(cloudConnectionChip(live, "ready", { reattaching: true }).label).toBe("Live");
+    expect(cloudConnectionChip({ state: "idle" }, "ready").label).toBe("Not connected");
+    expect(workspaceStarting(stoppingItem)).toBe(false);
+  });
+});
+
+// Found in a live two-user test: Alice (the owner) has the session open and
+// stops the workspace; Bob sends a message, the mailbox wakes it, and a new
+// runtime generation comes up. Alice's pane stayed on the old client: the chip
+// read "Live" (from the list), nothing arrived, and "Take the wheel" failed
+// with "RPC transport unavailable: lease.acquire" until she restarted the app.
+describe("an open session whose workspace stops and is woken by someone else", () => {
+  const ALICE = { userId: "u-me", role: "manager", canApprove: true };
+  const target = { kind: "cloud", organizationId: ORG, workspaceId: WS };
+  const chip = () => screen.getByTestId("session-connection").textContent;
+  /** The workspace list as it was asked for at `requestedAt`. */
+  const listed = (state: CloudWorkspaceListItem["workspace"]["state"], requestedAt: number, action: "suspend" | "resume" | null = null) => {
+    const item = workspaceItem(state, "manage");
+    item.workspace.accessMode = "organization";
+    item.workspace.you = { role: "manager", canApprove: true };
+    item.workspace.sharedWith = 2;
+    if (action) item.latestOperation = { state: "running", action } as CloudWorkspaceListItem["latestOperation"];
+    mocks.catalog.orgs = { [ORG]: { orgId: ORG, workspaces: [item], repositories: null, repositoriesAt: null, quota: null, fetchedAt: requestedAt, requestedAt, source: "live", error: null } };
+  };
+  const people = () => {
+    guard.handlers.organization_members = () => ({ members: [{ userId: "u-bob", email: "bob@example.com", displayName: "Bob", role: "member" }], pendingInvites: [], viewerRole: "owner", canManageMembers: true, removedOnDelete: [], runtimeFacts: { available: true }, contextRevision: "r" });
+  };
+  let woken: FakeRuntime;
+  let wokenClient: WorkspaceRpcClient;
+  let closedFirst: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    people();
+    runtime.collab = { you: ALICE, participants: [], leases: [] };
+    // What Bob's wake brings up: another runtime generation and process, reached over another attachment.
+    woken = new FakeRuntime();
+    woken.generation = 4;
+    woken.epoch = "e2";
+    wokenClient = new WorkspaceRpcClient(woken);
+    // The api layer closes a connection's client with it.
+    closedFirst = vi.fn(() => client.close());
+    mocks.workspaceConnection
+      .mockReset()
+      .mockImplementationOnce(async () => ({ target, client, activate, close: closedFirst }))
+      .mockImplementation(async () => ({ target, client: wokenClient, activate, close: vi.fn() }));
+  });
+  afterEach(() => {
+    wokenClient.close();
+    // The roster is read once per session; the next test names its own people.
+    resetPeople();
+  });
+
+  async function openAsAlice() {
+    listed("ready", 1);
+    runtime.tabs = [tabInfo()];
+    const view = render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalledTimes(1));
+    await act(async () => runtime.connectShared(ALICE, "manage"));
+    await screen.findByText("Fix login redirect");
+    await waitFor(() => expect(runtime.methods("collab.state").length).toBeGreaterThan(0));
+    expect(chip()).toBe("Live");
+    return () => view.rerender(wrap(<CloudHarness />));
+  }
+
+  it("attaches fresh with connect, subscribes again, shows the other person's turn and lease, and reads Live only once the transport is up", async () => {
+    const relist = await openAsAlice();
+
+    // Alice stops it. The list has the operation: Stopping…, never Starting, and not Live for the whole stop.
+    await act(async () => {
+      listed("ready", Date.now(), "suspend");
+      relist();
+    });
+    expect(chip()).toBe("Stopping…");
+    await act(async () => runtime.emit({ state: "reconnecting", attempt: 1, reason: "4100 runtime gone", retryInMs: 250 }));
+    expect(chip()).toBe("Stopping…");
+    await act(async () => runtime.emit({ state: "waitingForRuntime" }));
+    expect(chip()).toBe("Stopping…");
+    await act(async () => {
+      listed("suspended", Date.now());
+      relist();
+    });
+    // The transport has not found out yet: Stopped, not Starting.
+    expect(chip()).toBe("Stopped");
+    await act(async () => runtime.emit({ state: "suspended" }));
+    expect(chip()).toBe("Stopped");
+    expect(mocks.workspaceConnection).toHaveBeenCalledTimes(1);
+
+    // Bob sends: the mailbox wakes the workspace, his turn runs in a new runtime generation, and he drives the tab.
+    woken.tabs = [tabInfo({ status: "idle", lastSeq: seq + 2 })];
+    woken.events = [ev({ type: "user_message", text: "bob asks from his desktop", queued: false }), ev({ type: "assistant_text", text: "the answer to bob" })];
+    woken.collab = {
+      you: ALICE,
+      participants: [{ userId: "u-bob", role: "driver", canApprove: false, surfaces: 1, tabId: "t-1", activity: "viewing", since: 1 }],
+      leases: [{ tabId: "t-1", holderId: "u-bob", acquiredAt: 1, expiresAt: Date.now() + 60_000 }],
+    };
+    // A list asked for after the transport stopped says the machine runs again.
+    await act(async () => {
+      listed("ready", Date.now() + 1_000);
+      relist();
+    });
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalledTimes(2));
+    // A fresh attachment, and the old client is torn down.
+    expect(closedFirst).toHaveBeenCalledTimes(1);
+    // The list says ready, but the transport is not up: Reconnecting…, never Live.
+    expect(chip()).toBe("Reconnecting…");
+    await act(async () => woken.emit({ state: "connecting", attempt: 1 }));
+    expect(chip()).toBe("Reconnecting…");
+
+    await act(async () => woken.connectShared(ALICE, "manage"));
+    expect(chip()).toBe("Live");
+    // Everything is read and subscribed again on the new runtime.
+    await waitFor(() => {
+      for (const method of ["session.tabs", "session.list", "session.subscribe", "collab.state", "pty.list", "git.repositories"]) {
+        expect(woken.methods(method).length, method).toBeGreaterThan(0);
+      }
+    });
+    // Bob's turn, which ran while this pane had no connection, is here.
+    expect(await screen.findByText("bob asks from his desktop")).toBeTruthy();
+    expect(await screen.findByText("the answer to bob")).toBeTruthy();
+    // So is his lease: never "No one is driving" while he drives.
+    await waitFor(() => expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("Driving: Bob"));
+    expect((await screen.findAllByTestId("session-presence-person")).length).toBe(1);
+
+    // Events flow on the new subscription.
+    await act(async () => woken.stream(ev({ type: "assistant_text", text: "streamed after the wake" })));
+    expect(await screen.findByText("streamed after the wake")).toBeTruthy();
+
+    // Lease RPC works: no "RPC transport unavailable".
+    fireEvent.click(screen.getByRole("button", { name: "Take over" }));
+    await waitFor(() => expect(woken.methods("lease.takeOver")).toHaveLength(1));
+    await waitFor(() => expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("You are driving"));
+    expect(screen.getByTestId("cloud-agent-lease").textContent).not.toContain("RPC transport unavailable");
+
+    // Looking never wakes compute: both attachments were `connect`, nothing was raised to `wake`, nothing resumed.
+    expect(mocks.workspaceConnection.mock.calls.map((call) => call[1])).toEqual(["connect", "connect"]);
+    expect(activate).not.toHaveBeenCalled();
+    expect(guard.calls.map((call) => call.command)).not.toContain("cloud_workspace_resume");
+    expect(guard.violations).toEqual([]);
+    // Nothing was sent to the runtime that was stopped.
+    expect(runtime.methods("lease.takeOver")).toEqual([]);
+  });
+
+  it("never reads Live over a connection that was closed underneath the view", async () => {
+    await openAsAlice();
+    // Closed for good (the workspace was deleted here): the view's lease is over.
+    await act(async () => closeCloudConnection({ orgId: ORG, workspaceId: WS }));
+    expect(closedFirst).toHaveBeenCalledTimes(1);
+    expect(chip()).not.toBe("Live");
+    expect(screen.queryByTestId("cloud-agent-lease")).toBeNull();
+    expect(mocks.workspaceConnection).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays Stopped, and attaches nothing, while only an older list says the workspace runs", async () => {
+    const relist = await openAsAlice();
+    await act(async () => runtime.emit({ state: "suspended" }));
+    // The list in hand was asked for before the transport stopped: it is the stale one, and is read again.
+    expect(chip()).toBe("Stopped");
+    await waitFor(() => expect(mocks.refreshCatalog).toHaveBeenCalledWith(ORG));
+    await act(async () => {
+      listed("suspended", Date.now());
+      relist();
+    });
+    expect(chip()).toBe("Stopped");
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(mocks.workspaceConnection).toHaveBeenCalledTimes(1);
+    expect(activate).not.toHaveBeenCalled();
+  });
+});
+
+// Found in the same test: after a reconnect Bob's pane kept "chunk 98 of 150"
+// and "Working" for 40 s or more after the turn had finished.
+describe("a turn that finished while this desktop was away", () => {
+  afterEach(() => resetPeople());
+
+  it("is not left Working after a reconnect: the runtime's tab list and the transcript tail are read again", async () => {
+    runtime.tabs = [tabInfo({ status: "in_progress" })];
+    runtime.events = [ev({ type: "user_message", text: "count to 150", queued: false }), ev({ type: "assistant_text", text: "chunk 98 of 150" })];
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connect("manage"));
+    expect(await screen.findByText("chunk 98 of 150")).toBeTruthy();
+    expect(within(composer()).getByRole("button", { name: "Queue" })).toBeTruthy();
+    const tabReads = runtime.methods("session.tabs").length;
+    const subscriptions = runtime.methods("session.subscribe").length;
+
+    // The link drops; the turn finishes meanwhile, and its status change is never delivered.
+    await act(async () => runtime.emit({ state: "reconnecting", attempt: 1, reason: "4104 relay restarting", retryInMs: 250 }));
+    runtime.tabs = [tabInfo({ status: "completed" })];
+    runtime.events = [...runtime.events, ev({ type: "assistant_text", text: "chunk 150 of 150" }), ev({ type: "turn_completed", status: "ok", authFailed: false })];
+    await act(async () => runtime.connect("manage"));
+
+    await waitFor(() => expect(runtime.methods("session.tabs").length).toBeGreaterThan(tabReads));
+    await waitFor(() => expect(runtime.methods("session.subscribe").length).toBeGreaterThan(subscriptions));
+    expect(await screen.findByText("chunk 150 of 150")).toBeTruthy();
+    await waitFor(() => expect(within(composer()).getByRole("button", { name: "Send" })).toBeTruthy());
+    expect(within(composer()).queryByRole("button", { name: "Queue" })).toBeNull();
+    expect(guard.violations).toEqual([]);
+  });
+
+  it("is not left Working while the connection is away: the checkpoint says it finished", async () => {
+    runtime.tabs = [tabInfo({ status: "in_progress", lastSeq: seq + 2 })];
+    runtime.events = [ev({ type: "user_message", text: "count to 150", queued: false }), ev({ type: "assistant_text", text: "chunk 98 of 150" })];
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connect("manage"));
+    expect(await screen.findByText("chunk 98 of 150")).toBeTruthy();
+    expect(within(composer()).getByRole("button", { name: "Queue" })).toBeTruthy();
+
+    // The turn finishes and is checkpointed while this desktop cannot reach the runtime.
+    const tail = [ev({ type: "assistant_text", text: "chunk 150 of 150" }), ev({ type: "turn_completed", status: "ok", authFailed: false })];
+    guard.handlers.cloud_agent_checkpoint = () => ({
+      epoch: 1,
+      version: 2,
+      projection: { v: 1, tabId: "t-1", sessionId: "s-1", title: "Fix login", harness: "claude", model: "", effort: null, permissionMode: "bypassPermissions", status: "idle", process: "running", followUps: [], events: tail, truncated: false, updatedAt: 2 },
+    });
+    const sent = runtime.sent.length;
+    await act(async () => runtime.emit({ state: "reconnecting", attempt: 1, reason: "4104 relay restarting", retryInMs: 250 }));
+    expect(screen.getByTestId("session-connection").textContent).toBe("Reconnecting…");
+    expect(await screen.findByText("chunk 150 of 150")).toBeTruthy();
+    await waitFor(() => expect(within(composer()).getByRole("button", { name: "Send" })).toBeTruthy());
+    // Only a checkpoint was read: nothing went to the runtime, and nothing was woken.
+    expect(runtime.sent.length).toBe(sent);
+    expect(activate).not.toHaveBeenCalled();
+    expect(guard.violations).toEqual([]);
+  });
+
+  it("is not left Working when a share comes back on the connection that was kept", async () => {
+    const ME = { userId: "u-me", role: "driver", canApprove: false };
+    const item = workspaceItem("ready", "participate");
+    item.workspace.accessMode = "organization";
+    item.workspace.you = { role: "driver", canApprove: false };
+    setCatalog(item);
+    guard.handlers.organization_members = () => ({ members: [], pendingInvites: [], viewerRole: "member", canManageMembers: false, removedOnDelete: [], runtimeFacts: { available: true }, contextRevision: "r" });
+    runtime.collab = { you: ME, participants: [], leases: [] };
+    runtime.tabs = [tabInfo({ status: "in_progress" })];
+    runtime.events = [ev({ type: "user_message", text: "count to 150", queued: false }), ev({ type: "assistant_text", text: "chunk 98 of 150" })];
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connectShared(ME));
+    expect(await screen.findByText("chunk 98 of 150")).toBeTruthy();
+
+    // The share is revoked mid-turn; the turn finishes; then the workspace is shared again. No reconnect happens.
+    await act(async () => runtime.notify("collab.you", { you: { ...ME, role: "none", listed: true } }));
+    await screen.findByTestId("cloud-access-removed");
+    const tabReads = runtime.methods("session.tabs").length;
+    runtime.tabs = [tabInfo({ status: "completed" })];
+    runtime.events = [...runtime.events, ev({ type: "assistant_text", text: "chunk 150 of 150" }), ev({ type: "turn_completed", status: "ok", authFailed: false })];
+    runtime.collab.you = ME;
+    await act(async () => runtime.notify("collab.you", { you: { ...ME, listed: true } }));
+    await waitFor(() => expect(screen.queryByTestId("cloud-access-removed")).toBeNull());
+
+    await waitFor(() => expect(runtime.methods("session.tabs").length).toBeGreaterThan(tabReads));
+    expect(await screen.findByText("chunk 150 of 150")).toBeTruthy();
+    await waitFor(() => expect(within(composer()).queryByRole("button", { name: "Queue" })).toBeNull());
+    expect(mocks.workspaceConnection).toHaveBeenCalledTimes(1);
+    expect(guard.violations).toEqual([]);
   });
 });
 
@@ -1037,7 +1348,7 @@ describe("sharing states found in the live two-user test", () => {
     await openShared(ME);
     await waitFor(() => expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("You are driving"));
     await act(async () => runtime.emit({ state: "reconnecting", attempt: 1, reason: "4104 relay restarting", retryInMs: 250 }));
-    expect(screen.getByTestId("session-connection").textContent).toBe("Reconnecting");
+    expect(screen.getByTestId("session-connection").textContent).toBe("Reconnecting…");
     expect(screen.queryByTestId("cloud-access-removed")).toBeNull();
     // While reconnecting the lease bar is gone, and this person is never named as "someone else driving".
     expect(screen.queryByTestId("cloud-agent-lease")).toBeNull();

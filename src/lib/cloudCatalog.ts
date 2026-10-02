@@ -15,7 +15,8 @@ import {
 import { getAccount, refreshAccount, subscribeAccount } from "@/lib/account";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { phaseOf, settled } from "@/lib/cloudCreate";
-import { isArchived, isOpen, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
+import { isArchived, isOpen, machineRunning, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
+import { noteCloudWorkspaceListed } from "@/lib/cloudConnections";
 import { onAccessChanged } from "@/lib/cloudCollab";
 import { cloudProjectKey, cloudWorkspaceKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
 
@@ -290,6 +291,17 @@ const names = new Map<string, string>();
 const listedAt = new Map<string, number>();
 
 /**
+ * Tell the connection manager what a list says of each workspace's machine,
+ * so a connection whose workspace stopped and came back (woken by someone
+ * else, resumed from another surface) attaches again. Only ever a `connect`.
+ */
+function tellConnections(workspaces: readonly CloudWorkspaceListItem[], at: number) {
+  for (const item of workspaces) {
+    noteCloudWorkspaceListed({ orgId: item.workspace.orgId, workspaceId: item.workspace.id }, { running: machineRunning(item), at });
+  }
+}
+
+/**
  * Take a workspace list: tombstoned workspaces leave the rows, and what this
  * desktop kept of them is purged (their agent data, keys, outbox, terminals,
  * editors and connection). `orgId` is the organization the list is for; the
@@ -326,6 +338,7 @@ export async function ingestCloudList(
       orgs: { ...state.orgs, [org]: { ...current, workspaces, quota: list.quota ?? current.quota, fetchedAt: now, requestedAt, source: "live", error: null, sessions } },
       createMemory,
     });
+    tellConnections(workspaces, requestedAt);
   }
   const notices = await purgeTombstones(tombstones, names);
   if (notices.length) set({ ...state, notices: [...state.notices, ...notices] }, false);
@@ -341,6 +354,8 @@ export function applyCloudSnapshot(snapshot: CloudWorkspaceSnapshot) {
   const known = current.workspaces.some((row) => row.workspace.id === item.workspace.id);
   const workspaces = known ? current.workspaces.map((row) => (row.workspace.id === item.workspace.id ? item : row)) : [item, ...current.workspaces];
   set({ ...state, orgs: { ...state.orgs, [orgId]: { ...current, workspaces } } });
+  // The server's answer to a call made just now: as fresh as a list asked for now.
+  tellConnections([item], Date.now());
   schedulePoll(orgId);
 }
 

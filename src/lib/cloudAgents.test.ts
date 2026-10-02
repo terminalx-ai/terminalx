@@ -19,6 +19,8 @@ import {
   flushCloudAgentCache,
   getCloudAgents,
   loadCloudAgents,
+  markCloudAgentsOffline,
+  reconcileCloudAgents,
   refreshFromCheckpoint,
   resetCloudAgents,
   SAVE_DEBOUNCE_MS,
@@ -437,5 +439,65 @@ describe("cloud agent tabs store", () => {
     await expect(decideCloudAgent(dev, "t-1", { requestId: "r", optionId: "allow" }, client)).rejects.toThrow(DEV_SCOPE_NOTICE);
     await flushCloudAgentCache(dev);
     expect(backend.calls).toEqual([]);
+  });
+
+  // Found in a live two-user test: a pane kept "chunk 98 of 150 / Working" long after the turn had finished.
+  describe("a turn that finished while this desktop was away", () => {
+    const projection = (status: AgentTabInfo["status"], events: AgentEvent[]): Checkpoint["projection"] => ({
+      v: 1,
+      sessionId: "s-1",
+      tabId: "t-1",
+      title: null,
+      harness: "claude",
+      model: "",
+      effort: null,
+      permissionMode: "manual",
+      status,
+      process: "running",
+      events,
+      truncated: false,
+      followUps: [],
+      updatedAt: 10,
+    });
+
+    it("takes the finished turn from the checkpoint once the connection is gone, never while it is up", async () => {
+      applyLiveTabs(scope, [tabInfo({ status: "in_progress", lastSeq: 2 })]);
+      backend.checkpoints["t-1"] = { epoch: 7, version: 5, projection: projection("completed", [ev(2, { type: "assistant_text", text: "chunk 98" }), ev(3, { type: "assistant_text", text: "chunk 150" })]) };
+      // Connected: the runtime's own word is newer than any checkpoint.
+      await refreshFromCheckpoint(scope, "t-1");
+      expect(getCloudAgents(scope).tabs[0]!.info.status).toBe("in_progress");
+      // The connection went away: that status is only the last one known.
+      backend.checkpoints["t-1"] = { ...backend.checkpoints["t-1"]!, version: 6 };
+      markCloudAgentsOffline(scope);
+      expect(await refreshFromCheckpoint(scope, "t-1")).toBe(true);
+      const tab = getCloudAgents(scope).tabs[0]!;
+      expect(tab.info.status).toBe("completed");
+      expect(tab.unread).toBe(true);
+      expect(getTabLog("s-1", "t-1").events.map((e) => e.seq)).toEqual([2, 3]);
+    });
+
+    it("never goes back to an older checkpoint's status", async () => {
+      applyLiveTabs(scope, [tabInfo({ status: "in_progress", lastSeq: 9 })]);
+      markCloudAgentsOffline(scope);
+      // Taken before the turn this desktop saw start: its "completed" is the turn before.
+      backend.checkpoints["t-1"] = { epoch: 7, version: 5, projection: projection("completed", [ev(4, { type: "assistant_text", text: "the turn before" })]) };
+      await refreshFromCheckpoint(scope, "t-1");
+      expect(getCloudAgents(scope).tabs[0]!.info.status).toBe("in_progress");
+    });
+
+    it("on a connect, takes each tab's status from the runtime and the tail of a tab nothing streams from its checkpoint", async () => {
+      applyLiveTabs(scope, [tabInfo({ status: "in_progress", lastSeq: 2 }), tabInfo({ tabId: "t-2", status: "in_progress", lastSeq: 1 })]);
+      markCloudAgentsOffline(scope);
+      backend.checkpoints["t-1"] = { epoch: 7, version: 5, projection: projection("completed", [ev(2, { type: "assistant_text", text: "chunk 98" }), ev(3, { type: "assistant_text", text: "chunk 150" })]) };
+      const client = fakeClient();
+      // The open tab streams live: it replays from its cursor, not from a checkpoint.
+      await attachCloudAgentTab(scope, "t-2", client);
+      client.listAgentTabs.mockResolvedValue([tabInfo({ status: "completed", lastSeq: 3 }), tabInfo({ tabId: "t-2", status: "idle", lastSeq: 8 })]);
+      await reconcileCloudAgents(scope, client);
+      const tabs = getCloudAgents(scope).tabs;
+      expect(tabs.map((tab) => [tab.tabId, tab.info.status])).toEqual([["t-1", "completed"], ["t-2", "idle"]]);
+      expect(getTabLog("s-1", "t-1").events.map((e) => e.seq)).toEqual([2, 3]);
+      expect(backend.calls.filter((call) => call.cmd === "cloud_agent_checkpoint").map((call) => call.args.tabId)).toEqual(["t-1"]);
+    });
   });
 });

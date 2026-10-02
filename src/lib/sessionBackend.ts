@@ -210,6 +210,8 @@ export interface CloudSessionContext {
   you?: WorkspaceYou | null;
   /** The connection, when it was granted `collab/1`. */
   collabClient?: WorkspaceRpcClient | null;
+  /** How many times the connection connected: a tab attaches again after each (a reconnect, a new attachment). */
+  connects?: number;
 }
 
 /** Whether a cloud workspace's compute is asleep as far as this client knows. */
@@ -248,7 +250,7 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
   return {
     kind: "cloud",
     key: ctx.key,
-    generation: live ? `${live.runtimeGeneration}:${live.runtimeEpoch ?? ""}` : `offline:${ctx.client ? "client" : "none"}`,
+    generation: live ? `${live.runtimeGeneration}:${live.runtimeEpoch ?? ""}:${ctx.connects ?? 0}` : `offline:${ctx.client ? "client" : "none"}`,
     caps: { local: false, write, steer: true, images: false, recovery: false },
     readOnlyReason,
     approveBlockedReason,

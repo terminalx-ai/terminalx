@@ -37,6 +37,18 @@ export function isOpen(operation: CloudWorkspaceOperation | null | undefined): b
   return !!operation && ["queued", "running", "cancel-requested"].includes(operation.state);
 }
 
+/** A stop still running: the machine is on its way down, whoever asked. */
+export function stopping(item: Pick<CloudWorkspaceListItem, "latestOperation">): boolean {
+  return isOpen(item.latestOperation) && item.latestOperation?.action === "suspend";
+}
+
+/** The machine runs as far as the list knows: ready, with no stop, archive or delete taking it down. */
+export function machineRunning(item: CloudWorkspaceListItem): boolean {
+  const operation = item.latestOperation;
+  const goingDown = isOpen(operation) && (operation?.action === "suspend" || operation?.action === "archive" || operation?.action === "delete");
+  return item.workspace.state === "ready" && !goingDown;
+}
+
 /** A permanent delete still cleaning up, or one that stopped and can be resumed. */
 export function deletion(item: CloudWorkspaceListItem): "running" | "failed" | null {
   const operation = item.latestOperation;

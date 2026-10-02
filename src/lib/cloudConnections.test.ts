@@ -204,3 +204,192 @@ describe("every organization live (CS-18)", () => {
     expect(manager.liveCloudConnections()).toEqual(["cloud:org-a:wa"]);
   });
 });
+
+// Found in a live two-user test: the owner stopped the workspace with its
+// session open, someone else woke it, and the owner's pane stayed on a dead
+// client ("RPC transport unavailable") until the app was restarted.
+describe("a workspace that stops and comes back", () => {
+  /** Every attach is a new native connection, as in the app; closing one ends it. */
+  let attached: ReturnType<typeof fakeConnection>[];
+  let now: number;
+  const key = "cloud:org:w1";
+  const flush = async (ms = 0) => {
+    await vi.advanceTimersByTimeAsync(ms);
+  };
+  const wakes = () => mocks.workspaceConnection.mock.calls.filter((call) => call[1] === "wake").length + attached.reduce((sum, connection) => sum + connection.activate.mock.calls.length, 0);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    attached = [];
+    now = 1_000;
+    manager.setCloudConnectionClock(() => now);
+    mocks.workspaceConnection.mockReset().mockImplementation(async (connectionTarget: { workspaceId: string }) => {
+      const connection = fakeConnection(connectionTarget.workspaceId);
+      attached.push(connection);
+      return connection;
+    });
+  });
+
+  /** Held and connected, then stopped: the list said so, and the transport parked. */
+  async function heldThenStopped() {
+    const lease = await manager.retainCloudConnection(target("w1"));
+    attached[0]!.emit(connected);
+    manager.noteCloudWorkspaceListed(target("w1"), { running: true, at: now });
+    now += 100;
+    manager.noteCloudWorkspaceListed(target("w1"), { running: false, at: now });
+    now += 100;
+    attached[0]!.emit({ state: "suspended" });
+    await flush();
+    return lease;
+  }
+
+  it("attaches a held connection fresh with connect when a newer list says it runs again, and never wakes", async () => {
+    const undo = vi.fn();
+    const seen = vi.fn(() => undo);
+    const stop = manager.onCloudConnected(seen);
+    const lease = await heldThenStopped();
+    expect(lease.state()).toEqual({ state: "suspended" });
+    expect(attached).toHaveLength(1);
+
+    // Someone else woke it: a list asked for after the transport parked says it runs.
+    now += 5_000;
+    manager.noteCloudWorkspaceListed(target("w1"), { running: true, at: now });
+    await flush();
+    expect(attached).toHaveLength(2);
+    expect(attached[0]!.close).toHaveBeenCalledTimes(1);
+    expect(mocks.workspaceConnection.mock.calls.map((call) => call[1])).toEqual(["connect", "connect"]);
+    expect(mocks.detachCloudTerminals).toHaveBeenCalledWith(key);
+    // The lease follows to the new connection, which is not live yet.
+    expect(lease.current()).toBe(attached[1]);
+    expect(lease.state().state).toBe("connecting");
+    expect(manager.cloudConnectionInfo(key)).toMatchObject({ reattaching: true, refs: 1, woke: false });
+    expect(manager.connectedCloudClient(key)).toBeNull();
+
+    attached[1]!.emit({ ...connected, runtimeGeneration: 2 });
+    expect(lease.state()).toMatchObject({ state: "connected", runtimeGeneration: 2 });
+    expect(manager.cloudConnectionInfo(key)).toMatchObject({ state: "connected", reattaching: false, connects: 2 });
+    expect(manager.connectedCloudClient(key)).toBe(attached[1]!.client);
+    // Whoever follows connections reads everything again from the new client.
+    expect(seen).toHaveBeenCalledTimes(2);
+    expect(seen).toHaveBeenLastCalledWith(target("w1"), attached[1]!.client);
+    expect(wakes()).toBe(0);
+    lease.release();
+    stop();
+  });
+
+  it("does nothing on a list that was asked for before the transport parked", async () => {
+    const lease = await manager.retainCloudConnection(target("w1"));
+    attached[0]!.emit(connected);
+    const asked = now;
+    now += 100;
+    // Stopped by someone else: this desktop's list still says ready.
+    attached[0]!.emit({ state: "suspended" });
+    manager.noteCloudWorkspaceListed(target("w1"), { running: true, at: asked });
+    await flush(60_000);
+    expect(attached).toHaveLength(1);
+    expect(lease.state()).toEqual({ state: "suspended" });
+    lease.release();
+  });
+
+  it("replaces a connection that still reads connected from before the stop", async () => {
+    const lease = await manager.retainCloudConnection(target("w1"));
+    attached[0]!.emit(connected);
+    now += 100;
+    manager.noteCloudWorkspaceListed(target("w1"), { running: false, at: now });
+    now += 100;
+    manager.noteCloudWorkspaceListed(target("w1"), { running: true, at: now });
+    await flush();
+    expect(attached).toHaveLength(2);
+    expect(attached[0]!.close).toHaveBeenCalledTimes(1);
+    expect(lease.current()).toBe(attached[1]);
+    expect(wakes()).toBe(0);
+    lease.release();
+  });
+
+  it("leaves alone a connection made after the stop (this desktop woke it)", async () => {
+    const lease = await manager.retainCloudConnection(target("w1"));
+    now += 100;
+    manager.noteCloudWorkspaceListed(target("w1"), { running: false, at: now });
+    attached[0]!.emit({ state: "waitingForRuntime" });
+    now += 100;
+    attached[0]!.emit(connected);
+    now += 100;
+    manager.noteCloudWorkspaceListed(target("w1"), { running: true, at: now });
+    await flush(60_000);
+    expect(attached).toHaveLength(1);
+    expect(lease.state().state).toBe("connected");
+    lease.release();
+  });
+
+  it("backs off while an attach keeps ending stopped, and only tries again on a newer list", async () => {
+    const lease = await heldThenStopped();
+    const relist = () => {
+      now += 10;
+      manager.noteCloudWorkspaceListed(target("w1"), { running: true, at: now });
+    };
+    relist();
+    await flush();
+    expect(attached).toHaveLength(2);
+    // The new attach finds it stopped as well.
+    attached[1]!.emit({ state: "suspended" });
+    await flush(manager.REATTACH_MAX_MS);
+    expect(attached).toHaveLength(2);
+    relist();
+    await flush(manager.REATTACH_FIRST_MS - 100);
+    expect(attached).toHaveLength(2);
+    await flush(200);
+    expect(attached).toHaveLength(3);
+    attached[2]!.emit({ state: "suspended" });
+    relist();
+    await flush(manager.REATTACH_FIRST_MS * 2 - 100);
+    expect(attached).toHaveLength(3);
+    await flush(200);
+    expect(attached).toHaveLength(4);
+    expect(wakes()).toBe(0);
+    lease.release();
+  });
+
+  it("closes a parked connection nobody holds, so the next lease attaches fresh", async () => {
+    const lease = await heldThenStopped();
+    lease.release();
+    now += 1_000;
+    manager.noteCloudWorkspaceListed(target("w1"), { running: true, at: now });
+    await flush();
+    expect(attached[0]!.close).toHaveBeenCalledTimes(1);
+    expect(attached).toHaveLength(1);
+    expect(manager.liveCloudConnections()).toEqual([]);
+    const again = await manager.retainCloudConnection(target("w1"));
+    expect(again.current()).toBe(attached[1]);
+    again.release();
+  });
+
+  it("forgets the wake that started it once the list says it stopped: the next action wakes anew", async () => {
+    const lease = await manager.wakeCloudConnection(target("w1"));
+    attached[0]!.emit(connected);
+    manager.noteCloudWorkspaceListed(target("w1"), { running: true, at: now });
+    expect(manager.cloudConnectionInfo(key).woke).toBe(true);
+    now += 100;
+    manager.noteCloudWorkspaceListed(target("w1"), { running: false, at: now });
+    expect(manager.cloudConnectionInfo(key).woke).toBe(false);
+    const again = await manager.wakeCloudConnection(target("w1"));
+    expect(attached[0]!.activate).toHaveBeenCalledTimes(1);
+    expect(attached[0]!.activate).toHaveBeenCalledWith("wake");
+    lease.release();
+    again.release();
+  });
+
+  it("a lease never reads connected once its connection was closed for good", async () => {
+    const lease = await manager.retainCloudConnection(target("w1"));
+    attached[0]!.emit(connected);
+    expect(lease.state().state).toBe("connected");
+    manager.closeCloudConnection(target("w1"));
+    expect(lease.current()).toBeNull();
+    expect(lease.state()).toEqual({ state: "idle" });
+    // Another surface's later connection is not this lease's.
+    const other = await manager.retainCloudConnection(target("w1"));
+    attached[1]!.emit(connected);
+    expect(lease.current()).toBeNull();
+    expect(lease.state()).toEqual({ state: "idle" });
+    other.release();
+  });
+});
