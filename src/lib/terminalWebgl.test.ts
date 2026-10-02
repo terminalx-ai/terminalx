@@ -33,6 +33,11 @@ function terminal() {
   const term = {
     element,
     loadAddon: vi.fn(() => {
+      // As the real addon: a 2D canvas for links first, then the WebGL one.
+      const links = document.createElement("canvas");
+      links.className = "xterm-link-layer";
+      links.getContext = (() => null) as never;
+      element.appendChild(links);
       const canvas = document.createElement("canvas");
       canvas.getContext = (() => ({ getExtension: () => ({ loseContext }) })) as never;
       element.appendChild(canvas);
@@ -148,25 +153,41 @@ describe("WebGL contexts", () => {
     expect(counters.webglContexts).toEqual({ created: 2, lost: 1, failed: 0 });
   });
 
-  it("stops asking when the browser keeps taking the context away", async () => {
+  it("waits before asking again when the browser keeps taking the context away, and does ask again", async () => {
     vi.useFakeTimers();
     const { webgl, counters } = await load();
     const { term } = terminal();
     webgl.showWebgl(term);
-    for (let round = 0; round < 10; round++) {
+    for (let round = 0; round < 6; round++) {
       addons.made.at(-1)!.lose();
-      vi.runAllTimers();
+      vi.advanceTimersByTime(1);
     }
+    // Six losses in a moment: no seventh context straight away.
     expect(counters.rendererOf(term)).toBe("dom");
     expect(counters.webglContexts.created).toBe(6);
+    // Still on screen once things have settled: it is not left on the fallback.
+    vi.advanceTimersByTime(10_000);
+    expect(counters.rendererOf(term)).toBe("webgl");
+    expect(counters.webglContexts.created).toBe(7);
   });
 
-  it("leaves the DOM renderer in place when WebGL is refused", async () => {
+  it("leaves the DOM renderer in place when WebGL is refused, and does not ask on every show", async () => {
+    vi.useFakeTimers();
     const { webgl, counters } = await load();
     addons.refuse = true;
     const { term } = terminal();
     webgl.showWebgl(term);
+    webgl.hideWebgl(term);
+    webgl.showWebgl(term);
     expect(counters.rendererOf(term)).toBe("dom");
+    expect(counters.webglRefused()).toBe(true);
     expect(counters.webglContexts).toEqual({ created: 0, lost: 0, failed: 1 });
+
+    // Later it is worth one more try, and a success clears the verdict.
+    addons.refuse = false;
+    vi.advanceTimersByTime(30_000);
+    webgl.showWebgl(term);
+    expect(counters.rendererOf(term)).toBe("webgl");
+    expect(counters.webglRefused()).toBe(false);
   });
 });

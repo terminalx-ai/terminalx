@@ -82,3 +82,14 @@ export function setOnScreen(term: Terminal, shown: boolean) {
 export function isOnScreen(term: Terminal): boolean {
   return onScreen.has(term);
 }
+
+let refused = false;
+
+/** WebGL cannot be had in this window at all (no WebGL2): terminals draw with the DOM renderer, by necessity. */
+export function setWebglRefused(value: boolean) {
+  refused = value;
+}
+
+export function webglRefused(): boolean {
+  return refused;
+}

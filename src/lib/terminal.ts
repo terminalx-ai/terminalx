@@ -110,6 +110,8 @@ export interface TerminalCounters {
   /** Terminals a view is showing, and how many of those are on the DOM fallback: should be none. */
   onScreen: number;
   domOnScreen: number;
+  /** Terminals in the document that no view is showing. They would draw every frame of output for nobody: should be none. */
+  hiddenInDocument: number;
   webglContexts: typeof webglContexts;
   /** Lines held across every live instance's buffers. */
   bufferLines: number;
@@ -133,6 +135,7 @@ export function terminalCounters(): TerminalCounters {
     dom: live.length - webgl,
     onScreen: live.filter((inst) => isOnScreen(inst.term)).length,
     domOnScreen: live.filter((inst) => isOnScreen(inst.term) && rendererOf(inst.term) === "dom").length,
+    hiddenInDocument: live.filter((inst) => inst.el.isConnected && !isOnScreen(inst.term)).length,
     webglContexts: { ...webglContexts },
     bufferLines: live.reduce((lines, inst) => lines + inst.term.buffer.normal.length + inst.term.buffer.alternate.length, 0),
     replayBuffers: replay.size,

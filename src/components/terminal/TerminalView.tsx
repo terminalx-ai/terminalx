@@ -1,9 +1,10 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { pty } from "@/lib/api";
 import { getInstance, type TerminalInstance } from "@/lib/terminal";
+import { fitTerminal } from "@/lib/terminalFit";
 import { hideWebgl, showWebgl } from "@/lib/terminalWebgl";
 import { useTheme } from "@/lib/theme";
 
@@ -118,9 +119,15 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
 }
 
 /**
- * A view onto one long-lived terminal instance. Mounting re-parents the
- * instance's element here; unmounting detaches it, leaving the buffer and
- * the shell untouched. Size follows the box through a ResizeObserver.
+ * A view onto one long-lived terminal instance. The instance's element is
+ * here only while the view is `visible`; hiding or unmounting the view takes
+ * it out of the document again, leaving the buffer and the shell untouched.
+ * Out of the document xterm draws nothing, whatever the program prints, and a
+ * view that is merely covered (an agent's terminal under its chat, a shell
+ * tab behind another) would otherwise redraw on every frame of output.
+ *
+ * Size follows the view's box through a ResizeObserver, shown or not, so the
+ * program already has the right size when the terminal is first looked at.
  *
  * `create` makes the instance when there is none yet (a cloud terminal
  * wires its own input); `fit: false` keeps the size someone else set, for
@@ -147,26 +154,18 @@ export function TerminalView({
     const el = host.current;
     if (!el) return;
     const inst = getInstance(id, make);
-    el.appendChild(inst.el);
     const refit = () => {
-      if (fitting.current && el.clientWidth > 0 && el.clientHeight > 0) {
-        try {
-          inst.fit.fit();
-        } catch {
-          /* not laid out yet */
-        }
+      if (!fitting.current) return;
+      try {
+        fitTerminal(inst.term, el);
+      } catch {
+        /* not laid out yet */
       }
     };
     const ro = new ResizeObserver(refit);
     ro.observe(el);
-    requestAnimationFrame(() => {
-      refit();
-      if (visible) inst.term.focus();
-    });
-    return () => {
-      ro.disconnect();
-      if (inst.el.parentNode === el) el.removeChild(inst.el);
-    };
+    requestAnimationFrame(refit);
+    return () => ro.disconnect();
   }, [id]);
 
   useEffect(() => {
@@ -174,19 +173,26 @@ export function TerminalView({
     inst.term.options.theme = themeFor(resolvedMode);
   }, [id, resolvedMode]);
 
-  useEffect(() => {
-    if (!visible) return;
-    const { term } = getInstance(id, make);
-    showWebgl(term);
-    return () => hideWebgl(term);
+  // Before paint, so a terminal that is shown is never a blank frame first.
+  useLayoutEffect(() => {
+    const el = host.current;
+    if (!visible || !el) return;
+    const inst = getInstance(id, make);
+    el.appendChild(inst.el);
+    showWebgl(inst.term);
+    return () => {
+      hideWebgl(inst.term);
+      if (inst.el.parentNode === el) el.removeChild(inst.el);
+    };
   }, [id, visible]);
 
   useEffect(() => {
-    if (!visible) return;
+    const el = host.current;
+    if (!visible || !el) return;
     requestAnimationFrame(() => {
       const inst = getInstance(id, make);
       try {
-        if (fitting.current) inst.fit.fit();
+        if (fitting.current) fitTerminal(inst.term, el);
         inst.term.focus();
       } catch {
         /* ignore */

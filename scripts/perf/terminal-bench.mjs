@@ -7,7 +7,7 @@
 // writes the workload files, builds the commands and prints the results.
 //
 //   node scripts/perf/terminal-bench.mjs --home ~/.txperf --pid 12345 \
-//     [--scenarios yes,cat,tui,echo,interrupt,soak,churn] [--terminals 1,8,20] [--out results.json]
+//     [--scenarios yes,cat,tui,echo,interrupt,soak,churn,covered] [--terminals 1,8,20] [--out results.json]
 //     [--interrupt-after 2000] [--soak sessions,tabs,switches] [--work dir] [--label text]
 import { execFileSync } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -16,7 +16,7 @@ import { cpus, homedir, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
 
-const SCENARIOS = ["yes", "cat", "tui", "echo", "interrupt", "soak", "churn"];
+const SCENARIOS = ["yes", "cat", "tui", "echo", "interrupt", "soak", "churn", "covered"];
 const LOG_BYTES = 50 * 1024 * 1024;
 const TUI_FRAMES = 4000;
 const YES_LINES = 2_000_000;
@@ -249,6 +249,14 @@ function markdown(results) {
     for (const { request, result: r, memory: m } of interrupts) lines.push(`| ${r.terminals} | ${r.renderer} | ${request.afterMs / 1000} | ${r.exitMs} | ${r.outputStoppedMs} | ${(r.bytesAfter / 1024 / 1024).toFixed(1)} | ${r.mainThread.longTasks} | ${r.mainThread.longestMs} | ${r.mainThread.framesPerSecond} | ${web(m.before)} → ${web(m.peak)} → ${web(m.after)} |`);
     lines.push("");
   }
+  const covers = results.filter((r) => r.result.scenario === "covered");
+  if (covers.length) {
+    lines.push("| Covered terminal | Times drawn | Renderer | In the document | Output (KB/s) | Long tasks | Frames/s | Hidden terminals in the document |", "| --- | --- | --- | --- | --- | --- | --- | --- |");
+    for (const { name, result: r } of covers) {
+      lines.push(`| ${name} | ${r.renders} | ${r.renderer} | ${r.inDocument ? "yes" : "no"} | ${(r.bytes / 1024 / r.seconds).toFixed(0)} | ${r.mainThread.longTasks} | ${r.mainThread.framesPerSecond} | ${r.counters.hiddenInDocument ?? "n/a"} |`);
+    }
+    lines.push("");
+  }
   const churns = results.filter((r) => r.result.scenario === "churn");
   if (churns.length) {
     lines.push("| Run | Collected | WebContent before → after (MB) | GPU before → after (MB) | Contexts created / lost |", "| --- | --- | --- | --- | --- |");
@@ -293,7 +301,22 @@ const record = async (name, bytes, request) => {
   results.push({ name, bytes, request, ...(await run(options, status.pid, request)) });
 };
 
+/** A small repository of the benchmark's own, for the scenarios that open real sessions. */
+function soakProject() {
+  const project = join(options.work, "soak-project");
+  if (!existsSync(join(project, ".git"))) {
+    mkdirSync(project, { recursive: true });
+    execFileSync("git", ["init", "-q", project]);
+    execFileSync("git", ["-C", project, "-c", "user.name=bench", "-c", "user.email=bench@localhost", "commit", "-q", "--allow-empty", "-m", "init"]);
+  }
+  return project;
+}
+
 for (const scenario of options.scenarios) {
+  if (scenario === "covered") {
+    await record("agent-style stream in a covered terminal, 10 s", null, { scenario: "covered", projectPath: soakProject(), stream: background, seconds: 10 });
+    continue;
+  }
   if (scenario === "churn") {
     // No process and no view: what xterm and its renderer alone give back.
     const churn = { scenario: "churn", count: 30, lines: 10_000 };
@@ -305,12 +328,7 @@ for (const scenario of options.scenarios) {
     continue;
   }
   if (scenario === "soak") {
-    const project = join(options.work, "soak-project");
-    if (!existsSync(join(project, ".git"))) {
-      mkdirSync(project, { recursive: true });
-      execFileSync("git", ["init", "-q", project]);
-      execFileSync("git", ["-C", project, "-c", "user.name=bench", "-c", "user.email=bench@localhost", "commit", "-q", "--allow-empty", "-m", "init"]);
-    }
+    const project = soakProject();
     // Each terminal fills its scrollback, then waits: the most a terminal holds.
     const soak = { scenario: "soak", projectPath: project, fill: sh("seq 1 20000; exec cat") };
     await record(`${options.soak.sessions} sessions open (baseline)`, null, { ...soak, step: "open", sessions: options.soak.sessions });

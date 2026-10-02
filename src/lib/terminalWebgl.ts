@@ -1,7 +1,7 @@
 import { WebglAddon } from "@xterm/addon-webgl";
 import type { Terminal } from "@xterm/xterm";
 import { onInstanceDisposed } from "@/lib/terminal";
-import { isOnScreen, setOnScreen, setRenderer, webglContexts } from "@/lib/terminalCounters";
+import { isOnScreen, setOnScreen, setRenderer, setWebglRefused, webglContexts } from "@/lib/terminalCounters";
 
 /**
  * Who gets a WebGL context (issue #232).
@@ -20,24 +20,30 @@ import { isOnScreen, setOnScreen, setRenderer, webglContexts } from "@/lib/termi
  *   addon only removes its canvas and leaves the context to the garbage
  *   collector, and until that runs WebKit still counts it against the limit.
  *
- * A context that is no longer used still holds its slot until it is
- * collected, so after many terminals were closed WebKit may take a live one.
- * A terminal on screen whose context is taken gets a new one at once; a hidden
- * one gets it when it is next shown.
+ * A terminal on screen whose context the browser takes anyway gets a new one
+ * at once; a hidden one gets it when it is next shown.
  */
 export const WEBGL_BUDGET = 6;
 
 interface Held {
   addon: WebglAddon;
+  /** The canvas that owns the WebGL context (the addon also adds a 2D one for links). */
   canvas: HTMLCanvasElement | null;
 }
 /** Terminals with a context, least recently shown first. */
 const held = new Map<Terminal, Held>();
 
-/** When each terminal lost a context lately: a page that cannot keep one must not retry forever. */
+/** When each terminal lost a context lately: a page that cannot keep one must not spin. */
 const losses = new WeakMap<Terminal, number[]>();
 const RETRIES = 5;
 const RETRY_WINDOW_MS = 10_000;
+/** After WebGL was refused, nobody asks again for this long: a window without WebGL2 stays without it. */
+const REFUSED_BACKOFF_MS = 30_000;
+let refusedAt: number | null = null;
+
+interface AddonInternals {
+  _renderer?: { _canvas?: HTMLCanvasElement; _cursorBlinkStateManager?: { dispose?: () => void } };
+}
 
 /**
  * The addon (0.19.0) never disposes its cursor-blink timer: the field holding
@@ -49,8 +55,15 @@ const RETRY_WINDOW_MS = 10_000;
  * day it is renamed or fixed.
  */
 function stopCursorBlink(addon: WebglAddon) {
-  const renderer = (addon as unknown as { _renderer?: { _cursorBlinkStateManager?: { dispose?: () => void } } })._renderer;
-  renderer?._cursorBlinkStateManager?.dispose?.();
+  (addon as unknown as AddonInternals)._renderer?._cursorBlinkStateManager?.dispose?.();
+}
+
+/** The addon's WebGL canvas: its renderer's own, or else the one it added that is not the link layer. */
+function glCanvas(term: Terminal, addon: WebglAddon, before: Set<Element>): HTMLCanvasElement | null {
+  const own = (addon as unknown as AddonInternals)._renderer?._canvas;
+  if (own instanceof HTMLCanvasElement) return own;
+  const added = [...(term.element?.querySelectorAll("canvas") ?? [])].filter((canvas) => !before.has(canvas));
+  return added.find((canvas) => !canvas.classList.contains("xterm-link-layer")) ?? null;
 }
 
 function release(term: Terminal) {
@@ -84,21 +97,27 @@ function acquire(term: Terminal) {
     return;
   }
   if (!term.element) return;
+  if (refusedAt !== null && Date.now() - refusedAt < REFUSED_BACKOFF_MS) return;
   try {
-    const before = new Set(term.element.querySelectorAll("canvas"));
+    const before = new Set<Element>(term.element.querySelectorAll("canvas"));
     const addon = new WebglAddon();
     addon.onContextLoss(() => lost(term, addon));
     term.loadAddon(addon);
-    const canvas = [...term.element.querySelectorAll("canvas")].find((item) => !before.has(item)) ?? null;
+    const canvas = glCanvas(term, addon, before);
     // The addon reports a loss only after waiting three seconds for the
     // context to come back, and one WebKit took for the limit never does.
     canvas?.addEventListener("webglcontextlost", () => lost(term, addon), { once: true });
     held.set(term, { addon, canvas });
     webglContexts.created++;
+    refusedAt = null;
+    setWebglRefused(false);
     setRenderer(term, "webgl");
   } catch {
     /* the DOM renderer stays */
     webglContexts.failed++;
+    refusedAt = Date.now();
+    // With no context alive this is not the limit: the window has no WebGL2.
+    if (held.size === 0) setWebglRefused(true);
   }
   trim();
 }
@@ -111,11 +130,11 @@ function lost(term: Terminal, addon: WebglAddon) {
   const recent = (losses.get(term) ?? []).filter((at) => now - at < RETRY_WINDOW_MS);
   recent.push(now);
   losses.set(term, recent);
-  if (recent.length > RETRIES) return;
-  // Not from inside the event that reported the loss.
+  // Not from inside the event that reported the loss. A terminal that keeps
+  // losing its context waits the window out, then asks once more.
   setTimeout(() => {
     if (isOnScreen(term)) acquire(term);
-  }, 0);
+  }, recent.length > RETRIES ? RETRY_WINDOW_MS : 0);
 }
 
 /** The terminal is on screen: it draws with WebGL from here on. */

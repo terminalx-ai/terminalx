@@ -3,6 +3,7 @@ import { api, pty } from "@/lib/api";
 import { createInstance } from "@/components/terminal/TerminalView";
 import { addProject, deleteSession, getSessionStore, selectSession, upsertSession } from "@/lib/sessions";
 import { rendererOf } from "@/lib/terminalCounters";
+import { fitTerminal } from "@/lib/terminalFit";
 import { showWebgl } from "@/lib/terminalWebgl";
 import {
   adoptPane,
@@ -38,6 +39,7 @@ export type BenchRequest =
   | (Field & { scenario: "echo"; command: string; producers: number; producer: string; samples: number; intervalMs: number })
   | (Field & { scenario: "interrupt"; command: string; afterMs: number })
   | { scenario: "churn"; count: number; lines: number; attach: boolean; webgl: boolean; focus?: boolean; pty?: { cwd: string; command: string } }
+  | { scenario: "covered"; projectPath: string; stream: string; seconds: number }
   | ({ scenario: "soak"; projectPath: string; fill: string } & ({ step: "open"; sessions: number } | { step: "tabs" | "switches"; count: number } | { step: "cleanup" }));
 
 const MARK = 7777;
@@ -180,7 +182,7 @@ async function openField(field: Field, roles: (index: number) => string) {
   host.appendChild(front.el);
   showWebgl(front.term);
   await frame();
-  front.fit.fit();
+  fitTerminal(front.term, host);
   const { cols, rows } = front.term;
   // Background terminals first, so their shells are up before the measured one starts.
   await Promise.all(ids.slice(1).map((id, index) => pty.spawn(id, field.cwd, cols, rows, roles(index + 1))));
@@ -421,6 +423,53 @@ async function soak(request: Soak) {
 }
 
 /**
+ * A terminal that is mounted but covered: a shell tab behind the selected
+ * one, which is also how an agent's terminal sits under its chat. It prints
+ * an agent-style stream while nobody can see it; every time xterm draws it
+ * anyway is work for nothing, on the same thread as the terminal on screen.
+ */
+async function covered(request: Extract<BenchRequest, { scenario: "covered" }>) {
+  await addProject(request.projectPath);
+  const session = await api.createSession({ projectPath: request.projectPath, cwd: request.projectPath, useWorktree: false, title: "Covered terminal" });
+  upsertSession(session);
+  selectSession(session.id);
+  const behind = await openTerminal(session.id, session.cwd, 100, 24, { command: request.stream });
+  await settle();
+  const front = await openTerminal(session.id, session.cwd);
+  await settle();
+  await sleep(1000);
+  // Only looks the instance up: its view made it when it mounted.
+  const inst = getInstance(behind.id, () => createInstance(behind.id, mode()));
+  let renders = 0;
+  const counting = inst.term.onRender(() => renders++);
+  const from = terminalCounters().data.local;
+  const stop = watchMainThread();
+  await sleep(request.seconds * 1000);
+  const mainThread = stop();
+  counting.dispose();
+  const to = terminalCounters().data.local;
+  const counters = terminalCounters();
+  const result = {
+    scenario: request.scenario,
+    page: page(),
+    seconds: request.seconds,
+    /** Times xterm drew the covered terminal. */
+    renders,
+    renderer: rendererOf(inst.term),
+    inDocument: inst.el.isConnected,
+    bytes: to.bytes - from.bytes,
+    mainThread,
+    counters,
+  };
+  await closeTerminal(behind.id);
+  await closeTerminal(front.id);
+  for (const pane of getTerminalState().panes.filter((item) => item.sessionId === session.id)) await closeTerminal(pane.id);
+  await deleteSession(session.id, false).catch(() => undefined);
+  selectSession(null);
+  return result;
+}
+
+/**
  * Create, fill and dispose `count` terminals with no process and no React
  * view, then see how many of them the garbage collector got back. A terminal
  * that is still reachable after it was disposed keeps its whole buffer.
@@ -439,7 +488,7 @@ async function churn(request: Extract<BenchRequest, { scenario: "churn" }>) {
     registry.register(inst.term, id);
     if (request.attach) {
       overlay.appendChild(inst.el);
-      inst.fit.fit();
+      fitTerminal(inst.term, overlay);
       if (request.webgl) showWebgl(inst.term);
       if (request.focus) inst.term.focus();
     }
@@ -481,6 +530,8 @@ export async function runTerminalBench(request: BenchRequest): Promise<unknown> 
         return await soak(request);
       case "churn":
         return await churn(request);
+      case "covered":
+        return await covered(request);
       default:
         throw new Error(`unknown scenario ${(request as { scenario: string }).scenario}`);
     }
