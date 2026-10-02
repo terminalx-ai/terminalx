@@ -29,6 +29,8 @@ const commandCache = new Map<string, SlashCommand[]>();
 // Matches the textarea's max-h-60: about ten lines before it scrolls.
 const MAX_HEIGHT = 240;
 const NO_HISTORY: string[] = [];
+/** The least of its label the permission picker shows: about a first word ("Bypass…"). With less room it shows none. */
+const PERMISSION_LABEL_MIN_CHARS = 9;
 
 /**
  * The composer inside a session. Enter sends, Shift+Enter breaks a line.
@@ -303,6 +305,7 @@ export function Composer({
   const modelName = model?.label ?? tab.model ?? "Model";
   const effortName = tab.effort && model?.efforts.length ? (EFFORT_LABEL[tab.effort] ?? tab.effort) : null;
   const modelTitle = `Model: ${modelName}${effortName ? ` · ${effortName}` : ""}`;
+  const permissionLabel = modeLabel(tab.permissionMode);
   const pct = contextUsed && contextMax ? Math.min(100, Math.round((contextUsed / contextMax) * 100)) : null;
 
   return (
@@ -430,14 +433,25 @@ export function Composer({
 
           <DropdownMenu {...modeMenu.root}>
             <DropdownMenuTrigger asChild {...modeMenu.trigger}>
-              <Button variant="ghost" size="sm" className="min-w-11 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? `Permission mode: ${modeLabel(tab.permissionMode)}`} aria-label={settingsLockedReason ? `Permission mode: ${settingsLockedReason}` : undefined}>
+              {/*
+                In a narrow composer the label truncates down to about its first word, never to a
+                single letter: with no room for that it wraps out of sight below the button's one
+                line, leaving the mode's dot and the chevron. The tooltip names the mode either way.
+              */}
+              <Button variant="ghost" size="sm" className="min-w-11 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? `Permission mode: ${permissionLabel}`} aria-label={settingsLockedReason ? `Permission mode: ${settingsLockedReason}` : undefined} data-testid="permission-mode">
                 <span
                   className={cn(
                     "size-2 shrink-0 rounded-full",
                     tab.permissionMode === "bypassPermissions" ? "bg-destructive" : tab.permissionMode === "plan" ? "bg-info" : "bg-add",
                   )}
                 />
-                <span className="min-w-0 truncate">{modeLabel(tab.permissionMode)}</span>
+                <span className="flex h-5 min-w-0 flex-wrap content-start overflow-hidden leading-5">
+                  {/* Holds the one visible line, so a label that does not fit starts below it. */}
+                  <span aria-hidden className="h-5 w-0 shrink-0" />
+                  <span className="grow basis-0 truncate" style={{ minWidth: `${Math.min(permissionLabel.length, PERMISSION_LABEL_MIN_CHARS) * 0.8}ch` }} data-testid="permission-mode-label">
+                    {permissionLabel}
+                  </span>
+                </span>
                 <ChevronDown className="size-3 text-faint" />
               </Button>
             </DropdownMenuTrigger>

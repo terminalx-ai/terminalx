@@ -21,7 +21,9 @@ fn unnamed(tab: &TabEntry) -> bool {
         .is_none_or(|title| title.trim().is_empty())
 }
 
-/// A short excerpt, not an extra model request. Keep the user's own task words.
+/// A short excerpt, not an extra model request. Keep the user's own task words,
+/// in the case they were typed: a tab named after "echo:hello one" reads
+/// "echo:hello one", like the session started with the same words.
 fn request_title(request: &str) -> Option<String> {
     let mut request = request.trim();
     if let Some(attributed) = request.strip_prefix("[TerminalX Effective User v1] ") {
@@ -61,9 +63,9 @@ fn request_title(request: &str) -> Option<String> {
         }
     }
     let title = title.trim_end_matches(['.', '?', '!', ':', ',', ';']);
-    let mut chars = title.chars();
-    let first = chars.next()?;
-    let title = first.to_uppercase().chain(chars).collect::<String>();
+    if title.is_empty() {
+        return None;
+    }
     if title.chars().count() > MAX_TITLE_CHARS {
         Some(
             title
@@ -73,7 +75,7 @@ fn request_title(request: &str) -> Option<String> {
                 .collect(),
         )
     } else {
-        Some(title)
+        Some(title.to_string())
     }
 }
 
@@ -182,7 +184,7 @@ mod tests {
     fn uses_task_words_and_removes_request_boilerplate() {
         assert_eq!(
             request_title("Can you please fix login redirect? Then add tests."),
-            Some("Fix login redirect".into())
+            Some("fix login redirect".into())
         );
         assert_eq!(
             request_title(
@@ -198,8 +200,19 @@ mod tests {
     }
 
     #[test]
+    fn keeps_the_case_the_request_was_typed_in() {
+        // The live check: a tab read "Echo:hello one" under its session "echo:hello one".
+        assert_eq!(request_title("echo:hello one"), Some("echo:hello one".into()));
+        assert_eq!(request_title("npm test fails on CI"), Some("npm test fails on CI".into()));
+        assert_eq!(request_title("iOS build is broken"), Some("iOS build is broken".into()));
+        assert_eq!(request_title("Fix the Login page"), Some("Fix the Login page".into()));
+        assert_eq!(request_title("please éteins la lumière"), Some("éteins la lumière".into()));
+        assert_eq!(request_title("?!"), None);
+    }
+
+    #[test]
     fn strips_only_valid_mobile_attribution_and_bounds_unicode_titles() {
-        assert_eq!(request_title("[TerminalX Effective User v1] {\"authority\":\"host\",\"userId\":\"user\"}\nPlease fix sign in"), Some("Fix sign in".into()));
+        assert_eq!(request_title("[TerminalX Effective User v1] {\"authority\":\"host\",\"userId\":\"user\"}\nPlease fix sign in"), Some("fix sign in".into()));
         assert!(
             request_title("[TerminalX Effective User v1] not-json\nFix sign in")
                 .unwrap()
@@ -226,13 +239,13 @@ mod tests {
         let named = name_tab("session", "claude").unwrap().unwrap();
         assert_eq!(
             named.tab("claude").unwrap().title.as_deref(),
-            Some("Fix login redirect")
+            Some("fix login redirect")
         );
         prompt("claude", "Now rewrite everything");
         let sessions = backfill().unwrap();
         assert_eq!(
             sessions[0].tab("claude").unwrap().title.as_deref(),
-            Some("Fix login redirect")
+            Some("fix login redirect")
         );
         assert_eq!(
             sessions[0].tab("codex").unwrap().title.as_deref(),

@@ -52,3 +52,19 @@ describe("Settings dismissal", () => {
     expect(onBack).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("the section Settings opens on", () => {
+  it("is General when no section is asked for", () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
+  });
+
+  it("is General, not a blank page, when it is handed something that names no section", () => {
+    // What a click handler passes along: the click's event (O1 of the live check).
+    const event = { type: "click" } as unknown as Parameters<typeof SettingsPage>[0]["initialTab"];
+    render(<SettingsPage initialTab={event} onBack={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
+  });
+});
