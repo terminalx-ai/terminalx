@@ -151,35 +151,43 @@ impl CloudRemote {
         tauri::async_runtime::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                // Keys, outbox and cache of a previous identity are dropped.
-                let agents = remote.agents.clone();
-                let scope = remote.scope();
-                let observed = scope.as_ref().map(|scope| (scope.user_id.clone(), scope.kept_orgs()));
-                let _ = tauri::async_runtime::spawn_blocking(move || agents.observe_identity(observed)).await;
-                if remote.connections.lock().unwrap().is_empty() {
-                    continue;
-                }
-                let stopped: Vec<(String, Attached)> = {
-                    let mut connections = remote.connections.lock().unwrap();
-                    let ids: Vec<String> = connections
-                        .iter()
-                        .filter(|(_, attached)| attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref())))
-                        .map(|(id, _)| id.clone())
-                        .collect();
-                    ids.into_iter().filter_map(|id| connections.remove(&id).map(|attached| (id, attached))).collect()
-                };
-                let stale: Vec<String> = stopped
-                    .into_iter()
-                    .map(|(id, attached)| {
-                        attached.supervisor.stop();
-                        id
-                    })
-                    .collect();
+                let watched = remote.clone();
+                let stale = tauri::async_runtime::spawn_blocking(move || watched.drop_previous_identity()).await.unwrap_or_default();
                 if !stale.is_empty() {
                     let _ = app.emit(EVENT, RemoteEvent::IdentityChanged { connection_ids: stale });
                 }
             }
         });
+    }
+
+    /// One look at who is signed in: keys, outbox and cache of a previous
+    /// identity are dropped and its connections stopped. Returns the
+    /// connections stopped.
+    ///
+    /// Nothing is done while a sign-out waits for the Keychain. The session is
+    /// out of memory then, but a Keychain that refuses puts it back, and
+    /// unsent commands dropped in between would be lost to someone who is
+    /// still signed in. (Nothing is sent meanwhile either: `supervisor`
+    /// reads the scope as it is.)
+    fn drop_previous_identity(&self) -> Vec<String> {
+        let Some(scope) = self.account.settled_scope() else { return Vec::new() };
+        self.agents.observe_identity(scope.as_ref().map(|scope| (scope.user_id.clone(), scope.kept_orgs())));
+        let stopped: Vec<(String, Attached)> = {
+            let mut connections = self.connections.lock().unwrap();
+            let ids: Vec<String> = connections
+                .iter()
+                .filter(|(_, attached)| attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref())))
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.into_iter().filter_map(|id| connections.remove(&id).map(|attached| (id, attached))).collect()
+        };
+        stopped
+            .into_iter()
+            .map(|(id, attached)| {
+                attached.supervisor.stop();
+                id
+            })
+            .collect()
     }
 
     /// Called from an async command, so inside the Tauri runtime.
@@ -640,6 +648,81 @@ mod intercept_tests {
 
         store.release();
         refreshing.join().unwrap();
+    }
+
+    /// A sign-out the Keychain refuses leaves the person signed in. The
+    /// watcher looking in the meantime must not have dropped their unsent
+    /// commands, transcript cache and keys.
+    #[test]
+    fn a_refused_sign_out_drops_nothing_even_when_the_watcher_looks_in_the_middle_of_it() {
+        use crate::account::AccountContext;
+        use crate::cloud_agent_client::{KeyStore, MemoryKeys};
+        use crate::keychain::testing::MemorySecrets;
+
+        const KEY_ID: &str = "key-aaaaaaaaaaaaaaaaaaaaaa";
+        let account = Arc::new(AccountManager::default());
+        account.set_context_for_test(Some(AccountContext {
+            access_token: "a".into(),
+            user_id: "user".into(),
+            email: "a@example.com".into(),
+            display_name: "A".into(),
+            profile_id: "profile".into(),
+            organization_id: "org-a".into(),
+            relay_entitled: false,
+            generation: 1,
+        }));
+        let store = MemorySecrets::default();
+        account.use_secrets_for_test(Arc::new(store.clone()));
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Arc::new(MemoryKeys::default());
+        let agents = Arc::new(CloudAgentClient::with(account.clone(), keys.clone(), url::Url::parse("http://127.0.0.1:9/").unwrap(), dir.path().join("cloud-agent")));
+        let remote = CloudRemote::new(account.clone(), Arc::new(CloudWorkspaceService::new(account.clone())), agents.clone());
+        let attach = |id: &str| {
+            let (supervisor, frames) = Supervisor::connected_for_test();
+            remote.connections.lock().unwrap().insert(id.into(), Attached { supervisor, identity: Some(made_in("org-a")) });
+            frames
+        };
+        let _frames = attach("cloud-1");
+        let key = crate::cloud_agents::crypto::b64(&[7u8; 32]);
+        let answer = json!({ "currentKeyId": KEY_ID, "keys": [{ "keyId": KEY_ID, "key": key, "createdAt": 1 }] });
+        agents.store_keys("user", "org-a", "ws_1", &answer).unwrap();
+        agents.cache_save("org-a", "ws_1", "tab-1", Some(json!({ "events": [1] }))).unwrap();
+        let kept_dir = dir.path().join("cloud-agent").join("user").join("org-a").join("ws_1");
+        let intact = || kept_dir.join("keys.json").exists() && kept_dir.join("cache.json").exists() && keys.get("org-a", "ws_1", KEY_ID).unwrap().is_some();
+        // The watcher has seen who is signed in.
+        assert!(remote.drop_previous_identity().is_empty());
+        assert!(intact());
+
+        // Sign out; the Keychain takes its time and then refuses.
+        store.fail_writes(true);
+        store.block_writes();
+        let signing_out = {
+            let account = account.clone();
+            std::thread::spawn(move || account.sign_out_for_test())
+        };
+        store.wait_for_blocked(1);
+        assert!(account.current_scope().is_none(), "out of memory while the Keychain is asked");
+        // The watcher looks, more than once: nothing is dropped or stopped.
+        for _ in 0..3 {
+            assert!(remote.drop_previous_identity().is_empty());
+        }
+        assert!(intact(), "nothing was purged for a sign-out that is not confirmed");
+        assert!(remote.connections.lock().unwrap().contains_key("cloud-1"));
+        // Nothing is sent for the account meanwhile.
+        assert_eq!(remote.supervisor("cloud-1").err().as_deref(), Some("cloud_remote_identity_changed"));
+
+        store.release();
+        assert!(!signing_out.join().unwrap(), "the Keychain refused");
+        assert!(account.current_scope().is_some(), "still signed in");
+        assert!(remote.drop_previous_identity().is_empty());
+        assert!(intact());
+        assert!(remote.supervisor("cloud-1").is_ok(), "and the connection is usable again");
+
+        // A sign-out the Keychain confirms does drop it all.
+        store.fail_writes(false);
+        assert!(account.sign_out_for_test());
+        assert_eq!(remote.drop_previous_identity(), vec!["cloud-1".to_string()]);
+        assert!(!kept_dir.exists() && keys.get("org-a", "ws_1", KEY_ID).unwrap().is_none());
     }
 
     /// The exact shape `NativeWorkspaceTransport.route` (src/lib/api.ts) reads;

@@ -622,6 +622,8 @@ struct Counted {
     gets: AtomicUsize,
     deletes: AtomicUsize,
     during_get: Mutex<Option<DuringGet>>,
+    /// Run when a delete has reached the store and the key is still there.
+    before_delete: Mutex<Option<DuringGet>>,
 }
 
 impl KeyStore for Counted {
@@ -640,6 +642,10 @@ impl KeyStore for Counted {
     }
     fn delete(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<()> {
         self.deletes.fetch_add(1, Ordering::SeqCst);
+        let before = self.before_delete.lock().unwrap().take();
+        if let Some(before) = before {
+            before();
+        }
         self.keys.delete(organization_id, workspace_id, key_id)
     }
 }
@@ -717,4 +723,38 @@ fn reconnecting_writes_no_key_again_and_checking_for_one_reads_none() {
     client.observe_identity(None);
     assert_eq!(counts(&store).2, 1);
     assert_eq!(store.keys.get(ORG, WS, KEY_ID).unwrap(), None);
+}
+
+/// A checkpoint in flight at sign-out: its read lands after the delete has
+/// dropped the held copy and before the Keychain item is gone.
+#[test]
+fn a_read_that_lands_in_the_middle_of_a_delete_does_not_leave_the_key_in_memory() {
+    let store = Arc::new(Counted::default());
+    let cached = Arc::new(CachedKeys::new(store.clone()));
+    cached.put(ORG, WS, KEY_ID, &key()).unwrap();
+    let reading = cached.clone();
+    *store.before_delete.lock().unwrap() = Some(Box::new(move || {
+        assert_eq!(reading.get(ORG, WS, KEY_ID).unwrap(), Some(key()), "the item is still stored, so the read finds it");
+        assert_eq!(reading.held.lock().unwrap().keys.len(), 1, "and holds it, for now");
+    }));
+    cached.delete(ORG, WS, KEY_ID).unwrap();
+    assert!(cached.held.lock().unwrap().keys.is_empty(), "nothing of a deleted key stays in memory");
+    assert_eq!(cached.get(ORG, WS, KEY_ID).unwrap(), None);
+    assert_eq!(counts(&store), (1, 2, 1));
+}
+
+#[test]
+fn a_held_key_is_not_copied_when_the_cache_grows() {
+    assert_eq!(std::mem::size_of::<HeldKey>(), std::mem::size_of::<usize>(), "the map holds a pointer, not the key");
+    let cached = CachedKeys::new(Arc::new(MemoryKeys::default()));
+    cached.put(ORG, WS, KEY_ID, &key()).unwrap();
+    let account = key_account(ORG, WS, KEY_ID);
+    let place = |cached: &CachedKeys| cached.held.lock().unwrap().keys[&account].as_ptr();
+    let before = place(&cached);
+    // Enough keys to make the map reallocate several times.
+    for n in 0..2_000 {
+        cached.put(ORG, WS, &format!("key-{n}"), &[3u8; 32]).unwrap();
+    }
+    assert_eq!(place(&cached), before, "the key stayed where it was: no copy was left behind");
+    assert_eq!(cached.get(ORG, WS, KEY_ID).unwrap(), Some(key()));
 }

@@ -290,6 +290,9 @@ struct Inner {
     signing_in: bool,
     generation: u64,
     last_error: Option<String>,
+    /// Sign-outs whose Keychain delete has not answered yet. Until it does
+    /// the session is out of memory but may be put back (a refused delete).
+    ending: u32,
     /// Counts changes to `session` that the Keychain should follow.
     revision: u64,
     /// The `revision` the Keychain holds.
@@ -412,6 +415,12 @@ impl AccountManager {
     pub(crate) fn use_secrets_for_test(&self, store: Arc<dyn SecretStore>) {
         let _ = self.service.set(TEST_SERVICE.into());
         assert!(self.secrets.set(store).is_ok(), "the store is chosen before its first use");
+    }
+
+    /// Tests: sign out on this Mac; true when the Keychain let the session go.
+    #[cfg(test)]
+    pub(crate) fn sign_out_for_test(&self) -> bool {
+        self.end_session().is_some()
     }
 
     /// Tests: a forced role refresh the server answers with `role` in the
@@ -572,6 +581,17 @@ impl AccountManager {
     pub(crate) fn current_scope(&self) -> Option<CloudScope> {
         let inner = self.inner.lock().unwrap();
         inner.session.as_ref().map(cloud_scope)
+    }
+
+    /// [`Self::current_scope`] for whoever drops what a previous identity
+    /// left behind (connections, keys, the outbox, the transcript cache):
+    /// `None` while a sign-out waits for the Keychain, because the session
+    /// is then out of memory but comes back if the Keychain refuses. Nothing
+    /// is dropped until the sign-out is confirmed. Read in one step with the
+    /// outcome, so a refused sign-out is never seen as signed out.
+    pub(crate) fn settled_scope(&self) -> Option<Option<CloudScope>> {
+        let inner = self.inner.lock().unwrap();
+        (inner.ending == 0).then(|| inner.session.as_ref().map(cloud_scope))
     }
 
     /// The context for a cloud call in `organization_id` (CS-18). The active
@@ -800,13 +820,19 @@ impl AccountManager {
             inner.last_error = None;
             let session = inner.session.take();
             // Counted even with no session in memory: one that could not be
-            // read is removed too.
+            // read is removed too. Out of memory from here, so a save or a
+            // refresh that is under way writes nothing of it back.
             inner.set_session(None);
+            // Not confirmed until the Keychain answers (see `settled_scope`).
+            inner.ending += 1;
             (inner.generation, session)
         };
-        let Err(error) = self.store() else { return session };
-        log::warn!("could not remove TerminalX account session from Keychain: {:#}", error.into_error());
+        let stored = self.store();
         let mut inner = self.inner.lock().unwrap();
+        // With the outcome, in one step: confirmed, or put back just below.
+        inner.ending -= 1;
+        let Err(error) = stored else { return session };
+        log::warn!("could not remove TerminalX account session from Keychain: {:#}", error.into_error());
         // A sign-in begun meanwhile owns the account now.
         if inner.generation == generation {
             inner.last_error = Some("Sign-out could not remove the account session from macOS Keychain.".into());
@@ -1904,6 +1930,7 @@ mod tests {
             std::thread::spawn(move || manager.end_session())
         };
         eventually("signed out in memory without waiting for the Keychain", || manager.current_scope().is_none());
+        assert!(manager.settled_scope().is_none(), "but not confirmed: nothing of the account is dropped yet");
         assert_eq!(manager.inner.lock().unwrap().generation, 8, "and everything made for the account is fenced");
 
         // ...and in the Keychain once it answers, whichever write goes last.
@@ -1911,6 +1938,7 @@ mod tests {
         assert!(stuck.join().unwrap());
         assert!(waiting.join().unwrap());
         assert!(signing_out.join().unwrap().is_some(), "the ended session is returned for the server to be told");
+        assert_eq!(manager.settled_scope(), Some(None), "confirmed");
         assert_eq!(stored_session(&store).map(|session| session.access_token), None, "the saved session is gone, not put back by a late write");
         let calls = store.calls();
         assert_eq!(calls.last(), Some(&Call::Delete));
@@ -2040,6 +2068,7 @@ mod tests {
         // A sign-out that cannot remove the saved session stays signed in, as
         // the next launch would be.
         assert!(manager.end_session().is_none());
+        assert!(manager.settled_scope().is_some_and(|scope| scope.is_some()), "settled, and signed in");
         let status = serde_json::to_value(manager.snapshot()).unwrap();
         assert_eq!(status["state"], "signed-in");
         assert_eq!(status["lastError"], "Sign-out could not remove the account session from macOS Keychain.");

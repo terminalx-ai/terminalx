@@ -686,9 +686,11 @@ pub async fn cloud_workspace_operation_cancel(
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.cancel_operation(org_id.as_deref(), &operation_id))
 }
 
+/// Off the main thread: an expired pairing removes its device token from the Keychain.
 #[tauri::command]
-pub fn pairing_status(state: tauri::State<'_, crate::AppState>) -> crate::pairing::PairingStatus {
-    state.pairing.status()
+pub async fn pairing_status(state: tauri::State<'_, crate::AppState>) -> CmdResult<crate::pairing::PairingStatus> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.status()).await.map_err(err)
 }
 
 #[tauri::command]

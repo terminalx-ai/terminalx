@@ -192,9 +192,13 @@ pub struct CachedKeys {
     held: Mutex<Held>,
 }
 
+/// A held key lives in its own allocation: the map moves only the pointer
+/// when it grows, so no copy of the key is left behind un-zeroed.
+type HeldKey = Box<Zeroizing<[u8; crypto::KEY_LEN]>>;
+
 #[derive(Default)]
 struct Held {
-    keys: HashMap<String, Zeroizing<[u8; crypto::KEY_LEN]>>,
+    keys: HashMap<String, HeldKey>,
     /// Counts puts, deletes and forgets, so a read that was under way during
     /// one does not keep what it read.
     changes: u64,
@@ -217,7 +221,7 @@ impl CachedKeys {
     fn keep(&self, account: String, key: &[u8; crypto::KEY_LEN], as_of: u64) {
         let mut held = self.held.lock().unwrap();
         if held.changes == as_of {
-            held.keys.insert(account, Zeroizing::new(*key));
+            held.keys.insert(account, Box::new(Zeroizing::new(*key)));
         }
     }
 }
@@ -240,7 +244,7 @@ impl KeyStore for CachedKeys {
         let as_of = {
             let held = self.held.lock().unwrap();
             if let Some(key) = held.keys.get(&account) {
-                return Ok(Some(**key));
+                return Ok(Some(***key));
             }
             held.changes
         };
@@ -252,8 +256,13 @@ impl KeyStore for CachedKeys {
     }
 
     fn delete(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<()> {
-        self.invalidate(&key_account(organization_id, workspace_id, key_id));
-        self.store.delete(organization_id, workspace_id, key_id)
+        let account = key_account(organization_id, workspace_id, key_id);
+        self.invalidate(&account);
+        let deleted = self.store.delete(organization_id, workspace_id, key_id);
+        // Again once the key is gone: a read that began after the first and
+        // found the key still stored must not leave it held.
+        self.invalidate(&account);
+        deleted
     }
 
     fn forget(&self) {

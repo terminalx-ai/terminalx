@@ -232,3 +232,42 @@ pub(crate) mod testing {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// A synchronous Tauri command runs on the main thread. These reach the
+    /// Keychain (or wait for something that does), so each must be `async`
+    /// and do its work on a blocking thread.
+    #[test]
+    fn no_command_that_reaches_the_keychain_runs_on_the_main_thread() {
+        let sources = [include_str!("commands.rs"), include_str!("cloud_remote.rs"), include_str!("cloud_agent_client.rs")].concat();
+        let commands = [
+            "account_status",
+            "account_refresh_roles",
+            "account_sign_in",
+            "account_sign_out",
+            "organization_create",
+            "organization_select",
+            "pairing_status",
+            "pairing_generate",
+            "pairing_revoke",
+            "cloud_remote_attach",
+            "cloud_remote_activate",
+            "cloud_remote_detach",
+            "cloud_agent_enqueue",
+            "cloud_agent_checkpoint",
+            "cloud_agent_has_key",
+            "cloud_agent_outbox_sync",
+            "cloud_agent_purge_workspace",
+        ];
+        for command in commands {
+            assert!(sources.contains(&format!("pub async fn {command}(")), "{command} must be an async command");
+            assert!(!sources.contains(&format!("pub fn {command}(")), "{command} must not run on the main thread");
+        }
+        // The launch-time cleanup of unclaimed device tokens is handed to a blocking thread.
+        let pairing = include_str!("pairing/mod.rs");
+        let configure = &pairing[pairing.find("pub fn configure(").unwrap()..pairing.find("pub fn attach_sessions").unwrap()];
+        assert!(!configure.contains("delete_device_token"), "configure runs on the main thread");
+        assert!(configure.contains("spawn_blocking(move || manager.forget_device_tokens"));
+    }
+}

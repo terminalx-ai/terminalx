@@ -119,8 +119,13 @@ impl PairingManager {
             None => log::warn!("relay diagnostics unavailable (category=local-storage)"),
         }
         self.secrets.configure(app_identifier)?;
-        for device_id in self.registry.remove_unclaimed()? {
-            self.secrets.delete_device_token(&device_id)?;
+        let unclaimed = self.registry.remove_unclaimed()?;
+        if !unclaimed.is_empty() {
+            // This runs on the main thread at launch; the Keychain is not
+            // called from it. The devices are already gone from the registry,
+            // so a token that stays behind authenticates nothing.
+            let manager = self.clone();
+            tauri::async_runtime::spawn_blocking(move || manager.forget_device_tokens(&unclaimed));
         }
         self.sink
             .set(sink.clone())
@@ -1114,6 +1119,14 @@ impl PairingManager {
                 serde_json::to_value(relay.confirm_resume(req_id, basis_conn_id.clone()).await?)?;
         }
         Ok(result)
+    }
+
+    fn forget_device_tokens(&self, device_ids: &[String]) {
+        for device_id in device_ids {
+            if let Err(error) = self.secrets.delete_device_token(device_id) {
+                log::warn!("could not remove an unclaimed device token from Keychain: {error:#}");
+            }
+        }
     }
 
     fn revoke_local(&self, device_id: &str) -> Result<()> {
