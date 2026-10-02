@@ -6,7 +6,10 @@
 #     `terminalx://` links or activates "TerminalX Dev" can reach it;
 #   - its own TERMINALX_HOME (short: the socket path is limited) and its own
 #     Keychain service;
-#   - opened in the background, so it does not take focus.
+#   - opened in the background, so it does not take focus;
+#   - its own HOME, with a stand-in `claude` (scripts/remote-runtime/fake-claude)
+#     first on its PATH: agent tabs run that, never a real agent, and neither
+#     it nor the shells read or write anything under your real home.
 #
 #   pnpm tauri build --debug --bundles app --no-sign --config src-tauri/tauri.dev.conf.json
 #   scripts/perf/bench-app.sh [home, default ~/.txperf]
@@ -25,7 +28,11 @@ PLIST="$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleName TerminalX Perf" "$PLIST"
 /usr/libexec/PlistBuddy -c "Delete :CFBundleURLTypes" "$PLIST" 2>/dev/null || true
 codesign --force --deep -s - "$APP" >/dev/null 2>&1
+mkdir -p "$HOME_DIR/home" "$HOME_DIR/bin"
+ln -sf "$ROOT/scripts/remote-runtime/fake-claude" "$HOME_DIR/bin/claude"
 open -g -n -a "$APP" \
+  --env "HOME=$HOME_DIR/home" \
+  --env "PATH=$HOME_DIR/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
   --stdout "$HOME_DIR/app.log" --stderr "$HOME_DIR/app.log" \
   --env "TERMINALX_HOME=$HOME_DIR" \
   --env "RACCOON_DEV_KEYCHAIN_SERVICE=dev.terminalx.perf-$(date +%s)" \

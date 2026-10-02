@@ -208,3 +208,44 @@ describe("a session's terminals", () => {
     expect(killed()).toEqual([shell.id]);
   });
 });
+
+describe("an agent tab's terminal", () => {
+  async function withAgentPane() {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_workspaces") return [main, worktree];
+      if (command === "list_harnesses") return [];
+      if (command === "remove_tab") return undefined;
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const terminal = await import("./terminal");
+    await terminal.adoptPane({ id: "tab:tab-with-transcript", sessionId: attached.id, title: "Agent", hidden: true, owned: true });
+    const dispose = vi.fn();
+    terminal.getInstance("tab:tab-with-transcript", () => ({ el: document.createElement("div"), term: { write: vi.fn(), dispose }, fit: {} }) as never);
+    return { terminal, dispose };
+  }
+
+  it("is dropped when the tab is closed here", async () => {
+    const { terminal, dispose } = await withAgentPane();
+    await sessions.removeTab(attached.id, "tab-with-transcript");
+    await Promise.resolve();
+    expect(sessions.getSessionStore().sessions[0].tabs).toEqual([]);
+    expect(terminal.getTerminalState().panes).toEqual([]);
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("is dropped when the backend says the session no longer has the tab", async () => {
+    const { terminal, dispose } = await withAgentPane();
+    mocks.listeners.get("session_updated")?.({ payload: { ...attached, tabs: [], activeTab: null } });
+    await Promise.resolve();
+    expect(terminal.getTerminalState().panes).toEqual([]);
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("is kept through an update that keeps the tab", async () => {
+    const { terminal, dispose } = await withAgentPane();
+    mocks.listeners.get("session_updated")?.({ payload: { ...attached, title: "Renamed" } });
+    await Promise.resolve();
+    expect(terminal.getTerminalState().panes.map((pane) => pane.id)).toEqual(["tab:tab-with-transcript"]);
+    expect(dispose).not.toHaveBeenCalled();
+  });
+});
