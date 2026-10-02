@@ -162,9 +162,19 @@ const DONE = 'printf "\\033]7777;done\\007"';
 /** The command a pane runs: no single quotes inside, it is itself single-quoted. */
 const sh = (script) => `sh -c '${script}'`;
 
+/** How often xterm has thrown output away for want of flow control, as the app logged it. */
+function discards(home) {
+  try {
+    return readFileSync(join(home, "app.log"), "utf8").split("write data discarded").length - 1;
+  } catch {
+    return null;
+  }
+}
+
 /** Run one request in the app, reading the processes' memory before, while it runs and after. */
 async function run(options, pid, request, timeoutMs = 900_000) {
   const before = memory(pid);
+  const discarded = discards(options.home);
   const peak = { ...before };
   const { requestId } = await control(options.home, "perf.terminal.start", request);
   const deadline = Date.now() + timeoutMs;
@@ -177,7 +187,7 @@ async function run(options, pid, request, timeoutMs = 900_000) {
     if (answer.result?.error) throw new Error(`${request.scenario}: ${answer.result.error}`);
     // Let the window drop what it is going to drop before the "after" reading.
     await sleep(5000);
-    return { result: answer.result, memory: { before, peak, after: memory(pid) } };
+    return { result: answer.result, memory: { before, peak, after: memory(pid) }, discarded: discarded === null ? null : discards(options.home) - discarded };
   }
   throw new Error(`${request.scenario}: no result in ${timeoutMs} ms`);
 }
@@ -228,25 +238,25 @@ function markdown(results) {
   const lines = [];
   const drains = results.filter((r) => r.result.scenario === "drain");
   if (drains.length) {
-    lines.push("| Workload | Terminals | Drain (s) | MB/s | Long tasks | Blocked (ms) | Longest block (ms) | Frames/s | WebContent + GPU memory before → peak → after (MB) | Renderer on screen | WebGL / DOM |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
-    for (const { name, bytes, result: r, memory: m } of drains) {
+    lines.push("| Workload | Terminals | Drain (s) | MB/s | Long tasks | Blocked (ms) | Longest block (ms) | Frames/s | WebContent + GPU memory before → peak → after (MB) | Renderer on screen | WebGL / DOM | Writes discarded |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    for (const { name, bytes, result: r, memory: m, discarded } of drains) {
       const rate = bytes && r.drainMs ? (bytes / 1024 / 1024 / (r.drainMs / 1000)).toFixed(1) : "n/a";
-      lines.push(`| ${name.replaceAll("|", "\\|")} | ${r.terminals} | ${seconds(r.drainMs)} | ${rate} | ${r.mainThread.longTasks} | ${r.mainThread.blockedMs} | ${r.mainThread.longestMs} | ${r.mainThread.framesPerSecond} | ${web(m.before)} → ${web(m.peak)} → ${web(m.after)} | ${r.renderer} | ${r.loaded.webgl} / ${r.loaded.dom} |`);
+      lines.push(`| ${name.replaceAll("|", "\\|")} | ${r.terminals} | ${seconds(r.drainMs)} | ${rate} | ${r.mainThread.longTasks} | ${r.mainThread.blockedMs} | ${r.mainThread.longestMs} | ${r.mainThread.framesPerSecond} | ${web(m.before)} → ${web(m.peak)} → ${web(m.after)} | ${r.renderer} | ${r.loaded.webgl} / ${r.loaded.dom} | ${discarded ?? "n/a"} |`);
     }
     lines.push("");
   }
   const echoes = results.filter((r) => r.result.scenario === "echo");
   if (echoes.length) {
-    lines.push("| Terminals | Renderer on screen | Producers | Load (MB/s) | Echo p50 (ms) | Echo p95 (ms) | Echo max (ms) | To frame p50 (ms) | To frame p95 (ms) | Lost | Long tasks | Longest block (ms) | WebContent + GPU memory before → peak → after (MB) |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
-    for (const { result: r, memory: m } of echoes) {
-      lines.push(`| ${r.terminals} | ${r.renderer} | ${r.producers} | ${(r.load.bytesPerSecond / 1024 / 1024).toFixed(1)} | ${r.echoMs.p50} | ${r.echoMs.p95} | ${r.echoMs.max} | ${r.echoFrameMs.p50} | ${r.echoFrameMs.p95} | ${r.lost} | ${r.mainThread.longTasks} | ${r.mainThread.longestMs} | ${web(m.before)} → ${web(m.peak)} → ${web(m.after)} |`);
+    lines.push("| Terminals | Renderer on screen | Producers | Load (MB/s) | Echo p50 (ms) | Echo p95 (ms) | Echo max (ms) | To frame p50 (ms) | To frame p95 (ms) | Lost | Long tasks | Longest block (ms) | WebContent + GPU memory before → peak → after (MB) | Writes discarded |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    for (const { result: r, memory: m, discarded } of echoes) {
+      lines.push(`| ${r.terminals} | ${r.renderer} | ${r.producers} | ${(r.load.bytesPerSecond / 1024 / 1024).toFixed(1)} | ${r.echoMs.p50} | ${r.echoMs.p95} | ${r.echoMs.max} | ${r.echoFrameMs.p50} | ${r.echoFrameMs.p95} | ${r.lost} | ${r.mainThread.longTasks} | ${r.mainThread.longestMs} | ${web(m.before)} → ${web(m.peak)} → ${web(m.after)} | ${discarded ?? "n/a"} |`);
     }
     lines.push("");
   }
   const interrupts = results.filter((r) => r.result.scenario === "interrupt");
   if (interrupts.length) {
-    lines.push("| Terminals | Renderer on screen | Flood before Ctrl+C (s) | Ctrl+C → process exit (ms) | Ctrl+C → output stops (ms) | Output after Ctrl+C (MB) | Long tasks | Longest block (ms) | Frames/s | WebContent + GPU memory before → peak → after (MB) |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
-    for (const { request, result: r, memory: m } of interrupts) lines.push(`| ${r.terminals} | ${r.renderer} | ${request.afterMs / 1000} | ${r.exitMs} | ${r.outputStoppedMs} | ${(r.bytesAfter / 1024 / 1024).toFixed(1)} | ${r.mainThread.longTasks} | ${r.mainThread.longestMs} | ${r.mainThread.framesPerSecond} | ${web(m.before)} → ${web(m.peak)} → ${web(m.after)} |`);
+    lines.push("| Terminals | Renderer on screen | Flood before Ctrl+C (s) | Ctrl+C → process exit (ms) | Ctrl+C → output stops (ms) | Output after Ctrl+C (MB) | Long tasks | Longest block (ms) | Frames/s | WebContent + GPU memory before → peak → after (MB) | Writes discarded |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    for (const { request, result: r, memory: m, discarded } of interrupts) lines.push(`| ${r.terminals} | ${r.renderer} | ${request.afterMs / 1000} | ${r.exitMs} | ${r.outputStoppedMs} | ${(r.bytesAfter / 1024 / 1024).toFixed(1)} | ${r.mainThread.longTasks} | ${r.mainThread.longestMs} | ${r.mainThread.framesPerSecond} | ${web(m.before)} → ${web(m.peak)} → ${web(m.after)} | ${discarded ?? "n/a"} |`);
     lines.push("");
   }
   const covers = results.filter((r) => r.result.scenario === "covered");
@@ -267,10 +277,10 @@ function markdown(results) {
   }
   const soak = results.filter((r) => r.result.scenario === "soak");
   if (soak.length) {
-    lines.push("| After | WebContent (MB) | GPU (MB) | Main (MB) | xterm instances | WebGL / DOM | On screen (on DOM) | Contexts created / lost | Buffer lines | Replay buffers (bytes) | Panes | Closed terminals collected |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    lines.push("| After | WebContent (MB) | GPU (MB) | Main (MB) | xterm instances | WebGL / DOM | On screen (on DOM) | Contexts created / lost | Buffer lines | Panes | Closed terminals collected |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
     for (const { name, result: r, memory: m } of soak) {
       const c = r.counters;
-      lines.push(`| ${name} | ${mb(m.after?.WebContent)} | ${mb(m.after?.GPU)} | ${mb(m.after?.main)} | ${c.instances} | ${c.webgl} / ${c.dom} | ${c.onScreen} (${c.domOnScreen}) | ${c.webglContexts.created} / ${c.webglContexts.lost} | ${c.bufferLines} | ${c.replayBuffers} (${c.replayBytes}) | ${c.panes} | ${r.closed.collected} of ${r.closed.tracked}${r.stepClosed ? ` (this step: ${r.stepClosed.collected} of ${r.stepClosed.tracked})` : ""} |`);
+      lines.push(`| ${name} | ${mb(m.after?.WebContent)} | ${mb(m.after?.GPU)} | ${mb(m.after?.main)} | ${c.instances} | ${c.webgl} / ${c.dom} | ${c.onScreen} (${c.domOnScreen}) | ${c.webglContexts.created} / ${c.webglContexts.lost} | ${c.bufferLines} | ${c.panes} | ${r.closed.collected} of ${r.closed.tracked}${r.stepClosed ? ` (this step: ${r.stepClosed.collected} of ${r.stepClosed.tracked})` : ""} |`);
     }
     const left = soak.find((r) => r.result.leftAfterDelete)?.result.leftAfterDelete;
     if (left) lines.push("", `Right after deleting the sessions, ${left.panes} of their panes and ${left.counters.instances} xterm instances were still held.`);

@@ -1,7 +1,12 @@
 //! Terminals. A PTY per pane, the reader's login shell inside it, and output
 //! coalesced before it crosses to the webview: every emit is a JS eval, and a
 //! flood of tiny reads (a build log, `yes`) is thousands per second, which
-//! freezes input. Chunks are gathered for up to 8ms or 32KB and sent once.
+//! freezes input. Chunks are gathered for up to 8ms or 32KB and sent once;
+//! the first output after a quiet spell (a key's echo) goes at once.
+//!
+//! A view that shows a pane takes its output over a tap and says how much it
+//! has drawn. A pane that is too far ahead of its view stops being read, so
+//! the program blocks on its own output instead of the window drowning in it.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
@@ -38,9 +43,38 @@ struct Pane {
     cwd: String,
 }
 
+/// A direct line for one pane's raw output, beside the `pty_data` event: the
+/// desktop window attaches one per terminal it shows, so its bytes cross as
+/// bytes, to that terminal only. Returns `false` once nobody is receiving.
+pub type Tap = Box<dyn Fn(&[u8]) -> bool + Send>;
+
+#[derive(Default)]
+struct Tapped {
+    tap: Option<Tap>,
+    /// Bytes sent to the tap that its view has not said it has drawn.
+    unacked: usize,
+    /// The view went silent while the pane was held for it, so the pane is no
+    /// longer held; the view's next word puts it back under control.
+    stalled: bool,
+}
+type TapSlot = Arc<(Mutex<Tapped>, std::sync::Condvar)>;
+
+/// A pane this far ahead of its view is not read until the view catches up.
+/// xterm.js throws output away past 50 MB of backlog; this keeps it near none,
+/// and it is what makes Ctrl+C take effect at once during a flood.
+const FLOW_HIGH: usize = 1024 * 1024;
+/// A view that says nothing for this long while its pane is held (a frozen
+/// window, a page that was reloaded) stops being waited for: a program must
+/// never hang on a window that is not drawing.
+const FLOW_STALL: Duration = Duration::from_secs(2);
+
 pub struct Terminals {
     panes: Mutex<HashMap<String, Pane>>,
     sink: Mutex<Option<Arc<dyn EventSink>>>,
+    /// Keyed by pane id and kept across the pane's own life: a view may
+    /// attach before its pane is spawned, and stays attached when the process
+    /// in its pane is replaced.
+    taps: Mutex<HashMap<String, TapSlot>>,
     /// Output sent to the webview since launch, for `terminalx status`.
     emitted: Arc<Emitted>,
 }
@@ -53,7 +87,7 @@ struct Emitted {
 
 impl Default for Terminals {
     fn default() -> Self {
-        Self { panes: Mutex::new(HashMap::new()), sink: Mutex::new(None), emitted: Arc::default() }
+        Self { panes: Mutex::new(HashMap::new()), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default() }
     }
 }
 
@@ -64,6 +98,9 @@ pub struct TerminalStats {
     pub panes: usize,
     pub running: usize,
     pub scrollback_bytes: usize,
+    /// Views attached to a pane's output, and what they have yet to draw.
+    pub views: usize,
+    pub unacked_bytes: usize,
     /// `pty_data` events and their raw bytes since launch.
     pub data_events: u64,
     pub data_bytes: u64,
@@ -113,6 +150,21 @@ pub(crate) fn shell() -> String {
             "/bin/bash".into()
         }
     })
+}
+
+/// Hold the pane's output back while its view is more than `FLOW_HIGH` behind.
+fn wait_for_view(slot: &TapSlot) {
+    let (tapped, acked) = &**slot;
+    let mut tapped = tapped.lock().unwrap();
+    let deadline = Instant::now() + FLOW_STALL;
+    while tapped.tap.is_some() && !tapped.stalled && tapped.unacked > FLOW_HIGH {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            tapped.stalled = true;
+            break;
+        }
+        tapped = acked.wait_timeout(tapped, left).unwrap().0;
+    }
 }
 
 fn append_scrollback(scrollback: &Mutex<VecDeque<u8>>, bytes: &[u8]) {
@@ -201,6 +253,7 @@ impl Terminals {
             let last_output = last_output.clone();
             let scrollback = scrollback.clone();
             let emitted = self.emitted.clone();
+            let tap = self.tap_slot(&id);
             // Reading blocks until the program writes again, so it gets a
             // thread of its own: the emitter below must be able to send what
             // it gathered when the window closes even if the program has
@@ -222,7 +275,18 @@ impl Terminals {
             std::thread::Builder::new().name(format!("pty-emit-{id}")).spawn(move || {
                 let flush = |acc: &mut Vec<u8>| {
                     let data = base64::engine::general_purpose::STANDARD.encode(&*acc);
-                    append_scrollback(&scrollback, acc);
+                    {
+                        // Held across both, so a view attaching now gets these
+                        // bytes exactly once: in the scrollback it is handed,
+                        // or from its tap.
+                        let mut tapped = tap.0.lock().unwrap();
+                        append_scrollback(&scrollback, acc);
+                        match tapped.tap.as_ref().map(|send| send(acc)) {
+                            Some(true) => tapped.unacked += acc.len(),
+                            Some(false) => *tapped = Tapped::default(),
+                            None => {}
+                        }
+                    }
                     emitted.events.fetch_add(1, Ordering::Relaxed);
                     emitted.bytes.fetch_add(acc.len() as u64, Ordering::Relaxed);
                     *last_output.lock().unwrap() = Some(Instant::now());
@@ -231,13 +295,17 @@ impl Terminals {
                 };
                 let mut acc: Vec<u8> = Vec::with_capacity(MAX_CHUNK);
                 let mut open = true;
+                let mut flushed: Option<Instant> = None;
                 while open {
                     let Ok(first) = gathered.recv() else { break };
                     acc.extend_from_slice(&first);
                     // Gather a little more if it is arriving fast, so one emit
                     // carries a burst rather than each read costing an eval.
+                    // After a quiet spell there is no burst yet to gather: a
+                    // key's echo is sent as it is, not 8ms later.
                     let start = Instant::now();
-                    while acc.len() < MAX_CHUNK {
+                    let quiet = flushed.is_none_or(|at| at.elapsed() >= COALESCE);
+                    while !quiet && acc.len() < MAX_CHUNK {
                         let left = COALESCE.saturating_sub(start.elapsed());
                         if left.is_zero() {
                             break;
@@ -252,6 +320,8 @@ impl Terminals {
                         }
                     }
                     flush(&mut acc);
+                    flushed = Some(Instant::now());
+                    wait_for_view(&tap);
                 }
                 *alive.lock().unwrap() = false;
                 sink.emit(crate::status::resources::CHANGED_EVENT, &());
@@ -269,6 +339,58 @@ impl Terminals {
         self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, writer, pid, alive, last_output, scrollback, cwd: cwd.to_string() });
         self.changed();
         Ok(())
+    }
+
+    fn tap_slot(&self, id: &str) -> TapSlot {
+        self.taps.lock().unwrap().entry(id.to_string()).or_default().clone()
+    }
+
+    /// Send pane `id`'s output to `tap` from here on, starting with what the
+    /// pane has printed so far (its bounded scrollback), with nothing lost or
+    /// repeated in between. It replaces an earlier tap for the same pane.
+    pub fn attach(&self, id: &str, tap: Tap) {
+        let slot = self.tap_slot(id);
+        let mut tapped = slot.0.lock().unwrap();
+        let mut sent = 0;
+        if let Some(printed) = self.read_output(id).filter(|bytes| !bytes.is_empty()) {
+            // A full scrollback was cut at an arbitrary byte, perhaps inside
+            // a character or an escape sequence: start at the next line.
+            let cut = printed.len() >= SCROLLBACK_BYTES;
+            let start = cut.then(|| printed.iter().take(4096).position(|byte| *byte == b'\n').map(|at| at + 1)).flatten().unwrap_or(0);
+            if !tap(&printed[start..]) {
+                return;
+            }
+            sent = printed.len() - start;
+        }
+        *tapped = Tapped { tap: Some(tap), unacked: sent, stalled: false };
+        slot.1.notify_all();
+    }
+
+    /// The view has drawn `bytes` more of what its tap was sent.
+    pub fn ack(&self, id: &str, bytes: usize) {
+        let Some(slot) = self.taps.lock().unwrap().get(id).cloned() else { return };
+        let mut tapped = slot.0.lock().unwrap();
+        tapped.unacked = tapped.unacked.saturating_sub(bytes);
+        tapped.stalled = false;
+        slot.1.notify_all();
+    }
+
+    /// Every view is gone at once: the window was loaded afresh, and its old
+    /// page's views will never draw or answer again.
+    pub fn detach_all(&self) {
+        let slots: Vec<TapSlot> = self.taps.lock().unwrap().drain().map(|(_, slot)| slot).collect();
+        for slot in slots {
+            *slot.0.lock().unwrap() = Tapped::default();
+            slot.1.notify_all();
+        }
+    }
+
+    /// The view is gone: stop sending, and forget the pane id.
+    pub fn detach(&self, id: &str) {
+        if let Some(slot) = self.taps.lock().unwrap().remove(id) {
+            *slot.0.lock().unwrap() = Tapped::default();
+            slot.1.notify_all();
+        }
     }
 
     pub fn write(&self, id: &str, data: &[u8]) -> Result<()> {
@@ -393,8 +515,15 @@ impl Terminals {
     }
 
     pub fn stats(&self) -> TerminalStats {
+        let taps: Vec<TapSlot> = self.taps.lock().unwrap().values().cloned().collect();
+        let (views, unacked_bytes) = taps.iter().fold((0, 0), |(views, bytes), slot| {
+            let tapped = slot.0.lock().unwrap();
+            (views + usize::from(tapped.tap.is_some()), bytes + tapped.unacked)
+        });
         let panes = self.panes.lock().unwrap();
         TerminalStats {
+            views,
+            unacked_bytes,
             panes: panes.len(),
             running: panes.values().filter(|pane| *pane.alive.lock().unwrap()).count(),
             scrollback_bytes: panes.values().map(|pane| pane.scrollback.lock().unwrap().len()).sum(),
@@ -449,6 +578,111 @@ mod tests {
         assert!(stats.data_events >= 3, "{stats:?}");
         terminals.kill_all();
         assert_eq!(terminals.stats().panes, 0);
+    }
+
+    /// Collects what a tap is sent.
+    fn collector() -> (Tap, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let (sent, received) = std::sync::mpsc::channel::<Vec<u8>>();
+        let sent = Mutex::new(sent);
+        (Box::new(move |bytes| sent.lock().unwrap().send(bytes.to_vec()).is_ok()), received)
+    }
+
+    fn read_until(received: &std::sync::mpsc::Receiver<Vec<u8>>, wanted: &str) -> String {
+        let mut output = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !String::from_utf8_lossy(&output).contains(wanted) {
+            let chunk = received
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|_| panic!("no {wanted:?} in {:?}", String::from_utf8_lossy(&output)));
+            output.extend(chunk);
+        }
+        String::from_utf8_lossy(&output).into_owned()
+    }
+
+    #[test]
+    fn a_tap_gets_what_was_printed_before_it_attached_and_everything_after_exactly_once() {
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let terminals = Terminals::new();
+        let dir = tempfile::tempdir().unwrap();
+        // Attached before the pane exists: a view can mount before its spawn lands.
+        let (early, early_output) = collector();
+        terminals.attach("pane", early);
+        let command = "sh -c 'printf one-; sleep 2; printf two-; sleep 2; printf three; exec sleep 600'";
+        let spec = PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some(command), env: &[] };
+        terminals.spawn(sink, "pane", spec).unwrap();
+        assert!(read_until(&early_output, "one-").ends_with("one-"));
+
+        // A second view takes over: it starts with the scrollback, then follows.
+        let (late, late_output) = collector();
+        terminals.attach("pane", late);
+        let seen = read_until(&late_output, "three");
+        assert!(seen.contains("one-two-three"), "{seen:?}");
+        assert_eq!(seen.matches("one-").count(), 1, "{seen:?}");
+        // The first one was replaced, not doubled.
+        assert!(early_output.try_recv().is_err());
+
+        terminals.detach("pane");
+        assert!(terminals.taps.lock().unwrap().is_empty());
+        terminals.kill_all();
+    }
+
+    #[test]
+    fn a_tap_whose_receiver_is_gone_is_dropped() {
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let terminals = Terminals::new();
+        let dir = tempfile::tempdir().unwrap();
+        let (tap, output) = collector();
+        drop(output);
+        terminals.attach("pane", tap);
+        let spec = PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sh -c 'printf hello; exec sleep 600'"), env: &[] };
+        terminals.spawn(sink, "pane", spec).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while terminals.tap_slot("pane").0.lock().unwrap().tap.is_some() {
+            assert!(Instant::now() < deadline, "a dead tap is still attached");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        terminals.kill_all();
+    }
+
+    #[test]
+    fn a_pane_far_ahead_of_its_view_is_not_read_until_the_view_catches_up() {
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let terminals = Terminals::new();
+        let dir = tempfile::tempdir().unwrap();
+        let received = Arc::new(AtomicU64::new(0));
+        let count = received.clone();
+        terminals.attach("pane", Box::new(move |bytes| {
+                count.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                true
+            }));
+        // 64 MB as fast as the PTY carries it.
+        let command = "sh -c 'head -c 67108864 /dev/zero | tr \"\\0\" x; exec sleep 600'";
+        let spec = PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some(command), env: &[] };
+        terminals.spawn(sink, "pane", spec).unwrap();
+
+        let total = 64 * 1024 * 1024;
+        let sent = || received.load(Ordering::Relaxed) as usize;
+        let bound = FLOW_HIGH + 16 * MAX_CHUNK;
+
+        // The view draws nothing: the pane is held about a megabyte in.
+        std::thread::sleep(Duration::from_millis(700));
+        let held = sent();
+        assert!(held > FLOW_HIGH && held < bound, "sent {held} bytes to a view that drew none");
+        assert!(terminals.stats().unacked_bytes > FLOW_HIGH);
+
+        // The view catches up: the pane moves on, and is held again that much further.
+        terminals.ack("pane", held);
+        std::thread::sleep(Duration::from_millis(700));
+        let ahead = sent() - held;
+        assert!(ahead > FLOW_HIGH && ahead < bound, "{ahead} bytes ahead of a view that drew {held}");
+
+        // The view never speaks again (its page is gone): the program is not left hanging.
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while sent() < total {
+            assert!(Instant::now() < deadline, "stuck at {} bytes", sent());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        terminals.kill_all();
     }
 
     #[test]
