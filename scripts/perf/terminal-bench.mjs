@@ -16,7 +16,7 @@ import { cpus, homedir, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
 
-const SCENARIOS = ["yes", "cat", "tui", "echo", "interrupt", "soak", "churn", "covered", "background"];
+const SCENARIOS = ["yes", "cat", "tui", "echo", "interrupt", "soak", "churn", "covered", "background", "engine"];
 const LOG_BYTES = 50 * 1024 * 1024;
 const TUI_FRAMES = 4000;
 const YES_LINES = 2_000_000;
@@ -267,6 +267,15 @@ function markdown(results) {
     }
     lines.push("");
   }
+  const engines = results.filter((r) => r.result.scenario === "engine");
+  if (engines.length) {
+    lines.push("| Workload | Engine | Off screen (MB/s) | On screen, drawing (MB/s) | Long tasks on screen | Frames/s on screen | Lines kept | Notes |", "| --- | --- | --- | --- | --- | --- | --- | --- |");
+    for (const { result: r } of engines) {
+      lines.push(`| ${r.name} (${r.megabytes} MB) | xterm.js + WebGL | ${r.xtermParse.megabytesPerSecond} | ${r.xtermOnScreen.megabytesPerSecond} | ${r.xtermOnScreen.mainThread.longTasks} | ${r.xtermOnScreen.mainThread.framesPerSecond} | ${r.xtermOnScreen.lines} | renderer ${r.xtermOnScreen.renderer} |`);
+      lines.push(`| | libghostty-vt + 2D canvas | ${r.ghosttyParse.parseMegabytesPerSecond} | ${r.ghosttyOnScreen.megabytesPerSecond} | ${r.ghosttyOnScreen.mainThread.longTasks} | ${r.ghosttyOnScreen.mainThread.framesPerSecond} | ${r.ghosttyOnScreen.lines} | parse alone ${r.ghosttyOnScreen.parseMegabytesPerSecond} MB/s; ${r.ghosttyOnScreen.draws} draws, mean ${r.ghosttyOnScreen.meanDrawMs} ms, longest ${r.ghosttyOnScreen.longestDrawMs} ms; WASM memory ${mb(r.ghosttyOnScreen.wasmBytes)} MB; loaded in ${r.ghosttyLoadMs} ms |`);
+    }
+    lines.push("");
+  }
   const covers = results.filter((r) => r.result.scenario === "covered");
   if (covers.length) {
     lines.push("| Covered terminal | Times drawn | Renderer | In the document | Output (KB/s) | Long tasks | Frames/s | Hidden terminals in the document |", "| --- | --- | --- | --- | --- | --- | --- | --- |");
@@ -372,6 +381,12 @@ for (const scenario of options.scenarios) {
       results[results.length - 1].background = { readMs };
     }
     hide(false);
+    continue;
+  }
+  if (scenario === "engine") {
+    // Spike (phase 3): the same bytes through xterm.js and through libghostty-vt.
+    await record("cat of a 50 MB log", null, { scenario: "engine", cwd: options.work, name: "50 MB log", command: sh(`cat "${files.log}"`) });
+    await record("agent-style redraws, 4000 frames", null, { scenario: "engine", cwd: options.work, name: "agent-style redraws", command: sh(`cat "${files.tui}"`) });
     continue;
   }
   if (scenario === "covered") {

@@ -1,0 +1,10 @@
+[package]
+name = "vtbench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+alacritty_terminal = "0.25"
+
+[profile.release]
+opt-level = 3
