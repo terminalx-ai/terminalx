@@ -416,7 +416,9 @@ export function TabView({
   // A PTY-first tab keeps its terminal mounted under the chat: the pane holds
   // the live CLI, so unmounting it to show the transcript would throw away the
   // scrollback and resize the agent's window on every toggle. `invisible`
-  // rather than `hidden` because xterm needs a laid-out box to fit itself to.
+  // rather than `hidden` because the terminal is sized from this laid-out
+  // box. The xterm itself is out of the document until the terminal is shown
+  // (`TerminalView`), so the CLI's redraws cost nothing while the chat is up.
   if (ptyFirst) {
     return wrap(
       <div className="relative flex h-full min-h-0 flex-1 flex-col">
