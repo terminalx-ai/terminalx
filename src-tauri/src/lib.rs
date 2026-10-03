@@ -327,6 +327,7 @@ pub fn run() {
             commands::cloud_workspace_preflight,
             commands::cloud_workspace_repositories,
             commands::cloud_workspaces,
+            commands::cloud_catalog_feed,
             commands::cloud_workspace_suspend,
             commands::cloud_workspace_resume,
             commands::cloud_workspace_release,

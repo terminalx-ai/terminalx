@@ -28,6 +28,11 @@ pub const STATUS_EVENT: &str = "account_status";
 /// desktop reaches only its active Organization, as before.
 pub const MULTI_ORG_CAPABILITY: &str = "cloud.desktop.multi-org.v1";
 
+/// The server lists every member Organization's cloud workspaces in one
+/// request (`GET /v1/desktop/cloud-catalog`, PRO-74). Without it the desktop
+/// lists each Organization on its own.
+pub const CATALOG_FEED_CAPABILITY: &str = "cloud.desktop.catalog-feed.v1";
+
 const API_BASE_URL: &str = "https://login.terminalx.ai";
 /// Debug builds only: point the account service (and everything built on it,
 /// such as cloud workspaces) at a local stack, e.g. terminalx-saas
@@ -93,6 +98,8 @@ pub struct AccountStatus {
     organizations: Vec<OrganizationSummary>,
     /// The server lets this desktop work in every member Organization at once (CS-18).
     multi_org: bool,
+    /// The server lists every member Organization in one request (PRO-74).
+    catalog_feed: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -403,6 +410,13 @@ impl AccountManager {
         session.capabilities.flags.insert(MULTI_ORG_CAPABILITY.into(), multi_org);
     }
 
+    /// Tests: whether the server advertises the catalog feed.
+    #[cfg(test)]
+    pub(crate) fn set_catalog_feed_for_test(&self, offered: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.session.as_mut().expect("signed in").capabilities.flags.insert(CATALOG_FEED_CAPABILITY.into(), offered);
+    }
+
     /// Tests: another client changed the default (active) Organization.
     #[cfg(test)]
     pub(crate) fn set_active_org_for_test(&self, organization_id: &str) {
@@ -626,6 +640,23 @@ impl AccountManager {
                     })
             }
         }
+    }
+
+    /// Whether the server offers the cross-organization catalog feed (PRO-74).
+    pub(crate) fn catalog_feed(&self) -> bool {
+        self.inner.lock().unwrap().session.as_ref().is_some_and(catalog_feed)
+    }
+
+    /// For an answer that spans Organizations (the catalog feed): the scope of
+    /// now, if the account that asked is still the one signed in. The caller
+    /// keeps only the Organizations this scope allows.
+    pub(crate) fn scope_if_same_account(&self, context: &AccountContext) -> Option<CloudScope> {
+        let inner = self.inner.lock().unwrap();
+        if inner.generation != context.generation {
+            return None;
+        }
+        let scope = cloud_scope(inner.session.as_ref()?);
+        (scope.user_id == context.user_id && scope.profile_id == context.profile_id).then_some(scope)
     }
 
     /// Fence native service responses against sign-out or account replacement.
@@ -1214,7 +1245,14 @@ fn snapshot(inner: &Inner) -> AccountStatus {
         }),
         organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone(), is_personal: org.is_personal, cloud: org.cloud.clone() }).collect()).unwrap_or_default(),
         multi_org: inner.session.as_ref().is_some_and(multi_org),
+        catalog_feed: inner.session.as_ref().is_some_and(catalog_feed),
     }
+}
+
+/// The feed spans Organizations, so it is only used where the server also
+/// authorizes by membership.
+fn catalog_feed(session: &DesktopSession) -> bool {
+    multi_org(session) && session.capabilities.flags.get(CATALOG_FEED_CAPABILITY) == Some(&true)
 }
 
 fn multi_org(session: &DesktopSession) -> bool {

@@ -4,6 +4,8 @@ import { normalizeRepositoryIdentity } from "@terminalx/portable/repositoryIdent
 import {
   api,
   type AccountStatus,
+  type CloudCatalogFeed,
+  type CloudCatalogOrganization,
   type CloudSelectedRepository,
   type CloudWorkspace,
   type CloudWorkspaceList,
@@ -514,6 +516,155 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
   return flight;
 }
 
+// ---- Cross-organization feed (PRO-74, CS-21) --------------------------------
+
+/** The last feed answer's cursor (this launch only): sent back so an unchanged catalog answers 304. */
+let feedCursor: string | null = null;
+let feedFlight: Promise<void> | null = null;
+/** Organizations the last whole answer could not list; a 304 says they are still not listed. */
+const feedErrors = new Map<string, string>();
+/** The account for which the server turned out not to serve the feed after all; per-organization lists are used until it changes. */
+let feedRefusedFor: string | null = null;
+
+const accountKey = (status: AccountStatus): string | null => (status.state === "signed-in" ? (status.context?.account ?? status.identity?.email ?? null) : null);
+
+/**
+ * Whether the workspace lists come from the cross-organization feed: one
+ * request per interval for every live organization, mostly answered 304. A
+ * server that does not advertise it (or refused it) keeps one list per
+ * organization, exactly as before.
+ */
+export function usesCatalogFeed(status: AccountStatus = getAccount().status): boolean {
+  return isMultiOrg(status) && status.catalogFeed === true && feedRefusedFor !== accountKey(status);
+}
+
+/** Answers that mean "this server has no feed", as opposed to a failure the next poll may not see. */
+const FEED_UNSUPPORTED = new Set(["cloud_catalog_feed_unavailable", "not_found", "cloud_workspace_request_invalid"]);
+
+/** An organization's selected repositories, every few minutes: the feed carries the workspace lists only. */
+async function refreshRepositories(orgId: string, owner: string | null, now: () => number): Promise<void> {
+  const current = state.orgs[orgId];
+  if (current?.repositoriesAt && now() - current.repositoriesAt <= REPOSITORIES_MAX_AGE_MS) return;
+  try {
+    const repositories = await api.cloudWorkspaceRepositories(cloudOrgArg(orgId));
+    if (state.owner !== owner || !liveCloudOrgIds(getAccount().status).includes(orgId)) return;
+    if (repositories) patchOrg(orgId, { repositories: repositories.repositories, repositoriesAt: now() });
+  } catch {
+    // The picker reads them again when it opens; the rows do not depend on them.
+  }
+}
+
+/**
+ * A feed answer that lists only what changed (`reset: false`), as the whole
+ * list it stands for: the changed workspaces replace their rows, deleted and
+ * tombstoned ones leave, every other row stays as it is.
+ */
+export function mergeFeedDelta(current: readonly CloudWorkspaceListItem[], entry: Pick<CloudCatalogOrganization, "workspaces" | "tombstones" | "quota">, deletedWorkspaceIds: readonly string[]): CloudWorkspaceList {
+  const gone = new Set([...deletedWorkspaceIds, ...entry.tombstones.map((tombstone) => tombstone.id)]);
+  const changed = new Map(entry.workspaces.map((item) => [item.workspace.id, item]));
+  const workspaces = current.filter((item) => !gone.has(item.workspace.id)).map((item) => changed.get(item.workspace.id) ?? item);
+  const known = new Set(current.map((item) => item.workspace.id));
+  const added = entry.workspaces.filter((item) => !known.has(item.workspace.id) && !gone.has(item.workspace.id));
+  return { workspaces: [...added, ...workspaces], tombstones: entry.tombstones, quota: entry.quota ?? undefined };
+}
+
+/**
+ * Read every live organization's workspaces in one request. Like a list it
+ * only looks: nothing attaches or resumes. An unchanged catalog (304) keeps
+ * every row as it is; a changed one replaces each organization's rows in one
+ * step, so the sidebar never passes through an empty state and the selection
+ * stays where it is. An organization the server could not list keeps what it
+ * showed, with the error; a failed request keeps everything.
+ */
+export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
+  if (!usesCatalogFeed()) return Promise.resolve();
+  if (feedFlight) return feedFlight;
+  const owner = state.owner;
+  const account = accountKey(getAccount().status);
+  const asked = liveCloudOrgIds(getAccount().status);
+  if (!asked.length) return Promise.resolve();
+  let refused = false;
+  const flight = (async () => {
+    const requestedAt = now();
+    const repositories = Promise.allSettled(asked.map((orgId) => refreshRepositories(orgId, owner, now)));
+    let feed: CloudCatalogFeed;
+    try {
+      feed = await api.cloudCatalogFeed(feedCursor);
+    } catch (error) {
+      await repositories;
+      // Signed out or another user while it ran: nothing lands.
+      if (state.owner !== owner) return;
+      const code = errorText(error);
+      if (FEED_UNSUPPORTED.has(code)) {
+        refused = true;
+        feedRefusedFor = account;
+        return;
+      }
+      // An error never replaces what is shown: the rows stay, with the reason.
+      for (const orgId of liveCloudOrgIds(getAccount().status)) patchOrg(orgId, { error: code });
+      return;
+    }
+    await repositories;
+    if (state.owner !== owner) return;
+    // As of the answer: an organization the user left meanwhile gets nothing.
+    const live = liveCloudOrgIds(getAccount().status);
+    if (!feed.changed) {
+      for (const orgId of live) {
+        // Listed by the answer the cursor names; one it could not list still is not.
+        if (feedErrors.has(orgId) || !state.orgs[orgId] || state.orgs[orgId].fetchedAt === null) continue;
+        patchOrg(orgId, { fetchedAt: now(), requestedAt, error: null });
+      }
+      return;
+    }
+    if (!Array.isArray(feed.organizations)) {
+      for (const orgId of live) patchOrg(orgId, { error: "cloud_workspace_invalid_response" });
+      return;
+    }
+    const answered = new Map(feed.organizations.map((organization) => [organization.orgId, organization]));
+    if (feed.reset) feedErrors.clear();
+    for (const orgId of live) {
+      const entry = answered.get(orgId);
+      if (!entry) {
+        // A delta says nothing of an organization with no change. A whole
+        // catalog without it means the server no longer lists it for this
+        // person: the organizations held here are older than the server's.
+        if (feed.reset) {
+          feedErrors.set(orgId, "cloud_workspace_not_found");
+          patchOrg(orgId, { error: "cloud_workspace_not_found" });
+          void refreshAccountRoles(true);
+        }
+        continue;
+      }
+      if (entry.error) {
+        feedErrors.set(orgId, entry.error);
+        patchOrg(orgId, { error: entry.error });
+        if (entry.error === "cloud_workspace_not_found") void refreshAccountRoles(true);
+        continue;
+      }
+      feedErrors.delete(orgId);
+      if (!Array.isArray(entry.workspaces) || entry.workspaces.some((item) => item.workspace.orgId !== orgId)) {
+        patchOrg(orgId, { error: "cloud_workspace_invalid_response" });
+        continue;
+      }
+      const list: CloudWorkspaceList = feed.reset
+        ? { workspaces: entry.workspaces, tombstones: entry.tombstones ?? [], quota: entry.quota ?? undefined }
+        : mergeFeedDelta(state.orgs[orgId]?.workspaces ?? [], { ...entry, tombstones: entry.tombstones ?? [] }, feed.deletedWorkspaceIds ?? []);
+      await ingestCloudList(list, orgId, now(), requestedAt);
+      if (state.owner !== owner) return;
+      noteListedOrgRole(orgId, listedOrgManages(list), requestedAt);
+    }
+    feedCursor = feed.cursor;
+  })().finally(() => {
+    feedFlight = null;
+    if (state.owner !== owner) return;
+    // No feed after all: each organization is listed on its own from now on.
+    if (refused) for (const orgId of liveCloudOrgIds(getAccount().status)) void refreshCloudCatalog(orgId);
+    schedulePoll();
+  });
+  feedFlight = flight;
+  return flight;
+}
+
 /**
  * What a workspace list says about this person's role in its organization:
  * true for an owner or admin (the API's `manager`, or a `manage` authority on
@@ -569,8 +720,9 @@ export function isChanging(item: CloudWorkspaceListItem): boolean {
  *
  * "Seen" is never taken from visibility alone: a window with the focus polls
  * fast whatever `visibilityState` says. Each live organization follows this
- * on its own timer (until the cross-organization feed, CS-21). Listing never
- * wakes compute.
+ * on its own timer; with the cross-organization feed (CS-21) one request
+ * covers them all, at the pace of the organization that needs it soonest.
+ * Listing never wakes compute.
  */
 export function pollDelay(org: OrgCatalog | undefined, window: { visible: boolean; focused: boolean }): number {
   if (!window.visible && !window.focused) return POLL_BACKGROUND_MS;
@@ -580,6 +732,14 @@ export function pollDelay(org: OrgCatalog | undefined, window: { visible: boolea
 
 /** Per live organization, its next list. */
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
+/** With the feed: the one next request for every live organization, and when it is due. */
+let feedTimer: ReturnType<typeof setTimeout> | null = null;
+let feedDueAt = 0;
+
+function clearFeedTimer() {
+  if (feedTimer !== null) clearTimeout(feedTimer);
+  feedTimer = null;
+}
 
 function windowState(): { visible: boolean; focused: boolean } {
   if (typeof document === "undefined") return { visible: false, focused: false };
@@ -597,6 +757,24 @@ function clearTimers(keep: ReadonlySet<string> = new Set()) {
 /** Schedule the next list of one organization, or (none named) of every live one; an organization no longer live stops. */
 function schedulePoll(only?: string) {
   const live = booted ? liveCloudOrgIds(getAccount().status) : [];
+  if (booted && usesCatalogFeed()) {
+    // One request covers every live organization, at the pace of the one
+    // that needs it soonest (3 s while anything anywhere is changing state).
+    clearTimers();
+    if (!live.length) return clearFeedTimer();
+    const delay = Math.min(...live.map((orgId) => pollDelay(state.orgs[orgId], windowState())));
+    const due = Date.now() + delay;
+    // One organization's own refresh never pushes the request for all of them back.
+    if (feedTimer !== null && only && feedDueAt <= due) return;
+    clearFeedTimer();
+    feedDueAt = due;
+    feedTimer = setTimeout(() => {
+      feedTimer = null;
+      void refreshCloudFeed();
+    }, delay);
+    return;
+  }
+  clearFeedTimer();
   clearTimers(new Set(live));
   for (const orgId of live) {
     if (only && orgId !== only) continue;
@@ -622,6 +800,16 @@ function schedulePoll(only?: string) {
 function onWindowChange(event?: Event) {
   const { visible, focused } = windowState();
   const returned = event?.type === "focus" || (event?.type === "visibilitychange" && visible);
+  if (usesCatalogFeed()) {
+    const live = liveCloudOrgIds(getAccount().status);
+    const justAsked = live.some((orgId) => {
+      const asked = state.orgs[orgId]?.requestedAt ?? null;
+      return asked !== null && Date.now() - asked < REFRESH_ON_RETURN_FLOOR_MS;
+    });
+    if (returned && (visible || focused) && !justAsked) void refreshCloudFeed();
+    else schedulePoll();
+    return;
+  }
   for (const orgId of liveCloudOrgIds(getAccount().status)) {
     const asked = state.orgs[orgId]?.requestedAt ?? null;
     const justAsked = asked !== null && Date.now() - asked < REFRESH_ON_RETURN_FLOOR_MS;
@@ -762,6 +950,14 @@ async function loadSaved(owner: string, revision: string) {
 
 // ---- Account ---------------------------------------------------------------
 
+/** Forget the feed's cursor and what it could not list: the next request reads the whole catalog. */
+function resetFeed() {
+  feedCursor = null;
+  feedFlight = null;
+  feedErrors.clear();
+  feedRefusedFor = null;
+}
+
 let booted = false;
 let unsubscribe: (() => void) | null = null;
 let unsubscribeAccess: (() => void) | null = null;
@@ -781,6 +977,7 @@ function syncAccount() {
     listedAt.clear();
     names.clear();
     projectNames.clear();
+    resetFeed();
     set({ ...EMPTY, owner, revision }, false);
     if (owner && revision) void loadSaved(owner, revision);
   } else if (revision !== state.revision) {
@@ -792,10 +989,15 @@ function syncAccount() {
   // moments ago keeps its timer rather than listing again on every status
   // read; the default organization alone (no capability) lists as before.
   const multi = isMultiOrg(status);
-  for (const orgId of live) {
+  const fresh = (orgId: string) => {
     const org = state.orgs[orgId];
-    if (multi && org?.source === "live" && org.fetchedAt !== null && Date.now() - org.fetchedAt < POLL_CHANGING_MS) continue;
-    void refreshCloudCatalog(orgId);
+    return multi && org?.source === "live" && org.fetchedAt !== null && Date.now() - org.fetchedAt < POLL_CHANGING_MS;
+  };
+  if (owner && usesCatalogFeed(status)) {
+    // One request for every live organization (PRO-74), unless all of them were read moments ago.
+    if (live.length && !live.every(fresh)) void refreshCloudFeed();
+  } else {
+    for (const orgId of live) if (!fresh(orgId)) void refreshCloudCatalog(orgId);
   }
   schedulePoll();
 }
@@ -849,6 +1051,8 @@ export function resetCloudCatalog() {
     document.removeEventListener("visibilitychange", onWindowChange);
   }
   clearTimers();
+  clearFeedTimer();
+  resetFeed();
   if (saveTimer !== null) clearTimeout(saveTimer);
   saveTimer = null;
   booted = false;

@@ -460,6 +460,25 @@ people the runtime lists (`collab.presence` with a different set of people,
 roles or approval rights), or a share or visibility change made in the
 dialog. All of these only list; none attaches to or resumes a workspace.
 
+**One request for every organization (PRO-74).** On a server that advertises
+`cloud.desktop.catalog-feed.v1` (and authorizes by membership), the poll above
+is one request for all live organizations, `cloud_catalog_feed`
+(`GET /v1/desktop/cloud-catalog`, saas contract §23), at the pace of the
+organization that needs it soonest (3 s while a workspace anywhere is
+changing state). The desktop sends back the last answer's cursor, and an
+unchanged catalog answers 304: no row is touched. A changed one replaces each
+organization's rows in one step (`refreshCloudFeed` in
+`src/lib/cloudCatalog.ts`), so the sidebar never shows an empty state in
+between and the selection stays. An organization the server could not list
+keeps its rows with the error; a failed request keeps everything. Natively
+(`CloudWorkspaceService::catalog_feed`) the answer is fenced by the account
+that asked, each organization by membership as of the answer, and each list
+is validated like a single organization's. Refreshing one organization (after
+an action there, or an access change) still lists that organization alone.
+The organization's selected repositories are read per organization every
+five minutes, as before. On a server without the capability, or one that
+refuses the feed, each organization is listed on its own timer as before.
+
 Not moved yet: the full participants bar (names, windows, tabs) stays on the
 workspace page; SessionView shows the compact avatars.
 

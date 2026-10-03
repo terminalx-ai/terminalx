@@ -188,6 +188,8 @@ export const api = {
     invoke<CloudWorkspacePreflight>("cloud_workspace_preflight", { repositories, orgId: orgId ?? null }),
   cloudWorkspaceRepositories: (orgId?: string | null) => invoke<CloudSelectedRepositories>("cloud_workspace_repositories", { orgId: orgId ?? null }),
   cloudWorkspaces: (orgId?: string | null) => invoke<CloudWorkspaceList>("cloud_workspaces", { orgId: orgId ?? null }),
+  /** Every member organization's list in one request, for a server that offers it; `cursor` is the last answer's. */
+  cloudCatalogFeed: (cursor?: string | null) => invoke<CloudCatalogFeed>("cloud_catalog_feed", { cursor: cursor ?? null }),
   cloudWorkspaceSuspend: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_suspend", { workspaceId, orgId: orgId ?? null }),
   cloudWorkspaceResume: (workspaceId: string, orgId?: string | null) =>
@@ -358,6 +360,31 @@ export interface AccountStatus {
   organizations?: OrganizationSummary[];
   /** The server authorizes desktop cloud routes by membership (`cloud.desktop.multi-org.v1`, CS-18). */
   multiOrg?: boolean;
+  /** The server lists every member organization's cloud workspaces in one request (`cloud.desktop.catalog-feed.v1`, PRO-74). */
+  catalogFeed?: boolean;
+}
+
+/** One organization of the catalog feed: its list, or why it was not listed (the others are unaffected). */
+export interface CloudCatalogOrganization {
+  orgId: string;
+  workspaces: CloudWorkspaceListItem[];
+  tombstones: CloudWorkspaceTombstone[];
+  quota?: CloudWorkspaceQuota | null;
+  error?: string | null;
+}
+
+/**
+ * `cloud_catalog_feed` (saas contract §23). `changed: false` is the server's
+ * 304: the catalog `cursor` names is still current. `reset` means the answer
+ * is the whole catalog; without it, only the workspaces that changed are
+ * listed and `deletedWorkspaceIds` names the ones to drop.
+ */
+export interface CloudCatalogFeed {
+  changed: boolean;
+  cursor: string | null;
+  reset: boolean;
+  organizations: CloudCatalogOrganization[];
+  deletedWorkspaceIds: string[];
 }
 
 /** `local-docker` is offered by debug builds only (terminalx-saas `cloud:e2e:local --serve`). */
