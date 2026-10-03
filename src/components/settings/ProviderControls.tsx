@@ -249,7 +249,8 @@ export function ProviderControls({
                     ? "Retry disconnect / cleanup"
                     : "Disconnect"}
                 </Button>
-                {connection.state !== "not-connected" && (
+                {/* Not while a disconnect is under way: the key is on its way out, and re-checking it says nothing useful. */}
+                {connection.state !== "not-connected" && !connection.disconnectDisposition && (
                   <Button
                     size="sm"
                     variant="outline"

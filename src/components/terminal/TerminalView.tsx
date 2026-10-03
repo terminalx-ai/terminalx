@@ -8,6 +8,7 @@ import { feedLocalPane } from "@/lib/terminalFeed";
 import { fitTerminal } from "@/lib/terminalFit";
 import { hideWebgl, showWebgl } from "@/lib/terminalWebgl";
 import { useTheme } from "@/lib/theme";
+import { REMOTE_DROP_REFUSAL, TerminalDropHint, useTerminalDrop, type TerminalDropRefusal } from "./TerminalDrop";
 
 function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -157,19 +158,27 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
  * `create` makes the instance when there is none yet (a cloud terminal
  * wires its own input); `fit: false` keeps the size someone else set, for
  * a view that watches a terminal another device controls.
+ *
+ * A file dropped on a local terminal types its path (`TerminalDrop.tsx`).
+ * A terminal with its own `create` is not on this computer and takes no
+ * drop at all unless `dropRefusal` says what it does take.
  */
 export function TerminalView({
   id,
   visible,
   create,
   fit = true,
+  dropRefusal,
 }: {
   id: string;
   visible: boolean;
   create?: (mode: "dark" | "light") => TerminalInstance;
   fit?: boolean;
+  dropRefusal?: TerminalDropRefusal;
 }) {
   const host = useRef<HTMLDivElement>(null);
+  const frame = useRef<HTMLDivElement>(null);
+  const drop = useTerminalDrop({ id, frame, enabled: visible, refusal: dropRefusal ?? (create ? REMOTE_DROP_REFUSAL : undefined) });
   const { resolvedMode } = useTheme();
   const make = () => (create ? create(resolvedMode) : createInstance(id, resolvedMode));
   const fitting = useRef(fit);
@@ -227,5 +236,10 @@ export function TerminalView({
     });
   }, [id, visible, fit]);
 
-  return <div ref={host} className="terminal-host h-full w-full px-2 pt-1" />;
+  return (
+    <div ref={frame} className="relative h-full w-full" data-testid="terminal-drop-target" {...drop.zoneProps}>
+      <div ref={host} className="terminal-host h-full w-full px-2 pt-1" />
+      <TerminalDropHint drop={drop} />
+    </div>
+  );
 }

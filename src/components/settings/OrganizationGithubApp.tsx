@@ -194,6 +194,10 @@ export function OrganizationGithubApp({
     attemptSeq.current += 1;
     const canceled = await act("cancel", (revision) => organizationGithubApp.cancelAttempt(attempt.attemptId, revision));
     const ended = canceled?.value;
+    // A poll can start while the cancel is in flight (an earlier poll's
+    // answer re-arms it). Its answer still says "waiting", and landing after
+    // this one it would put the canceled attempt back on screen.
+    attemptSeq.current += 1;
     if (!ended) {
       // Not canceled: keep polling the attempt.
       setAttempt((shown) => (shown ? { ...shown } : shown));

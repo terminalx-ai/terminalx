@@ -22,6 +22,8 @@ const LIFECYCLE: &str = "archive-v1";
 const SUPPORTED_PROVIDERS: &str = if cfg!(debug_assertions) { "machine0,box,local-docker" } else { "machine0,box" };
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const RESPONSE_LIMIT_BYTES: u64 = 512 * 1024;
+/// The catalog feed carries every member Organization's list in one answer.
+const CATALOG_RESPONSE_LIMIT_BYTES: u64 = 4 * RESPONSE_LIMIT_BYTES;
 const MAX_RETRY_AFTER_SECONDS: u64 = 60 * 60;
 /// Diagnostics carry up to a few hundred operations with their history.
 const DIAGNOSTICS_RESPONSE_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
@@ -710,6 +712,47 @@ pub struct CloudWorkspaceList {
     pub quota: Option<CloudWorkspaceQuota>,
 }
 
+/// One Organization of the catalog feed (saas contract §23): its list as
+/// `GET …/cloud-workspaces` answers it, or why it could not be listed.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudCatalogOrganization {
+    pub org_id: String,
+    #[serde(default)]
+    pub workspaces: Vec<CloudWorkspaceListItem>,
+    #[serde(default)]
+    pub tombstones: Vec<CloudWorkspaceTombstone>,
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub quota: Option<CloudWorkspaceQuota>,
+    /// Set when this Organization was not listed; the others are unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudCatalogBody {
+    cursor: String,
+    #[serde(default)]
+    reset: bool,
+    organizations: Vec<CloudCatalogOrganization>,
+    #[serde(default)]
+    deleted_workspace_ids: Vec<String>,
+}
+
+/// What `cloud_catalog_feed` hands the webview. `changed: false` is the
+/// server's 304: the catalog the cursor names is still current.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudCatalogFeed {
+    pub changed: bool,
+    pub cursor: Option<String>,
+    /// The answer is the whole catalog and replaces what the desktop holds.
+    pub reset: bool,
+    pub organizations: Vec<CloudCatalogOrganization>,
+    pub deleted_workspace_ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudWorkspaceTombstone {
@@ -1172,6 +1215,42 @@ impl Client {
     }
 }
 
+impl Client {
+    /// `GET /v1/desktop/cloud-catalog` (saas contract §23). `None` is the
+    /// server's 304: nothing changed since `cursor`.
+    fn catalog_feed(&self, context: &AccountContext, cursor: Option<&str>) -> Result<Option<CloudCatalogBody>, CloudWorkspaceClientError> {
+        let risk = RequestRisk::Read;
+        let mut url = self.base.clone();
+        url.path_segments_mut()
+            .map_err(|_| CloudWorkspaceClientError::local("cloud_workspace_client_invalid", false))?
+            .extend(["v1", "desktop", "cloud-catalog"]);
+        let agent = ureq::AgentBuilder::new().timeout(self.timeout).redirects(0).build();
+        let mut request = agent
+            .request("GET", url.as_str())
+            .set("authorization", &format!("Bearer {}", context.access_token))
+            .set("X-TerminalX-Cloud-Workspace-Contract", CONTRACT)
+            .set("X-TerminalX-Cloud-Workspace-Providers", SUPPORTED_PROVIDERS)
+            .set("X-TerminalX-Cloud-Workspace-Idle-Options", "never-v1")
+            .set("X-TerminalX-Cloud-Workspace-Lifecycle", LIFECYCLE);
+        if let Some(cursor) = cursor {
+            request = request.set("If-None-Match", &format!("\"{cursor}\""));
+        }
+        match request.call() {
+            Ok(response) if response.status() == 304 => Ok(None),
+            Ok(response) if response.status() == 200 => decode_response(response, risk, CATALOG_RESPONSE_LIMIT_BYTES).map(Some),
+            // Redirects are off: any other answer is not this API's.
+            Ok(_) => Err(invalid_response()),
+            Err(ureq::Error::Status(status, response)) => Err(http_error(status, response, risk)),
+            Err(ureq::Error::Transport(_)) => Err(transport_error(risk)),
+        }
+    }
+}
+
+/// A cursor is the server's opaque token; only one that is safe in a header is sent back.
+fn valid_cursor(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128 && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
 pub struct CloudWorkspaceService {
     account: Arc<AccountManager>,
     client: Client,
@@ -1506,6 +1585,50 @@ impl CloudWorkspaceService {
             )?;
             ensure_list(result, &context.organization_id, RequestRisk::Read)
         })
+    }
+
+    /// Every member Organization's list in one request (PRO-74, saas contract
+    /// §23), for a server that offers it. The answer is fenced by the account
+    /// that asked, and each Organization by membership as of the answer: an
+    /// Organization the user is not (or no longer) a member of never reaches
+    /// the webview, whatever the server sent. One Organization's invalid list
+    /// is reported as that Organization's error and hides no other.
+    pub fn catalog_feed(&self, cursor: Option<&str>) -> Result<CloudCatalogFeed, CloudWorkspaceClientError> {
+        let risk = RequestRisk::Read;
+        let context = self.account.context().ok_or_else(|| CloudWorkspaceClientError::local("account_signed_out", false))?;
+        if !self.account.catalog_feed() {
+            return Err(CloudWorkspaceClientError::local("cloud_catalog_feed_unavailable", false));
+        }
+        let cursor = cursor.filter(|cursor| valid_cursor(cursor));
+        let answer = self.client.catalog_feed(&context, cursor);
+        let scope = self.account.scope_if_same_account(&context).filter(|scope| scope.multi_org).ok_or_else(|| context_changed_error(risk))?;
+        let Some(body) = answer? else {
+            return Ok(CloudCatalogFeed { changed: false, cursor: cursor.map(str::to_string), reset: false, organizations: Vec::new(), deleted_workspace_ids: Vec::new() });
+        };
+        if !valid_cursor(&body.cursor) {
+            return Err(invalid_response());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut organizations = Vec::new();
+        for organization in body.organizations {
+            if !valid_resource_id(&organization.org_id) || !scope.allows(&organization.org_id) || !seen.insert(organization.org_id.clone()) {
+                continue;
+            }
+            let org_id = organization.org_id;
+            let failed = |code: String| CloudCatalogOrganization { org_id: org_id.clone(), workspaces: Vec::new(), tombstones: Vec::new(), quota: None, error: Some(code) };
+            organizations.push(match organization.error {
+                // Only a code this desktop knows crosses to the webview.
+                Some(code) => failed(if known_error_code(&code) { code } else { "cloud_workspace_unknown_error".into() }),
+                None => match ensure_list(CloudWorkspaceList { workspaces: organization.workspaces, tombstones: organization.tombstones, quota: organization.quota }, &org_id, risk) {
+                    Ok(list) => CloudCatalogOrganization { org_id: org_id.clone(), workspaces: list.workspaces, tombstones: list.tombstones, quota: list.quota, error: None },
+                    Err(error) => failed(error.code),
+                },
+            });
+        }
+        let listed: std::collections::BTreeSet<&str> = organizations.iter().flat_map(|organization| organization.tombstones.iter().map(|tombstone| tombstone.id.as_str())).collect();
+        // Only ids this desktop was also shown a tombstone for, or (in a delta) ids that are well formed.
+        let deleted_workspace_ids = body.deleted_workspace_ids.into_iter().filter(|id| valid_resource_id(id) && (!body.reset || listed.contains(id.as_str()))).collect();
+        Ok(CloudCatalogFeed { changed: true, cursor: Some(body.cursor), reset: body.reset, organizations, deleted_workspace_ids })
     }
 
     /// Check the repositories and refs before quoting (contract §16), and
@@ -2455,6 +2578,143 @@ mod tests {
         account.set_memberships_for_test(&["org-1"], true);
         assert!(listing.join().unwrap().is_err(), "an answer for an organization the user left never lands");
         request.join().unwrap();
+    }
+
+    fn feed_service(base: &str, organizations: &[&str]) -> (Arc<AccountManager>, Arc<CloudWorkspaceService>) {
+        let (account, service) = test_service(base);
+        account.set_memberships_for_test(organizations, true);
+        account.set_catalog_feed_for_test(true);
+        (account, Arc::new(service))
+    }
+
+    fn feed_item(org: &str, id: &str) -> Value {
+        let snapshot: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
+        let mut workspace = snapshot["workspace"].clone();
+        workspace["orgId"] = json!(org);
+        workspace["id"] = json!(id);
+        let mut operation = snapshot["operation"].clone();
+        operation["workspaceId"] = json!(id);
+        json!({ "workspace": workspace, "latestOperation": operation })
+    }
+
+    fn feed_body(organizations: Value) -> String {
+        json!({ "v": 1, "cursor": "cursor-2", "reset": true, "organizations": organizations, "deletedWorkspaceIds": ["gone-1", "never-listed"] }).to_string()
+    }
+
+    #[test]
+    fn the_catalog_feed_is_only_asked_of_a_server_that_offers_it() {
+        // Nothing listens here: a request would fail differently.
+        let (account, service) = test_service("http://127.0.0.1:9");
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        assert_eq!(service.catalog_feed(None).unwrap_err().code, "cloud_catalog_feed_unavailable");
+        // The feed spans Organizations: without membership authorization it is not used either.
+        account.set_catalog_feed_for_test(true);
+        account.set_memberships_for_test(&["org-1", "org-2"], false);
+        assert_eq!(service.catalog_feed(None).unwrap_err().code, "cloud_catalog_feed_unavailable");
+        account.set_context_for_test(None);
+        assert_eq!(service.catalog_feed(None).unwrap_err().code, "account_signed_out");
+    }
+
+    #[test]
+    fn the_catalog_feed_sends_its_cursor_and_reads_304_as_unchanged() {
+        let (base, _, request) = serve_once(response("304 Not Modified", "", "ETag: \"cursor-1\"\r\n"), Duration::ZERO);
+        let (_, service) = feed_service(&base, &["org-1", "org-2"]);
+        let feed = service.catalog_feed(Some("cursor-1")).unwrap();
+        assert!(!feed.changed);
+        assert_eq!(feed.cursor.as_deref(), Some("cursor-1"));
+        assert!(feed.organizations.is_empty());
+        let request = request.join().unwrap().text;
+        assert!(request.starts_with("GET /v1/desktop/cloud-catalog HTTP/1.1"), "{request}");
+        assert!(request.to_ascii_lowercase().contains("if-none-match: \"cursor-1\""), "{request}");
+        assert!(request.contains("native-secret-token"));
+
+        // A cursor that is not a plain token is never put in a header.
+        let (base, _, request) = serve_once(response("200 OK", &feed_body(json!([])), ""), Duration::ZERO);
+        let (_, service) = feed_service(&base, &["org-1"]);
+        assert!(service.catalog_feed(Some("bad\r\nX-Injected: 1")).unwrap().changed);
+        let request = request.join().unwrap().text.to_ascii_lowercase();
+        assert!(!request.contains("if-none-match") && !request.contains("x-injected"), "{request}");
+    }
+
+    #[test]
+    fn the_catalog_feed_keeps_only_member_organizations_and_valid_lists() {
+        let body = feed_body(json!([
+            { "orgId": "org-1", "workspaces": [feed_item("org-1", "ws-1")], "tombstones": [{ "id": "gone-1", "orgId": "org-1", "deletedAt": 1, "expiresAt": 2 }], "quota": { "used": 1, "limit": 2 } },
+            // A list that names another Organization's workspace is not shown; the others are.
+            { "orgId": "org-2", "workspaces": [feed_item("org-1", "ws-2")], "tombstones": [] },
+            // Not a member: dropped, whatever the server sent.
+            { "orgId": "org-9", "workspaces": [feed_item("org-9", "ws-9")], "tombstones": [] },
+            { "orgId": "org-3", "error": "cloud_provider_unavailable" },
+            { "orgId": "org-4", "error": "<script>" },
+            // The same Organization twice: the first answer stands.
+            { "orgId": "org-1", "workspaces": [], "tombstones": [] }
+        ]));
+        let (base, _, request) = serve_once(response("200 OK", &body, ""), Duration::ZERO);
+        let (_, service) = feed_service(&base, &["org-1", "org-2", "org-3", "org-4"]);
+        let feed = service.catalog_feed(None).unwrap();
+        request.join().unwrap();
+        assert!(feed.changed && feed.reset);
+        assert_eq!(feed.cursor.as_deref(), Some("cursor-2"));
+        let summary: Vec<(String, usize, Option<String>)> = feed.organizations.iter().map(|org| (org.org_id.clone(), org.workspaces.len(), org.error.clone())).collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("org-1".to_string(), 1, None),
+                ("org-2".to_string(), 0, Some("cloud_workspace_invalid_response".to_string())),
+                ("org-3".to_string(), 0, Some("cloud_provider_unavailable".to_string())),
+                ("org-4".to_string(), 0, Some("cloud_workspace_unknown_error".to_string())),
+            ]
+        );
+        assert_eq!(feed.organizations[0].quota.as_ref().map(|quota| (quota.used, quota.limit)), Some((1, 2)));
+        // In a whole catalog, a deleted id counts only with a tombstone this desktop was shown.
+        assert_eq!(feed.deleted_workspace_ids, vec!["gone-1".to_string()]);
+        let text = serde_json::to_string(&feed).unwrap();
+        assert!(!text.contains("org-9") && !text.contains("ws-9") && !text.contains("<script>"), "{text}");
+    }
+
+    #[test]
+    fn a_catalog_feed_answer_is_fenced_by_the_account_and_by_membership_as_of_the_answer() {
+        let body = feed_body(json!([
+            { "orgId": "org-1", "workspaces": [feed_item("org-1", "ws-1")], "tombstones": [] },
+            { "orgId": "org-2", "workspaces": [feed_item("org-2", "ws-2")], "tombstones": [] }
+        ]));
+        // The membership in org-2 ends while the request is in flight.
+        let (base, accepted, request) = serve_once(response("200 OK", &body, ""), Duration::from_millis(150));
+        let (account, service) = feed_service(&base, &["org-1", "org-2"]);
+        let asking = { let service = service.clone(); thread::spawn(move || service.catalog_feed(None)) };
+        accepted.recv_timeout(Duration::from_secs(2)).unwrap();
+        account.set_memberships_for_test(&["org-1"], true);
+        let feed = asking.join().unwrap().unwrap();
+        request.join().unwrap();
+        assert_eq!(feed.organizations.iter().map(|org| org.org_id.as_str()).collect::<Vec<_>>(), vec!["org-1"]);
+
+        // A change of the default Organization fences nothing.
+        let (base, accepted, request) = serve_once(response("200 OK", &body, ""), Duration::from_millis(150));
+        let (account, service) = feed_service(&base, &["org-1", "org-2"]);
+        let asking = { let service = service.clone(); thread::spawn(move || service.catalog_feed(None)) };
+        accepted.recv_timeout(Duration::from_secs(2)).unwrap();
+        account.set_active_org_for_test("org-2");
+        assert_eq!(asking.join().unwrap().unwrap().organizations.len(), 2);
+        request.join().unwrap();
+
+        // Signed out meanwhile: nothing of the answer lands.
+        let (base, accepted, request) = serve_once(response("200 OK", &body, ""), Duration::from_millis(150));
+        let (account, service) = feed_service(&base, &["org-1", "org-2"]);
+        let asking = { let service = service.clone(); thread::spawn(move || service.catalog_feed(None)) };
+        accepted.recv_timeout(Duration::from_secs(2)).unwrap();
+        account.set_context_for_test(None);
+        assert_eq!(asking.join().unwrap().unwrap_err().code, "account_context_changed");
+        request.join().unwrap();
+    }
+
+    #[test]
+    fn a_catalog_feed_failure_is_an_error_and_never_an_empty_catalog() {
+        for (status, body, code) in [("503 Service Unavailable", r#"{"error":"cloud_provider_unavailable"}"#, "cloud_provider_unavailable"), ("200 OK", "not json", "cloud_workspace_invalid_response"), ("302 Found", "", "cloud_workspace_invalid_response")] {
+            let (base, _, request) = serve_once(response(status, body, ""), Duration::ZERO);
+            let (_, service) = feed_service(&base, &["org-1"]);
+            assert_eq!(service.catalog_feed(Some("cursor-1")).unwrap_err().code, code, "{status}");
+            request.join().unwrap();
+        }
     }
 
     #[test]

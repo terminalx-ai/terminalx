@@ -310,6 +310,9 @@ describe("organization provider controls", () => {
       availability = "available";
       await ready();
       expect(screen.queryByRole("button", { name: /new machines/ })).toBeNull();
+      // Nor a key re-check while the disconnect is under way.
+      expect(screen.queryByRole("button", { name: "Check key again" })).toBeNull();
+      expect(screen.getByRole("button", { name: "Retry disconnect / cleanup" })).toBeTruthy();
     });
 
     it("keeps the switch where it was and says why when the service refuses", async () => {

@@ -415,6 +415,12 @@ impl TurnTail {
         self.closed = false;
     }
 
+    /// Whether the turn's boundary has been published (or no turn has been
+    /// opened yet): whatever is read next belongs to a turn after it.
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+
     /// Take the right to close the turn. `false` means it is already closed
     /// and the caller is the second of the two racing closers, whose boundary
     /// would land as a turn with no prompt in it.

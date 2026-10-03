@@ -83,7 +83,8 @@ app. The outbound connections are these nine:
 Some detail on each:
 
 - **TerminalX account.** Sign-in opens the deployed TerminalX console in your
-  default browser, returns through `terminalx://auth/callback`, and exchanges the
+  default browser, returns through `terminalx://auth/callback` (or
+  `terminalx-dev://auth/callback` in Dev), and exchanges the
   one-time code with `login.terminalx.ai`. Access and refresh tokens stay in the
   native process and are stored in macOS Keychain under the app's own
   `com.terminalx.next.account` service (or the corresponding development app
