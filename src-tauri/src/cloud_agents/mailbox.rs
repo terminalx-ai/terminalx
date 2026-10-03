@@ -153,6 +153,16 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
             return finish(agents, lease, "rejected", Some("lease-held"), json!({ "holderId": held.holder_id }));
         }
     }
+    // The CLI runs a slash command, a `!` shell command or an `@/path`
+    // mention by itself, and each can change or get around the same
+    // settings: from a plain driver only the harmless ones go through
+    // (PRO-88). Refused before the applying mark: nothing reached the agent.
+    if matches!(lease.kind.as_str(), "send" | "steer") {
+        let text = plaintext.get("text").and_then(Value::as_str).unwrap_or("");
+        if let Some(refusal) = agents.slash_refusal(access, &tab.session_id, &tab.harness, text) {
+            return finish(agents, lease, "rejected", Some(refusal.category()), json!({ "command": refusal.command, "message": refusal.message() }));
+        }
+    }
     if let Err(error) = agents.receipts.applying(id) {
         // Without the durable mark the outcome could not be proven later,
         // so the agent is not touched: definitely not applied.
@@ -163,7 +173,7 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
     // own: only a manager or someone who may approve permissions sets them
     // (the live `session.configure` needs manage). A driver's send still
     // goes through, without them.
-    let may_configure = access.role == Role::Manager || access.can_approve;
+    let may_configure = access.can_configure();
     let (outcome, category, extra) = apply(agents, lease, &tab.session_id, &plaintext, may_configure);
     // Only input that reached the agent (or its queue) claims the tab.
     if let (Some(collab), "applied", "send" | "steer") = (agents.collab(), outcome, lease.kind.as_str()) {

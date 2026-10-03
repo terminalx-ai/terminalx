@@ -247,12 +247,12 @@ impl FollowUps {
 
     /// Drop the follow-ups `keep` refuses, in every tab; returns them with
     /// their tab.
-    pub fn retain(&self, keep: impl Fn(&FollowUp) -> bool) -> Result<Vec<(String, FollowUp)>> {
+    pub fn retain(&self, keep: impl Fn(&str, &FollowUp) -> bool) -> Result<Vec<(String, FollowUp)>> {
         let mut dropped = Vec::new();
         self.change(|tabs| {
             for (tab_id, queue) in tabs.iter_mut() {
                 queue.retain(|follow_up| {
-                    let kept = keep(follow_up);
+                    let kept = keep(tab_id, follow_up);
                     if !kept {
                         dropped.push((tab_id.clone(), follow_up.clone()));
                     }

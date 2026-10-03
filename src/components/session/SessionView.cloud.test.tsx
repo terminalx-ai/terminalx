@@ -1248,6 +1248,24 @@ describe("a shared cloud workspace in SessionView (PRO-30)", () => {
     expect(enqueued).toEqual([]);
   });
 
+  it("PRO-88: a driver takes control of a terminal only with the right to approve permissions", async () => {
+    names();
+    runtime.terminals = [{ ...runtime.terminals[0]!, control: "other", controllerId: "u-alice" }];
+    const terminal = { kind: "terminal" as const, id: `cloud:cloud:${ORG}:${WS}:p1` };
+    setCatalog(shared("driver"));
+    runtime.collab = { you: ME, participants: [], leases: [] };
+    await openShared(ME);
+    await waitFor(() => expect(runtime.methods("pty.list").length).toBeGreaterThan(0));
+    act(() => selectSessionTab(KEY, terminal));
+    const viewer = await screen.findByTestId("cloud-terminal-viewer");
+    expect(viewer.textContent).toContain("You can watch; typing in a terminal needs the right to approve permissions");
+    expect(screen.queryByRole("button", { name: "Take control" })).toBeNull();
+    // The runtime says they may approve now: the same view offers control.
+    await act(async () => runtime.notify("collab.you", { you: { ...ME, canApprove: true } }));
+    expect(await screen.findByRole("button", { name: "Take control" })).toBeTruthy();
+    expect(runtime.methods("pty.control")).toEqual([]);
+  });
+
   it("hides Stop from a driver while someone else drives the running turn", async () => {
     names();
     setCatalog(shared("driver", true));

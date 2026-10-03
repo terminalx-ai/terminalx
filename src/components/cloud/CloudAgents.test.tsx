@@ -497,11 +497,26 @@ describe("shared cloud workspace agent tabs (PRO-30)", () => {
     outbox = [
       { clientCommandId: "c-1", tabId: "t-1", kind: "send", text: "deploy", state: "rejected", category: "lease-held", receipt: { holderId: "u-alice" }, createdAt: 1, updatedAt: 1 },
       { clientCommandId: "c-2", tabId: "t-1", kind: "send", text: "hi", state: "rejected", category: "access-revoked", createdAt: 1, updatedAt: 1 },
+      // PRO-88: the runtime refused a slash command this person may not send.
+      {
+        clientCommandId: "c-3",
+        tabId: "t-1",
+        kind: "send",
+        text: "/model opus",
+        state: "rejected",
+        category: "slash-command-forbidden",
+        receipt: { command: "/model", message: "/model was not sent: only someone who can approve permissions may send it. Without that right you can send /clear, /compact, /help." },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      { clientCommandId: "c-4", tabId: "t-1", kind: "send", text: "!ls", state: "rejected", category: "shell-command-forbidden", createdAt: 1, updatedAt: 1 },
     ];
     const state = share(me("driver"));
     render(view(state));
     expect(await screen.findByText("Alice is driving — your message was not sent")).toBeTruthy();
     expect(screen.getByText("Not sent: your access changed")).toBeTruthy();
+    expect(screen.getByText("Not sent: /model: only someone who can approve permissions may send it. Without that right you can send /clear, /compact, /help.")).toBeTruthy();
+    expect(screen.getByText("Not sent: a message that starts with ! runs as a shell command, which needs someone who can approve permissions.")).toBeTruthy();
     expect(screen.getByTestId("cloud-agent-followup").textContent).toContain("Queued follow-up from Alice:");
   });
 

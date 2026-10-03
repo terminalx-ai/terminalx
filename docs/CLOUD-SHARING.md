@@ -31,11 +31,62 @@ Two things decide a connection's rights:
 | Presence, notes | | ✓ | ✓ | ✓ |
 | Workspace content key (`keys.get`) | | ✓ | ✓ | ✓ |
 | Send, steer, stop (mailbox) | | | ✓ (lease) | ✓ (lease) |
-| Take control of and type into a terminal | | | ✓ | ✓ |
+| Slash commands `/clear`, `/compact`, `/help` | | | ✓ (lease) | ✓ (lease) |
+| Any other slash command (`/model`, `/permissions`, `/login`, `/mcp`, …), a message starting with `!` | | | `canApprove` | ✓ |
+| Model, effort and permission mode | | | `canApprove` | ✓ |
+| Take control of and type into a terminal (a shell) | | | `canApprove` | ✓ |
 | Watch an agent tab's own terminal (its terminal view) | | ✓ | ✓ | ✓ |
-| Type into an agent tab's own terminal | | | ✓ (lease, and `canApprove`) | ✓ (lease) |
+| Type into an agent tab's own terminal | | | `canApprove` (lease) | ✓ (lease) |
 | Take over another person's tab lease | | | | ✓ |
 | Permission decisions | `canApprove` | `canApprove` | `canApprove` | ✓ |
+
+### What each role can really do (PRO-88)
+
+The table is what the runtime checks. This is what it adds up to, so that
+nobody shares a workspace expecting a tighter line than there is.
+
+**The line between a driver and an approver only means something on tabs in
+a mode that asks.** A new tab starts in `bypassPermissions` unless another
+mode is chosen (`DEFAULT_PERMISSION_MODE`). In that mode the agent runs
+anything without asking, so a plain driver gets code execution as the
+workspace's user by asking for it in prose, and nothing below holds them. A
+manager or an approver has to put the tab in `manual`, `plan` or
+`acceptEdits` for the rest of this section to apply; a plain driver cannot
+change the mode back.
+
+- **Viewer.** Reads everything the workspace shows: transcripts, terminal
+  output (whatever was printed there, secrets included), files, Git, and
+  holds the content key. Changes nothing. A viewer with `canApprove` answers
+  the agent's permission requests: they decide whether a command the agent
+  asked for runs, never which command.
+- **Driver without `canApprove`** (a "plain" driver). Sends, steers and stops
+  the agent in prose, and sends `/clear`, `/compact` and `/help` (per CLI,
+  below). They cannot change a tab's model, effort or permission mode by any
+  route (the pickers, a message's settings, a slash command), cannot answer
+  permission requests, cannot type into a shell or into the agent's own
+  terminal, and cannot make the CLI act by itself: a message that starts
+  with `!` (a shell command in both CLIs) or mentions a file outside the
+  project with `@` is refused. In a mode that asks, each tool use the mode
+  does not cover waits for someone who can approve; in `acceptEdits` the
+  agent edits files in the project without asking, which is what that mode
+  is.
+- **Driver with `canApprove`**, which the workspace's creator always is.
+  Everything above, and decides what the agent may do on its own: its
+  settings, every slash command, `!` commands, the permission requests, and
+  the agent's own terminal. They also type into shells, which is code
+  execution as the workspace's user with nothing in between: a shell can
+  read the tokens in the environment, edit the agent's settings files, or
+  start an agent with other flags. Give `canApprove` to a driver only if
+  they may do all of that.
+- **Manager** (organization owners and admins). Everything, plus the
+  runtime-scope work of a `manage` attachment (create and kill terminals,
+  file and Git writes, tabs and sessions, the key) and other people's leases.
+
+`canApprove` is therefore one right: answering permission requests (any
+role), and, for a driver, everything that decides what the agent does
+without asking (`Access::can_configure` in the runtime, `mayConfigure` and
+`canTypeInTerminals` on the desktop): the tab's settings, the slash and `!`
+commands, shells, and the agent's own terminal (PRO-86).
 
 The API lists everyone whose role is not `none` on every `/refresh`
 (`collaboration`, advertised by the runtime as `collaboration-v1`) and stamps
@@ -105,8 +156,11 @@ role changed).
   over explicitly. `AgentTabInfo` carries `lease`, and every queued follow-up
   its sender (`followUps[].actorId`).
 - **Terminals.** Unchanged ownership (PRO-26): one controller per terminal.
-  Drivers may now take control too. Terminals and `pty.control`
-  notifications carry `controllerId`, so clients show who is typing.
+  A driver who may approve permissions may take control too; a plain driver
+  and a viewer watch (PRO-88: `pty.write`, `pty.resize` and `pty.control`
+  answer `forbidden` with `data.reason: "approval-required"`). Terminals and
+  `pty.control` notifications carry `controllerId`, so clients show who is
+  typing.
 - **Taking the wheel (fair use).** `lease.acquire` without input holds an
   idle tab for two minutes. Asking again while holding it does not extend it
   (only input the agent receives does), and after one's own idle lease lapses
@@ -128,6 +182,80 @@ role changed).
   composer says "Your model, effort or mode change was not applied: you can
   no longer approve permissions"; the same is said when a receipt arrives
   with `settingsIgnored`.
+- **What the CLI runs by itself** (PRO-88). A message is typed into the
+  agent's CLI, and the CLI does not read every message as a prompt. Checked
+  on 2026-10-03 against Claude Code 2.1.288 and Codex 0.153.4, in throwaway
+  runs (a temporary home, a key that is not one), pasting the way the app
+  does (Ctrl+U, a bracketed paste, Enter):
+
+  | Message | Claude Code | Codex |
+  | --- | --- | --- |
+  | `!command` | runs it as a shell command, no permission request (manual mode) | runs it, no request, outside its read-only sandbox |
+  | ` !command` (leading space) | prose | runs it |
+  | `!command` on a later line | prose | prose |
+  | `/model` typed, or pasted alone | runs the command | runs the command |
+  | `/model` as the first line of several | runs it, the other lines as its argument | runs it |
+  | ` /model` (leading space) | prose | prose |
+  | `/mod` typed | completed to `/model` | completed to `/model` |
+  | `/help`, `/reset` | known | "Unrecognized command", left in the composer |
+  | `@/etc/hosts …` | reads the file, no permission request | sent as written (nothing shown as attached) |
+  | `@"x y/../../outside.txt"` (double quotes, a space) | reads the file outside the project | not run |
+  | `@'x y/../../outside.txt'` (single quotes) | prose | not run |
+  | `！ls`, `／model` (full-width) | prose | prose |
+  | `#…` | prose (no memory shortcut) | not run |
+
+  So for a plain driver the runtime decides (`cloud_agents/slash.rs`),
+  wherever input reaches an agent: a mailbox `send` or `steer` (also one
+  that waited in the mailbox while the workspace was stopped: it is judged
+  when it is leased, by the sender's access then), a queued follow-up right
+  before it is typed, and the live `session.send`. From a manager or someone
+  with `canApprove` everything passes. From a plain driver:
+  - **`!`**: a message whose first line starts with `!` is refused
+    (`shell-command-forbidden`).
+  - **`/`**: on the first line, only the tab's CLI's harmless commands pass,
+    typed exactly: Claude Code `/clear` (also `/reset`, `/new`), `/compact`,
+    `/help`; Codex `/clear`, `/new`, `/compact`; any other agent, none.
+    Everything else that starts with `/` is refused
+    (`slash-command-forbidden`), not only the commands known to be
+    sensitive, so no list of the CLIs' commands has to be kept complete. An
+    allowed command with a control character, an `@` or a `\` is refused
+    too: typed as keys they are a key, a picker and a line continuation.
+  - **`@`**: anywhere in the message, a mention of a file outside the
+    project is refused (`file-mention-forbidden`): a path under `~`, an
+    absolute path that is not under the session's working directory, or a
+    relative one that climbs above it, with `.` and `..` resolved as text. A
+    quoted mention (`@"a b/c"`) is read to its closing quote. A mention
+    starts a word, also after an invisible character. `@src/main.rs`, the
+    project's own files by absolute path, and `name@example.com` pass.
+  - **The project's own commands** (`.claude/commands`, `.claude/skills`)
+    are not allowed. A plain driver can have the agent write one (in
+    `acceptEdits`, without a request), and its front matter can name tools
+    that run without asking (`allowed-tools`) or change the model.
+
+  "First line" is the first line that is not blank, after whitespace and
+  invisible characters are skipped (Codex trims before it looks). Later
+  lines are prose to both CLIs, so a Markdown image (`![shot](a.png)`), a
+  path on its own line or a quoted command there does not stop a message.
+  The full-width `！` and `／` are prose to both CLIs and are not refused.
+
+  **What the check cannot see.** It reads text. A symbolic link inside the
+  project that points out of it makes `@link/secret` a path inside the
+  project here and a file outside it to the CLI; so does any other way the
+  file system differs from the text (a mount, a hard link). A plain driver
+  cannot create a link without the agent, and in a mode that asks the agent
+  needs approval to run `ln`.
+
+  A refused mailbox command settles `rejected` with its category, never
+  reaches the agent and does not claim the tab; its receipt carries
+  `command` (as typed, shortened) and `message`. `session.send` answers
+  `forbidden` with `data.reason` of the same name. A queued follow-up that
+  became refusable (its sender lost `canApprove` while it waited) is dropped
+  with a note in the transcript. On the live `session.send`, a slash or `!`
+  command is never queued behind a running turn, whoever sends it
+  (`conflict`, `data.reason: "command-not-queued"`), because nothing
+  re-checks the session's own queue; prose queues as before. The desktop
+  shows the runtime's sentence for these refusals, on the outbox entry or as
+  the send's error.
 - **Permission decisions** are not lease-bound; they need `canApprove`.
 
 ### Revocation
@@ -139,11 +267,13 @@ list:
    attachments the API revoked are closed as before. Streams (terminals,
    file watches, agent tabs) of anyone left without access are ended, also
    on the first list after a start.
-2. A person who may no longer drive loses terminal control (announced) and
-   their tab leases.
+2. A person who may no longer drive loses their tab leases. A person who
+   may no longer type into terminals (no longer a driver, or no longer an
+   approver) loses terminal control (announced).
 3. Queued follow-ups of anyone who may no longer drive are dropped, with a
-   note in the transcript. Each follow-up is also re-checked right before it
-   is typed.
+   note in the transcript; so are queued slash commands of a driver who may
+   no longer approve. Each follow-up is also re-checked right before it is
+   typed.
 4. The workspace content key rotates when anyone lost access, as it does for
    revocations and for a workspace turning private. Who was handed the
    current key is recorded durably (`<data dir>/cloud-agent/key-holders.json`),
@@ -319,7 +449,9 @@ granted:
 **Terminals.** A terminal controlled by someone else names them ("Alice is
 typing in this terminal", from `controllerId` in the terminal description and
 `pty.control`). "Take control" is offered to manage attachments and to
-drivers and managers of a shared workspace; viewers never get it.
+managers and approving drivers of a shared workspace (`canTypeInTerminals`).
+A viewer never gets it; a plain driver reads "You can watch; typing in a
+terminal needs the right to approve permissions; ask an admin."
 
 **Not shared.** A participate connection whose role is `none` sees "This
 workspace has not been shared with you" instead of empty terminal and agent
@@ -372,7 +504,8 @@ organization is live in the sidebar. Sharing follows them there:
   open composer. The "+" menu's Terminal wakes a stopped workspace only for
   someone who would manage it (terminals are a manager's); a viewer or driver
   is not offered a wake that would end in a refusal.
-* **Terminals.** Drivers get "Take control" and see who is typing.
+* **Terminals.** Managers and approving drivers get "Take control"; everyone
+  sees who is typing, and a plain driver reads why they only watch.
 * **Workspace actions.** Resume, Stop, Archive and Delete are the API's
   manage actions (organization owners and admins), so only a `manager` is
   offered them, in the project menu, a workspace row's menu and the header
@@ -625,6 +758,15 @@ and attachments may carry `userId`. The file is re-read on every refresh.
   `presence_and_notes_…` and `the_driver_lease_…`, and `cloud_agents::mailbox`
   tests for viewers, approvers, narrowed roles, the lease and dropped
   follow-ups.
+- PRO-88: `cloud_agents::slash` (the rule itself: `!`, `@`, whitespace,
+  lines, prefixes, hidden keys, each CLI's commands); `cloud_agents::mailbox`
+  `a_plain_drivers_slash_command_is_refused_…`,
+  `the_allowed_commands_follow_the_tabs_agent`,
+  `a_slash_command_queued_while_the_workspace_slept_…` and
+  `a_queued_slash_command_is_dropped_…`; `remote::server`
+  `a_plain_drivers_slash_command_is_refused_on_the_live_send_too`,
+  `a_shell_needs_the_approval_right_and_loses_its_controller_when_it_is_withdrawn`
+  and `shells_and_agent_terminals_need_the_same_right_on_every_call`.
 - An agent tab's terminal view (PRO-86): `remote::server` tests
   `an_agent_terminal_…`, `attaching_to_an_agent_terminal_…`,
   `only_the_lease_holder_types_…`, `a_second_viewer_never_resizes_…` and

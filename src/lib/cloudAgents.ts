@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { WorkspaceRpcError, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { applyEvent, dropTabLog, getTabLog, lastSeq, mergeTabEvents } from "@/lib/agentEvents";
 import {
   cloudAgentApi,
@@ -770,11 +770,21 @@ export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, te
   return entry;
 }
 
+/** `data.reason` of a live `session.send` the runtime refused with a sentence meant for the person. */
+const LIVE_SEND_REFUSALS = new Set(["command-not-queued", "slash-command-forbidden", "shell-command-forbidden", "file-mention-forbidden"]);
+
 /** A development runtime has no mailbox: the legacy live `session.send`. */
 async function sendOverLiveRpc(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null): Promise<OutboxEntry> {
   const tab = store(scope).tabs.get(tabId);
   if (!client || client.connection.state !== "connected" || !tab?.info.sessionId) throw new Error("The development runtime is not connected");
-  await client.mutate("session.send", { sessionId: tab.info.sessionId, tabId, text });
+  try {
+    await client.mutate("session.send", { sessionId: tab.info.sessionId, tabId, text });
+  } catch (error) {
+    // The runtime's own sentence for what it refused to type or to queue (PRO-88), rather than the bare code.
+    const reason = error instanceof WorkspaceRpcError ? (error.data as { reason?: unknown } | undefined)?.reason : undefined;
+    if (typeof reason === "string" && LIVE_SEND_REFUSALS.has(reason)) throw new Error((error as Error).message);
+    throw error;
+  }
   const now = Date.now();
   return { clientCommandId: `live-${now}`, tabId, kind: "send", text, state: "applied", createdAt: now, updatedAt: now };
 }
