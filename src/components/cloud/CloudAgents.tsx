@@ -283,6 +283,13 @@ export function connectionLabel(state: WorkspaceConnectionState): string {
  * wrong and who can fix it where. `mayManage` is the viewer's owner-or-admin
  * role in the organization, null while it is not known.
  */
+/** The server's words for a login it will not hand out. A word this app does not know is never shown as is. */
+const SIGN_IN_STATES: Record<string, string> = {
+  revoked: "was revoked",
+  disconnected: "was disconnected",
+  unavailable: "is not available",
+};
+
 export function signInMessage(info: Pick<AgentTabInfo, "harness" | "signIn">, mayManage: boolean | null): string | null {
   const signIn = info.signIn;
   if (!signIn) return null;
@@ -294,7 +301,7 @@ export function signInMessage(info: Pick<AgentTabInfo, "harness" | "signIn">, ma
         ? `The organization's ${agent} login is limited to workspaces its owners and admins create`
         : signIn.state === "not-connected"
           ? `${agent} isn't connected for this organization`
-          : `The organization's ${agent} login is ${signIn.state === "unavailable" ? "not available" : signIn.state}`;
+          : `The organization's ${agent} login ${SIGN_IN_STATES[signIn.state] ?? "is not available"}`;
   const fix =
     signIn.reason === "shared-use-policy"
       ? mayManage

@@ -149,7 +149,8 @@ and the session did not start with a credential. `state` is `not-connected`
 when the organization has no login for the provider, else the server's state
 for the one it has (`revoked`, `disconnected`, `unavailable`, with a `reason`
 such as `token-expired` or `shared-use-policy`). It is never set on a guess:
-not before the first grant sync, not after a failed one. Such a tab does not
+not before the first grant sync, not after a failed one, and never for an
+agent the runtime cannot rule out a hand sign-in for (Cursor). Such a tab does not
 count as an active turn in the activity report, so it does not hold off the
 idle suspend, and the desktop shows it as "Needs sign-in", not "Working". A
 first prompt for such an agent fails with the launch category
