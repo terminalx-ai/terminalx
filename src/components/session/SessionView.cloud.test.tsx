@@ -65,6 +65,7 @@ vi.mock("@/components/chat/Composer", () => ({
     settingsNoteWarning?: boolean;
     canStop?: boolean;
     commands?: { key: string; load(): Promise<{ commands: { name: string }[]; note: string | null }> } | null;
+    files?: { key: string; search(query: string, limit: number): Promise<{ path: string }[]> } | null;
     cwd?: string;
   }) => (
     <div data-testid="composer" data-cwd={props.cwd ?? ""}>
@@ -75,6 +76,18 @@ vi.mock("@/components/chat/Composer", () => ({
       <button onClick={() => void Promise.resolve(props.onSend(props.draft, [])).then(() => props.onDraftChange(""), () => undefined)}>{props.busy ? "Queue" : "Send"}</button>
       {props.busy && props.canStop !== false && <button onClick={props.onStop}>Stop</button>}
       <button onClick={() => props.onSetModel("opus")}>Use opus</button>
+      {/* What the `@` list would hold for "login". */}
+      {props.files && (
+        <button
+          data-testid="find-files"
+          onClick={(event) => {
+            const button = event.currentTarget;
+            void props.files!.search("login", 30).then((hits) => (button.dataset.found = hits.map((hit) => hit.path).join("|")));
+          }}
+        >
+          Files
+        </button>
+      )}
       {/* What the `/` list would hold: the names the source gives, then its note. */}
       {props.commands && (
         <button
@@ -232,8 +245,10 @@ class FakeRuntime implements WorkspaceTransport {
   }
   /** PRO-22: what `session.commands` answers; null is a runtime from before `composer/1`. */
   commands: { commands: { name: string; description: string; source: string }[]; restricted: boolean } | null = null;
-  private composer(): "composer/1"[] {
-    return this.commands ? ["composer/1"] : [];
+  /** PRO-22: what `session.files` answers; null is a runtime from before `composer/2`. */
+  files: { path: string; name: string; score: number }[] | null = null;
+  private composer(): ("composer/1" | "composer/2")[] {
+    return [...(this.commands ? (["composer/1"] as const) : []), ...(this.files ? (["composer/2"] as const) : [])];
   }
   /** PRO-30: what `collab.state` answers on a runtime that granted `collab/1`. */
   collab: { you: Record<string, unknown>; participants: unknown[]; leases: unknown[] } | null = null;
@@ -274,6 +289,8 @@ class FakeRuntime implements WorkspaceTransport {
         return ok({ subscriptionId: this.sessionSubscription, events: this.events.map((event) => ({ cursor: `${this.generation}:${event.seq}`, event })), cursor: `${this.generation}:${this.events.at(-1)?.seq ?? 0}` });
       case "session.commands":
         return ok(this.commands);
+      case "session.files":
+        return ok({ files: this.files });
       case "session.nudge":
       case "session.markRead":
       case "session.unsubscribe":
@@ -655,12 +672,34 @@ describe("cloud session actions", () => {
     expect(guard.calls.map((call) => call.command)).not.toContain("cloud_workspace_resume");
   });
 
-  it("PRO-22: a view-only reader is offered no commands", async () => {
+  it("PRO-22: a view-only reader is offered no commands and no file list", async () => {
     runtime.commands = { commands: [{ name: "compact", description: "", source: "builtin" }], restricted: false };
+    runtime.files = [{ path: "src/auth/login.rs", name: "login.rs", score: 1 }];
     setCatalog(workspaceItem("ready", "participate"));
     await openConnected("participate");
     expect(screen.queryByTestId("list-commands")).toBeNull();
+    expect(screen.queryByTestId("find-files")).toBeNull();
     expect(runtime.methods("session.commands")).toEqual([]);
+  });
+
+  it("PRO-22: the composer's @ list searches the session's files on the runtime, and only while it is connected", async () => {
+    runtime.files = [{ path: "src/auth/login.rs", name: "login.rs", score: 1 }];
+    await openConnected();
+    const button = screen.getByTestId("find-files");
+    fireEvent.click(button);
+    await waitFor(() => expect(button.dataset.found).toBe("src/auth/login.rs"));
+    expect(runtime.methods("session.files").map((frame) => frame.params)).toEqual([{ sessionId: "s-1", query: "login", limit: 30 }]);
+    // Stopped: the list is gone, and nothing wakes the workspace to bring it back.
+    await act(async () => runtime.emit({ state: "suspended" }));
+    await waitFor(() => expect(screen.queryByTestId("find-files")).toBeNull());
+    expect(activate).not.toHaveBeenCalled();
+    expect(guard.violations).toEqual([]);
+  });
+
+  it("PRO-22: a runtime from before composer/2 offers no file list", async () => {
+    await openConnected();
+    expect(screen.queryByTestId("find-files")).toBeNull();
+    expect(runtime.methods("session.files")).toEqual([]);
   });
 
   it("gates a view-only attachment and says why", async () => {

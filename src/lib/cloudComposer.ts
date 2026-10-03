@@ -1,5 +1,5 @@
 import type { WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
-import type { SlashCommand } from "@/lib/api";
+import type { FileHit, SlashCommand } from "@/lib/api";
 import { mayConfigure } from "@/lib/cloudCollab";
 
 /** The slash commands a composer offers, and why some are not among them (null when all are). */
@@ -78,6 +78,43 @@ export function cloudComposerCommands(target: {
       const list = parse(await client.call<{ commands?: unknown; restricted?: unknown }>("session.commands", { sessionId: target.sessionId, tabId: target.tabId }));
       lists.set(stored, list);
       return list;
+    },
+  };
+}
+
+/**
+ * Where a composer's `@` list comes from: the files of the directory the
+ * tab runs in, by name. A local tab searches this computer; a cloud tab asks
+ * the workspace's runtime (`composer/2`).
+ */
+export interface ComposerFiles {
+  /** Names the directory searched. */
+  key: string;
+  /** The best matches for `query`, paths relative to that directory; an empty query lists the shallowest files. */
+  search(query: string, limit: number): Promise<FileHit[]>;
+}
+
+/**
+ * The files a cloud agent tab's composer can mention: the session's own
+ * directory on the workspace, searched by the runtime as a local tab's is
+ * searched here. Only while the runtime is connected and serves
+ * `composer/2`: a stopped workspace is never woken to list files (the path
+ * can still be typed), and null then hides the list and its button.
+ */
+export function cloudComposerFiles(target: { workspaceKey: string; sessionId: string; client: WorkspaceRpcClient | null }): ComposerFiles | null {
+  const { client } = target;
+  if (!client || client.connection.state !== "connected" || !client.hasCapability("composer/2")) return null;
+  return {
+    key: `${target.workspaceKey}|${target.sessionId}`,
+    search: async (query, limit) => {
+      const result = await client.call<{ files?: unknown }>("session.files", { sessionId: target.sessionId, query, limit });
+      const hits: FileHit[] = [];
+      for (const entry of Array.isArray(result.files) ? result.files : []) {
+        const hit = entry as Partial<FileHit> | null;
+        if (!hit || typeof hit.path !== "string" || !hit.path) continue;
+        hits.push({ path: hit.path, name: typeof hit.name === "string" && hit.name ? hit.name : (hit.path.split("/").pop() ?? hit.path), score: typeof hit.score === "number" ? hit.score : 0 });
+      }
+      return hits;
     },
   };
 }
