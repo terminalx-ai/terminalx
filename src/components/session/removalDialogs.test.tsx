@@ -33,6 +33,7 @@ const safe: Landed = {
   merged: "squash",
   unmergedCommits: 0,
   pushed: true,
+  fresh: true,
   notVerified: null,
   safe: true,
   losses: [],
@@ -92,6 +93,8 @@ describe("WorkspaceRemoveDialog", () => {
     expect(sessions.getByText("Fix login")).toBeTruthy();
     expect(sessions.getByText("Review the fix")).toBeTruthy();
     expect(removeButton().textContent).toContain("Delete workspace");
+    // This dialog is the caller that asks for the fetch.
+    expect(mocks.workspaceDisposition).toHaveBeenCalledWith("/p", path, { fetch: true });
 
     fireEvent.click(removeButton());
     await waitFor(() => expect(mocks.removeWorkspace).toHaveBeenCalledWith("/p", path, { keepSessions: false, deleteBranch: true, confirmedRisky: false }));
