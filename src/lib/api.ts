@@ -1123,6 +1123,8 @@ export const files = {
   search: (cwd: string, query: string, limit = 40) => invoke<FileHit[]>("search_files", { cwd, query, limit }),
   invalidate: (cwd: string) => invoke<void>("invalidate_file_index", { cwd }),
   readImage: (path: string) => invoke<{ mediaType: string; data: string; name: string } | null>("read_image_file", { path }),
+  /** The plain text of the drag that just ended on the window: the drop event itself carries only file paths. */
+  droppedText: () => invoke<string | null>("dropped_text"),
   slashCommands: (cwd: string, harness: string) => invoke<SlashCommand[]>("list_slash_commands", { cwd, harness }),
 };
 

@@ -51,6 +51,8 @@ mod pipe_transport;
 #[cfg(feature = "desktop")]
 mod dictation;
 #[cfg(feature = "desktop")]
+mod drag_text;
+#[cfg(feature = "desktop")]
 mod transcription;
 mod events;
 mod files;
@@ -427,6 +429,7 @@ pub fn run() {
             commands::search_files,
             commands::list_slash_commands,
             commands::read_image_file,
+            drag_text::dropped_text,
             commands::invalidate_file_index,
             commands::git_commit,
             commands::git_identity,
@@ -523,6 +526,9 @@ pub fn run() {
             }
         })
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(drag) = event {
+                drag_text::on_drag_drop(drag);
+            }
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(state) = window.try_state::<AppState>() {
                     state.pairing.stop();
