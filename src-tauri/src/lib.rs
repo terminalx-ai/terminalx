@@ -7,6 +7,7 @@
 
 #[cfg(feature = "desktop")]
 mod account;
+mod agent_data;
 #[cfg(feature = "desktop")]
 mod automations;
 mod binpath;
@@ -321,6 +322,8 @@ pub fn run() {
             commands::cloud_provider,
             commands::cloud_provider_connect,
             commands::cloud_provider_disconnect,
+            commands::cloud_provider_set_creation_enabled,
+            commands::cloud_provider_revalidate,
             commands::cloud_workspace_setup,
             commands::cloud_workspace_quote,
             commands::cloud_workspace_create,
@@ -394,6 +397,7 @@ pub fn run() {
             commands::work_status,
             commands::list_branches,
             commands::worktree_disposition,
+            commands::sessions_sharing_worktree,
             commands::remove_session_worktree,
             commands::snapshot_tree,
             commands::head_tree,
@@ -442,6 +446,10 @@ pub fn run() {
             star_nag::star_nag_act,
             commands::pty_spawn,
             commands::pty_write,
+            commands::pty_attach,
+            commands::pty_detach,
+            commands::pty_detach_all,
+            commands::pty_ack,
             commands::pty_resize,
             commands::mobile_terminal_drivers,
             commands::pty_kill,

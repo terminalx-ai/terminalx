@@ -25,6 +25,8 @@ import { ShortcutsTab } from "./ShortcutsTab";
 
 const TABS = ["account", "devices", "general", "appearance", "agents", "transcription", "integrations", "shortcuts", "about"] as const;
 export type SettingsTab = (typeof TABS)[number];
+/** The section Settings opens on when nothing asks for a particular one (PRO-81). */
+export const DEFAULT_SETTINGS_TAB: SettingsTab = "account";
 type Tab = SettingsTab;
 const TAB_LABEL: Record<Tab, string> = {
   account: "Account",
@@ -40,17 +42,24 @@ const TAB_LABEL: Record<Tab, string> = {
 
 export function SettingsPage({
   onBack,
-  initialTab = "general",
+  initialTab = DEFAULT_SETTINGS_TAB,
+  openRequest = 0,
 }: {
   onBack: () => void;
   initialTab?: SettingsTab;
+  /**
+   * Counts each time Settings is asked for. Asking again while it is open
+   * goes to `initialTab` even when that is the section it opened on and the
+   * reader has since picked another by hand.
+   */
+  openRequest?: number;
 }) {
   // Settings always opens on a section: a value that names none is the default one.
-  const initial: Tab = TABS.includes(initialTab) ? initialTab : "general";
+  const initial: Tab = TABS.includes(initialTab) ? initialTab : DEFAULT_SETTINGS_TAB;
   const [tab, setTab] = useState<Tab>(initial);
   useEffect(() => {
     setTab(initial);
-  }, [initial]);
+  }, [initial, openRequest]);
 
   useHotkey("escape", () => {
     if (hasEscapeOverlay()) return false;
@@ -136,11 +145,6 @@ function GeneralTab() {
     <div className="flex flex-col">
       <SettingRow label="Website links" description="Choose where HTTP(S) links open by default." control={<Segmented aria-label="Website links" value={prefs.linkBrowser} onChange={(v) => setPrefs({ linkBrowser: v })} options={[{ value: "terminalx", label: "TerminalX Browser" }, { value: "system", label: "System Browser" }]} />} />
       <SettingRow label="Link actions" description="Show both browser destinations in the link action menu." control={<Switch checked={prefs.linkActions} onCheckedChange={(v) => setPrefs({ linkActions: v })} />} />
-      <SettingRow
-        label="Cloud workspaces in the sidebar"
-        description="Show a section for each organization with cloud workspaces enabled. When off, cloud workspaces open from the command palette only."
-        control={<Switch aria-label="Cloud workspaces in the sidebar" checked={prefs.cloudSidebar} onCheckedChange={(v) => setPrefs({ cloudSidebar: v })} />}
-      />
       <SettingRow
         label="Command line tool"
         description={

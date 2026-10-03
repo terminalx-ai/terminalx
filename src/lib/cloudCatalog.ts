@@ -13,7 +13,7 @@ import {
   type OrganizationSummary,
 } from "@/lib/api";
 import { getAccount, refreshAccount, subscribeAccount } from "@/lib/account";
-import { noteListedOrgRole, refreshAccountRoles } from "@/lib/accountRoles";
+import { noteListedOrgRole, refreshAccountRoles, roleAskStamp } from "@/lib/accountRoles";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { phaseOf, settled } from "@/lib/cloudCreate";
 import { isArchived, isOpen, machineRunning, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
@@ -344,6 +344,8 @@ export async function ingestCloudList(
     const current = state.orgs[org] ?? emptyOrg(org);
     const createMemory = { ...state.createMemory };
     for (const tombstone of tombstones) delete createMemory[memoryKey(tombstone.orgId, tombstone.id)];
+    // The server now says where these workspaces belong (S1 `repositories`), so what this desktop remembered of them is never read again.
+    for (const item of workspaces) if (Array.isArray(item.workspace.repositories)) delete createMemory[memoryKey(item.workspace.orgId, item.workspace.id)];
     const sessions = { ...current.sessions };
     for (const tombstone of tombstones) delete sessions[tombstone.id];
     // Session lists kept for a workspace this person can no longer open (not
@@ -471,6 +473,8 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
   const flight = (async () => {
     const current = state.orgs[orgId];
     const requestedAt = now();
+    // Its place among the role reads and the lists, which the clock cannot give within one millisecond.
+    const roleAsk = roleAskStamp();
     const wantRepositories = !current?.repositoriesAt || now() - current.repositoriesAt > REPOSITORIES_MAX_AGE_MS;
     const [list, repositories] = await Promise.allSettled([
       api.cloudWorkspaces(cloudOrgArg(orgId)),
@@ -499,7 +503,7 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
       // The list is read every 30 s and names this person's role on every
       // workspace: a role changed by an owner shows here before the account
       // session is next renewed.
-      noteListedOrgRole(orgId, listedOrgManages(list.value), requestedAt);
+      noteListedOrgRole(orgId, listedOrgManages(list.value), roleAsk);
     } else {
       patchOrg(orgId, { error: errorText(list.reason) });
       // A list answers "not found" only to someone who is not a member of the

@@ -47,9 +47,9 @@ import {
   type AccessLoss,
 } from "@/lib/cloudCollab";
 import { cloudAgentLabel, cloudTabTitle } from "@/lib/cloudRowState";
-import { createCloudTerminal, detachCloudTerminals, followCloudTerminals, sessionTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
+import { createCloudTerminal, detachCloudTerminals, followCloudTerminals, quietCloudTerminals, sessionTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
 import { cloudGitSource, desktopGitIdentity, type GitSource } from "@/lib/gitSource";
-import { clearCloudWake, cloudAsleep, cloudSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
+import { agentPtyServed, clearCloudWake, cloudAsleep, cloudSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
 import { selectSessionTab } from "@/lib/terminal";
 import { useTheme } from "@/lib/theme";
 import { cloudFileSource, registerFileSource, type CloudFileSource } from "@/lib/workspaceFiles";
@@ -541,6 +541,10 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   }, [fileSource]);
 
   const asleep = cloudAsleep(state, workspaceState);
+  // Stopped: its terminals' views keep their picture and nothing else, so looking at one says nothing to anyone.
+  useEffect(() => {
+    if (asleep) quietCloudTerminals(workspaceKey);
+  }, [asleep, workspaceKey]);
   // The header chip: Live only while the transport is up, never for a stopped workspace, and monotonic while this desktop wakes it.
   const wakeFloor = useRef(0);
   if (!managed.woke || state.state === "connected") wakeFloor.current = 0;
@@ -575,6 +579,9 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     },
     [agents.tabs],
   );
+  // PRO-86: whether the runtime serves agent terminals; its last word outlives the connection.
+  const agentPty = agentPtyServed(workspaceKey, connected && client ? client.hasCapability("agent-pty/1") : null);
+  const agentProcess = useCallback((tabId: string) => agents.tabs.find((tab) => tab.tabId === tabId)?.info.process ?? null, [agents.tabs]);
   const backend = useMemo(
     () =>
       cloudSessionBackend({
@@ -593,8 +600,11 @@ export function useCloudSession(key: string): CloudSessionModel | null {
         collabClient: collabLive ? client : null,
         settingsNotice,
         connects,
+        agentPty,
+        terminalBase,
+        agentProcess,
       }),
-    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, wake, you, collabLive, settingsNotice, connects],
+    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, wake, you, collabLive, settingsNotice, connects, agentPty, terminalBase, agentProcess],
   );
 
   const ownTabs = useMemo(() => {

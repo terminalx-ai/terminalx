@@ -22,11 +22,13 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * - `session/2`: `session.update`, `session.addTab`, `session.delete` and the
  *   `session.sessions` notification;
  * - `pty/2`: `pty.create` takes a `sessionId`, and `pty.list` returns it;
- * - `agents/1`: `runtime.agents`.
+ * - `agents/1`: `runtime.agents`;
+ * - `agent-pty/1` (PRO-86): the terminal an agent tab's CLI runs in answers
+ *   the `pty.*` methods as `agentPtyId(tabId)`. It adds no method.
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 
 /**
@@ -47,6 +49,17 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "lease.release": "collab/1",
   "lease.takeOver": "collab/1",
 };
+
+/**
+ * The terminal an agent tab's own CLI runs in, on a runtime that granted
+ * `agent-pty/1`. It is attached, typed into, sized and controlled like a
+ * shell (`attachPty`, `write`, `resizePty`, `controlPty`), is never in
+ * `pty.list`, and cannot be killed: it closes with its tab. Typing and sizing
+ * also need the tab's lease to be free or this person's.
+ */
+export function agentPtyId(tabId: string): string {
+  return `tab:${tabId}`;
+}
 
 /** How much a caller may cost: only an interactive action may wake compute. */
 export type Activation = "cache-only" | "sync" | "connect" | "wake";
@@ -183,6 +196,10 @@ export interface RuntimeAgentModel {
   isDefault: boolean;
   upgrade: string | null;
   description: string | null;
+  /** A family alias (`opus`): it follows the latest release rather than staying on one version. */
+  alias?: boolean;
+  /** The full model id an alias runs now, per the runtime's own CLI. */
+  resolved?: string | null;
 }
 
 /** An agent installed on the runtime (`runtime.agents`, `agents/1`). */
@@ -233,6 +250,9 @@ export interface PtyInfo {
   controllerId?: string | null;
   /** The session the terminal was opened for (`pty/2`); absent otherwise and from older runtimes. */
   sessionId?: string;
+  /** An agent tab's own terminal (`agent-pty/1`): the tab, and whether its CLI runs now. */
+  tabId?: string;
+  running?: boolean;
 }
 
 /** Where a terminal view left off, to resume without replaying what it shows. */
@@ -242,7 +262,12 @@ export interface PtyCursor {
 }
 
 export interface PtyHandlers {
-  onData(bytes: Uint8Array, offset: number): void;
+  /**
+   * `replay`: the bytes were written before this attach (the ring's replay,
+   * or what was missed while away). A terminal emulator must not answer the
+   * queries it finds in them: the program that asked is long past them.
+   */
+  onData(bytes: Uint8Array, offset: number, replay: boolean): void;
   onExit?(code: number | null): void;
   onControl?(control: PtyControl, controllerId?: string | null): void;
   /** The controller resized the terminal; a viewer should match it. */
@@ -298,7 +323,7 @@ class PtyInput {
   /** Last seq the runtime accepted from this writer. */
   seq = 0;
   running = false;
-  pending: { data: string; resolve: () => void; reject: (error: unknown) => void }[] = [];
+  pending: { data: string; report: boolean; resolve: () => void; reject: (error: unknown) => void }[] = [];
 
   reset(): void {
     this.writerId = randomRequestId();
@@ -383,11 +408,16 @@ export class WorkspaceRpcClient {
    * runtime refuses it, e.g. `not_controller`, an exited terminal, or one
    * whose runtime restarted.
    */
-  write(ptyId: string, data: string): Promise<void> {
+  write(ptyId: string, data: string, options: { report?: boolean } = {}): Promise<void> {
     let input = this.inputs.get(ptyId);
     if (!input) this.inputs.set(ptyId, (input = new PtyInput()));
+    // `report`: bytes the terminal emulator produced by itself (a focus
+    // report, the answer to a query), not typed by a person. The runtime
+    // delivers the controller's, and counts them neither as use of the
+    // workspace nor as driving an agent tab.
+    const report = options.report === true;
     return new Promise<void>((resolve, reject) => {
-      input.pending.push({ data, resolve, reject });
+      input.pending.push({ data, report, resolve, reject });
       if (!input.running) void this.pumpInput(ptyId, input);
     });
   }
@@ -396,14 +426,17 @@ export class WorkspaceRpcClient {
     input.running = true;
     try {
       while (input.pending.length && !this.closed) {
-        const batch = input.pending.splice(0);
+        // One write carries input of one kind: what was typed is never sent as a report, nor the other way round.
+        const report = input.pending[0]!.report;
+        const run = input.pending.findIndex((entry) => entry.report !== report);
+        const batch = input.pending.splice(0, run < 0 ? input.pending.length : run);
         try {
           const text = batch.map((entry) => entry.data).join("");
           for (let start = 0; start < text.length; ) {
             let end = Math.min(text.length, start + WRITE_CHUNK);
             // Never split a surrogate pair across two writes.
             if (end < text.length && /[\uDC00-\uDFFF]/.test(text[end]!)) end--;
-            await this.sendInput(ptyId, input, text.slice(start, end));
+            await this.sendInput(ptyId, input, text.slice(start, end), report);
             start = end;
           }
           for (const entry of batch) entry.resolve();
@@ -417,7 +450,7 @@ export class WorkspaceRpcClient {
     }
   }
 
-  private async sendInput(ptyId: string, input: PtyInput, data: string): Promise<void> {
+  private async sendInput(ptyId: string, input: PtyInput, data: string, report: boolean): Promise<void> {
     const seq = input.seq + 1;
     for (;;) {
       const epoch = this.ptyEpochs.get(ptyId);
@@ -425,7 +458,7 @@ export class WorkspaceRpcClient {
         throw new WorkspaceRpcError("not_found", "the terminal's runtime restarted", "pty.write");
       }
       try {
-        const params = { ptyId, data, seq, writerId: input.writerId, ...(epoch ? { epoch } : {}) };
+        const params = { ptyId, data, seq, writerId: input.writerId, ...(epoch ? { epoch } : {}), ...(report ? { report: true } : {}) };
         await this.resending(() => this.untilDropped(this.rpc.request("pty.write", params)).then((value) => unwrap("pty.write", value)));
         input.seq = seq;
         return;
@@ -464,9 +497,13 @@ export class WorkspaceRpcClient {
     return this.call("pty.resize", this.withEpoch(ptyId, { ptyId, cols, rows }));
   }
 
-  /** Take over a terminal's input and size explicitly, at this view's size. */
-  controlPty(ptyId: string, cols?: number, rows?: number): Promise<PtyInfo> {
-    return this.call<PtyInfo>("pty.control", this.withEpoch(ptyId, { ptyId, ...(cols && rows ? { cols, rows } : {}) }));
+  /**
+   * Take over a terminal's input and size explicitly, at this view's size.
+   * `start` (an agent tab's terminal only) also starts the tab's CLI when it
+   * is not running; without it nothing is ever started.
+   */
+  controlPty(ptyId: string, cols?: number, rows?: number, options: { start?: boolean } = {}): Promise<PtyInfo> {
+    return this.call<PtyInfo>("pty.control", this.withEpoch(ptyId, { ptyId, ...(cols && rows ? { cols, rows } : {}), ...(options.start ? { start: true } : {}) }));
   }
 
   async killPty(ptyId: string): Promise<void> {
@@ -519,6 +556,8 @@ export class WorkspaceRpcClient {
     let cursor: PtyCursor | undefined = handlers.since;
     if (cursor && !this.ptyEpochs.has(ptyId)) this.ptyEpochs.set(ptyId, cursor.epoch);
     let gone = false;
+    /** Output before this offset was written before the attach. */
+    let replayUntil = 0;
     const markGone = (reason: "closed" | "runtime-restarted") => {
       if (gone) return;
       gone = true;
@@ -529,7 +568,7 @@ export class WorkspaceRpcClient {
       const bytes = decodeBase64(dataB64);
       // Replay and live output can overlap by a chunk around a reconnect.
       const skip = cursor === undefined ? 0 : Math.max(0, cursor.offset - offset);
-      if (skip < bytes.length) handlers.onData(bytes.subarray(skip), offset + skip);
+      if (skip < bytes.length) handlers.onData(bytes.subarray(skip), offset + skip, offset + skip < replayUntil);
       cursor = { offset: Math.max(cursor?.offset ?? 0, offset + bytes.length), epoch: this.ptyEpochs.get(ptyId) ?? cursor?.epoch ?? "" };
     };
     const stop = await this.subscribe({
@@ -560,8 +599,11 @@ export class WorkspaceRpcClient {
         cursor = undefined;
       },
       onReplay: (result) => {
-        const info = result as Partial<PtyInfo> & { data?: string; truncated?: boolean };
+        const info = result as Partial<PtyInfo> & { data?: string; truncated?: boolean; end?: number; replayEnd?: number };
         if (typeof info.epoch === "string") this.ptyEpochs.set(ptyId, info.epoch);
+        // An older runtime does not say where the replay ends: then it is the slice in the answer.
+        const sliceEnd = Number(info.offset ?? 0) + decodeBase64(String(info.data ?? "")).length;
+        replayUntil = Math.max(Number(info.replayEnd ?? 0), Number(info.end ?? 0), sliceEnd);
         if (info.truncated === true) handlers.onTruncated?.();
         emit(String(info.data ?? ""), Number(info.offset ?? 0));
         if (info.control) handlers.onControl?.(info.control, info.controllerId);

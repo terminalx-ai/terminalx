@@ -36,6 +36,7 @@ import { refreshAccountRoles } from "@/lib/accountRoles";
 import { refreshCloudCatalog } from "@/lib/cloudCatalog";
 import { TreeToggle } from "./SidebarRows";
 import { CloudSections, useCloudSections, useSectionCollapsed } from "./cloud/CloudSections";
+import { DevelopmentSection } from "@/components/cloud/DevRuntime";
 
 /**
  * The unified sidebar: global destinations followed by an expandable project
@@ -50,7 +51,6 @@ export function ProjectRail({
   onOpenAutomations,
   onOpenSkills,
   onSearch,
-  onOpenCloudPage,
 }: {
   onOpenSettings: () => void;
   onOpenAccount: () => void;
@@ -60,7 +60,6 @@ export function ProjectRail({
   onOpenAutomations: () => void;
   onOpenSkills: () => void;
   onSearch: () => void;
-  onOpenCloudPage?: () => void;
 }) {
   const store = useSessionStore();
   // A destination looks active only while it is what the main slot shows: no session and no cloud workspace selected.
@@ -297,16 +296,20 @@ export function ProjectRail({
         ) : (
           localRows
         )}
-        {sectioned && <CloudSections onOpenCloudPage={onOpenCloudPage} onOpenAccount={onOpenAccount} />}
+        {sectioned && <CloudSections onOpenAccount={onOpenAccount} />}
+        <DevelopmentSection />
       </div>
 
-      <div className="shrink-0 border-t border-hairline p-2">
-        <AccountSidebarEntry onOpenAccount={onOpenAccount} />
-        <Button variant="ghost" className="w-full justify-start gap-2 px-2" onClick={() => onOpenSettings()}>
-          <Settings />
-          Settings
-          <Keys shortcut="app.settings" />
-        </Button>
+      {/* One row: the account (which opens Account) takes the width and truncates; the gear is its own target at the right end. */}
+      <div className="flex shrink-0 items-center gap-1 border-t border-hairline p-2" data-testid="sidebar-account-row">
+        <div className="min-w-0 flex-1">
+          <AccountSidebarEntry onOpenAccount={onOpenAccount} />
+        </div>
+        <WithTooltip label="Settings" shortcut="app.settings" side="top">
+          <Button variant="ghost" size="icon-sm" className="shrink-0" aria-label="Settings" onClick={() => onOpenSettings()}>
+            <Settings />
+          </Button>
+        </WithTooltip>
       </div>
     </div>
   );

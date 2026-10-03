@@ -32,6 +32,8 @@ Two things decide a connection's rights:
 | Workspace content key (`keys.get`) | | ✓ | ✓ | ✓ |
 | Send, steer, stop (mailbox) | | | ✓ (lease) | ✓ (lease) |
 | Take control of and type into a terminal | | | ✓ | ✓ |
+| Watch an agent tab's own terminal (its terminal view) | | ✓ | ✓ | ✓ |
+| Type into an agent tab's own terminal | | | ✓ (lease, and `canApprove`) | ✓ (lease) |
 | Take over another person's tab lease | | | | ✓ |
 | Permission decisions | `canApprove` | `canApprove` | `canApprove` | ✓ |
 
@@ -472,13 +474,126 @@ the "live two-user test" blocks of `SessionView.cloud.test.tsx`,
 `src/components/layout/cloud/CloudSections.test.tsx`,
 `packages/portable/src/workspaceCollab.test.ts`,
 `src/components/cloud/CloudShareDialog.test.tsx`, the PRO-30 blocks of
-`CloudAgents.test.tsx` and `CloudSessionPage.test.tsx`, and the
+`CloudAgents.test.tsx` and `CloudWorkspaceView.test.tsx`, and the
 `cloud_workspaces::tests::share*` Rust tests. `src/lib/cloudSessions.access.test.ts`
 covers what is forgotten when access ends and read again when it returns.
 `pnpm test:webkit-layout` (after `pnpm build`) measures in WebKit what jsdom
 cannot: the composer's toolbar at 1000x520 and 1280x760 with the Notes drawer
 open (no control overlaps another), and a modal dialog's overlay covering the
 Notes drawer.
+
+## An agent tab's terminal view (PRO-86)
+
+A cloud agent tab switches between its chat and its terminal view like a
+local one: the same header button and `mod+shift+t`, remembered per tab. The
+terminal view is the tab's own CLI, the process the chat is a projection of,
+so switching starts, stops and restarts nothing and both views show the same
+turn. It shows what the CLI draws: prompts, menus, slash-command pickers and
+login or first-run screens, which is where those are answered.
+
+### Runtime: `agent-pty/1`
+
+Every agent tab's CLI already runs in a terminal the runtime owns (the pane
+`tab:<tabId>`, `SessionManager::pane_id`). `agent-pty/1`, granted in
+`rpc.hello` when asked for, lets a connection address that pane through the
+shell terminals' own methods, as `ptyId: "tab:<tabId>"`. It adds no method.
+
+| Call | On an agent's terminal |
+| --- | --- |
+| `pty.attach` | Replays recent output (the runtime keeps the last 1 MiB from the CLI's first byte, in memory), then streams. `sinceOffset` resumes. The result also carries `tabId` and `running`. Starts nothing. |
+| `pty.write` | The controller's input, numbered and applied once, as for a shell. With `report: true` (shells too) the bytes are the client's terminal emulator speaking for itself (a focus report, the answer to a query): delivered from the controller only, and neither activity nor a lease claim. |
+| `pty.resize` | The controller's size. Anyone else gets `not_controller`. |
+| `pty.control` | Take the input and size, optionally at this view's size. `start: true` also starts the tab's CLI when it is not running (`ensure_started`); without it nothing is ever started. |
+| `pty.detach` | End the stream. |
+| `pty.list`, `pty.kill`, `pty.create` | Never: it is not listed or counted as a shell, and `pty.kill` is `forbidden`. It closes with its tab. |
+
+Without the capability every one of them answers `capability_not_granted` for
+a `tab:` id, so an older client never meets it. The terminal stays through
+every CLI the tab starts in the pane (a restart for a setting, a resume after
+an exit): one stream of offsets, and the controller's size is applied to each
+new process. Whether a CLI runs is the tab's `process` in `session.tabs`,
+sent again when a process starts or ends.
+
+Who may do what (checked on every call, against the latest member list):
+
+- **Watch**: anyone the workspace is shared with (role viewer or above). No
+  role, no terminal (`forbidden` or `not_found`).
+- **Type, size, take control**: a driver or manager, and only while nobody
+  else holds the tab's driver lease (`lease_held`, with the lease, the same
+  refusal a send gets). Accepted input claims or extends the typist's lease,
+  as a send does. A manager takes a held lease over by taking the terminal
+  (`pty.control`), never by a keystroke.
+- **Approval rights**: a driver also needs `canApprove`. This matches the
+  rule that only a manager or an approver changes a tab's model, effort and
+  permission mode, all of which the agent's own screen can change. It is that
+  rule applied to the terminal, not a complete barrier: someone who may type
+  can do whatever the CLI lets its user do. A driver who may not approve
+  watches (`forbidden`, `data.needs: "canApprove"`), and one whose approval
+  rights are withdrawn stops being the terminal's controller (announced) and
+  the tab's lease they held is released.
+- **One controller**: input and size follow one device, as for shells
+  (`control`, `controllerId`, `pty.control` and `pty.resized` notifications).
+  A second viewer's window never resizes the program.
+- **Revocation** is the shells': a person who lost access has their
+  connection closed and their streams ended; one who may no longer drive
+  loses control, announced.
+
+**What a later viewer can read.** Attaching replays the terminal's last
+1 MiB, to anyone who has a role at that moment, including someone the
+workspace was shared with afterwards. That can include things the transcript
+never holds: a `/login` code or URL, the output of a `!` shell command, text
+typed into the CLI's composer and not sent. The ring exists only in the
+runtime's memory: it is gone when the tab is removed, and when the runtime
+process ends (a stop, a restart).
+
+Nothing new is stored. Output is kept only in the runtime's memory, and
+keystrokes go from the desktop to the runtime as `pty.write` over the same
+end-to-end encrypted relay channel as shell input: not through the API
+mailbox, not into a transcript or checkpoint, and not onto either disk.
+
+### Desktop
+
+`SessionBackend.terminalView(tab)` says whether the switch is offered and
+why not; `SessionBackend.agentTerminal` is what a cloud tab's view attaches
+to. `src/lib/cloudTerminals.ts` keeps the view (its xterm, stream and resume
+point) beside the shell terminals' but apart from them, and
+`src/components/cloud/CloudAgentTerminal.tsx` is the view.
+
+- **Offered** on Claude Code and Codex tabs while the runtime grants
+  `agent-pty/1`. On an older runtime, or for an agent that does not run in a
+  terminal, the switch is off and its tooltip says why. A stopped workspace
+  follows what its runtime last said; if this desktop never saw it running,
+  the switch is offered.
+- **Looking never wakes compute.** On a stopped workspace the view says
+  "Stopped" and asks the server for nothing. Typing there wakes the workspace
+  once, the same single wake a send asks for (`wakeCloudWorkspaceOnce`); what
+  was typed while it slept is not kept or sent.
+- **It streams only while it shows.** Leaving the view or the tab detaches;
+  coming back resumes after the last byte seen. After a runtime restart the
+  view starts over on the new process instead of ending.
+- **Looking never starts the agent.** With the CLI not running the view says
+  so and offers "Start agent"; pressing a key does the same, and that key is
+  not typed into a CLI that is still starting.
+- **Control.** If nobody controls the terminal and this person may type, the
+  view takes control at its own size when it opens. While someone else
+  controls it, it shows their size and "<Name> controls this terminal; you
+  are watching." with "Take control". The tab's lease bar sits above it as it
+  does above the chat.
+- **Read-only** for a viewer, for a driver while someone else drives the tab,
+  and for a driver who may not approve; the view says which, and sends no
+  input, size or control request.
+- Escape is the agent's in this view (it does not stop the turn from here).
+- **Only what a person does is input.** Key presses, paste and IME text may
+  wake a stopped workspace, take control or start the agent. What the
+  terminal emulator says by itself (focus in and out, answers to cursor,
+  device and colour queries, mouse reports) never does: it is forwarded as a
+  `report` only from a view that controls the terminal, and dropped
+  otherwise. Queries found in replayed output are not answered at all. When
+  the workspace stops, its terminals' views forget the focus and mouse modes
+  their programs had set. The same holds for cloud shell terminals.
+
+Not done here: the phone, and keeping the stream attached while the chat
+shows.
 
 ## Development and tests
 
@@ -491,6 +606,14 @@ and attachments may carry `userId`. The file is re-read on every refresh.
   `presence_and_notes_…` and `the_driver_lease_…`, and `cloud_agents::mailbox`
   tests for viewers, approvers, narrowed roles, the lease and dropped
   follow-ups.
+- An agent tab's terminal view (PRO-86): `remote::server` tests
+  `an_agent_terminal_…`, `attaching_to_an_agent_terminal_…`,
+  `only_the_lease_holder_types_…`, `a_second_viewer_never_resizes_…` and
+  `revoked_access_ends_an_agent_terminal_stream` (a real shell stands in for
+  the CLI); `src/lib/cloudAgentTerminals.test.ts` (the store and the backend
+  capability) and `src/components/session/SessionView.terminalView.test.tsx`
+  (the switch on local and cloud tabs, against a fake runtime). Not covered by
+  the relay e2e.
 - Relay e2e (`scripts/remote-runtime/e2e.sh`,
   `a_shared_workspace_serializes_input_and_stops_access_when_revoked`): an
   admin, a driver, an approving viewer and an unshared member over the real

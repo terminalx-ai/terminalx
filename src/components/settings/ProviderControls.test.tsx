@@ -6,7 +6,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, type CloudProviderConnection } from "@/lib/api";
+import { api, type CloudProviderConnection, type CloudProviderSummary } from "@/lib/api";
 import { ProviderControls } from "./ProviderControls";
 
 vi.mock("@/lib/api", () => ({
@@ -15,12 +15,16 @@ vi.mock("@/lib/api", () => ({
     cloudProvider: vi.fn(),
     cloudProviderConnect: vi.fn(),
     cloudProviderDisconnect: vi.fn(),
+    cloudProviderSetCreationEnabled: vi.fn(),
+    cloudProviderRevalidate: vi.fn(),
     cloudWorkspaceCreate: vi.fn(),
   },
 }));
 let detail: CloudProviderConnection;
+let availability: CloudProviderSummary["availability"];
 beforeEach(() => {
   vi.clearAllMocks();
+  availability = "available";
   detail = {
     provider: "box",
     state: "connected",
@@ -51,7 +55,7 @@ beforeEach(() => {
         id: "box",
         displayName: "Box",
         canManage: detail.canManage,
-        availability: "available",
+        availability,
         connection: null,
         capabilities: {
           suspend: true,
@@ -257,5 +261,86 @@ describe("organization provider controls", () => {
     expect(api.cloudProviderConnect).toHaveBeenCalledOnce();
     expect(api.cloudWorkspaceCreate).not.toHaveBeenCalled();
     expect(screen.queryByRole("checkbox")).toBeNull();
+  });
+
+  // PRO-79: what an admin could only do in the web console.
+  describe("new machines and the key re-check", () => {
+    it("pauses new machines without touching the key, and allows them again", async () => {
+      vi.mocked(api.cloudProviderSetCreationEnabled).mockImplementation(async (_provider, _revision, enabled) => {
+        availability = enabled ? "available" : "disabled-for-create";
+        return {} as CloudProviderSummary;
+      });
+      await ready();
+      expect(screen.queryByTestId("provider-creation-paused")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Pause new machines" }));
+      expect((await screen.findByTestId("provider-creation-paused")).textContent).toContain("New machines are paused on Box.");
+      expect(api.cloudProviderSetCreationEnabled).toHaveBeenLastCalledWith("box", "org-revision", false);
+      expect(screen.getByTestId("provider-notice").textContent).toContain("Existing workspaces are not affected");
+      // The key and the connection were not touched.
+      expect(api.cloudProviderConnect).not.toHaveBeenCalled();
+      expect(api.cloudProviderDisconnect).not.toHaveBeenCalled();
+      expect(screen.getByText("Original account")).toBeTruthy();
+
+      fireEvent.click(await screen.findByRole("button", { name: "Allow new machines" }));
+      await waitFor(() => expect(screen.queryByTestId("provider-creation-paused")).toBeNull());
+      expect(api.cloudProviderSetCreationEnabled).toHaveBeenLastCalledWith("box", "org-revision", true);
+      expect(screen.getByRole("button", { name: "Pause new machines" })).toBeTruthy();
+    });
+
+    it("shows a member that new machines are paused, with no switch", async () => {
+      detail.canManage = false;
+      availability = "disabled-for-create";
+      render(<ProviderControls contextRevision="org-revision" />);
+      expect((await screen.findByTestId("provider-creation-paused")).textContent).toMatch(/owner or administrator can allow new machines again/);
+      expect(screen.queryByRole("button", { name: /new machines/ })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Check key again" })).toBeNull();
+    });
+
+    it("offers no switch until a provider is connected, or while it is being disconnected", async () => {
+      detail.state = "not-connected";
+      availability = "not-connected";
+      const first = render(<ProviderControls contextRevision="org-revision" />);
+      await screen.findByRole("button", { name: "Connect provider" });
+      expect(screen.queryByRole("button", { name: /new machines/ })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Check key again" })).toBeNull();
+      first.unmount();
+
+      detail.state = "connected";
+      detail.disconnectDisposition = "retain";
+      availability = "available";
+      await ready();
+      expect(screen.queryByRole("button", { name: /new machines/ })).toBeNull();
+    });
+
+    it("keeps the switch where it was and says why when the service refuses", async () => {
+      vi.mocked(api.cloudProviderSetCreationEnabled).mockRejectedValue({ code: "organization_admin_required" });
+      await ready();
+      fireEvent.click(screen.getByRole("button", { name: "Pause new machines" }));
+      expect((await screen.findByRole("alert")).textContent).toMatch(/Only an organization owner or administrator/);
+      expect(screen.queryByTestId("provider-notice")).toBeNull();
+      expect(screen.queryByTestId("provider-creation-paused")).toBeNull();
+    });
+
+    it("checks the saved key again without asking for it", async () => {
+      vi.mocked(api.cloudProviderRevalidate).mockImplementation(async () => {
+        detail.state = "connected";
+        return detail;
+      });
+      detail.state = "attention-required";
+      await ready();
+      fireEvent.click(screen.getByRole("button", { name: "Check key again" }));
+      expect((await screen.findByTestId("provider-notice")).textContent).toContain("checked with the provider and is valid");
+      expect(api.cloudProviderRevalidate).toHaveBeenCalledWith("box", "org-revision");
+      expect(api.cloudProviderConnect).not.toHaveBeenCalled();
+      await screen.findByText("Setup complete — compute connection validated");
+    });
+
+    it("says the saved key was rejected when the re-check fails, and keeps the connection shown", async () => {
+      vi.mocked(api.cloudProviderRevalidate).mockRejectedValue({ code: "cloud_provider_credential_invalid" });
+      await ready();
+      fireEvent.click(screen.getByRole("button", { name: "Check key again" }));
+      expect((await screen.findByRole("alert")).textContent).toMatch(/Validation failed/);
+      expect(screen.getByText("Original account")).toBeTruthy();
+    });
   });
 });

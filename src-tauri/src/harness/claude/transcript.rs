@@ -38,7 +38,7 @@ use crate::harness::tui::TurnMark;
 /// anywhere — a conversation that has yet to be written — it is the derived
 /// path.
 pub fn locate(cwd: &str, session_id: &str) -> Option<PathBuf> {
-    Some(locate_in(&projects_dir()?, cwd, session_id))
+    Some(locate_in(&projects_root()?, cwd, session_id))
 }
 
 /// [`locate`] within a given projects folder.
@@ -63,15 +63,15 @@ pub fn locate_in(projects: &Path, cwd: &str, session_id: &str) -> PathBuf {
         .unwrap_or(derived)
 }
 
-/// The folder that holds every checkout's transcripts: `projects` under the
-/// CLI's config directory, which `CLAUDE_CONFIG_DIR` moves and which is
-/// `~/.claude` otherwise. The tab's CLI inherits this process's environment,
-/// so what is set here is what it writes under.
-pub fn projects_dir() -> Option<PathBuf> {
-    projects_from(std::env::var("CLAUDE_CONFIG_DIR").ok(), dirs::home_dir())
+/// Where the CLI keeps every project's transcripts: `projects` under
+/// `CLAUDE_CONFIG_DIR` when that is set, else under `~/.claude`. Reading a
+/// transcript and deleting one both go through here, so they cannot disagree
+/// about where the CLI wrote.
+pub fn projects_root() -> Option<PathBuf> {
+    projects_root_from(std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(), dirs::home_dir().as_deref())
 }
 
-fn projects_from(config_dir: Option<String>, home: Option<PathBuf>) -> Option<PathBuf> {
+pub fn projects_root_from(config_dir: Option<&str>, home: Option<&Path>) -> Option<PathBuf> {
     match config_dir.filter(|dir| !dir.is_empty()) {
         Some(dir) => Some(PathBuf::from(dir).join("projects")),
         None => home.map(|home| home.join(".claude").join("projects")),
@@ -93,12 +93,17 @@ fn uuids_in(text: &str) -> HashSet<String> {
         .collect()
 }
 
-/// Where the CLI files the transcript of a session started in `cwd`. Every
-/// character outside `[A-Za-z0-9-]` becomes `-`, which is why a dot-folder
-/// yields a double dash.
+/// The folder name the CLI gives a working directory under `~/.claude/projects`.
+/// Every character outside `[A-Za-z0-9-]` becomes `-`, which is why a
+/// dot-folder yields a double dash. The encoding loses information: two
+/// different paths can share a name.
+pub fn encoded_cwd(cwd: &str) -> String {
+    cwd.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect()
+}
+
+/// Where the CLI files the transcript of a session started in `cwd`.
 pub fn transcript_in(projects: &Path, cwd: &str, session_id: &str) -> PathBuf {
-    let encoded: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
-    projects.join(encoded).join(format!("{session_id}.jsonl"))
+    projects.join(encoded_cwd(cwd)).join(format!("{session_id}.jsonl"))
 }
 
 fn text_of(content: &Value) -> String {
@@ -340,7 +345,9 @@ fn decode_assistant(v: &Value, out: &mut Vec<Payload>) {
         }
     }
     if let Some(used) = v["message"]["usage"].as_object().and_then(|_| occupancy(&v["message"]["usage"])) {
-        out.push(Payload::UsageUpdate(Usage { context_used: Some(used), ..Default::default() }));
+        // The record names the model that answered; `<synthetic>` is the CLI speaking for itself.
+        let model = v["message"]["model"].as_str().filter(|m| m.starts_with("claude-")).map(String::from);
+        out.push(Payload::UsageUpdate(Usage { context_used: Some(used), model, ..Default::default() }));
     }
 }
 
@@ -352,7 +359,7 @@ mod tests {
     const FIXTURE: &str = r#"{"type":"queue-operation","timestamp":"2026-09-02T02:41:16.631Z","sessionId":"s"}
 {"parentUuid":null,"isSidechain":false,"type":"user","uuid":"u1","timestamp":"2026-09-02T02:41:18.686Z","userType":"external","cwd":"/tmp/x","sessionId":"s","message":{"role":"user","content":[{"type":"text","text":"Add multiply"}]}}
 {"parentUuid":"u1","isSidechain":false,"type":"assistant","uuid":"a1","timestamp":"2026-09-02T02:41:23.156Z","cwd":"/tmp/x","sessionId":"s","message":{"id":"m1","role":"assistant","content":[{"type":"thinking","thinking":"hmm"}]}}
-{"parentUuid":"a1","isSidechain":false,"type":"assistant","uuid":"a2","timestamp":"2026-09-02T02:41:23.158Z","cwd":"/tmp/x","sessionId":"s","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"Looking first."}],"usage":{"input_tokens":10,"cache_read_input_tokens":90,"output_tokens":5}}}
+{"parentUuid":"a1","isSidechain":false,"type":"assistant","uuid":"a2","timestamp":"2026-09-02T02:41:23.158Z","cwd":"/tmp/x","sessionId":"s","message":{"id":"m1","role":"assistant","model":"claude-opus-5-5","content":[{"type":"text","text":"Looking first."}],"usage":{"input_tokens":10,"cache_read_input_tokens":90,"output_tokens":5}}}
 {"parentUuid":"a2","isSidechain":false,"type":"assistant","uuid":"a3","timestamp":"2026-09-02T02:41:24.816Z","cwd":"/tmp/x","sessionId":"s","message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"cat src/math.js"}}]}}
 {"parentUuid":"a3","isSidechain":false,"type":"user","uuid":"u2","timestamp":"2026-09-02T02:41:26.219Z","cwd":"/tmp/x","sessionId":"s","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"export const x = 1;"}]}}
 {"parentUuid":"u2","isSidechain":true,"type":"assistant","uuid":"a4b","timestamp":"2026-09-02T02:41:29.000Z","cwd":"/tmp/x","sessionId":"s","message":{"id":"m9","role":"assistant","content":[{"type":"text","text":"subagent chatter"}]}}
@@ -410,7 +417,7 @@ mod tests {
         let mut s = Streamer::at(0, decode_line);
         let p = s.push(FIXTURE.as_bytes());
         assert!(matches!(&p[0], Payload::UserMessage { text, .. } if text == "Add multiply"));
-        assert!(matches!(&p[3], Payload::UsageUpdate(u) if u.context_used == Some(105)));
+        assert!(matches!(&p[3], Payload::UsageUpdate(u) if u.context_used == Some(105) && u.model.as_deref() == Some("claude-opus-5-5")));
         assert!(matches!(&p[4], Payload::ToolCallStarted { tool_type: ToolType::Shell, name, .. } if name == "Bash"));
         assert!(matches!(&p[7], Payload::FileEdits { edits, .. } if edits[0].path == "/tmp/x/math.js"));
         assert!(matches!(&p[8], Payload::UserMessage { text, .. } if text == "Thanks, now add divide"));
@@ -612,13 +619,13 @@ mod tests {
     }
 
     #[test]
-    fn the_projects_folder_follows_the_cli_s_config_directory() {
-        let home = Some(PathBuf::from("/h"));
-        assert_eq!(projects_from(None, home.clone()), Some(PathBuf::from("/h/.claude/projects")));
-        assert_eq!(projects_from(Some(String::new()), home.clone()), Some(PathBuf::from("/h/.claude/projects")));
-        assert_eq!(projects_from(Some("/elsewhere/claude".into()), home), Some(PathBuf::from("/elsewhere/claude/projects")));
-        assert_eq!(projects_from(Some("/elsewhere".into()), None), Some(PathBuf::from("/elsewhere/projects")));
-        assert_eq!(projects_from(None, None), None);
+    fn the_projects_root_follows_claude_config_dir() {
+        let home = Path::new("/Users/me");
+        assert_eq!(projects_root_from(None, Some(home)), Some(PathBuf::from("/Users/me/.claude/projects")));
+        assert_eq!(projects_root_from(Some(""), Some(home)), Some(PathBuf::from("/Users/me/.claude/projects")));
+        assert_eq!(projects_root_from(Some("/opt/claude"), Some(home)), Some(PathBuf::from("/opt/claude/projects")));
+        assert_eq!(projects_root_from(Some("/opt/claude"), None), Some(PathBuf::from("/opt/claude/projects")));
+        assert_eq!(projects_root_from(None, None), None);
     }
 
     #[test]

@@ -13,6 +13,12 @@ writer of each tab's transcript. Desktops talk to it two ways:
   is exactly one delivery path and one receipt per command, whether the
   runtime is online, reconnecting or suspended.
 
+One more live path exists since PRO-86: the tab's **terminal view** types
+into the agent's own terminal with `pty.write` (`agent-pty/1`), as into a
+shell. It is keystrokes, not commands: nothing is queued, receipted or
+replayed, it only works while the runtime is online, and it has its own
+authority rules. See "An agent tab's terminal view" in `CLOUD-SHARING.md`.
+
 The server half is terminalx-saas #109 (`apps/api/docs/cloud-workspace-remote-runtime-contract.md`
 §11-14). This document is the runtime/app half of that contract.
 
@@ -183,7 +189,7 @@ the next `send` (the harness resumes the provider session).
   `outcome-unknown`. `text` and `requestId` come from the local plaintext, so
   the UI can show them.
 
-### UI (`CloudSessionPage` agent view, `src/lib/cloudAgents.ts`)
+### UI (the agent view of `CloudWorkspaceView`, `src/lib/cloudAgents.ts`)
 
 - Tabs are listed from the local cache first, then from checkpoint metadata,
   then from `session.tabs` when connected.

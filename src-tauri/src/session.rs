@@ -427,6 +427,10 @@ type ArchivedImages = (Vec<ImageRef>, Vec<(String, String)>);
 
 /// How long a restart waits for the outgoing CLI to let go of its conversation.
 const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(6);
+/// Columns and rows every agent CLI starts at. A view that controls the
+/// pane's size (the desktop's terminal view, a cloud tab's controller)
+/// resizes it from here.
+pub const CLI_PANE_SIZE: (u16, u16) = (120, 30);
 
 fn key_of(session_id: &str, tab_id: &str) -> String {
     format!("{session_id}/{tab_id}")
@@ -1560,7 +1564,7 @@ impl SessionManager {
         let spawned = crate::cloud_grants::unset_prefix(&format!("{}{}", launch.command, config.args), &unset);
         let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);
-        let spec = pty::PaneSpec { cwd: &entry.cwd, cols: 120, rows: 30, command: Some(&spawned), env: &env };
+        let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: Some(&spawned), env: &env };
         self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI")?;
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         rt.engine = Engine::Cli(CliTab {
@@ -1588,7 +1592,10 @@ impl SessionManager {
         if let Some(id) = launch.minted {
             index::update_tab(&rt.session_id, &rt.tab_id, |t| {
                 t.provider_session_id = Some(id.clone());
-                t.fork_from = None;
+                // `fork_from` stays: the CLI has only just started, and until
+                // it has written the fork's own transcript the parent's is
+                // the only copy of the conversation. A tab with an id of its
+                // own resumes that id, so the field no longer drives launch.
                 Ok(())
             })?;
         }
@@ -1625,7 +1632,7 @@ impl SessionManager {
         // Where the conversation's file is, not where a conversation started
         // in this folder would be: a resumed one is still written where it
         // began, which a renamed workspace no longer derives (#250).
-        let projects = claude::transcript::projects_dir().ok_or_else(|| anyhow!("no home directory"))?;
+        let projects = claude::transcript::projects_root().ok_or_else(|| anyhow!("no home directory"))?;
         let derived = claude::transcript::transcript_in(&projects, &entry.cwd, &provider_id);
         let path = claude::transcript::locate_in(&projects, &entry.cwd, &provider_id);
         // The folder derived from the checkout is where the CLI files what

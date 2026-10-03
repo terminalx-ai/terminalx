@@ -22,15 +22,13 @@ import type { CloudProject } from "@/types/target";
  * Cloud projects the new-session picker offers, per organization section:
  * every live organization's (all cloud-enabled ones on a server that
  * authorizes by membership, CS-18; else the default one), as their sidebar
- * sections show them, default first. None while signed out or with the kill
- * switch off.
+ * sections show them, default first. None while signed out.
  */
 export function useCloudProjectChoices(): { orgId: string; orgName: string; projects: CloudProject[]; mayStart: boolean | null }[] {
   const catalog = useCloudCatalog();
   const prefs = usePrefs();
   const { status } = useAccount();
   return useMemo(() => {
-    if (!prefs.cloudSidebar) return [];
     const live = new Set(liveCloudOrgIds(status));
     const defaultOrg = defaultOrgId(status);
     const orgs = cloudOrganizations(status)
@@ -45,7 +43,7 @@ export function useCloudProjectChoices(): { orgId: string; orgName: string; proj
       // Whether this account may start a session there: an owner or admin; null while its role is not known yet.
       return { orgId: org.id, orgName: sectionName(org), projects: placed.projects, mayStart: mayStartCloudSessions(status, org.id) };
     });
-  }, [catalog, prefs.cloudSidebar, prefs.cloudPinned, prefs.cloudProjects, prefs.cloudBlankProjects, status]);
+  }, [catalog, prefs.cloudPinned, prefs.cloudProjects, prefs.cloudBlankProjects, status]);
 }
 
 function sectionName(org: { isPersonal?: boolean; name: string }): string {

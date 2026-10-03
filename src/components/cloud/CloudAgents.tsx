@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { runningLimitReached } from "@/lib/runningLimit";
 import { useTabLog } from "@/lib/agentEvents";
 import { buildTranscript } from "@/lib/transcript";
-import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, useModels } from "@/lib/models";
+import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, modelOptionText, offeredOn, useModels } from "@/lib/models";
 import {
   attachCloudAgentTab,
   closeCloudAgentTab,
@@ -56,6 +56,7 @@ export function CloudAgentsView({
   state,
   workspaceState,
   wakeWorkspace,
+  waking = false,
   collabKey,
   active: shown = true,
 }: {
@@ -66,6 +67,8 @@ export function CloudAgentsView({
   workspaceState: string | null;
   /** Raise the connection to `wake` after an interactive command. */
   wakeWorkspace?: () => void;
+  /** This window asked for the workspace to be woken (it was opened with a resume, or a command went out). */
+  waking?: boolean;
   /** Where this workspace's presence, notes and leases are kept (cloudCollab); defaults to its target key. */
   collabKey?: string;
   /** The agent view is the one on screen (presence reports its tab). */
@@ -132,7 +135,7 @@ export function CloudAgentsView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="cloud-agents">
-      <StatusBar state={state} tab={active} snapshot={snapshot} workspaceState={workspaceState} orgId={scope.organizationId} />
+      <StatusBar state={state} tab={active} snapshot={snapshot} workspaceState={workspaceState} orgId={scope.organizationId} waking={waking} />
       <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-hairline px-3 py-1" role="tablist" aria-label="Agent tabs">
         {tabs.map((tab, index) => (
           <div key={tab.tabId} className="flex items-center" data-testid="cloud-agent-tab">
@@ -220,20 +223,47 @@ function StatusBar({
   snapshot,
   workspaceState,
   orgId,
+  waking,
 }: {
   state: WorkspaceConnectionState;
   tab: CloudAgentTab | null;
   snapshot: CloudAgentsSnapshot;
   workspaceState: string | null;
   orgId: string;
+  waking: boolean;
 }) {
+  // Somebody is waking it: this window, or a command the server woke it for. A wake the server refused is not one.
+  const wakingNow = snapshot.wake !== "unavailable" && (waking || snapshot.wake === "queued" || snapshot.wake === "in-progress");
+  const asleep = stoppedAndStaying(state, workspaceState, wakingNow);
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline px-3 py-1 text-[11px] text-muted-foreground">
-      <Chip label="Connection" value={connectionLabel(state)} testId="cloud-agent-connection" />
+      <Chip label="Connection" value={connectionLabel(state, asleep ? (workspaceState === "archived" ? "archived" : "asleep") : false)} testId="cloud-agent-connection" />
       <Chip label="Agent" value={tab ? turnLabel(tab) : "No tab"} testId="cloud-agent-turn" />
-      <Chip label="Workspace" value={provisioningLabel(workspaceState, snapshot.wake, state, snapshot.wake === "unavailable" && runningLimitReached(orgId))} testId="cloud-agent-provisioning" />
+      <Chip
+        label="Workspace"
+        value={provisioningLabel(workspaceState, snapshot.wake, state, snapshot.wake === "unavailable" && runningLimitReached(orgId), wakingNow)}
+        testId="cloud-agent-provisioning"
+      />
     </div>
   );
+}
+
+/** The connection is still trying to attach (each try reads "opening", then "waitingForRuntime" again). */
+function attaching(state: WorkspaceConnectionState): boolean {
+  return state.state === "opening" || state.state === "waitingForRuntime";
+}
+
+/**
+ * The workspace is stopped and nothing is waking it. The connection keeps
+ * trying in the background, which used to flip both chips every few seconds
+ * ("Asleep"/"Starting", "Checking"/"Waiting for runtime"); a stopped
+ * workspace reads one way until someone resumes it. An archived workspace
+ * opened to read is stopped the same way.
+ */
+export function stoppedAndStaying(state: WorkspaceConnectionState, workspaceState: string | null, waking: boolean): boolean {
+  if (waking || state.state === "connected") return false;
+  const stopped = workspaceState === "suspended" || workspaceState === "archived";
+  return state.state === "suspended" || (stopped && (attaching(state) || state.state === "idle"));
 }
 
 function Chip({ label, value, testId }: { label: string; value: string; testId: string }) {
@@ -244,7 +274,8 @@ function Chip({ label, value, testId }: { label: string; value: string; testId: 
   );
 }
 
-export function connectionLabel(state: WorkspaceConnectionState): string {
+export function connectionLabel(state: WorkspaceConnectionState, stopped: false | "asleep" | "archived" = false): string {
+  if (stopped) return stopped === "archived" ? "Offline (workspace archived)" : "Offline (workspace asleep)";
   switch (state.state) {
     case "connected":
       return "Live";
@@ -252,8 +283,8 @@ export function connectionLabel(state: WorkspaceConnectionState): string {
       return "Connecting";
     case "reconnecting":
       return "Reconnecting";
+    // One wait, however many times the connection asks again.
     case "opening":
-      return "Checking";
     case "waitingForRuntime":
       return "Waiting for runtime";
     case "suspended":
@@ -288,13 +319,15 @@ export function turnLabel(tab: CloudAgentTab): string {
  * but when the organization's last list shows its running limit reached,
  * that is the likely reason, and stopping a workspace is the way out.
  */
-export function provisioningLabel(workspaceState: string | null, wake: WakeResult | null, state: WorkspaceConnectionState, runningLimitReached = false): string {
+export function provisioningLabel(workspaceState: string | null, wake: WakeResult | null, state: WorkspaceConnectionState, runningLimitReached = false, waking = false): string {
   if (wake === "queued") return "Waking";
   if (wake === "in-progress" && state.state !== "connected") return "Starting";
   if (wake === "unavailable" && runningLimitReached) return "Cannot wake: the running limit is reached. Stop a workspace (commands stay queued)";
   if (wake === "unavailable") return "Cannot wake (commands stay queued)";
-  // A running workspace this window is still attaching to is Ready, not starting.
-  if (state.state === "waitingForRuntime" && workspaceState !== "ready") return "Starting";
+  // A running workspace this window is still attaching to is Ready, not starting,
+  // and a stopped one nobody is waking stays Asleep.
+  const stopped = workspaceState === "suspended" || workspaceState === "archived";
+  if (attaching(state) && workspaceState !== "ready" && (!stopped || waking)) return "Starting";
   if (state.state === "connected") return "Ready";
   switch (workspaceState) {
     case "suspended":
@@ -321,7 +354,8 @@ function NewAgentForm({
   onCancel: () => void;
 }) {
   const [agent, setAgent] = useState("claude");
-  const models = useModels(agent);
+  // Aliases only: this list is the desktop's, and the workspace's CLI may not run a version pinned from it.
+  const models = offeredOn(useModels(agent), false);
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
   const [mode, setMode] = useState(DEFAULT_PERMISSION_MODE);
@@ -346,7 +380,7 @@ function NewAgentForm({
         <option value="">Default model</option>
         {models.map((m) => (
           <option key={m.id} value={m.id}>
-            {m.label}
+            {modelOptionText(m, models, false)}
           </option>
         ))}
       </select>
@@ -618,6 +652,8 @@ function CloudAgentPane({
                   onSetModel={(model) => configure({ model })}
                   onSetEffort={(effort) => configure({ effort })}
                   onSetMode={(mode) => configure({ mode })}
+                  reportedModel={transcript.model}
+                  modelsAreLocal={false}
                   disabled={!!blocked}
                   settingsLockedReason={mayConfigure ? null : SETTINGS_LOCKED_REASON}
                   settingsNote={tab.settingsIgnored ? SETTINGS_IGNORED_REASON : tab.pendingConfig && mayConfigure ? SETTINGS_WITH_NEXT_MESSAGE : null}

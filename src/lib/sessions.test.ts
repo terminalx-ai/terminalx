@@ -107,7 +107,7 @@ describe("worktree deletion events", () => {
     sessions.upsertSession(other);
     sessions.selectSession(other.id);
     mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "delete_workspace") return [attached];
+      if (command === "delete_workspace") return { sessions: [attached], keptBranch: null, rescuedBranch: null };
       if (command === "list_workspaces") return [main];
       if (command === "list_harnesses") return [];
       throw new Error(`Unexpected command: ${command}`);
@@ -247,5 +247,29 @@ describe("an agent tab's terminal", () => {
     await Promise.resolve();
     expect(terminal.getTerminalState().panes.map((pane) => pane.id)).toEqual(["tab:tab-with-transcript"]);
     expect(dispose).not.toHaveBeenCalled();
+  });
+});
+
+describe("a refreshed session list", () => {
+  it("drops the terminals of the tabs and sessions that are no longer in it", async () => {
+    const other: SessionEntry = { ...attached, id: "other-session", tabs: [], activeTab: null };
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_workspaces") return [main, worktree];
+      if (command === "list_harnesses" ) return [];
+      if (command === "pty_spawn" || command === "pty_kill") return undefined;
+      // The tab was closed and the other session deleted somewhere this window heard nothing of.
+      if (command === "list_sessions") return [{ ...attached, tabs: [], activeTab: null }];
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    sessions.upsertSession(other);
+    const terminal = await import("./terminal");
+    await terminal.adoptPane({ id: "tab:tab-with-transcript", sessionId: attached.id, title: "Agent", hidden: true, owned: true });
+    const kept = await terminal.openTerminal(attached.id, worktreePath);
+    await terminal.openTerminal(other.id, projectPath);
+
+    await sessions.refreshSessions();
+    await Promise.resolve();
+
+    expect(terminal.getTerminalState().panes.map((pane) => pane.id)).toEqual([kept.id]);
   });
 });

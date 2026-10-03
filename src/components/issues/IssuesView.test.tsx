@@ -40,7 +40,9 @@ vi.mock("@/components/chat/Dictation", () => ({
 vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonScene: () => null }));
 vi.mock("@/lib/dictation", () => ({ stopDictation: vi.fn() }));
 vi.mock("@/lib/hotkeys", () => ({ useHotkey: vi.fn(), useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
-vi.mock("@/lib/models", () => ({
+vi.mock("@/lib/models", async (original) => ({
+  // The pure helpers stay real; only the list and its loading are stubbed.
+  ...(await original<typeof import("@/lib/models")>()),
   BYPASS_MODE: "bypassPermissions",
   DEFAULT_AUTOMATION_MODE: "bypassPermissions",
   EFFORT_LABEL: {},

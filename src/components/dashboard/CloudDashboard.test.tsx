@@ -41,6 +41,9 @@ vi.mock("@/lib/account", () => ({
   subscribeAccount: () => () => undefined,
   refreshAccount: vi.fn(),
 }));
+// The new-workspace form has its own tests; here only that the palette opens it.
+const openNewWorkspace = vi.hoisted(() => vi.fn());
+vi.mock("@/components/cloud/NewCloudWorkspaceDialog", () => ({ openNewCloudWorkspace: openNewWorkspace }));
 vi.mock("@/lib/cloudConnections", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/lib/cloudConnections")>();
   return { ...original, wakeCloudConnection: vi.fn(original.wakeCloudConnection), retainCloudConnection: vi.fn(original.retainCloudConnection) };
@@ -56,7 +59,6 @@ const terminal = await import("@/lib/terminal");
 const connections = await import("@/lib/cloudConnections");
 const { resetCloudAgents } = await import("@/lib/cloudAgents");
 const { resetCloudSessions } = await import("@/lib/cloudSessions");
-const { getCloudDashboard } = await import("@/lib/cloudDashboard");
 
 const ORG = "org-a";
 const OTHER = "org-b";
@@ -201,17 +203,6 @@ describe("the Agent Dashboard", () => {
     expect(terminal.getTerminalState().selected[`cloud:${ORG}:ws-1:s1`]).toEqual({ kind: "agent", id: "s1-tab" });
     expectNoWake();
   });
-
-  it("leaves the cloud out with the kill switch off", async () => {
-    const prefs = await import("@/lib/prefs");
-    act(() => prefs.setPrefs({ cloudSidebar: false }));
-    try {
-      await settle();
-      expect(getCloudDashboard()).toEqual([]);
-    } finally {
-      act(() => prefs.setPrefs({ cloudSidebar: true }));
-    }
-  });
 });
 
 describe("the command palette", () => {
@@ -248,5 +239,82 @@ describe("the command palette", () => {
     } finally {
       frame.mockRestore();
     }
+  });
+
+  describe("the entries that replace the full-window cloud page (PRO-68)", () => {
+    const frames = () =>
+      vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+        callback(0);
+        return 0;
+      });
+    const search = (value: string) => fireEvent.change(screen.getByPlaceholderText(/Search sessions/), { target: { value } });
+
+    it("no longer has the old page's command", async () => {
+      openPalette();
+      search("cloud workspace session");
+      await screen.findByRole("option", { name: /Go to cloud session…/ });
+      expect(screen.queryByRole("option", { name: /Open a cloud workspace session/ })).toBeNull();
+    });
+
+    it("Go to cloud session… keeps the palette open on the cloud sessions; choosing one selects it without a wake", async () => {
+      const frame = frames();
+      try {
+        const onOpenChange = vi.fn();
+        render(
+          <TooltipProvider>
+            <CommandPalette open onOpenChange={onOpenChange} onOpenSettings={() => undefined} onCreated={() => undefined} />
+          </TooltipProvider>,
+        );
+        search("go to cloud");
+        fireEvent.click(await screen.findByRole("option", { name: /Go to cloud session…/ }));
+        expect(onOpenChange).not.toHaveBeenCalledWith(false);
+        const input = (await screen.findByPlaceholderText("Search cloud sessions…")) as HTMLInputElement;
+        expect(input.value).toBe("");
+        // Only cloud sessions are listed, both organizations', by kind: no command, project or local row.
+        await screen.findByRole("option", { name: /Fix login redirect/ });
+        const options = screen.getAllByRole("option");
+        expect(options.every((option) => /cloud/.test(option.textContent ?? ""))).toBe(true);
+        expect(screen.queryByRole("option", { name: /Go to cloud session…/ })).toBeNull();
+        expect(screen.queryByRole("option", { name: /New cloud workspace…/ })).toBeNull();
+        // What is typed next searches those sessions only.
+        fireEvent.change(input, { target: { value: "landing" } });
+        await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(1));
+        fireEvent.click(await screen.findByRole("option", { name: /Landing page copy/ }));
+        await waitFor(() => expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${OTHER}:ws-b:sb`));
+        expectNoWake();
+      } finally {
+        frame.mockRestore();
+      }
+    });
+
+    it("New cloud workspace… opens the form for an admin of the default organization, and creates nothing by itself", async () => {
+      const frame = frames();
+      try {
+        openPalette();
+        search("new cloud workspace");
+        fireEvent.click(await screen.findByRole("option", { name: /New cloud workspace…/ }));
+        await waitFor(() => expect(openNewWorkspace).toHaveBeenCalledTimes(1));
+        expectNoWake();
+      } finally {
+        frame.mockRestore();
+      }
+    });
+
+    it("does not offer New cloud workspace… to a member, who could only be refused", async () => {
+      mocks.status = { ...mocks.status, organizations: mocks.status.organizations!.map((org) => (org.id === ORG ? { ...org, role: "member" } : org)) } as AccountStatus;
+      openPalette();
+      search("cloud workspace");
+      await screen.findByRole("option", { name: /Go to cloud session…/ });
+      expect(screen.queryByRole("option", { name: /New cloud workspace…/ })).toBeNull();
+    });
+
+    it("offers neither entry while signed out", async () => {
+      mocks.status = { state: "signed-out", identity: null, expiresAt: null, lastError: null } as unknown as AccountStatus;
+      openPalette();
+      search("cloud");
+      await settle();
+      expect(screen.queryByRole("option", { name: /Go to cloud session…/ })).toBeNull();
+      expect(screen.queryByRole("option", { name: /New cloud workspace…/ })).toBeNull();
+    });
   });
 });
