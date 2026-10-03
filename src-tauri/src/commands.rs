@@ -1446,17 +1446,19 @@ pub fn tab_status(state: State<'_, AppState>, session_id: String, tab_id: String
     Ok(state.manager().ok_or("not ready")?.status_of(&session_id, &tab_id))
 }
 
-/// The picker's list. Everything but Codex is static; Codex depends on the
-/// signed-in account, so it is read from the CLI and cached. `refresh` is what
-/// the picker sends when it opens, so a model added (or retired) mid-session
-/// shows up without a restart. Ordering and the hidden-harness filter both
-/// live in `models::offered`.
+/// The picker's list. Claude and Codex depend on the signed-in account and
+/// on the CLI installed here, so both are read from their CLIs and cached; the
+/// rest is static. `refresh` is what the picker sends when it opens, so a
+/// model added (or retired) mid-session shows up without a restart. Ordering
+/// and the hidden-harness filter both live in `models::offered`.
 #[tauri::command]
 pub async fn list_models(state: State<'_, AppState>, refresh: Option<bool>) -> CmdResult<Vec<crate::models::Model>> {
     let cache = state.codex_models.clone();
     let refresh = refresh.unwrap_or(false);
-    let codex = tauri::async_runtime::spawn_blocking(move || cache.get(refresh)).await.map_err(err)?;
-    Ok(crate::models::offered(codex))
+    // Each asks its own CLI; neither waits on the other.
+    let claude = tauri::async_runtime::spawn_blocking(move || crate::harness::claude::models::get(refresh));
+    let codex = tauri::async_runtime::spawn_blocking(move || cache.get(refresh));
+    Ok(crate::models::offered(claude.await.map_err(err)?, codex.await.map_err(err)?))
 }
 
 #[tauri::command]

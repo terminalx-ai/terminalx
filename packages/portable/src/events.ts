@@ -56,6 +56,8 @@ export interface Usage {
   contextUsed?: number;
   contextMax?: number;
   costUsd?: number;
+  /** The full id of the model that produced this reading, when the agent says. */
+  model?: string;
 }
 
 export type TurnStatus = "ok" | "error" | "aborted";

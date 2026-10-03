@@ -210,7 +210,9 @@ fn decode_assistant(v: &Value, out: &mut Vec<Payload>) {
         }
     }
     if let Some(used) = v["message"]["usage"].as_object().and_then(|_| occupancy(&v["message"]["usage"])) {
-        out.push(Payload::UsageUpdate(Usage { context_used: Some(used), ..Default::default() }));
+        // The record names the model that answered; `<synthetic>` is the CLI speaking for itself.
+        let model = v["message"]["model"].as_str().filter(|m| m.starts_with("claude-")).map(String::from);
+        out.push(Payload::UsageUpdate(Usage { context_used: Some(used), model, ..Default::default() }));
     }
 }
 
@@ -222,7 +224,7 @@ mod tests {
     const FIXTURE: &str = r#"{"type":"queue-operation","timestamp":"2026-09-02T02:41:16.631Z","sessionId":"s"}
 {"parentUuid":null,"isSidechain":false,"type":"user","uuid":"u1","timestamp":"2026-09-02T02:41:18.686Z","userType":"external","cwd":"/tmp/x","sessionId":"s","message":{"role":"user","content":[{"type":"text","text":"Add multiply"}]}}
 {"parentUuid":"u1","isSidechain":false,"type":"assistant","uuid":"a1","timestamp":"2026-09-02T02:41:23.156Z","cwd":"/tmp/x","sessionId":"s","message":{"id":"m1","role":"assistant","content":[{"type":"thinking","thinking":"hmm"}]}}
-{"parentUuid":"a1","isSidechain":false,"type":"assistant","uuid":"a2","timestamp":"2026-09-02T02:41:23.158Z","cwd":"/tmp/x","sessionId":"s","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"Looking first."}],"usage":{"input_tokens":10,"cache_read_input_tokens":90,"output_tokens":5}}}
+{"parentUuid":"a1","isSidechain":false,"type":"assistant","uuid":"a2","timestamp":"2026-09-02T02:41:23.158Z","cwd":"/tmp/x","sessionId":"s","message":{"id":"m1","role":"assistant","model":"claude-opus-5-5","content":[{"type":"text","text":"Looking first."}],"usage":{"input_tokens":10,"cache_read_input_tokens":90,"output_tokens":5}}}
 {"parentUuid":"a2","isSidechain":false,"type":"assistant","uuid":"a3","timestamp":"2026-09-02T02:41:24.816Z","cwd":"/tmp/x","sessionId":"s","message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"cat src/math.js"}}]}}
 {"parentUuid":"a3","isSidechain":false,"type":"user","uuid":"u2","timestamp":"2026-09-02T02:41:26.219Z","cwd":"/tmp/x","sessionId":"s","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"export const x = 1;"}]}}
 {"parentUuid":"u2","isSidechain":true,"type":"assistant","uuid":"a4b","timestamp":"2026-09-02T02:41:29.000Z","cwd":"/tmp/x","sessionId":"s","message":{"id":"m9","role":"assistant","content":[{"type":"text","text":"subagent chatter"}]}}
@@ -280,7 +282,7 @@ mod tests {
         let mut s = Streamer::at(0, decode_line);
         let p = s.push(FIXTURE.as_bytes());
         assert!(matches!(&p[0], Payload::UserMessage { text, .. } if text == "Add multiply"));
-        assert!(matches!(&p[3], Payload::UsageUpdate(u) if u.context_used == Some(105)));
+        assert!(matches!(&p[3], Payload::UsageUpdate(u) if u.context_used == Some(105) && u.model.as_deref() == Some("claude-opus-5-5")));
         assert!(matches!(&p[4], Payload::ToolCallStarted { tool_type: ToolType::Shell, name, .. } if name == "Bash"));
         assert!(matches!(&p[7], Payload::FileEdits { edits, .. } if edits[0].path == "/tmp/x/math.js"));
         assert!(matches!(&p[8], Payload::UserMessage { text, .. } if text == "Thanks, now add divide"));
