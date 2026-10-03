@@ -12,6 +12,7 @@ import { ExecutionLocation, WorkspaceView, describe, describeWorkspace, type Ope
 import { workspaceTargetKey, type CloudWorkspaceListItem } from "@/lib/api";
 import { retainCloudConnection, setSelectedCloudConnection, subscribeCloudConnections, type CloudLease } from "@/lib/cloudConnections";
 import { findCloudWorkspace, refreshCloudCatalog, resumeCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
+import { CloudResourceNotice } from "@/components/cloud/CloudResourceNotice";
 import { archiving, deletion, isOpen, lastSavedText, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 import { errorCode } from "@/lib/cloudTerminals";
 import { selectSession } from "@/lib/sessions";
@@ -141,6 +142,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
           {saved && <span data-testid="cloud-last-saved"> {saved}</span>}
         </div>
       )}
+      {member && item && parsed && <CloudResourceNotice workspaceKey={cloudWorkspaceKey(parsed.orgId, parsed.workspaceId)} />}
       {error && <p className="shrink-0 px-4 py-1 text-xs text-destructive">Could not open: {error}</p>}
       {!member ? (
         <Centered>
