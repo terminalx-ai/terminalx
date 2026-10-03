@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { agent, errorMessage, type HandoffInfo, type TabPtyEvent } from "@/lib/api";
-import { adoptPane, closeTerminal, openTerminal } from "@/lib/terminal";
+import { adoptPane, agentPaneId, closeTerminal, openTerminal } from "@/lib/terminal";
 import type { SessionEntry, TabEntry } from "@/types/session";
 
 /**
@@ -55,8 +55,9 @@ export function useTabViews(): State {
 }
 
 export function terminalPaneId(tabId: string): string {
-  return `tab:${tabId}`;
+  return agentPaneId(tabId);
 }
+
 
 export function tabViewOf(tabId: string): TabViewMode {
   return state.views[tabId] ?? "chat";
