@@ -1,4 +1,4 @@
-import { invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
+import { Channel, invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   WorkspaceRpcClient,
@@ -1178,6 +1178,22 @@ export const browser = {
 export const pty = {
   spawn: (id: string, cwd: string, cols: number, rows: number, command?: string) => invoke<void>("pty_spawn", { id, cwd, cols, rows, command: command ?? null }),
   write: (id: string, data: string) => invoke<void>("pty_write", { id, data }),
+  /**
+   * Receive pane `id`'s output as raw bytes, starting with what it has
+   * printed so far. One attachment per pane: a later one replaces it.
+   * `token` names this attachment; its acknowledgements and its detach carry
+   * it, so they cannot act on an attachment that has replaced it.
+   */
+  attach: (id: string, token: string, onData: (bytes: Uint8Array) => void) => {
+    const channel = new Channel<ArrayBuffer>();
+    channel.onmessage = (message) => onData(new Uint8Array(message));
+    return invoke<void>("pty_attach", { id, token, channel });
+  },
+  /** This window has drawn `drawn` bytes of the pane's output since it attached; the backend holds a pane that gets too far ahead. */
+  ack: (id: string, token: string, drawn: number) => invoke<void>("pty_ack", { id, token, drawn }),
+  detach: (id: string, token: string) => invoke<void>("pty_detach", { id, token }),
+  /** This page has attached nothing yet: drop what a page loaded before it in this window had attached. */
+  detachAll: () => invoke<void>("pty_detach_all"),
   resize: (id: string, cols: number, rows: number) => invoke<void>("pty_resize", { id, cols, rows }),
   kill: (id: string) => invoke<void>("pty_kill", { id }),
 };
