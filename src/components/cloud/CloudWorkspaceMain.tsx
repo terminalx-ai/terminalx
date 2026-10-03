@@ -51,12 +51,14 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   const [held, setHeld] = useState<{ lease: CloudLease; name: string; provider: OpenedWorkspace["provider"]; workspaceState: OpenedWorkspace["workspaceState"] } | null>(null);
   const connection = useSyncExternalStore(subscribeCloudConnections, () => held?.lease.current() ?? null, () => null);
   const state = useSyncExternalStore<WorkspaceConnectionState>(subscribeCloudConnections, () => held?.lease.state() ?? NOT_CONNECTED, () => NOT_CONNECTED);
-  const opened = useMemo<OpenedWorkspace | null>(
-    () => (held && connection ? { connection, name: held.name, provider: held.provider, workspaceState: held.workspaceState } : null),
-    [held, connection],
-  );
   const [error, setError] = useState<string | null>(null);
   const [resuming, setResuming] = useState(false);
+  // The list's state of now, so the view's chips follow a stop or a resume instead of what was true when it was opened.
+  const listState = item?.workspace.state ?? null;
+  const opened = useMemo<OpenedWorkspace | null>(
+    () => (held && connection ? { connection, name: held.name, provider: held.provider, workspaceState: listState ?? held.workspaceState, waking: resuming } : null),
+    [held, connection, listState, resuming],
+  );
 
   useEffect(() => {
     if (!parsed || !item || !canOpen) return;

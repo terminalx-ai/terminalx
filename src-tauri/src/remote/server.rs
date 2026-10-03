@@ -1033,6 +1033,10 @@ impl WorkspaceRpc {
             "exitCode": pty.exit.flatten(),
             "control": pty.control_for(peer),
             "controllerId": pty.controller_user.as_ref().and_then(|(user, _)| user.clone()),
+            // Whether the controlling device is still watching. A controller
+            // that went away (its window closed, or it re-attached as a new
+            // device) is not typing, so its own person may take over unasked.
+            "controllerPresent": pty.controller.as_ref().is_some_and(|device| pty.subscribers.values().any(|peer| peer.device_id == *device)),
         });
         // `pty/2`, and only a session this peer may see; absent for a
         // terminal that belongs to no session.

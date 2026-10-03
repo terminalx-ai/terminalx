@@ -285,6 +285,10 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
           }
         } else if (!payload.text.startsWith("tool_pending:")) {
           const turn = ensureTurn(event);
+          // A notice repeated back to back (a runtime that restarted several
+          // times says so each time) is shown once.
+          const last = turn.work[turn.work.length - 1];
+          if (last?.kind === "status" && last.text === payload.text) break;
           turn.work.push({ kind: "status", text: payload.text, key: `st${event.seq}`, seq: event.seq });
         }
         break;

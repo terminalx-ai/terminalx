@@ -105,6 +105,12 @@ role changed).
 - **Terminals.** Unchanged ownership (PRO-26): one controller per terminal.
   Drivers may now take control too. Terminals and `pty.control`
   notifications carry `controllerId`, so clients show who is typing.
+  A terminal's description also says whether the controlling device is still
+  attached (`controllerPresent`). When it is not, and the controller was the
+  same person (the same Mac re-attached after a resume, or a closed window),
+  the desktop takes control back with the ordinary `pty.control` call instead
+  of showing "another device controls this terminal". The runtime's own
+  checks on `pty.control` are unchanged.
 - **Taking the wheel (fair use).** `lease.acquire` without input holds an
   idle tab for two minutes. Asking again while holding it does not extend it
   (only input the agent receives does), and after one's own idle lease lapses

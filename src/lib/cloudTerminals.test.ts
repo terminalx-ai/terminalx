@@ -58,6 +58,36 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+// PRO-84: after a resume the strip showed "Terminal 1 (ended)" next to "Terminal 1".
+describe("terminals of a runtime that restarted", () => {
+  it("names the new runtime's terminals apart from the ended ones still shown", async () => {
+    const { state, client } = runtime([pty("p1", 1), pty("p2", 2)]);
+    await syncCloudTerminals(WS, client, xterm);
+    // The runtime restarted: a new process, numbering from 1 again.
+    state.listed = [{ ...pty("q1", 1), epoch: "e2" }];
+    (client.listPtys as ReturnType<typeof vi.fn>).mockImplementation(async () => ({ epoch: "e2", terminals: state.listed }));
+    await syncCloudTerminals(WS, client, xterm);
+    const shown = cloudTerminalsOf(WS).terminals.map((terminal) => [terminal.title, terminal.gone]);
+    expect(shown).toEqual([
+      ["Terminal 1", "runtime-restarted"],
+      ["Terminal 2", "runtime-restarted"],
+      ["Terminal 3", null],
+    ]);
+    // The name holds through later reads of the list.
+    await syncCloudTerminals(WS, client, xterm);
+    expect(cloudTerminalsOf(WS).terminals.map((terminal) => terminal.title)).toEqual(["Terminal 1", "Terminal 2", "Terminal 3"]);
+  });
+
+  it("carries whether the controlling device is still attached, when the runtime says", async () => {
+    const { state, client } = runtime([{ ...pty("p1", 1), controllerPresent: false }, pty("p2", 2)]);
+    await syncCloudTerminals(WS, client, xterm);
+    expect(cloudTerminalsOf(WS).terminals.map((terminal) => terminal.controllerPresent)).toEqual([false, null]);
+    state.listed = [{ ...pty("p1", 1), controllerPresent: true }, pty("p2", 2)];
+    await syncCloudTerminals(WS, client, xterm);
+    expect(cloudTerminalsOf(WS).terminals[0]!.controllerPresent).toBe(true);
+  });
+});
+
 describe("a connected workspace's terminals", () => {
   it("shows a terminal someone else opens without reopening anything, and attaches it once", async () => {
     const { state, client } = runtime([pty("p1", 1, "s1")]);

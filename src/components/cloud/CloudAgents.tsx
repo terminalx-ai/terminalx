@@ -56,6 +56,8 @@ export function CloudAgentsView({
   state,
   workspaceState,
   wakeWorkspace,
+  waking = false,
+  onResume,
   collabKey,
   active: shown = true,
 }: {
@@ -66,6 +68,10 @@ export function CloudAgentsView({
   workspaceState: string | null;
   /** Raise the connection to `wake` after an interactive command. */
   wakeWorkspace?: () => void;
+  /** This window asked for the workspace to be woken (it was opened with a resume, or a command went out). */
+  waking?: boolean;
+  /** Resume a stopped workspace; only for someone who may (an owner or admin). */
+  onResume?: () => void;
   /** Where this workspace's presence, notes and leases are kept (cloudCollab); defaults to its target key. */
   collabKey?: string;
   /** The agent view is the one on screen (presence reports its tab). */
@@ -132,7 +138,7 @@ export function CloudAgentsView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="cloud-agents">
-      <StatusBar state={state} tab={active} snapshot={snapshot} workspaceState={workspaceState} orgId={scope.organizationId} />
+      <StatusBar state={state} tab={active} snapshot={snapshot} workspaceState={workspaceState} orgId={scope.organizationId} waking={waking} onResume={onResume} />
       <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-hairline px-3 py-1" role="tablist" aria-label="Agent tabs">
         {tabs.map((tab, index) => (
           <div key={tab.tabId} className="flex items-center" data-testid="cloud-agent-tab">
@@ -220,20 +226,52 @@ function StatusBar({
   snapshot,
   workspaceState,
   orgId,
+  waking,
+  onResume,
 }: {
   state: WorkspaceConnectionState;
   tab: CloudAgentTab | null;
   snapshot: CloudAgentsSnapshot;
   workspaceState: string | null;
   orgId: string;
+  waking: boolean;
+  onResume?: () => void;
 }) {
+  // Somebody is waking it: this window, or a command the server woke it for.
+  const wakingNow = waking || snapshot.wake === "queued" || snapshot.wake === "in-progress";
+  const asleep = stoppedAndStaying(state, workspaceState, wakingNow);
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline px-3 py-1 text-[11px] text-muted-foreground">
-      <Chip label="Connection" value={connectionLabel(state)} testId="cloud-agent-connection" />
+      <Chip label="Connection" value={connectionLabel(state, asleep)} testId="cloud-agent-connection" />
       <Chip label="Agent" value={tab ? turnLabel(tab) : "No tab"} testId="cloud-agent-turn" />
-      <Chip label="Workspace" value={provisioningLabel(workspaceState, snapshot.wake, state, snapshot.wake === "unavailable" && runningLimitReached(orgId))} testId="cloud-agent-provisioning" />
+      <Chip
+        label="Workspace"
+        value={provisioningLabel(workspaceState, snapshot.wake, state, snapshot.wake === "unavailable" && runningLimitReached(orgId), waking)}
+        testId="cloud-agent-provisioning"
+      />
+      {asleep && onResume && (
+        <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={onResume} data-testid="cloud-agent-resume">
+          Resume
+        </Button>
+      )}
     </div>
   );
+}
+
+/** The connection is still trying to attach (each try reads "opening", then "waitingForRuntime" again). */
+function attaching(state: WorkspaceConnectionState): boolean {
+  return state.state === "opening" || state.state === "waitingForRuntime";
+}
+
+/**
+ * The workspace is stopped and nothing is waking it. The connection keeps
+ * trying in the background, which used to flip both chips every few seconds
+ * ("Asleep"/"Starting", "Checking"/"Waiting for runtime"); a stopped
+ * workspace reads one way until someone resumes it.
+ */
+export function stoppedAndStaying(state: WorkspaceConnectionState, workspaceState: string | null, waking: boolean): boolean {
+  if (waking || state.state === "connected") return false;
+  return state.state === "suspended" || (workspaceState === "suspended" && (attaching(state) || state.state === "idle"));
 }
 
 function Chip({ label, value, testId }: { label: string; value: string; testId: string }) {
@@ -244,7 +282,8 @@ function Chip({ label, value, testId }: { label: string; value: string; testId: 
   );
 }
 
-export function connectionLabel(state: WorkspaceConnectionState): string {
+export function connectionLabel(state: WorkspaceConnectionState, asleep = false): string {
+  if (asleep) return "Offline (workspace asleep)";
   switch (state.state) {
     case "connected":
       return "Live";
@@ -252,8 +291,8 @@ export function connectionLabel(state: WorkspaceConnectionState): string {
       return "Connecting";
     case "reconnecting":
       return "Reconnecting";
+    // One wait, however many times the connection asks again.
     case "opening":
-      return "Checking";
     case "waitingForRuntime":
       return "Waiting for runtime";
     case "suspended":
@@ -288,13 +327,15 @@ export function turnLabel(tab: CloudAgentTab): string {
  * but when the organization's last list shows its running limit reached,
  * that is the likely reason, and stopping a workspace is the way out.
  */
-export function provisioningLabel(workspaceState: string | null, wake: WakeResult | null, state: WorkspaceConnectionState, runningLimitReached = false): string {
+export function provisioningLabel(workspaceState: string | null, wake: WakeResult | null, state: WorkspaceConnectionState, runningLimitReached = false, waking = false): string {
   if (wake === "queued") return "Waking";
   if (wake === "in-progress" && state.state !== "connected") return "Starting";
   if (wake === "unavailable" && runningLimitReached) return "Cannot wake: the running limit is reached. Stop a workspace (commands stay queued)";
   if (wake === "unavailable") return "Cannot wake (commands stay queued)";
-  // A running workspace this window is still attaching to is Ready, not starting.
-  if (state.state === "waitingForRuntime" && workspaceState !== "ready") return "Starting";
+  // A running workspace this window is still attaching to is Ready, not starting,
+  // and a stopped one nobody is waking stays Asleep.
+  const stopped = workspaceState === "suspended" || workspaceState === "archived";
+  if (attaching(state) && workspaceState !== "ready" && (!stopped || waking)) return "Starting";
   if (state.state === "connected") return "Ready";
   switch (workspaceState) {
     case "suspended":

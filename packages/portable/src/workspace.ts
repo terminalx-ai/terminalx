@@ -231,6 +231,8 @@ export interface PtyInfo {
   control: PtyControl;
   /** The person controlling the terminal (PRO-30); null when nobody does, absent from older runtimes. */
   controllerId?: string | null;
+  /** Whether the controlling device is still attached to the terminal; absent from older runtimes. */
+  controllerPresent?: boolean;
   /** The session the terminal was opened for (`pty/2`); absent otherwise and from older runtimes. */
   sessionId?: string;
 }
@@ -244,7 +246,7 @@ export interface PtyCursor {
 export interface PtyHandlers {
   onData(bytes: Uint8Array, offset: number): void;
   onExit?(code: number | null): void;
-  onControl?(control: PtyControl, controllerId?: string | null): void;
+  onControl?(control: PtyControl, controllerId?: string | null, controllerPresent?: boolean): void;
   /** The controller resized the terminal; a viewer should match it. */
   onResize?(cols: number, rows: number): void;
   /** Output older than the runtime's ring was lost while away. */
@@ -564,7 +566,7 @@ export class WorkspaceRpcClient {
         if (typeof info.epoch === "string") this.ptyEpochs.set(ptyId, info.epoch);
         if (info.truncated === true) handlers.onTruncated?.();
         emit(String(info.data ?? ""), Number(info.offset ?? 0));
-        if (info.control) handlers.onControl?.(info.control, info.controllerId);
+        if (info.control) handlers.onControl?.(info.control, info.controllerId, info.controllerPresent);
         if (info.cols && info.rows) handlers.onResize?.(info.cols, info.rows);
         if (info.exited === true) handlers.onExit?.(info.exitCode ?? null);
       },
@@ -578,7 +580,8 @@ export class WorkspaceRpcClient {
             handlers.onExit?.((params.code as number | null | undefined) ?? null);
             break;
           case "pty.control":
-            handlers.onControl?.(params.control as PtyControl, params.controllerId as string | null | undefined);
+            // Whoever just took control is attached; an older runtime's notice says nothing either way.
+            handlers.onControl?.(params.control as PtyControl, params.controllerId as string | null | undefined, params.control === "none" ? undefined : true);
             break;
           case "pty.resized":
             handlers.onResize?.(Number(params.cols), Number(params.rows));

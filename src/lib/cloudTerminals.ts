@@ -28,6 +28,8 @@ export interface CloudTerminal {
   control: PtyControl;
   /** The person controlling it on a shared workspace (PRO-30); null when nobody or unknown. */
   controllerId: string | null;
+  /** Whether the controlling device is still attached; null when the runtime does not say. */
+  controllerPresent: boolean | null;
   /** The controller's size, which a viewer shows. */
   cols: number;
   rows: number;
@@ -119,6 +121,7 @@ function fromInfo(workspace: string, info: PtyInfo): CloudTerminal {
     exitCode: info.exitCode,
     control: info.control,
     controllerId: info.controllerId ?? null,
+    controllerPresent: info.controllerPresent ?? null,
     cols: info.cols,
     rows: info.rows,
     gone: null,
@@ -192,8 +195,8 @@ async function attach(workspace: string, client: WorkspaceRpcClient, terminal: C
       const current = cloudTerminalsOf(workspace).terminals.find((item) => item.id === terminal.id);
       if (current && !current.exited) patch(workspace, terminal.id, { exited: true, exitCode: code });
     },
-    onControl: (control, controllerId) => {
-      patch(workspace, terminal.id, { control, ...(controllerId !== undefined ? { controllerId } : {}) });
+    onControl: (control, controllerId, controllerPresent) => {
+      patch(workspace, terminal.id, { control, ...(controllerId !== undefined ? { controllerId } : {}), ...(controllerPresent !== undefined ? { controllerPresent } : {}) });
       // A viewer shows the program at the controller's size.
       const current = cloudTerminalsOf(workspace).terminals.find((item) => item.id === terminal.id);
       if (control !== "you" && current && (instance.term.cols !== current.cols || instance.term.rows !== current.rows)) {
@@ -223,6 +226,20 @@ async function attach(workspace: string, client: WorkspaceRpcClient, terminal: C
   binding.attachment = attachment;
 }
 
+/**
+ * A restarted runtime numbers its terminals from 1 again, while the tabs of
+ * the one before stay open (ended) until they are closed. A new terminal
+ * whose name another tab still shows takes the next free number, so the strip
+ * never reads "Terminal 1 (ended)" next to "Terminal 1".
+ */
+function named(terminal: CloudTerminal, shown: readonly CloudTerminal[]): CloudTerminal {
+  const taken = new Set(shown.filter((other) => other.id !== terminal.id).map((other) => other.title));
+  if (!taken.has(terminal.title)) return terminal;
+  let number = terminal.number;
+  while (taken.has(`Terminal ${number}`)) number++;
+  return { ...terminal, title: `Terminal ${number}` };
+}
+
 /** `next` when it says something new about the terminal, else the object the views already hold. */
 function unchanged(current: CloudTerminal, next: CloudTerminal): CloudTerminal {
   return (Object.keys(next) as (keyof CloudTerminal)[]).every((field) => current[field] === next[field]) ? current : next;
@@ -250,7 +267,7 @@ export async function syncCloudTerminals(
       if (terminal.gone || (openedAt.get(terminal.id) ?? 0) > asked) return terminal;
       return { ...terminal, gone: terminal.epoch === listed.epoch ? "closed" : "runtime-restarted" };
     });
-    for (const info of listed.terminals) if (!known.has(info.ptyId)) terminals.push(fromInfo(workspace, info));
+    for (const info of listed.terminals) if (!known.has(info.ptyId)) terminals.push(named(fromInfo(workspace, info), terminals));
     const selected = current.selected && terminals.some((terminal) => terminal.id === current.selected) ? current.selected : (terminals[0]?.id ?? null);
     if (selected === current.selected && terminals.length === current.terminals.length && terminals.every((terminal, index) => terminal === current.terminals[index])) return current;
     return { ...current, terminals, selected };
@@ -268,7 +285,7 @@ export async function createCloudTerminal(
   options: { sessionId?: string } = {},
 ): Promise<CloudTerminal> {
   const info = await client.createPty(options.sessionId ? { ...size, sessionId: options.sessionId } : size);
-  const terminal = fromInfo(workspace, info);
+  const terminal = named(fromInfo(workspace, info), cloudTerminalsOf(workspace).terminals);
   openedAt.set(terminal.id, ++clock);
   update(workspace, (current) => ({
     ...current,
@@ -373,7 +390,7 @@ export async function takeControl(workspace: string, client: WorkspaceRpcClient,
   const terminal = cloudTerminalsOf(workspace).terminals.find((item) => item.id === id);
   if (!terminal) return;
   const info = await client.controlPty(terminal.ptyId, size?.cols, size?.rows);
-  patch(workspace, id, { control: info.control, controllerId: info.controllerId ?? null, cols: info.cols, rows: info.rows, inputError: null });
+  patch(workspace, id, { control: info.control, controllerId: info.controllerId ?? null, controllerPresent: info.controllerPresent ?? null, cols: info.cols, rows: info.rows, inputError: null });
 }
 
 /**

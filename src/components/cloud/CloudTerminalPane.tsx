@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { TerminalView, createTerminal } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
@@ -53,6 +53,19 @@ export function CloudTerminalPane({
     }
   };
 
+  // The same person coming back (this Mac re-attached after a resume, or a
+  // window that was closed) is not "another device": when the runtime says
+  // the controlling device is gone, take control once without asking. A
+  // controller that is still attached, or someone else's, is left alone.
+  const reclaimed = useRef<string | null>(null);
+  const reclaim = shouldReclaim(terminal, mayControl, you) && connected;
+  useEffect(() => {
+    const attempt = `${terminal.id}:${terminal.epoch}`;
+    if (!reclaim || reclaimed.current === attempt) return;
+    reclaimed.current = attempt;
+    void control();
+  }, [reclaim, terminal.id, terminal.epoch]);
+
   let notice: string | null = null;
   if (terminal.gone === "runtime-restarted") notice = "This terminal ended when the workspace runtime restarted. Input is not sent anywhere.";
   else if (terminal.gone === "closed") notice = "This terminal was closed.";
@@ -61,7 +74,7 @@ export function CloudTerminalPane({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="cloud-terminal">
-      {!terminal.gone && !terminal.exited && !controlling && (
+      {!terminal.gone && !terminal.exited && !controlling && !(reclaim && busy) && (
         <div className="flex items-center gap-2 border-b border-hairline px-3 py-1 text-xs text-muted-foreground" data-testid="cloud-terminal-viewer">
           <span>{viewerText(terminal, manage, mayControl, you, nameOf)}</span>
           {mayControl && (
@@ -82,6 +95,16 @@ export function CloudTerminalPane({
       </div>
     </div>
   );
+}
+
+/**
+ * Whether this view should take a terminal back by itself: it may control
+ * terminals, the runtime says the controlling device is no longer attached,
+ * and that device was this person's (or nobody the runtime can name).
+ */
+export function shouldReclaim(terminal: CloudTerminal, mayControl: boolean, you: WorkspaceYou | null): boolean {
+  if (!mayControl || terminal.gone || terminal.exited || terminal.control !== "other" || terminal.controllerPresent !== false) return false;
+  return terminal.controllerId === null || terminal.controllerId === you?.userId;
 }
 
 /** Why this view only watches the terminal, and who controls it. */

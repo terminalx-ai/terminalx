@@ -46,7 +46,7 @@ import {
   useCloudTerminals,
   type CloudTerminal,
 } from "@/lib/cloudTerminals";
-import { canDrive, sharingKnown, effectiveYou, notShared, presenceTab, rememberYou, startCollab, useCollab } from "@/lib/cloudCollab";
+import { canDrive, sharingKnown, effectiveYou, notShared, presenceTab, rememberYou, startCollab, useCollab, workspaceAuthority } from "@/lib/cloudCollab";
 import { rememberPeople } from "@/lib/cloudPeople";
 import { getCloudAgents } from "@/lib/cloudAgents";
 import { useTheme } from "@/lib/theme";
@@ -59,6 +59,10 @@ export interface OpenedWorkspace {
   provider: string | null;
   /** The API state when it was opened (ready, suspended, provisioning); null for a development runtime. */
   workspaceState: string | null;
+  /** It was opened with a resume: the stopped state above is on its way out. */
+  waking?: boolean;
+  /** This person may resume it (the lifecycle is an owner's or admin's). */
+  mayResume?: boolean;
 }
 
 /** A cloud provider's display name. */
@@ -177,7 +181,16 @@ export function CloudSessionPage({ onBack }: { onBack: () => void }) {
         { kind: "cloud", organizationId: item.workspace.orgId, workspaceId: item.workspace.id },
         wake ? "wake" : "connect",
       );
-      if (next) setOpened({ connection: next, name: item.workspace.name, provider: item.workspace.provider, workspaceState: item.workspace.state });
+      if (next) {
+        setOpened({
+          connection: next,
+          name: item.workspace.name,
+          provider: item.workspace.provider,
+          workspaceState: item.workspace.state,
+          waking: wake,
+          mayResume: workspaceAuthority(item.workspace).lifecycle,
+        });
+      }
     } catch (e) {
       setError(errorCode(e));
     }
@@ -512,6 +525,19 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
   const agentScope = connection.target.kind === "cloud" ? connection.target : { organizationId: "", workspaceId: key };
   const { terminals, selected, reveal } = useCloudTerminals(key);
   const [view, setView] = useState<View>({ kind: "terminal" });
+  // Whether this window asked for the workspace to be woken: until then a stopped workspace just reads stopped.
+  const [waking, setWaking] = useState(opened.waking ?? false);
+  useEffect(() => {
+    if (opened.waking) setWaking(true);
+  }, [opened.waking]);
+  // Connected: that wake is spent, and a later stop reads stopped again.
+  useEffect(() => {
+    if (state.state === "connected") setWaking(false);
+  }, [state.state]);
+  const wake = useCallback(() => {
+    setWaking(true);
+    void connection.activate("wake").catch(() => undefined);
+  }, [connection]);
   // A terminal row chosen in the sidebar shows that terminal, whatever view was up.
   useEffect(() => {
     if (reveal) setView({ kind: "terminal" });
@@ -755,7 +781,9 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
           client={client}
           state={state}
           workspaceState={opened.workspaceState}
-          wakeWorkspace={() => void connection.activate("wake").catch(() => undefined)}
+          wakeWorkspace={wake}
+          waking={waking}
+          onResume={opened.mayResume ? wake : undefined}
           collabKey={key}
           active={view.kind === "agent"}
         />
