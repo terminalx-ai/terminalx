@@ -33,7 +33,7 @@ vi.mock("@/components/chat/Composer", () => ({
 // jsdom has no canvas for the chat's idle animation.
 vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonRunner: () => null, RaccoonScene: () => null }));
 
-import { CloudAgentsView, provisioningLabel } from "./CloudAgents";
+import { CloudAgentsView, provisioningLabel, signInMessage } from "./CloudAgents";
 import { resetCloudAgents } from "@/lib/cloudAgents";
 import { rememberYou, resetCollab, startCollab, TYPING_IDLE_MS } from "@/lib/cloudCollab";
 import { rememberPeople, resetPeople } from "@/lib/cloudPeople";
@@ -338,6 +338,34 @@ describe("cloud agent tabs", () => {
     // Not shown as still working: no stop button, a plain send.
     expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
     expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
+  });
+
+  it("says an agent needs sign-in instead of showing it working, and what to do (PRO-78)", async () => {
+    liveTabs = [tabInfo({ status: "in_progress", signIn: { provider: "claude", state: "not-connected", reason: null } })];
+    render(view(connected()));
+    const notice = await screen.findByTestId("cloud-agent-sign-in");
+    expect(notice.textContent).toContain("Needs sign-in: Claude Code isn't connected for this organization");
+    expect(screen.getByTestId("cloud-agent-turn").textContent).toContain("Needs sign-in");
+    expect(screen.getByTestId("cloud-agent-turn").textContent).not.toContain("Working");
+    // Not a turn in progress: no spinner on the tab, no stop button.
+    expect(within(screen.getByTestId("cloud-agent-tab")).queryByLabelText("working")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  });
+
+  it("words the sign-in notice for who is reading and why the login is missing", () => {
+    const info = (signIn: AgentTabInfo["signIn"]) => ({ harness: "codex", signIn });
+    expect(signInMessage(info(null), true)).toBeNull();
+    expect(signInMessage(info({ provider: "codex", state: "not-connected" }), true)).toBe(
+      "Needs sign-in: Codex isn't connected for this organization, so it can't take prompts here. Connect it in the web console under Compute setup → Agent logins, then send again.",
+    );
+    // A member cannot connect it, and is not sent somewhere they have no access to.
+    expect(signInMessage(info({ provider: "codex", state: "not-connected" }), false)).toBe(
+      "Needs sign-in: Codex isn't connected for this organization, so it can't take prompts here. Ask an owner or admin to connect it, then send again.",
+    );
+    expect(signInMessage(info({ provider: "codex", state: "not-connected" }), null)).toContain("Ask an owner or admin");
+    expect(signInMessage(info({ provider: "codex", state: "unavailable", reason: "token-expired" }), true)).toContain("login has expired");
+    expect(signInMessage(info({ provider: "codex", state: "unavailable", reason: "shared-use-policy" }), false)).toContain("An owner or admin can allow it for the whole organization.");
+    expect(signInMessage(info({ provider: "codex", state: "revoked" }), true)).toContain("Codex login is revoked");
   });
 
   it("wakes a sleeping workspace only after an interactive command, and reports the wake", async () => {

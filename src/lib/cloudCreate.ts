@@ -13,6 +13,7 @@ import type {
   CloudWorkspaceSnapshot,
 } from "@/lib/api";
 import { roleRefusedMessage } from "@/lib/accountRoles";
+import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
 
 /**
  * Creating a cloud workspace from repositories and a first prompt (PRO-21,
@@ -91,9 +92,29 @@ export function launchInput(form: CreateForm): CloudWorkspaceLaunchInput {
   };
 }
 
+/**
+ * Check the repositories and, when there is a first prompt, that the
+ * organization has a login for its agent (PRO-78): a prompt sent to an agent
+ * at its sign-in screen is never read. A workspace without a first prompt
+ * needs no agent login. Throws the refusal; nothing is quoted or created.
+ */
+export async function preflightCreate(api: Pick<CreateApi, "cloudWorkspacePreflight">, form: CreateForm, orgId: string | null): Promise<void> {
+  const repositories = repositoriesInput(form);
+  const agent = form.prompt.trim() ? form.agent : null;
+  if (!repositories.length && !agent) return;
+  const preflight = await api.cloudWorkspacePreflight(repositories, orgId, agent);
+  // An `agent-credential` check counts only when it names this agent: an
+  // older API sends one about the setup's credential ids on every desktop
+  // create, which says nothing about the organization's logins.
+  const failed = preflight.checks.find((check) => check.status === "failed" && (check.kind !== "agent-credential" || (agent !== null && check.agent === agent)));
+  if (!failed) return;
+  if (failed.kind === "agent-credential") throw new CreateRefused("cloud_workspace_agent_credential_required", agent);
+  throw new CreateRefused(failed.errorCode ?? "cloud_workspace_request_invalid", failed.cloneUrl);
+}
+
 /** What the API calls look like to the flow; the page passes `api`. */
 export interface CreateApi {
-  cloudWorkspacePreflight: (repositories: CloudWorkspaceRepositoryInput[], orgId?: string | null) => Promise<CloudWorkspacePreflight>;
+  cloudWorkspacePreflight: (repositories: CloudWorkspaceRepositoryInput[], orgId?: string | null, agent?: string | null) => Promise<CloudWorkspacePreflight>;
   cloudWorkspaceSetup: (provider: CloudWorkspaceProviderId, orgId?: string | null) => Promise<CloudWorkspaceSetup>;
   cloudWorkspaceQuote: (input: CloudWorkspaceQuoteInput, orgId?: string | null) => Promise<CloudWorkspaceQuote>;
   cloudWorkspaceCreate: (input: CloudWorkspaceCreateInput, orgId?: string | null) => Promise<CloudWorkspaceSnapshot>;
@@ -148,11 +169,9 @@ export async function createWorkspace(
     const first = Object.values(errors)[0];
     if (first) throw new CreateRefused("cloud_workspace_form_invalid", first);
     const repositories = repositoriesInput(form);
-    if (repositories.length) {
+    if (repositories.length || form.prompt.trim()) {
       onStep?.("checking");
-      const preflight = await api.cloudWorkspacePreflight(repositories, options.orgId ?? null);
-      const failed = preflight.checks.find((check) => check.status === "failed" && check.kind !== "agent-credential");
-      if (failed) throw new CreateRefused(failed.errorCode ?? "cloud_workspace_request_invalid", failed.cloneUrl);
+      await preflightCreate(api, form, options.orgId ?? null);
     }
     onStep?.("quoting");
     const setup = await api.cloudWorkspaceSetup(form.provider!, options.orgId ?? null);
@@ -386,8 +405,16 @@ const MESSAGES: Record<string, string> = {
   cloud_workspace_launch_invalid: "Choose a valid agent, model and effort.",
 };
 
+/** Where an organization's agent logins are connected. Only an owner or admin can. */
+export const AGENT_LOGIN_PLACE = "the web console under Compute setup → Agent logins";
+
 export function createErrorMessage(code: string, detail: string | null = null): string {
   if (code === "cloud_workspace_form_invalid") return detail ?? "Check the form.";
+  // Only an owner or admin creates workspaces, so the fix is theirs to make.
+  if (code === "cloud_workspace_agent_credential_required") {
+    const agent = detail ? cloudAgentLabel(detail) : "The agent";
+    return `${agent} isn't connected for this organization, so it can't run a first prompt. Connect it in ${AGENT_LOGIN_PLACE}, or create the workspace without a prompt.`;
+  }
   const message = MESSAGES[code] ?? `The workspace could not be created (${code}).`;
   return detail && code.startsWith("cloud_workspace_repository") ? `${message} (${detail.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "")})` : message;
 }
@@ -397,6 +424,7 @@ const FAILURES: Record<string, string> = {
   "repository-sync-failed": "A repository could not be switched to its branch.",
   "branch-create-failed": "The work branch could not be created.",
   "agent-start-failed": "The agent could not be started.",
+  "agent-sign-in-required": `The agent isn't connected for this organization, so the first prompt was not sent. An owner or admin can connect it in ${AGENT_LOGIN_PLACE}.`,
   "runtime-interrupted": "The workspace restarted while starting the agent. The prompt may not have been sent.",
   "runtime-storage-replaced": "The workspace lost its state while starting the agent. The prompt may not have been sent.",
   "payload-invalid": "The launch settings were not accepted by the workspace.",

@@ -76,6 +76,11 @@ pub struct AgentTabInfo {
     pub follow_ups: Vec<FollowUpView>,
     /// Who is driving the tab (contract §21.5), if anyone.
     pub lease: Option<crate::remote::collab::TabLease>,
+    /// Set when the tab's agent has no way to sign in (PRO-78): the
+    /// organization has no usable login for it and the workspace
+    /// configuration sets no key. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<crate::cloud_grants::SignInRequired>,
     pub last_seq: u64,
     pub created: String,
     pub modified: String,
@@ -228,6 +233,7 @@ impl AgentOps for ManagerOps {
                         .collect(),
                     follow_ups: Vec::new(),
                     lease: None,
+                    sign_in: crate::cloud_grants::sign_in_required_for_launch(&tab.harness, &format!("{}/{}", entry.id, tab.id)),
                     last_seq,
                     created: tab.created.clone(),
                     modified: tab.modified.clone(),

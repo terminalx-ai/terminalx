@@ -95,7 +95,7 @@ describe("CloudCreateWorkspace", () => {
     expect(mocked.cloudWorkspacePreflight).toHaveBeenCalledWith([
       { cloneUrl: "https://github.com/acme/app.git", ref: "feature/login" },
       { cloneUrl: "https://github.com/acme/lib.git", ref: null },
-    ], null);
+    ], null, "claude");
     expect(mocked.cloudWorkspaceQuote).toHaveBeenCalledWith(expect.objectContaining({ provider: "box", sourceId: "s" }), null);
     const input = mocked.cloudWorkspaceCreate.mock.calls[0][0];
     expect(input).toMatchObject({

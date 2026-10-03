@@ -130,6 +130,8 @@ beforeEach(async () => {
   mocks.api.cloudAgentPurgeWorkspace.mockResolvedValue({ removed: false, unsentCommands: 0, cachedTabs: 0 });
   mocks.api.listHarnesses.mockResolvedValue([{ id: "claude", name: "Claude", available: false, installHint: "" }]);
   mocks.api.cloudProviders.mockResolvedValue({ providers: [{ id: "box", displayName: "Box", availability: "available" }] });
+  // A first prompt asks whether its agent has a login, repositories or not (PRO-78).
+  mocks.api.cloudWorkspacePreflight.mockResolvedValue({ ready: true, checks: [] });
   mocks.api.cloudWorkspaceSetup.mockResolvedValue({ defaults: { sourceId: "s", locationId: "l", machineClassId: "m", idleSuspendMinutes: 30, retentionDays: 7, networkPolicy: "open" } });
   mocks.api.cloudWorkspaceQuote.mockResolvedValue({ id: "q", currency: "USD", pricing: "provider-rate", activeHourlyMicros: 120_000, estimatedSuspendedMonthlyMicros: null, configuration: { machineClassLabel: "Small", vcpu: 2, memoryMiB: 4096, locationLabel: "Frankfurt", idleSuspendMinutes: 30 } });
   const connection = runtime();
