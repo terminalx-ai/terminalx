@@ -49,6 +49,7 @@ import { useCloudConnection } from "@/lib/cloudConnections";
 import { lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { cloudAgentLabel, deriveCloudActivity, type CloudActivity, type RowTone } from "@/lib/cloudRowState";
+import { workspaceUsage } from "@/lib/runningLimit";
 import {
   bootCloudSessions,
   closeCloudSessionTab,
@@ -193,6 +194,8 @@ function OrgSection({
   // a project's "+": true for them, false for a member, null while this
   // account's role here is not known yet (nothing is offered until it is).
   const mayCreate = mayStartCloudSessions(status, org.id);
+  // From the list this section already has; an older server sends none.
+  const usage = live ? workspaceUsage(org.id, catalog) : null;
 
   const switchOrg = async () => {
     setSwitchError(null);
@@ -244,6 +247,11 @@ function OrgSection({
         <span className={cn("shrink-0", yieldsToRowActions)} data-testid="cloud-org-role">
           <RowChip>{org.role}</RowChip>
         </span>
+        {usage && (
+          <span className={cn("shrink-0", usage.atLimit && "[&>span]:text-warning", yieldsToRowActions)} title={usage.card} data-testid="cloud-org-quota" data-at-limit={usage.atLimit || undefined}>
+            <RowChip>{usage.label}</RowChip>
+          </span>
+        )}
         <RowActions persistent className={menu.open || addMenu.open ? "not-sr-only" : undefined}>
           {!live && (
             <WithTooltip label="Make this the default organization to show its cloud sessions">
@@ -472,6 +480,8 @@ function CloudProjectNode({ project, onLifecycle }: { project: CloudProject; onL
           {project.blank ? <Folder className="size-4 shrink-0 text-muted-foreground" /> : <FolderGit2 className="size-4 shrink-0 text-muted-foreground" />}
           <span className="min-w-0 flex-1 truncate text-[13px]">{project.fullName}</span>
           {project.pinned && <Pin className="size-3 shrink-0 text-faint" />}
+          {/* One workspace has no row of its own: its extra repositories show here. */}
+          {!grouped && project.workspaces[0] && <ExtraRepositoriesChip item={project.workspaces[0].item} />}
           {project.blank && <RowChip>no repo</RowChip>}
           {!project.selected && <RowChip>not accessible</RowChip>}
         </button>
@@ -592,6 +602,23 @@ function workspaceCard(item: CloudWorkspaceListItem, activity: CloudActivity): s
   return [...new Set(lines)].join("\n");
 }
 
+/**
+ * `+N repo` for a workspace with more checkouts than the repository it is
+ * listed under (its primary one, S1 `repositories`); the tooltip names them.
+ * Nothing on a server that does not report repositories.
+ */
+function ExtraRepositoriesChip({ item, className }: { item: CloudWorkspaceListItem; className?: string }) {
+  const repositories = item.workspace.repositories ?? [];
+  const extra = repositories.filter((repository, index) => (repositories.some((each) => each.primary) ? !repository.primary : index > 0));
+  if (!extra.length) return null;
+  const names = extra.map((repository) => repository.fullName ?? repository.identity ?? "a repository no longer selected");
+  return (
+    <span className={cn("shrink-0", className)} title={`${item.workspace.name} also checks out ${names.join(", ")}`} data-testid="cloud-extra-repositories">
+      <RowChip>{`+${extra.length} ${extra.length === 1 ? "repo" : "repos"}`}</RowChip>
+    </span>
+  );
+}
+
 /** The state a workspace shows: its lifecycle, then its connection, then the most urgent of its sessions. */
 function useWorkspaceActivity(node: CloudWorkspaceNode, sessions: readonly CloudSessionRow[], fromCache: boolean): CloudActivity {
   const connection = useCloudConnection(node.key);
@@ -635,6 +662,7 @@ function WorkspaceGroupNode({ node, expanded: projectExpanded, onLifecycle }: { 
             <RowChip mono>{branch}</RowChip>
           </span>
         )}
+        <ExtraRepositoriesChip item={node.item} className={yieldsToRowActions} />
         <ShareBadge you={workspace.you} sharedWith={workspace.sharedWith} className={yieldsToRowActions} />
         <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", DOT[activity.tone])} />
         <span className={cn("shrink-0 text-[10px] text-faint", activity.tone === "attention" && "text-destructive", yieldsToRowActions)} data-testid="cloud-workspace-row-state">

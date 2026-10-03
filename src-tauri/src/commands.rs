@@ -1669,6 +1669,31 @@ pub fn pty_write(state: State<'_, AppState>, id: String, data: String) -> CmdRes
     state.terminals.write(&id, data.as_bytes()).map_err(err)
 }
 
+/// The window shows this pane: send it the pane's output as raw bytes, the
+/// scrollback so far first. No base64, no JSON, and no other listener hears it.
+/// `token` names this attachment in the acknowledgements and the detach that follow.
+#[tauri::command]
+pub fn pty_attach(state: State<'_, AppState>, id: String, token: String, channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>) {
+    state.terminals.attach(&id, &token, Box::new(move |bytes| channel.send(tauri::ipc::InvokeResponseBody::Raw(bytes.to_vec())).is_ok()));
+}
+
+/// The window has drawn `drawn` bytes of the pane's output since it attached (flow control).
+#[tauri::command]
+pub fn pty_ack(state: State<'_, AppState>, id: String, token: String, drawn: u64) {
+    state.terminals.ack(&id, &token, drawn);
+}
+
+/// A freshly loaded window: whatever its previous page was shown is gone.
+#[tauri::command]
+pub fn pty_detach_all(state: State<'_, AppState>) {
+    state.terminals.detach_all();
+}
+
+#[tauri::command]
+pub fn pty_detach(state: State<'_, AppState>, id: String, token: String) {
+    state.terminals.detach(&id, &token);
+}
+
 #[tauri::command]
 pub fn pty_resize(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> CmdResult<()> {
     if !state.pairing.desktop_terminal_input_allowed(&id) {
