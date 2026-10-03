@@ -25,7 +25,7 @@ vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
   setItem: vi.fn(async (key: string, value: string) => { mocks.storage.set(key, value); }),
   removeItem: vi.fn(async (key: string) => { mocks.storage.delete(key); }),
 } }));
-vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Search", "ChevronUp", "FileText", "Paperclip", "Radio", "Send", "Terminal", "X"].map((name) => [name, () => null])));
+vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Search", "ChevronUp", "FileText", "MoreVertical", "Paperclip", "Radio", "Send", "Terminal", "X"].map((name) => [name, () => null])));
 vi.mock("react-native", () => {
   const Box = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
@@ -69,7 +69,7 @@ beforeEach(() => {
   mocks.setParams.mockImplementation((params) => Object.assign(mocks.params, params));
   mocks.app = {
     logs: [],
-    activeHost: { id: mocks.params.hostId, label: "Mac", endpoint: "localhost" }, connectionStage: "connected",
+    hosts: [], activeHost: { id: mocks.params.hostId, label: "Mac", endpoint: "localhost" }, connectionStage: "connected",
     sessions: [{ id: "worktree", title: "Create a new issue", project: "TerminalX", worktree: "issue-132", modified: "today", tabs: [
       { id: "claude", harness: "claude", status: "waiting" }, { id: "codex", harness: "codex", status: "in_progress" },
     ] }],
