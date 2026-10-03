@@ -32,7 +32,7 @@ import {
 } from "@/components/ui/menu";
 import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { AgentTabRow, ItemTitle, RowChip, RowTime, ShellTabRow, StatusStripe, TreeGroup, TreeNode, TreeRow, TreeToggle } from "@/components/layout/SidebarRows";
-import { archiveLine } from "@/components/cloud/CloudWorkspaceLifecycle";
+import { archiveLine, deletionLine } from "@/components/cloud/CloudWorkspaceLifecycle";
 import { archivingText, describeWorkspace } from "@/components/cloud/CloudWorkspaceView";
 import { openNewCloudWorkspace } from "@/components/cloud/NewCloudWorkspaceDialog";
 import { api, errorMessage, type CloudWorkspaceListItem, type OrganizationSummary } from "@/lib/api";
@@ -383,6 +383,9 @@ function OrgTree({ org, orgId, mayCreate, onLifecycle }: { org: OrgCatalog | und
             </button>
           </div>
           <TreeGroup expanded={archivedOpen} className="pb-1 pl-2">
+            <p className="px-1.5 pb-1 text-[10px] leading-snug text-faint" data-testid="cloud-archived-note">
+              Stopped and kept until their deadline, then deleted automatically. Storage keeps billing at the provider until then.
+            </p>
             {placed.archived.map((node) => (
               <ArchivedWorkspaceRow key={node.key} node={node} onLifecycle={onLifecycle} />
             ))}
@@ -603,6 +606,9 @@ function workspaceCard(item: CloudWorkspaceListItem, activity: CloudActivity): s
   const lines = [`Cloud workspace ${workspace.name}`, `Runs on ${workspace.provider}`, `State: ${activity.label}${activity.lastKnown ? " (last known)" : ""}`, describeWorkspace(item)];
   const branch = workspace.launch?.workBranch;
   if (branch) lines.push(`Branch: ${branch}`);
+  // How far a delete is, or why it stopped.
+  const deleting = deletionLine(item);
+  if (deleting) lines.push(deleting);
   const repositories = (workspace.repositories ?? []).map((repository) => repository.fullName ?? repository.identity).filter(Boolean);
   if (repositories.length) lines.push(`Repositories: ${repositories.join(", ")}`);
   lines.push(`Access: ${workspace.accessMode === "organization" ? "organization" : "private"}`);
@@ -671,6 +677,11 @@ function WorkspaceGroupNode({ node, expanded: projectExpanded, onLifecycle }: { 
         </RowActions>
       </TreeRow>
       {error && <p className="ml-6 text-[10px] text-destructive">{error}</p>}
+      {deletionLine(node.item) && (
+        <p className={cn("ml-6 text-[10px]", deletion(node.item) === "failed" ? "whitespace-normal break-words text-destructive" : "text-faint")} data-testid="cloud-workspace-row-deletion">
+          {deletionLine(node.item)}
+        </p>
+      )}
       <TreeGroup expanded={expanded} className="pl-2">
         <WorkspaceSessions node={node} shown={shown} showLocation={false} />
       </TreeGroup>
@@ -1048,12 +1059,16 @@ export function archivedRowText(item: CloudWorkspaceListItem, now = Date.now()):
   const busy = archiving(item);
   const failed = item.workspace.state !== "archived" && !busy && !deletion(item);
   const saved = !busy && item.latestOperation?.action === "archive" ? checkpointText(item.latestOperation.checkpoint) : null;
-  const line = busy
-    ? archivingText(item)
-    : failed
-      ? `The archive did not finish: ${item.latestOperation ? operationFailureText(item.latestOperation) : lifecycleErrorMessage("cloud_workspace_unknown_error")}`
-      : archiveLine(item, now);
-  return { line, failed, saved };
+  const deleting = deletionLine(item);
+  const line = deleting
+    ? deleting
+    : busy
+      ? archivingText(item)
+      : failed
+        ? `The archive did not finish: ${item.latestOperation ? operationFailureText(item.latestOperation) : lifecycleErrorMessage("cloud_workspace_unknown_error")}`
+        : archiveLine(item, now);
+  // A reason is read whole: it wraps instead of being cut at the sidebar's width.
+  return { line, failed: failed || deletion(item) === "failed", saved };
 }
 
 function ArchivedWorkspaceRow({ node, onLifecycle }: { node: CloudWorkspaceNode; onLifecycle: (dialog: Dialog) => void }) {
@@ -1091,7 +1106,7 @@ function ArchivedWorkspaceRow({ node, onLifecycle }: { node: CloudWorkspaceNode;
               {state.label}
             </span>
           </span>
-          <span className={cn("truncate pl-4 text-[10px] text-faint", text.failed && "text-destructive")} data-testid="cloud-archive-deadline">
+          <span className={cn("pl-4 text-[10px] text-faint", text.failed ? "whitespace-normal break-words text-destructive" : "truncate")} data-testid="cloud-archive-deadline">
             {text.line}
           </span>
           {text.saved && (

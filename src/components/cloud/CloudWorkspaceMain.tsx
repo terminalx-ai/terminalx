@@ -7,6 +7,7 @@ import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { workspaceRowState } from "@/components/layout/cloud/rowState";
 import { useCloudSections } from "@/components/layout/cloud/CloudSections";
 import { DeletionProgress } from "./CloudWorkspaceLifecycle";
+import { WorkspaceLifecycleDialog } from "./WorkspaceActions";
 import { ExecutionLocation, WorkspaceView, describe, describeWorkspace, type OpenedWorkspace } from "./CloudWorkspaceView";
 import { workspaceTargetKey, type CloudWorkspaceListItem } from "@/lib/api";
 import { retainCloudConnection, setSelectedCloudConnection, subscribeCloudConnections, type CloudLease } from "@/lib/cloudConnections";
@@ -55,6 +56,8 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   );
   const [error, setError] = useState<string | null>(null);
   const [resuming, setResuming] = useState(false);
+  // A retried delete the server refuses because work is still running: the delete dialog says what would be lost and asks.
+  const [forcing, setForcing] = useState(false);
 
   useEffect(() => {
     if (!parsed || !item || !canOpen) return;
@@ -149,7 +152,8 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
         </Centered>
       ) : deleting ? (
         <div className="p-4">
-          <DeletionProgress item={item} onChanged={() => void refreshCloudCatalog(item.workspace.orgId)} onForceNeeded={() => undefined} />
+          <DeletionProgress item={item} onChanged={() => void refreshCloudCatalog(item.workspace.orgId)} onForceNeeded={() => setForcing(true)} />
+          {forcing && <WorkspaceLifecycleDialog request={{ item, action: "delete" }} onClose={() => setForcing(false)} />}
         </div>
       ) : !canOpen ? (
         <Centered>{describeWorkspace(item)}</Centered>

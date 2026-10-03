@@ -268,9 +268,17 @@ describe("the command palette", () => {
         search("go to cloud");
         fireEvent.click(await screen.findByRole("option", { name: /Go to cloud session…/ }));
         expect(onOpenChange).not.toHaveBeenCalledWith(false);
-        expect((screen.getByPlaceholderText(/Search sessions/) as HTMLInputElement).value).toBe("cloud ");
-        // Both organizations' sessions are listed.
+        const input = (await screen.findByPlaceholderText("Search cloud sessions…")) as HTMLInputElement;
+        expect(input.value).toBe("");
+        // Only cloud sessions are listed, both organizations', by kind: no command, project or local row.
         await screen.findByRole("option", { name: /Fix login redirect/ });
+        const options = screen.getAllByRole("option");
+        expect(options.every((option) => /cloud/.test(option.textContent ?? ""))).toBe(true);
+        expect(screen.queryByRole("option", { name: /Go to cloud session…/ })).toBeNull();
+        expect(screen.queryByRole("option", { name: /New cloud workspace…/ })).toBeNull();
+        // What is typed next searches those sessions only.
+        fireEvent.change(input, { target: { value: "landing" } });
+        await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(1));
         fireEvent.click(await screen.findByRole("option", { name: /Landing page copy/ }));
         await waitFor(() => expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${OTHER}:ws-b:sb`));
         expectNoWake();

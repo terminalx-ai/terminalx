@@ -255,6 +255,8 @@ export function CommandPalette({
   const status = useStatus();
   const theme = useTheme();
   const [query, setQuery] = useState("");
+  // "Go to cloud session…": only cloud sessions are listed, searched by what is typed next.
+  const [cloudOnly, setCloudOnly] = useState(false);
   const deferredQuery = useDeferredValue(query);
   const [fileHits, setFileHits] = useState<FileHit[]>([]);
   const [fileLoading, setFileLoading] = useState(false);
@@ -298,6 +300,7 @@ export function CommandPalette({
   useEffect(() => {
     if (!open) return;
     setQuery("");
+    setCloudOnly(false);
     setFileHits([]);
     setSelected(0);
     setExpanded({});
@@ -474,9 +477,9 @@ export function CommandPalette({
       indexPaletteItem({ id: "command:mode:light", group: "commands" as const, primary: "Appearance: Light", secondary: theme.mode === "light" ? "Current appearance" : "Use the light appearance", recentAt: 4, icon: Sun, run: () => setMode("light") }),
       indexPaletteItem({ id: "command:mode:dark", group: "commands" as const, primary: "Appearance: Dark", secondary: theme.mode === "dark" ? "Current appearance" : "Use the dark appearance", recentAt: 3, icon: Moon, run: () => setMode("dark") }),
       indexPaletteItem({ id: "command:settings:appearance", group: "commands" as const, primary: "Open Appearance settings", secondary: "Themes, type and transcript layout", recentAt: 2, icon: Settings, run: () => onOpenSettings("appearance") }),
-      // Cloud sessions are among the sessions (their line says "<organization> cloud"): this narrows the list to them. Choosing one only selects it.
+      // Narrows the palette to cloud sessions (by kind, not by the word "cloud"). Choosing one only selects it.
       ...(cloud.live
-        ? [indexPaletteItem({ id: "command:cloud-go", group: "commands" as const, primary: "Go to cloud session…", secondary: "List the sessions in your organizations' cloud workspaces", recentAt: 1, icon: Cloud, keepOpen: true, run: () => setQuery("cloud ") }, ["cloud workspace session open"])]
+        ? [indexPaletteItem({ id: "command:cloud-go", group: "commands" as const, primary: "Go to cloud session…", secondary: "List the sessions in your organizations' cloud workspaces", recentAt: 1, icon: Cloud, keepOpen: true, run: () => { setCloudOnly(true); setQuery(""); setSelected(0); } }, ["cloud workspace session open"])]
         : []),
       // Creating a workspace is an owner's or admin's; nobody else is offered it.
       ...(cloud.mayCreate
@@ -627,6 +630,10 @@ export function CommandPalette({
       restoreFocus: !!match.item.shortcut,
     }));
 
+    if (cloudOnly) {
+      const cloudRows = entityMatches.sessions.flatMap((match, index) => (match.item.cloudKey ? [sessionRows[index]] : []));
+      return [{ id: "sessions", label: "Cloud sessions", rows: cloudRows }];
+    }
     return [
       { id: "smart", label: "Smart input", rows: smartRows },
       { id: "sessions", label: deferredQuery.trim() ? "Sessions" : "Recent sessions", rows: sessionRows },
@@ -635,7 +642,7 @@ export function CommandPalette({
       { id: "files", label: activeProject ? `Files · ${activeProject.name}` : "Files", rows: fileRows },
       { id: "commands", label: "Views and commands", rows: commandRows },
     ];
-  }, [activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading]);
+  }, [cloudOnly, activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading]);
 
   const renderedGroups = useMemo(() => {
     let offset = 0;
@@ -685,6 +692,9 @@ export function CommandPalette({
       event.preventDefault();
       const row = selectableRows[selected];
       if (row && !startingWorkItem) choose(row);
+    } else if (event.key === "Backspace" && cloudOnly && !query) {
+      // Backspace on an empty search leaves the cloud-only list.
+      setCloudOnly(false);
     }
   };
 
@@ -715,7 +725,7 @@ export function CommandPalette({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={onInputKeyDown}
-            placeholder="Search sessions, workspaces, projects, files and commands…"
+            placeholder={cloudOnly ? "Search cloud sessions…" : "Search sessions, workspaces, projects, files and commands…"}
             aria-label="Command palette search"
             aria-controls="command-palette-results"
             aria-activedescendant={selectableRows[selected]?.id}
