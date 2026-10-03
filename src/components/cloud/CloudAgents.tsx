@@ -42,6 +42,7 @@ import type { TabEntry } from "@/types/session";
 import { cn } from "@/lib/cn";
 import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, inputRefusalText, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
+import { cloudComposerCommands } from "@/lib/cloudComposer";
 import { LeaseBar, NotesPanel, NotSharedNotice, useNowUntil } from "./CloudCollab";
 
 /**
@@ -643,6 +644,11 @@ function CloudAgentPane({
                 )}
                 <Composer
                   tab={entry}
+                  commands={
+                    info.sessionId && !blocked
+                      ? cloudComposerCommands({ workspaceKey: collabKey, sessionId: info.sessionId, tabId: tab.tabId, harness: entry.harness, client: connected ? client : null, you })
+                      : null
+                  }
                   busy={live}
                   draft={draft}
                   onDraftChange={changeDraft}

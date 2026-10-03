@@ -687,7 +687,7 @@ fn members(list: Value) -> Option<collab::Members> {
     Some(serde_json::from_value(json!({ "v": 1, "members": list })).unwrap())
 }
 
-const ALL: [&str; 6] = ["pty/1", "fs/1", "session/1", "keys/1", "collab/1", "git/1"];
+const ALL: [&str; 7] = ["pty/1", "fs/1", "session/1", "keys/1", "collab/1", "git/1", "composer/1"];
 
 async fn person(rpc: &Arc<WorkspaceRpc>, device: &str, authority: Authority, user: &str) -> (Arc<Peer>, Notifications, Value) {
     let (peer, events) = Peer::for_user(device.into(), authority, Some(user.into()));
@@ -1095,6 +1095,62 @@ async fn a_plain_drivers_slash_command_is_refused_on_the_live_send_too() {
             assert_eq!(code(send(peer, text).await), "unavailable", "an approver's and a manager's {text:?} passes");
         }
     }
+}
+
+/// PRO-22: `session.commands` lists what the tab's CLI offers, and to a
+/// plain driver only what `session.send` would accept from them (PRO-88).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_composer_is_offered_only_the_commands_its_reader_may_send() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let session = seed_session(&f.root, "Fix login", None);
+    let tab_id = session.tabs[0].id.clone();
+    let command = |name: &str, source: &str| crate::harness::claude::commands::SlashCommand {
+        name: name.into(),
+        description: format!("About {name}"),
+        argument_hint: None,
+        source: source.into(),
+    };
+    f.rpc.set_commands_for_tests(vec![command("compact", "builtin"), command("deploy", "user"), command("help", "builtin"), command("review", "builtin")]);
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager" },
+        { "userId": "alice", "role": "driver", "canApprove": false },
+        { "userId": "erin", "role": "driver", "canApprove": true },
+        { "userId": "vera", "role": "viewer" },
+    ])));
+    let (admin, _admin_events, _) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    let (alice, _alice_events, _) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (erin, _erin_events, _) = person(&f.rpc, "d-erin", Authority::Participate, "erin").await;
+    let (vera, _vera_events, _) = person(&f.rpc, "d-vera", Authority::Participate, "vera").await;
+    let params = json!({ "sessionId": session.id, "tabId": tab_id });
+    let names = |listed: &Value| listed["commands"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    for peer in [&admin, &erin] {
+        let listed = call(&f.rpc, peer, "session.commands", params.clone()).await.unwrap();
+        assert_eq!(names(&listed), ["compact", "deploy", "help", "review"]);
+        assert_eq!(listed["restricted"], false);
+        assert_eq!(listed["commands"][1], json!({ "name": "deploy", "description": "About deploy", "source": "user" }));
+    }
+    // A plain driver: every command offered is one the live send accepts,
+    // and a project command (which can carry its own tools) is not among them.
+    let listed = call(&f.rpc, &alice, "session.commands", params.clone()).await.unwrap();
+    assert_eq!(listed["restricted"], true);
+    let offered = names(&listed);
+    assert_eq!(offered, ["compact", "help"]);
+    for (index, name) in offered.iter().enumerate() {
+        let send = json!({ "sessionId": session.id, "tabId": tab_id, "text": format!("/{name}"), "clientRequestId": format!("request-offered-{index}") });
+        assert_eq!(code(call(&f.rpc, &alice, "session.send", send).await), "unavailable", "/{name} is offered, so it is not refused");
+    }
+    // A viewer cannot send, and is offered nothing.
+    let listed = call(&f.rpc, &vera, "session.commands", params.clone()).await.unwrap();
+    assert_eq!((names(&listed).len(), listed["restricted"].clone()), (0, json!(true)));
+    assert_eq!(code(call(&f.rpc, &alice, "session.commands", json!({ "sessionId": session.id, "tabId": "tab-nope" })).await), "not_found");
+    // Withdrawn: the next reading is the narrower list.
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager" },
+        { "userId": "erin", "role": "driver", "canApprove": false },
+    ])));
+    let listed = call(&f.rpc, &erin, "session.commands", params).await.unwrap();
+    assert_eq!((listed["restricted"].clone(), names(&listed).contains(&"deploy".to_string())), (json!(true), false));
 }
 
 /// One tab whose turn is running.

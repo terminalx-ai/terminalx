@@ -21,6 +21,7 @@ export function PickerMenu({
   onHover,
   title,
   empty,
+  note = null,
 }: {
   items: PickerItem[];
   highlighted: number;
@@ -28,6 +29,8 @@ export function PickerMenu({
   onHover: (index: number) => void;
   title: string;
   empty: string;
+  /** Why the list is shorter than the reader may expect; said under it. */
+  note?: string | null;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -64,6 +67,11 @@ export function PickerMenu({
           {it.hint && <span className="ml-auto max-w-[35%] shrink-0 truncate pl-3 font-mono text-[11px] text-faint">{it.hint}</span>}
         </div>
       ))}
+      {note && (
+        <div className="px-2 py-1.5 text-[11px] text-muted-foreground" data-testid="picker-note">
+          {note}
+        </div>
+      )}
     </div>
   );
 }
