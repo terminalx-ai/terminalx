@@ -147,6 +147,37 @@ describe("CloudWorkspaceLifecycleDialog", () => {
     expect(mocked.cloudWorkspaceSuspend).toHaveBeenCalledWith("ws-1", null);
   });
 
+  it("the Stop dialog names what the provider's resume brings back (PRO-33)", async () => {
+    const undo = () => screen.getByTestId("cloud-lifecycle-undo").textContent;
+    // Boat: a cold boot; what runs now is lost.
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition({ providerCapabilities: { permanentDelete: true, releaseDisposition: "destroyed", preservesProcessesOnResume: false } }));
+    renderDialog(item("ready"), "stop", clean);
+    // Nothing is claimed before the server has answered.
+    expect(undo()).toBe("Resume at any time.");
+    await waitFor(() => expect(undo()).toMatch(/Boat starts the machine again from its disk \(a cold boot\).*programs and terminals that are running now do not/));
+    cleanup();
+
+    // A provider that freezes the machine: a warm reconnect.
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(
+      disposition({ provider: "local-docker", providerCapabilities: { permanentDelete: true, releaseDisposition: "destroyed", preservesProcessesOnResume: true } }),
+    );
+    renderDialog(item("ready", { provider: "local-docker" }), "stop", clean);
+    await waitFor(() => expect(undo()).toMatch(/Local Docker freezes the machine as it is.*continue where they were/));
+    cleanup();
+
+    // An older server does not say: neither is promised.
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition());
+    renderDialog(item("ready"), "stop", clean);
+    await waitFor(() => expect(undo()).toMatch(/may not/));
+    cleanup();
+
+    // The facts could not be read: the same caution, and Stop still works.
+    mocked.cloudWorkspaceDisposition.mockRejectedValue({ code: "cloud_workspace_unavailable" });
+    renderDialog(item("ready"), "stop", clean);
+    await waitFor(() => expect(undo()).toMatch(/may not/));
+    expect(button(/Stop workspace/).hasAttribute("disabled")).toBe(false);
+  });
+
   it("switching to delete says it cannot be undone and needs an explicit acknowledgement", async () => {
     mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition());
     mocked.cloudWorkspaceDelete.mockResolvedValue(snapshot("delete") as never);

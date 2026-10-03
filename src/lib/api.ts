@@ -588,7 +588,8 @@ export interface CloudWorkspaceDisposition {
   activeOperation: { id: string; action: string; state: string } | null;
   runtime: { reporting: boolean; reportedAt: number | null; stale: boolean; activeTurns: number; pendingApprovals: number };
   attachedClients: number;
-  providerCapabilities: { permanentDelete: boolean; releaseDisposition: string };
+  /** `preservesProcessesOnResume` is absent from an older server: then it is not known. */
+  providerCapabilities: { permanentDelete: boolean; releaseDisposition: string; preservesProcessesOnResume?: boolean | null };
   archiveRetentionDays: number;
   blockers: ("active-turns" | "pending-approvals" | "operation-in-progress" | (string & {}))[];
   removedOnDelete: string[];
