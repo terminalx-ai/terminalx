@@ -3,14 +3,16 @@ import { listen } from "@tauri-apps/api/event";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import { pty } from "@/lib/api";
-import { countTerminalData, dataRate, isOnScreen, rendererOf, webglContexts, type DataRate } from "@/lib/terminalCounters";
+import { dataRate, isOnScreen, rendererOf, webglContexts, type DataRate } from "@/lib/terminalCounters";
 
 /**
- * Terminal panes per session, and one bridge for the PTY events.
+ * Terminal panes per session, and the live xterm of each one that has been
+ * shown.
  *
- * Output arrives base64-encoded; it is decoded only for panes this window
- * opened, and a pane that has no view mounted keeps a bounded replay buffer
- * (newest bytes win) so switching sessions never loses the tail.
+ * A pane's output comes straight to its xterm over its own channel, attached
+ * when the xterm is made (`TerminalView`). A pane that no view has shown yet
+ * costs this window nothing: the backend keeps its bounded scrollback and
+ * hands it over at attach, so switching to it never loses the tail.
  */
 export interface TerminalPane {
   id: string;
@@ -74,39 +76,10 @@ export interface TerminalInstance {
   el: HTMLDivElement;
   term: Terminal;
   fit: FitAddon;
+  /** Stops whatever feeds it output; called when the instance is disposed. */
+  release?: () => void;
 }
 const instances = new Map<string, TerminalInstance>();
-const REPLAY_MAX = 256 * 1024;
-const replay = new Map<string, { chunks: Uint8Array[]; size: number }>();
-/**
- * Panes closed a moment ago. The last output of a pane that was just killed
- * is still on its way, and with no pane to show it, it would start a replay
- * buffer that nothing ever reads or drops.
- */
-const closing = new Map<string, ReturnType<typeof setTimeout>>();
-const CLOSING_MS = 5_000;
-
-/** Let go of everything this window holds for a pane that is gone. */
-function forgetPane(id: string) {
-  clearTimeout(closing.get(id));
-  closing.set(id, setTimeout(() => closing.delete(id), CLOSING_MS));
-  replay.delete(id);
-  disposeInstance(id);
-}
-
-/** A pane with this id is (again) wanted: its output is kept from here on. */
-function expectPane(id: string) {
-  clearTimeout(closing.get(id));
-  closing.delete(id);
-}
-
-function decode(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
 /** The live instance of a pane, if it has one. Never makes one: a view that is on its way out must not bring a closed terminal back. */
 export function peekInstance(id: string): TerminalInstance | undefined {
   return instances.get(id);
@@ -117,11 +90,6 @@ export function getInstance(id: string, create: () => TerminalInstance): Termina
   if (!inst) {
     inst = create();
     instances.set(id, inst);
-    const r = replay.get(id);
-    if (r) {
-      for (const c of r.chunks) inst.term.write(c);
-      replay.delete(id);
-    }
   }
   return inst;
 }
@@ -141,9 +109,6 @@ export interface TerminalCounters {
   webglContexts: typeof webglContexts;
   /** Lines held across every live instance's buffers. */
   bufferLines: number;
-  /** Output kept for panes that have no instance yet. */
-  replayBuffers: number;
-  replayBytes: number;
   panes: number;
   data: { local: DataRate; cloud: DataRate };
 }
@@ -152,8 +117,6 @@ export interface TerminalCounters {
 export function terminalCounters(): TerminalCounters {
   const live = [...instances.values()];
   const webgl = live.filter((inst) => rendererOf(inst.term) === "webgl").length;
-  let replayBytes = 0;
-  for (const r of replay.values()) replayBytes += r.size;
   return {
     instances: live.length,
     attached: live.filter((inst) => inst.el.isConnected).length,
@@ -164,8 +127,6 @@ export function terminalCounters(): TerminalCounters {
     hiddenInDocument: live.filter((inst) => inst.el.isConnected && !isOnScreen(inst.term)).length,
     webglContexts: { ...webglContexts },
     bufferLines: live.reduce((lines, inst) => lines + inst.term.buffer.normal.length + inst.term.buffer.alternate.length, 0),
-    replayBuffers: replay.size,
-    replayBytes,
     panes: state.panes.length,
     data: { local: dataRate("local"), cloud: dataRate("cloud") },
   };
@@ -181,6 +142,7 @@ export function onInstanceDisposed(listener: (inst: TerminalInstance) => void) {
 export function disposeInstance(id: string) {
   const inst = instances.get(id);
   if (inst) {
+    inst.release?.();
     inst.term.dispose();
     for (const listener of disposals) listener(inst);
     inst.el.remove();
@@ -198,29 +160,18 @@ export function subscribeTerminals(): Promise<void> {
 
 async function register() {
   try {
-    await listen<{ id: string; data: string }>("pty_data", (e) => {
-      const { id, data } = e.payload;
-      const bytes = decode(data);
-      countTerminalData("local", bytes.length);
-      const inst = instances.get(id);
-      if (inst) {
-        inst.term.write(bytes);
-        return;
-      }
-      if (closing.has(id)) return;
-      let r = replay.get(id);
-      if (!r) replay.set(id, (r = { chunks: [], size: 0 }));
-      r.chunks.push(bytes);
-      r.size += bytes.length;
-      while (r.size > REPLAY_MAX && r.chunks.length > 1) {
-        const dropped = r.chunks.shift()!;
-        r.size -= dropped.length;
-      }
-    });
     await listen<{ id: string; code: number | null }>("pty_exit", (e) => {
       const { id, code } = e.payload;
       set({ panes: state.panes.map((p) => (p.id === id ? { ...p, exited: true, exitCode: code } : p)) });
     });
+  } catch {
+    /* outside a webview */
+  }
+  try {
+    // A reloaded window: the backend may still be sending to the old page's
+    // views. A view attaches only after this (`createInstance` waits for
+    // `subscribeTerminals`), or it would be dropped with them.
+    await pty.detachAll();
   } catch {
     /* outside a webview */
   }
@@ -233,7 +184,6 @@ export async function openTerminal(sessionId: string, cwd: string, cols = 100, r
   counter++;
   const id = opts.id ?? `${sessionId}:${Date.now().toString(36)}${counter}`;
   if (state.panes.some((p) => p.id === id)) await closeTerminal(id);
-  expectPane(id);
   const number = (terminalNumbers.get(sessionId) ?? 0) + 1;
   if (!opts.hidden && !opts.title) terminalNumbers.set(sessionId, number);
   const pane: TerminalPane = {
@@ -276,7 +226,7 @@ export async function closeTerminal(id: string) {
   await pty.kill(id).catch(() => {});
   if (pane.hidden) {
     set({ panes: state.panes.filter((p) => p.id !== id) });
-    forgetPane(id);
+    disposeInstance(id);
     return;
   }
   const visibleBefore = state.panes.filter((p) => p.sessionId === pane.sessionId && !p.hidden);
@@ -294,7 +244,7 @@ export async function closeTerminal(id: string) {
     active: { ...state.active, [pane.sessionId]: nextTerminal?.id ?? "" },
     selected,
   });
-  forgetPane(id);
+  disposeInstance(id);
 }
 
 /**
@@ -312,13 +262,17 @@ export function dropSessionTerminals(sessionIds: readonly string[]) {
   set({ panes: state.panes.filter((pane) => !gone.has(pane.sessionId)), active: without(state.active), selected: without(state.selected) });
   for (const pane of doomed) {
     void pty.kill(pane.id).catch(() => {});
-    forgetPane(pane.id);
+    disposeInstance(pane.id);
   }
 }
 
 /** The pane an agent tab's CLI runs in. */
 export function agentPaneId(tabId: string): string {
   return `tab:${tabId}`;
+}
+
+export function isAgentPane(id: string): boolean {
+  return id.startsWith("tab:");
 }
 
 /**
@@ -330,8 +284,7 @@ export function agentPaneId(tabId: string): string {
 export function dropTabTerminals(tabIds: readonly string[]) {
   const gone = new Set(tabIds.map(agentPaneId));
   if (state.panes.some((pane) => gone.has(pane.id))) set({ panes: state.panes.filter((pane) => !gone.has(pane.id)) });
-  // Also for a pane this window never adopted: its output may be waiting in a replay buffer.
-  for (const id of gone) forgetPane(id);
+  for (const id of gone) disposeInstance(id);
 }
 
 /** Close a session's shells and leave its agent panes: its checkout was removed, so a shell there has nowhere to be. */
@@ -385,11 +338,10 @@ export function clearSelectedBrowser(sessionId: string, id: string) {
 
 /**
  * Take over a pane the backend opened — an agent tab's own CLI. The pane may
- * already have produced output before this window heard about it, which is why
- * the replay buffer is kept for ids no pane claims yet.
+ * already have produced output before this window heard about it; the view
+ * gets that from the backend's scrollback when it attaches.
  */
 export async function adoptPane(pane: Omit<TerminalPane, "created" | "exited" | "exitCode">) {
-  expectPane(pane.id);
   await subscribeTerminals();
   const live = { ...pane, created: new Date().toISOString(), exited: false, exitCode: null };
   // The same pane can be adopted twice: a tab whose CLI is replaced in place
