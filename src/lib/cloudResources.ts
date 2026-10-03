@@ -13,6 +13,13 @@ const GIB = 1024 * MIB;
 
 /** How often a connected workspace is asked. */
 export const SAMPLE_MS = 60_000;
+/** How often while an agent turn runs: memory can go in seconds. */
+export const TURN_SAMPLE_MS = 10_000;
+/** Low memory: available under this share of RAM and under this much, both (the server's own rule, saas contract 9.5). */
+export const MEMORY_LOW_RATIO = 0.1;
+export const MEMORY_LOW_BYTES = 512 * MIB;
+/** One low reading is a spike; this many in a row during a turn is a warning. */
+export const MEMORY_LOW_SAMPLES = 3;
 /** Below this, writes are already failing or about to: the disk is full. */
 export const STORAGE_FULL_BYTES = 128 * MIB;
 /** Almost full: under this share of the disk and under this much, both. */
@@ -56,11 +63,32 @@ export function storageNotice(storage: RuntimeResources["storage"]): { level: "l
     : { level, text: `The workspace's disk is almost full (${room}). Free some space, or saves, commits and agent work will start to fail.` };
 }
 
+/** Whether a reading shows the machine short of memory. Not reported is not low. */
+export function memoryLow(memory: RuntimeResources["memory"]): boolean {
+  return !!memory && memory.totalBytes > 0 && memory.availableBytes < memory.totalBytes * MEMORY_LOW_RATIO && memory.availableBytes < MEMORY_LOW_BYTES;
+}
+
+export function memoryNoticeText(memory: NonNullable<RuntimeResources["memory"]>): string {
+  return `The workspace's machine is almost out of memory (${bytesText(memory.availableBytes)} free of ${bytesText(memory.totalBytes)}). The agent, or a program it runs, may be stopped by the machine. Stop programs you do not need from a terminal; if it keeps happening, the work needs a larger machine.`;
+}
+
 // ---- sampling
 
-interface Entry {
+/** What a view reads: the last reading, and whether memory has stayed low through a running turn. */
+export interface CloudResourcesSnapshot {
   resources: RuntimeResources | null;
+  memoryWarning: boolean;
+}
+
+const NOTHING: CloudResourcesSnapshot = { resources: null, memoryWarning: false };
+
+interface Entry {
+  snapshot: CloudResourcesSnapshot;
+  /** Readings in a row, taken while a turn ran, that showed low memory. */
+  lowStreak: number;
   users: number;
+  /** How many of the users are showing a running agent turn. */
+  turns: number;
   timer: ReturnType<typeof setInterval> | null;
   unsubscribe: (() => void) | null;
   /** The client last asked, and whether it answered that it does not report resources. */
@@ -78,9 +106,22 @@ function emit() {
 }
 
 function set(entry: Entry, resources: RuntimeResources | null) {
-  if (entry.resources === resources) return;
-  entry.resources = resources;
+  // Only readings taken during a turn count, and only an unbroken run of them.
+  entry.lowStreak = resources && entry.turns > 0 && memoryLow(resources.memory) ? entry.lowStreak + 1 : 0;
+  publish(entry, resources);
+}
+
+function publish(entry: Entry, resources: RuntimeResources | null) {
+  const memoryWarning = entry.lowStreak >= MEMORY_LOW_SAMPLES;
+  if (entry.snapshot.resources === resources && entry.snapshot.memoryWarning === memoryWarning) return;
+  entry.snapshot = { resources, memoryWarning };
   emit();
+}
+
+/** Ask at the turn's pace while one runs, and at the idle pace otherwise. */
+function pace(key: string, entry: Entry) {
+  if (entry.timer) clearInterval(entry.timer);
+  entry.timer = setInterval(() => void sample(key), entry.turns > 0 ? TURN_SAMPLE_MS : SAMPLE_MS);
 }
 
 async function sample(key: string) {
@@ -114,28 +155,43 @@ async function sample(key: string) {
   }
 }
 
-function retain(key: string): () => void {
+function retain(key: string, turn: boolean): () => void {
   let entry = entries.get(key);
   if (!entry) {
-    entry = { resources: null, users: 0, timer: null, unsubscribe: null, client: null, unsupported: false, reading: false };
+    entry = { snapshot: NOTHING, lowStreak: 0, users: 0, turns: 0, timer: null, unsubscribe: null, client: null, unsupported: false, reading: false };
     entries.set(key, entry);
   }
   const held = entry;
   held.users += 1;
-  if (held.users === 1) {
-    held.timer = setInterval(() => void sample(key), SAMPLE_MS);
-    // Asked again as soon as it connects, and forgotten as soon as it does not.
-    held.unsubscribe = subscribeCloudConnections(() => {
-      if (connectedCloudClient(key) !== held.client) void sample(key);
-    });
+  if (turn) held.turns += 1;
+  // Asked again as soon as it connects, and forgotten as soon as it does not.
+  held.unsubscribe ??= subscribeCloudConnections(() => {
+    if (connectedCloudClient(key) !== held.client) void sample(key);
+  });
+  // The first view, or a turn that just started: asked now, then at that pace.
+  if (held.users === 1 || (turn && held.turns === 1)) {
+    pace(key, held);
     void sample(key);
   }
   return () => {
     held.users -= 1;
+    if (turn) {
+      held.turns -= 1;
+      if (held.turns === 0) {
+        // The turn is over: the warning was about it.
+        held.lowStreak = 0;
+        publish(held, held.snapshot.resources);
+        pace(key, held);
+      }
+    }
     if (held.users > 0) return;
-    if (held.timer) clearInterval(held.timer);
-    held.unsubscribe?.();
-    entries.delete(key);
+    // A view that only changed (a turn starting or ending) is back at once: keep what was read for it.
+    setTimeout(() => {
+      if (held.users > 0 || entries.get(key) !== held) return;
+      if (held.timer) clearInterval(held.timer);
+      held.unsubscribe?.();
+      entries.delete(key);
+    }, 0);
   };
 }
 
@@ -144,13 +200,18 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-/** The last reading of a connected workspace (`cloud:<org>:<workspace>`), kept fresh while this is mounted; null when not connected or not reported. */
-export function useCloudResources(workspaceKey: string | null): RuntimeResources | null {
-  useEffect(() => (workspaceKey ? retain(workspaceKey) : undefined), [workspaceKey]);
+/**
+ * The last reading of a connected workspace (`cloud:<org>:<workspace>`), kept
+ * fresh while this is mounted; nothing when it is not connected or does not
+ * report. `turn` says an agent turn is running where this is shown: the
+ * machine is then asked more often, and memory that stays low is a warning.
+ */
+export function useCloudResources(workspaceKey: string | null, turn = false): CloudResourcesSnapshot {
+  useEffect(() => (workspaceKey ? retain(workspaceKey, turn) : undefined), [workspaceKey, turn]);
   return useSyncExternalStore(
     subscribe,
-    () => (workspaceKey ? (entries.get(workspaceKey)?.resources ?? null) : null),
-    () => null,
+    () => (workspaceKey ? (entries.get(workspaceKey)?.snapshot ?? NOTHING) : NOTHING),
+    () => NOTHING,
   );
 }
 
