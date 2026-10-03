@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
     cloudWorkspaceResume: vi.fn(),
     cloudWorkspaceUnarchive: vi.fn(),
     cloudWorkspaceOperation: vi.fn(),
+    cloudWorkspaceDelete: vi.fn(),
     cloudRemoteAttach: vi.fn(),
     cloudRemoteActivate: vi.fn(),
     cloudAgentPurgeWorkspace: vi.fn(),
@@ -285,6 +286,22 @@ describe("organization sections", () => {
     expect(connection.activate).not.toHaveBeenCalled();
   });
 
+  it("Retry delete that the server refuses for running work opens the delete dialog instead of doing nothing (PRO-68 review)", async () => {
+    const failed = { id: "op-d", workspaceId: "stuck", action: "delete", type: "delete", state: "failed", stage: "failed", errorCode: "cloud_provider_unavailable", cancelable: false, createdAt: 1, updatedAt: 2 };
+    await catalog.ingestCloudList({ workspaces: [{ ...item("stuck", { repositories }), latestOperation: failed } as CloudWorkspaceListItem] }, ORG);
+    mocks.api.cloudWorkspaceOperation.mockResolvedValue({ workspace: item("stuck", { repositories }).workspace, operation: failed });
+    mocks.api.cloudWorkspaceDelete.mockRejectedValue({ code: "cloud_workspace_active_work", status: 409 });
+    render(<CloudWorkspaceMain workspaceKey={`cloud:${ORG}:stuck`} sidebarOpen onToggleSidebar={() => undefined} />);
+    expect((await screen.findByTestId("cloud-deletion-progress")).textContent).toContain("The delete stopped");
+    expect(screen.queryByTestId("lifecycle-dialog")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Retry delete/ }));
+    // The dialog that says what would be lost and asks, opened on Delete for this workspace.
+    expect((await screen.findByTestId("lifecycle-dialog")).textContent).toBe("delete");
+    expect(mocks.lifecycle.at(-1)).toMatchObject({ initial: "delete", item: { workspace: { id: "stuck" } } });
+    expect(mocks.api.cloudWorkspaceDelete).toHaveBeenCalledTimes(1);
+    expect(mocks.api.cloudWorkspaceDelete).toHaveBeenCalledWith("stuck", false, null);
+  });
+
   it("a workspace that is still starting is shown without connecting", async () => {
     await catalog.ingestCloudList({ workspaces: [item("starting", { state: "provisioning", repositories })] }, ORG);
     render(<CloudWorkspaceMain workspaceKey={`cloud:${ORG}:starting`} sidebarOpen onToggleSidebar={() => undefined} />);
@@ -369,6 +386,20 @@ describe("lifecycle menu", () => {
       expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Retry archive", "Unarchive", "Delete…"]);
       fireEvent.click(within(menu).getByRole("menuitem", { name: "Retry archive" }));
       await waitFor(() => expect(mocks.lifecycle.at(-1)).toMatchObject({ initial: "archive", item: { workspace: { id: "old" } } }));
+    });
+
+    it("shows the whole reason of a failed archive (it wraps), and says storage keeps billing until the deadline", async () => {
+      await showArchived(archivedWith({ state: "attention-required" }, { id: "op-a", workspaceId: "old", action: "archive", state: "failed", errorCode: "cloud_provider_unavailable" }));
+      const line = within(row("old")).getByTestId("cloud-archive-deadline");
+      expect(line.className).toContain("whitespace-normal");
+      expect(line.className).not.toContain("truncate");
+      expect(screen.getByTestId("cloud-archived-note").textContent).toBe("Stopped and kept until their deadline, then deleted automatically. Storage keeps billing at the provider until then.");
+    });
+
+    it("says how far a delete of an archived workspace is, in the row", async () => {
+      const cleanup = { items: [{ kind: "machine", state: "removed" }, { kind: "volume", state: "removed" }, { kind: "snapshot", state: "pending" }, { kind: "relay", state: "pending" }, { kind: "keys", state: "pending" }] };
+      await showArchived(archivedWith({}, { id: "op-d", workspaceId: "old", action: "delete", state: "running", cleanup }));
+      expect(within(row("old")).getByTestId("cloud-archive-deadline").textContent).toBe("Deleting: 2 of 5 removed.");
     });
 
     it("says an archive is still saving conversations while it runs", async () => {
