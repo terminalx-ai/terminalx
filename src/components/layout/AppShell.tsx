@@ -93,8 +93,10 @@ export function AppShell() {
 
   const toggleSidebar = useCallback(() => setPrefs({ sidebarOpen: !prefs.sidebarOpen }), [prefs.sidebarOpen]);
   const togglePanel = useCallback(() => setPrefs({ panelOpen: !prefs.panelOpen }), [prefs.panelOpen]);
-  const openSettings = useCallback((tab: SettingsTab = "general") => {
-    setSettingsTab(tab);
+  // Also a click handler (the sidebar's Settings button), which is handed the click's event:
+  // anything that is not a section's name opens the default section, never a blank page.
+  const openSettings = useCallback((tab?: unknown) => {
+    setSettingsTab(typeof tab === "string" ? (tab as SettingsTab) : "general");
     setSettingsOpen(true);
   }, []);
   const openAccountSettings = useCallback(() => {

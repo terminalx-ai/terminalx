@@ -10,7 +10,7 @@ import { accessibilityPress, mouseClick } from "@/test/press";
 // workspace, or asks for the one-time cost confirmation before creating one.
 // No local path command runs for a cloud draft.
 
-const { invoke, flow, draft, mayStart } = vi.hoisted(() => ({
+const { invoke, flow, draft, mayStart, noLocal } = vi.hoisted(() => ({
   invoke: vi.fn(),
   flow: {
     planCloudStart: vi.fn(),
@@ -21,6 +21,8 @@ const { invoke, flow, draft, mayStart } = vi.hoisted(() => ({
   draft: { value: null as { project: CloudProject | null; orgName: string; mayStart: boolean | null } | null },
   /** Whether this account may start cloud sessions in the organization (an owner or admin). */
   mayStart: { value: true as boolean | null },
+  /** This computer has no local projects (a member who only uses the organization's cloud projects). */
+  noLocal: { value: false },
 }));
 
 vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ onDragDropEvent: vi.fn(async () => vi.fn()) }) }));
@@ -54,7 +56,7 @@ const local = { path: "/repos/raccoon", name: "raccoon" } as Project;
 // Claude is not installed on this computer; it is on the cloud workspace.
 const harness = { id: "claude", name: "Claude", available: false, installHint: "" } as HarnessInfo;
 vi.mock("@/lib/sessions", () => ({
-  useSessionStore: () => ({ projects: [local], harnesses: [harness], selectedProject: local.path, workspaces: {}, newSessionPreset: null, cloudSessionPreset: { projectKey: "cloud:org-a:github.com/acme/api" } }),
+  useSessionStore: () => ({ projects: noLocal.value ? [] : [local], harnesses: [harness], selectedProject: local.path, workspaces: {}, newSessionPreset: null, cloudSessionPreset: { projectKey: "cloud:org-a:github.com/acme/api" } }),
   addProject: vi.fn(),
   clearNewSessionPreset: vi.fn(),
   selectProject: vi.fn(),
@@ -99,6 +101,7 @@ beforeEach(() => {
   });
   for (const fn of Object.values(flow)) fn.mockReset();
   mayStart.value = true;
+  noLocal.value = false;
   draft.value = { project, orgName: "Acme", mayStart: true };
 });
 
@@ -263,6 +266,25 @@ describe("the project picker", () => {
     expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["raccoon", "acme/api", "scratchno repo", "Add a project…"]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: /scratch/ }));
     expect(sessions.startCloudSessionIn).toHaveBeenCalledWith("cloud:org-a:blank/scratch");
+  });
+});
+
+describe("the project picker with no local projects", () => {
+  it("shows no Local heading over nothing, and starts with the organization's group (no rule above it)", async () => {
+    noLocal.value = true;
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /acme\/api/ }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).queryByText("Local")).toBeNull();
+    expect(within(menu).queryByText("Projects")).toBeNull();
+    expect(within(menu).getByText("Acme cloud")).toBeTruthy();
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["acme/api", "scratchno repo", "Add a project…"]);
+    // The first thing in the menu is the cloud group's heading, not a separator under an empty section.
+    const group = within(menu).getByRole("group", { name: "Acme cloud projects" });
+    expect(menu.firstElementChild).toBe(group);
+    expect(group.firstElementChild?.textContent).toBe("Acme cloud");
+    // One rule is left: the one above "Add a project…".
+    expect(within(menu).getAllByRole("separator")).toHaveLength(1);
   });
 });
 

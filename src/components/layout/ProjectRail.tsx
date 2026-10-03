@@ -302,7 +302,7 @@ export function ProjectRail({
 
       <div className="shrink-0 border-t border-hairline p-2">
         <AccountSidebarEntry onOpenAccount={onOpenAccount} />
-        <Button variant="ghost" className="w-full justify-start gap-2 px-2" onClick={onOpenSettings}>
+        <Button variant="ghost" className="w-full justify-start gap-2 px-2" onClick={() => onOpenSettings()}>
           <Settings />
           Settings
           <Keys shortcut="app.settings" />
