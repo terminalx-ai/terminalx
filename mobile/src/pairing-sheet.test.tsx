@@ -22,7 +22,7 @@ vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => ({
 }) }));
 vi.mock("expo-router", () => ({ useRouter: () => ({}) }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
-vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Keyboard", "QrCode", "X"].map((name) => [name, () => null])));
+vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Keyboard", "MoreVertical", "QrCode", "X"].map((name) => [name, () => null])));
 vi.mock("expo-camera", async () => {
   const { useEffect } = await import("react");
   return {

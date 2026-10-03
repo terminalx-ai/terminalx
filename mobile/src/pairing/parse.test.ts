@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { sha256 } from "@noble/hashes/sha256";
 import { base64Url } from "./bytes";
-import { parsePairingCode, parsePairingCodeOrThrow } from "./parse";
+import { extractPairingNameFromUrl, parsePairingCode, parsePairingCodeOrThrow } from "./parse";
 
 const now = 1_900_000_000_000;
 const publicKey = new Uint8Array(32).fill(7);
@@ -64,5 +64,26 @@ describe("safe pairing parse errors", () => {
     expect(() => parsePairingCodeOrThrow(encode({ ...offer, unknownPrivateField: "secret" }), () => now)).toThrow("Generate a fresh offer");
     try { parsePairingCodeOrThrow(encode({ ...offer, unknownPrivateField: "secret" }), () => now); }
     catch (cause) { expect(String(cause)).not.toMatch(/unknownPrivateField|secret/); }
+  });
+});
+
+// PRO-87: the computer's name rides beside the offer in the pairing link.
+describe("the computer's name in a pairing link", () => {
+  const link = `terminalx://pair?code=${encode(offer)}`;
+
+  it("is read from the link, and a link without one or a bare code has none", () => {
+    expect(extractPairingNameFromUrl(`${link}&name=Paresh%E2%80%99s+Mac+mini`)).toBe("Paresh’s Mac mini");
+    expect(extractPairingNameFromUrl(`${link}&name=A%26B%20%3D%20C`)).toBe("A&B = C");
+    expect(extractPairingNameFromUrl(link)).toBeNull();
+    expect(extractPairingNameFromUrl(encode(offer))).toBeNull();
+    expect(extractPairingNameFromUrl("https://example.com/?name=evil")).toBeNull();
+    expect(extractPairingNameFromUrl(`terminalx://other?code=x&name=evil`)).toBeNull();
+  });
+
+  it("does not change what the offer is: the same offer parses with or without the name", () => {
+    const named = `${link}&name=Paresh%E2%80%99s+Mac+mini`;
+    expect(parsePairingCodeOrThrow(named, () => now)).toEqual(parsePairingCodeOrThrow(link, () => now));
+    // A name is never taken for the code.
+    expect(parsePairingCode(`terminalx://pair?name=${encode(offer)}`, () => now)).toBeNull();
   });
 });

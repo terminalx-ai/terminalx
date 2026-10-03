@@ -25,8 +25,12 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 /// - `collab/1` (PRO-30): presence, notes, tab leases and `collab.state`.
 /// - `agent-pty/1` (PRO-86): the terminal an agent tab's CLI runs in is
 ///   reached through the `pty.*` methods as `tab:<tabId>`. It adds no method.
-pub const CAPABILITIES: [&str; 11] =
-    ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1"];
+/// - `composer/1` (PRO-22): `session.commands`, the slash commands an agent
+///   tab's composer offers its reader.
+/// - `composer/2`: `session.files`, the session's files by name, for the
+///   composer's `@` list.
+pub const CAPABILITIES: [&str; 13] =
+    ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2"];
 
 /// The namespace that lets a connection address an agent tab's own terminal
 /// (spelled out in [`CAPABILITIES`], which the client's tests read).
@@ -94,6 +98,10 @@ pub const METHODS: &[Method] = &[
     method("session.delete", "session/2", Manage, true),
     // What a new session or tab may run; read-only, like `harness::offered`.
     method("runtime.agents", "agents/1", Participate, false),
+    // What the composer of an agent tab offers: read-only, and never more
+    // than the caller may send (PRO-88).
+    method("session.commands", "composer/1", Participate, false),
+    method("session.files", "composer/2", Participate, false),
     method("pty.create", "pty/1", Manage, true),
     method("pty.list", "pty/1", Participate, false),
     // Input and size belong to the terminal's controller; `pty.control`
@@ -169,6 +177,9 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "agents/1" => &["runtime.agents"],
         "keys/1" => &["keys."],
         "lifecycle/1" => &["lifecycle."],
+        // `composer/N` adds what an agent tab's composer asks of its session.
+        "composer/1" => &["session.commands"],
+        "composer/2" => &["session.files"],
         _ => &[],
     }
 }
