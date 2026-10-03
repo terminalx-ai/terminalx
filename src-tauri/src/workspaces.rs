@@ -212,13 +212,13 @@ pub fn delete(project: &Path, path: &Path, delete_branch: bool, direct: git::Dir
     if let Err(git_error) = git::run(project, &["worktree", "remove", "--force", p.to_str().unwrap_or_default()]) {
         removed_by_git = false;
         if direct == git::DirectDelete::Never {
-            anyhow::bail!("Could not remove the worktree at {}: {git_error:#}", p.display());
+            anyhow::bail!("Could not remove the worktree at {}: {git_error:#}. {}", p.display(), git::leftover_state(&p));
         }
         if let (Some(commit), Some(name)) = (&detached, p.file_name().and_then(|name| name.to_str())) {
             removal.rescued_branch = git::rescue_detached(project, name, commit);
         }
         if let Err(direct_error) = git::remove_managed_worktree_dir(project, &p) {
-            anyhow::bail!("Could not remove the worktree at {}: {direct_error:#} ({git_error:#})", p.display());
+            anyhow::bail!("Could not remove the worktree at {}: {direct_error:#} ({git_error:#}). {}", p.display(), git::leftover_state(&p));
         }
     }
     let _ = git::run(project, &["worktree", "prune"]);

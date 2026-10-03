@@ -501,7 +501,7 @@ function SessionMenu({ session }: { session: SessionEntry }) {
         <GitFork /> Fork session
       </DropdownMenuItem>
       {session.worktreeName && !session.worktreeRemoved ? (
-        <DropdownMenuItem onSelect={() => openSettle(session.id)}>
+        <DropdownMenuItem onSelect={() => openSettle(session)}>
           <X /> Settle worktree…
         </DropdownMenuItem>
       ) : null}

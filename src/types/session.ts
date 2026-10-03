@@ -217,19 +217,13 @@ export interface WorktreeDisposition {
   branch: string | null;
 }
 
-export interface DeleteSessionReport {
-  /** The worktree's branch, when it was kept because it holds commits nothing else has. */
+/** What a workspace removal did: the sessions it deleted or moved, and what became of the branch. */
+export interface WorkspaceRemoveReport {
+  sessions: SessionEntry[];
+  /** The workspace's branch, when it was kept because it holds commits nothing else has. */
   keptBranch: string | null;
   /** A branch made to keep a detached HEAD's commits reachable. */
   rescuedBranch: string | null;
-}
-
-export interface SettleReport extends DeleteSessionReport {
-  session: SessionEntry;
-}
-
-export interface WorkspaceDeleteReport extends DeleteSessionReport {
-  sessions: SessionEntry[];
 }
 
 export function sessionStatus(s: SessionEntry): TabStatus {
