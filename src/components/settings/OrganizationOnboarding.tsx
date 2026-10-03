@@ -75,7 +75,7 @@ export function OrganizationOnboarding({
       // Freeze the logical request across refreshes and failed profile selection.
       const next = attempt ?? newSetup(name.trim(), crypto.randomUUID());
       persist(next);
-      let unselected: string | null = null;
+      let unselected = false;
       if (next.organizationId) {
         // Created earlier: only select it. Creation is never run again.
         await api.organizationSelect(next.organizationId, contextRevision);
@@ -85,13 +85,13 @@ export function OrganizationOnboarding({
         const created = await api.organizationCreate(next.name, next.requestId);
         const selected = created.selected !== false;
         persist({ ...next, organizationId: created.id, step: selected ? "compute" : "select" });
-        if (!selected) unselected = created.selectionError ?? "the selection did not complete";
+        unselected = !selected;
       }
       localStorage.removeItem(draftStorageKey);
       if (!mounted.current || epoch !== identityEpoch.current) return;
       await refreshAccount();
       if (unselected && mounted.current && epoch === identityEpoch.current)
-        setError(`The organization was created, but could not be selected (${unselected}). Resume setup to select it; it will not be created again.`);
+        setError("The organization was created, but could not be selected. Resume setup to select it; it will not be created again.");
     } catch (failure) {
       if (mounted.current && epoch === identityEpoch.current)
         setError(errorMessage(failure));

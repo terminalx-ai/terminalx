@@ -161,9 +161,9 @@ export const api = {
   accountRefreshRoles: (force: boolean) => invoke<{ status: AccountStatus; fresh: boolean }>("account_refresh_roles", { force }),
   accountSignIn: () => invoke<AccountStatus>("account_sign_in"),
   accountSignOut: () => invoke<AccountStatus>("account_sign_out"),
-  /** `selected: false`: created, but selecting it failed (`selectionError`). Select it by id; never create again. */
+  /** `selected: false`: created, but selecting it failed. Select it by id; never create again. */
   organizationCreate: (name: string, idempotencyKey: string) =>
-    invoke<OrganizationSummary & { selected?: boolean; selectionError?: string | null }>("organization_create", { name, idempotencyKey }),
+    invoke<OrganizationSummary & { selected?: boolean }>("organization_create", { name, idempotencyKey }),
   organizationSelect: (organizationId: string, contextRevision: string) =>
     invoke<AccountStatus>("organization_select", { organizationId, contextRevision }),
 

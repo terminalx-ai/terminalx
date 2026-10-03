@@ -128,8 +128,6 @@ pub struct OrganizationCreated {
     #[serde(flatten)]
     pub organization: OrganizationSummary,
     pub selected: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub selection_error: Option<String>,
 }
 
 /// Per-organization cloud capabilities, as the desktop session reports them.
@@ -694,8 +692,15 @@ impl AccountManager {
             Some(&context.access_token),
             Some(idempotency_key),
         )?;
-        let selection_error = self.select_organization(&organization.id, &context).err().map(|error| format!("{error:#}"));
-        Ok(OrganizationCreated { organization, selected: selection_error.is_none(), selection_error })
+        // Why it failed stays in the log: the interface says what to do next.
+        let selected = match self.select_organization(&organization.id, &context) {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("created organization {} but could not select it: {error:#}", organization.id);
+                false
+            }
+        };
+        Ok(OrganizationCreated { organization, selected })
     }
 
     fn select_organization(&self, organization_id: &str, context: &AccountContext) -> Result<()> {
@@ -1465,14 +1470,13 @@ mod tests {
     #[test]
     fn a_created_organization_says_whether_it_was_selected() {
         let organization = OrganizationSummary { id: "org-1".into(), name: "Team".into(), role: "owner".into(), is_personal: false, cloud: None };
-        let unselected = OrganizationCreated { organization: organization.clone(), selected: false, selection_error: Some("account context changed".into()) };
+        let unselected = OrganizationCreated { organization: organization.clone(), selected: false };
         assert_eq!(
             serde_json::to_value(&unselected).unwrap(),
-            serde_json::json!({ "id": "org-1", "name": "Team", "role": "owner", "isPersonal": false, "selected": false, "selectionError": "account context changed" })
+            serde_json::json!({ "id": "org-1", "name": "Team", "role": "owner", "isPersonal": false, "selected": false })
         );
-        let selected = OrganizationCreated { organization, selected: true, selection_error: None };
+        let selected = OrganizationCreated { organization, selected: true };
         assert_eq!(serde_json::to_value(&selected).unwrap()["selected"], true);
-        assert!(serde_json::to_value(&selected).unwrap().get("selectionError").is_none());
     }
 
     fn pending() -> PendingAuth {

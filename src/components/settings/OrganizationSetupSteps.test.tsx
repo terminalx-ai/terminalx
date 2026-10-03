@@ -151,3 +151,14 @@ it("completes once the workspace is healthy and its agent took the prompt, and l
   shown.rerender(view());
   expect(screen.getByTestId("organization-setup-done").textContent).toContain("terminal only");
 });
+
+it("does not offer to resend a create request older than a day (the server no longer replays it)", async () => {
+  const stale = { idempotencyKey: "k", createdAt: Date.now() - 25 * 60 * 60 * 1000, request: { name: "Setup check" } as never };
+  record = { ...record, step: "workspace", workspace: { pending: stale, id: null } };
+  const shown = render(view());
+  await waitFor(() => expect(record.workspace).toBeNull());
+  shown.rerender(view());
+  expect(screen.queryByRole("button", { name: "Resume creating the setup workspace" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Prepare setup workspace" })).toBeTruthy();
+  expect(api.cloudWorkspaceCreate).not.toHaveBeenCalled();
+});

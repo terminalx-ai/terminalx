@@ -8,6 +8,7 @@ import { organizationGithubApp } from "@/lib/organizationGithubApp";
 import {
   ENVIRONMENT_CHECK_PROMPT,
   reconcileSetup,
+  resendable,
   setupWorkspace,
   STEP_LABELS,
   type OrganizationSetupRecord,
@@ -182,7 +183,8 @@ export function OrganizationSetupSteps({
   const step = record.step;
   const reached = (name: SetupStep) => ORDER.indexOf(step) > ORDER.indexOf(name);
   const item = setupWorkspace(record, facts.workspaces);
-  const unsent = record.workspace && !record.workspace.id ? record.workspace.pending : null;
+  // Resent only while the server still answers it as the same create.
+  const unsent = resendable(record);
 
   if (step === "done") {
     return (

@@ -172,10 +172,10 @@ it("names the selector for what it decides once every organization is live (CS-1
 
 
 it("keeps a created organization that could not be selected, and only selects it on resume (PRO-16)", async () => {
-  vi.mocked(api.organizationCreate).mockResolvedValue({ ...organization, selected: false, selectionError: "account context changed" });
+  vi.mocked(api.organizationCreate).mockResolvedValue({ ...organization, selected: false });
   render(<OrganizationOnboarding {...props} />);
   start();
-  await screen.findByText(/was created, but could not be selected \(account context changed\)/);
+  await screen.findByText("The organization was created, but could not be selected. Resume setup to select it; it will not be created again.");
   const [record] = stored()!.records;
   expect(record).toMatchObject({ v: 2, organizationId: "org-1", step: "select", name: "Team", requestId: vi.mocked(api.organizationCreate).mock.calls[0]![1] });
   cleanup();

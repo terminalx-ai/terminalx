@@ -7,7 +7,7 @@ import { dropCloudAgentsIn } from "@/lib/cloudAgents";
 import { closeCloudConnectionsIn, resetCloudConnections } from "@/lib/cloudConnections";
 import { dropCloudTerminalsIn, resetCloudTerminals } from "@/lib/cloudTerminals";
 import { forgetPendingCreates, setPendingCreateUser } from "@/lib/cloudCreate";
-import { forgetSetups } from "@/lib/organizationSetup";
+import { forgetOtherSetups, forgetSetups } from "@/lib/organizationSetup";
 import { dropCollabIn, resetCollab } from "@/lib/cloudCollab";
 import { resetPeople } from "@/lib/cloudPeople";
 import { dropEditors } from "@/lib/editors";
@@ -63,6 +63,9 @@ function applyStatus(status: AccountStatus) {
     for (const orgId of change.left) dropCloudOrg(orgId);
   }
   for (const orgId of leftMemberships(state.status, status)) forgetCloudOrg(orgId, status.state === "signed-in" ? (status.identity?.email ?? null) : null);
+  // Signing out here (not a launch that finds nobody signed in) forgets the
+  // setup records: they name organizations and hold a prepared prompt.
+  if (state.status.state === "signed-in" && status.state === "signed-out") forgetOtherSetups(null);
   followUser(status);
   set({ status, ready: true });
   scheduleRefresh(status);
@@ -129,8 +132,10 @@ function followUser(status: AccountStatus) {
     /* storage unavailable */
   }
   if (last === user) return;
-  // Pending creates of anyone else (and unscoped ones from before) go.
+  // Pending creates of anyone else (and unscoped ones from before) go, and
+  // so do their organization setup records.
   forgetPendingCreates((owner) => last !== null && owner !== user);
+  if (last !== null) forgetOtherSetups(user);
   if (last !== null && status.organizations) {
     const members = new Set(status.organizations.map((org) => org.id));
     pruneCloudPrefs((orgId) => members.has(orgId));

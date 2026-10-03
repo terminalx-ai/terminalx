@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { CloudWorkspaceListItem } from "@/lib/api";
-import { forgetSetups, loadSetups, newSetup, reconcileSetup, saveSetup, setupFor, unfinishedCreation, type OrganizationSetupRecord, type SetupFacts } from "./organizationSetup";
+import { forgetSetups, loadSetups, newSetup, reconcileSetup, resendable, saveSetup, setupFor, unfinishedCreation, type OrganizationSetupRecord, type SetupFacts } from "./organizationSetup";
 
 const USER = "owner@example.test";
 const record = (patch: Partial<OrganizationSetupRecord> = {}): OrganizationSetupRecord => ({ ...newSetup("Team", "request-1", 1), organizationId: "org-1", step: "compute", ...patch });
@@ -100,7 +100,7 @@ describe("reconciling against the server", () => {
     // An unsent create request is kept: it is what makes the retry the same workspace.
     const pending = { idempotencyKey: "k", createdAt: 1, request: {} as never };
     const unsent = record({ step: "workspace", workspace: { pending, id: null } });
-    expect(reconcileSetup(unsent, facts({ workspaces: [] }))).toBe(unsent);
+    expect(reconcileSetup(unsent, facts({ workspaces: [] }), 2)).toBe(unsent);
   });
 
   it("keeps a completed setup completed, and returns the same record when nothing changed", () => {
@@ -108,5 +108,26 @@ describe("reconciling against the server", () => {
     expect(reconcileSetup(done, facts({ compute: false, workspaces: [] }))).toBe(done);
     const same = record({ step: "workspace" });
     expect(reconcileSetup(same, facts())).toBe(same);
+  });
+
+  it("resends an unanswered create request only for a day, then adopts the workspace it made or drops the request", () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const pending = { idempotencyKey: "k", createdAt: 1_000_000, request: { name: "Setup check" } as never };
+    const unsent = record({ step: "workspace", workspace: { pending, id: null } });
+    expect(resendable(unsent, 1_000_000 + DAY - 1)).toBe(pending);
+    expect(resendable(unsent, 1_000_000 + DAY)).toBeNull();
+    expect(resendable(withWorkspace(), 0)).toBeNull();
+    // Still resendable: nothing is decided for it.
+    expect(reconcileSetup(unsent, facts({ workspaces: [] }), 1_000_000 + 1)).toBe(unsent);
+    // Too old, and the list is not known: kept, but no longer offered for resending.
+    expect(reconcileSetup(unsent, facts({ workspaces: null }), 1_000_000 + DAY).workspace).toEqual({ pending, id: null });
+    // Too old, and the workspace it asked for exists after all: that is the setup workspace.
+    const made = workspace({ id: "ws-made", name: "Setup check", createdAt: 1_000_500 });
+    const older = workspace({ id: "ws-old", name: "Setup check", createdAt: 1 });
+    const adopted = reconcileSetup(unsent, facts({ workspaces: [older, made] }), 1_000_000 + DAY);
+    expect([adopted.workspace, adopted.step]).toEqual([{ pending: null, id: "ws-made" }, "done"]);
+    // Too old and nothing was made: the request is dropped, so a new one can be prepared.
+    const dropped = reconcileSetup(unsent, facts({ workspaces: [older] }), 1_000_000 + DAY);
+    expect([dropped.workspace, dropped.step]).toEqual([null, "workspace"]);
   });
 });

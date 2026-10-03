@@ -129,6 +129,57 @@ export function forgetSetups(user: string, gone: (organizationId: string) => boo
 }
 
 /**
+ * Forget setup records on this Mac: everyone's, or everyone's but `keep`'s.
+ * A record names an organization and holds a prepared first prompt; it is
+ * not left behind for the next person who signs in here.
+ */
+export function forgetOtherSetups(keep: string | null): void {
+  try {
+    const kept = keep === null ? null : storageKey(keep);
+    const doomed: string[] = [];
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (!key) continue;
+      if (key.startsWith(`${KEY}.`) && key !== kept) doomed.push(key);
+      // The previous version's attempt and name draft, keyed by the raw email.
+      else if (key.startsWith(`${LEGACY_KEY}.`) && (keep === null || !key.startsWith(`${LEGACY_KEY}.${keep}`))) doomed.push(key);
+    }
+    for (const key of doomed) localStorage.removeItem(key);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+/**
+ * How long the setup workspace's create request may be resent. The server
+ * replays a create by its key for a day (as `loadPending` in cloudCreate
+ * assumes); after that the same request would be a new workspace.
+ */
+export const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** The setup workspace's unanswered create request, while resending it is still the same create. */
+export function resendable(record: OrganizationSetupRecord, now = Date.now()): PendingCreate | null {
+  const workspace = record.workspace;
+  if (!workspace || workspace.id || !workspace.pending) return null;
+  return now - workspace.pending.createdAt < PENDING_TTL_MS ? workspace.pending : null;
+}
+
+/**
+ * An unanswered create request that is too old to resend: if the workspace
+ * it asked for is in the list after all (same name, created since), that is
+ * the setup workspace; otherwise the request is dropped and a new one may
+ * be prepared. Decided only from a list that is known.
+ */
+function settleExpiredRequest(record: OrganizationSetupRecord, workspaces: readonly CloudWorkspaceListItem[] | null, now: number): OrganizationSetupRecord {
+  const pending = record.workspace?.pending;
+  if (!pending || record.workspace?.id || resendable(record, now) || !workspaces) return record;
+  // Clocks differ a little between this Mac and the server.
+  const since = pending.createdAt - 5 * 60 * 1000;
+  const made = workspaces.find((item) => item.workspace.name === pending.request.name && item.workspace.createdAt >= since && item.workspace.state !== "destroyed");
+  return { ...record, workspace: made ? { pending: null, id: made.workspace.id } : null };
+}
+
+/**
  * The creation to resume: one the server has not confirmed, one that was
  * created and never selected, or, while no organization is selected at all,
  * one whose setup is not complete. An organization the person switched away
@@ -206,7 +257,8 @@ function stepFrom(record: OrganizationSetupRecord, facts: SetupFacts): SetupStep
  * (the same object when nothing changed) and never touches a record whose
  * organization is not the one the facts are about.
  */
-export function reconcileSetup(record: OrganizationSetupRecord, facts: SetupFacts, now = Date.now()): OrganizationSetupRecord {
+export function reconcileSetup(given: OrganizationSetupRecord, facts: SetupFacts, now = Date.now()): OrganizationSetupRecord {
+  const record = settleExpiredRequest(given, facts.workspaces, now);
   const step = stepFrom(record, facts);
   const completedAt = step === "done" ? (record.completedAt ?? now) : record.completedAt;
   if (step === record.step && completedAt === record.completedAt) return record;
