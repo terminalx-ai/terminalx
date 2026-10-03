@@ -13,6 +13,7 @@ mod desktop_links;
 #[cfg(feature = "desktop")]
 mod automations;
 mod binpath;
+mod cleanup;
 #[cfg(feature = "desktop")]
 mod cloud_catalog;
 mod cloud_activity;
@@ -514,6 +515,8 @@ pub fn run() {
             commands::workspace_disposition,
             commands::remove_workspace,
             commands::workspace_size,
+            commands::scan_leftovers,
+            commands::remove_leftovers,
             commands::issues_list,
             commands::issue_details,
             commands::linear_status,

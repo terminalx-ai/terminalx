@@ -90,7 +90,6 @@ pub enum Fetch {
     Fresh,
     /// The caller fetched the remote default branch a moment ago (one fetch
     /// for many workspaces of the same project).
-    #[cfg_attr(not(test), allow(dead_code))]
     JustFetched,
     /// Use what is already known locally: the quick state shown for every
     /// workspace in a list, which must not wait on the network. Such a check
@@ -262,7 +261,7 @@ fn hidden_from_status(cwd: &Path) -> Option<u32> {
     Some(out.lines().filter(|line| line.starts_with('S') || line.chars().next().is_some_and(|flag| flag.is_ascii_lowercase())).count() as u32)
 }
 
-/// After a patch match: would merging HEAD into `base` leave `base` as it
+/// After a patch match: would merging `rev` into `base` leave `base` as it
 /// is? `Some(false)` when the merge is clean and changes the base, so the
 /// branch holds something the base does not.
 ///
@@ -271,23 +270,23 @@ fn hidden_from_status(cwd: &Path) -> Option<u32> {
 /// it could apply. With more than one (two identical blocks), the match may
 /// be for a change the base made somewhere else, and the answer is `None`:
 /// not verified. `None` too when git cannot do the test merge at all.
-fn base_already_holds_head(cwd: &Path, base: &str, merge_base: &str) -> Option<bool> {
+fn base_already_holds(cwd: &Path, base: &str, rev: &str, merge_base: &str) -> Option<bool> {
     let base_tree = git::run(cwd, &["rev-parse", &format!("{base}^{{tree}}")]).ok()?.trim().to_string();
-    match git::run(cwd, &["merge-tree", "--write-tree", base, "HEAD"]) {
+    match git::run(cwd, &["merge-tree", "--write-tree", base, rev]) {
         Ok(out) => Some(out.lines().next().map(str::trim) == Some(base_tree.as_str())),
         // Exit 1 with nothing on stderr is "there are conflicts".
-        Err(error) if format!("{error:#}").contains(": exit ") => (!applies_in_more_than_one_place(cwd, merge_base)?).then_some(true),
+        Err(error) if format!("{error:#}").contains(": exit ") => (!applies_in_more_than_one_place(cwd, merge_base, rev)?).then_some(true),
         Err(_) => None,
     }
 }
 
-/// Whether any hunk of the change `merge_base..HEAD` could apply at more
+/// Whether any hunk of the change `merge_base..rev` could apply at more
 /// than one place in the file it changes: its lines before the change (the
 /// context and what it removes) occur more than once in the old file. A
 /// patch id is the same wherever such a hunk lands. `None` when the diff
 /// cannot be read.
-fn applies_in_more_than_one_place(cwd: &Path, merge_base: &str) -> Option<bool> {
-    let diff = git::run(cwd, &["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--ignore-submodules=none", merge_base, "HEAD", "--"]).ok()?;
+fn applies_in_more_than_one_place(cwd: &Path, merge_base: &str, rev: &str) -> Option<bool> {
+    let diff = git::run(cwd, &["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--ignore-submodules=none", merge_base, rev, "--"]).ok()?;
     let mut old_file: Option<Vec<String>> = None;
     let mut hunk: Vec<String> = Vec::new();
     let mut in_hunk = false;
@@ -345,7 +344,13 @@ fn verbatim_patch_ids(cwd: &Path, log_args: &[&str]) -> Option<std::collections:
 /// How the work at HEAD got into `base`, if it did, and how many commits
 /// did not.
 fn merged_into(cwd: &Path, base: &str) -> Option<(Option<MergedBy>, u32)> {
-    if count(cwd, &["rev-list", "--count", &format!("{base}..HEAD")])? == 0 {
+    merged_rev(cwd, base, "HEAD")
+}
+
+/// The same question for any commit or branch `rev`, not only a checkout's
+/// HEAD: a branch with no worktree can be asked about too.
+pub(crate) fn merged_rev(cwd: &Path, base: &str, rev: &str) -> Option<(Option<MergedBy>, u32)> {
+    if count(cwd, &["rev-list", "--count", &format!("{base}..{rev}")])? == 0 {
         return Some((Some(MergedBy::Ancestor), 0));
     }
     // `git cherry` marks each commit `-` when the base has a patch-equivalent
@@ -354,10 +359,10 @@ fn merged_into(cwd: &Path, base: &str) -> Option<(Option<MergedBy>, u32)> {
     // merging). So with any merge commit on the branch, "every commit has an
     // equivalent" proves nothing, and only the whole-change comparison
     // below can say the work is in the base.
-    let cherry = git::run(cwd, &["cherry", base, "HEAD"]).ok()?;
-    let merges = count(cwd, &["rev-list", "--count", "--merges", &format!("{base}..HEAD")])?;
+    let cherry = git::run(cwd, &["cherry", base, rev]).ok()?;
+    let merges = count(cwd, &["rev-list", "--count", "--merges", &format!("{base}..{rev}")])?;
     let unmerged = cherry.lines().filter(|line| line.starts_with('+')).count() as u32;
-    let merge_base = git::run(cwd, &["merge-base", base, "HEAD"]).ok()?.trim().to_string();
+    let merge_base = git::run(cwd, &["merge-base", base, rev]).ok()?.trim().to_string();
     // What the base gained since the branch left it, as exact patches. Only
     // worked out when `git cherry` found a candidate to confirm.
     let upstream = std::cell::OnceCell::new();
@@ -365,15 +370,15 @@ fn merged_into(cwd: &Path, base: &str) -> Option<(Option<MergedBy>, u32)> {
     if unmerged == 0 && merges == 0 {
         // Every commit has a look-alike upstream; each must be the same
         // change exactly, not the same but for whitespace.
-        let ours = verbatim_patch_ids(cwd, &[&format!("{base}..HEAD")])?;
+        let ours = verbatim_patch_ids(cwd, &[&format!("{base}..{rev}")])?;
         let theirs = upstream()?;
-        if ours.iter().all(|id| theirs.contains(id)) && base_already_holds_head(cwd, base, &merge_base)? {
+        if ours.iter().all(|id| theirs.contains(id)) && base_already_holds(cwd, base, rev, &merge_base)? {
             return Some((Some(MergedBy::Rebase), 0));
         }
     }
     // Nothing was told apart commit by commit: count them all as unmerged
     // unless the whole-change comparison below says otherwise.
-    let ahead = count(cwd, &["rev-list", "--count", "--no-merges", &format!("{base}..HEAD")])?;
+    let ahead = count(cwd, &["rev-list", "--count", "--no-merges", &format!("{base}..{rev}")])?;
     let unmerged = if unmerged == 0 && merges == 0 { ahead } else { unmerged };
     // What is reported when the whole-change comparison also fails: the
     // commits with no equivalent, or the merge commits that hid the change.
@@ -384,8 +389,8 @@ fn merged_into(cwd: &Path, base: &str) -> Option<(Option<MergedBy>, u32)> {
     // Trees, not `git diff --quiet`: a diff honours `submodule.<name>.ignore`
     // and `diff.ignoreSubmodules`, and would call a branch that moves a
     // submodule to another commit "no changes".
-    let tree = |rev: &str| git::run(cwd, &["rev-parse", "--verify", "--quiet", &format!("{rev}^{{tree}}")]).ok().map(|tree| tree.trim().to_string());
-    if tree(&merge_base)? == tree("HEAD")? {
+    let tree = |of: &str| git::run(cwd, &["rev-parse", "--verify", "--quiet", &format!("{of}^{{tree}}")]).ok().map(|tree| tree.trim().to_string());
+    if tree(&merge_base)? == tree(rev)? {
         return Some((Some(MergedBy::NoChanges), 0));
     }
     // The whole branch as one commit on top of where it started; nothing
@@ -396,7 +401,7 @@ fn merged_into(cwd: &Path, base: &str) -> Option<(Option<MergedBy>, u32)> {
     let epoch = "1970-01-01T00:00:00Z";
     let squashed = git::run_env(
         cwd,
-        &["-c", "user.name=TerminalX", "-c", "user.email=noreply@terminalx.invalid", "commit-tree", "HEAD^{tree}", "-p", &merge_base, "-m", "squash check"],
+        &["-c", "user.name=TerminalX", "-c", "user.email=noreply@terminalx.invalid", "commit-tree", &format!("{rev}^{{tree}}"), "-p", &merge_base, "-m", "squash check"],
         &[("GIT_AUTHOR_DATE", epoch), ("GIT_COMMITTER_DATE", epoch)],
     )
     .ok()?;
@@ -406,7 +411,7 @@ fn merged_into(cwd: &Path, base: &str) -> Option<(Option<MergedBy>, u32)> {
         // re-indents a line still matches when whitespace is ignored.
         let whole = verbatim_patch_ids(cwd, &["-1", squashed.trim()])?;
         let theirs = upstream()?;
-        if !whole.is_empty() && whole.iter().all(|id| theirs.contains(id)) && base_already_holds_head(cwd, base, &merge_base)? {
+        if !whole.is_empty() && whole.iter().all(|id| theirs.contains(id)) && base_already_holds(cwd, base, rev, &merge_base)? {
             return Some((Some(MergedBy::Squash), 0));
         }
     }

@@ -238,6 +238,26 @@ export interface WorkspaceRemoveReport {
   rescuedBranch: string | null;
 }
 
+/** Something an earlier delete left on disk; see Storage in Settings. */
+export interface Leftover {
+  id: string;
+  kind: "worktree" | "agentData" | "branch";
+  projectPath: string;
+  projectName: string;
+  name: string;
+  agent: string | null;
+  paths: string[];
+  sizeBytes: number;
+  /** Why the clean-up will not remove it; null when it can. */
+  keptBecause: string | null;
+}
+
+export interface LeftoverRemoval {
+  removed: string[];
+  failed: { id: string; error: string }[];
+  freedBytes: number;
+}
+
 export function sessionStatus(s: SessionEntry): TabStatus {
   let out: TabStatus = "idle";
   for (const t of s.tabs) {
