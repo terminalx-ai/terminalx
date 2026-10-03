@@ -169,7 +169,8 @@ async function register() {
   }
   try {
     // A reloaded window: the backend may still be sending to the old page's
-    // views. Waited for, so no view of this page can attach before it lands.
+    // views. A view attaches only after this (`createInstance` waits for
+    // `subscribeTerminals`), or it would be dropped with them.
     await pty.detachAll();
   } catch {
     /* outside a webview */
@@ -268,6 +269,10 @@ export function dropSessionTerminals(sessionIds: readonly string[]) {
 /** The pane an agent tab's CLI runs in. */
 export function agentPaneId(tabId: string): string {
   return `tab:${tabId}`;
+}
+
+export function isAgentPane(id: string): boolean {
+  return id.startsWith("tab:");
 }
 
 /**

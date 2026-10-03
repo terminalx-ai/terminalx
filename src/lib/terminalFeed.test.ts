@@ -13,50 +13,61 @@ function terminal() {
   return { term: term as never, parse: () => parsed.splice(0).forEach((done) => done()) };
 }
 
-const acked = () => pty.ack.mock.calls.reduce((total, [, bytes]) => total + (bytes as number), 0);
+/** The totals reported so far, in order. */
+const reported = () => pty.ack.mock.calls.map(([, total]) => total as number);
+
+let hidden = false;
+function hideWindow(value: boolean) {
+  hidden = value;
+  document.dispatchEvent(new Event("visibilitychange"));
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
   vi.useFakeTimers();
+  hidden = false;
+  Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden });
 });
 afterEach(() => vi.useRealTimers());
 
 describe("a local pane's output", () => {
-  it("is acknowledged once drawn, in steps, for the terminal on screen", () => {
+  it("is acknowledged once drawn, as a running total, for the terminal on screen", () => {
     const { term, parse } = terminal();
     setOnScreen(term, true);
     const feed = feedLocalPane("p1", term);
     const before = dataRate("local").bytes;
 
-    feed(new Uint8Array(ACK_BYTES - 1));
+    feed.data(new Uint8Array(ACK_BYTES - 1));
     // Received, not drawn: nothing to acknowledge yet.
     expect(pty.ack).not.toHaveBeenCalled();
     parse();
     // Drawn, but less than a step.
     expect(pty.ack).not.toHaveBeenCalled();
 
-    feed(new Uint8Array(10));
+    feed.data(new Uint8Array(10));
     parse();
-    expect(pty.ack).toHaveBeenCalledTimes(1);
-    expect(pty.ack).toHaveBeenCalledWith("p1", ACK_BYTES + 9);
-    expect(dataRate("local").bytes - before).toBe(ACK_BYTES + 9);
+    feed.data(new Uint8Array(ACK_BYTES));
+    parse();
+    // Totals, not steps: one that goes missing is made good by the next.
+    expect(reported()).toEqual([ACK_BYTES + 9, 2 * ACK_BYTES + 9]);
+    expect(pty.ack).toHaveBeenLastCalledWith("p1", 2 * ACK_BYTES + 9);
+    expect(dataRate("local").bytes - before).toBe(2 * ACK_BYTES + 9);
   });
 
-  it("is acknowledged a step per tick for a hidden terminal, and all at once when it is shown", () => {
+  it("is acknowledged a step per tick for a hidden shell, and all at once when it is shown", () => {
     const { term, parse } = terminal();
     const feed = feedLocalPane("p1", term);
-    feed(new Uint8Array(ACK_BYTES * 4));
+    feed.data(new Uint8Array(ACK_BYTES * 4));
     parse();
     expect(pty.ack).not.toHaveBeenCalled();
 
     vi.advanceTimersByTime(HIDDEN_ACK_MS);
-    expect(acked()).toBe(ACK_BYTES);
     vi.advanceTimersByTime(HIDDEN_ACK_MS);
-    expect(acked()).toBe(ACK_BYTES * 2);
+    expect(reported()).toEqual([ACK_BYTES, ACK_BYTES * 2]);
 
     setOnScreen(term, true);
     vi.advanceTimersByTime(HIDDEN_ACK_MS);
-    expect(acked()).toBe(ACK_BYTES * 4);
+    expect(reported()).toEqual([ACK_BYTES, ACK_BYTES * 2, ACK_BYTES * 4]);
     // Nothing owed: no more ticks.
     vi.advanceTimersByTime(HIDDEN_ACK_MS * 10);
     expect(pty.ack).toHaveBeenCalledTimes(3);
@@ -66,10 +77,56 @@ describe("a local pane's output", () => {
     const { term, parse } = terminal();
     const feed = feedLocalPane("p1", term);
     for (let frame = 0; frame < 20; frame++) {
-      feed(new Uint8Array(3000));
+      feed.data(new Uint8Array(3000));
       parse();
       vi.advanceTimersByTime(100);
     }
     expect(pty.ack).not.toHaveBeenCalled();
+  });
+
+  it("never slows an agent's pane for not being looked at", () => {
+    const { term, parse } = terminal();
+    // Not on screen: the agent's terminal under its chat.
+    const feed = feedLocalPane("tab:t1", term, { paced: false });
+    feed.data(new Uint8Array(ACK_BYTES * 4));
+    parse();
+    // All of it at once, with no timer involved.
+    expect(reported()).toEqual([ACK_BYTES * 4]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("holds nothing back while the window is hidden, where the page's timers barely run", () => {
+    const { term, parse } = terminal();
+    setOnScreen(term, true);
+    const feed = feedLocalPane("p1", term);
+    feed.data(new Uint8Array(ACK_BYTES * 2));
+    // Arrived and not yet parsed: with the window visible that is not acknowledged.
+    expect(pty.ack).not.toHaveBeenCalled();
+
+    // The window is hidden: what has arrived is acknowledged there and then.
+    hideWindow(true);
+    expect(reported()).toEqual([ACK_BYTES * 2]);
+    feed.data(new Uint8Array(ACK_BYTES));
+    expect(reported()).toEqual([ACK_BYTES * 2, ACK_BYTES * 3]);
+
+    // Shown again, and xterm catches up: nothing is acknowledged twice.
+    hideWindow(false);
+    parse();
+    expect(pty.ack).toHaveBeenCalledTimes(2);
+    feed.data(new Uint8Array(ACK_BYTES));
+    parse();
+    expect(reported()).toEqual([ACK_BYTES * 2, ACK_BYTES * 3, ACK_BYTES * 4]);
+  });
+
+  it("says nothing more once its terminal is gone", () => {
+    const { term, parse } = terminal();
+    const feed = feedLocalPane("p1", term);
+    feed.data(new Uint8Array(ACK_BYTES * 4));
+    parse();
+    feed.stop();
+    vi.advanceTimersByTime(HIDDEN_ACK_MS * 10);
+    hideWindow(true);
+    expect(pty.ack).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

@@ -7,7 +7,7 @@
 // writes the workload files, builds the commands and prints the results.
 //
 //   node scripts/perf/terminal-bench.mjs --home ~/.txperf --pid 12345 \
-//     [--scenarios yes,cat,tui,echo,interrupt,soak,churn,covered] [--terminals 1,8,20] [--out results.json]
+//     [--scenarios yes,cat,tui,echo,interrupt,soak,churn,covered,background] [--terminals 1,8,20] [--out results.json]
 //     [--interrupt-after 2000] [--soak sessions,tabs,switches,agents] [--work dir] [--label text]
 import { execFileSync } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -16,7 +16,7 @@ import { cpus, homedir, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
 
-const SCENARIOS = ["yes", "cat", "tui", "echo", "interrupt", "soak", "churn", "covered"];
+const SCENARIOS = ["yes", "cat", "tui", "echo", "interrupt", "soak", "churn", "covered", "background"];
 const LOG_BYTES = 50 * 1024 * 1024;
 const TUI_FRAMES = 4000;
 const YES_LINES = 2_000_000;
@@ -236,7 +236,7 @@ const web = (sample) => (sample ? `${mb(sample.WebContent)} + ${mb(sample.GPU)}`
 
 function markdown(results) {
   const lines = [];
-  const drains = results.filter((r) => r.result.scenario === "drain");
+  const drains = results.filter((r) => r.result.scenario === "drain" && !r.background);
   if (drains.length) {
     lines.push("| Workload | Terminals | Drain (s) | MB/s | Long tasks | Blocked (ms) | Longest block (ms) | Frames/s | WebContent + GPU memory before → peak → after (MB) | Renderer on screen | WebGL / DOM | Writes discarded |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
     for (const { name, bytes, result: r, memory: m, discarded } of drains) {
@@ -257,6 +257,14 @@ function markdown(results) {
   if (interrupts.length) {
     lines.push("| Terminals | Renderer on screen | Flood before Ctrl+C (s) | Ctrl+C → process exit (ms) | Ctrl+C → output stops (ms) | Output after Ctrl+C (MB) | Long tasks | Longest block (ms) | Frames/s | WebContent + GPU memory before → peak → after (MB) | Writes discarded |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
     for (const { request, result: r, memory: m, discarded } of interrupts) lines.push(`| ${r.terminals} | ${r.renderer} | ${request.afterMs / 1000} | ${r.exitMs} | ${r.outputStoppedMs} | ${(r.bytesAfter / 1024 / 1024).toFixed(1)} | ${r.mainThread.longTasks} | ${r.mainThread.longestMs} | ${r.mainThread.framesPerSecond} | ${web(m.before)} → ${web(m.peak)} → ${web(m.after)} | ${discarded ?? "n/a"} |`);
+    lines.push("");
+  }
+  const backgrounds = results.filter((r) => r.background);
+  if (backgrounds.length) {
+    lines.push("| Workload | Page | Program's output read by the backend (s) | Program exited (s) |", "| --- | --- | --- | --- |");
+    for (const { name, result: r, background } of backgrounds) {
+      lines.push(`| ${name} | ${r.page?.visibility ?? "no answer"} | ${background.readMs === null ? "not within 180" : seconds(background.readMs)} | ${r.exitMs ? seconds(r.exitMs) : "not within 180"} |`);
+    }
     lines.push("");
   }
   const covers = results.filter((r) => r.result.scenario === "covered");
@@ -325,6 +333,47 @@ function soakProject() {
 }
 
 for (const scenario of options.scenarios) {
+  if (scenario === "background") {
+    // The window is hidden, as when the person works in another app: WebKit
+    // then runs the page's timers about once a second. What matters is that
+    // the program is not slowed, so the time taken is until the backend has
+    // read all of its output, whatever the page has drawn by then.
+    const { name, bytes, command } = drainWorkloads.cat;
+    const expected = bytes;
+    const hide = (hidden) => execFileSync("/usr/bin/osascript", ["-e", `tell application "System Events" to set visible of (first process whose unix id is ${status.pid}) to ${!hidden}`], { stdio: "ignore" });
+    try {
+      hide(true);
+    } catch {
+      console.error("terminal-bench: could not hide the window (System Events needs permission); skipping the background scenario");
+      continue;
+    }
+    await sleep(3000);
+    for (const agent of [false, true]) {
+      const label = `${name}, window hidden, ${agent ? "an agent's pane" : "a shell"}`;
+      const from = (await control(options.home, "status")).terminals.backend.dataBytes;
+      const started = Date.now();
+      let readMs = null;
+      let done = false;
+      const watching = (async () => {
+        while (readMs === null && !done && Date.now() - started < 200_000) {
+          await sleep(100);
+          const now = (await control(options.home, "status").catch(() => null))?.terminals.backend.dataBytes ?? 0;
+          if (now - from >= expected) readMs = Date.now() - started;
+        }
+      })();
+      try {
+        console.error(`terminal-bench: ${label} ...`);
+        results.push({ name: label, bytes, ...(await run(options, status.pid, { scenario: "background", cwd: options.work, command, agent }, 180_000)) });
+      } catch (error) {
+        results.push({ name: label, bytes, result: { scenario: "background", error: error.message } });
+      }
+      done = true;
+      await watching;
+      results[results.length - 1].background = { readMs };
+    }
+    hide(false);
+    continue;
+  }
   if (scenario === "covered") {
     await record("agent-style stream in a covered terminal, 10 s", null, { scenario: "covered", projectPath: soakProject(), stream: background, seconds: 10 });
     continue;

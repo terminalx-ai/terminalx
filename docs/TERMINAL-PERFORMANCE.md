@@ -97,6 +97,10 @@ What a run does:
   through the store). A `FinalizationRegistry` counts how many the garbage
   collector takes back. This is what separates a leak in xterm or its renderer
   from one in the app.
+- **Background** (`--scenarios background`). The app is hidden through System
+  Events, by process id, and a pane runs `cat` of the 50 MB log, once as a
+  shell and once as an agent's pane. Timed: until the program has exited.
+  Nothing in this scenario waits for a frame, which a hidden page never gets.
 - **Covered** (`--scenarios covered`). A real session with two shell tabs:
   the one behind prints an agent-style stream for 10 s while the other is
   selected. Counted: how often xterm draws the covered one (`onRender`). The
@@ -365,20 +369,42 @@ path. That is where the 500–600 ms of output after Ctrl+C came from, and the
   other listener. It is handed the backend's scrollback first, with nothing
   lost or repeated in between, so the window no longer keeps replay buffers,
   and a pane no view has shown costs the window nothing.
-- The view acknowledges what xterm has parsed, 256 KB at a time. A pane that
-  is more than 1 MB ahead of its view is not read until the view catches up,
-  so the program waits on its own output as it would in any terminal.
-- A terminal that is not on screen is acknowledged at about 5 MB/s. Its
+- The view acknowledges what xterm has parsed, as a running total, about
+  every 256 KB. A pane that is more than 1 MB ahead of its view is not read
+  until the view catches up, so the program waits on its own output as it
+  would in any terminal. A total that is lost on the way is made good by the
+  next one.
+- A **shell** that is not on screen is acknowledged at about 5 MB/s. Its
   output is still parsed in order and in full, but a flood in a hidden tab no
   longer takes the main thread from the terminal being typed in.
+- An **agent's pane** is never slowed for not being looked at: it is
+  acknowledged as fast as xterm parses, shown or not.
+- **Nothing is held for a hidden window.** WebKit runs a hidden page's timers
+  about once a second, and xterm parses on timers, so a page in that state
+  acknowledges output as it arrives and every program runs at full speed, as
+  before there was flow control.
 - The first output after a quiet spell is sent at once instead of after the
   8 ms batching window. That is a key's echo.
 - A view that says nothing for 2 s while its pane is held (a frozen window)
-  stops being waited for until it speaks again, so a program can never hang
-  on a window that is not drawing. A reloaded window drops the attachments of
-  the page before it.
+  stops being waited for until it speaks again, and what it was silent on is
+  written off, so a program can never hang, or be held back for good, on a
+  window that is not drawing or on bytes that never arrived.
+- A pane keeps one slot for its views for as long as it lives. A view that
+  detaches and attaches again, a page that is reloaded, and a view that
+  attaches before or after its pane was spawned all get the scrollback and
+  then everything after it. A reloaded page drops the attachments of the page
+  before it, and a view attaches only after that.
+- A pane's exit is announced after the last of its output.
 - The `pty_data` event is still emitted for the listeners in the backend (the
   mobile reader, the remote runtime); the window no longer listens to it.
+
+**Where memory is not bounded.** Flow control bounds what is in flight to
+about 1 MB per pane only while the window is visible and answering. While a
+window is hidden, or for the 2 s it takes to decide a view has stalled and
+from then until it speaks again, output is sent as fast as the program
+prints, and waits in the page (Tauri's channel queue, then xterm's write
+buffer, which discards past 50 MB). That is what happened on every flood
+before this change; it is not made worse, and it is not fixed.
 
 Cloud terminals already have their own bounded stream: the runtime keeps a
 ring per terminal and a reader that falls behind resumes from it, so they are
@@ -388,25 +414,55 @@ not part of this change. They share the view, and so the earlier ones.
 
 | | Before | After |
 | --- | --- | --- |
-| Typing echo, nothing else running, p50 / p95 | 12 / 14 ms | 1 / 2 ms |
-| Typing echo, a flood in another tab, p50 / p95 | 20–21 / 31 ms | 1 / 1–2 ms |
-| Key press to the frame showing it, p95 | 29 ms idle, 50–52 ms under a flood | 17 ms in both |
+| Typing echo, nothing else running, p50 / p95 | 12 / 14 ms | 1 / 3 ms |
+| Typing echo, a flood in another tab, p50 / p95 | 20–21 / 31 ms | 1 / 1–4 ms |
+| Key press to the frame showing it, p95 | 29 ms idle, 50–52 ms under a flood | 16–17 ms in both |
 | Long tasks during 14 s of typing under a flood | 5–6, up to 57 ms | 0 |
-| Ctrl+C to the last output, during a flood | 605–647 ms | 5–13 ms |
+| Ctrl+C to the last output, during a flood | 605–647 ms | 6–15 ms |
 | Writes xterm discarded in the matrix | about 91,000 | 0 |
-| `cat` of a 50 MB log | 0.56–0.66 s, 76–90 MB/s | 0.51–0.60 s, 83–99 MB/s |
-| Agent-style redraws, 4,000 frames | 0.09–0.12 s | 0.09–0.10 s |
-| WebContent memory after the soak (baseline → after) | 300 → 344 MB | 351 → 385 MB |
+| `cat` of a 50 MB log | 0.56–0.66 s, 76–90 MB/s | 0.51–0.61 s, 82–98 MB/s |
+| Agent-style redraws, 4,000 frames | 0.09–0.12 s | 0.10–0.13 s |
+| WebContent memory after the soak (baseline → after) | 300 → 344 MB | 364 → 377 MB |
 
-- `yes | head -n 2000000` is unchanged at 2.0–2.1 s; it is limited by the
-  pipe. Its first run in the matrix took 4.20 s once; three repeats on a
-  fresh app gave 2.01–2.08 s.
-- A flood in a hidden terminal now runs at about 5 MB/s instead of as fast as
+- The after column is from 2026-10-03, on a machine that other sessions were
+  loading heavily (load average 43 to 73 over the preceding fifteen minutes).
+  In the matrix run itself `cat` took 0.71, 1.70 and 5.30 s with 1, 8 and 20
+  terminals, and `yes | head` 3.6–4.2 s; a repeat a few minutes later gave
+  the `cat` figures in the table and `yes | head` at 2.1–4.0 s. On 2026-10-02,
+  with the machine quiet, `yes | head` was 2.0–2.1 s. It is limited by the
+  pipe and the PTY, not by the app.
+- A flood in a hidden shell now runs at about 5 MB/s instead of as fast as
   the PTY carries it. That is the trade for the typing numbers above.
 - Key press to frame is bounded by the display: 17 ms is one frame at 60 Hz.
 
-All five acceptance criteria of the issue are met on this machine, the
-memory one within run-to-run spread (1.10 times here).
+**With the window hidden** (`--scenarios background`: the app is hidden as
+when the person works in another app, and a pane runs `cat` of the 50 MB
+log):
+
+| | Acknowledged on parse, hidden or not (first revision of this change) | Now |
+| --- | --- | --- |
+| The program has exited after | not within 180 s; 18 of 50 MB read after about six minutes | 0.75 s in a shell, 0.71 s in an agent's pane |
+
+A program must not be slowed because nobody is looking at the window, an
+agent's CLI least of all. The first revision of this change held the pane for
+a page whose timers WebKit had all but stopped.
+
+**In the real window** (`scripts/perf/verify-agent-terminal.mjs`). The
+benchmark attaches its own terminals in its own order, and that hid two
+defects in the first revision: an agent tab's terminal stayed blank after a
+launch, and a view that attached a second time got the scrollback and nothing
+after it. This script goes through the app's launch, its session and tab
+views and a page reload, with the stand-in agent CLI, and checks that the
+reply to a prompt appears in the tab's terminal:
+
+| | First revision | Now |
+| --- | --- | --- |
+| An agent started from the CLI, once its session is opened | scrollback only | live |
+| An agent tab after a launch | blank | live |
+| An agent tab after the page is reloaded | scrollback only | live |
+
+All five acceptance criteria of the issue are met on this machine (memory
+after the soak 1.04 times the baseline in this run).
 
 Still open from the baseline: finding 8 (the status bar cannot see the web
 view's memory on macOS). Not done: an archived session keeps its terminals,

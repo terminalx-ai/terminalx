@@ -1187,8 +1187,8 @@ export const pty = {
     channel.onmessage = (message) => onData(new Uint8Array(message));
     return invoke<void>("pty_attach", { id, channel });
   },
-  /** This window has drawn `bytes` more of the pane's output; the backend holds a pane that gets too far ahead. */
-  ack: (id: string, bytes: number) => invoke<void>("pty_ack", { id, bytes }),
+  /** This window has drawn `drawn` bytes of the pane's output since it attached; the backend holds a pane that gets too far ahead. */
+  ack: (id: string, drawn: number) => invoke<void>("pty_ack", { id, drawn }),
   detach: (id: string) => invoke<void>("pty_detach", { id }),
   /** This page has attached nothing yet: drop what a page loaded before it in this window had attached. */
   detachAll: () => invoke<void>("pty_detach_all"),

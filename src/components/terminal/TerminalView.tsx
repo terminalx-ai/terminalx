@@ -3,7 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { pty } from "@/lib/api";
-import { getInstance, peekInstance, type TerminalInstance } from "@/lib/terminal";
+import { getInstance, isAgentPane, peekInstance, subscribeTerminals, type TerminalInstance } from "@/lib/terminal";
 import { feedLocalPane } from "@/lib/terminalFeed";
 import { fitTerminal } from "@/lib/terminalFit";
 import { hideWebgl, showWebgl } from "@/lib/terminalWebgl";
@@ -113,12 +113,30 @@ export function createTerminal(mode: "dark" | "light"): TerminalInstance {
 /** A terminal wired to the local pane `id`. */
 export function createInstance(id: string, mode: "dark" | "light"): TerminalInstance {
   const { el, term, fit } = createTerminal(mode);
-  // The pane's output so far, then everything it prints, as raw bytes.
-  void pty.attach(id, feedLocalPane(id, term)).catch(() => {});
+  // The pane's output so far, then everything it prints, as raw bytes. Only
+  // once this page has dropped what a page before it had attached
+  // (`subscribeTerminals`): attached before that, the view would be dropped
+  // with them, and its terminal would stay blank.
+  const feed = feedLocalPane(id, term, { paced: !isAgentPane(id) });
+  let released = false;
+  void subscribeTerminals()
+    .then(() => (released ? undefined : pty.attach(id, feed.data)))
+    // Disposed while the attach was on its way: it must not be left attached to nothing.
+    .then(() => (released ? pty.detach(id) : undefined))
+    .catch(() => {});
   term.onData((d) => void pty.write(id, d).catch(() => {}));
   term.onBinary((d) => void pty.write(id, d).catch(() => {}));
   term.onResize(({ cols, rows }) => void pty.resize(id, cols, rows).catch(() => {}));
-  return { el, term, fit, release: () => void pty.detach(id).catch(() => {}) };
+  return {
+    el,
+    term,
+    fit,
+    release: () => {
+      released = true;
+      feed.stop();
+      void pty.detach(id).catch(() => {});
+    },
+  };
 }
 
 /**

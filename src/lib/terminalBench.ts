@@ -2,6 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { api, pty } from "@/lib/api";
 import { createInstance } from "@/components/terminal/TerminalView";
 import { addProject, addTab, deleteSession, getSessionStore, removeTab, selectSession, upsertSession } from "@/lib/sessions";
+import { enterTerminalView } from "@/lib/tabViews";
 import { rendererOf } from "@/lib/terminalCounters";
 import { fitTerminal } from "@/lib/terminalFit";
 import { showWebgl } from "@/lib/terminalWebgl";
@@ -41,6 +42,11 @@ export type BenchRequest =
   | (Field & { scenario: "echo"; command: string; producers: number; producer: string; samples: number; intervalMs: number })
   | (Field & { scenario: "interrupt"; command: string; afterMs: number })
   | { scenario: "churn"; count: number; lines: number; attach: boolean; webgl: boolean; focus?: boolean; pty?: { cwd: string; command: string } }
+  | { scenario: "background"; cwd: string; command: string; agent: boolean }
+  | { scenario: "ui"; action: "project"; projectPath: string }
+  | { scenario: "ui"; action: "select"; sessionId: string }
+  | { scenario: "ui"; action: "terminalView"; sessionId: string; tabId: string }
+  | { scenario: "ui"; action: "screen" | "reload" }
   | { scenario: "covered"; projectPath: string; stream: string; seconds: number }
   | ({ scenario: "soak"; projectPath: string; fill: string } & ({ step: "open"; sessions: number } | { step: "tabs" | "switches"; count: number } | { step: "agents"; count: number; harness: string } | { step: "cleanup" }));
 
@@ -448,6 +454,82 @@ async function soak(request: Soak) {
 }
 
 /**
+ * One program's output into a terminal, with nothing that needs the page to
+ * be visible: no frames, no timers. For measuring what a hidden window does
+ * to a program; the driver hides the window and times the backend's reading.
+ */
+async function background(request: Extract<BenchRequest, { scenario: "background" }>) {
+  // An agent's pane is named `tab:<id>`, which is what decides how it is acknowledged.
+  const id = `${request.agent ? "tab:" : ""}perf:background:${Date.now().toString(36)}${++runs}`;
+  await adoptPane({ id, sessionId: "perf:background", title: "Benchmark", hidden: true, owned: true });
+  const inst = getInstance(id, () => createInstance(id, mode()));
+  const exited = new Promise<void>((resolve) => {
+    void listen<{ id: string }>("pty_exit", (event) => {
+      if (event.payload.id === id) resolve();
+    });
+  });
+  const from = terminalCounters().data.local.bytes;
+  const started = performance.now();
+  await pty.spawn(id, request.cwd, 190, 24, request.command);
+  await exited;
+  const result = {
+    scenario: request.scenario,
+    agent: request.agent,
+    page: page(),
+    exitMs: round(performance.now() - started),
+    receivedBytes: terminalCounters().data.local.bytes - from,
+    lines: inst.term.buffer.active.length,
+  };
+  await closeTerminal(id);
+  return result;
+}
+
+/**
+ * Drive the app's own navigation and read back what its terminals show, for
+ * checks that must go through the real launch, tab and reload paths
+ * (`scripts/perf/verify-agent-terminal.mjs`).
+ */
+async function ui(request: Extract<BenchRequest, { scenario: "ui" }>) {
+  switch (request.action) {
+    case "project":
+      await addProject(request.projectPath);
+      break;
+    case "select":
+      selectSession(request.sessionId);
+      await settle();
+      break;
+    case "terminalView": {
+      const session = getSessionStore().sessions.find((item) => item.id === request.sessionId);
+      const tab = session?.tabs.find((item) => item.id === request.tabId);
+      if (!session || !tab) throw new Error("no such session or tab in this window");
+      await enterTerminalView(session, tab);
+      await settle();
+      break;
+    }
+    case "reload":
+      // After the answer has left: the page that asked is the one that goes.
+      setTimeout(() => window.location.reload(), 300);
+      break;
+    case "screen":
+      break;
+  }
+  const lines = (term: TerminalInstance["term"]) => {
+    const buffer = term.buffer.active;
+    const text: string[] = [];
+    for (let y = Math.max(0, buffer.length - 40); y < buffer.length; y++) {
+      const line = buffer.getLine(y)?.translateToString(true) ?? "";
+      if (line.trim()) text.push(line);
+    }
+    return text;
+  };
+  const terminals = getTerminalState().panes.map((pane) => {
+    const inst = peekInstance(pane.id);
+    return { id: pane.id, sessionId: pane.sessionId, exited: pane.exited, instance: !!inst, inDocument: !!inst?.el.isConnected, renderer: inst ? rendererOf(inst.term) : null, lines: inst ? lines(inst.term) : [] };
+  });
+  return { scenario: request.scenario, action: request.action, page: page(), selected: getSessionStore().selectedSessionId, sessions: getSessionStore().sessions.map((session) => ({ id: session.id, tabs: session.tabs.map((tab) => tab.id) })), terminals, counters: terminalCounters() };
+}
+
+/**
  * A terminal that is mounted but covered: a shell tab behind the selected
  * one, which is also how an agent's terminal sits under its chat. It prints
  * an agent-style stream while nobody can see it; every time xterm draws it
@@ -557,6 +639,10 @@ export async function runTerminalBench(request: BenchRequest): Promise<unknown> 
         return await churn(request);
       case "covered":
         return await covered(request);
+      case "ui":
+        return await ui(request);
+      case "background":
+        return await background(request);
       default:
         throw new Error(`unknown scenario ${(request as { scenario: string }).scenario}`);
     }

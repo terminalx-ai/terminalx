@@ -1668,10 +1668,10 @@ pub fn pty_attach(state: State<'_, AppState>, id: String, channel: tauri::ipc::C
     state.terminals.attach(&id, Box::new(move |bytes| channel.send(tauri::ipc::InvokeResponseBody::Raw(bytes.to_vec())).is_ok()));
 }
 
-/// The window has drawn `bytes` more of the pane's output (flow control).
+/// The window has drawn `drawn` bytes of the pane's output since it attached (flow control).
 #[tauri::command]
-pub fn pty_ack(state: State<'_, AppState>, id: String, bytes: usize) {
-    state.terminals.ack(&id, bytes);
+pub fn pty_ack(state: State<'_, AppState>, id: String, drawn: u64) {
+    state.terminals.ack(&id, drawn);
 }
 
 /// A freshly loaded window: whatever its previous page was shown is gone.
