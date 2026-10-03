@@ -662,10 +662,15 @@ pub struct CloudWorkspaceOperation {
     pub detail_code: Option<String>,
     pub progress: Option<OperationProgress>,
     pub events: Option<Vec<OperationEvent>>,
-    /// An archive's final checkpoint: committed, failed, timed-out or skipped
-    /// (§10.3). A string so a newer server's value still reaches the page.
+    /// A stop's or an archive's final checkpoint: committed, failed,
+    /// timed-out or skipped (§10.3). A string so a newer server's value still
+    /// reaches the page.
     #[serde(default)]
     pub checkpoint: Option<String>,
+    /// When the runtime reported that checkpoint. Absent from an older
+    /// server, and for one the runtime never answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_at: Option<i64>,
     /// A delete's cleanup report until the provider confirms (§10.4).
     #[serde(default)]
     pub cleanup: Option<CleanupReport>,
@@ -963,10 +968,10 @@ fn valid_clone_url(value: &str) -> bool {
 }
 
 fn setup_body(repositories: &[CreateRepository]) -> Value {
-    json!({
-        "version": 1,
-        "credentialIds": [],
-        "repositories": repositories
+    let mut body = json!({ "version": 1, "credentialIds": [] });
+    // A setup may name no repository at all, but never an empty list.
+    if !repositories.is_empty() {
+        body["repositories"] = repositories
             .iter()
             .map(|repository| {
                 let mut entry = json!({ "sourceProvider": "github", "cloneUrl": repository.clone_url });
@@ -975,8 +980,9 @@ fn setup_body(repositories: &[CreateRepository]) -> Value {
                 }
                 entry
             })
-            .collect::<Vec<_>>(),
-    })
+            .collect();
+    }
+    body
 }
 
 fn launch_body(launch: &CreateLaunch) -> Value {
@@ -1008,6 +1014,10 @@ pub struct PreflightCheck {
     pub kind: String,
     #[serde(default)]
     pub clone_url: Option<String>,
+    /// On an `agent-credential` check from an API that answers per agent
+    /// (PRO-78): the agent it is about.
+    #[serde(default)]
+    pub agent: Option<String>,
     pub status: String,
     #[serde(default, deserialize_with = "safe_optional_error_code")]
     pub error_code: Option<String>,
@@ -1697,19 +1707,26 @@ impl CloudWorkspaceService {
         Ok(CloudCatalogFeed { changed: true, cursor: Some(body.cursor), reset: body.reset, organizations, deleted_workspace_ids })
     }
 
-    /// Check the repositories and refs before quoting (contract §16).
-    pub fn preflight(&self, org: Option<&str>, repositories: Vec<CreateRepository>) -> Result<CloudWorkspacePreflight, CloudWorkspaceClientError> {
-        if repositories.is_empty() {
+    /// Check the repositories and refs before quoting (contract §16), and
+    /// with `agent` (the one a first prompt would go to, PRO-78) whether the
+    /// organization has a login for it.
+    pub fn preflight(&self, org: Option<&str>, repositories: Vec<CreateRepository>, agent: Option<String>) -> Result<CloudWorkspacePreflight, CloudWorkspaceClientError> {
+        if repositories.is_empty() && agent.is_none() {
             return Ok(CloudWorkspacePreflight { ready: true, checks: Vec::new() });
         }
         validate_create("preflight", &repositories, None)?;
+        if agent.as_deref().is_some_and(|agent| !crate::cloud_agents::launch::valid_agent(agent)) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_launch_invalid", false));
+        }
         // A POST, but it changes nothing: a failed call is simply retryable,
         // never an unknown outcome.
         self.run_in(org, RequestRisk::Mutation, |client, context| {
             client.request(
                 context,
                 &["cloud-workspaces", "preflight"],
-                None,
+                // A query parameter: an older API ignores it, where it would
+                // reject an unknown body field.
+                agent.as_deref().map(|agent| ("agent", agent)),
                 Some(json!({ "setup": setup_body(&repositories) })),
                 None,
                 RequestRisk::Mutation,
@@ -3553,10 +3570,11 @@ mod tests {
         let body = r#"{"version":1,"ready":false,"checks":[{"kind":"repository","cloneUrl":"https://github.com/acme/app.git","status":"failed","errorCode":"cloud_workspace_repository_ref_not_found","retryable":false}]}"#;
         let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let result = service.preflight(None, vec![repo("app", Some("nope"))]).unwrap();
+        let result = service.preflight(None, vec![repo("app", Some("nope"))], None).unwrap();
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/preflight "));
         assert!(captured.text.contains(r#""ref":"nope""#));
+        assert!(captured.text.contains(r#""credentialIds":[]"#));
         assert!(!result.ready);
         assert_eq!(result.checks[0].error_code.as_deref(), Some("cloud_workspace_repository_ref_not_found"));
 
@@ -3571,10 +3589,30 @@ mod tests {
     }
 
     #[test]
+    fn preflight_asks_about_the_agent_of_a_first_prompt() {
+        // No repositories: the prompt's agent alone is worth the call, and the
+        // setup names no repository rather than an empty list.
+        let body = r#"{"version":1,"ready":false,"checks":[{"kind":"agent-credential","agent":"claude","provider":"claude","status":"failed","errorCode":"cloud_workspace_agent_credential_required","retryable":false}]}"#;
+        let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let result = service.preflight(None, Vec::new(), Some("claude".into())).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/preflight?agent=claude "), "{}", captured.text.lines().next().unwrap_or_default());
+        assert!(captured.text.contains(r#"{"setup":{"credentialIds":[],"version":1}}"#));
+        assert_eq!(result.checks[0].agent.as_deref(), Some("claude"));
+        assert_eq!(result.checks[0].error_code.as_deref(), Some("cloud_workspace_agent_credential_required"));
+
+        // Nothing to check sends nothing; a malformed agent is refused here.
+        let (_, service) = test_service("http://127.0.0.1:9");
+        assert!(service.preflight(None, Vec::new(), None).unwrap().ready);
+        assert_eq!(service.preflight(None, Vec::new(), Some("Not Valid".into())).unwrap_err().code, "cloud_workspace_launch_invalid");
+    }
+
+    #[test]
     fn a_failed_preflight_call_is_retryable_not_an_unknown_outcome() {
         let (base, _, request) = serve_once(response("503 Service Unavailable", "oops", ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let error = service.preflight(None, vec![repo("app", None)]).unwrap_err();
+        let error = service.preflight(None, vec![repo("app", None)], None).unwrap_err();
         request.join().unwrap();
         assert_eq!((error.code.as_str(), error.retryable), ("cloud_workspace_unavailable", true));
     }
@@ -3673,6 +3711,7 @@ mod tests {
         archived["operation"]["action"] = json!("archive");
         archived["operation"]["state"] = json!("succeeded");
         archived["operation"]["checkpoint"] = json!("committed");
+        archived["operation"]["checkpointAt"] = json!(15);
         let (base, _, request) = serve_once(response("202 Accepted", &archived.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
         let snapshot = service.lifecycle_with(None, "workspace-1", OperationAction::Archive, true).unwrap();
@@ -3684,6 +3723,7 @@ mod tests {
         assert_eq!((snapshot.workspace.archived_at, snapshot.workspace.delete_after), (Some(10), Some(20)));
         assert!(matches!(snapshot.operation.action, Some(OperationAction::Archive)));
         assert_eq!(snapshot.operation.checkpoint.as_deref(), Some("committed"));
+        assert_eq!(snapshot.operation.checkpoint_at, Some(15));
 
         let mut deleting: Value = serde_json::from_str(&snapshot_body(Some("provider_cleanup_pending"))).unwrap();
         deleting["operation"]["action"] = json!("delete");

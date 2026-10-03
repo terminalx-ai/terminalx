@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { WorkspaceRpcError, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { applyEvent, dropTabLog, getTabLog, lastSeq, mergeTabEvents } from "@/lib/agentEvents";
 import {
   cloudAgentApi,
@@ -410,11 +410,21 @@ export async function refreshFromCheckpoint(scope: CloudAgentScope, tabId: strin
 
 // ---- the live runtime
 
+/**
+ * An agent with no way to sign in (PRO-78) is not working, whatever turn its
+ * tab is in: the prompt went to a sign-in screen. Settled here, where tab
+ * state comes in, so every row, badge and spinner agrees.
+ */
+export function settledStatus(info: Pick<AgentTabInfo, "signIn">, status: AgentTabStatus): AgentTabStatus {
+  return info.signIn && status === "in_progress" ? "idle" : status;
+}
+
 /** The runtime's own tab list is authoritative: tabs it no longer has are gone. */
 export function applyLiveTabs(scope: CloudAgentScope, tabs: AgentTabInfo[]) {
   const s = store(scope);
   const seen = new Set<string>();
-  for (const info of tabs) {
+  for (const reported of tabs) {
+    const info = { ...reported, status: settledStatus(reported, reported.status) };
     seen.add(info.tabId);
     const existing = s.tabs.get(info.tabId);
     if (!existing) {
@@ -534,10 +544,11 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
       onStatus: (change) => {
         const current = s.tabs.get(tabId);
         if (!current) return;
-        noteStatus(current, change.status);
-        if (change.status === "completed" && isViewed(scope, tabId)) current.unread = false;
+        const status = settledStatus(current.info, change.status);
+        noteStatus(current, status);
+        if (status === "completed" && isViewed(scope, tabId)) current.unread = false;
         // The runtime reports the process in `session.tabs`, not with a status.
-        current.info = { ...current.info, status: change.status, process: change.process ?? current.info.process };
+        current.info = { ...current.info, status, process: change.process ?? current.info.process };
         publish(s);
         scheduleSave(s, tabId);
       },
@@ -770,11 +781,21 @@ export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, te
   return entry;
 }
 
+/** `data.reason` of a live `session.send` the runtime refused with a sentence meant for the person. */
+const LIVE_SEND_REFUSALS = new Set(["command-not-queued", "slash-command-forbidden", "shell-command-forbidden", "file-mention-forbidden"]);
+
 /** A development runtime has no mailbox: the legacy live `session.send`. */
 async function sendOverLiveRpc(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null): Promise<OutboxEntry> {
   const tab = store(scope).tabs.get(tabId);
   if (!client || client.connection.state !== "connected" || !tab?.info.sessionId) throw new Error("The development runtime is not connected");
-  await client.mutate("session.send", { sessionId: tab.info.sessionId, tabId, text });
+  try {
+    await client.mutate("session.send", { sessionId: tab.info.sessionId, tabId, text });
+  } catch (error) {
+    // The runtime's own sentence for what it refused to type or to queue (PRO-88), rather than the bare code.
+    const reason = error instanceof WorkspaceRpcError ? (error.data as { reason?: unknown } | undefined)?.reason : undefined;
+    if (typeof reason === "string" && LIVE_SEND_REFUSALS.has(reason)) throw new Error((error as Error).message);
+    throw error;
+  }
   const now = Date.now();
   return { clientCommandId: `live-${now}`, tabId, kind: "send", text, state: "applied", createdAt: now, updatedAt: now };
 }

@@ -81,9 +81,10 @@ cleanup as a single workspace's archive and delete.
 
 ## Runtime: the final checkpoint
 
-`terminalx-serve` advertises `quiesce-v1`. While an archive waits, the
-refresh answer carries `quiesce { operationId, deadline }`, and
-`src-tauri/src/cloud_quiesce.rs`:
+`terminalx-serve` advertises `quiesce-v1`. While an archive or a stop waits
+(the server asks before either, PRO-33; `reason` is `archive` or `suspend`
+and is not read here), the refresh answer carries
+`quiesce { operationId, deadline }`, and `src-tauri/src/cloud_quiesce.rs`:
 
 1. stops taking new work: nothing is leased from the mailbox and no queued
    follow-up is typed (`CloudAgents::quiesce`); the running turn is not
@@ -100,11 +101,23 @@ failed, or was undone before compute stopped), it takes work again. The
 request is read leniently: a malformed one is dropped without failing the
 refresh.
 
-The request is only seen on the relay-token refresh, every 30 s, so up to
-half of the server's 60 s window can pass before the checkpoint starts; with
-many tabs, or clock skew against the request's `deadline`, the upload may not
-finish and the archive records `failed` or `timed-out` (the disk is kept
-either way). Refreshing sooner while an archive is pending is a follow-up.
+The request is seen on the relay-token refresh, every 5 s
+(`cloud_bootstrap::REFRESH_INTERVAL`, 30 s before PRO-30), and the watcher
+looks every 2 s, so the checkpoint starts within about 7 s of the server's
+60 s window opening. With many tabs, or clock skew against the request's
+`deadline`, the upload may still not finish and the operation records `failed`
+or `timed-out` (the disk is kept either way).
+
+## Last saved, on a stopped workspace
+
+A stop's operation carries `checkpoint` and, when the runtime answered,
+`checkpointAt`. `lastSavedText` (`src/lib/cloudLifecycle.ts`) turns the
+workspace's latest operation into one line, shown under "Stopped" in the
+workspace view and in a stopped session: "Last saved 3 Oct, 14:05.", or that
+the save did not finish and conversations may end earlier than the work did.
+It says nothing when the server said nothing (an older server, a workspace
+that was not running), and nothing once another operation (a failed resume)
+is the latest: the list carries only the latest operation.
 
 ## Tests
 
@@ -120,7 +133,7 @@ either way). Refreshing sooner while an archive is pending is a follow-up.
   provider failure.
 - `src/components/layout/cloud/CloudSections.test.tsx`: the archive list,
   unarchive without compute, a failed archive, a tombstone's notice.
-- `src/lib/cloudLifecycle.test.ts`: purging a deleted workspace and only it;
+- `src/lib/cloudLifecycle.test.ts`: the last-saved line; purging a deleted workspace and only it;
   an already-purged tombstone; a failed native purge retried.
 - `src-tauri/src/cloud_workspaces.rs`: the header, force, the archive
   vocabulary, refusal codes, unarchive, tombstones, disposition.
@@ -133,8 +146,6 @@ either way). Refreshing sooner while an archive is pending is a follow-up.
 
 ## Open
 
-- The final checkpoint's latency (above): the runtime learns of the request
-  on its 30 s refresh.
 - There is no endpoint to delete an organization, so nothing yet requires a
   completed teardown first; a teardown cannot be cancelled; the console has
   no archive or unarchive.

@@ -582,8 +582,9 @@ pub async fn cloud_workspace_preflight(
     repositories: Vec<crate::cloud_workspaces::CreateRepository>,
     state: tauri::State<'_, crate::AppState>,
     org_id: Option<String>,
+    agent: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspacePreflight, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.preflight(org_id.as_deref(), repositories))
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.preflight(org_id.as_deref(), repositories, agent))
 }
 
 #[tauri::command]

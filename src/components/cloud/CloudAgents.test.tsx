@@ -35,7 +35,7 @@ vi.mock("@/components/chat/Composer", () => ({
 // jsdom has no canvas for the chat's idle animation.
 vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonRunner: () => null, RaccoonScene: () => null }));
 
-import { CloudAgentsView, connectionLabel, provisioningLabel, stoppedAndStaying } from "./CloudAgents";
+import { CloudAgentsView, connectionLabel, provisioningLabel, signInMessage, stoppedAndStaying } from "./CloudAgents";
 import { resetCloudAgents } from "@/lib/cloudAgents";
 import { rememberYou, resetCollab, startCollab, TYPING_IDLE_MS } from "@/lib/cloudCollab";
 import { rememberPeople, resetPeople } from "@/lib/cloudPeople";
@@ -342,6 +342,39 @@ describe("cloud agent tabs", () => {
     expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
   });
 
+  it("says an agent needs sign-in instead of showing it working, and what to do (PRO-78)", async () => {
+    liveTabs = [tabInfo({ status: "in_progress", signIn: { provider: "claude", state: "not-connected", reason: null } })];
+    render(view(connected()));
+    const notice = await screen.findByTestId("cloud-agent-sign-in");
+    expect(notice.textContent).toContain("Needs sign-in: Claude Code isn't connected for this organization");
+    expect(screen.getByTestId("cloud-agent-turn").textContent).toContain("Needs sign-in");
+    expect(screen.getByTestId("cloud-agent-turn").textContent).not.toContain("Working");
+    // Not a turn in progress: no spinner on the tab, no stop button.
+    expect(within(screen.getByTestId("cloud-agent-tab")).queryByLabelText("working")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  });
+
+  it("words the sign-in notice for who is reading and why the login is missing", () => {
+    const info = (signIn: AgentTabInfo["signIn"]) => ({ harness: "codex", signIn });
+    expect(signInMessage(info(null), true)).toBeNull();
+    expect(signInMessage(info({ provider: "codex", state: "not-connected" }), true)).toBe(
+      "Needs sign-in: Codex isn't connected for this organization, so it can't take prompts here. Connect it in the web console under Compute setup → Agent logins, then send again.",
+    );
+    // A member cannot connect it, and is not sent somewhere they have no access to.
+    expect(signInMessage(info({ provider: "codex", state: "not-connected" }), false)).toBe(
+      "Needs sign-in: Codex isn't connected for this organization, so it can't take prompts here. Ask an owner or admin to connect it, then send again.",
+    );
+    expect(signInMessage(info({ provider: "codex", state: "not-connected" }), null)).toContain("Ask an owner or admin");
+    expect(signInMessage(info({ provider: "codex", state: "unavailable", reason: "token-expired" }), true)).toContain("login has expired");
+    expect(signInMessage(info({ provider: "codex", state: "unavailable", reason: "shared-use-policy" }), false)).toContain("An owner or admin can allow it for the whole organization.");
+    expect(signInMessage(info({ provider: "codex", state: "revoked" }), true)).toContain("Codex login was revoked");
+    expect(signInMessage(info({ provider: "codex", state: "disconnected" }), true)).toContain("Codex login was disconnected");
+    // A state word this app does not know is not printed.
+    const unknown = signInMessage(info({ provider: "codex", state: "quarantined_v2" }), true)!;
+    expect(unknown).toContain("Codex login is not available");
+    expect(unknown).not.toContain("quarantined");
+  });
+
   it("wakes a sleeping workspace only after an interactive command, and reports the wake", async () => {
     cache["t-1"] = { tab: tabInfo(), events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
     const wake = vi.fn();
@@ -497,11 +530,26 @@ describe("shared cloud workspace agent tabs (PRO-30)", () => {
     outbox = [
       { clientCommandId: "c-1", tabId: "t-1", kind: "send", text: "deploy", state: "rejected", category: "lease-held", receipt: { holderId: "u-alice" }, createdAt: 1, updatedAt: 1 },
       { clientCommandId: "c-2", tabId: "t-1", kind: "send", text: "hi", state: "rejected", category: "access-revoked", createdAt: 1, updatedAt: 1 },
+      // PRO-88: the runtime refused a slash command this person may not send.
+      {
+        clientCommandId: "c-3",
+        tabId: "t-1",
+        kind: "send",
+        text: "/model opus",
+        state: "rejected",
+        category: "slash-command-forbidden",
+        receipt: { command: "/model", message: "/model was not sent: only someone who can approve permissions may send it. Without that right you can send /clear, /compact, /help." },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      { clientCommandId: "c-4", tabId: "t-1", kind: "send", text: "!ls", state: "rejected", category: "shell-command-forbidden", createdAt: 1, updatedAt: 1 },
     ];
     const state = share(me("driver"));
     render(view(state));
     expect(await screen.findByText("Alice is driving — your message was not sent")).toBeTruthy();
     expect(screen.getByText("Not sent: your access changed")).toBeTruthy();
+    expect(screen.getByText("Not sent: /model: only someone who can approve permissions may send it. Without that right you can send /clear, /compact, /help.")).toBeTruthy();
+    expect(screen.getByText("Not sent: a message that starts with ! runs as a shell command, which needs someone who can approve permissions.")).toBeTruthy();
     expect(screen.getByTestId("cloud-agent-followup").textContent).toContain("Queued follow-up from Alice:");
   });
 

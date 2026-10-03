@@ -21,7 +21,9 @@ import { cloudConnectionInfo, resetCloudConnections, retainCloudConnection } fro
 import {
   checkRuntime,
   cleanupStateText,
+  dateTimeText,
   deadlineText,
+  lastSavedText,
   purgeNoticeText,
   purgeTombstones,
   repositoryLabel,
@@ -147,6 +149,23 @@ describe("risks and wording", () => {
     }
     expect(repositoryLabel({ path: "site" }, "parity-test")).toBe("site");
     expect(repositoryLabel({ path: "./packages/api/" }, "parity-test")).toBe("packages/api");
+  });
+
+  it("says when a stopped workspace was last saved, from its stop", () => {
+    const at = Date.UTC(2026, 9, 3, 12, 30);
+    const stopped = (operation: Record<string, unknown> | null, state = "suspended") =>
+      ({ workspace: { id: "ws", state }, ...(operation ? { latestOperation: { action: "suspend", state: "succeeded", ...operation } } : {}) }) as unknown as Parameters<typeof lastSavedText>[0];
+    expect(lastSavedText(stopped({ checkpoint: "committed", checkpointAt: at }))).toBe(`Last saved ${dateTimeText(at)}.`);
+    expect(lastSavedText(stopped({ checkpoint: "committed" }))).toBe("Its conversations were saved before it stopped.");
+    expect(lastSavedText(stopped({ checkpoint: "timed-out" }))).toMatch(/did not finish.*disk was kept/);
+    expect(lastSavedText(stopped({ checkpoint: "failed", checkpointAt: at }))).toMatch(/did not finish/);
+    // Nothing is claimed when the server said nothing, or the stop is not what happened last.
+    expect(lastSavedText(stopped({ checkpoint: "skipped" }))).toBeNull();
+    expect(lastSavedText(stopped({}))).toBeNull();
+    expect(lastSavedText(stopped(null))).toBeNull();
+    expect(lastSavedText(stopped({ action: "resume", state: "failed", checkpoint: "committed" }))).toBeNull();
+    expect(lastSavedText(stopped({ state: "running", checkpoint: "committed" }))).toBeNull();
+    expect(lastSavedText(stopped({ checkpoint: "committed", checkpointAt: at }, "ready"))).toBeNull();
   });
 
   it("says when the deadline is and what a cleanup item waits for", () => {
