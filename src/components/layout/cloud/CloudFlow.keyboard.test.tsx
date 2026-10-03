@@ -54,6 +54,7 @@ vi.mock("@/components/chat/Dictation", () => ({
   MicButton: () => null,
   NEW_SESSION_TARGET: "new-session",
   useDictationInto: () => ({ dictating: false, toggle: vi.fn() }),
+  useDictationShortcuts: vi.fn(),
 }));
 vi.mock("@/lib/dictation", () => ({ stopDictation: vi.fn() }));
 vi.mock("@/lib/models", async (original) => ({

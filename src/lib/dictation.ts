@@ -79,6 +79,10 @@ function trace(e: DictationEvent) {
   void invoke("frontend_log", { level: "debug", message: `dictation ${e.kind}${detail}` }).catch(() => {});
 }
 
+/** The start in flight: the microphone is open (or the start has failed) once it settles. */
+let opening: Promise<void> | null = null;
+/** A stop was asked for and has not finished. */
+let stopping = false;
 let subscribed = false;
 let previousPartialAt: number | null = null;
 async function subscribe() {
@@ -90,7 +94,8 @@ async function subscribe() {
       trace(p);
       switch (p.kind) {
         case "listening":
-          set({ phase: "listening", error: null, settings: null });
+          // A stop asked for while the microphone was still opening stays a stop.
+          set({ phase: stopping ? "finishing" : "listening", error: null, settings: null });
           break;
         case "transcribing":
           set({ phase: "finishing" });
@@ -111,10 +116,12 @@ async function subscribe() {
           break;
         case "error":
           previousPartialAt = null;
+          stopping = false;
           set({ phase: "idle", error: p.message ?? "Dictation failed.", settings: p.settings ?? null, target: null });
           break;
         case "stopped":
           previousPartialAt = null;
+          stopping = false;
           set({ phase: "idle", target: null });
           break;
       }
@@ -161,9 +168,10 @@ export function startDictation(target: string): number | null {
   if (state.phase !== "idle" || isTranscriptionInputSaving()) return null;
   buffer = EMPTY_BUFFER;
   previousPartialAt = null;
+  stopping = false;
   const session = state.session + 1;
   set({ phase: "starting", text: "", session, target, error: null, settings: null });
-  void (async () => {
+  opening = (async () => {
     // The listener is in place before the microphone is, so no result can
     // arrive before there is somewhere for it to go.
     await subscribe();
@@ -171,6 +179,7 @@ export function startDictation(target: string): number | null {
     try {
       await invoke("dictation_start");
     } catch (e) {
+      stopping = false;
       set({ phase: "idle", target: null, error: String(e) });
     }
   })();
@@ -180,10 +189,17 @@ export function startDictation(target: string): number | null {
 /** Stop listening; the last utterance is committed when the recogniser finishes it. */
 export async function stopDictation() {
   if (state.phase === "idle") return;
+  stopping = true;
   set({ phase: "finishing" });
+  // A key held to talk can be released before the microphone is open. The stop
+  // waits for the start it follows: sent sooner it would find nothing to stop,
+  // and the microphone would then open and stay open.
+  await opening;
+  if ((state.phase as DictationPhase) === "idle") return;
   try {
     await invoke("dictation_stop");
   } catch (e) {
+    stopping = false;
     set({ phase: "idle", target: null, error: String(e) });
   }
 }

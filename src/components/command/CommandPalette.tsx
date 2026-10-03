@@ -54,7 +54,7 @@ import {
 } from "@/lib/commandPalette";
 import { api, errorMessage, files, gh, issues, type FileHit, type Issue, type PullRequest } from "@/lib/api";
 import { openFile } from "@/lib/editors";
-import { keycaps, useHotkey } from "@/lib/hotkeys";
+import { runShortcut, useHotkey } from "@/lib/hotkeys";
 import { issuePrompt, issueWorktreeName, pullRequestPrompt } from "@/lib/issueSession";
 import { getPrefs } from "@/lib/prefs";
 import {
@@ -66,7 +66,7 @@ import {
   upsertSession,
   useSessionStore,
 } from "@/lib/sessions";
-import { SHORTCUTS, type Shortcut } from "@/lib/shortcuts";
+import { SHORTCUT_ACTIONS, keycaps, useKeymap, type ShortcutAction } from "@/lib/shortcuts";
 import { openCloudSession, useCloudDashboard } from "@/lib/cloudDashboard";
 import { setStatusSettings, useStatus } from "@/lib/status";
 import { THEMES, setMode, setTheme, useTheme } from "@/lib/theme";
@@ -86,6 +86,9 @@ const GROUP_CAPS: Record<string, number> = {
 interface CommandEntry extends PaletteEntityBase {
   group: "commands";
   icon: LucideIcon;
+  /** The entry is a keyboard shortcut's action: it runs where the focus was. */
+  shortcut?: boolean;
+  /** The action's current keys, when it has any. */
   chord?: string;
   run: () => void | Promise<void>;
 }
@@ -126,7 +129,7 @@ interface ResolvedWorkItem {
   pullRequest?: PullRequest;
 }
 
-function shortcutIcon(shortcut: Shortcut): LucideIcon {
+function shortcutIcon(shortcut: ShortcutAction): LucideIcon {
   const label = shortcut.label.toLowerCase();
   if (label.includes("session") || label === "send") return MessageSquare;
   if (label.includes("issue")) return CircleDot;
@@ -187,28 +190,15 @@ function insertComposerText(text: string): boolean {
   return true;
 }
 
-function dispatchShortcut(chord: string, previousFocus: HTMLElement | null): void {
+/** Run a shortcut's action from the palette, with the focus back where it was: by its action, so it works whatever its keys are, even none. */
+function dispatchShortcut(action: ShortcutAction, previousFocus: HTMLElement | null): void {
   previousFocus?.isConnected && previousFocus.focus({ preventScroll: true });
-  if (chord === "@" || chord === "/") {
-    insertComposerText(chord);
+  if (action.id === "composer.mention" || action.id === "composer.slashCommand") {
+    insertComposerText(action.keys[0]);
     return;
   }
-  if (chord === "shift+enter" && insertComposerText("\n")) return;
-
-  const parts = chord.toLowerCase().split("+");
-  const key = parts[parts.length - 1];
-  const target = document.activeElement instanceof HTMLElement ? document.activeElement : window;
-  target.dispatchEvent(
-    new KeyboardEvent("keydown", {
-      key: key === "escape" ? "Escape" : key === "enter" ? "Enter" : key === "up" ? "ArrowUp" : key === "down" ? "ArrowDown" : key,
-      code: key === "[" ? "BracketLeft" : key === "]" ? "BracketRight" : undefined,
-      metaKey: parts.includes("mod"),
-      altKey: parts.includes("alt"),
-      shiftKey: parts.includes("shift"),
-      bubbles: true,
-      cancelable: true,
-    }),
-  );
+  if (action.id === "composer.newLine" && insertComposerText("\n")) return;
+  runShortcut(action.id);
 }
 
 function githubRepoKey(value: string): string {
@@ -406,23 +396,25 @@ export function CommandPalette({
     };
   }, [deferredQuery, fileRoot, open, smartInput]);
 
-  const runShortcut = useCallback(
-    (chord: string) => dispatchShortcut(chord, previousFocusRef.current),
+  const runAction = useCallback(
+    (action: ShortcutAction) => dispatchShortcut(action, previousFocusRef.current),
     [],
   );
+  const keymap = useKeymap();
 
   const commandEntries = useMemo<CommandEntry[]>(() => {
-    const shortcutEntries = SHORTCUTS.map((shortcut, index) =>
+    const shortcutEntries = SHORTCUT_ACTIONS.map((shortcut, index) =>
       indexPaletteItem({
-        id: `command:shortcut:${index}:${shortcut.chord}`,
+        id: `command:shortcut:${shortcut.id}`,
         group: "commands" as const,
         primary: shortcut.label,
         secondary: `${shortcut.group} shortcut`,
-        recentAt: SHORTCUTS.length - index,
+        recentAt: SHORTCUT_ACTIONS.length - index,
         icon: shortcutIcon(shortcut),
-        chord: shortcut.chord,
-        run: () => runShortcut(shortcut.chord),
-      }, [shortcut.chord]),
+        shortcut: true,
+        chord: keymap[shortcut.id][0],
+        run: () => runAction(shortcut),
+      }, keymap[shortcut.id]),
     );
     const extras: CommandEntry[] = [
       indexPaletteItem({
@@ -472,7 +464,7 @@ export function CommandPalette({
         : []),
     ];
     return [...shortcutEntries, ...extras];
-  }, [onOpenCloudSession, onOpenSettings, runShortcut, status.settings.percent, status.settings.visible, theme.mode, theme.theme]);
+  }, [onOpenCloudSession, onOpenSettings, runAction, keymap, status.settings.percent, status.settings.visible, theme.mode, theme.theme]);
 
   const fileEntries = useMemo<FileEntry[]>(
     () => fileHits.map((hit, index) => indexPaletteItem({
@@ -611,7 +603,7 @@ export function CommandPalette({
     const commandRows = commandMatches.map((match) => entityRow(match, "command", match.item.run, {
       chord: match.item.chord,
       icon: match.item.icon,
-      restoreFocus: !!match.item.chord,
+      restoreFocus: !!match.item.shortcut,
     }));
 
     return [

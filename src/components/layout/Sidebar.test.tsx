@@ -1,7 +1,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [] }));
+vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children }));
 vi.mock("./ProjectRail", () => ({ ProjectRail: () => <nav data-testid="project-tree" /> }));
 

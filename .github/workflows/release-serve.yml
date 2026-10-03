@@ -5,7 +5,7 @@ name: Release terminalx-serve
 # `terminalx-serve-linux-x64`, checked against SHA256SUMS and gated on the
 # `protocol` in `terminalx-serve.json`.
 #
-# After CI succeeds on a push to main (or by hand from main), and only if the
+# When dispatched by hand from main (see `on:` below), and only if the
 # commit is a strict descendant of the newest runtime prerelease's commit and
 # is still on main, this builds and publishes
 # `runtime-v<serve version>-<commit UTC yyyymmddHHMMSS>-<sha7>`. Anything
@@ -18,11 +18,12 @@ name: Release terminalx-serve
 # so it gets a read-only token and no GH_TOKEN; only the publish job can
 # write. Built on Ubuntu 22.04: glibc floor 2.35 or lower.
 
+# Manual only for now: run it from main with `gh workflow run
+# release-serve.yml --ref main` once a runtime change has been checked live.
+# To publish after every green CI on main again, add back:
+#   workflow_run: { workflows: [CI], types: [completed], branches: [main] }
+# The plan step below still handles that event.
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [main]
   workflow_dispatch:
 
 permissions:

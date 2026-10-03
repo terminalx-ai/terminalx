@@ -65,7 +65,7 @@ vi.mock("@/lib/editors", () => ({ closeEditor: vi.fn(), useEditors: () => ({ edi
 vi.mock("@/lib/mobileDriver", () => ({ useMobileDrivenTabs: () => new Set() }));
 vi.mock("@/lib/api", () => ({ skills: { list: vi.fn().mockResolvedValue([]) } }));
 vi.mock("@/lib/prefs", () => ({ getPrefs: () => ({ lastModel: {}, lastEffort: {}, lastMode: "default" }) }));
-vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: (key: string, callback: () => void) => mocks.hotkeys.set(key, callback) }));
+vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn(), useShortcut: (action: string, callback: () => void) => mocks.hotkeys.set(action, callback) }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/components/ui/menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => children,
@@ -140,11 +140,11 @@ describe("mixed session tab actions", () => {
 
   it("cycles mixed tabs and closes shells without closing agent-owned panes", () => {
     render(<TabActions session={session} selected={{ kind: "terminal", id: "shell-1" }} />);
-    mocks.hotkeys.get("mod+shift+[")!();
+    mocks.hotkeys.get("session.previousTab")!();
     expect(mocks.setActiveTab).toHaveBeenCalledWith("session-1", "agent-1");
-    mocks.hotkeys.get("mod+shift+]")!();
+    mocks.hotkeys.get("session.nextTab")!();
     expect(mocks.setActiveTab).toHaveBeenCalledWith("session-1", "agent-2");
-    mocks.hotkeys.get("mod+w")!();
+    mocks.hotkeys.get("session.closeTab")!();
     expect(mocks.closeTerminal).toHaveBeenCalledWith("shell-1");
     expect(mocks.removeTab).not.toHaveBeenCalled();
   });

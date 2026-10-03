@@ -23,8 +23,14 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 /// - `agents/1`: `runtime.agents`, the installed agents with their models,
 ///   efforts and modes.
 /// - `collab/1` (PRO-30): presence, notes, tab leases and `collab.state`.
-pub const CAPABILITIES: [&str; 10] =
-    ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1"];
+/// - `agent-pty/1` (PRO-86): the terminal an agent tab's CLI runs in is
+///   reached through the `pty.*` methods as `tab:<tabId>`. It adds no method.
+pub const CAPABILITIES: [&str; 11] =
+    ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1"];
+
+/// The namespace that lets a connection address an agent tab's own terminal
+/// (spelled out in [`CAPABILITIES`], which the client's tests read).
+pub const AGENT_PTY: &str = "agent-pty/1";
 
 /// Authority an attachment grants, from the API's `authority` (`manage` →
 /// runtime scope, `participate` → session scope).
@@ -403,9 +409,10 @@ mod tests {
         assert_eq!(granted, vec!["pty/1", "session/1"]);
         // A session/1-only client is not handed the additions.
         let old = negotiate(&json!({"protocol": PROTOCOL, "want": ["pty/1", "fs/1", "git/1", "session/1", "keys/1", "lifecycle/1"]})).unwrap();
-        assert!(!old.iter().any(|capability| ["pty/2", "session/2", "agents/1"].contains(&capability.as_str())));
+        assert!(!old.iter().any(|capability| ["pty/2", "session/2", "agents/1", AGENT_PTY].contains(&capability.as_str())));
         let new = negotiate(&json!({"protocol": PROTOCOL, "want": CAPABILITIES})).unwrap();
         assert_eq!(new, CAPABILITIES.to_vec());
+        assert!(CAPABILITIES.contains(&AGENT_PTY));
         assert_eq!(negotiate(&json!({"protocol": PROTOCOL, "want": ["pty/9"]})).unwrap_err().code, "update_required");
         assert_eq!(negotiate(&json!({"protocol": "terminalx-workspace-rpc/2", "want": ["pty/1"]})).unwrap_err().code, "update_required");
     }
