@@ -294,6 +294,8 @@ export function TabView({
             backend.patchTab(tab.id, { permissionMode: m });
             void backend.setPermissionMode(tab.id, m).catch((e) => setError(local ? safeError(e) : commandError(e)));
           }}
+          reportedModel={transcript.model}
+          modelsAreLocal={local}
           contextUsed={transcript.contextUsed ?? tab.contextUsed ?? undefined}
           contextMax={transcript.contextMax ?? tab.contextMax ?? undefined}
           handoffs={handoffsFor(transcript, isGit && changes.files.length > 0)}

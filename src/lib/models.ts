@@ -48,6 +48,9 @@ export function useModels(harness?: string): ModelInfo[] {
 export function prettyModelId(id: string): string {
   if (!id) return "Default";
   const last = id.split("/").pop() ?? id;
+  // `claude-opus-5-5` reads as `Opus 5.5`; a date stamp is not part of the version.
+  const claude = /^claude-([a-z]+)((?:-\d{1,2})+)(?:-\d{6,})?$/.exec(last);
+  if (claude) return `${claude[1]![0]!.toUpperCase()}${claude[1]!.slice(1)} ${claude[2]!.slice(1).replace(/-/g, ".")}`;
   return last
     .replace(/^gpt/i, "GPT")
     .replace(/(\d)-([a-z])/gi, "$1 $2")
@@ -61,6 +64,58 @@ export function prettyModelId(id: string): string {
 export function upgradeHint(m: ModelInfo, all: ModelInfo[]): string | null {
   if (!m.upgrade) return null;
   return all.find((x) => x.id === m.upgrade)?.label ?? prettyModelId(m.upgrade);
+}
+
+/**
+ * What a family alias is known to run: what the session itself last reported
+ * if that is the same family, else what the CLI said when it listed its
+ * models. `null` when nobody has said, and for a pinned version. `here: false`
+ * is for a tab on another machine (a cloud workspace): only its own report
+ * counts there, since its CLI may resolve the alias differently.
+ */
+export function aliasRuns(m: ModelInfo, reported?: string | null, here = true): string | null {
+  if (!m.alias) return null;
+  if (reported && reported.includes(`-${m.id}-`)) return reported;
+  return here ? (m.resolved ?? null) : null;
+}
+
+/**
+ * The name on the composer's model button: the version actually in use where
+ * that is known (`Opus 5.5`), the family alone where it is not (`Opus`).
+ */
+export function runningModelName(m: ModelInfo, reported?: string | null, here = true): string {
+  const runs = aliasRuns(m, reported, here);
+  return runs ? prettyModelId(runs) : m.label;
+}
+
+/**
+ * The faint note after a model in a menu. An alias says that it follows the
+ * latest release and, when known, which version that is now; a model being
+ * retired names its replacement. `here: false` is for a list drawn for
+ * another machine (a cloud workspace), whose CLI may resolve the alias
+ * differently, so no version is claimed.
+ */
+export function modelNote(m: ModelInfo, all: ModelInfo[], here = true): string | null {
+  const upgrade = upgradeHint(m, all);
+  if (upgrade) return `→ ${upgrade}`;
+  if (!m.alias) return null;
+  return here && m.resolved ? `latest · ${prettyModelId(m.resolved)}` : "latest";
+}
+
+/** The same in one string, for a plain `<select>`: `Opus (latest · Opus 5.5)`. */
+export function modelOptionText(m: ModelInfo, all: ModelInfo[], here = true): string {
+  const note = m.alias ? modelNote(m, all, here) : null;
+  return note ? `${m.label} (${note})` : m.label;
+}
+
+/** A menu's models as the reader chooses between them: the aliases, then the versions that can be pinned. */
+export function modelGroups(models: ModelInfo[]): { title: string | null; models: ModelInfo[] }[] {
+  const latest = models.filter((m) => m.alias);
+  if (latest.length === 0) return [{ title: null, models }];
+  return [
+    { title: null, models: latest },
+    { title: "Pinned version", models: models.filter((m) => !m.alias) },
+  ].filter((g) => g.models.length > 0);
 }
 
 export function modelLabel(harness: string, id: string): string {

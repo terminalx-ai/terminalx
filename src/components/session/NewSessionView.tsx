@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Cloud, FolderOpen, FolderGit2, GitBranch, Loader2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
@@ -21,7 +21,7 @@ import { RaccoonScene } from "@/components/raccoon/Raccoon";
 import { isRoleRefusal, refreshAccountRoles } from "@/lib/accountRoles";
 import { api, errorMessage, type ImageInput } from "@/lib/api";
 import { addProject, clearNewSessionPreset, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
-import { EFFORT_LABEL, PERMISSION_MODES, refreshModels, upgradeHint, useModels } from "@/lib/models";
+import { EFFORT_LABEL, PERMISSION_MODES, modelGroups, modelNote, modelOptionText, refreshModels, useModels } from "@/lib/models";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { chooseMode } from "@/lib/dialogs";
 import { useHotkey } from "@/lib/hotkeys";
@@ -356,22 +356,27 @@ export function NewSessionView({
               <DropdownMenu {...modelMenu.root}>
                 <DropdownMenuTrigger asChild {...modelMenu.trigger}>
                   <Button variant="secondary" size="sm" className={pill}>
-                    {model?.label ?? modelId ?? "Model"}
+                    {model ? modelOptionText(model, models, !cloud) : modelId || "Model"}
                     <ChevronDown className="text-faint" />
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="min-w-[12rem]">
                   <DropdownMenuLabel>Model</DropdownMenuLabel>
                   <DropdownMenuRadioGroup value={modelId} onValueChange={(v) => setPrefs({ lastModel: { ...prefs.lastModel, [harness.id]: v } })}>
-                    {models.map((m) => {
-                      const upgrade = upgradeHint(m, models);
-                      return (
-                        <DropdownMenuRadioItem key={m.id} value={m.id}>
-                          {m.label}
-                          {upgrade ? <span className="ml-1.5 text-faint">→ {upgrade}</span> : null}
-                        </DropdownMenuRadioItem>
-                      );
-                    })}
+                    {modelGroups(models).map((group) => (
+                      <Fragment key={group.title ?? "models"}>
+                        {group.title ? <DropdownMenuLabel className="pt-2">{group.title}</DropdownMenuLabel> : null}
+                        {group.models.map((m) => {
+                          const note = modelNote(m, models, !cloud);
+                          return (
+                            <DropdownMenuRadioItem key={m.id} value={m.id}>
+                              {m.label}
+                              {note ? <span className="ml-1.5 text-faint">{note}</span> : null}
+                            </DropdownMenuRadioItem>
+                          );
+                        })}
+                      </Fragment>
+                    ))}
                   </DropdownMenuRadioGroup>
                 </DropdownMenuContent>
               </DropdownMenu>

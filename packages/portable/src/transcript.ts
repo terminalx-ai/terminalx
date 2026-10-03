@@ -59,6 +59,8 @@ export interface Transcript {
   tasks: BackgroundTask[];
   contextUsed?: number;
   contextMax?: number;
+  /** The full id of the model the agent last said it ran; what an alias came to. */
+  model?: string;
   compacting: boolean;
   retry?: { attempt: number; maxRetries: number; reason?: string };
   modelRequestOpen: boolean;
@@ -94,6 +96,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
   let tasks: BackgroundTask[] = [];
   let contextUsed: number | undefined;
   let contextMax: number | undefined;
+  let model: string | undefined;
   let compacting = false;
   let retry: Transcript["retry"];
   let modelRequestOpen = false;
@@ -248,6 +251,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
       case "usage_update":
         if (payload.contextUsed != null) contextUsed = payload.contextUsed;
         if (payload.contextMax != null) contextMax = payload.contextMax;
+        if (payload.model) model = payload.model;
         break;
       case "context_compaction_started":
         compacting = true;
@@ -316,6 +320,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
     tasks,
     contextUsed,
     contextMax,
+    model,
     compacting,
     retry,
     modelRequestOpen,

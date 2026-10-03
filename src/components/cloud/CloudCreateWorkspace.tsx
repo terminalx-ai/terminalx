@@ -33,7 +33,7 @@ import {
 } from "@/lib/cloudCreate";
 import { cloudOrgArg, rememberCreatedWorkspace } from "@/lib/cloudCatalog";
 import { errorCode } from "@/lib/cloudTerminals";
-import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, useModels } from "@/lib/models";
+import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, modelOptionText, useModels } from "@/lib/models";
 
 const AGENTS = [
   { id: "claude", label: "Claude Code" },
@@ -318,7 +318,7 @@ export function CloudCreateWorkspace({
             <option value="">Default</option>
             {models.map((item) => (
               <option key={item.id} value={item.id}>
-                {item.label}
+                {modelOptionText(item, models, false)}
               </option>
             ))}
           </select>

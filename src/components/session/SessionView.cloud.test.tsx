@@ -37,7 +37,9 @@ vi.mock("@/lib/theme", () => ({ useTheme: () => ({ resolvedMode: "dark" }) }));
 vi.mock("@/lib/prefs", () => ({ usePrefs: () => mocks.prefs, getPrefs: () => mocks.prefs, setPrefs: vi.fn() }));
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
 vi.mock("@/lib/mobileDriver", () => ({ useMobileDrivenTabs: () => new Set<string>() }));
-vi.mock("@/lib/models", () => ({
+vi.mock("@/lib/models", async (original) => ({
+  // The pure helpers stay real; only the list and its loading are stubbed.
+  ...(await original<typeof import("@/lib/models")>()),
   EFFORT_LABEL: {},
   DEFAULT_PERMISSION_MODE: "bypassPermissions",
   PERMISSION_MODES: [{ id: "bypassPermissions", label: "Bypass permissions", hint: "" }],

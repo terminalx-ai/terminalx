@@ -1665,7 +1665,9 @@ impl WorkspaceRpc {
         } else {
             Vec::new()
         };
-        let models = crate::models::offered(codex);
+        // This runtime's own CLI, which need not be the desktop's version.
+        let claude = if installed.iter().any(|agent| agent.id == "claude") { crate::harness::claude::models::get(false) } else { Vec::new() };
+        let models = crate::models::offered(claude, codex);
         let agents: Vec<Value> = installed
             .into_iter()
             .map(|agent| {
@@ -1682,6 +1684,8 @@ impl WorkspaceRpc {
                             "isDefault": model.is_default,
                             "upgrade": model.upgrade,
                             "description": model.description,
+                            "alias": model.alias,
+                            "resolved": model.resolved,
                         })
                     })
                     .collect();

@@ -4,6 +4,7 @@ import type { PendingAsk } from "@/lib/transcript";
 import { PermissionCard, QuestionCard } from "@/components/chat/AskCards";
 import { Button } from "@/components/ui/button";
 import type { ModelInfo } from "@/lib/api";
+import { modelOptionText } from "@/lib/models";
 
 export function RecoveryBanner({ kind, waiting, asks, busy, answering = false, answerBlockedReason = null, askDetail = false, models, onPermission, onQuestions, onRetry, onStop, onContinue }: {
   kind: RecoveryKind | null;
@@ -33,7 +34,7 @@ export function RecoveryBanner({ kind, waiting, asks, busy, answering = false, a
       {kind && kind !== "permission_expired" && !asks.length && <Button size="sm" disabled={busy} onClick={() => onRetry()}>Retry safely</Button>}
       {kind === "capacity" && !asks.length && <select aria-label="Choose another model" disabled={busy} value="" onChange={e => onRetry(e.target.value)} className="rounded border border-hairline bg-background px-2">
         <option value="" disabled>Choose another model</option>
-        {models.map(model => <option key={model.id} value={model.id}>{model.label}</option>)}
+        {models.map(model => <option key={model.id} value={model.id}>{modelOptionText(model, models)}</option>)}
       </select>}
       <Button size="sm" variant="outline" disabled={busy} onClick={onStop}>Stop session</Button>
       {kind && <Button size="sm" variant="ghost" disabled={busy} onClick={onContinue}>Continue in new session</Button>}

@@ -1014,6 +1014,10 @@ export interface ModelInfo {
   /** The model that replaces this one when the provider is retiring it. */
   upgrade: string | null;
   description: string | null;
+  /** A family alias (`opus`): it follows the latest release rather than staying on one version. */
+  alias?: boolean;
+  /** The full model id an alias runs now, per the CLI on the machine that listed it. */
+  resolved?: string | null;
 }
 
 export interface HandoffInfo {

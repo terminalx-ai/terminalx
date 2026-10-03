@@ -1,5 +1,5 @@
 import "@testing-library/dom";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TabEntry } from "@/types/session";
@@ -20,13 +20,16 @@ vi.mock("@/components/chat/Dictation", () => ({
   useDictationInto: () => ({ dictating: false, toggle: vi.fn() }),
 }));
 vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn() }));
-vi.mock("@/lib/models", () => ({
+const listed = vi.hoisted(() => ({ models: [] as import("@/lib/api").ModelInfo[] }));
+vi.mock("@/lib/models", async (original) => ({
+  // The pure helpers stay real; only the list and its loading are stubbed.
+  ...(await original<typeof import("@/lib/models")>()),
   EFFORT_LABEL: {},
   PERMISSION_MODES: [{ id: "auto", label: "Auto", hint: "" }],
   modeLabel: () => "Auto",
   refreshModels: vi.fn(),
   upgradeHint: () => null,
-  useModels: () => [],
+  useModels: () => listed.models,
 }));
 vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
 
@@ -211,7 +214,7 @@ describe("composer pickers", () => {
   it("the model and permission pickers open on a real mouse click and close on a second one", async () => {
     const models = await import("@/lib/models");
     render(<TestComposer onSend={vi.fn()} />);
-    for (const [name, label] of [[/default/, "Model"], [/Auto/, "Permissions"]] as const) {
+    for (const [name, label] of [[/Default/, "Model"], [/Auto/, "Permissions"]] as const) {
       mouseClick(picker(name));
       const menu = await screen.findByRole("menu");
       expect(menu.textContent).toContain(label);
@@ -225,12 +228,63 @@ describe("composer pickers", () => {
 
   it("open on an accessibility press (a click with no pointerdown)", async () => {
     render(<TestComposer onSend={vi.fn()} />);
-    for (const name of [/default/, /Auto/]) {
+    for (const name of [/Default/, /Auto/]) {
       accessibilityPress(picker(name));
       await screen.findByRole("menu");
       fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
       await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
     }
+  });
+});
+
+describe("a Claude alias in the model picker (#256)", () => {
+  const claude = (id: string, label: string, extra: Partial<import("@/lib/api").ModelInfo> = {}) => ({ id, label, harness: "claude", efforts: [], defaultEffort: null, acceptsImages: true, isDefault: false, upgrade: null, description: null, ...extra });
+  const onOpus: TabEntry = { ...tab, harness: "claude", model: "opus" };
+  const show = (props: Partial<Parameters<typeof Composer>[0]> = {}) =>
+    render(<Composer tab={onOpus} busy={false} draft="" onDraftChange={vi.fn()} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} {...props} />);
+
+  beforeEach(() => {
+    listed.models = [claude("opus", "Opus", { alias: true, resolved: "claude-opus-5-5", isDefault: true }), claude("claude-opus-5-5", "Opus 5.5"), claude("claude-opus-5", "Opus 5")];
+  });
+  afterEach(() => {
+    listed.models = [];
+  });
+
+  it("names the version the CLI says the alias runs, and says the alias follows the latest", () => {
+    show();
+    const button = screen.getByRole("button", { name: /Opus 5\.5/ });
+    expect(button.getAttribute("title")).toBe("Model: Opus (latest, running Opus 5.5)");
+  });
+
+  it("names what the session itself reported over what the CLI listed", () => {
+    show({ reportedModel: "claude-opus-5" });
+    expect(screen.getByRole("button", { name: /Opus 5$/ }).getAttribute("title")).toBe("Model: Opus (latest, running Opus 5)");
+  });
+
+  it("claims no version for a cloud tab until its session reports one", () => {
+    const view = show({ modelsAreLocal: false });
+    expect(screen.getByTitle("Model: Opus (latest)").textContent).not.toContain("5.5");
+    view.unmount();
+    show({ modelsAreLocal: false, reportedModel: "claude-opus-5-5" });
+    expect(screen.getByRole("button", { name: /Opus 5\.5/ })).toBeTruthy();
+  });
+
+  it("offers the alias and, apart, the versions that can be pinned", async () => {
+    const onSetModel = vi.fn();
+    show({ onSetModel });
+    mouseClick(screen.getByRole("button", { name: /Opus 5\.5/ }));
+    const menu = await screen.findByRole("menu");
+    expect(menu.textContent).toContain("Pinned version");
+    const items = within(menu).getAllByRole("menuitemradio").map((item) => item.textContent);
+    expect(items).toEqual(["Opuslatest · Opus 5.5", "Opus 5.5", "Opus 5"]);
+    fireEvent.click(within(menu).getByRole("menuitemradio", { name: "Opus 5" }));
+    expect(onSetModel).toHaveBeenCalledWith("claude-opus-5");
+  });
+
+  it("reads a stored pinned id the list no longer carries", () => {
+    show({ tab: { ...onOpus, model: "claude-opus-4-8" } });
+    // Still what the tab runs: it is named, not passed off as the default.
+    expect(screen.getByRole("button", { name: /Opus 4\.8/ }).getAttribute("title")).toBe("Model: Opus 4.8");
   });
 });
 
@@ -513,7 +567,7 @@ describe("composer history (PRO-85)", () => {
 
   it("the model and permission menus take the arrows while open", async () => {
     render(<HistoryComposer />);
-    for (const name of [/default/, /Auto/]) {
+    for (const name of [/Default/, /Auto/]) {
       mouseClick(screen.getByRole("button", { name, hidden: true }));
       await screen.findByRole("menu");
       expect(press("ArrowUp")).toBe(false);
