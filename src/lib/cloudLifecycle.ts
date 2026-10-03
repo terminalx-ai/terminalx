@@ -164,8 +164,8 @@ export function dateTimeText(at: number): string {
 export function resumeBehaviourText(name: string, preservesProcesses: boolean | null | undefined): string {
   if (preservesProcesses === true) return `Resume at any time. ${name} freezes the machine as it is: programs and terminals that are running continue where they were.`;
   if (preservesProcesses === false)
-    return `Resume at any time. ${name} starts the machine again from its disk (a cold boot): files, repositories and conversations come back; programs and terminals that are running now do not.`;
-  return "Resume at any time. Files, repositories and conversations come back; programs and terminals that are running now may not.";
+    return `Resume at any time. ${name} starts the machine again (a cold boot): the files in the workspace come back, and its saved conversations are shown as before; programs and terminals that are running now do not, and what was installed or written outside the workspace may not.`;
+  return "Resume at any time. The files in the workspace come back, and its saved conversations are shown as before; programs and terminals that are running now may not.";
 }
 
 const MESSAGES: Record<string, string> = {

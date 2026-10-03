@@ -14,9 +14,11 @@ an archive's `checkpoint`, a delete's `cleanup` report and the list's
 
 What "resume" brings back depends on the provider, and the Stop tab says
 which (PRO-33): `providerCapabilities.preservesProcessesOnResume` in the
-disposition facts is `false` for Boat, Hetzner and Machine0 (a cold boot from
-the disk: files, repositories and conversations come back, running programs
-and terminals do not) and `true` only where the machine is frozen as it is
+disposition facts is `false` for Boat, Hetzner and Machine0 (a cold boot: the
+files in the workspace come back and its saved conversations are shown as
+before; running programs and terminals do not, and what was installed or
+written outside the workspace may not, because Boat keeps only part of the
+disk) and `true` only where the machine is frozen as it is
 (local Docker in pause mode). An older server does not send it, and the
 dialog then promises neither (`resumeBehaviourText`).
 
