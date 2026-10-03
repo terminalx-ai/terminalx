@@ -44,10 +44,15 @@ fn uuids_in(text: &str) -> HashSet<String> {
         .collect()
 }
 
+/// The folder name the CLI gives a working directory under `~/.claude/projects`.
+/// The encoding loses information: two different paths can share a name.
+pub fn encoded_cwd(cwd: &str) -> String {
+    cwd.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect()
+}
+
 /// Path check without the home lookup, for tests and callers that have one.
 pub fn transcript_under(home: &Path, cwd: &str, session_id: &str) -> PathBuf {
-    let encoded: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
-    home.join(".claude").join("projects").join(encoded).join(format!("{session_id}.jsonl"))
+    home.join(".claude").join("projects").join(encoded_cwd(cwd)).join(format!("{session_id}.jsonl"))
 }
 
 fn text_of(content: &Value) -> String {

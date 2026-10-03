@@ -7,6 +7,7 @@
 
 #[cfg(feature = "desktop")]
 mod account;
+mod agent_data;
 #[cfg(feature = "desktop")]
 mod automations;
 mod binpath;

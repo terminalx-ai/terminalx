@@ -220,8 +220,9 @@ pub(crate) fn delete_workspace_entries(project_path: &str, path: &str, delete_br
     Ok((affected, removal))
 }
 
-/// Drop sessions from the index along with their transcript logs and
-/// attachments. Callers stop whatever the tabs were running first.
+/// Drop sessions from the index along with their transcript logs,
+/// attachments and the agent CLIs' own data for them. Callers stop whatever
+/// the tabs were running first.
 pub(crate) fn remove_session_entries(doomed: &[SessionEntry]) -> Result<()> {
     if doomed.is_empty() {
         return Ok(());
@@ -241,6 +242,18 @@ pub(crate) fn remove_session_entries(doomed: &[SessionEntry]) -> Result<()> {
         if let Some(dir) = &attachments_dir {
             let _ = std::fs::remove_dir_all(dir.join(&session.id));
         }
+    }
+    // What the agent CLIs kept for these sessions goes with them. Without
+    // the index there is no telling what another session still uses, so
+    // nothing is removed then.
+    match index::load() {
+        Ok(remaining) => {
+            let freed = crate::agent_data::remove_for_deleted_sessions(doomed, &remaining);
+            if freed > 0 {
+                log::info!("removed {freed} bytes of agent data for {} deleted session(s)", doomed.len());
+            }
+        }
+        Err(error) => log::warn!("agent data kept: the session index could not be read: {error:#}"),
     }
     Ok(())
 }
@@ -438,6 +451,57 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
         }
+    }
+
+    const CONVERSATION: &str = "11111111-1111-4111-8111-111111111111";
+
+    /// Give the session's first tab a conversation and write its Claude
+    /// transcript where the CLI would, under the temporary home.
+    fn claude_transcript(session: &SessionEntry) -> PathBuf {
+        index::update_tab(&session.id, &session.tabs[0].id, |tab| {
+            tab.provider_session_id = Some(CONVERSATION.into());
+            Ok(())
+        })
+        .unwrap();
+        let folder = crate::agent_data::claude_projects_root().unwrap().join(crate::harness::claude::transcript::encoded_cwd(&session.cwd));
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join(format!("{CONVERSATION}.jsonl"));
+        std::fs::write(&file, format!("{}\n", serde_json::json!({ "type": "user", "cwd": session.cwd }))).unwrap();
+        file
+    }
+
+    #[test]
+    fn deleting_a_session_removes_its_agent_data_and_removing_only_the_worktree_does_not() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let sink = crate::sink::BroadcastSink::new(16);
+        let stop = |_: &SessionEntry| {};
+
+        // The worktree goes but the session is kept: resume still needs the transcript.
+        let kept = worktree_session(dir.path());
+        let transcript = claude_transcript(&kept);
+        git::remove_worktree(Path::new(&kept.project_path), kept.worktree_name.as_deref().unwrap()).unwrap();
+        assert!(transcript.exists());
+
+        // The session goes: so does the folder for its removed worktree.
+        let doomed = worktree_session(dir.path());
+        let transcript = claude_transcript(&doomed);
+        delete_session_blocking(&sink, &doomed.id, true, &stop).unwrap();
+        assert!(!Path::new(&doomed.cwd).exists());
+        assert!(!transcript.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn a_failed_delete_leaves_the_agent_data_alone() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let sink = crate::sink::BroadcastSink::new(16);
+        let session = worktree_session(dir.path());
+        let transcript = claude_transcript(&session);
+        let locked = ReadOnly::new(Path::new(&session.cwd));
+        assert!(delete_session_blocking(&sink, &session.id, true, &|_| {}).is_err());
+        drop(locked);
+        assert!(transcript.exists());
     }
 
     #[test]
