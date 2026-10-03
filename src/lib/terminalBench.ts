@@ -468,6 +468,10 @@ async function background(request: Extract<BenchRequest, { scenario: "background
       if (event.payload.id === id) resolve();
     });
   });
+  // What the page's timers are doing: a hidden or covered page has them slowed to about one a second.
+  const ticking = performance.now();
+  for (let tick = 0; tick < 3; tick++) await sleep(100);
+  const timerMs = round((performance.now() - ticking) / 3);
   const from = terminalCounters().data.local.bytes;
   const started = performance.now();
   await pty.spawn(id, request.cwd, 190, 24, request.command);
@@ -476,6 +480,9 @@ async function background(request: Extract<BenchRequest, { scenario: "background
     scenario: request.scenario,
     agent: request.agent,
     page: page(),
+    hidden: document.hidden,
+    /** How long a 100 ms timer took. */
+    timerMs,
     exitMs: round(performance.now() - started),
     receivedBytes: terminalCounters().data.local.bytes - from,
     lines: inst.term.buffer.active.length,

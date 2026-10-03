@@ -51,6 +51,11 @@ pub type Tap = Box<dyn Fn(&[u8]) -> bool + Send>;
 #[derive(Default)]
 struct Tapped {
     tap: Option<Tap>,
+    /// Which attachment this is. A view names its own when it reports or
+    /// detaches, so the word of a view that has since been replaced (its
+    /// detach arriving late, a report still on its way) cannot touch the one
+    /// that took its place.
+    token: String,
     /// Bytes sent to the tap since it attached.
     sent: u64,
     /// How many of them its view says it has drawn. The view reports a
@@ -363,8 +368,13 @@ impl Terminals {
                 // give it a moment to send the tail, so the exit is not announced
                 // ahead of the output. Bounded: a background job the program left
                 // behind can keep the terminal open, and the output never ends.
-                exited.store(true, Ordering::Relaxed);
-                tap.1.notify_all();
+                // Set under the slot's lock: the emitter checks it under that lock
+                // before it waits, so it cannot miss this and sleep out the stall.
+                {
+                    let _held = tap.0.lock().unwrap();
+                    exited.store(true, Ordering::Relaxed);
+                    tap.1.notify_all();
+                }
                 let _ = emitted_all.recv_timeout(EXIT_AFTER_OUTPUT);
                 sink.emit("pty_exit", &PtyExit { id, code });
             })?;
@@ -412,7 +422,7 @@ impl Terminals {
     /// Send pane `id`'s output to `tap` from here on, starting with what the
     /// pane has printed so far (its bounded scrollback), with nothing lost or
     /// repeated in between. It replaces an earlier tap for the same pane.
-    pub fn attach(&self, id: &str, tap: Tap) {
+    pub fn attach(&self, id: &str, token: &str, tap: Tap) {
         let slot = self.tap_slot(id);
         let mut tapped = slot.0.lock().unwrap();
         let mut sent = 0;
@@ -426,7 +436,7 @@ impl Terminals {
             }
             sent = printed.len() - start;
         }
-        *tapped = Tapped { tap: Some(tap), sent: sent as u64, drawn: 0, forgiven: 0, stalled: false };
+        *tapped = Tapped { tap: Some(tap), token: token.to_string(), sent: sent as u64, drawn: 0, forgiven: 0, stalled: false };
         slot.1.notify_all();
         drop(tapped);
         // The pane was closed, or closed and opened again, while this was
@@ -444,11 +454,14 @@ impl Terminals {
         }
     }
 
-    /// The view has drawn `drawn` bytes of what its tap was sent since it
-    /// attached: a running total.
-    pub fn ack(&self, id: &str, drawn: u64) {
+    /// The view attached as `token` has drawn `drawn` bytes of what its tap
+    /// was sent since it attached: a running total.
+    pub fn ack(&self, id: &str, token: &str, drawn: u64) {
         let Some(slot) = self.taps.lock().unwrap().get(id).cloned() else { return };
         let mut tapped = slot.0.lock().unwrap();
+        if tapped.tap.is_none() || tapped.token != token {
+            return;
+        }
         tapped.drawn = tapped.drawn.max(drawn.min(tapped.sent));
         // What was written off is owed again only as far as it is still missing.
         tapped.forgiven = tapped.forgiven.min(tapped.sent - tapped.drawn);
@@ -462,16 +475,27 @@ impl Terminals {
     pub fn detach_all(&self) {
         let ids: Vec<String> = self.taps.lock().unwrap().keys().cloned().collect();
         for id in ids {
-            self.detach(&id);
+            self.reset_slot(&id, None);
         }
     }
 
-    /// The view is gone: stop sending to it. The pane, if there is one,
-    /// keeps its slot for the next view.
-    pub fn detach(&self, id: &str) {
+    /// The view attached as `token` is gone: stop sending to it. The pane,
+    /// if there is one, keeps its slot for the next view. A view that has
+    /// already been replaced detaches nothing.
+    pub fn detach(&self, id: &str, token: &str) {
+        self.reset_slot(id, Some(token));
+    }
+
+    fn reset_slot(&self, id: &str, token: Option<&str>) {
         let Some(slot) = self.taps.lock().unwrap().get(id).cloned() else { return };
-        *slot.0.lock().unwrap() = Tapped::default();
-        slot.1.notify_all();
+        {
+            let mut tapped = slot.0.lock().unwrap();
+            if token.is_some_and(|token| tapped.token != token) {
+                return;
+            }
+            *tapped = Tapped::default();
+            slot.1.notify_all();
+        }
         self.drop_slot_if_unused(id);
     }
 
@@ -695,13 +719,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Attached before the pane exists: a view can mount before its spawn lands.
         let (early, early_output) = collector();
-        terminals.attach("pane", early);
+        terminals.attach("pane", "view", early);
         pane(&terminals, &sink, &dir, "pane", "sh -c 'printf one-; sleep 2; printf two-; sleep 2; printf three; exec sleep 600'");
         assert!(read_until(&early_output, "one-").ends_with("one-"));
 
         // A second view takes over: it starts with the scrollback, then follows.
         let (late, late_output) = collector();
-        terminals.attach("pane", late);
+        terminals.attach("pane", "view", late);
         let seen = read_until(&late_output, "three");
         assert!(seen.contains("one-two-three"), "{seen:?}");
         assert_eq!(seen.matches("one-").count(), 1, "{seen:?}");
@@ -709,7 +733,7 @@ mod tests {
         assert!(early_output.try_recv().is_err());
 
         // The view goes; the pane keeps its slot. Both go: nothing is kept.
-        terminals.detach("pane");
+        terminals.detach("pane", "view");
         assert_eq!(terminals.taps.lock().unwrap().len(), 1);
         terminals.kill_all();
         assert!(terminals.taps.lock().unwrap().is_empty());
@@ -721,20 +745,20 @@ mod tests {
         let terminals = Terminals::new();
         let dir = tempfile::tempdir().unwrap();
         let (first, first_output) = collector();
-        terminals.attach("pane", first);
+        terminals.attach("pane", "view", first);
         pane(&terminals, &sink, &dir, "pane", "sh -c 'printf one-; sleep 2; printf two-; sleep 2; printf three-; sleep 2; printf four; exec sleep 600'");
         read_until(&first_output, "one-");
 
         // The instance is disposed and made again (a tab's terminal dropped and shown again).
-        terminals.detach("pane");
+        terminals.detach("pane", "view");
         let (second, second_output) = collector();
-        terminals.attach("pane", second);
+        terminals.attach("pane", "view", second);
         assert!(read_until(&second_output, "two-").contains("one-two-"));
 
         // The page is reloaded: every view goes at once, and the new page's attach.
         terminals.detach_all();
         let (third, third_output) = collector();
-        terminals.attach("pane", third);
+        terminals.attach("pane", "view", third);
         let seen = read_until(&third_output, "four");
         assert!(seen.contains("one-two-three-four"), "{seen:?}");
         assert!(second_output.try_recv().is_err());
@@ -747,7 +771,7 @@ mod tests {
         let terminals = Terminals::new();
         let dir = tempfile::tempdir().unwrap();
         let (view, output) = collector();
-        terminals.attach("pane", view);
+        terminals.attach("pane", "view", view);
         pane(&terminals, &sink, &dir, "pane", "sh -c 'printf first; exec sleep 600'");
         read_until(&output, "first");
         terminals.kill_and_wait("pane", Duration::from_secs(5));
@@ -756,7 +780,7 @@ mod tests {
         terminals.kill_all();
         // The view is still there, so its slot is.
         assert_eq!(terminals.taps.lock().unwrap().len(), 1);
-        terminals.detach("pane");
+        terminals.detach("pane", "view");
         assert!(terminals.taps.lock().unwrap().is_empty());
     }
 
@@ -767,7 +791,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tap, output) = collector();
         drop(output);
-        terminals.attach("pane", tap);
+        terminals.attach("pane", "view", tap);
         pane(&terminals, &sink, &dir, "pane", "sh -c 'printf hello; exec sleep 600'");
         let deadline = Instant::now() + Duration::from_secs(60);
         while terminals.tap_slot("pane").0.lock().unwrap().tap.is_some() {
@@ -779,14 +803,23 @@ mod tests {
 
     /// A view that counts what it is sent, on a pane that prints 64 MB as fast as the PTY carries it.
     fn flood(terminals: &Terminals, dir: &tempfile::TempDir) -> impl Fn() -> u64 {
+        flood_of(terminals, dir, "head -c 67108864 /dev/zero | tr \"\\0\" x")
+    }
+
+    /// The same, of a program that never stops printing.
+    fn endless_flood(terminals: &Terminals, dir: &tempfile::TempDir) -> impl Fn() -> u64 {
+        flood_of(terminals, dir, "tr \"\\0\" x < /dev/zero")
+    }
+
+    fn flood_of(terminals: &Terminals, dir: &tempfile::TempDir, program: &str) -> impl Fn() -> u64 {
         let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
         let received = Arc::new(AtomicU64::new(0));
         let count = received.clone();
-        terminals.attach("pane", Box::new(move |bytes| {
+        terminals.attach("pane", "view", Box::new(move |bytes| {
             count.fetch_add(bytes.len() as u64, Ordering::Relaxed);
             true
         }));
-        pane(terminals, &sink, dir, "pane", "sh -c 'head -c 67108864 /dev/zero | tr \"\\0\" x; exec sleep 600'");
+        pane(terminals, &sink, dir, "pane", &format!("sh -c '{program}; exec sleep 600'"));
         move || received.load(Ordering::Relaxed)
     }
 
@@ -823,13 +856,13 @@ mod tests {
         assert!(terminals.stats().unacked_bytes > FLOW_HIGH);
 
         // The view catches up: the pane moves on, and is held again that much further.
-        terminals.ack("pane", held);
+        terminals.ack("pane", "view", held);
         let ahead = until_held(&sent) - held;
         assert!(ahead > FLOW_HIGH as u64 && ahead < WINDOW, "{ahead} bytes ahead of a view that drew {held}");
 
         // The same total said twice, or an older one arriving late, changes nothing.
-        terminals.ack("pane", held);
-        terminals.ack("pane", held / 2);
+        terminals.ack("pane", "view", held);
+        terminals.ack("pane", "view", held / 2);
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(sent() - held, ahead);
         terminals.kill_all();
@@ -839,21 +872,58 @@ mod tests {
     fn a_view_that_goes_silent_never_hangs_the_program_and_is_under_control_again_when_it_speaks() {
         let terminals = Terminals::new();
         let dir = tempfile::tempdir().unwrap();
-        let sent = flood(&terminals, &dir);
-        until_held(&sent);
+        // It never stops printing, so whatever this test waits for cannot be missed by the program finishing first.
+        let sent = endless_flood(&terminals, &dir);
+        let held = until_held(&sent);
 
         // The view says nothing more (a frozen window): after the stall the program runs free.
         let deadline = Instant::now() + Duration::from_secs(60);
-        while sent() < TOTAL / 2 {
+        while sent() < held + 16 * WINDOW {
             assert!(Instant::now() < deadline, "stuck at {} bytes", sent());
             std::thread::sleep(Duration::from_millis(20));
         }
         // It speaks again, having drawn all of that: the pane is held for it once more.
         let drawn = sent();
-        terminals.ack("pane", drawn);
+        terminals.ack("pane", "view", drawn);
         let ahead = until_held(&sent) - drawn;
-        assert!(sent() < TOTAL, "the pane ran to the end unheld");
         assert!(ahead < WINDOW, "{ahead} bytes ahead of a view that had caught up");
+        terminals.kill_all();
+    }
+
+    #[test]
+    fn a_view_that_was_replaced_cannot_detach_or_answer_for_the_one_that_took_its_place() {
+        let terminals = Terminals::new();
+        let dir = tempfile::tempdir().unwrap();
+        let sent = endless_flood(&terminals, &dir);
+        let held = until_held(&sent);
+
+        // A second view of the same pane takes over (the first was disposed, its detach is still on its way).
+        let second = Arc::new(AtomicU64::new(0));
+        let count = second.clone();
+        terminals.attach("pane", "second", Box::new(move |bytes| {
+            count.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+            true
+        }));
+        let got = || second.load(Ordering::Relaxed);
+        let before = until_held(&got);
+
+        // The first view's late report must not let the pane run ahead of the second...
+        terminals.ack("pane", "view", held + 64 * WINDOW);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(got(), before, "a replaced view's report moved the pane on");
+        // ...and its late detach must not cut the second one off.
+        terminals.detach("pane", "view");
+        terminals.ack("pane", "second", before);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while got() == before {
+            assert!(Instant::now() < deadline, "the second view was detached by the first one's detach");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Its own detach does.
+        terminals.detach("pane", "second");
+        let stopped = got();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(got(), stopped);
         terminals.kill_all();
     }
 
@@ -871,42 +941,58 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(120);
         while sent() < TOTAL {
             assert!(Instant::now() < deadline, "stuck at {} bytes", sent());
-            terminals.ack("pane", sent() - lost);
+            terminals.ack("pane", "view", sent() - lost);
             std::thread::sleep(Duration::from_millis(1));
         }
         // All of it arrived although the totals never matched, and what is still
         // counted as outstanding is at most the missing megabyte.
-        terminals.ack("pane", sent() - lost);
+        terminals.ack("pane", "view", sent() - lost);
         assert!(terminals.stats().unacked_bytes as u64 <= lost);
         terminals.kill_all();
     }
 
     #[test]
     fn a_panes_exit_is_announced_after_its_last_output_even_when_it_was_being_held() {
+        // Enough to be held for a view that draws nothing (more than FLOW_HIGH),
+        // and so little more that the rest fits in the reader's queue of 64
+        // reads, each perhaps a kilobyte: the program can then finish and exit
+        // while the pane is still being held. With more than that left it
+        // could not: it would be blocked writing, and there would be no exit
+        // to announce early.
+        const OUTPUT: u64 = FLOW_HIGH as u64 + 48 * 1024;
         let sink = Arc::new(crate::sink::BroadcastSink::new(64));
-        let events = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let events = Arc::new(Mutex::new(Vec::<(&'static str, Instant)>::new()));
         let seen = events.clone();
-        sink.listen("pty_exit", Box::new(move |_| seen.lock().unwrap().push("exit")));
+        sink.listen("pty_exit", Box::new(move |_| seen.lock().unwrap().push(("exit", Instant::now()))));
         let terminals = Terminals::new();
         let dir = tempfile::tempdir().unwrap();
         let received = Arc::new(AtomicU64::new(0));
         let (count, seen) = (received.clone(), events.clone());
-        terminals.attach("pane", Box::new(move |bytes| {
-            if count.fetch_add(bytes.len() as u64, Ordering::Relaxed) + bytes.len() as u64 >= 4 * 1024 * 1024 {
-                seen.lock().unwrap().push("last output");
+        terminals.attach("pane", "view", Box::new(move |bytes| {
+            let before = count.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+            if before == 0 {
+                seen.lock().unwrap().push(("first output", Instant::now()));
+            }
+            if before < OUTPUT && before + bytes.len() as u64 >= OUTPUT {
+                seen.lock().unwrap().push(("last output", Instant::now()));
             }
             true
         }));
-        // 4 MB and gone, to a view that draws nothing: the pane is held with most of it unsent.
         let sink: Arc<dyn EventSink> = sink;
-        pane(&terminals, &sink, &dir, "pane", "sh -c 'head -c 4194304 /dev/zero | tr \"\\0\" x'");
+        pane(&terminals, &sink, &dir, "pane", &format!("sh -c 'head -c {OUTPUT} /dev/zero | tr \"\\0\" x'"));
         let deadline = Instant::now() + Duration::from_secs(60);
-        while !events.lock().unwrap().contains(&"exit") {
+        while !events.lock().unwrap().iter().any(|(what, _)| *what == "exit") {
             assert!(Instant::now() < deadline, "no exit; {} bytes sent", received.load(Ordering::Relaxed));
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert_eq!(*events.lock().unwrap(), ["last output", "exit"]);
-        assert!(received.load(Ordering::Relaxed) >= 4 * 1024 * 1024);
+        let events = events.lock().unwrap();
+        assert_eq!(events.iter().map(|(what, _)| *what).collect::<Vec<_>>(), ["first output", "last output", "exit"]);
+        assert!(received.load(Ordering::Relaxed) >= OUTPUT);
+        // The pane was held (the view drew nothing), and was let go by the
+        // exit, not by the stall: the tail did not wait out those two seconds.
+        let took = events[2].1.duration_since(events[0].1);
+        assert!(took < FLOW_STALL - Duration::from_millis(500), "the tail waited {took:?}, as long as a stall");
+        drop(events);
         terminals.kill_all();
     }
 

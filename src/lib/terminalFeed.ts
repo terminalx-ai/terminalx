@@ -50,10 +50,11 @@ export interface PaneFeed {
 }
 
 /**
- * `paced: false` is for an agent's pane: acknowledged as soon as it is
- * parsed, whether or not anyone is looking.
+ * `token` is the attachment this feed belongs to. `paced: false` is for an
+ * agent's pane: acknowledged as soon as it is parsed, whether or not anyone
+ * is looking.
  */
-export function feedLocalPane(id: string, term: Terminal, { paced = true }: { paced?: boolean } = {}): PaneFeed {
+export function feedLocalPane(id: string, token: string, term: Terminal, { paced = true }: { paced?: boolean } = {}): PaneFeed {
   let received = 0;
   let parsed = 0;
   /** The total last reported. */
@@ -61,7 +62,7 @@ export function feedLocalPane(id: string, term: Terminal, { paced = true }: { pa
   let timer: ReturnType<typeof setTimeout> | null = null;
   const report = (total: number) => {
     acked = total;
-    void pty.ack(id, total).catch(() => {});
+    void pty.ack(id, token, total).catch(() => {});
   };
   const settle = () => {
     // A hidden window is never waited for: what has arrived counts as drawn.

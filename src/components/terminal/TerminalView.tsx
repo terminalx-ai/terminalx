@@ -117,12 +117,16 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
   // once this page has dropped what a page before it had attached
   // (`subscribeTerminals`): attached before that, the view would be dropped
   // with them, and its terminal would stay blank.
-  const feed = feedLocalPane(id, term, { paced: !isAgentPane(id) });
+  // This attachment's own name: another terminal made for the same pane
+  // (this one disposed, the next one created) has another, and neither can
+  // detach or answer for the other, in whatever order their calls land.
+  const token = crypto.randomUUID();
+  const feed = feedLocalPane(id, token, term, { paced: !isAgentPane(id) });
   let released = false;
   void subscribeTerminals()
-    .then(() => (released ? undefined : pty.attach(id, feed.data)))
+    .then(() => (released ? undefined : pty.attach(id, token, feed.data)))
     // Disposed while the attach was on its way: it must not be left attached to nothing.
-    .then(() => (released ? pty.detach(id) : undefined))
+    .then(() => (released ? pty.detach(id, token) : undefined))
     .catch(() => {});
   term.onData((d) => void pty.write(id, d).catch(() => {}));
   term.onBinary((d) => void pty.write(id, d).catch(() => {}));
@@ -134,7 +138,7 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
     release: () => {
       released = true;
       feed.stop();
-      void pty.detach(id).catch(() => {});
+      void pty.detach(id, token).catch(() => {});
     },
   };
 }

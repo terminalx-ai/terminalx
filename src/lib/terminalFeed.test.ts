@@ -14,7 +14,7 @@ function terminal() {
 }
 
 /** The totals reported so far, in order. */
-const reported = () => pty.ack.mock.calls.map(([, total]) => total as number);
+const reported = () => pty.ack.mock.calls.map(([, , total]) => total as number);
 
 let hidden = false;
 function hideWindow(value: boolean) {
@@ -34,7 +34,7 @@ describe("a local pane's output", () => {
   it("is acknowledged once drawn, as a running total, for the terminal on screen", () => {
     const { term, parse } = terminal();
     setOnScreen(term, true);
-    const feed = feedLocalPane("p1", term);
+    const feed = feedLocalPane("p1", "a1", term);
     const before = dataRate("local").bytes;
 
     feed.data(new Uint8Array(ACK_BYTES - 1));
@@ -50,13 +50,13 @@ describe("a local pane's output", () => {
     parse();
     // Totals, not steps: one that goes missing is made good by the next.
     expect(reported()).toEqual([ACK_BYTES + 9, 2 * ACK_BYTES + 9]);
-    expect(pty.ack).toHaveBeenLastCalledWith("p1", 2 * ACK_BYTES + 9);
+    expect(pty.ack).toHaveBeenLastCalledWith("p1", "a1", 2 * ACK_BYTES + 9);
     expect(dataRate("local").bytes - before).toBe(2 * ACK_BYTES + 9);
   });
 
   it("is acknowledged a step per tick for a hidden shell, and all at once when it is shown", () => {
     const { term, parse } = terminal();
-    const feed = feedLocalPane("p1", term);
+    const feed = feedLocalPane("p1", "a1", term);
     feed.data(new Uint8Array(ACK_BYTES * 4));
     parse();
     expect(pty.ack).not.toHaveBeenCalled();
@@ -75,7 +75,7 @@ describe("a local pane's output", () => {
 
   it("costs a quiet hidden terminal no acknowledgements at all", () => {
     const { term, parse } = terminal();
-    const feed = feedLocalPane("p1", term);
+    const feed = feedLocalPane("p1", "a1", term);
     for (let frame = 0; frame < 20; frame++) {
       feed.data(new Uint8Array(3000));
       parse();
@@ -87,7 +87,7 @@ describe("a local pane's output", () => {
   it("never slows an agent's pane for not being looked at", () => {
     const { term, parse } = terminal();
     // Not on screen: the agent's terminal under its chat.
-    const feed = feedLocalPane("tab:t1", term, { paced: false });
+    const feed = feedLocalPane("tab:t1", "a1", term, { paced: false });
     feed.data(new Uint8Array(ACK_BYTES * 4));
     parse();
     // All of it at once, with no timer involved.
@@ -98,7 +98,7 @@ describe("a local pane's output", () => {
   it("holds nothing back while the window is hidden, where the page's timers barely run", () => {
     const { term, parse } = terminal();
     setOnScreen(term, true);
-    const feed = feedLocalPane("p1", term);
+    const feed = feedLocalPane("p1", "a1", term);
     feed.data(new Uint8Array(ACK_BYTES * 2));
     // Arrived and not yet parsed: with the window visible that is not acknowledged.
     expect(pty.ack).not.toHaveBeenCalled();
@@ -120,7 +120,7 @@ describe("a local pane's output", () => {
 
   it("says nothing more once its terminal is gone", () => {
     const { term, parse } = terminal();
-    const feed = feedLocalPane("p1", term);
+    const feed = feedLocalPane("p1", "a1", term);
     feed.data(new Uint8Array(ACK_BYTES * 4));
     parse();
     feed.stop();

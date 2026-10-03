@@ -97,9 +97,11 @@ What a run does:
   through the store). A `FinalizationRegistry` counts how many the garbage
   collector takes back. This is what separates a leak in xterm or its renderer
   from one in the app.
-- **Background** (`--scenarios background`). The app is hidden through System
-  Events, by process id, and a pane runs `cat` of the 50 MB log, once as a
-  shell and once as an agent's pane. Timed: until the program has exited.
+- **Background** (`--scenarios background`). The app's window is covered by
+  another window (`scripts/perf/cover-window.swift`, which activates
+  nothing), and then the app is hidden through System Events, by process id.
+  In each state a pane runs `cat` of the 50 MB log, once as a shell and once
+  as an agent's pane. Timed: until the program has exited.
   Nothing in this scenario waits for a frame, which a hidden page never gets.
 - **Covered** (`--scenarios covered`). A real session with two shell tabs:
   the one behind prints an agent-style stream for 10 s while the other is
@@ -389,6 +391,9 @@ path. That is where the 500–600 ms of output after Ctrl+C came from, and the
   stops being waited for until it speaks again, and what it was silent on is
   written off, so a program can never hang, or be held back for good, on a
   window that is not drawing or on bytes that never arrived.
+- Each attachment has a name of its own, which its acknowledgements and its
+  detach carry. A terminal that was disposed cannot detach, or answer for,
+  the one made for the same pane after it, in whatever order their calls land.
 - A pane keeps one slot for its views for as long as it lives. A view that
   detaches and attaches again, a page that is reloaded, and a view that
   attaches before or after its pane was spawned all get the scrollback and
@@ -398,13 +403,28 @@ path. That is where the 500–600 ms of output after Ctrl+C came from, and the
 - The `pty_data` event is still emitted for the listeners in the backend (the
   mobile reader, the remote runtime); the window no longer listens to it.
 
-**Where memory is not bounded.** Flow control bounds what is in flight to
-about 1 MB per pane only while the window is visible and answering. While a
-window is hidden, or for the 2 s it takes to decide a view has stalled and
-from then until it speaks again, output is sent as fast as the program
-prints, and waits in the page (Tauri's channel queue, then xterm's write
-buffer, which discards past 50 MB). That is what happened on every flood
-before this change; it is not made worse, and it is not fixed.
+**Where memory is and is not bounded.** While the window is visible and
+answering, what is in flight to it is about 1 MB per pane. The cases outside
+that:
+
+- **A window nobody can see** (hidden or covered). Nothing is held for it,
+  so output is sent as fast as the program prints and waits in the page:
+  Tauri's channel queue, then xterm's write buffer, which discards past
+  50 MB.
+- **A view that stalls.** For the 2 s it takes to decide, the pane is held.
+  From then until the view speaks again the pane is not held at all, as
+  above.
+- **After a stall.** What the view was silent on is written off, and the
+  1 MB window is counted beyond it: until the view has drawn those bytes,
+  what is in flight can be the written-off amount plus 1 MB.
+- **A pane whose program has exited** is never held again: the rest of its
+  output is sent at once, so its exit is not reported ahead of it. That is
+  at most what was left in the PTY and the reader's queue of 64 reads; a
+  program with more than that still to write is blocked writing it, and has
+  not exited.
+
+The first two are what happened on every flood before this change. They are
+not made worse, and they are not fixed.
 
 Cloud terminals already have their own bounded stream: the runtime keeps a
 ring per terminal and a reader that falls behind resumes from it, so they are
@@ -435,17 +455,23 @@ not part of this change. They share the view, and so the earlier ones.
   the PTY carries it. That is the trade for the typing numbers above.
 - Key press to frame is bounded by the display: 17 ms is one frame at 60 Hz.
 
-**With the window hidden** (`--scenarios background`: the app is hidden as
-when the person works in another app, and a pane runs `cat` of the 50 MB
-log):
+**With the window not being looked at** (`--scenarios background`: a pane
+runs `cat` of the 50 MB log while the app's window is covered by another
+window, and again while the app is hidden):
 
-| | Acknowledged on parse, hidden or not (first revision of this change) | Now |
-| --- | --- | --- |
-| The program has exited after | not within 180 s; 18 of 50 MB read after about six minutes | 0.75 s in a shell, 0.71 s in an agent's pane |
+| Window | `document.hidden` | Pane | The program has exited after |
+| --- | --- | --- | --- |
+| Covered by another window | true | a shell | 1.58 s |
+| Covered by another window | true | an agent's pane | 0.76 s |
+| App hidden | true | a shell | 0.75 s |
+| App hidden | true | an agent's pane | 0.78 s |
+| App hidden, first revision of this change (acknowledged on parse, hidden or not) | true | a shell | not within 180 s; 18 of 50 MB read after about six minutes |
 
-A program must not be slowed because nobody is looking at the window, an
-agent's CLI least of all. The first revision of this change held the pane for
-a page whose timers WebKit had all but stopped.
+A window that another window covers reports `document.hidden` just as a
+hidden app does, so both take the same path: nothing is held for a page in
+that state. A program must not be slowed because nobody is looking at the
+window, an agent's CLI least of all. The first revision of this change held
+the pane for a page whose timers WebKit had all but stopped.
 
 **In the real window** (`scripts/perf/verify-agent-terminal.mjs`). The
 benchmark attaches its own terminals in its own order, and that hid two

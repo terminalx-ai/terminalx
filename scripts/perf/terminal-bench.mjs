@@ -9,11 +9,12 @@
 //   node scripts/perf/terminal-bench.mjs --home ~/.txperf --pid 12345 \
 //     [--scenarios yes,cat,tui,echo,interrupt,soak,churn,covered,background] [--terminals 1,8,20] [--out results.json]
 //     [--interrupt-after 2000] [--soak sessions,tabs,switches,agents] [--work dir] [--label text]
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { cpus, homedir, totalmem } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 
 const SCENARIOS = ["yes", "cat", "tui", "echo", "interrupt", "soak", "churn", "covered", "background"];
@@ -236,7 +237,7 @@ const web = (sample) => (sample ? `${mb(sample.WebContent)} + ${mb(sample.GPU)}`
 
 function markdown(results) {
   const lines = [];
-  const drains = results.filter((r) => r.result.scenario === "drain" && !r.background);
+  const drains = results.filter((r) => r.result.scenario === "drain");
   if (drains.length) {
     lines.push("| Workload | Terminals | Drain (s) | MB/s | Long tasks | Blocked (ms) | Longest block (ms) | Frames/s | WebContent + GPU memory before → peak → after (MB) | Renderer on screen | WebGL / DOM | Writes discarded |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
     for (const { name, bytes, result: r, memory: m, discarded } of drains) {
@@ -259,11 +260,11 @@ function markdown(results) {
     for (const { request, result: r, memory: m, discarded } of interrupts) lines.push(`| ${r.terminals} | ${r.renderer} | ${request.afterMs / 1000} | ${r.exitMs} | ${r.outputStoppedMs} | ${(r.bytesAfter / 1024 / 1024).toFixed(1)} | ${r.mainThread.longTasks} | ${r.mainThread.longestMs} | ${r.mainThread.framesPerSecond} | ${web(m.before)} → ${web(m.peak)} → ${web(m.after)} | ${discarded ?? "n/a"} |`);
     lines.push("");
   }
-  const backgrounds = results.filter((r) => r.background);
+  const backgrounds = results.filter((r) => r.result.scenario === "background");
   if (backgrounds.length) {
-    lines.push("| Workload | Page | Program's output read by the backend (s) | Program exited (s) |", "| --- | --- | --- | --- |");
-    for (const { name, result: r, background } of backgrounds) {
-      lines.push(`| ${name} | ${r.page?.visibility ?? "no answer"} | ${background.readMs === null ? "not within 180" : seconds(background.readMs)} | ${r.exitMs ? seconds(r.exitMs) : "not within 180"} |`);
+    lines.push("| Workload | document.hidden | A 100 ms timer took (ms) | Program exited after (s) |", "| --- | --- | --- | --- |");
+    for (const { name, result: r } of backgrounds) {
+      lines.push(`| ${name} | ${r.hidden ?? "no answer"} | ${r.timerMs ?? "no answer"} | ${r.exitMs ? seconds(r.exitMs) : "not within 180"} |`);
     }
     lines.push("");
   }
@@ -334,44 +335,45 @@ function soakProject() {
 
 for (const scenario of options.scenarios) {
   if (scenario === "background") {
-    // The window is hidden, as when the person works in another app: WebKit
-    // then runs the page's timers about once a second. What matters is that
-    // the program is not slowed, so the time taken is until the backend has
-    // read all of its output, whatever the page has drawn by then.
+    // The window is not being looked at, as when the person works in another
+    // app: hidden outright, and covered by another window. WebKit then runs
+    // the page's timers about once a second. What matters is that the program
+    // is not slowed, so the time taken is until it has exited, whatever the
+    // page has drawn by then.
     const { name, bytes, command } = drainWorkloads.cat;
-    const expected = bytes;
     const hide = (hidden) => execFileSync("/usr/bin/osascript", ["-e", `tell application "System Events" to set visible of (first process whose unix id is ${status.pid}) to ${!hidden}`], { stdio: "ignore" });
+    const cases = async (how) => {
+      for (const agent of [false, true]) {
+        const label = `${name}, window ${how}, ${agent ? "an agent's pane" : "a shell"}`;
+        console.error(`terminal-bench: ${label} ...`);
+        try {
+          results.push({ name: label, bytes, how, ...(await run(options, status.pid, { scenario: "background", cwd: options.work, command, agent }, 180_000)) });
+        } catch (error) {
+          results.push({ name: label, bytes, how, result: { scenario: "background", error: error.message } });
+          // The run may still be going in the app: nothing more can be asked of it.
+          return;
+        }
+      }
+    };
+    // Covered: another window in front of it, nothing else changed.
+    const cover = spawn("/usr/bin/swift", [join(dirname(fileURLToPath(import.meta.url)), "cover-window.swift"), String(status.pid), "200"], { stdio: ["ignore", "pipe", "inherit"] });
+    const covering = await Promise.race([once(cover.stdout, "data").then(() => true), once(cover, "exit").then(() => false)]);
+    if (covering) {
+      await sleep(3000);
+      await cases("covered by another window");
+    } else {
+      console.error("terminal-bench: could not cover the window; skipping that case");
+    }
+    cover.kill();
+    await sleep(2000);
     try {
       hide(true);
+      await sleep(3000);
+      await cases("hidden");
+      hide(false);
     } catch {
-      console.error("terminal-bench: could not hide the window (System Events needs permission); skipping the background scenario");
-      continue;
+      console.error("terminal-bench: could not hide the window (System Events needs permission); skipping that case");
     }
-    await sleep(3000);
-    for (const agent of [false, true]) {
-      const label = `${name}, window hidden, ${agent ? "an agent's pane" : "a shell"}`;
-      const from = (await control(options.home, "status")).terminals.backend.dataBytes;
-      const started = Date.now();
-      let readMs = null;
-      let done = false;
-      const watching = (async () => {
-        while (readMs === null && !done && Date.now() - started < 200_000) {
-          await sleep(100);
-          const now = (await control(options.home, "status").catch(() => null))?.terminals.backend.dataBytes ?? 0;
-          if (now - from >= expected) readMs = Date.now() - started;
-        }
-      })();
-      try {
-        console.error(`terminal-bench: ${label} ...`);
-        results.push({ name: label, bytes, ...(await run(options, status.pid, { scenario: "background", cwd: options.work, command, agent }, 180_000)) });
-      } catch (error) {
-        results.push({ name: label, bytes, result: { scenario: "background", error: error.message } });
-      }
-      done = true;
-      await watching;
-      results[results.length - 1].background = { readMs };
-    }
-    hide(false);
     continue;
   }
   if (scenario === "covered") {
