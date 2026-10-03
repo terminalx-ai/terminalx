@@ -181,6 +181,12 @@ export const api = {
   /** Check the saved key against the provider again, without entering it. */
   cloudProviderRevalidate: (provider: CloudWorkspaceProviderId, contextRevision: string) =>
     invoke<CloudProviderConnection>("cloud_provider_revalidate", { provider, contextRevision }),
+  // Agent logins for the organization's cloud workspaces (PRO-79). The login itself is collected in Rust
+  // (a native secure dialog, or this computer's own login) and never passes through the webview.
+  cloudAgentLogins: () => invoke<{ credentials: AgentLogin[] }>("cloud_agent_logins"),
+  cloudAgentLoginConnect: (provider: AgentLoginProvider, source: AgentLoginSource, consent: AgentLoginConsent) =>
+    invoke<AgentLogin>("cloud_agent_login_connect", { provider, source, consent }),
+  cloudAgentLoginRemove: (provider: AgentLoginProvider, contextRevision: string) => invoke<void>("cloud_agent_login_remove", { provider, contextRevision }),
   cloudProviderConnect: (provider: CloudWorkspaceProviderId, input: CloudProviderConnectInput) =>
     invoke<CloudProviderConnection>("cloud_provider_connect", { provider, input }),
   // Cloud workspace routes take the Organization they act in (CS-18). None
@@ -396,6 +402,28 @@ export interface CloudProviderSummary {
     credentialFingerprint: string | null;
   } | null;
   capabilities: CloudProviderCapabilities;
+}
+
+export type AgentLoginProvider = "codex" | "claude" | "cursor";
+/** `api-key`: typed into a native secure dialog. `local-login`: the agent's own login on this computer. */
+export type AgentLoginSource = "api-key" | "local-login";
+
+/** What the service says about a stored agent login; never the login. */
+export interface AgentLogin {
+  provider: AgentLoginProvider;
+  authKind: "api-key" | "oauth-credentials-json" | (string & {});
+  fingerprint: string;
+  displayIdentity?: string;
+  version: number;
+  updatedAt: number;
+  state?: "connected" | "revoked" | "disconnected" | (string & {});
+  sharedUse?: "organization" | "managers" | (string & {});
+}
+
+export interface AgentLoginConsent {
+  contextRevision: string;
+  organizationSharing: boolean;
+  machineInstallation: boolean;
 }
 
 export interface CloudProviderSummaryResponse {

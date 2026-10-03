@@ -443,15 +443,26 @@ impl ProviderPromptError {
 
 #[cfg(target_os = "macos")]
 fn secure_provider_prompt(provider: crate::cloud_workspaces::CloudWorkspaceProviderId, organization_id: &str) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
+    secure_prompt(
+        "Provider connection",
+        &format!("Enter the {} provider key for organization {}. The key is sent to the account service only for validation and secure storage.", provider.as_str(), organization_id),
+        "Provider key",
+    )
+}
+
+/// A key typed into a native secure field: it never passes through the
+/// webview, and the field is emptied whichever way the dialog ends.
+#[cfg(target_os = "macos")]
+fn secure_prompt(title: &str, text: &str, placeholder: &str) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
     use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{NSAlert, NSSecureTextField, NSAlertFirstButtonReturn};
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
     let mtm = MainThreadMarker::new().ok_or(ProviderPromptError::Unavailable)?;
     let alert = NSAlert::new(mtm);
-    alert.setMessageText(&NSString::from_str("Provider connection"));
-    alert.setInformativeText(&NSString::from_str(&format!("Enter the {} provider key for organization {}. The key is sent to the account service only for validation and secure storage.", provider.as_str(), organization_id)));
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(text));
     let field = NSSecureTextField::initWithFrame(NSSecureTextField::alloc(mtm), NSRect::new(NSPoint::new(0., 0.), NSSize::new(360., 24.)));
-    field.setPlaceholderString(Some(&NSString::from_str("Provider key")));
+    field.setPlaceholderString(Some(&NSString::from_str(placeholder)));
     alert.setAccessoryView(Some(&field));
     alert.addButtonWithTitle(&NSString::from_str("Validate"));
     alert.addButtonWithTitle(&NSString::from_str("Cancel"));
@@ -498,6 +509,168 @@ pub async fn cloud_provider_connect(
     tauri::async_runtime::spawn_blocking(move || service.connect_authorized(authorization, input, credential))
         .await
         .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::task_failed(crate::cloud_workspaces::RequestRisk::Mutation))?
+}
+
+#[cfg(not(target_os = "macos"))]
+fn secure_prompt(_title: &str, _text: &str, _placeholder: &str) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
+    Err(ProviderPromptError::Unavailable)
+}
+
+// ------------------------------------------------- agent logins (PRO-79)
+
+/// Where a login to store comes from. Either way it is collected here, in
+/// Rust: the webview names the source and never holds the login.
+#[derive(Clone, Copy, Debug, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentLoginSource {
+    /// An API key typed into a native secure dialog.
+    ApiKey,
+    /// The agent's own login already on this computer.
+    LocalLogin,
+}
+
+fn agent_label(provider: crate::cloud_workspaces::AgentLoginProvider) -> &'static str {
+    use crate::cloud_workspaces::AgentLoginProvider::*;
+    match provider {
+        Codex => "Codex",
+        Claude => "Claude Code",
+        Cursor => "Cursor",
+    }
+}
+
+#[tauri::command]
+pub async fn cloud_agent_logins(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::AgentLoginList, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.agent_logins())
+}
+
+/// Store an agent's login for the organization's cloud workspaces. The
+/// order matters: consent and the owner-or-admin check first, and only then
+/// is a key asked for or this computer's login read.
+#[tauri::command]
+pub async fn cloud_agent_login_connect(
+    app: AppHandle,
+    provider: crate::cloud_workspaces::AgentLoginProvider,
+    source: AgentLoginSource,
+    consent: crate::cloud_workspaces::AgentLoginConsent,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::AgentLogin, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    use crate::cloud_workspaces::{AgentLoginKind, AgentLoginProvider, CloudWorkspaceClientError, RequestRisk};
+    // Only Claude Code's sign-in can be lent without its refresh token.
+    if source == AgentLoginSource::LocalLogin && provider != AgentLoginProvider::Claude {
+        return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+    }
+    static GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = GUARD.try_lock().map_err(|_| CloudWorkspaceClientError::local("cloud_provider_operation_in_progress", true))?;
+    let service = state.cloud_workspaces.clone();
+    let authorization = tauri::async_runtime::spawn_blocking(move || service.authorize_agent_login(&consent))
+        .await
+        .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Read))??;
+    // The organization by name when it is the active one; its id otherwise, as the provider dialog shows it.
+    let organization = state.account.active_organization_name(authorization.organization_id()).unwrap_or_else(|| authorization.organization_id().to_owned());
+    let unavailable = || CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false);
+    let (kind, secret, identity) = match source {
+        AgentLoginSource::ApiKey => {
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            let title = format!("{} API key", agent_label(provider));
+            let text = format!(
+                "Enter the {} API key for organization {}. It is sent to the account service only for validation and encrypted storage, and is not shown again.",
+                agent_label(provider),
+                organization
+            );
+            app.run_on_main_thread(move || {
+                let _ = sender.send(secure_prompt(&title, &text, "API key"));
+            })
+            .map_err(|_| unavailable())?;
+            let entered = tauri::async_runtime::spawn_blocking(move || receiver.recv()).await.map_err(|_| unavailable())?.map_err(|_| unavailable())?;
+            (AgentLoginKind::ApiKey, entered.map_err(ProviderPromptError::client_error)?, None)
+        }
+        AgentLoginSource::LocalLogin => {
+            let read = tauri::async_runtime::spawn_blocking(crate::agent_local_login::claude)
+                .await
+                .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Read))?;
+            let login = read.map_err(|error| CloudWorkspaceClientError::local(error.code(), false))?;
+            // The confirmation that counts. What the webview says the person agreed to is only a
+            // request: this dialog is drawn by the app itself, names the organization and the
+            // account, and nothing is uploaded unless its own button is pressed. Every time.
+            let expires = local_time(login.expires_at_ms);
+            let account = login.account.clone().unwrap_or_else(|| "the Claude Code account signed in on this Mac (its name is not recorded here)".into());
+            let text = local_login_confirmation(&organization, &account, &expires);
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            app.run_on_main_thread(move || {
+                let _ = sender.send(native_confirm("Lend this Mac's Claude Code sign-in?", &text, "Upload access token"));
+            })
+            .map_err(|_| unavailable())?;
+            let confirmed = tauri::async_runtime::spawn_blocking(move || receiver.recv()).await.map_err(|_| unavailable())?.map_err(|_| unavailable())?;
+            match confirmed {
+                Some(true) => {}
+                Some(false) => return Err(CloudWorkspaceClientError::local("cloud_agent_local_login_cancelled", false)),
+                None => return Err(unavailable()),
+            }
+            let identity = format!("{} · this Mac's sign-in, temporary until {}", login.account.as_deref().unwrap_or("Claude Code"), expires);
+            (AgentLoginKind::LoginDocument, login.secret, Some(identity))
+        }
+    };
+    let service = state.cloud_workspaces.clone();
+    tauri::async_runtime::spawn_blocking(move || service.save_agent_login(authorization, provider, kind, secret, identity.as_deref()))
+        .await
+        .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Mutation))?
+}
+
+/// When a lent sign-in stops working, in this computer's own time.
+fn local_time(at_ms: i64) -> String {
+    use chrono::TimeZone;
+    match chrono::Local.timestamp_millis_opt(at_ms) {
+        chrono::LocalResult::Single(at) => at.format("%-d %b %Y, %H:%M").to_string(),
+        _ => "an unknown time".into(),
+    }
+}
+
+/// What the native confirmation says before a local sign-in is uploaded:
+/// which organization gets it, whose it is, what exactly leaves this Mac,
+/// who can use it, and when and how it ends.
+fn local_login_confirmation(organization: &str, account: &str, expires: &str) -> String {
+    format!(
+        "Organization: {organization}\nAccount: {account}\n\n\
+         TerminalX will upload this sign-in's short-lived access token to the account service, for agents in the cloud workspaces of {organization}. \
+         The refresh token stays on this Mac, so this Mac's sign-in keeps working and the uploaded token cannot be renewed: it stops working on {expires}.\n\n\
+         Until then, agents in every member's workspaces of this organization may run on your Claude subscription, \
+         and anyone who can drive one of those workspaces can read the token off its machine.\n\n\
+         To end it sooner, disconnect it in Settings (the service refuses while a workspace still uses the login) or sign out of Claude Code."
+    )
+}
+
+/// A yes-or-no question asked by the app itself, outside the webview.
+/// `None` when it cannot be asked here.
+#[cfg(target_os = "macos")]
+fn native_confirm(title: &str, text: &str, confirm: &str) -> Option<bool> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSAlertStyle};
+    use objc2_foundation::NSString;
+    let mtm = MainThreadMarker::new()?;
+    let alert = NSAlert::new(mtm);
+    alert.setAlertStyle(NSAlertStyle::Warning);
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(text));
+    // Cancel first: Return and the default button never upload anything.
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    alert.addButtonWithTitle(&NSString::from_str(confirm));
+    Some(alert.runModal() != NSAlertFirstButtonReturn)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn native_confirm(_title: &str, _text: &str, _confirm: &str) -> Option<bool> {
+    None
+}
+
+#[tauri::command]
+pub async fn cloud_agent_login_remove(
+    provider: crate::cloud_workspaces::AgentLoginProvider,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.remove_agent_login(provider, context_revision))
 }
 
 #[tauri::command]
@@ -2037,6 +2210,18 @@ mod command_tests {
     use std::process::Command;
 
     use super::{rename_workspace_entries, NewSession, NewTab};
+
+    // PRO-79: the app's own confirmation before a local sign-in is uploaded.
+    #[test]
+    fn the_local_sign_in_confirmation_names_the_organization_the_account_and_the_expiry() {
+        let text = super::local_login_confirmation("Acme Robotics", "ada@example.com", "3 Oct 2026, 21:40");
+        assert!(text.starts_with("Organization: Acme Robotics\nAccount: ada@example.com\n"));
+        assert!(text.contains("stops working on 3 Oct 2026, 21:40"));
+        assert!(text.contains("The refresh token stays on this Mac"));
+        assert!(text.contains("every member's workspaces"));
+        assert!(text.contains("anyone who can drive one of those workspaces can read the token"));
+        assert!(text.contains("the service refuses while a workspace still uses the login"));
+    }
     use crate::session_ops::{
         create_session_entry, delete_workspace_entries, new_tab_entry, notify_workspace_deleted,
         validate_session_target,
