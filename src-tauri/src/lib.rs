@@ -50,6 +50,8 @@ mod pipe_transport;
 #[cfg(feature = "desktop")]
 mod dictation;
 #[cfg(feature = "desktop")]
+mod drag_text;
+#[cfg(feature = "desktop")]
 mod transcription;
 mod events;
 mod files;
@@ -422,6 +424,7 @@ pub fn run() {
             commands::search_files,
             commands::list_slash_commands,
             commands::read_image_file,
+            drag_text::dropped_text,
             commands::invalidate_file_index,
             commands::git_commit,
             commands::git_identity,

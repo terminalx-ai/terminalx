@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type HTMLAttributes, type RefObject } from "react";
 import { Paperclip, X } from "lucide-react";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { files as filesApi, type ImageInput } from "@/lib/api";
+import { registerFileDropTarget } from "@/lib/fileDrop";
 
 export interface Attachment {
   id: string;
@@ -56,9 +56,9 @@ export function useImageAttachments({
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [dragging, setDragging] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
-  // The drag-drop subscription is per webview and must be registered once, so
-  // it reads the draft through a ref rather than taking it as a dependency —
-  // otherwise every keystroke tore the listener down and built another.
+  // The drop target is registered once, so it reads the draft through a ref
+  // rather than taking it as a dependency — otherwise every keystroke tore
+  // the registration down and built another.
   const latest = useRef({ draft, onDraftChange });
   latest.current = { draft, onDraftChange };
 
@@ -129,44 +129,20 @@ export function useImageAttachments({
     if (fileRef.current) fileRef.current.value = "";
   }, []);
 
-  // Dropped paths arrive from the window, not the DOM: images attach, the
-  // rest become mentions the harness reads itself.
-  useEffect(() => {
-    let off: (() => void) | null = null;
-    let disposed = false;
-    // Called from two places — the cleanup and the late-resolving registration
-    // — and Tauri throws if a listener is dropped twice.
-    const stop = () => {
-      const fn = off;
-      off = null;
-      try {
-        fn?.();
-      } catch {
-        /* already gone */
-      }
-    };
-    void (async () => {
-      try {
-        const fn = await getCurrentWebview().onDragDropEvent(async (e) => {
-          const p = e.payload;
-          if (p.type === "enter" || p.type === "over") setDragging(true);
-          else if (p.type === "leave") setDragging(false);
-          else if (p.type === "drop") {
-            setDragging(false);
-            await addPaths(p.paths);
-          }
-        });
-        off = fn;
-        if (disposed) stop();
-      } catch {
-        /* outside a webview */
-      }
-    })();
-    return () => {
-      disposed = true;
-      stop();
-    };
-  }, [addPaths]);
+  // Dropped paths arrive from the window, not the DOM, through the one
+  // router every drop target shares (`fileDrop.ts`): images attach, the rest
+  // become mentions the harness reads itself. A composer takes what lands on
+  // it and what lands on nothing else, never what lands on a terminal.
+  useEffect(
+    () =>
+      registerFileDropTarget({
+        element: () => textareaRef.current?.parentElement ?? null,
+        anywhere: true,
+        onDragChange: setDragging,
+        onDrop: addPaths,
+      }),
+    [addPaths, textareaRef],
+  );
 
   const images = useMemo(() => attachments.map((a) => ({ mediaType: a.mediaType, data: a.data, name: a.name })), [attachments]);
 
