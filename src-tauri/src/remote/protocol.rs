@@ -142,6 +142,9 @@ pub const METHODS: &[Method] = &[
     method("git.prMerge", "git/1", Manage, true),
     // PRO-34 facts before archive or delete (saas contract 10.2): read-only.
     method("lifecycle.dispositionFacts", "lifecycle/1", Participate, false),
+    // PRO-33: free memory and disk of the machine; read-only. A runtime
+    // from before it answers `method_not_found`.
+    method("lifecycle.resources", "lifecycle/1", Participate, false),
     // PRO-30 (saas contract §21.5): presence, notes and the tab driver
     // lease. Every call also needs the caller to have a role (not `none`).
     method("collab.state", "collab/1", Participate, false),

@@ -18,6 +18,7 @@ mod cloud_catalog;
 mod cloud_activity;
 mod cloud_bootstrap;
 mod cloud_quiesce;
+mod cloud_resources;
 mod cloud_environment;
 pub mod cloud_agents;
 mod cloud_github;
