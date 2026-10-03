@@ -43,16 +43,23 @@ const TAB_LABEL: Record<Tab, string> = {
 export function SettingsPage({
   onBack,
   initialTab = DEFAULT_SETTINGS_TAB,
+  openRequest = 0,
 }: {
   onBack: () => void;
   initialTab?: SettingsTab;
+  /**
+   * Counts each time Settings is asked for. Asking again while it is open
+   * goes to `initialTab` even when that is the section it opened on and the
+   * reader has since picked another by hand.
+   */
+  openRequest?: number;
 }) {
   // Settings always opens on a section: a value that names none is the default one.
   const initial: Tab = TABS.includes(initialTab) ? initialTab : DEFAULT_SETTINGS_TAB;
   const [tab, setTab] = useState<Tab>(initial);
   useEffect(() => {
     setTab(initial);
-  }, [initial]);
+  }, [initial, openRequest]);
 
   useHotkey("escape", () => {
     if (hasEscapeOverlay()) return false;

@@ -96,8 +96,8 @@ vi.mock("@/components/layout/RightPanel", () => ({
   RightPanel: ({ cwd, branch }: { cwd: string; branch?: string | null }) => <div data-testid="right-panel" data-cwd={cwd} data-branch={branch ?? ""} />,
 }));
 vi.mock("@/components/settings/SettingsPage", () => ({
-  SettingsPage: ({ onBack, initialTab }: { onBack: () => void; initialTab?: unknown }) => (
-    <div data-testid="settings-page" data-initial-tab={typeof initialTab === "string" ? initialTab : "not-a-section"}>
+  SettingsPage: ({ onBack, initialTab, openRequest }: { onBack: () => void; initialTab?: unknown; openRequest?: number }) => (
+    <div data-testid="settings-page" data-initial-tab={typeof initialTab === "string" ? initialTab : "not-a-section"} data-open-request={openRequest}>
       <button type="button" onClick={onBack}>Back to previous page</button>
     </div>
   ),
@@ -242,6 +242,20 @@ describe("settings page navigation", () => {
     close();
     pressSettingsShortcut();
     expect(await section()).toBe("account");
+  });
+
+  it("tells Settings each time it is asked for, so a section picked by hand gives way to the one asked for", async () => {
+    render(<AppShell />);
+    pressSettingsShortcut();
+    const first = Number((await screen.findByTestId("settings-page")).dataset.openRequest);
+    // Same section as before (Account): only the request count tells Settings to go back to it.
+    pressSettingsShortcut();
+    await waitFor(() => expect(Number(screen.getByTestId("settings-page").dataset.openRequest)).toBe(first + 1));
+    expect(screen.getByTestId("settings-page").dataset.initialTab).toBe("account");
+    // An action that names a section counts too (Agent settings stays reachable with Settings open).
+    fireEvent.click(screen.getByRole("button", { name: "Agent settings" }));
+    await waitFor(() => expect(Number(screen.getByTestId("settings-page").dataset.openRequest)).toBe(first + 2));
+    expect(screen.getByTestId("settings-page").dataset.initialTab).toBe("agents");
   });
 
   it("goes from a named section straight to Account when the shortcut is pressed with Settings open", async () => {
