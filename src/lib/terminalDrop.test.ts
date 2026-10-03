@@ -45,6 +45,17 @@ describe("dragged text", () => {
     expect(droppedText("one\r\n\ttwo\rthree\n\n", true)).toBe("one\n\ttwo\nthree");
   });
 
+  it("loses invisible and direction-changing characters", () => {
+    expect(droppedText("a\u202eb\u2066c\u2069d\u200be\u200ff\ufeffg\u2028h\u2029i\u202aj", true)).toBe("abcdefghij");
+  });
+
+  it("trims long runs of newlines in time that grows with the text, not its square", () => {
+    const run = "\n".repeat(200_000);
+    const started = performance.now();
+    expect(droppedText(`a${run}b${run}c${run}`, true)).toBe(`a${run}b${run}c`);
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
   it("never sends a newline when the program has no bracketed paste", () => {
     expect(droppedText("echo one\nrm -rf x\r\n\tlast\n", false)).toBe("echo one rm -rf x last");
     expect(droppedText("ls\x1b[201~\rwhoami", false)).not.toMatch(/[\r\n\x1b]/);

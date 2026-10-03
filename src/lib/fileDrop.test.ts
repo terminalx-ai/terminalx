@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { dragDropListener, unlisten } = vi.hoisted(() => ({ dragDropListener: vi.fn(), unlisten: vi.fn() }));
+const { dragDropListener, unlisten, droppedText } = vi.hoisted(() => ({ dragDropListener: vi.fn(), unlisten: vi.fn(), droppedText: vi.fn(async () => null) }));
+vi.mock("@/lib/api", () => ({ files: { droppedText } }));
 vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ onDragDropEvent: dragDropListener }) }));
 
 import { registerFileDropTarget, type FileDropTarget } from "./fileDrop";
@@ -94,6 +95,25 @@ describe("routing a file drop", () => {
     expect(composer.onDragChange).toHaveBeenLastCalledWith(true, "files");
     await emit({ type: "leave" });
     expect(composer.onDragChange).toHaveBeenLastCalledWith(false, "files");
+  });
+
+  it("throws away the text of a drop that nobody took, and only after the target had its turn", async () => {
+    const composer = target(true);
+    const order: string[] = [];
+    composer.onDrop.mockImplementation(async () => void order.push("target"));
+    droppedText.mockImplementation(async () => (order.push("discard"), null));
+    under = composer.el;
+    await emit({ type: "drop", paths: [] });
+    expect(order).toEqual(["target", "discard"]);
+
+    // A drop on nothing at all leaves nothing behind either; a file drop has no text to discard.
+    for (const off of cleanups.splice(0)) off();
+    target();
+    under = document.body;
+    await emit({ type: "drop", paths: [] });
+    expect(droppedText).toHaveBeenCalledTimes(2);
+    await emit({ type: "drop", paths: ["/a"] });
+    expect(droppedText).toHaveBeenCalledTimes(2);
   });
 
   it("says a drag with no paths is text, for as long as that drag lasts", async () => {

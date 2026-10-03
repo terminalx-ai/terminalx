@@ -196,6 +196,14 @@ describe("dropping on a terminal", () => {
     expect(write).toHaveBeenCalledExactlyOnceWith("p1", "\x1b[200~ls[201~\rwhoami\x1b[201~");
   });
 
+  it("refuses more than a megabyte of dragged text, and says so", async () => {
+    droppedText.mockResolvedValueOnce("x".repeat(1024 * 1024 + 1));
+    const { drag } = await mount();
+    await drag({ type: "drop", paths: [] });
+    expect(write).not.toHaveBeenCalled();
+    expect(screen.getByRole("status").textContent).toBe("That is too much text to drop on a terminal (over 1 MB).");
+  });
+
   it("types multi-line dragged text as one line when the program has no bracketed paste", async () => {
     droppedText.mockResolvedValueOnce("echo one\r\nrm -rf x\x1b\nlast\n");
     const { drag } = await mount();
@@ -212,7 +220,8 @@ describe("dropping on a terminal", () => {
     expect(screen.getByRole("status").textContent).toMatch(/can't be dropped on a cloud terminal/);
     await drag({ type: "drop", paths: [] });
     expect(screen.getByRole("status").textContent).toBe("Nothing can be dropped on this terminal.");
-    expect(droppedText).not.toHaveBeenCalled();
+    // Taken only to be thrown away: the text does not stay readable after a refused drop.
+    expect(droppedText).toHaveBeenCalledOnce();
     expect(write).not.toHaveBeenCalled();
   });
 
@@ -223,10 +232,11 @@ describe("dropping on a terminal", () => {
     expect(write).not.toHaveBeenCalled();
   });
 
-  it("does not read the dragged text for someone who cannot type there", async () => {
+  it("throws the dragged text away for someone who cannot type there", async () => {
     const { drag } = await mount({ dropRefusal: { files: "View only.", text: "View only." } });
     await drag({ type: "drop", paths: [] });
-    expect(droppedText).not.toHaveBeenCalled();
+    // Taken only to be thrown away: the text does not stay readable after a refused drop.
+    expect(droppedText).toHaveBeenCalledOnce();
     expect(write).not.toHaveBeenCalled();
     expect(screen.getByRole("status").textContent).toBe("View only.");
   });

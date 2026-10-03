@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type HTMLAttributes, type RefObje
 import { files as filesApi } from "@/lib/api";
 import { registerFileDropTarget } from "@/lib/fileDrop";
 import { peekInstance } from "@/lib/terminal";
-import { droppedPathsText, droppedText } from "@/lib/terminalDrop";
+import { MAX_DROPPED_TEXT, droppedPathsText, droppedText } from "@/lib/terminalDrop";
 
 /**
  * Why this terminal takes no dropped files, or no dropped text: said on the
@@ -76,6 +76,10 @@ export function useTerminalDrop({
       const data = await text();
       const term = peekInstance(id)?.term;
       if (!term) return;
+      if (kind === "text" && data.length > MAX_DROPPED_TEXT) {
+        setRefused("That is too much text to drop on a terminal (over 1 MB).");
+        return;
+      }
       // Dragged text is not ours: no control characters, and no Enter outside a bracketed paste.
       const typed = kind === "text" ? droppedText(data, term.modes.bracketedPasteMode) : data;
       if (!typed) return;

@@ -30,16 +30,24 @@ export function droppedPathsText(paths: readonly string[]): string {
   return paths.map((path) => `${shellQuotePath(path)} `).join("");
 }
 
+/** More dragged text than this is refused, not typed. */
+export const MAX_DROPPED_TEXT = 1024 * 1024;
+
 /**
  * Dragged text as it may be typed. It is somebody else's text, so it carries
  * no control characters: an escape could end a bracketed paste early and have
- * the rest read as keys. Lines stay lines only inside a bracketed paste;
- * without one a newline is an Enter, so the text goes in as a single line.
+ * the rest read as keys. It carries no invisible or direction-changing
+ * characters either, which would make what is typed differ from what is
+ * seen. Lines stay lines only inside a bracketed paste; without one a
+ * newline is an Enter, so the text goes in as a single line.
  */
 export function droppedText(text: string, bracketed: boolean): string {
   const clean = text
     .replace(/\r\n?/g, "\n")
-    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "")
-    .replace(/\n+$/, "");
-  return bracketed ? clean : clean.replace(/[\n\t]+/g, " ");
+    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g, "");
+  // Not a regex: /\n+$/ retries from every newline of a long run that is not at the end.
+  let end = clean.length;
+  while (end > 0 && clean.charCodeAt(end - 1) === 0x0a) end--;
+  const trimmed = clean.slice(0, end);
+  return bracketed ? trimmed : trimmed.replace(/[\n\t]+/g, " ");
 }

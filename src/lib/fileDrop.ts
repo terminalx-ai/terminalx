@@ -1,4 +1,5 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { files as filesApi } from "@/lib/api";
 
 /**
  * Files dragged in from outside reach the app through the Tauri window, not
@@ -69,10 +70,24 @@ async function route(payload: DragDropPayload) {
   const receivers = targetsAt(payload.position);
   if (payload.type === "drop") {
     for (const target of targets) target.onDragChange(false, kind);
-    await Promise.all(receivers.map((target) => target.onDrop(payload.paths ?? [])));
+    try {
+      await Promise.all(receivers.map((target) => target.onDrop(payload.paths ?? [])));
+    } finally {
+      // The backend kept the text of a drop with no files for whoever takes
+      // it. Whatever nobody took is thrown away now, not left to be read later.
+      if (!payload.paths?.length) discardDroppedText();
+    }
     return;
   }
   for (const target of targets) target.onDragChange(receivers.includes(target), kind);
+}
+
+function discardDroppedText() {
+  try {
+    void filesApi.droppedText().catch(() => {});
+  } catch {
+    /* outside a webview */
+  }
 }
 
 function subscribe() {

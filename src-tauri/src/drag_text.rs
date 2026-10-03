@@ -5,14 +5,24 @@
 //! app arrives as a drop with no paths. The system keeps what was dragged on
 //! the drag pasteboard, which is read here at the moment of such a drop and
 //! handed out once: the page cannot read what was dragged at any other time,
-//! nor read the same drop twice.
+//! nor read the same drop twice. The page's drop router takes it for a
+//! terminal or throws it away as soon as the drop is handled, and text that
+//! is not collected within a few seconds is gone anyway.
 
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
-static DROPPED: Mutex<Option<String>> = Mutex::new(None);
+/// How long a drop's text waits for the drop handler.
+const KEPT_FOR: Duration = Duration::from_secs(5);
+
+static DROPPED: Mutex<Option<(Instant, String)>> = Mutex::new(None);
 
 fn set(text: Option<String>) {
-    *DROPPED.lock().unwrap_or_else(|e| e.into_inner()) = text;
+    set_at(text, Instant::now());
+}
+
+fn set_at(text: Option<String>, at: Instant) {
+    *DROPPED.lock().unwrap_or_else(|e| e.into_inner()) = text.map(|text| (at, text));
 }
 
 /// Follow the window's drags: a new drag forgets the last one's text, and a
@@ -28,7 +38,8 @@ pub fn on_drag_drop(event: &tauri::DragDropEvent) {
 /// The plain text of the drop that just happened, once.
 #[tauri::command]
 pub fn dropped_text() -> Option<String> {
-    DROPPED.lock().unwrap_or_else(|e| e.into_inner()).take()
+    let (at, text) = DROPPED.lock().unwrap_or_else(|e| e.into_inner()).take()?;
+    (at.elapsed() < KEPT_FOR).then_some(text)
 }
 
 #[cfg(target_os = "macos")]
@@ -61,5 +72,11 @@ mod tests {
         set(Some("stale".into()));
         on_drag_drop(&tauri::DragDropEvent::Leave);
         assert_eq!(dropped_text(), None);
+
+        // Nobody came for it in time: it is not kept for whoever asks later.
+        if let Some(long_ago) = Instant::now().checked_sub(KEPT_FOR) {
+            set_at(Some("uncollected".into()), long_ago);
+            assert_eq!(dropped_text(), None);
+        }
     }
 }
