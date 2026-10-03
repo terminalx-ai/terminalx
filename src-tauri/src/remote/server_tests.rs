@@ -632,6 +632,11 @@ async fn participants_read_git_and_disposition_facts_but_never_publish() {
     assert_eq!(facts["repositories"][0]["untrackedFiles"], 1);
     assert_eq!(facts["runningProcesses"], 0);
     assert_eq!(facts["activeTasks"], json!([]));
+    // PRO-33: anyone who may look may read how much disk and memory is left.
+    let resources = call(&f.rpc, &participant, "lifecycle.resources", json!({})).await.unwrap();
+    assert_eq!(resources["v"], 1);
+    #[cfg(unix)]
+    assert!(resources["storage"]["availableBytes"].as_u64().unwrap() <= resources["storage"]["totalBytes"].as_u64().unwrap());
 }
 
 // ---- sharing, presence, notes and leases (PRO-30, saas contract §21) ---------
@@ -654,6 +659,7 @@ impl crate::cloud_agents::AgentOps for OneTab {
             pending_permissions: Vec::new(),
             follow_ups: Vec::new(),
             lease: None,
+            sign_in: None,
             last_seq: 0,
             created: String::new(),
             modified: String::new(),

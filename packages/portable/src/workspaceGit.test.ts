@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RpcWireRequest } from "./rpc";
 import { WorkspaceRpcClient, WorkspaceRpcError, type WorkspaceConnectionState, type WorkspaceTransport } from "./workspace";
-import { RemoteGit, dispositionFacts, gitErrorMessage, hasUnpublishedWork, listRepositories } from "./workspaceGit";
+import { RemoteGit, dispositionFacts, gitErrorMessage, hasUnpublishedWork, listRepositories, runtimeResources } from "./workspaceGit";
 
 const connected: WorkspaceConnectionState = {
   state: "connected",
@@ -134,6 +134,20 @@ describe("workspace git", () => {
       },
     });
     expect(await dispositionFacts(old.client)).toBeNull();
+  });
+
+  it("reads the machine's free memory and disk, or null from a runtime that does not report them", async () => {
+    const resources = { v: 1, memory: { totalBytes: 4096, availableBytes: 1024 }, storage: { totalBytes: 100, availableBytes: 5, totalInodes: 10, availableInodes: 9 }, observedAt: 1 };
+    const { client, runtime } = connect({ "lifecycle.resources": () => resources });
+    expect(await runtimeResources(client)).toEqual(resources);
+    // A read: no clientRequestId, nothing to replay.
+    expect(runtime.sent.at(-1)).toMatchObject({ method: "lifecycle.resources" });
+    const old = connect({
+      "lifecycle.resources": () => {
+        throw refusal("method_not_found");
+      },
+    });
+    expect(await runtimeResources(old.client)).toBeNull();
   });
 
   it("explains refusals by code", () => {

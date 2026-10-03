@@ -105,7 +105,7 @@ describe("createWorkspace", () => {
     expect(api.cloudWorkspacePreflight).toHaveBeenCalledWith([
       { cloneUrl: "https://github.com/acme/app.git", ref: "main" },
       { cloneUrl: "https://github.com/acme/lib.git", ref: null },
-    ], null);
+    ], null, "claude");
     expect(api.cloudWorkspaceCreate).toHaveBeenCalledWith({
       name: "Fix login",
       quoteId: "quote-1",
@@ -135,6 +135,42 @@ describe("createWorkspace", () => {
     expect((refused as CreateRefused).code).toBe("cloud_workspace_repository_ref_not_found");
     expect(calls).toEqual([]);
     expect(createErrorMessage("cloud_workspace_repository_ref_not_found", "https://github.com/acme/app.git")).toContain("acme/app");
+  });
+
+  it("refuses a first prompt for an agent the organization has not connected, before quoting (PRO-78)", async () => {
+    const notConnected = { kind: "agent-credential", cloneUrl: null, agent: "claude", status: "failed" as const, errorCode: "cloud_workspace_agent_credential_required", retryable: false };
+    const { api, calls } = fakeApi({ cloudWorkspacePreflight: vi.fn(async () => ({ ready: false, checks: [notConnected] })) });
+    const refused = (await createWorkspace(api, form()).catch((e: unknown) => e)) as CreateRefused;
+    expect(refused).toBeInstanceOf(CreateRefused);
+    expect(refused.code).toBe("cloud_workspace_agent_credential_required");
+    expect(calls).toEqual([]);
+    const message = createErrorMessage(refused.code, refused.detail);
+    expect(message).toContain("Claude Code isn't connected for this organization");
+    expect(message).toContain("Compute setup");
+    expect(message).toContain("without a prompt");
+
+    // With no repositories the prompt alone asks the question.
+    await expect(createWorkspace(api, form({ repositories: [] }))).rejects.toMatchObject({ code: "cloud_workspace_agent_credential_required" });
+    expect(api.cloudWorkspacePreflight).toHaveBeenLastCalledWith([], null, "claude");
+  });
+
+  it("creates without a first prompt whatever the agent's login, and asks nothing about it", async () => {
+    const { api, calls } = fakeApi();
+    await createWorkspace(api, form({ prompt: "  " }));
+    expect(api.cloudWorkspacePreflight).toHaveBeenCalledWith(expect.any(Array), null, null);
+    expect(calls).toEqual(["preflight", "setup", "quote", "create"]);
+    // No repositories and no prompt: nothing to check at all.
+    const blank = fakeApi();
+    await createWorkspace(blank.api, form({ prompt: "", repositories: [] }));
+    expect(blank.api.cloudWorkspacePreflight).not.toHaveBeenCalled();
+  });
+
+  it("ignores an agent check that does not name the agent: an older API sends one on every desktop create", async () => {
+    const legacy = { kind: "agent-credential", cloneUrl: null, status: "failed" as const, errorCode: "cloud_workspace_agent_credential_required", retryable: false };
+    const other = { ...legacy, agent: "codex" };
+    const { api, calls } = fakeApi({ cloudWorkspacePreflight: vi.fn(async () => ({ ready: false, checks: [legacy, other] })) });
+    await createWorkspace(api, form());
+    expect(calls).toEqual(["setup", "quote", "create"]);
   });
 
   it("never quotes an invalid form", async () => {

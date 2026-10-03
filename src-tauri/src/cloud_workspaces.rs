@@ -17,9 +17,10 @@ const CONTRACT: &str = "providers-v1";
 /// Archive, tombstones and cleanup reports (terminalx-saas contract §10.6).
 /// Without it an archived workspace reads as suspended.
 const LIFECYCLE: &str = "archive-v1";
-/// The local Docker provider (terminalx-saas `cloud:e2e:local --serve`) is
-/// offered only by debug builds.
-const SUPPORTED_PROVIDERS: &str = if cfg!(debug_assertions) { "machine0,box,local-docker" } else { "machine0,box" };
+/// The providers this client can show and drive; the server leaves every
+/// other one out of its answers. The local Docker provider (terminalx-saas
+/// `cloud:e2e:local --serve`) is offered only by debug builds.
+const SUPPORTED_PROVIDERS: &str = if cfg!(debug_assertions) { "machine0,box,hetzner,local-docker" } else { "machine0,box,hetzner" };
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const RESPONSE_LIMIT_BYTES: u64 = 512 * 1024;
 /// The catalog feed carries every member Organization's list in one answer.
@@ -33,6 +34,7 @@ const DIAGNOSTICS_RESPONSE_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
 pub enum CloudWorkspaceProviderId {
     Machine0,
     Box,
+    Hetzner,
     #[serde(rename = "local-docker")]
     LocalDocker,
 }
@@ -42,6 +44,7 @@ impl CloudWorkspaceProviderId {
         match self {
             Self::Machine0 => "machine0",
             Self::Box => "box",
+            Self::Hetzner => "hetzner",
             Self::LocalDocker => "local-docker",
         }
     }
@@ -818,6 +821,10 @@ pub struct DispositionRuntime {
 pub struct DispositionCapabilities {
     pub permanent_delete: bool,
     pub release_disposition: String,
+    /// Whether a resume after a stop brings the same processes back (a warm
+    /// reconnect) or is a cold boot. Absent from an older server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserves_processes_on_resume: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -921,10 +928,10 @@ fn valid_clone_url(value: &str) -> bool {
 }
 
 fn setup_body(repositories: &[CreateRepository]) -> Value {
-    json!({
-        "version": 1,
-        "credentialIds": [],
-        "repositories": repositories
+    let mut body = json!({ "version": 1, "credentialIds": [] });
+    // A setup may name no repository at all, but never an empty list.
+    if !repositories.is_empty() {
+        body["repositories"] = repositories
             .iter()
             .map(|repository| {
                 let mut entry = json!({ "sourceProvider": "github", "cloneUrl": repository.clone_url });
@@ -933,8 +940,9 @@ fn setup_body(repositories: &[CreateRepository]) -> Value {
                 }
                 entry
             })
-            .collect::<Vec<_>>(),
-    })
+            .collect();
+    }
+    body
 }
 
 fn launch_body(launch: &CreateLaunch) -> Value {
@@ -966,6 +974,10 @@ pub struct PreflightCheck {
     pub kind: String,
     #[serde(default)]
     pub clone_url: Option<String>,
+    /// On an `agent-credential` check from an API that answers per agent
+    /// (PRO-78): the agent it is about.
+    #[serde(default)]
+    pub agent: Option<String>,
     pub status: String,
     #[serde(default, deserialize_with = "safe_optional_error_code")]
     pub error_code: Option<String>,
@@ -1631,19 +1643,26 @@ impl CloudWorkspaceService {
         Ok(CloudCatalogFeed { changed: true, cursor: Some(body.cursor), reset: body.reset, organizations, deleted_workspace_ids })
     }
 
-    /// Check the repositories and refs before quoting (contract §16).
-    pub fn preflight(&self, org: Option<&str>, repositories: Vec<CreateRepository>) -> Result<CloudWorkspacePreflight, CloudWorkspaceClientError> {
-        if repositories.is_empty() {
+    /// Check the repositories and refs before quoting (contract §16), and
+    /// with `agent` (the one a first prompt would go to, PRO-78) whether the
+    /// organization has a login for it.
+    pub fn preflight(&self, org: Option<&str>, repositories: Vec<CreateRepository>, agent: Option<String>) -> Result<CloudWorkspacePreflight, CloudWorkspaceClientError> {
+        if repositories.is_empty() && agent.is_none() {
             return Ok(CloudWorkspacePreflight { ready: true, checks: Vec::new() });
         }
         validate_create("preflight", &repositories, None)?;
+        if agent.as_deref().is_some_and(|agent| !crate::cloud_agents::launch::valid_agent(agent)) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_launch_invalid", false));
+        }
         // A POST, but it changes nothing: a failed call is simply retryable,
         // never an unknown outcome.
         self.run_in(org, RequestRisk::Mutation, |client, context| {
             client.request(
                 context,
                 &["cloud-workspaces", "preflight"],
-                None,
+                // A query parameter: an older API ignores it, where it would
+                // reject an unknown body field.
+                agent.as_deref().map(|agent| ("agent", agent)),
                 Some(json!({ "setup": setup_body(&repositories) })),
                 None,
                 RequestRisk::Mutation,
@@ -2760,6 +2779,20 @@ mod tests {
     }
 
     #[test]
+    fn hetzner_is_a_provider_this_client_names_and_reads() {
+        assert!(SUPPORTED_PROVIDERS.split(',').any(|provider| provider == "hetzner"));
+        let provider: CloudWorkspaceProviderId = serde_json::from_str(r#""hetzner""#).unwrap();
+        assert_eq!(provider, CloudWorkspaceProviderId::Hetzner);
+        assert_eq!(provider.as_str(), "hetzner");
+        assert_eq!(serde_json::to_string(&provider).unwrap(), r#""hetzner""#);
+        // Every provider the client declares is one it can also read back.
+        for name in SUPPORTED_PROVIDERS.split(',') {
+            let parsed: CloudWorkspaceProviderId = serde_json::from_value(json!(name)).unwrap();
+            assert_eq!(parsed.as_str(), name);
+        }
+    }
+
+    #[test]
     fn sends_provider_contract_and_encodes_native_organization() {
         let body = r#"{"providers":[]}"#;
         let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
@@ -2781,7 +2814,7 @@ mod tests {
         let lower = request.to_ascii_lowercase();
         assert!(lower.contains("authorization: bearer native-secret-token"));
         assert!(lower.contains("x-terminalx-cloud-workspace-contract: providers-v1"));
-        assert!(lower.contains("x-terminalx-cloud-workspace-providers: machine0,box"));
+        assert!(lower.contains("x-terminalx-cloud-workspace-providers: machine0,box,hetzner"));
     }
 
     #[test]
@@ -3479,10 +3512,11 @@ mod tests {
         let body = r#"{"version":1,"ready":false,"checks":[{"kind":"repository","cloneUrl":"https://github.com/acme/app.git","status":"failed","errorCode":"cloud_workspace_repository_ref_not_found","retryable":false}]}"#;
         let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let result = service.preflight(None, vec![repo("app", Some("nope"))]).unwrap();
+        let result = service.preflight(None, vec![repo("app", Some("nope"))], None).unwrap();
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/preflight "));
         assert!(captured.text.contains(r#""ref":"nope""#));
+        assert!(captured.text.contains(r#""credentialIds":[]"#));
         assert!(!result.ready);
         assert_eq!(result.checks[0].error_code.as_deref(), Some("cloud_workspace_repository_ref_not_found"));
 
@@ -3497,10 +3531,30 @@ mod tests {
     }
 
     #[test]
+    fn preflight_asks_about_the_agent_of_a_first_prompt() {
+        // No repositories: the prompt's agent alone is worth the call, and the
+        // setup names no repository rather than an empty list.
+        let body = r#"{"version":1,"ready":false,"checks":[{"kind":"agent-credential","agent":"claude","provider":"claude","status":"failed","errorCode":"cloud_workspace_agent_credential_required","retryable":false}]}"#;
+        let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let result = service.preflight(None, Vec::new(), Some("claude".into())).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/preflight?agent=claude "), "{}", captured.text.lines().next().unwrap_or_default());
+        assert!(captured.text.contains(r#"{"setup":{"credentialIds":[],"version":1}}"#));
+        assert_eq!(result.checks[0].agent.as_deref(), Some("claude"));
+        assert_eq!(result.checks[0].error_code.as_deref(), Some("cloud_workspace_agent_credential_required"));
+
+        // Nothing to check sends nothing; a malformed agent is refused here.
+        let (_, service) = test_service("http://127.0.0.1:9");
+        assert!(service.preflight(None, Vec::new(), None).unwrap().ready);
+        assert_eq!(service.preflight(None, Vec::new(), Some("Not Valid".into())).unwrap_err().code, "cloud_workspace_launch_invalid");
+    }
+
+    #[test]
     fn a_failed_preflight_call_is_retryable_not_an_unknown_outcome() {
         let (base, _, request) = serve_once(response("503 Service Unavailable", "oops", ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let error = service.preflight(None, vec![repo("app", None)]).unwrap_err();
+        let error = service.preflight(None, vec![repo("app", None)], None).unwrap_err();
         request.join().unwrap();
         assert_eq!((error.code.as_str(), error.retryable), ("cloud_workspace_unavailable", true));
     }
@@ -3775,6 +3829,15 @@ mod tests {
         assert_eq!(disposition.runtime.active_turns, 1);
         assert_eq!(disposition.blockers, ["active-turns", "pending-approvals"]);
         assert!(disposition.runtime_facts.available);
+        // An older server does not say what a resume brings back.
+        assert_eq!(disposition.provider_capabilities.preserves_processes_on_resume, None);
+
+        let mut cold = facts.clone();
+        cold["providerCapabilities"]["preservesProcessesOnResume"] = json!(false);
+        let (base, _, request) = serve_once(response("200 OK", &cold.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.disposition(None, "workspace-1").unwrap().provider_capabilities.preserves_processes_on_resume, Some(false));
+        request.join().unwrap();
 
         let (base, _, request) = serve_once(response("200 OK", &facts.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);

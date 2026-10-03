@@ -142,6 +142,13 @@ export interface AgentTabInfo {
   followUps: { clientCommandId: string; text: string; actorId?: string | null }[];
   /** Who holds the tab's input lease, on a runtime with `collab/1`. */
   lease?: { tabId: string; holderId: string; acquiredAt: number; expiresAt: number } | null;
+  /**
+   * Set when the tab's agent has no way to sign in (PRO-78): `state` is
+   * `not-connected` when the organization has no login for `provider`, else
+   * the server's state for the one it has (`revoked`, `disconnected`,
+   * `unavailable`, with a `reason` such as `token-expired`).
+   */
+  signIn?: { provider: string; state: string; reason?: string | null } | null;
   lastSeq: number;
   created: string;
   modified: string;

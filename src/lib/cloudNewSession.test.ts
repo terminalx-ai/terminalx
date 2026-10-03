@@ -263,8 +263,10 @@ describe("blank projects", () => {
     expect(pending).toMatchObject({ blank: true, fullName: "scratch", workspaces: [] });
     expect(flow.planCloudStart(pending)).toEqual({ kind: "create" });
     const prepared = await flow.prepareCloudCreate(pending, request);
-    // No repository to check.
-    expect(mocks.api.cloudWorkspacePreflight).not.toHaveBeenCalled();
+    // No repository to check: only that the prompt's agent has a login (PRO-78).
+    expect(mocks.api.cloudWorkspacePreflight).toHaveBeenCalledTimes(1);
+    const [checked, , agent] = mocks.api.cloudWorkspacePreflight.mock.calls[0]!;
+    expect([checked, agent]).toEqual([[], "claude"]);
     const created = item("scratch-ws", { name: "scratch", repositories: [], state: "ready" });
     mocks.api.cloudWorkspaceCreate.mockResolvedValue({ workspace: created.workspace, operation: { id: "op", state: "succeeded", type: "create", stage: "ready" } });
     await flow.confirmCloudCreate(prepared);
@@ -318,7 +320,7 @@ describe("every organization live (CS-18)", () => {
     expect(mocks.api.cloudProviders).not.toHaveBeenCalled();
     expect(mocks.api.cloudWorkspaceSetup).toHaveBeenCalledTimes(1);
     expect(mocks.api.cloudWorkspaceSetup).toHaveBeenCalledWith("box", ORG_B);
-    expect(mocks.api.cloudWorkspacePreflight).toHaveBeenCalledWith(expect.any(Array), ORG_B);
+    expect(mocks.api.cloudWorkspacePreflight).toHaveBeenCalledWith(expect.any(Array), ORG_B, "claude");
     expect(mocks.api.cloudWorkspaceQuote).toHaveBeenCalledWith(expect.objectContaining({ provider: "box" }), ORG_B);
     expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
 
@@ -349,6 +351,20 @@ describe("every organization live (CS-18)", () => {
     expect(mocks.api.cloudWorkspaceSetup.mock.calls.map(([provider]) => provider)).toEqual(["machine0", "box"]);
     expect(prepared.form.provider).toBe("box");
     expect(prepared.providerLabel).toBe("Box");
+  });
+
+  it("creates on Hetzner in an organization that offers only Hetzner (PRO-10)", async () => {
+    mocks.status = {
+      ...mocks.status,
+      organizations: mocks.status.organizations!.map((org) =>
+        org.id === ORG_B ? { ...org, cloud: { enabled: true, flags: { "cloud.workspaces.provider.machine0.v1": false, "cloud.workspaces.provider.box.v1": false, "cloud.workspaces.provider.hetzner.v1": true } } } : org,
+      ),
+    };
+    const prepared = await flow.prepareCloudCreate(target, request);
+    expect(mocks.api.cloudWorkspaceSetup.mock.calls.map(([provider]) => provider)).toEqual(["hetzner"]);
+    expect(mocks.api.cloudWorkspaceQuote).toHaveBeenCalledWith(expect.objectContaining({ provider: "hetzner" }), ORG_B);
+    expect(prepared.form.provider).toBe("hetzner");
+    expect(prepared.providerLabel).toBe("Hetzner");
   });
 
   it.each(["organization_admin_required", "cloud_workspace_network_unavailable", "cloud_workspace_rate_limited"])("shows the real setup error (%s) instead of trying the next provider", async (code) => {

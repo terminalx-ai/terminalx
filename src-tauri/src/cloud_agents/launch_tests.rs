@@ -94,11 +94,16 @@ struct FakeStarter {
     panic: bool,
     /// The tab is created, then typing the prompt fails.
     send_fails: bool,
+    signed_out: bool,
 }
 
 impl Starter for FakeStarter {
     fn available(&self, _agent: &str) -> bool {
         !self.unavailable
+    }
+
+    fn sign_in_required(&self, _agent: &str) -> bool {
+        self.signed_out
     }
 
     fn start(&self, cwd: &Path, claim: &Claim, title: &str) -> Result<(String, String), StartError> {
@@ -268,6 +273,24 @@ fn failures_are_reported_with_their_category() {
     std::fs::create_dir_all(dir.path().join("a")).unwrap();
     assert_eq!(launcher.pass().unwrap(), Pass::Settled("failed".into()));
     assert_eq!(api.completions.lock().unwrap()[0].category.as_deref(), Some("agent-unavailable"));
+
+    // No login for the agent: the prompt is not sent to a sign-in screen.
+    let api = FakeApi::new(Some(claim(vec![repository(dir.path(), "signed-out")])));
+    let starter = Arc::new(FakeStarter { signed_out: true, ..FakeStarter::default() });
+    let launcher = make(&dir.path().join("s"), api.clone(), starter.clone(), "incarnation-ssssssssssss");
+    std::fs::create_dir_all(dir.path().join("s")).unwrap();
+    assert_eq!(launcher.pass().unwrap(), Pass::Settled("failed".into()));
+    assert_eq!(api.completions.lock().unwrap()[0].category.as_deref(), Some("agent-sign-in-required"));
+    assert!(starter.starts.lock().unwrap().is_empty());
+    // Without a prompt there is nothing to lose: the tab is still made.
+    let mut quiet = claim(vec![repository(dir.path(), "no-prompt")]);
+    quiet.prompt = None;
+    let api = FakeApi::new(Some(quiet));
+    let starter = Arc::new(FakeStarter { signed_out: true, ..FakeStarter::default() });
+    let launcher = make(&dir.path().join("q"), api.clone(), starter.clone(), "incarnation-qqqqqqqqqqqq");
+    std::fs::create_dir_all(dir.path().join("q")).unwrap();
+    assert_eq!(launcher.pass().unwrap(), Pass::Settled("started".into()));
+    assert_eq!(starter.starts.lock().unwrap().len(), 1);
 
     // A base ref the remote does not have.
     let mut missing = repository(dir.path(), "other");
