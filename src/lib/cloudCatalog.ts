@@ -535,11 +535,28 @@ const accountKey = (status: AccountStatus): string | null => (status.state === "
  * organization, exactly as before.
  */
 export function usesCatalogFeed(status: AccountStatus = getAccount().status): boolean {
-  return isMultiOrg(status) && status.catalogFeed === true && feedRefusedFor !== accountKey(status);
+  return isMultiOrg(status) && status.catalogFeed === true && feedRefusedFor !== accountKey(status) && Date.now() >= feedPausedUntil;
 }
 
 /** Answers that mean "this server has no feed", as opposed to a failure the next poll may not see. */
-const FEED_UNSUPPORTED = new Set(["cloud_catalog_feed_unavailable", "not_found", "cloud_workspace_request_invalid"]);
+const FEED_UNSUPPORTED = new Set(["cloud_catalog_feed_unavailable", "cloud_workspace_request_invalid"]);
+
+/** A server that advertises the feed and has no such route answers 404 (the native side reports the status beside its own code). */
+function feedUnsupported(error: unknown): boolean {
+  if (FEED_UNSUPPORTED.has(errorText(error))) return true;
+  return !!error && typeof error === "object" && (error as { status?: unknown }).status === 404;
+}
+
+/**
+ * The feed failing again and again (a 5xx, a timeout, a catalog over the
+ * size cap) must not leave every organization on stale rows while its own
+ * list would answer: after this many failures in a row the organizations are
+ * listed one by one, and the feed is tried again after the pause.
+ */
+export const FEED_FAILURES_BEFORE_FALLBACK = 3;
+export const FEED_RETRY_AFTER_MS = 10 * 60 * 1000;
+let feedFailures = 0;
+let feedPausedUntil = 0;
 
 /** An organization's selected repositories, every few minutes: the feed carries the workspace lists only. */
 async function refreshRepositories(orgId: string, owner: string | null, now: () => number): Promise<void> {
@@ -595,9 +612,19 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
       // Signed out or another user while it ran: nothing lands.
       if (state.owner !== owner) return;
       const code = errorText(error);
-      if (FEED_UNSUPPORTED.has(code)) {
+      if (feedUnsupported(error)) {
         refused = true;
         feedRefusedFor = account;
+        return;
+      }
+      feedFailures++;
+      if (feedFailures >= FEED_FAILURES_BEFORE_FALLBACK) {
+        // Each organization's own list from here; the feed is tried again later, from the start.
+        refused = true;
+        feedFailures = 0;
+        feedPausedUntil = now() + FEED_RETRY_AFTER_MS;
+        feedCursor = null;
+        feedErrors.clear();
         return;
       }
       // An error never replaces what is shown: the rows stay, with the reason.
@@ -606,6 +633,7 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
     }
     await repositories;
     if (state.owner !== owner) return;
+    feedFailures = 0;
     // As of the answer: an organization the user left meanwhile gets nothing.
     const live = liveCloudOrgIds(getAccount().status);
     if (!feed.changed) {
@@ -622,16 +650,29 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
     }
     const answered = new Map(feed.organizations.map((organization) => [organization.orgId, organization]));
     if (feed.reset) feedErrors.clear();
+    // An organization listed on its own after this feed was asked for holds newer rows: the feed's are not taken for it.
+    let passedOver = false;
+    const take = async (orgId: string, list: CloudWorkspaceList) => {
+      if ((listedAt.get(orgId) ?? -Infinity) > requestedAt) passedOver = true;
+      await ingestCloudList(list, orgId, now(), requestedAt);
+    };
     for (const orgId of live) {
       const entry = answered.get(orgId);
       if (!entry) {
-        // A delta says nothing of an organization with no change. A whole
-        // catalog without it means the server no longer lists it for this
-        // person: the organizations held here are older than the server's.
+        // A whole catalog without it means the server no longer lists it for
+        // this person: the organizations held here are older than the server's.
         if (feed.reset) {
           feedErrors.set(orgId, "cloud_workspace_not_found");
           patchOrg(orgId, { error: "cloud_workspace_not_found" });
           void refreshAccountRoles(true);
+          continue;
+        }
+        // A delta with no entry for it changed none of its rows, but may still name some of them deleted.
+        const rows = state.orgs[orgId]?.workspaces ?? [];
+        const gone = new Set(feed.deletedWorkspaceIds ?? []);
+        if (rows.some((item) => gone.has(item.workspace.id))) {
+          await take(orgId, mergeFeedDelta(rows, { workspaces: [], tombstones: [], quota: state.orgs[orgId]?.quota ?? undefined }, feed.deletedWorkspaceIds ?? []));
+          if (state.owner !== owner) return;
         }
         continue;
       }
@@ -649,13 +690,16 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
       const list: CloudWorkspaceList = feed.reset
         ? { workspaces: entry.workspaces, tombstones: entry.tombstones ?? [], quota: entry.quota ?? undefined }
         : mergeFeedDelta(state.orgs[orgId]?.workspaces ?? [], { ...entry, tombstones: entry.tombstones ?? [] }, feed.deletedWorkspaceIds ?? []);
-      await ingestCloudList(list, orgId, now(), requestedAt);
+      await take(orgId, list);
       if (state.owner !== owner) return;
       noteListedOrgRole(orgId, listedOrgManages(list), requestedAt);
     }
-    feedCursor = feed.cursor;
+    // The cursor says "this desktop holds that catalog". Where part of it was
+    // not taken it does not, so the next request reads the whole catalog again.
+    feedCursor = passedOver ? null : feed.cursor;
   })().finally(() => {
-    feedFlight = null;
+    // Only its own flight: after an account switch a newer one may be running.
+    if (feedFlight === flight) feedFlight = null;
     if (state.owner !== owner) return;
     // No feed after all: each organization is listed on its own from now on.
     if (refused) for (const orgId of liveCloudOrgIds(getAccount().status)) void refreshCloudCatalog(orgId);
@@ -956,6 +1000,8 @@ function resetFeed() {
   feedFlight = null;
   feedErrors.clear();
   feedRefusedFor = null;
+  feedFailures = 0;
+  feedPausedUntil = 0;
 }
 
 let booted = false;
