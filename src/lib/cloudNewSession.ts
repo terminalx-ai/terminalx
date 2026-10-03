@@ -85,8 +85,15 @@ function worktreeRefused(error: unknown): boolean {
 export async function startInWorkspace(
   plan: Extract<CloudStartPlan, { kind: "reuse" | "wake" }>,
   request: CloudSessionRequest,
-  /** `select: false` leaves the window where it is (the CLI starts sessions without moving the reader). */
-  options: { select?: boolean } = {},
+  /**
+   * `select: false` leaves the window where it is (the CLI starts sessions
+   * without moving the reader). `wakeIfStopped` decides what happens when the
+   * list said running and the runtime turns out to be stopped: the app's form
+   * wakes it (starting a session there is the person's own action); a caller
+   * that was not told to wake passes false, or a question to ask first, and
+   * gets `cloud_workspace_stopped` instead.
+   */
+  options: { select?: boolean; wakeIfStopped?: boolean | (() => Promise<boolean>) } = {},
 ): Promise<string> {
   bootCloudSessions();
   const { orgId, id: workspaceId } = plan.node.item.workspace;
@@ -100,6 +107,8 @@ export async function startInWorkspace(
     } catch (error) {
       // The list said running, the runtime says stopped: starting a session is an action, so wake it (once).
       if (!(error instanceof Error) || error.message !== "cloud_workspace_stopped") throw error;
+      const wake = options.wakeIfStopped ?? true;
+      if (!(typeof wake === "function" ? await wake() : wake)) throw error;
       lease.release();
       lease = await wakeCloudConnection(target);
       client = await waitCloudConnected(lease, WAKE_WITHIN_MS);

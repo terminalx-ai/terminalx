@@ -62,6 +62,12 @@ export interface Prefs {
    * Kept per machine. An action not listed uses its defaults.
    */
   shortcuts: Record<string, string[]>;
+  /**
+   * Whether the `terminalx` command line may act on cloud workspaces
+   * (PRO-40). Every agent in a local tab can run that command line, so this
+   * is off until the person turns it on.
+   */
+  cloudControlFromAgents: boolean;
 }
 
 const DEFAULTS: Prefs = {
@@ -93,6 +99,7 @@ const DEFAULTS: Prefs = {
   cloudPinned: {},
   cloudCollapsed: {},
   shortcuts: {},
+  cloudControlFromAgents: false,
 };
 
 const KEY = "raccoon.prefs";

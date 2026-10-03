@@ -24,7 +24,10 @@ pub const REQUEST_EVENT: &str = "cloud_control_request";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(50);
 /// A new session may wait for a workspace to resume (the window gives it five minutes).
 const CREATE_TIMEOUT: Duration = Duration::from_secs(320);
-const MAX_WAIT_SECONDS: u64 = 86_400;
+/// One `wait` call is short (the window allows 30 s); the CLI asks again
+/// until its own timeout, so a caller that goes away leaves nothing long
+/// running in the window.
+pub(crate) const WAIT_CHUNK_SECONDS: u64 = 30;
 
 /// Requests the window has not answered (`None`) or whose answer nobody has read yet.
 #[derive(Default)]
@@ -69,7 +72,7 @@ pub(crate) fn timeout_for(action: &str, params: &Value) -> Duration {
     match action {
         "sessions.create" => CREATE_TIMEOUT,
         "wait" => {
-            let seconds = params.get("timeoutSeconds").and_then(Value::as_u64).unwrap_or(600).min(MAX_WAIT_SECONDS);
+            let seconds = params.get("timeoutSeconds").and_then(Value::as_u64).unwrap_or(WAIT_CHUNK_SECONDS).min(WAIT_CHUNK_SECONDS);
             Duration::from_secs(seconds.saturating_add(20))
         }
         _ => DEFAULT_TIMEOUT,
@@ -169,7 +172,8 @@ mod tests {
     fn the_socket_waits_as_long_as_the_command_may_take() {
         assert_eq!(timeout_for("read", &json!({})), DEFAULT_TIMEOUT);
         assert_eq!(timeout_for("sessions.create", &json!({})), CREATE_TIMEOUT);
-        assert_eq!(timeout_for("wait", &json!({ "timeoutSeconds": 30 })), Duration::from_secs(50));
-        assert_eq!(timeout_for("wait", &json!({ "timeoutSeconds": u64::MAX })), Duration::from_secs(MAX_WAIT_SECONDS + 20));
+        assert_eq!(timeout_for("wait", &json!({ "timeoutSeconds": 10 })), Duration::from_secs(30));
+        // However long the caller asks for, one call is one short wait.
+        assert_eq!(timeout_for("wait", &json!({ "timeoutSeconds": u64::MAX })), Duration::from_secs(WAIT_CHUNK_SECONDS + 20));
     }
 }

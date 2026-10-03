@@ -52,7 +52,7 @@ Usage:
   terminalx sessions create --project CLOUD_PROJECT --prompt TEXT [--agent AGENT]
       [--model MODEL] [--effort EFFORT] [--mode MODE] [--on-main]
       [--wake] [--confirm-spend] [--idempotency-key KEY] [--json]
-  terminalx send CLOUD_SESSION TEXT [--tab TAB] [--json]
+  terminalx send CLOUD_SESSION TEXT [--tab TAB] [--idempotency-key KEY] [--json]
   terminalx read CLOUD_SESSION [--tab TAB] [--since SEQ] [--tail COUNT] [--json]
   terminalx wait CLOUD_SESSION [--tab TAB] [--timeout SECONDS] [--json]
   terminalx cloud status [--json]
@@ -178,7 +178,7 @@ fn run(args: &[String]) -> i32 {
             command,
             params,
             timeout,
-        } => match control::call(&command, params.clone(), timeout) {
+        } => match if command == "cloud.wait" { cloud_wait(&params, timeout, &mut |command, params, timeout| control::call(command, params, timeout)) } else { control::call(&command, params.clone(), timeout) } {
             Ok(response) => {
                 let ok = response.ok;
                 let readable = (!parsed.json && ok)
@@ -204,6 +204,29 @@ fn run(args: &[String]) -> i32 {
                 1
             }
         },
+    }
+}
+
+/// `wait` on a cloud session: the app waits at most
+/// [`crate::cloud_control::WAIT_CHUNK_SECONDS`] per call, so the wait is asked
+/// for again until the tab settles or the caller's timeout passes. When this
+/// process is interrupted, at most one short wait is left behind in the app.
+fn cloud_wait(
+    params: &Value,
+    timeout: Duration,
+    call: &mut dyn FnMut(&str, Value, Duration) -> Result<ControlResponse, ControlError>,
+) -> Result<ControlResponse, ControlError> {
+    let mut left = params.get("timeoutSeconds").and_then(Value::as_u64).unwrap_or(600);
+    loop {
+        let chunk = left.min(crate::cloud_control::WAIT_CHUNK_SECONDS);
+        let mut asked = params.clone();
+        asked["timeoutSeconds"] = json!(chunk);
+        let response = call("cloud.wait", asked, timeout)?;
+        left -= chunk;
+        let timed_out = response.ok && response.result.as_ref().and_then(|result| result.get("reason")).and_then(Value::as_str) == Some("timeout");
+        if !timed_out || left == 0 {
+            return Ok(response);
+        }
     }
 }
 
@@ -289,12 +312,14 @@ fn parse_with_stdin(
         }
         "send" => {
             let tab = tokens.option("--tab")?;
+            let idempotency_key = tokens.option("--idempotency-key")?;
             let target = tokens.required_front("session or tab")?;
             let text = tokens.required_front("text")?;
             if is_cloud_key(&target) {
-                cloud_rpc("send", json!({"target": target, "text": text, "tab": tab}), &mut tokens)
+                cloud_rpc("send", json!({"target": target, "text": text, "tab": tab, "idempotencyKey": idempotency_key}), &mut tokens)
             } else {
                 local_only(&tab, "--tab")?;
+                local_only(&idempotency_key, "--idempotency-key")?;
                 rpc("send", json!({"target": target, "text": text}), &mut tokens)
             }
         }
@@ -323,11 +348,11 @@ fn parse_with_stdin(
             let target = tokens.required_front("session or tab")?;
             tokens.finish()?;
             if is_cloud_key(&target) {
+                // Asked in short calls until the timeout (see `cloud_wait`), so nothing outlives this process in the app.
                 Ok(Action::Rpc {
                     command: "cloud.wait".into(),
                     params: json!({"target": target, "timeoutSeconds": seconds, "tab": tab}),
-                    // Longer than the app waits for its window, so the app's own answer is the one printed.
-                    timeout: Duration::from_secs(seconds.saturating_add(40)),
+                    timeout: CLOUD_TIMEOUT,
                 })
             } else {
                 local_only(&tab, "--tab")?;
@@ -688,12 +713,13 @@ mod tests {
         assert_eq!(command, "cloud.sessions.list");
 
         let (command, params, _) = rpc_of(&["send", "cloud:org-a:ws-1:s1", "run the tests", "--tab", "t2"]);
-        assert_eq!((command.as_str(), params), ("cloud.send", json!({"target": "cloud:org-a:ws-1:s1", "text": "run the tests", "tab": "t2"})));
+        assert_eq!((command.as_str(), params), ("cloud.send", json!({"target": "cloud:org-a:ws-1:s1", "text": "run the tests", "tab": "t2", "idempotencyKey": null})));
+        assert_eq!(rpc_of(&["send", "cloud:org-a:ws-1:s1", "again", "--idempotency-key", "k-7"]).1["idempotencyKey"], json!("k-7"));
         let (command, params, _) = rpc_of(&["read", "cloud:org-a:ws-1:s1", "--tail", "5"]);
         assert_eq!((command.as_str(), params), ("cloud.read", json!({"target": "cloud:org-a:ws-1:s1", "since": null, "tail": 5, "tab": null})));
         let (command, params, timeout) = rpc_of(&["wait", "cloud:org-a:ws-1:s1", "--timeout", "30"]);
         assert_eq!((command.as_str(), params), ("cloud.wait", json!({"target": "cloud:org-a:ws-1:s1", "timeoutSeconds": 30, "tab": null})));
-        // The CLI outlasts the app's own wait for its window (the timeout plus 20 s).
+        // The CLI outlasts the app's own wait for its window (one chunk plus 20 s).
         assert!(timeout > crate::cloud_control::timeout_for("wait", &json!({"timeoutSeconds": 30})));
 
         let (command, params, _) = rpc_of(&["cloud", "stop", "cloud:org-a:ws-1", "--yes"]);
@@ -704,6 +730,41 @@ mod tests {
         assert_eq!((command.as_str(), params), ("cloud.resume", json!({"workspace": "cloud:org-a:ws-1"})));
         assert_eq!(rpc_of(&["cloud", "status"]).0, "cloud.status");
         assert!(parse(&args(&["cloud", "delete", "cloud:org-a:ws-1"])).is_err());
+    }
+
+    #[test]
+    fn a_cloud_wait_is_asked_in_short_calls_until_the_tab_settles_or_the_timeout_passes() {
+        let params = json!({"target": "cloud:org-a:ws-1:s1", "timeoutSeconds": 70, "tab": null});
+        let answer = |reason: &str| ControlResponse::success("1", json!({"reason": reason, "status": "in_progress"}));
+
+        // Still working for the whole 70 s: 30 + 30 + 10, then the timeout is reported.
+        let mut asked = Vec::new();
+        let response = cloud_wait(&params, CLOUD_TIMEOUT, &mut |command, params, _| {
+            assert_eq!(command, "cloud.wait");
+            asked.push(params["timeoutSeconds"].as_u64().unwrap());
+            Ok(answer("timeout"))
+        })
+        .unwrap();
+        assert_eq!(asked, vec![30, 30, 10]);
+        assert_eq!(response.result.unwrap()["reason"], "timeout");
+
+        // It settles during the second call: nothing more is asked.
+        let mut calls = 0;
+        let response = cloud_wait(&params, CLOUD_TIMEOUT, &mut |_, _, _| {
+            calls += 1;
+            Ok(answer(if calls == 2 { "permission" } else { "timeout" }))
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(response.result.unwrap()["reason"], "permission");
+
+        // A refusal ends it at once.
+        let mut calls = 0;
+        let refused = cloud_wait(&params, CLOUD_TIMEOUT, &mut |_, _, _| {
+            calls += 1;
+            Err(ControlError::new("forbidden", "no", None::<String>))
+        });
+        assert_eq!((calls, refused.unwrap_err().code.as_str()), (1, "forbidden"));
     }
 
     #[test]

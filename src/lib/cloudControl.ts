@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { api, type CloudWorkspaceListItem } from "@/lib/api";
 import { getAccount } from "@/lib/account";
 import { getTabLog } from "@/lib/agentEvents";
@@ -18,13 +19,13 @@ import {
 import { LIFECYCLE_ADMIN_REASON, NEW_SESSION_ADMIN_REASON, NOT_SHARED_REASON, effectiveYou, getCollab, listedYou, tabGate, workspaceAuthority } from "@/lib/cloudCollab";
 import { cloudConnectionInfo, connectedCloudClient, retainCloudConnection, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
 import { getCloudDashboard, type CloudDashboardSession } from "@/lib/cloudDashboard";
-import { archiving, deletion, isArchived } from "@/lib/cloudLifecycle";
+import { archiving, deletion, isArchived, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 import { confirmCloudCreate, planCloudStart, prepareCloudCreate, startInWorkspace, type CloudSessionRequest } from "@/lib/cloudNewSession";
 import { personName } from "@/lib/cloudPeople";
 import { deriveCloudActivity } from "@/lib/cloudRowState";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { getPrefs } from "@/lib/prefs";
-import { cloudSessionBackend } from "@/lib/sessionBackend";
+import { cloudAsleep, cloudSessionBackend } from "@/lib/sessionBackend";
 import { cloudWorkspaceKey, isCloudKey, parseCloudWorkspaceKey, type CloudProject } from "@/types/target";
 import type { WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable/workspace";
 
@@ -51,6 +52,57 @@ import type { WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable
  */
 
 export const CLOUD_CONTROL_VERSION = 1;
+
+/**
+ * Who is on the other end of the socket. The control socket is opened with
+ * the app's launch token, and every agent tab the app starts is given that
+ * token, so a `cloud.*` command may come from an agent and not from the
+ * person. Across every organization they belong to it could list workspaces,
+ * read transcripts kept here, send (which resumes and bills a stopped
+ * workspace), stop, resume, and create a machine. The flags the CLI asks for
+ * (`--yes`, `--wake`, `--confirm-spend`) are passed by that same caller, so
+ * they are no check on it.
+ *
+ * Two answers to that are built, and this one constant chooses which ships
+ * (the owner's decision, PRO-40):
+ *
+ * - `"setting"`: every cloud command is refused until the person turns on
+ *   "Let agents in local sessions control cloud workspaces" in Settings
+ *   (off by default). Once on, the commands run as asked.
+ * - `"confirm"`: the commands are available, and each one that would start
+ *   billed compute or stop a workspace first asks the person in the window.
+ */
+export type CloudControlPolicy = "setting" | "confirm";
+export const CLOUD_CONTROL_POLICY: CloudControlPolicy = "setting";
+let policy: CloudControlPolicy = CLOUD_CONTROL_POLICY;
+/** For tests: run under the other option. */
+export function setCloudControlPolicy(next: CloudControlPolicy = CLOUD_CONTROL_POLICY) {
+  policy = next;
+}
+
+export const CLOUD_CONTROL_SETTING = "Let agents in local sessions control cloud workspaces";
+
+/** Under the setting: nothing of the cloud is reachable from the command line until the person allows it. */
+function allowed(): boolean {
+  return policy !== "setting" || getPrefs().cloudControlFromAgents === true;
+}
+
+function assertAllowed() {
+  if (!allowed()) {
+    throw new CloudControlError("cloud_control_disabled", "Cloud workspaces cannot be used from the command line until that is turned on in TerminalX.", `In TerminalX, open Settings and turn on "${CLOUD_CONTROL_SETTING}".`);
+  }
+}
+
+/**
+ * Under "confirm": ask the person, in the window, before something that
+ * starts billed compute or stops a workspace. The question says it came from
+ * the command line. Under "setting" the person already allowed it.
+ */
+async function confirmInWindow(what: string, okLabel: string): Promise<void> {
+  if (policy !== "confirm") return;
+  const yes = await ask(`A terminalx command (run by you or by an agent in a local session) asks to ${what}`, { title: "Cloud workspace request", kind: "warning", okLabel, cancelLabel: "Refuse" }).catch(() => false);
+  if (!yes) throw new CloudControlError("declined", "The request was refused in the TerminalX window.");
+}
 export const CLOUD_CONTROL_CAPABILITIES = ["projects.list", "sessions.list", "sessions.create", "send", "read", "wait", "stop", "resume"] as const;
 
 /** A refusal the CLI prints as `code: message`, with what to do about it. */
@@ -127,10 +179,15 @@ function workspaceView(item: CloudWorkspaceListItem) {
 }
 
 function status() {
+  // Off: say so, and nothing about the account or its organizations.
+  if (!allowed()) return { version: CLOUD_CONTROL_VERSION, policy, enabled: false, capabilities: [] as string[], organizations: [] as never[], enable: `In TerminalX, open Settings and turn on "${CLOUD_CONTROL_SETTING}".` };
   const account = signedIn();
   const live = new Set(liveCloudOrgIds(account));
   return {
     version: CLOUD_CONTROL_VERSION,
+    // Which of the two answers this app ships, and whether cloud commands run at all.
+    policy,
+    enabled: true,
     capabilities: [...CLOUD_CONTROL_CAPABILITIES],
     organizations: cloudOrganizations(account).map((org) => ({ id: org.id, name: org.name, role: org.role, live: live.has(org.id), mayStartSessions: mayStartCloudSessions(account, org.id) === true })),
   };
@@ -253,7 +310,25 @@ function assertReadable(you: WorkspaceYou | null) {
   if (you?.role === "none" && you.listed !== false) throw forbidden(NOT_SHARED_REASON);
 }
 
-async function send(params: Params) {
+/** `send --idempotency-key`: the answer a key already got, for this run of the app. A retry gets it instead of sending again. */
+const sent = new Map<string, Promise<unknown>>();
+const SENT_KEYS = 500;
+
+function send(params: Params): Promise<unknown> {
+  const key = text(params, "idempotencyKey");
+  if (!key) return sendOnce(params);
+  const scoped = `${text(params, "target") ?? ""}\0${key}`;
+  const earlier = sent.get(scoped);
+  if (earlier) return earlier;
+  const attempt = sendOnce(params);
+  sent.set(scoped, attempt);
+  if (sent.size > SENT_KEYS) sent.delete(sent.keys().next().value!);
+  // A send that was refused may be asked for again with the same key.
+  attempt.catch(() => sent.get(scoped) === attempt && sent.delete(scoped));
+  return attempt;
+}
+
+async function sendOnce(params: Params) {
   const target = resolveSession(required(params, "target"));
   const message = required(params, "text");
   const tab = await resolveTab(target, text(params, "tab"));
@@ -286,6 +361,8 @@ async function send(params: Params) {
   const lease = client && collab.available && you ? (collab.leases[tab.tabId] ?? null) : null;
   const gate = tabGate(you, lease, Date.now(), tab.info.status === "in_progress" || tab.info.status === "waiting", personName);
   if (gate.blocked) throw forbidden(gate.blocked);
+  // The message resumes a stopped workspace, which starts billing its compute.
+  if (cloudAsleep(state, target.item.workspace.state)) await confirmInWindow(`send a message to the stopped cloud workspace ${target.item.workspace.name}. Sending resumes it, which starts billing its compute.`, "Resume and send");
   const before = new Set(getCloudAgents(scope).outbox.map((entry) => entry.clientCommandId));
   await backend.send(tab.tabId, message, []);
   const entry = getCloudAgents(scope).outbox.find((candidate) => !before.has(candidate.clientCommandId) && candidate.tabId === tab.tabId);
@@ -316,7 +393,16 @@ async function read(params: Params) {
   return { session: target.key, tabId: tab.tabId, status: current.info.status, source: current.source, events };
 }
 
-const WAIT_POLL_MS = 2_000;
+/** While connected the runtime's own events say when the tab settles; this only re-reads them. */
+const WAIT_LIVE_MS = 1_000;
+/** Not connected (a stopped workspace): the saved checkpoint is asked for, at a gentle pace. */
+const WAIT_CHECKPOINT_MS = 5_000;
+/**
+ * One call waits at most this long. The CLI asks again until its own timeout,
+ * so a caller that goes away (Ctrl-C, a killed agent) leaves at most one
+ * short wait, and its connection lease, behind in the window.
+ */
+export const WAIT_CHUNK_SECONDS = 30;
 
 function settledReason(tab: CloudAgentTab, pending: boolean): "permission" | "stop" | "stopped" | null {
   if (tab.info.status === "waiting" || tab.info.pendingPermissions.length > 0) return "permission";
@@ -336,21 +422,23 @@ async function wait(params: Params, sleep: (ms: number) => Promise<void> = (ms) 
   assertReadable(youIn(target, first ? first.connection : { state: "idle" }));
   const tab = await resolveTab(target, text(params, "tab"));
   const scope = { organizationId: target.orgId, workspaceId: target.workspaceId };
-  const seconds = typeof params.timeoutSeconds === "number" ? Math.min(Math.max(params.timeoutSeconds, 0), 86_400) : 600;
+  const seconds = typeof params.timeoutSeconds === "number" ? Math.min(Math.max(params.timeoutSeconds, 0), WAIT_CHUNK_SECONDS) : WAIT_CHUNK_SECONDS;
   const deadline = now() + seconds * 1000;
   // A running workspace is followed live; `connect` attaches and never resumes.
   let lease: CloudLease | null = null;
   if (target.item.workspace.state === "ready") lease = await retainCloudConnection({ orgId: target.orgId, workspaceId: target.workspaceId }, "connect").catch(() => null);
   try {
     for (;;) {
-      await refreshFromCheckpoint(scope, tab.tabId).catch(() => undefined);
+      const live = !!connectedCloudClient(target.workspaceKey);
+      // Connected, the runtime feeds the tab; only otherwise is the checkpoint read.
+      if (!live) await refreshFromCheckpoint(scope, tab.tabId).catch(() => undefined);
       const snapshot = getCloudAgents(scope);
       const current = snapshot.tabs.find((candidate) => candidate.tabId === tab.tabId) ?? tab;
       const pending = snapshot.outbox.some((entry) => entry.tabId === tab.tabId && OUTBOX_PENDING.has(entry.state));
       const reason = settledReason(current, pending);
       if (reason) return { session: target.key, tabId: tab.tabId, reason, status: current.info.status };
       if (now() >= deadline) return { session: target.key, tabId: tab.tabId, reason: "timeout", status: current.info.status };
-      await sleep(Math.min(WAIT_POLL_MS, Math.max(0, deadline - now())));
+      await sleep(Math.min(live ? WAIT_LIVE_MS : WAIT_CHECKPOINT_MS, Math.max(0, deadline - now())));
     }
   } finally {
     lease?.release();
@@ -390,9 +478,29 @@ async function sessionsCreate(params: Params) {
     if (plan.kind === "wake" && workspace.state === "suspended" && params.wake !== true) {
       throw new CloudControlError("cloud_workspace_stopped", `The project's workspace ${workspace.name} is stopped. A new session there resumes it, which starts billing its compute.`, "Pass --wake to resume it for this session, or resume it first with terminalx cloud resume.");
     }
-    // The CLI does not move the window's selection.
-    const key = await startInWorkspace(plan, request, { select: false });
-    return { created: "session", session: key, workspace: plan.node.key, resumed: plan.kind === "wake" && workspace.state === "suspended" };
+    const resumes = plan.kind === "wake" && workspace.state === "suspended";
+    if (resumes) await confirmInWindow(`start a session in the stopped cloud workspace ${workspace.name}. That resumes it, which starts billing its compute.`, "Resume and start");
+    let woke = resumes;
+    let key: string;
+    try {
+      // The CLI does not move the window's selection. The list can say running while the runtime has
+      // stopped by itself: that too is only woken when the caller said --wake (and, under "confirm", the person agrees).
+      key = await startInWorkspace(plan, request, {
+        select: false,
+        wakeIfStopped: async () => {
+          if (params.wake !== true) return false;
+          await confirmInWindow(`start a session in the cloud workspace ${workspace.name}, which has stopped. That resumes it, which starts billing its compute.`, "Resume and start");
+          woke = true;
+          return true;
+        },
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === "cloud_workspace_stopped") {
+        throw new CloudControlError("cloud_workspace_stopped", `The project's workspace ${workspace.name} has stopped. A new session there resumes it, which starts billing its compute.`, "Pass --wake to resume it for this session, or resume it first with terminalx cloud resume.");
+      }
+      throw error;
+    }
+    return { created: "session", session: key, workspace: plan.node.key, resumed: woke };
   }
   // No usable workspace: a new machine, which is always an explicit, priced step.
   const prepared = await prepareCloudCreate(project, request);
@@ -404,6 +512,7 @@ async function sessionsCreate(params: Params) {
       "Pass --confirm-spend to create it.",
     );
   }
+  await confirmInWindow(`create a new cloud workspace for ${project.fullName} on ${prepared.providerLabel}. Its compute is billed while it runs.`, "Create workspace");
   const idempotencyKey = text(params, "idempotencyKey");
   if (idempotencyKey) {
     prepared.pending.idempotencyKey = idempotencyKey;
@@ -434,6 +543,7 @@ async function stop(params: Params) {
   if (target.item.workspace.state !== "ready") throw new CloudControlError("cloud_workspace_not_running", `This workspace is ${deriveCloudActivity(target.item).label.toLowerCase()}; only a running one can be stopped.`);
   // The app asks before stopping: running agent turns end with the machine.
   if (params.confirmed !== true) throw new CloudControlError("confirmation_required", `Stopping ${target.item.workspace.name} ends any agent turn running in it. Everything is kept, and it can be resumed.`, "Pass --yes to stop it.");
+  await confirmInWindow(`stop the cloud workspace ${target.item.workspace.name}. Any agent turn running in it ends.`, "Stop workspace");
   const requestedAt = Date.now();
   const snapshot = await api.cloudWorkspaceSuspend(target.workspaceId, cloudOrgArg(target.orgId));
   if (snapshot?.workspace) applyCloudSnapshot(snapshot, requestedAt);
@@ -446,6 +556,7 @@ async function resume(params: Params) {
   assertLifecycle(target.item);
   if (target.item.workspace.state === "ready") return { workspace: target.key, state: "ready", changed: false };
   if (target.item.workspace.state !== "suspended") throw new CloudControlError("cloud_workspace_not_stopped", `This workspace is ${deriveCloudActivity(target.item).label.toLowerCase()}; only a stopped one can be resumed.`);
+  await confirmInWindow(`resume the cloud workspace ${target.item.workspace.name}, which starts billing its compute.`, "Resume workspace");
   // The one explicit wake: the same call as the menu's Resume.
   await resumeCloudWorkspace(target.item);
   void refreshCloudCatalog(target.orgId);
@@ -455,9 +566,9 @@ async function resume(params: Params) {
 
 /** Run one `cloud.*` control command. Throws `CloudControlError` for a refusal. */
 export async function handleCloudControl(action: string, params: Params = {}): Promise<unknown> {
+  if (action === "status") return status();
+  assertAllowed();
   switch (action) {
-    case "status":
-      return status();
     case "projects.list":
       return projectsList(params);
     case "sessions.list":
@@ -496,8 +607,9 @@ export async function answerCloudControl(action: string, params: Params): Promis
     if (error instanceof CloudControlError) return { ok: false, error: { code: error.code, message: error.message, recovery: error.recovery } };
     // The API's and the runtime's own refusals keep their codes (a role, a limit, a network failure).
     const code = error && typeof error === "object" && "code" in error && typeof (error as { code: unknown }).code === "string" ? (error as { code: string }).code : "cloud_error";
-    const message = error instanceof Error && error.message ? error.message : code;
-    return { ok: false, error: { code, message, recovery: null } };
+    // In words where the app has them (the running limit, a lost role, an unreachable service); the code stays for scripts.
+    const said = error instanceof Error && error.message && error.message !== code ? error.message : null;
+    return { ok: false, error: { code, message: said ?? (code === "cloud_error" ? "The cloud command failed." : lifecycleErrorMessage(code)), recovery: null } };
   }
 }
 
