@@ -81,13 +81,13 @@ vi.mock("@/components/chat/Composer", () => ({
 import { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { SessionView } from "./SessionView";
 import { CloudSessionHost } from "./CloudSessionHost";
-import { cloudConnectionChip, useCloudSession, workspaceStarting } from "@/lib/cloudSession";
+import { IN_PROGRESS_LABELS, cloudConnectionChip, useCloudSession, workspaceStarting } from "@/lib/cloudSession";
 import { resetCloudAgents } from "@/lib/cloudAgents";
 import { TERMINAL_POLL_MS, cloudTerminalsOf, resetCloudTerminals, sessionTerminals } from "@/lib/cloudTerminals";
 import { closeCloudConnection, resetCloudConnections } from "@/lib/cloudConnections";
 import { resetCollab } from "@/lib/cloudCollab";
 import { resetPeople } from "@/lib/cloudPeople";
-import { selectSessionTab } from "@/lib/terminal";
+import { clearSessionTabsUnder, selectSessionTab } from "@/lib/terminal";
 import { resetCloudWakes } from "@/lib/sessionBackend";
 import { getSessionStore, selectCloudSession, upsertSession } from "@/lib/sessions";
 import { api } from "@/lib/api";
@@ -161,6 +161,8 @@ class FakeRuntime implements WorkspaceTransport {
   up = false;
   sent: RpcWireRequest[] = [];
   tabs: AgentTabInfo[] = [tabInfo()];
+  /** What `session.list` answers. */
+  sessions: RuntimeSession[] = [runtimeSession()];
   events: AgentEvent[] = [];
   repositories = [
     { repo: "api", branch: "tx/login-fix", head: "abc", remote: "origin", defaultBranch: "main" },
@@ -245,7 +247,7 @@ class FakeRuntime implements WorkspaceTransport {
       case "session.tabs":
         return ok({ tabs: this.tabs });
       case "session.list":
-        return ok({ sessions: [runtimeSession()] });
+        return ok({ sessions: this.sessions });
       case "session.subscribe":
         this.sessionSubscription = `sub-${++this.subscription}`;
         return ok({ subscriptionId: this.sessionSubscription, events: this.events.map((event) => ({ cursor: `${this.generation}:${event.seq}`, event })), cursor: `${this.generation}:${this.events.at(-1)?.seq ?? 0}` });
@@ -456,6 +458,51 @@ describe("cloud session actions", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // O7 of the live check: Bob had the session open on its first tab without having picked a tab.
+  // Alice added a tab; the runtime made it the session's active tab, and Bob's view moved to it.
+  for (const order of ["the tab list first", "the session list first"] as const) {
+    it(`stays on the tab it shows when someone else adds a tab (${order})`, async () => {
+      // This person opened the session from its row: no tab was picked here.
+      clearSessionTabsUnder(KEY);
+      runtime.sessions = [{ ...runtimeSession(), activeTab: "t-1" }];
+      await openConnected("participate");
+      const panel = (tabId: string) => `session-agent-panel-${tabId}`;
+      const shown = () => [...document.querySelectorAll('[role="tabpanel"]:not([aria-hidden="true"])')].map((node) => node.id);
+      await waitFor(() => expect(runtime.methods("session.list").length).toBeGreaterThan(0));
+      await act(async () => {});
+      expect(shown()).toEqual([panel("t-1")]);
+
+      // Someone else adds an agent tab. The runtime makes it the session's active tab and tells everyone.
+      const listed = runtimeSession();
+      const session: RuntimeSession = { ...listed, activeTab: "t-2", tabs: [...listed.tabs, { ...listed.tabs[0], id: "t-2" }] };
+      runtime.tabs = [tabInfo(), tabInfo({ tabId: "t-2", title: null, process: "not-started" })];
+      runtime.sessions = [session];
+      const updates = [() => runtime.notify("session.tabs", { tabs: runtime.tabs }), () => runtime.notify("session.sessions", { sessions: [session] })];
+      if (order === "the session list first") updates.reverse();
+      for (const update of updates) await act(async () => update());
+      // The new tab is there, and this view is still on the one it showed.
+      await waitFor(() => expect(document.getElementById(panel("t-2"))).not.toBeNull());
+      expect(shown()).toEqual([panel("t-1")]);
+
+      // Picking the new tab here still opens it, and then it is the one kept.
+      act(() => selectSessionTab(KEY, { kind: "agent", id: "t-2" }));
+      expect(shown()).toEqual([panel("t-2")]);
+      await act(async () => runtime.notify("session.sessions", { sessions: [{ ...session, activeTab: "t-1" }] }));
+      expect(shown()).toEqual([panel("t-2")]);
+    });
+  }
+
+  it("opens on the session's active tab when no tab was picked here", async () => {
+    clearSessionTabsUnder(KEY);
+    const listed = runtimeSession();
+    runtime.sessions = [{ ...listed, activeTab: "t-2", tabs: [...listed.tabs, { ...listed.tabs[0], id: "t-2" }] }];
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    runtime.tabs = [tabInfo(), tabInfo({ tabId: "t-2", title: "Second" })];
+    await act(async () => runtime.connect("participate"));
+    await waitFor(() => expect([...document.querySelectorAll('[role="tabpanel"]:not([aria-hidden="true"])')].map((node) => node.id)).toEqual(["session-agent-panel-t-2"]));
   });
 
   it("keeps the chat inside the window: the tab's body is a flex column the transcript scrolls in", async () => {
@@ -691,7 +738,7 @@ describe("the session header's location and connection chips", () => {
     runtime.tabs = [tabInfo()];
     await act(async () => runtime.connect("manage"));
     seen.push(screen.getByTestId("session-connection").textContent ?? "");
-    expect(seen).toEqual(["Resuming", "Connecting…", "Connecting…", "Connecting…", "Live"]);
+    expect(seen).toEqual(["Resuming…", "Connecting…", "Connecting…", "Connecting…", "Live"]);
   });
 
   it("says Connecting…, not Starting, while it attaches to a workspace that is already running", async () => {
@@ -717,19 +764,37 @@ describe("the session header's location and connection chips", () => {
     render(wrap(<CloudHarness />));
     await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
     await act(async () => runtime.emit({ state: "waitingForRuntime" }));
-    expect(screen.getByTestId("session-connection").textContent).toBe("Starting");
+    expect(screen.getByTestId("session-connection").textContent).toBe("Starting…");
     expect(cloudConnectionChip({ state: "waitingForRuntime" }, "ready").label).toBe("Connecting…");
     expect(cloudConnectionChip({ state: "waitingForRuntime" }, null).label).toBe("Connecting…");
     // Stopped by the list and nothing resumes it: the transport is still finding out. Nothing is starting.
     expect(cloudConnectionChip({ state: "waitingForRuntime" }, "suspended").label).toBe("Stopped");
-    expect(cloudConnectionChip({ state: "waitingForRuntime" }, "suspended", { starting: true }).label).toBe("Starting");
-    expect(cloudConnectionChip({ state: "waitingForRuntime" }, "ready", { starting: true }).label).toBe("Starting");
+    expect(cloudConnectionChip({ state: "waitingForRuntime" }, "suspended", { starting: true }).label).toBe("Starting…");
+    expect(cloudConnectionChip({ state: "waitingForRuntime" }, "ready", { starting: true }).label).toBe("Starting…");
     const resuming = { ...workspaceItem("suspended"), latestOperation: { state: "running", action: "resume" } } as CloudWorkspaceListItem;
     const stopping = { ...workspaceItem("ready"), latestOperation: { state: "running", action: "suspend" } } as CloudWorkspaceListItem;
     expect(workspaceStarting(resuming)).toBe(true);
     expect(workspaceStarting(stopping)).toBe(false);
     expect(workspaceStarting(workspaceItem("ready"))).toBe(false);
     expect(workspaceStarting(null)).toBe(false);
+  });
+
+  it("ends every in-progress label in an ellipsis, and no settled one (Resuming… like Stopping…, Connecting… and Reconnecting…)", () => {
+    const states = ["idle", "opening", "connecting", "reconnecting", "waitingForRuntime", "connected", "suspended", "stopped", "updateRequired"];
+    const flags = [false, true];
+    const seen = new Map<string, string>();
+    for (const state of states) {
+      for (const workspaceState of [null, "provisioning", "ready", "suspended", "archived", "attention-required"]) {
+        for (const woke of flags) for (const starting of flags) for (const stopping of flags) for (const reattaching of flags) for (const wakeFloor of [0, 1]) {
+          const chip = cloudConnectionChip({ state } as WorkspaceConnectionState, workspaceState, { woke, starting, stopping, reattaching, wakeFloor });
+          seen.set(chip.label, chip.tone);
+        }
+      }
+    }
+    const pending = [...seen].filter(([, tone]) => tone === "pending").map(([label]) => label).sort();
+    expect(pending).toEqual([...IN_PROGRESS_LABELS].sort());
+    expect(pending).toEqual(["Connecting…", "Reconnecting…", "Resuming…", "Starting…", "Stopping…"]);
+    for (const [label, tone] of seen) expect([label, label.endsWith("…")]).toEqual([label, tone === "pending"]);
   });
 
   it("says Stopping… while a stop runs, whoever asked, then Stopped: never Starting or Live", async () => {
