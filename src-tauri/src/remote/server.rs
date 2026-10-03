@@ -294,7 +294,7 @@ pub struct WorkspaceRpc {
     #[cfg(test)]
     offered_for_tests: Mutex<Option<Vec<crate::harness::HarnessInfo>>>,
     #[cfg(test)]
-    commands_for_tests: Mutex<Option<Vec<SlashCommand>>>,
+    commands_for_tests: Mutex<Option<Option<Vec<SlashCommand>>>>,
     /// Terminal input this runtime counted as use of the workspace (the
     /// process-wide activity flag is shared by every test).
     #[cfg(test)]
@@ -2363,7 +2363,7 @@ impl WorkspaceRpc {
         let may_send = self.authority(peer) == Authority::Manage || access.can_drive();
         let restricted = !access.can_configure();
         let commands: Vec<SlashCommand> = if may_send {
-            let listed = self.listed_commands(&tab.harness, Path::new(&session.cwd));
+            let listed = self.listed_commands(&tab.harness, Path::new(&session.cwd))?;
             listed.into_iter().filter(|command| !restricted || slash::allows(&tab.harness, &command.name)).collect()
         } else {
             Vec::new()
@@ -2390,23 +2390,25 @@ impl WorkspaceRpc {
 
     /// What the CLI of `harness` lists in `cwd`, as `list_slash_commands`
     /// does for a local tab: only Claude Code is asked. A CLI that is not
-    /// installed or does not answer lists nothing.
-    fn listed_commands(&self, harness: &str, cwd: &Path) -> Vec<SlashCommand> {
+    /// installed or did not answer (a just-woken machine can be slow) is an
+    /// error, `unavailable`, never an empty list: the composer would keep
+    /// "no commands" as the answer, and it asks again instead.
+    fn listed_commands(&self, harness: &str, cwd: &Path) -> Result<Vec<SlashCommand>, RpcError> {
         #[cfg(test)]
         if let Some(commands) = self.commands_for_tests.lock().unwrap().clone() {
-            return commands;
+            return commands.ok_or_else(|| RpcError::new("unavailable", "the agent's command list could not be read"));
         }
         if harness != "claude" {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        crate::harness::claude::commands::list(cwd).unwrap_or_else(|error| {
+        crate::harness::claude::commands::list(cwd).map_err(|error| {
             log::warn!("list slash commands: {error:#}");
-            Vec::new()
+            RpcError::new("unavailable", "the agent's command list could not be read").with_data(json!({ "reason": "commands-unavailable" }))
         })
     }
 
     #[cfg(test)]
-    pub(super) fn set_commands_for_tests(&self, commands: Vec<SlashCommand>) {
+    pub(super) fn set_commands_for_tests(&self, commands: Option<Vec<SlashCommand>>) {
         *self.commands_for_tests.lock().unwrap() = Some(commands);
     }
 

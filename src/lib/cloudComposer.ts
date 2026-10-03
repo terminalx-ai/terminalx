@@ -28,7 +28,10 @@ export interface ComposerCommands {
 export const COMMANDS_RESTRICTED_NOTE = "Other commands need someone who can approve permissions.";
 
 const NONE: ComposerCommandList = { commands: [], note: null };
+/** What each runtime last listed, by session, agent and the right the runtime said the list was made for. */
 const lists = new Map<string, ComposerCommandList>();
+/** Listings on their way, so several composers and a reader typing `/` ask once. */
+const asking = new Map<string, Promise<ComposerCommandList>>();
 
 function parse(result: { commands?: unknown; restricted?: unknown }): ComposerCommandList {
   const commands: SlashCommand[] = [];
@@ -49,9 +52,12 @@ function parse(result: { commands?: unknown; restricted?: unknown }): ComposerCo
  * The slash commands of a cloud agent tab, as the runtime lists them for
  * this person: everything the tab's CLI offers in the session's directory,
  * or, for a driver who may not approve permissions, only what the runtime
- * will accept from them. Asked once per session, agent and right while the
- * runtime is connected; never wakes a stopped workspace, which keeps what
- * was last listed. Null on a runtime from before `composer/1`.
+ * will accept from them. A list with commands in it is kept per session,
+ * agent and the right the runtime made it for, and not asked for again. An
+ * empty list or a failed listing is not kept: the CLI may not have answered
+ * yet on a machine that just woke, so `load` asks again. Never wakes a
+ * stopped workspace, which keeps what was last listed. Null on a runtime
+ * from before `composer/1`.
  */
 export function cloudComposerCommands(target: {
   /** `cloud:<orgId>:<workspaceId>`. */
@@ -67,17 +73,30 @@ export function cloudComposerCommands(target: {
   const { client } = target;
   const live = !!client && client.connection.state === "connected";
   if (live && !client.hasCapability("composer/1")) return null;
-  // The right is part of the name: a list read as an approver is not shown to the same person once they are not.
-  const stored = `${target.workspaceKey}|${target.sessionId}|${target.harness}|${mayConfigure(target.you) ? "all" : "restricted"}`;
+  const base = `${target.workspaceKey}|${target.sessionId}|${target.harness}`;
+  const slot = (restricted: boolean) => `${base}|${restricted ? "restricted" : "all"}`;
+  // Looked up by what this person is believed to be allowed, kept under what the runtime said
+  // the list was made for: a list made for an approver is never shown to someone who is not one,
+  // even if the two disagree for a moment.
+  const expected = slot(!mayConfigure(target.you));
   return {
-    key: `${stored}|${live ? "live" : "offline"}`,
-    known: () => lists.get(stored) ?? null,
-    load: async () => {
-      const known = lists.get(stored);
-      if (known || !live) return known ?? NONE;
-      const list = parse(await client.call<{ commands?: unknown; restricted?: unknown }>("session.commands", { sessionId: target.sessionId, tabId: target.tabId }));
-      lists.set(stored, list);
-      return list;
+    key: `${expected}|${live ? "live" : "offline"}`,
+    known: () => lists.get(expected) ?? null,
+    load: () => {
+      const known = lists.get(expected);
+      if (known || !live) return Promise.resolve(known ?? NONE);
+      const pending = asking.get(expected);
+      if (pending) return pending;
+      const asked = client
+        .call<{ commands?: unknown; restricted?: unknown }>("session.commands", { sessionId: target.sessionId, tabId: target.tabId })
+        .then((result) => {
+          const list = parse(result);
+          if (list.commands.length) lists.set(slot(result.restricted === true), list);
+          return list;
+        })
+        .finally(() => asking.delete(expected));
+      asking.set(expected, asked);
+      return asked;
     },
   };
 }
@@ -122,4 +141,5 @@ export function cloudComposerFiles(target: { workspaceKey: string; sessionId: st
 /** Tests only. */
 export function resetCloudComposer() {
   lists.clear();
+  asking.clear();
 }
