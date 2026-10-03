@@ -8,32 +8,38 @@ what they point to. It is updated by each change that moves a number.
 ## The path being measured
 
 ```
-program ──▶ PTY ──▶ pty-read thread ──▶ pty-emit thread ──▶ Tauri event `pty_data`
-                    (16 KB reads)       (8 ms / 32 KB        (base64 in JSON, to
-                                         batches)             every listener)
-                                                                   │
-        screen ◀── WebGL or DOM renderer ◀── xterm.js ◀── decode ◀─┘
+program ──▶ PTY ──▶ pty-read thread ──▶ pty-emit thread ──▶ the pane's channel
+                    (16 KB reads)       (batches of up to    (raw bytes, to the
+                         ▲               8 ms / 32 KB; the    one xterm showing
+                         │               first output after   this pane)
+                 held while the view     a quiet spell goes        │
+                 is 1 MB behind          at once)                  ▼
+                         └──────────── acknowledgements ◀──── xterm.js ──▶ WebGL
 ```
 
-One xterm.js instance per terminal lives for as long as the terminal does,
-on screen or not (`src/lib/terminal.ts`). Each asks for a WebGL context when
-it is created (`src/components/terminal/TerminalView.tsx`).
+One xterm.js instance per terminal lives for as long as the terminal does
+(`src/lib/terminal.ts`). It is in the document, and has a WebGL context, only
+while a view shows it (`src/components/terminal/TerminalView.tsx`,
+`src/lib/terminalWebgl.ts`). The baseline below was measured on the path as
+it was before: output base64-encoded in a JSON event broadcast to the window,
+no acknowledgements, and a WebGL context per terminal from creation.
 
 ## Counters
 
 `terminalx status --json` reports what the terminals hold, under `terminals`:
 
-- `backend`: PTY panes, how many are running, scrollback bytes held, and the
-  `pty_data` events and bytes sent since launch.
+- `backend`: PTY panes, how many are running, scrollback bytes held, the
+  output batches and bytes sent since launch, how many panes have a view
+  attached (`views`), and how many bytes those views have yet to draw
+  (`unackedBytes`: around 1 MB per pane that is being held back).
 - `webview`: live xterm instances and how many are in the document, how many
   are on WebGL and how many on the DOM renderer, how many a view is showing
   (`onScreen`), how many of those are on the DOM fallback (`domOnScreen`,
   which should be 0) and how many are in the document with no view showing
   them (`hiddenInDocument`, which should be 0: such a terminal draws all its
   output for nobody), WebGL contexts created / lost / refused since the window
-  loaded, buffer lines held, replay
-  buffers and their bytes, and output events and bytes per second (local and
-  cloud). It is `null` when the window did not answer within 500 ms.
+  loaded, buffer lines held, and output events and bytes per second (local
+  and cloud). It is `null` when the window did not answer within 500 ms.
 
 The webview counts as it goes (a few additions per output event) and computes
 the rest only when asked. The same counters are at
@@ -91,6 +97,12 @@ What a run does:
   through the store). A `FinalizationRegistry` counts how many the garbage
   collector takes back. This is what separates a leak in xterm or its renderer
   from one in the app.
+- **Background** (`--scenarios background`). The app's window is covered by
+  another window (`scripts/perf/cover-window.swift`, which activates
+  nothing), and then the app is hidden through System Events, by process id.
+  In each state a pane runs `cat` of the 50 MB log, once as a shell and once
+  as an agent's pane. Timed: until the program has exited.
+  Nothing in this scenario waits for a frame, which a hidden page never gets.
 - **Covered** (`--scenarios covered`). A real session with two shell tabs:
   the one behind prints an agent-style stream for 10 s while the other is
   selected. Counted: how often xterm draws the covered one (`onRender`). The
@@ -343,4 +355,141 @@ own, so no real agent runs and nothing is written under the real home.
 
 An archived session still keeps its terminals.
 
-Still open from the baseline: findings 5, 6 and 8.
+### Output over a raw channel per pane, with flow control
+
+**What the baseline hid.** With output as a broadcast event and nothing
+holding the program back, a flood reached xterm faster than it parses, and
+past 50 MB of backlog xterm.js throws output away. The app logged about
+91,000 `write data discarded` errors in one run of the matrix on the old
+path. That is where the 500–600 ms of output after Ctrl+C came from, and the
+"100 MB/s" in the typing-echo rows was largely output being dropped.
+
+**What changed** (`src-tauri/src/pty.rs`, `src/lib/terminalFeed.ts`):
+
+- A view attaches to its pane (`pty_attach`) and gets the pane's output as
+  raw bytes on a `tauri::ipc::Channel` of its own: no base64, no JSON, and no
+  other listener. It is handed the backend's scrollback first, with nothing
+  lost or repeated in between, so the window no longer keeps replay buffers,
+  and a pane no view has shown costs the window nothing.
+- The view acknowledges what xterm has parsed, as a running total, about
+  every 256 KB. A pane that is more than 1 MB ahead of its view is not read
+  until the view catches up, so the program waits on its own output as it
+  would in any terminal. A total that is lost on the way is made good by the
+  next one.
+- A **shell** that is not on screen is acknowledged at about 5 MB/s. Its
+  output is still parsed in order and in full, but a flood in a hidden tab no
+  longer takes the main thread from the terminal being typed in.
+- An **agent's pane** is never slowed for not being looked at: it is
+  acknowledged as fast as xterm parses, shown or not.
+- **Nothing is held for a hidden window.** WebKit runs a hidden page's timers
+  about once a second, and xterm parses on timers, so a page in that state
+  acknowledges output as it arrives and every program runs at full speed, as
+  before there was flow control.
+- The first output after a quiet spell is sent at once instead of after the
+  8 ms batching window. That is a key's echo.
+- A view that says nothing for 2 s while its pane is held (a frozen window)
+  stops being waited for until it speaks again, and what it was silent on is
+  written off, so a program can never hang, or be held back for good, on a
+  window that is not drawing or on bytes that never arrived.
+- Each attachment has a name of its own, which its acknowledgements and its
+  detach carry. A terminal that was disposed cannot detach, or answer for,
+  the one made for the same pane after it, in whatever order their calls land.
+- A pane keeps one slot for its views for as long as it lives. A view that
+  detaches and attaches again, a page that is reloaded, and a view that
+  attaches before or after its pane was spawned all get the scrollback and
+  then everything after it. A reloaded page drops the attachments of the page
+  before it, and a view attaches only after that.
+- A pane's exit is announced after the last of its output.
+- The `pty_data` event is still emitted for the listeners in the backend (the
+  mobile reader, the remote runtime); the window no longer listens to it.
+
+**Where memory is and is not bounded.** While the window is visible and
+answering, what is in flight to it is about 1 MB per pane. The cases outside
+that:
+
+- **A window nobody can see** (hidden or covered). Nothing is held for it,
+  so output is sent as fast as the program prints and waits in the page:
+  Tauri's channel queue, then xterm's write buffer, which discards past
+  50 MB.
+- **A view that stalls.** For the 2 s it takes to decide, the pane is held.
+  From then until the view speaks again the pane is not held at all, as
+  above.
+- **After a stall.** What the view was silent on is written off, and the
+  1 MB window is counted beyond it: until the view has drawn those bytes,
+  what is in flight can be the written-off amount plus 1 MB.
+- **A pane whose program has exited** is never held again: the rest of its
+  output is sent at once, so its exit is not reported ahead of it. That is
+  at most what was left in the PTY and the reader's queue of 64 reads; a
+  program with more than that still to write is blocked writing it, and has
+  not exited.
+
+The first two are what happened on every flood before this change. They are
+not made worse, and they are not fixed.
+
+Cloud terminals already have their own bounded stream: the runtime keeps a
+ring per terminal and a reader that falls behind resumes from it, so they are
+not part of this change. They share the view, and so the earlier ones.
+
+**Before → after** (before: the entry above, same machine and build type):
+
+| | Before | After |
+| --- | --- | --- |
+| Typing echo, nothing else running, p50 / p95 | 12 / 14 ms | 1 / 3 ms |
+| Typing echo, a flood in another tab, p50 / p95 | 20–21 / 31 ms | 1 / 1–4 ms |
+| Key press to the frame showing it, p95 | 29 ms idle, 50–52 ms under a flood | 16–17 ms in both |
+| Long tasks during 14 s of typing under a flood | 5–6, up to 57 ms | 0 |
+| Ctrl+C to the last output, during a flood | 605–647 ms | 6–15 ms |
+| Writes xterm discarded in the matrix | about 91,000 | 0 |
+| `cat` of a 50 MB log | 0.56–0.66 s, 76–90 MB/s | 0.51–0.61 s, 82–98 MB/s |
+| Agent-style redraws, 4,000 frames | 0.09–0.12 s | 0.10–0.13 s |
+| WebContent memory after the soak (baseline → after) | 300 → 344 MB | 364 → 377 MB |
+
+- The after column is from 2026-10-03, on a machine that other sessions were
+  loading heavily (load average 43 to 73 over the preceding fifteen minutes).
+  In the matrix run itself `cat` took 0.71, 1.70 and 5.30 s with 1, 8 and 20
+  terminals, and `yes | head` 3.6–4.2 s; a repeat a few minutes later gave
+  the `cat` figures in the table and `yes | head` at 2.1–4.0 s. On 2026-10-02,
+  with the machine quiet, `yes | head` was 2.0–2.1 s. It is limited by the
+  pipe and the PTY, not by the app.
+- A flood in a hidden shell now runs at about 5 MB/s instead of as fast as
+  the PTY carries it. That is the trade for the typing numbers above.
+- Key press to frame is bounded by the display: 17 ms is one frame at 60 Hz.
+
+**With the window not being looked at** (`--scenarios background`: a pane
+runs `cat` of the 50 MB log while the app's window is covered by another
+window, and again while the app is hidden):
+
+| Window | `document.hidden` | Pane | The program has exited after |
+| --- | --- | --- | --- |
+| Covered by another window | true | a shell | 1.58 s |
+| Covered by another window | true | an agent's pane | 0.76 s |
+| App hidden | true | a shell | 0.75 s |
+| App hidden | true | an agent's pane | 0.78 s |
+| App hidden, first revision of this change (acknowledged on parse, hidden or not) | true | a shell | not within 180 s; 18 of 50 MB read after about six minutes |
+
+A window that another window covers reports `document.hidden` just as a
+hidden app does, so both take the same path: nothing is held for a page in
+that state. A program must not be slowed because nobody is looking at the
+window, an agent's CLI least of all. The first revision of this change held
+the pane for a page whose timers WebKit had all but stopped.
+
+**In the real window** (`scripts/perf/verify-agent-terminal.mjs`). The
+benchmark attaches its own terminals in its own order, and that hid two
+defects in the first revision: an agent tab's terminal stayed blank after a
+launch, and a view that attached a second time got the scrollback and nothing
+after it. This script goes through the app's launch, its session and tab
+views and a page reload, with the stand-in agent CLI, and checks that the
+reply to a prompt appears in the tab's terminal:
+
+| | First revision | Now |
+| --- | --- | --- |
+| An agent started from the CLI, once its session is opened | scrollback only | live |
+| An agent tab after a launch | blank | live |
+| An agent tab after the page is reloaded | scrollback only | live |
+
+All five acceptance criteria of the issue are met on this machine (memory
+after the soak 1.04 times the baseline in this run).
+
+Still open from the baseline: finding 8 (the status bar cannot see the web
+view's memory on macOS). Not done: an archived session keeps its terminals,
+and there is no cap on how many idle xterm instances are kept.

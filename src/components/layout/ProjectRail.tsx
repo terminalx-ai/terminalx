@@ -8,7 +8,8 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { cn } from "@/lib/cn";
-import { keycaps } from "@/lib/hotkeys";
+import { useShortcutKeys } from "@/lib/hotkeys";
+import type { ShortcutId } from "@/lib/shortcuts";
 import { errorMessage } from "@/lib/api";
 import {
   addProject,
@@ -191,7 +192,7 @@ export function ProjectRail({
         <Button variant="ghost" className="justify-start gap-2 px-2" onClick={onSearch}>
           <Search />
           Search
-          <Keys chord="mod+k" />
+          <Keys shortcut="app.commandPalette" />
         </Button>
         <Button
           variant="ghost"
@@ -200,9 +201,9 @@ export function ProjectRail({
         >
           <CircleDot />
           Issues
-          <Keys chord="mod+i" />
+          <Keys shortcut="app.issues" />
         </Button>
-        <WithTooltip label="Agent dashboard" keys={keycaps("mod+shift+a")}>
+        <WithTooltip label="Agent dashboard" shortcut="app.agentDashboard">
           <Button
             variant="ghost"
             className={cn("min-w-0 justify-start gap-2 px-2", store.view === "agents" && onNavView ? "bg-selected text-foreground" : "")}
@@ -213,7 +214,7 @@ export function ProjectRail({
             <DashboardTotals buckets={dashboardBuckets} />
           </Button>
         </WithTooltip>
-        <WithTooltip label="Stats & Usage" keys={keycaps("mod+shift+u")}>
+        <WithTooltip label="Stats & Usage" shortcut="app.stats">
           <Button
             variant="ghost"
             className={cn("justify-start gap-2 px-2", store.view === "stats" && onNavView ? "bg-selected text-foreground" : "")}
@@ -223,7 +224,7 @@ export function ProjectRail({
             <span className="truncate">Stats &amp; Usage</span>
           </Button>
         </WithTooltip>
-        <WithTooltip label="Automations" keys={keycaps("mod+shift+r")}>
+        <WithTooltip label="Automations" shortcut="app.automations">
           <Button
             variant="ghost"
             className={cn("justify-start gap-2 px-2", store.view === "automations" && onNavView ? "bg-selected text-foreground" : "")}
@@ -239,7 +240,7 @@ export function ProjectRail({
             )}
           </Button>
         </WithTooltip>
-        <WithTooltip label="Skills" keys={keycaps("mod+shift+k")}>
+        <WithTooltip label="Skills" shortcut="app.skills">
           <Button
             variant="ghost"
             className={cn("justify-start gap-2 px-2", store.view === "skills" && onNavView ? "bg-selected text-foreground" : "")}
@@ -247,7 +248,7 @@ export function ProjectRail({
           >
             <Sparkles />
             Skills
-            <Keys chord="mod+shift+k" />
+            <Keys shortcut="app.skills" />
           </Button>
         </WithTooltip>
       </div>
@@ -304,7 +305,7 @@ export function ProjectRail({
         <Button variant="ghost" className="w-full justify-start gap-2 px-2" onClick={() => onOpenSettings()}>
           <Settings />
           Settings
-          <Keys chord="mod+," />
+          <Keys shortcut="app.settings" />
         </Button>
       </div>
     </div>
@@ -335,10 +336,11 @@ function DashboardTotals({ buckets }: { buckets: Record<ColumnId, readonly unkno
   );
 }
 
-function Keys({ chord }: { chord: string }) {
+function Keys({ shortcut }: { shortcut: ShortcutId }) {
+  const keys = useShortcutKeys(shortcut);
   return (
     <span className="ml-auto flex gap-0.5 text-[10px] text-faint">
-      {keycaps(chord).map((k) => (
+      {keys.map((k) => (
         <kbd key={k} className="rounded-sm bg-veil-raised px-1 font-sans">
           {k}
         </kbd>

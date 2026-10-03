@@ -143,6 +143,13 @@ export const VIEWER_REASON = "You can view this workspace; ask an admin for driv
 export const NOT_SHARED_REASON = "This workspace has not been shared with you. Ask an organization admin or its creator to share it.";
 /** Shown on the model, effort and mode pickers to someone who may not change them (review M1). */
 export const SETTINGS_LOCKED_REASON = "Only a workspace admin or someone who can approve permissions changes the model, effort or permission mode";
+/**
+ * Shown in an agent tab's terminal view (PRO-86) to a driver who may not
+ * approve: the agent's own screen answers its permission prompts and changes
+ * its mode, so typing there needs the same rights as changing its settings.
+ */
+export const TERMINAL_APPROVAL_REASON =
+  "Typing in the agent's terminal can answer its permission requests and change its mode, so it needs approval rights. You can watch here and send messages from the chat.";
 /** Shown on permission requests to someone who may not answer them. */
 export const APPROVE_BLOCKED_REASON = "Waiting for someone who can approve";
 

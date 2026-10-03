@@ -5,7 +5,7 @@ import type { AgentEvent } from "@/types/events";
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@/lib/prefs", () => ({ usePrefs: () => ({ panelWidth: 360 }), setPrefs: vi.fn() }));
-vi.mock("@/lib/hotkeys", () => ({ useHotkey: vi.fn(), keycaps: () => [] }));
+vi.mock("@/lib/hotkeys", () => ({ useHotkey: vi.fn(), keycaps: () => [], useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
 vi.mock("@/lib/dialogs", () => ({ openSettle: vi.fn(), openWorkspaceDelete: vi.fn() }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children }));
 vi.mock("@/components/changes/PrPanel", () => ({ PrPanel: () => null }));
