@@ -1214,6 +1214,27 @@ impl Client {
         risk: RequestRisk,
         limit: u64,
     ) -> Result<T, CloudWorkspaceClientError> {
+        self.send_body(method, context, tail, query, body.map(RequestBody::Json), idempotency_key, risk, limit)
+    }
+
+    /// A mutation whose JSON body holds a secret: the body is one zeroized
+    /// buffer from the caller to the socket, never a second copy in a `Value`.
+    fn send_secret<T: DeserializeOwned>(&self, method: &str, context: &AccountContext, tail: &[&str], body: zeroize::Zeroizing<String>) -> Result<T, CloudWorkspaceClientError> {
+        self.send_body(method, context, tail, None, Some(RequestBody::Secret(body)), None, RequestRisk::Mutation, RESPONSE_LIMIT_BYTES)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_body<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        context: &AccountContext,
+        tail: &[&str],
+        query: Option<(&str, &str)>,
+        body: Option<RequestBody>,
+        idempotency_key: Option<&str>,
+        risk: RequestRisk,
+        limit: u64,
+    ) -> Result<T, CloudWorkspaceClientError> {
         let mut url = self.base.clone();
         {
             let mut segments = url.path_segments_mut().map_err(|_| {
@@ -1241,7 +1262,9 @@ impl Client {
             request = request.set("Idempotency-Key", key);
         }
         let response = match body {
-            Some(body) => request.send_json(body),
+            Some(RequestBody::Json(body)) => request.send_json(body),
+            // A body that holds a secret is sent from its own zeroized buffer.
+            Some(RequestBody::Secret(body)) => request.send_string(&body),
             None => request.call(),
         };
         match response {
@@ -1250,6 +1273,11 @@ impl Client {
             Err(ureq::Error::Transport(_)) => Err(transport_error(risk)),
         }
     }
+}
+
+enum RequestBody {
+    Json(Value),
+    Secret(zeroize::Zeroizing<String>),
 }
 
 pub struct CloudWorkspaceService {
@@ -1542,7 +1570,9 @@ impl CloudWorkspaceService {
         authorization: AgentLoginAuthorization,
         provider: AgentLoginProvider,
         kind: AgentLoginKind,
-        mut secret: zeroize::Zeroizing<String>,
+        secret: zeroize::Zeroizing<String>,
+        // Whose login it is, shown to the organization's other admins; never part of the secret.
+        display_identity: Option<&str>,
     ) -> Result<AgentLogin, CloudWorkspaceClientError> {
         if secret.trim().is_empty() || secret.len() > 64 * 1024 {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
@@ -1550,23 +1580,19 @@ impl CloudWorkspaceService {
         if !self.account.is_current(&authorization.context) {
             return Err(context_changed_error(RequestRisk::Mutation));
         }
-        let result: Result<AgentLogin, _> = self.client.request_as(
-            "PUT",
-            &authorization.context,
-            &["cloud-workspace-credentials", provider.as_str()],
-            None,
-            Some(json!({
-                "authKind": kind.as_str(),
-                "secret": &*secret,
-                "displayIdentity": Value::Null,
-                "confirmOrganizationSharing": true,
-                "confirmMachineInstallation": true,
-            })),
-            None,
-            RequestRisk::Mutation,
-        );
-        secret.clear();
-        let login = result?;
+        // Built as text in zeroized buffers: the secret is JSON-escaped once and placed in the body once.
+        let invalid = |_| CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false);
+        let escaped = zeroize::Zeroizing::new(serde_json::to_string(secret.as_str()).map_err(invalid)?);
+        drop(secret);
+        let identity = serde_json::to_string(&display_identity).map_err(invalid)?;
+        let body = zeroize::Zeroizing::new(format!(
+            r#"{{"authKind":"{}","secret":{},"displayIdentity":{},"confirmOrganizationSharing":true,"confirmMachineInstallation":true}}"#,
+            kind.as_str(),
+            escaped.as_str(),
+            identity
+        ));
+        drop(escaped);
+        let login: AgentLogin = self.client.send_secret("PUT", &authorization.context, &["cloud-workspace-credentials", provider.as_str()], body)?;
         if !self.account.is_current(&authorization.context) {
             return Err(context_changed_error(RequestRisk::Mutation));
         }
@@ -2850,6 +2876,7 @@ mod tests {
                 AgentLoginProvider::Claude,
                 AgentLoginKind::LoginDocument,
                 zeroize::Zeroizing::new(r#"{"claudeAiOauth":{"accessToken":"at-1"}}"#.to_string()),
+                Some("ada@example.com (temporary)"),
             )
             .unwrap();
         let captured = request.join().unwrap();
@@ -2859,7 +2886,7 @@ mod tests {
             json!({
                 "authKind": "oauth-credentials-json",
                 "secret": r#"{"claudeAiOauth":{"accessToken":"at-1"}}"#,
-                "displayIdentity": null,
+                "displayIdentity": "ada@example.com (temporary)",
                 "confirmOrganizationSharing": true,
                 "confirmMachineInstallation": true,
             })
@@ -2872,9 +2899,9 @@ mod tests {
         // An empty login is refused here, and an answer about another agent is not accepted.
         let (base, _, _request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let empty = service.save_agent_login(AgentLoginAuthorization { context: context() }, AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("  ".to_string()));
+        let empty = service.save_agent_login(AgentLoginAuthorization { context: context() }, AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("  ".to_string()), None);
         assert_eq!(empty.err().unwrap().code, "cloud_workspace_request_invalid");
-        let other = service.save_agent_login(AgentLoginAuthorization { context: context() }, AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("sk-1".to_string()));
+        let other = service.save_agent_login(AgentLoginAuthorization { context: context() }, AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("sk-1".to_string()), None);
         assert!(other.is_err());
     }
 
@@ -2891,7 +2918,7 @@ mod tests {
         let (_, service) = test_service(&base);
         // Asked for another organization than the active one: nothing is sent.
         assert_eq!(service.remove_agent_login(AgentLoginProvider::Cursor, "old-context".into()).err().unwrap().code, "account_context_changed");
-        let refused = service.save_agent_login(AgentLoginAuthorization { context: context() }, AgentLoginProvider::Cursor, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("key-1".to_string()));
+        let refused = service.save_agent_login(AgentLoginAuthorization { context: context() }, AgentLoginProvider::Cursor, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("key-1".to_string()), None);
         assert_eq!(refused.err().unwrap().code, "cloud_workspace_credential_invalid");
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("PUT ") && !captured.extra_request);

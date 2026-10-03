@@ -16,7 +16,8 @@ import { api, type AgentLogin, type AgentLoginProvider, type AgentLoginSource } 
  */
 const AGENTS: { id: AgentLoginProvider; name: string; local: string | null }[] = [
   { id: "claude", name: "Claude Code", local: "Claude Code" },
-  { id: "codex", name: "Codex", local: "Codex" },
+  // Codex's own login cannot be used without its refresh token, which must not leave this Mac: no local option.
+  { id: "codex", name: "Codex", local: null },
   { id: "cursor", name: "Cursor", local: null },
 ];
 
@@ -32,13 +33,17 @@ export function agentLoginMessage(error: unknown): string {
     case "cloud_workspace_credential_verification_unavailable":
       return "The login could not be checked with the provider just now. Nothing was changed; try again in a moment.";
     case "cloud_workspace_credential_in_use":
-      return "A workspace is using this login right now. Stop it, or try again when it is idle.";
+      return "The service did not remove this login: a workspace of this organization still uses it. Delete or archive those workspaces first, or revoke the login in the web console. Nothing was changed.";
     case "cloud_workspace_request_invalid":
       return "That is not a login this agent can use. Nothing was changed.";
     case "cloud_agent_local_login_not_found":
       return "No login for this agent was found on this Mac. Sign in with the agent's own CLI first, or use an API key.";
     case "cloud_agent_local_login_invalid":
       return "The login found on this Mac is not one the service can use. Sign in again with the agent's own CLI, or use an API key.";
+    case "cloud_agent_local_login_expired":
+      return "The Claude Code sign-in on this Mac has expired or is about to. Run claude once so it renews, then try again.";
+    case "cloud_agent_local_login_cancelled":
+      return "Canceled in the confirmation. Nothing was sent.";
     case "cloud_agent_local_login_denied":
       return "This Mac's login was not read: access to it was not allowed. Nothing was sent.";
     case "cloud_provider_entry_cancelled":
@@ -65,7 +70,8 @@ function statusLine(login: AgentLogin | undefined): string {
   return `Connected · ${how}${who}${scope} · updated ${new Date(login.updatedAt).toLocaleDateString()}`;
 }
 
-export function OrganizationAgentLogins({ contextRevision }: { contextRevision: string }) {
+export function OrganizationAgentLogins({ contextRevision, organizationName }: { contextRevision: string; organizationName?: string | null }) {
+  const organization = organizationName?.trim() || "this organization";
   const [logins, setLogins] = useState<AgentLogin[] | null>(null);
   const [adminOnly, setAdminOnly] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -198,21 +204,24 @@ export function OrganizationAgentLogins({ contextRevision }: { contextRevision: 
                     <div className="mt-2 space-y-2 rounded-md border border-hairline bg-background p-2" data-testid="agent-login-consent">
                       <p>
                         {open.source === "local-login"
-                          ? `TerminalX will read the ${agent.name} login that is on this Mac (macOS may ask you to allow it) and send it to the account service, which checks it with the provider and stores it encrypted. It is your own sign-in: usage in this organization's cloud workspaces counts against your account. TerminalX does not change the login on this Mac.`
-                          : `A secure dialog will ask for the ${agent.name} API key. It is sent to the account service, which checks it with the provider and stores it encrypted.`}
+                          ? `TerminalX will read the ${agent.name} sign-in on this Mac and lend its short-lived access token to ${organization}. The refresh token stays on this Mac, so what is uploaded cannot be renewed: it stops working when it expires, usually within hours, and has to be lent again. Before anything is sent, a confirmation from the app names the organization, the account and the expiry. It is your own subscription: usage in these workspaces counts against it.`
+                          : `A secure dialog will ask for the ${agent.name} API key for ${organization}. It is sent to the account service, which checks it with the provider and stores it encrypted.`}
                       </p>
                       <label className="flex items-start gap-2">
                         <input type="checkbox" checked={sharing} disabled={busy} onChange={(event) => setSharing(event.target.checked)} />
                         <span>
-                          Agents in <strong>every member's</strong> cloud workspaces of this organization may run on this login.
+                          Agents in <strong>every member's</strong> cloud workspaces of {organization} may run on this login.
                         </span>
                       </label>
                       <label className="flex items-start gap-2">
                         <input type="checkbox" checked={machines} disabled={busy} onChange={(event) => setMachines(event.target.checked)} />
-                        <span>Short-lived access made from it is installed on those workspace machines. The login itself never is.</span>
+                        <span>
+                          Short-lived access made from it is installed on those workspace machines, where anyone who can drive a workspace can read it.
+                        </span>
                       </label>
                       <p className="text-muted-foreground">
-                        To revoke it, press Disconnect here: workspaces stop receiving it at once.
+                        To end it, press Disconnect here. The service refuses while a workspace of the organization still uses the login; delete or archive
+                        those first, or revoke it in the web console. Access already handed to a machine lasts until its own expiry.
                       </p>
                       <div className="flex gap-1.5">
                         <Button
@@ -231,7 +240,7 @@ export function OrganizationAgentLogins({ contextRevision }: { contextRevision: 
                           }
                         >
                           {busy && <Loader2 className="animate-spin" />}
-                          {open.source === "local-login" ? "Read and store this Mac's login" : "Enter the key"}
+                          {open.source === "local-login" ? "Read this Mac's sign-in and confirm" : "Enter the key"}
                         </Button>
                         <Button size="xs" variant="ghost" disabled={busy} onClick={() => choose(null)}>
                           Cancel
@@ -243,8 +252,9 @@ export function OrganizationAgentLogins({ contextRevision }: { contextRevision: 
                   {open?.source === "disconnect" && (
                     <div className="mt-2 space-y-2 rounded-md border border-destructive/25 bg-background p-2" data-testid="agent-login-disconnect">
                       <p>
-                        Disconnect {agent.name}? Workspaces stop receiving this login at once, and {agent.name} agents in them will need a sign-in before
-                        they can work again. The stored login is removed.
+                        Disconnect {agent.name}? The stored login is removed and {agent.name} agents will need a sign-in before they can work again. The
+                        service refuses while a workspace of the organization still uses the login. Access already handed to a machine lasts until its own
+                        expiry.
                       </p>
                       <div className="flex gap-1.5">
                         <Button

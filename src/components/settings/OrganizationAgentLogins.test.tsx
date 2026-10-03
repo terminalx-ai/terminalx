@@ -15,7 +15,7 @@ let stored: AgentLogin[];
 const login = (fields: Partial<AgentLogin>): AgentLogin => ({ provider: "claude", authKind: "oauth-credentials-json", fingerprint: "sha256:ab", version: 1, updatedAt: 1_790_000_000_000, state: "connected", sharedUse: "organization", ...fields });
 const row = (agent: string) => screen.getAllByTestId("agent-login").find((item) => item.dataset.agent === agent)!;
 const show = async () => {
-  render(<OrganizationAgentLogins contextRevision="org-revision" />);
+  render(<OrganizationAgentLogins contextRevision="org-revision" organizationName="Acme Robotics" />);
   await screen.findAllByTestId("agent-login");
 };
 const consent = (within_: HTMLElement) => within(within_).getAllByRole("checkbox").forEach((box) => fireEvent.click(box));
@@ -34,8 +34,10 @@ describe("agent logins in Settings (PRO-79)", () => {
     expect(within(row("claude")).getByTestId("agent-login-status").textContent).toMatch(/^Connected · subscription login · ada@example\.com · updated /);
     expect(within(row("codex")).getByTestId("agent-login-status").textContent).toMatch(/^Revoked \(API key\)/);
     expect(within(row("cursor")).getByTestId("agent-login-status").textContent).toBe("Not connected");
-    // Cursor has no login on this Mac to offer; a connected agent can be disconnected, a missing one cannot.
+    // Only Claude Code's sign-in can be lent from this Mac (Codex's cannot be used without its refresh token).
     expect(within(row("cursor")).queryByRole("button", { name: /this Mac/ })).toBeNull();
+    expect(within(row("codex")).queryByRole("button", { name: /this Mac/ })).toBeNull();
+    expect(within(row("claude")).getByRole("button", { name: "Use this Mac's Claude Code login" })).toBeTruthy();
     expect(within(row("cursor")).queryByRole("button", { name: "Disconnect" })).toBeNull();
     expect(within(row("claude")).getByRole("button", { name: "Disconnect" })).toBeTruthy();
     cleanup();
@@ -47,7 +49,7 @@ describe("agent logins in Settings (PRO-79)", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("stores this Mac's Claude login only after both consents, and never holds the login itself", async () => {
+  it("asks to lend this Mac's Claude sign-in only after both consents, says what that means, and never holds the login itself", async () => {
     vi.mocked(api.cloudAgentLoginConnect).mockImplementation(async () => {
       stored = [login({})];
       return stored[0]!;
@@ -56,10 +58,15 @@ describe("agent logins in Settings (PRO-79)", () => {
     fireEvent.click(within(row("claude")).getByRole("button", { name: "Use this Mac's Claude Code login" }));
     const panel = within(row("claude")).getByTestId("agent-login-consent");
     // What is shared, who can use it, how to revoke it.
-    expect(panel.textContent).toContain("read the Claude Code login that is on this Mac");
-    expect(panel.textContent).toContain("every member's cloud workspaces");
-    expect(panel.textContent).toContain("To revoke it, press Disconnect here");
-    const go = within(panel).getByRole("button", { name: "Read and store this Mac's login" });
+    expect(panel.textContent).toContain("lend its short-lived access token to Acme Robotics");
+    expect(panel.textContent).toContain("The refresh token stays on this Mac");
+    expect(panel.textContent).toContain("a confirmation from the app names the organization, the account and the expiry");
+    expect(panel.textContent).toContain("every member's cloud workspaces of Acme Robotics");
+    expect(panel.textContent).toContain("anyone who can drive a workspace can read it");
+    // The revoke promise is the true one: the service can refuse.
+    expect(panel.textContent).toContain("The service refuses while a workspace of the organization still uses the login");
+    expect(panel.textContent).not.toMatch(/stop receiving it at once|does not change the login/);
+    const go = within(panel).getByRole("button", { name: "Read this Mac's sign-in and confirm" });
     expect(go.hasAttribute("disabled")).toBe(true);
     fireEvent.click(within(panel).getAllByRole("checkbox")[0]!);
     expect(go.hasAttribute("disabled")).toBe(true);
@@ -89,13 +96,15 @@ describe("agent logins in Settings (PRO-79)", () => {
     await show();
     const failWith = async (code: string, text: RegExp) => {
       vi.mocked(api.cloudAgentLoginConnect).mockRejectedValueOnce({ code });
-      fireEvent.click(within(row("codex")).getByRole("button", { name: "Use this Mac's Codex login" }));
-      consent(within(row("codex")).getByTestId("agent-login-consent"));
-      fireEvent.click(within(row("codex")).getByRole("button", { name: "Read and store this Mac's login" }));
+      fireEvent.click(within(row("claude")).getByRole("button", { name: "Use this Mac's Claude Code login" }));
+      consent(within(row("claude")).getByTestId("agent-login-consent"));
+      fireEvent.click(within(row("claude")).getByRole("button", { name: "Read this Mac's sign-in and confirm" }));
       await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(text));
     };
     await failWith("cloud_agent_local_login_not_found", /No login for this agent was found on this Mac/);
     await failWith("cloud_agent_local_login_denied", /access to it was not allowed\. Nothing was sent/);
+    await failWith("cloud_agent_local_login_cancelled", /Canceled in the confirmation\. Nothing was sent/);
+    await failWith("cloud_agent_local_login_expired", /has expired or is about to/);
     await failWith("cloud_workspace_credential_invalid", /provider did not accept that login/);
     await failWith("organization_admin_required", /Only an organization owner or administrator/);
     await failWith("something_new", /could not be confirmed/);
@@ -111,9 +120,21 @@ describe("agent logins in Settings (PRO-79)", () => {
     fireEvent.click(within(row("claude")).getByRole("button", { name: "Disconnect" }));
     expect(api.cloudAgentLoginRemove).not.toHaveBeenCalled();
     const confirm = within(row("claude")).getByTestId("agent-login-disconnect");
-    expect(confirm.textContent).toContain("Workspaces stop receiving this login at once");
+    expect(confirm.textContent).toContain("The service refuses while a workspace of the organization still uses the login");
     fireEvent.click(within(confirm).getByRole("button", { name: "Disconnect Claude Code" }));
     await waitFor(() => expect(within(row("claude")).getByTestId("agent-login-status").textContent).toBe("Not connected"));
     expect(api.cloudAgentLoginRemove).toHaveBeenCalledWith("claude", "org-revision");
+  });
+
+  it("says why a disconnect was refused while a workspace still uses the login, and keeps it listed", async () => {
+    stored = [login({ displayIdentity: "ada@example.com · this Mac's sign-in, temporary until 3 Oct 2026, 21:40" })];
+    vi.mocked(api.cloudAgentLoginRemove).mockRejectedValue({ code: "cloud_workspace_credential_in_use" });
+    await show();
+    // Other admins see whose sign-in it is and that it is temporary.
+    expect(within(row("claude")).getByTestId("agent-login-status").textContent).toContain("ada@example.com · this Mac's sign-in, temporary until 3 Oct 2026, 21:40");
+    fireEvent.click(within(row("claude")).getByRole("button", { name: "Disconnect" }));
+    fireEvent.click(within(row("claude")).getByRole("button", { name: "Disconnect Claude Code" }));
+    expect((await screen.findByRole("alert")).textContent).toMatch(/still uses it\. Delete or archive those workspaces first, or revoke the login in the web console/);
+    expect(within(row("claude")).getByTestId("agent-login-status").textContent).toMatch(/^Connected/);
   });
 });

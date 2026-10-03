@@ -8,18 +8,17 @@ Settings → Account → **Agent logins**.
 
 ## What the section does
 
-- Lists each agent's status: connected (API key or subscription login, the
-  account it belongs to when the service knows it, who may use it), revoked,
-  or not connected.
+- Lists each agent's status: connected (API key or subscription login, whose
+  it is when the service knows, who may use it), revoked, or not connected.
 - **Connect / replace with an API key.** A native secure dialog collects the
   key (`secure_prompt` in `commands.rs`, the same one provider keys use).
-- **Use this Mac's login** (Claude Code and Codex). The app reads the login
-  the agent's own CLI keeps on this computer and stores it for the
-  organization.
+- **Use this Mac's Claude Code login.** The app lends the short-lived access
+  token of the Claude Code sign-in on this computer. See below.
 - **Disconnect**, after a confirmation.
 
 The provider's own sign-in flows ("Log in with Claude", "Sign in with
-ChatGPT") are PRO-82 and are added to this same section.
+ChatGPT") are PRO-82 and are added to this same section. They are the lasting
+way to connect a subscription; lending this Mac's sign-in is temporary.
 
 ## Who may do it
 
@@ -30,41 +29,69 @@ decide this itself and cannot widen it.
 
 A stored login is organization-wide: agents in every member's workspaces may
 run on it. A login that only its owner's workspaces use does not exist on the
-service yet (PRO-82 lists it as an open question), so the desktop does not
-offer one.
+service yet, so the desktop does not offer one.
 
 ## What never happens
 
 - A login is never typed into, held by or returned to the webview. The page
   sends the agent, the source (`api-key` or `local-login`) and the consent;
-  Rust collects the login, sends it once and clears it. The answer type
-  (`AgentLogin`) has no field for a login.
+  Rust collects the login, sends it once from one zeroized buffer and clears
+  it. The answer type (`AgentLogin`) has no field for a login.
 - Nothing is collected or read before `authorize_agent_login` passes: both
   consents given, the request is for the organization active now, and the
   service answered the list (so the person is an owner or admin).
-- A login is never logged. Failures are codes; the local reader's errors say
-  only which kind of failure it was.
-- A login is never read silently. "Use this Mac's login" runs only from its
-  button, after the consent text and both checkboxes.
+- A login is never logged. Failures are codes.
+- **A refresh token never leaves this Mac.**
 
-## Security review of "use this Mac's login"
+## "Use this Mac's Claude Code login"
 
-| Concern | What the code does |
-| --- | --- |
-| Reading without the person's knowledge | Only `cloud_agent_login_connect` with `source: local-login` reads it, after consent and the admin check. For Claude Code the login is in the macOS Keychain item `Claude Code-credentials`, read with `/usr/bin/security`; macOS asks the person to allow that. The existing usage reader (`status/usage/claude_oauth.rs`) is separate and unchanged. |
-| More than the login leaving the Mac | Only the part the service stores is sent: `claudeAiOauth` for Claude; `auth_mode`, `last_refresh`, `tokens`, `OPENAI_API_KEY` for Codex. Other keys in those files (for example MCP server tokens in Claude's file) are dropped before upload. |
-| The wrong account | With `CLAUDE_CONFIG_DIR` set, only that directory's file is read, never the Keychain. Codex follows `CODEX_HOME`. |
-| A refresh token on a workspace machine | Unchanged from PRO-17: machines receive short-lived grants; the stored login stays with the service. |
-| Who can use it afterwards | Stated in the consent: every member's workspaces in the organization. The service's `managers` scope cannot be chosen from the desktop route today. |
-| Revoking | Disconnect in the same section; the service stops handing it out at once. |
-| A dialog left open, or two at once | One connect at a time (`cloud_provider_operation_in_progress`); the secure field is emptied whichever way the dialog ends. |
+What is uploaded is the access token of the local sign-in, with its expiry
+and scopes (`agent_local_login.rs`). Not the refresh token: a refresh token
+held by both this Mac and the service would be refreshed by both, and where
+the provider rotates it the first refresh on either side signs the other out.
 
-Not verified, and for the owner:
+So the lent sign-in is **temporary**. It stops working at the access token's
+own expiry (hours), the service cannot renew it, and it has to be lent again.
+The stored login's name says so ("… · this Mac's sign-in, temporary until
+…"), which is also how other admins see whose subscription it is.
 
-- **Sharing one refreshable login between this Mac and the service.** The
-  uploaded Claude or Codex login includes its refresh token, and the service
-  refreshes it. If the provider rotates refresh tokens, the CLI on this Mac
-  and the service may sign each other out. This was not tried against a real
-  provider. The web console's paste field has the same property.
+The steps, in order:
+
+1. The page's consent: two checkboxes, with text naming the organization.
+2. `authorize_agent_login`: consent, active organization, owner or admin.
+3. The sign-in is read. Claude Code keeps it in the Keychain item
+   `Claude Code-credentials`; the account's address comes from `.claude.json`.
+   A sign-in that has expired, or has no expiry, is not lent.
+4. **A native confirmation** (`native_confirm`, an `NSAlert` drawn by the
+   app, not the page) names the organization, the account and the expiry, and
+   says what leaves the Mac, who can use it and how it ends. Cancel is the
+   default button. This is the confirmation that counts: the page's
+   checkboxes are values the webview reports, and the Keychain prompt is not
+   a control, because the app already reads that item for the usage display.
+5. Only then is the access token uploaded.
+
+Codex has no such option: its `auth.json` is not usable without its refresh
+token.
+
+### What the person is told
+
+- Which organization and which account.
+- That only the access token is uploaded, and when it expires.
+- That agents in every member's workspaces may run on their subscription.
+- That anyone who can drive a workspace can read the short-lived token off
+  its machine (it is in the agent's environment there).
+- How it ends: Disconnect, which the service refuses (409) while a workspace
+  of the organization still uses the login; revoke in the web console; or
+  its own expiry. The desktop has no revoke route today.
+
+## Not verified, and for the owner
+
+- Not run against a real provider or server. In particular it was not
+  checked that the provider accepts the local access token from another
+  machine for as long as its `expiresAt` says.
+- The local access token carries the scopes of the CLI's own sign-in, which
+  are wider than the two PRO-82's server-side login asks for.
 - **Terms of use** for running a personal subscription in an organization's
   workspaces: the same open question as PRO-82.
+- Whether a temporary lend is worth offering at all once PRO-82's sign-in
+  exists.

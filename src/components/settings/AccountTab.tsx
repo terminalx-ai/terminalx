@@ -56,7 +56,7 @@ export function AccountTab() {
         <OrganizationOnboarding key={identity.email} organizationName={identity.organization} accountEmail={identity.email} contextRevision={status.context?.revision ?? ""} organizations={status.organizations ?? []} multiOrg={isMultiOrg(status)} />
         {identity.organization && <OrganizationMembers accountEmail={identity.email} contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationCompute contextRevision={status.context?.revision ?? ""} />}
-        {identity.organization && <OrganizationAgentLogins contextRevision={status.context?.revision ?? ""} />}
+        {identity.organization && <OrganizationAgentLogins contextRevision={status.context?.revision ?? ""} organizationName={identity.organization} />}
         {identity.organization && <OrganizationGithubApp contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationWorkspaceConfig contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationDiagnostics contextRevision={status.context?.revision ?? ""} member={activeRole === "member"} />}

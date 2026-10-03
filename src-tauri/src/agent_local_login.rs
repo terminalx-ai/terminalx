@@ -1,39 +1,51 @@
-//! "Use this Mac's login" (PRO-79): read the Claude Code or Codex login that
-//! is already on this computer, so an owner or admin can register it for
-//! their organization's cloud workspaces without pasting a file.
+//! "Use this Mac's Claude Code login" (PRO-79): read the short-lived access
+//! token of the Claude Code sign-in that is already on this computer, so an
+//! owner or admin can lend it to their organization's cloud workspaces
+//! without pasting a file.
 //!
 //! Rules this module keeps:
 //!
-//! - It is read only when the person asked for exactly that, after the
-//!   consent the command checks. Nothing here runs on its own.
-//! - The login never reaches the webview and is never logged. It lives in a
+//! - It is read only when the person asked for exactly that. Nothing here
+//!   runs on its own, and what it returns is uploaded only after a native
+//!   confirmation that names the organization and the account (the command
+//!   does that; a consent the webview reports is not enough).
+//! - **The refresh token never leaves this Mac.** Only the access token, its
+//!   expiry and its scopes are kept. A refresh token held in two places is
+//!   refreshed in two places, and where the provider rotates it the first
+//!   refresh on either side signs the other out. So what is uploaded is
+//!   temporary: it stops working at its own expiry, and the service cannot
+//!   renew it.
+//! - It never reaches the webview and is never logged. It lives in a
 //!   `Zeroizing<String>` from the read to the one request that uploads it,
 //!   and an error says only which kind of failure it was.
-//! - Only the part the service stores is kept: for Claude the
-//!   `claudeAiOauth` object, for Codex its mode, tokens and key. Anything
-//!   else in the file (settings, other accounts' data) is dropped here.
 //!
-//! Where each login lives is the CLI's own choice: Claude Code keeps it in
-//! the macOS Keychain item `Claude Code-credentials` (or
-//! `<config dir>/.credentials.json`), Codex in `$CODEX_HOME/auth.json`.
-//! Reading the Keychain item makes macOS ask the person to allow it.
+//! Claude Code keeps its login in the macOS Keychain item
+//! `Claude Code-credentials` (or `<config dir>/.credentials.json`), and the
+//! signed-in account's address in `.claude.json`.
+//!
+//! Codex is not offered: its `auth.json` cannot be used without its refresh
+//! token, so there is nothing safe to upload from it.
 
 use std::path::PathBuf;
 
 use serde_json::{json, Map, Value};
 use zeroize::Zeroizing;
 
-/// The largest login the service accepts.
+/// The largest login document read.
 const MAX_LOGIN_BYTES: usize = 64 * 1024;
+/// A token about to expire is not worth lending.
+const MIN_REMAINING_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LocalLoginError {
-    /// No login for that agent on this computer.
+    /// No Claude Code login on this computer.
     NotFound,
     /// Something is there but it is not a login the service can use.
     Invalid,
     /// The Keychain did not hand it over (denied, or no answer in time).
     Denied,
+    /// Its access token has expired, or is about to; the CLI renews it when it next runs.
+    Expired,
 }
 
 impl LocalLoginError {
@@ -42,8 +54,17 @@ impl LocalLoginError {
             Self::NotFound => "cloud_agent_local_login_not_found",
             Self::Invalid => "cloud_agent_local_login_invalid",
             Self::Denied => "cloud_agent_local_login_denied",
+            Self::Expired => "cloud_agent_local_login_expired",
         }
     }
+}
+
+/// What is lent: the access token's document, when it stops working, and
+/// whose sign-in it is when this Mac says.
+pub struct LocalClaudeLogin {
+    pub secret: Zeroizing<String>,
+    pub expires_at_ms: i64,
+    pub account: Option<String>,
 }
 
 fn object(raw: &str) -> Result<Map<String, Value>, LocalLoginError> {
@@ -56,42 +77,33 @@ fn object(raw: &str) -> Result<Map<String, Value>, LocalLoginError> {
     }
 }
 
-fn nonempty(value: Option<&Value>) -> bool {
-    value.and_then(Value::as_str).is_some_and(|text| !text.trim().is_empty())
-}
-
-/// The part of a Claude Code credentials document the service stores.
-pub fn claude_from_raw(raw: &str) -> Result<Zeroizing<String>, LocalLoginError> {
+/// The access token of a Claude Code credentials document, with its expiry
+/// and scopes and nothing else: no refresh token, no other keys.
+pub fn claude_from_raw(raw: &str, now_ms: i64) -> Result<(Zeroizing<String>, i64), LocalLoginError> {
     let parsed = object(raw)?;
     let oauth = parsed.get("claudeAiOauth").and_then(Value::as_object).ok_or(LocalLoginError::Invalid)?;
-    if !nonempty(oauth.get("accessToken")) {
-        return Err(LocalLoginError::Invalid);
-    }
-    Ok(Zeroizing::new(json!({ "claudeAiOauth": oauth }).to_string()))
-}
-
-/// The part of a Codex `auth.json` the service stores: a ChatGPT sign-in's
-/// tokens, or an API key kept there.
-pub fn codex_from_raw(raw: &str) -> Result<Zeroizing<String>, LocalLoginError> {
-    let parsed = object(raw)?;
-    let tokens = parsed.get("tokens").filter(|value| value.is_object());
-    let api_key = parsed.get("OPENAI_API_KEY").filter(|value| nonempty(Some(value)));
-    if tokens.is_none() && api_key.is_none() {
-        return Err(LocalLoginError::Invalid);
+    let token = oauth.get("accessToken").and_then(Value::as_str).map(str::trim).filter(|token| !token.is_empty()).ok_or(LocalLoginError::Invalid)?;
+    // Without an expiry nobody could be told how long it lasts.
+    let expires_at = oauth.get("expiresAt").and_then(Value::as_i64).ok_or(LocalLoginError::Invalid)?;
+    if expires_at < now_ms + MIN_REMAINING_MS {
+        return Err(LocalLoginError::Expired);
     }
     let mut kept = Map::new();
-    for key in ["auth_mode", "last_refresh"] {
-        if let Some(value) = parsed.get(key).filter(|value| value.is_string()) {
-            kept.insert(key.into(), value.clone());
-        }
+    kept.insert("accessToken".into(), Value::String(token.into()));
+    kept.insert("expiresAt".into(), json!(expires_at));
+    if let Some(scopes) = oauth.get("scopes").filter(|value| value.is_array()) {
+        kept.insert("scopes".into(), scopes.clone());
     }
-    if let Some(value) = api_key {
-        kept.insert("OPENAI_API_KEY".into(), value.clone());
-    }
-    if let Some(value) = tokens {
-        kept.insert("tokens".into(), value.clone());
-    }
-    Ok(Zeroizing::new(Value::Object(kept).to_string()))
+    Ok((Zeroizing::new(json!({ "claudeAiOauth": kept }).to_string()), expires_at))
+}
+
+/// The address of the account Claude Code is signed in to, from its
+/// `.claude.json`. Display only: it names the account in the confirmation
+/// and on the stored login.
+pub fn claude_account_from_raw(raw: &str) -> Option<String> {
+    let parsed = object(raw).ok()?;
+    let address = parsed.get("oauthAccount")?.get("emailAddress")?.as_str()?.trim();
+    (address.len() <= 120 && address.contains('@') && !address.chars().any(|c| c.is_control() || c.is_whitespace())).then(|| address.to_string())
 }
 
 fn read_file(path: PathBuf) -> Result<Zeroizing<String>, LocalLoginError> {
@@ -122,7 +134,8 @@ fn claude_keychain() -> Result<Zeroizing<String>, LocalLoginError> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| LocalLoginError::Denied)?;
-    let deadline = Instant::now() + Duration::from_secs(120);
+    // Long enough to answer the Keychain prompt, short enough not to hold the one connect at a time for minutes.
+    let deadline = Instant::now() + Duration::from_secs(45);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -150,91 +163,90 @@ fn claude_keychain() -> Result<Zeroizing<String>, LocalLoginError> {
     Err(LocalLoginError::NotFound)
 }
 
-/// This computer's Claude Code login.
-pub fn claude() -> Result<Zeroizing<String>, LocalLoginError> {
-    // A custom config directory never falls back to another account's Keychain item.
-    if let Some(dir) = env_dir("CLAUDE_CONFIG_DIR") {
-        return claude_from_raw(&read_file(dir.join(".credentials.json"))?);
-    }
-    match claude_keychain() {
-        Ok(raw) => claude_from_raw(&raw),
-        Err(LocalLoginError::NotFound) => {
-            let home = dirs::home_dir().ok_or(LocalLoginError::NotFound)?;
-            claude_from_raw(&read_file(home.join(".claude/.credentials.json"))?)
-        }
-        Err(error) => Err(error),
-    }
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|elapsed| elapsed.as_millis() as i64).unwrap_or(0)
 }
 
-/// This computer's Codex login.
-pub fn codex() -> Result<Zeroizing<String>, LocalLoginError> {
-    let dir = env_dir("CODEX_HOME").or_else(|| dirs::home_dir().map(|home| home.join(".codex"))).ok_or(LocalLoginError::NotFound)?;
-    codex_from_raw(&read_file(dir.join("auth.json"))?)
+/// This computer's Claude Code sign-in, as far as it may be lent.
+pub fn claude() -> Result<LocalClaudeLogin, LocalLoginError> {
+    let account_in = |dir: PathBuf| std::fs::read_to_string(dir.join(".claude.json")).ok().and_then(|raw| claude_account_from_raw(&raw));
+    // A custom config directory never falls back to another account's Keychain item.
+    if let Some(dir) = env_dir("CLAUDE_CONFIG_DIR") {
+        let (secret, expires_at_ms) = claude_from_raw(&read_file(dir.join(".credentials.json"))?, now_ms())?;
+        return Ok(LocalClaudeLogin { secret, expires_at_ms, account: account_in(dir) });
+    }
+    let home = dirs::home_dir();
+    let raw = match claude_keychain() {
+        Ok(raw) => raw,
+        Err(LocalLoginError::NotFound) => read_file(home.clone().ok_or(LocalLoginError::NotFound)?.join(".claude/.credentials.json"))?,
+        Err(error) => return Err(error),
+    };
+    let (secret, expires_at_ms) = claude_from_raw(&raw, now_ms())?;
+    Ok(LocalClaudeLogin { secret, expires_at_ms, account: home.and_then(account_in) })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const NOW: i64 = 1_790_000_000_000;
+    const LATER: i64 = NOW + 6 * 60 * 60 * 1000;
+
     #[test]
-    fn a_claude_login_keeps_only_the_oauth_object() {
+    fn only_the_access_token_its_expiry_and_scopes_are_kept_never_the_refresh_token() {
         let raw = json!({
-            "claudeAiOauth": { "accessToken": "at-1", "refreshToken": "rt-1", "expiresAt": 1, "scopes": ["user:inference"] },
+            "claudeAiOauth": { "accessToken": "at-1", "refreshToken": "rt-must-stay-here", "expiresAt": LATER, "scopes": ["user:inference"], "subscriptionType": "max" },
             "mcpOAuth": { "some-server": { "accessToken": "other-secret" } },
             "organizationUuid": "not-needed",
         })
         .to_string();
-        let kept: Value = serde_json::from_str(&claude_from_raw(&raw).unwrap()).unwrap();
-        assert_eq!(kept, json!({ "claudeAiOauth": { "accessToken": "at-1", "refreshToken": "rt-1", "expiresAt": 1, "scopes": ["user:inference"] } }));
-        assert!(!kept.to_string().contains("other-secret"));
+        let (secret, expires_at) = claude_from_raw(&raw, NOW).unwrap();
+        let kept: Value = serde_json::from_str(&secret).unwrap();
+        assert_eq!(kept, json!({ "claudeAiOauth": { "accessToken": "at-1", "expiresAt": LATER, "scopes": ["user:inference"] } }));
+        assert_eq!(expires_at, LATER);
+        assert!(!secret.contains("rt-must-stay-here") && !secret.contains("refresh") && !secret.contains("other-secret"));
     }
 
     #[test]
-    fn what_is_not_a_claude_login_is_refused_without_saying_what_it_held() {
+    fn what_cannot_be_lent_is_refused_without_saying_what_it_held() {
         for raw in [
-            "",
-            "not json",
-            "[1]",
-            r#"{"claudeAiOauth":"sk-secret"}"#,
-            r#"{"claudeAiOauth":{"accessToken":"  "}}"#,
-            r#"{"tokens":{"access_token":"sk-secret"}}"#,
+            "".to_string(),
+            "not json".to_string(),
+            "[1]".to_string(),
+            r#"{"claudeAiOauth":"sk-secret"}"#.to_string(),
+            json!({ "claudeAiOauth": { "accessToken": "  ", "expiresAt": LATER } }).to_string(),
+            // No expiry: nobody could be told how long it lasts.
+            json!({ "claudeAiOauth": { "accessToken": "at-1", "refreshToken": "rt-1" } }).to_string(),
+            r#"{"tokens":{"access_token":"sk-secret"}}"#.to_string(),
         ] {
-            assert_eq!(claude_from_raw(raw).unwrap_err(), LocalLoginError::Invalid, "{raw}");
+            assert_eq!(claude_from_raw(&raw, NOW).err(), Some(LocalLoginError::Invalid), "{raw}");
         }
-        let huge = format!(r#"{{"claudeAiOauth":{{"accessToken":"{}"}}}}"#, "a".repeat(MAX_LOGIN_BYTES));
-        assert_eq!(claude_from_raw(&huge).unwrap_err(), LocalLoginError::Invalid);
-        // The error is a kind, never the content.
-        assert!(!LocalLoginError::Invalid.code().contains("secret"));
+        let huge = format!(r#"{{"claudeAiOauth":{{"accessToken":"{}","expiresAt":{LATER}}}}}"#, "a".repeat(MAX_LOGIN_BYTES));
+        assert_eq!(claude_from_raw(&huge, NOW).err(), Some(LocalLoginError::Invalid));
+        // Expired, or about to: the CLI renews it when it next runs; it is not lent.
+        for expires_at in [NOW - 1, NOW + 60_000] {
+            let raw = json!({ "claudeAiOauth": { "accessToken": "at-1", "expiresAt": expires_at } }).to_string();
+            assert_eq!(claude_from_raw(&raw, NOW).err(), Some(LocalLoginError::Expired));
+        }
+        for error in [LocalLoginError::NotFound, LocalLoginError::Invalid, LocalLoginError::Denied, LocalLoginError::Expired] {
+            assert!(error.code().starts_with("cloud_agent_local_login_"));
+        }
     }
 
     #[test]
-    fn a_codex_login_keeps_its_mode_tokens_and_key_only() {
-        let raw = json!({
-            "auth_mode": "chatgpt",
-            "last_refresh": "2026-10-01T00:00:00Z",
-            "tokens": { "id_token": "id-1", "access_token": "at-1", "refresh_token": "rt-1", "account_id": "acct" },
-            "OPENAI_API_KEY": null,
-            "something_else": "dropped",
-        })
-        .to_string();
-        let kept: Value = serde_json::from_str(&codex_from_raw(&raw).unwrap()).unwrap();
-        assert_eq!(
-            kept,
-            json!({ "auth_mode": "chatgpt", "last_refresh": "2026-10-01T00:00:00Z", "tokens": { "id_token": "id-1", "access_token": "at-1", "refresh_token": "rt-1", "account_id": "acct" } })
-        );
-        let key_only: Value = serde_json::from_str(&codex_from_raw(r#"{"OPENAI_API_KEY":"sk-1"}"#).unwrap()).unwrap();
-        assert_eq!(key_only, json!({ "OPENAI_API_KEY": "sk-1" }));
-        for raw in ["{}", r#"{"tokens":"x"}"#, r#"{"OPENAI_API_KEY":" "}"#, r#"{"claudeAiOauth":{"accessToken":"at"}}"#] {
-            assert_eq!(codex_from_raw(raw).unwrap_err(), LocalLoginError::Invalid, "{raw}");
+    fn the_account_is_named_from_claude_json_or_not_at_all() {
+        assert_eq!(claude_account_from_raw(r#"{"oauthAccount":{"emailAddress":" ada@example.com "}}"#).as_deref(), Some("ada@example.com"));
+        for raw in ["{}", r#"{"oauthAccount":{}}"#, r#"{"oauthAccount":{"emailAddress":"not an address"}}"#, r#"{"oauthAccount":{"emailAddress":"a@b.c\nUpload to another org"}}"#, "nope"] {
+            assert_eq!(claude_account_from_raw(raw), None, "{raw}");
         }
     }
 
     #[test]
     fn a_missing_file_is_not_found_and_an_unreadable_one_is_denied() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(read_file(dir.path().join("auth.json")).unwrap_err(), LocalLoginError::NotFound);
+        assert_eq!(read_file(dir.path().join("auth.json")).err(), Some(LocalLoginError::NotFound));
         // A directory where the file should be cannot be read as one.
         std::fs::create_dir(dir.path().join("auth.json")).unwrap();
-        assert_eq!(read_file(dir.path().join("auth.json")).unwrap_err(), LocalLoginError::Denied);
+        assert_eq!(read_file(dir.path().join("auth.json")).err(), Some(LocalLoginError::Denied));
     }
 }
