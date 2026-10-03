@@ -6,7 +6,7 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
   const ORG = "org-a";
   const now = Date.now();
   const projects = Array.from({ length: f.localProjects }, (_, i) => ({ path: `/repos/p${i}`, name: `local-${i}` }));
-  const orgs = f.cloud ? [{ id: ORG, name: "Demo", role: "admin", isPersonal: false, cloud: { enabled: true, flags: {} } },
+  const orgs = f.cloud ? [{ id: ORG, name: f.orgName ?? "Demo", role: "admin", isPersonal: false, cloud: { enabled: true, flags: {} } },
     ...Array.from({ length: 10 }, (_, i) => ({ id: `o${i}`, name: `Other ${i}`, role: "member", isPersonal: false, cloud: { enabled: true, flags: {} } }))] : [];
   const status = { state: "signed-in", identity: { name: f.accountName ?? "A", email: "a@b.c", organization: "Demo", organizationId: ORG }, expiresAt: null, lastError: null, context: { scope: "s", revision: "s:1" }, organizations: orgs };
   const ws = (id, name) => ({ workspace: { id, orgId: ORG, name, provider: "box", state: "ready", accessMode: "private", createdAt: 1, updatedAt: now, releaseDisposition: null, repositories: [] }, latestOperation: null });
@@ -20,7 +20,8 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
     list_workspaces: [],
     account_status: f.cloud ? status : { state: "signed-out", identity: null, expiresAt: null, lastError: null },
     cloud_catalog_load: catalog,
-    cloud_workspaces: { workspaces: catalog.orgs[ORG].workspaces, quota: { used: 2, limit: 3 } },
+    // `running` as a server since PRO-76 reports it: the header's chip counts running workspaces only.
+    cloud_workspaces: { workspaces: catalog.orgs[ORG].workspaces, quota: { used: 2, limit: 3, running: { used: 2, limit: 3 }, total: { used: 2, limit: 20 } } },
     cloud_workspace_repositories: { configured: true, repositories: [] },
     cloud_agent_cache_load: { tabs: {} },
     cloud_agent_outbox: [],

@@ -39,12 +39,15 @@ export function runningLimitMessage(orgId: string | null, catalog: CloudCatalogS
 /**
  * What the organization header's quota chip says, from the last list: the
  * running slots (PRO-76: only running workspaces count), and the total
- * ceiling when the server reports one. Null on a server that sends no quota.
+ * ceiling when the server reports one. Null on a server that sends no quota,
+ * or one from before PRO-76 that does not count running workspaces apart.
  */
 export function workspaceUsage(orgId: string, catalog: CloudCatalogState = getCloudCatalog()): { used: number; limit: number; atLimit: boolean; label: string; card: string } | null {
+  // Only a server that counts running workspaces apart (PRO-76) says "running":
+  // before it, `used`/`limit` counted every workspace, stopped ones included.
   const quota = quotaOf(orgId, catalog);
-  if (!quota) return null;
-  const { used, limit } = quota.running ?? quota;
+  if (!quota?.running) return null;
+  const { used, limit } = quota.running;
   if (!Number.isFinite(used) || !Number.isFinite(limit) || limit <= 0) return null;
   const atLimit = used >= limit;
   const lines = [`${used} of ${limit} cloud workspaces running${atLimit ? ". Stop one to start another." : ""}`];

@@ -96,7 +96,7 @@ function signIn() {
 
 /** The catalog as a relaunch reads it: rows and each workspace's cached sessions. */
 async function load(workspaces: CloudWorkspaceListItem[], cached: Record<string, { sessions: unknown[]; capabilities: string[] | null }> = {}) {
-  await catalog.ingestCloudList({ workspaces, quota: { used: workspaces.length, limit: 3 } }, ORG);
+  await catalog.ingestCloudList({ workspaces, quota: { used: workspaces.length, limit: 3, running: { used: workspaces.length, limit: 3 }, total: { used: workspaces.length, limit: 20 } } } as never, ORG);
   for (const [workspaceId, entry] of Object.entries(cached)) catalog.cacheCloudSessions(ORG, workspaceId, entry.sessions as never, entry.capabilities);
 }
 
@@ -216,9 +216,9 @@ describe("sessions under the project", () => {
       const api = projectTree(`cloud:${ORG}:github.com/acme/api`);
       const chip = within(api).getByTestId("cloud-extra-repositories");
       expect(chip.textContent).toBe("+2 repos");
-      // The tooltip names them; an unselected repository shows by its identity.
-      expect(chip.getAttribute("title")).toBe("multi also checks out acme/web, github.com/acme/docs");
+      // The row is one button: its tooltip names them; an unselected repository shows by its identity.
       expect(within(api).getByTestId("cloud-project-row").contains(chip)).toBe(true);
+      expect(within(api).getByTestId("cloud-project-row").getAttribute("title")).toBe("github.com/acme/api\nmulti also checks out acme/web, github.com/acme/docs");
       // The extra repository is not a second place for the workspace.
       expect(within(projectTree(`cloud:${ORG}:github.com/acme/web`)).queryByTestId("cloud-extra-repositories")).toBeNull();
       expect(within(projectTree(`cloud:${ORG}:github.com/acme/web`)).getAllByTestId("cloud-session-node")).toHaveLength(1);
@@ -232,7 +232,12 @@ describe("sessions under the project", () => {
       mount();
       const api = projectTree(`cloud:${ORG}:github.com/acme/api`);
       const [multi, plain] = within(api).getAllByTestId("cloud-workspace-node");
-      expect(within(multi).getByTestId("cloud-extra-repositories").textContent).toBe("+1 repo");
+      const chip = within(multi).getByTestId("cloud-extra-repositories");
+      expect(chip.textContent).toBe("+1 repo");
+      // Reachable: it takes the focus, says what it means, and does not hide when the row's actions show.
+      expect(chip.getAttribute("tabindex")).toBe("0");
+      expect(chip.getAttribute("aria-label")).toBe("+1 repo. multi also checks out acme/web");
+      expect(chip.className).not.toMatch(/group-hover\/row:hidden|group-focus-within\/row:hidden/);
       expect(within(plain).queryByTestId("cloud-extra-repositories")).toBeNull();
       expect(within(api).getByTestId("cloud-project-row").querySelector('[data-testid="cloud-extra-repositories"]')).toBeNull();
     });
@@ -242,16 +247,33 @@ describe("sessions under the project", () => {
       const view = mount();
       const chip = screen.getByTestId("cloud-org-quota");
       expect(chip.textContent).toBe("1 of 2 running");
-      expect(chip.getAttribute("title")).toBe("1 of 2 cloud workspaces running\n5 of 20 workspaces in all, stopped ones included");
+      expect(chip.getAttribute("aria-label")).toBe("1 of 2 running. 1 of 2 cloud workspaces running\n5 of 20 workspaces in all, stopped ones included");
       expect(chip.getAttribute("data-at-limit")).toBeNull();
+      // The tooltip can be reached: the chip takes the focus and stays when the header's actions show.
+      expect(chip.getAttribute("tabindex")).toBe("0");
+      expect(chip.className).not.toMatch(/group-hover\/row:hidden|group-focus-within\/row:hidden/);
       view.unmount();
 
-      await catalog.ingestCloudList({ workspaces: [item("one", { repositories: [acmeApi] })], quota: { used: 2, limit: 2 } }, ORG);
+      await catalog.ingestCloudList({ workspaces: [item("one", { repositories: [acmeApi] })], quota: { used: 2, limit: 2, running: { used: 2, limit: 2 }, total: { used: 2, limit: 20 } } } as never, ORG);
       mount();
       const full = screen.getByTestId("cloud-org-quota");
       expect(full.textContent).toBe("2 of 2 running");
       expect(full.getAttribute("data-at-limit")).toBe("true");
-      expect(full.getAttribute("title")).toContain("Stop one to start another.");
+      expect(full.getAttribute("aria-label")).toContain("Stop one to start another.");
+    });
+
+    it("shows no running chip on a server from before PRO-76, whose quota counts stopped workspaces too", async () => {
+      await catalog.ingestCloudList({ workspaces: [item("one", { repositories: [acmeApi] })], quota: { used: 5, limit: 20 } }, ORG);
+      mount();
+      expect(screen.queryByTestId("cloud-org-quota")).toBeNull();
+    });
+
+    it("tells someone a workspace is not shared with nothing of its other repositories", async () => {
+      const none = { role: "none", canApprove: false, canManageShares: false };
+      await load([item("multi", { repositories: [acmeApi, webExtra], you: none, lastActivityAt: 50 }), item("plain", { repositories: [acmeApi], you: none, lastActivityAt: 40 }), item("alone", { repositories: [acmeWeb, { ...acmeApi, primary: false }], you: none })]);
+      const view = mount();
+      expect(screen.queryByTestId("cloud-extra-repositories")).toBeNull();
+      expect(view.container.innerHTML).not.toContain("also checks out");
     });
 
     it("draws neither chip for a server that sends neither field (CS-5 behaviour)", async () => {

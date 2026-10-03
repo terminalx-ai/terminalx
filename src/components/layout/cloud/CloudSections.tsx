@@ -247,10 +247,11 @@ function OrgSection({
         <span className={cn("shrink-0", yieldsToRowActions)} data-testid="cloud-org-role">
           <RowChip>{org.role}</RowChip>
         </span>
+        {/* Stays beside the row's actions (the role chip gives way): its tooltip is reached by hovering or focusing it. */}
         {usage && (
-          <span className={cn("shrink-0", usage.atLimit && "[&>span]:text-warning", yieldsToRowActions)} title={usage.card} data-testid="cloud-org-quota" data-at-limit={usage.atLimit || undefined}>
-            <RowChip>{usage.label}</RowChip>
-          </span>
+          <InfoChip card={usage.card} className={usage.atLimit ? "[&>span]:text-warning" : undefined} data-testid="cloud-org-quota" data-at-limit={usage.atLimit || undefined}>
+            {usage.label}
+          </InfoChip>
         )}
         <RowActions persistent className={menu.open || addMenu.open ? "not-sr-only" : undefined}>
           {!live && (
@@ -464,7 +465,8 @@ function CloudProjectNode({ project, onLifecycle }: { project: CloudProject; onL
       <div
         data-tree-row
         className={cn(actionRow, "relative flex h-8 min-w-0 items-center gap-1 rounded-md px-1", drafting || focused ? "bg-selected" : holdsSelection ? "bg-selected/50" : "hover:bg-selected/50")}
-        title={project.blank ? `${project.fullName} · no repository` : project.identity}
+        // The row is one button, so its own tooltip names the extra repositories of its only workspace.
+        title={[project.blank ? `${project.fullName} · no repository` : project.identity, !grouped && project.workspaces[0] ? extraRepositories(project.workspaces[0].item)?.card : null].filter(Boolean).join("\n")}
         data-testid="cloud-project-row"
         data-project={project.key}
       >
@@ -481,7 +483,7 @@ function CloudProjectNode({ project, onLifecycle }: { project: CloudProject; onL
           <span className="min-w-0 flex-1 truncate text-[13px]">{project.fullName}</span>
           {project.pinned && <Pin className="size-3 shrink-0 text-faint" />}
           {/* One workspace has no row of its own: its extra repositories show here. */}
-          {!grouped && project.workspaces[0] && <ExtraRepositoriesChip item={project.workspaces[0].item} />}
+          {!grouped && project.workspaces[0] && <ExtraRepositoriesChip item={project.workspaces[0].item} plain />}
           {project.blank && <RowChip>no repo</RowChip>}
           {!project.selected && <RowChip>not accessible</RowChip>}
         </button>
@@ -607,15 +609,51 @@ function workspaceCard(item: CloudWorkspaceListItem, activity: CloudActivity): s
  * listed under (its primary one, S1 `repositories`); the tooltip names them.
  * Nothing on a server that does not report repositories.
  */
-function ExtraRepositoriesChip({ item, className }: { item: CloudWorkspaceListItem; className?: string }) {
+/** The other repositories a workspace checks out, and the sentence naming them; null when there are none or this person may not know. */
+function extraRepositories(item: CloudWorkspaceListItem): { label: string; card: string } | null {
+  // Someone the workspace is not shared with learns nothing of what is in it.
+  if (item.workspace.you?.role === "none") return null;
   const repositories = item.workspace.repositories ?? [];
   const extra = repositories.filter((repository, index) => (repositories.some((each) => each.primary) ? !repository.primary : index > 0));
   if (!extra.length) return null;
   const names = extra.map((repository) => repository.fullName ?? repository.identity ?? "a repository no longer selected");
+  return { label: `+${extra.length} ${extra.length === 1 ? "repo" : "repos"}`, card: `${item.workspace.name} also checks out ${names.join(", ")}` };
+}
+
+/**
+ * A chip whose explanation is a tooltip: it can be hovered and takes the
+ * keyboard focus, so the tooltip is reachable either way, and it never gives
+ * way to the row's actions (a chip that hides on hover has a tooltip nobody
+ * can open).
+ */
+function InfoChip({ card, className, children, ...rest }: { card: string; className?: string; children: string } & Record<`data-${string}`, string | boolean | undefined>) {
   return (
-    <span className={cn("shrink-0", className)} title={`${item.workspace.name} also checks out ${names.join(", ")}`} data-testid="cloud-extra-repositories">
-      <RowChip>{`+${extra.length} ${extra.length === 1 ? "repo" : "repos"}`}</RowChip>
-    </span>
+    <WithTooltip label={card.replace(/\n/g, " · ")}>
+      <span tabIndex={0} role="note" aria-label={`${children}. ${card}`} className={cn("shrink-0 rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/40", className)} {...rest}>
+        <RowChip>{children}</RowChip>
+      </span>
+    </WithTooltip>
+  );
+}
+
+/**
+ * `+N repo` on a workspace's own row. Inside a project row (which is one
+ * button) the plain chip is used instead and the row's tooltip names them.
+ */
+function ExtraRepositoriesChip({ item, plain = false }: { item: CloudWorkspaceListItem; plain?: boolean }) {
+  const extra = extraRepositories(item);
+  if (!extra) return null;
+  if (plain) {
+    return (
+      <span className="shrink-0" data-testid="cloud-extra-repositories">
+        <RowChip>{extra.label}</RowChip>
+      </span>
+    );
+  }
+  return (
+    <InfoChip card={extra.card} data-testid="cloud-extra-repositories">
+      {extra.label}
+    </InfoChip>
   );
 }
 
@@ -662,7 +700,7 @@ function WorkspaceGroupNode({ node, expanded: projectExpanded, onLifecycle }: { 
             <RowChip mono>{branch}</RowChip>
           </span>
         )}
-        <ExtraRepositoriesChip item={node.item} className={yieldsToRowActions} />
+        <ExtraRepositoriesChip item={node.item} />
         <ShareBadge you={workspace.you} sharedWith={workspace.sharedWith} className={yieldsToRowActions} />
         <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", DOT[activity.tone])} />
         <span className={cn("shrink-0 text-[10px] text-faint", activity.tone === "attention" && "text-destructive", yieldsToRowActions)} data-testid="cloud-workspace-row-state">
