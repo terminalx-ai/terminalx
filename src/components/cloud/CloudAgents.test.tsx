@@ -510,6 +510,8 @@ describe("shared cloud workspace agent tabs (PRO-30)", () => {
         updatedAt: 1,
       },
       { clientCommandId: "c-4", tabId: "t-1", kind: "send", text: "!ls", state: "rejected", category: "shell-command-forbidden", createdAt: 1, updatedAt: 1 },
+      // PRO-33: the runtime could not write its record of the command, so it left the agent alone.
+      { clientCommandId: "c-5", tabId: "t-1", kind: "send", text: "go on", state: "rejected", category: "receipt-store-failed", createdAt: 1, updatedAt: 1 },
     ];
     const state = share(me("driver"));
     render(view(state));
@@ -517,6 +519,7 @@ describe("shared cloud workspace agent tabs (PRO-30)", () => {
     expect(screen.getByText("Not sent: your access changed")).toBeTruthy();
     expect(screen.getByText("Not sent: /model: only someone who can approve permissions may send it. Without that right you can send /clear, /compact, /help.")).toBeTruthy();
     expect(screen.getByText("Not sent: a message that starts with ! runs as a shell command, which needs someone who can approve permissions.")).toBeTruthy();
+    expect(screen.getByText("Not sent: the workspace could not record it (its disk may be full)")).toBeTruthy();
     expect(screen.getByTestId("cloud-agent-followup").textContent).toContain("Queued follow-up from Alice:");
   });
 

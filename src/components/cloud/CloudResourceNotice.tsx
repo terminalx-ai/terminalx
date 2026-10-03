@@ -9,10 +9,10 @@ import { cn } from "@/lib/cn";
  * shows nothing for a workspace that is not connected, so looking at a
  * stopped workspace never wakes it. `turn`: an agent turn is running here.
  */
-export function CloudResourceNotice({ workspaceKey, turn = false }: { workspaceKey: string | null; turn?: boolean }) {
+export function CloudResourceNotice({ workspaceKey, turn = false, manage = false }: { workspaceKey: string | null; turn?: boolean; /** This person has a terminal in the workspace to act with. */ manage?: boolean }) {
   const { resources, memoryWarning } = useCloudResources(workspaceKey, turn);
-  const storage = storageNotice(resources?.storage ?? null);
-  const memory = memoryWarning && resources?.memory ? memoryNoticeText(resources.memory) : null;
+  const storage = storageNotice(resources?.storage ?? null, manage);
+  const memory = memoryWarning && resources?.memory ? memoryNoticeText(resources.memory, manage) : null;
   if (!storage && !memory) return null;
   return (
     <>

@@ -49,18 +49,32 @@ export function bytesText(bytes: number): string {
   return `${Math.max(0, Math.round(bytes / MIB))} MB`;
 }
 
-/** What to tell the person about the disk; null while there is room. */
-export function storageNotice(storage: RuntimeResources["storage"]): { level: "low" | "full"; text: string } | null {
+/** Why the disk counts as full or almost full: its bytes, or its limit on the number of files. */
+function storageReason(storage: NonNullable<RuntimeResources["storage"]>, level: "low" | "full"): string {
+  const free = `${bytesText(storage.availableBytes)} free of ${bytesText(storage.totalBytes)}`;
+  const bytes =
+    level === "full" ? storage.availableBytes < STORAGE_FULL_BYTES : storage.availableBytes < STORAGE_LOW_BYTES && storage.availableBytes < storage.totalBytes * STORAGE_LOW_RATIO;
+  if (bytes) return free;
+  // The bytes are not what ran out: saying only how many are free would point at the wrong thing.
+  return level === "full" ? `it has reached its limit on the number of files, with ${free}` : `it is close to its limit on the number of files, with ${free}`;
+}
+
+/**
+ * What to tell the person about the disk; null while there is room. `manage`
+ * says they have a terminal there to free space with (a viewer or a plain
+ * driver has none): the others are told who can.
+ */
+export function storageNotice(storage: RuntimeResources["storage"], manage = true): { level: "low" | "full"; text: string } | null {
   const level = storageLevel(storage);
   if (level === "ok" || !storage) return null;
-  const outOfFiles = storage.totalInodes > 0 && storage.availableBytes >= STORAGE_LOW_BYTES;
-  const room = outOfFiles ? "it has no room for more files" : `${bytesText(storage.availableBytes)} free of ${bytesText(storage.totalBytes)}`;
+  const reason = storageReason(storage, level);
+  const how = manage ? "delete files or build output from a terminal" : "someone who manages this workspace can delete files or build output";
   return level === "full"
     ? {
         level,
-        text: `The workspace's disk is full (${room}). Saves, commits and agent work fail until space is freed: delete files or build output from a terminal. Nothing already on the disk is lost.`,
+        text: `The workspace's disk is full (${reason}). Saves, commits and agent work fail until space is freed: ${how}. Nothing already on the disk is lost, and a message the workspace could not record is refused, not half-applied.`,
       }
-    : { level, text: `The workspace's disk is almost full (${room}). Free some space, or saves, commits and agent work will start to fail.` };
+    : { level, text: `The workspace's disk is almost full (${reason}). Saves, commits and agent work will start to fail unless space is freed: ${how}.` };
 }
 
 /** Whether a reading shows the machine short of memory. Not reported is not low. */
@@ -68,8 +82,11 @@ export function memoryLow(memory: RuntimeResources["memory"]): boolean {
   return !!memory && memory.totalBytes > 0 && memory.availableBytes < memory.totalBytes * MEMORY_LOW_RATIO && memory.availableBytes < MEMORY_LOW_BYTES;
 }
 
-export function memoryNoticeText(memory: NonNullable<RuntimeResources["memory"]>): string {
-  return `The workspace's machine is almost out of memory (${bytesText(memory.availableBytes)} free of ${bytesText(memory.totalBytes)}). The agent, or a program it runs, may be stopped by the machine. Stop programs you do not need from a terminal; if it keeps happening, the work needs a larger machine.`;
+export function memoryNoticeText(memory: NonNullable<RuntimeResources["memory"]>, manage = true): string {
+  const what = manage
+    ? "Stop programs you do not need from a terminal; if it keeps happening, the work needs a larger machine."
+    : "Someone who manages this workspace can stop programs it does not need; if it keeps happening, the work needs a larger machine.";
+  return `The workspace's machine is almost out of memory (${bytesText(memory.availableBytes)} free of ${bytesText(memory.totalBytes)}). The agent, or a program it runs, may be stopped by the machine. ${what}`;
 }
 
 // ---- sampling
