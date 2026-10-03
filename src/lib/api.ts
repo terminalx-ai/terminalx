@@ -172,6 +172,12 @@ export const api = {
   cloudProvider: (provider: CloudWorkspaceProviderId) => invoke<CloudProviderConnection>("cloud_provider", { provider }),
   cloudProviderDisconnect: (provider: CloudWorkspaceProviderId, contextRevision: string, disposition: "retain" | "destroy") =>
     invoke<CloudProviderConnection>("cloud_provider_disconnect", { provider, contextRevision, disposition }),
+  /** Allow or stop new machines on a provider (owners and admins); saved keys and running workspaces are untouched. */
+  cloudProviderSetCreationEnabled: (provider: CloudWorkspaceProviderId, contextRevision: string, enabled: boolean) =>
+    invoke<CloudProviderSummary>("cloud_provider_set_creation_enabled", { provider, contextRevision, enabled }),
+  /** Check the saved key against the provider again, without entering it. */
+  cloudProviderRevalidate: (provider: CloudWorkspaceProviderId, contextRevision: string) =>
+    invoke<CloudProviderConnection>("cloud_provider_revalidate", { provider, contextRevision }),
   cloudProviderConnect: (provider: CloudWorkspaceProviderId, input: CloudProviderConnectInput) =>
     invoke<CloudProviderConnection>("cloud_provider_connect", { provider, input }),
   // Cloud workspace routes take the Organization they act in (CS-18). None

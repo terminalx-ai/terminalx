@@ -321,6 +321,8 @@ pub fn run() {
             commands::cloud_provider,
             commands::cloud_provider_connect,
             commands::cloud_provider_disconnect,
+            commands::cloud_provider_set_creation_enabled,
+            commands::cloud_provider_revalidate,
             commands::cloud_workspace_setup,
             commands::cloud_workspace_quote,
             commands::cloud_workspace_create,
