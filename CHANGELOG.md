@@ -1,5 +1,108 @@
 # TerminalX changelog
 
+## 0.2.6
+
+Cloud sessions stay connected after a workspace stops and restarts, and
+organization role changes reach the app without a restart.
+
+### Cloud sessions
+
+- An open cloud session attaches to the workspace again after someone else
+  stops and wakes it: the view reconnects, subscribes to sessions, tabs,
+  terminals and the transcript again, and driver controls work on the new
+  runtime. Looking at a workspace never wakes it. (#238)
+- The session chip reads "Live" only while the transport is connected, shows
+  "Stopping…" while a stop runs, then "Stopped", and "Reconnecting…" while a
+  new attach is in progress. A turn that finished while the desktop was away
+  no longer stays "Working". (#238)
+- Stopping or archiving a workspace from the sidebar no longer closes a
+  connection a session view still holds; the row reads Stopping at once. (#238)
+
+### Organizations and sharing
+
+- A demoted admin's role updates in the app: roles are re-read on launch, on
+  focus, on refresh and whenever a cloud request is refused for lack of role.
+  Menus, the "+" button and new-session actions follow the current role, and
+  refusals explain that the role changed. (#239)
+- The Members role select shows the saved role after a refused change, and
+  the roster read is retried once after a transient failure. (#239)
+- A member's empty organization explains that no cloud projects are shared
+  yet. Workspaces that leave the list keep their last known names, new tabs
+  are named by their agent until the first message, and narrow cloud session
+  headers give way in a predictable order. (#239)
+
+## 0.2.5
+
+Cloud projects and agent sessions now live alongside local work in the desktop,
+with workspace sharing, organization controls and runtime diagnostics.
+
+### Cloud workspaces
+
+- Create cloud workspaces from GitHub repositories and a first prompt, then
+  browse projects, workspaces and agent sessions in the sidebar. Cloud sessions
+  use the same conversation view, dashboard, notifications and keyboard
+  navigation as local sessions. (#184, #191, #214, #215, #221, #224)
+- Run agent tabs and interactive shell terminals in cloud workspaces. Browse,
+  edit and search remote files, review Git changes, commit and create pull
+  requests from the desktop. (#181, #185, #188, #190, #207, #211, #235)
+- Share workspaces with organization members, see presence, exchange notes
+  and hand over driver control. Sharing controls are available from the
+  sidebar, with role and revocation states shown clearly. Revoked workspaces
+  drop cached session rows, and member actions reflect current access. (#194, #234, #236)
+- Manage organization members, invitations, GitHub repositories, compute
+  limits, provider usage, workspace configuration, prompts, MCP and secrets
+  in Account settings. (#179, #183, #184, #186)
+- Archive and delete cloud workspaces with final checkpoints. Opening the app
+  or dismissing a menu no longer wakes a stopped workspace, and running-limit
+  errors explain what to change. (#193, #222, #229)
+- Add administrator cloud diagnostics and redacted exports; improve runtime
+  bootstrap, connection recovery, environment templates and agent first-run
+  setup. (#177, #178, #192, #198, #201)
+
+### Everyday fixes
+
+- Recall earlier and later messages with Up/Down in the chat composer. (#231)
+- Keep chat scrolling stable and prevent cloud content from pushing the app
+  outside its window. Cloud terminals appear in the sidebar. (#174, #235)
+- Avoid false stalled-session reports and keep a second TerminalX instance
+  from disconnecting tabs in the first instance. (#226, #227)
+- Clarify the Changes sidebar's scope and link to uncommitted files. (#175)
+- Improve pairing QR readability and relay recovery. Companion source changes
+  add guided scanning and agent conversation navigation; they require a
+  separately updated mobile app. (#165, #171, #172, #173)
+
+## 0.2.4
+
+- Add recovery actions for stalled agent sessions. (#161)
+- Name agent tabs from their first saved request, preserving custom names
+  and giving existing unnamed conversations readable titles. (#159)
+- Improve mobile conversation selection and access, with separate transcripts
+  and drafts for each agent tab. These companion changes require an updated
+  mobile app. (#159)
+- Improve mobile reconnection across LAN and VPN changes by sharing multiple
+  direct endpoints and the Mac's Bonjour address. Both desktop and companion
+  need updating to use the new pairing offers. (#160)
+- Restore the TerminalX Legacy icon across desktop and mobile, with a distinct
+  orange D badge for development builds. (#157)
+- Explain Claude Code's terminal diff sidebar and its `/diff` toggle in the
+  Terminal view, including narrow panes. (#158)
+
+## 0.2.3
+
+- Choose whether website links open in the TerminalX browser or the system
+  browser. Context-menu actions and ⇧⌘-click offer the alternate browser.
+- Select the transcription microphone beside the composer mic, with the
+  same saved preference available in Settings. Unavailable devices show the
+  system-default fallback; selection is disabled during recording. (#137)
+- Account settings support organization creation and selection, plus
+  administrator provider onboarding with a native secure key dialog and
+  explicit billing and organization-use consent. (#145)
+- Clarify relay offline status and how relay pairing differs from local
+  network pairing. (#146)
+- Use `TERMINALX_HOME` as the canonical state-directory override, retaining
+  `RACCOON_HOME` as a fallback for existing setups. (#150)
+- Redact and aggregate workspace pull-request recovery errors.
+
 ## 0.2.2
 
 Open ordinary folders as projects and follow chat links directly into the
