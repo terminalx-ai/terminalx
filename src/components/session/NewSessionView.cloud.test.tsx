@@ -43,11 +43,14 @@ vi.mock("@/lib/models", async (original) => ({
   PERMISSION_MODES: [{ id: "bypassPermissions", label: "Bypass", hint: "" }],
   refreshModels: vi.fn(),
   upgradeHint: () => null,
-  useModels: () => [{ id: "opus", label: "Opus", efforts: [], defaultEffort: null, isDefault: true }],
+  useModels: () => [
+    { id: "opus", label: "Opus", harness: "claude", efforts: [], defaultEffort: null, isDefault: true, alias: true, resolved: "claude-opus-5-5" },
+    { id: "claude-opus-5", label: "Opus 5", harness: "claude", efforts: [], defaultEffort: null, isDefault: false },
+  ],
 }));
 vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
 vi.mock("@/lib/prefs", () => ({
-  usePrefs: () => ({ useWorktree: true, lastAgent: "claude", lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", lastProject: null }),
+  usePrefs: () => ({ useWorktree: true, lastAgent: "claude", lastModel: { claude: "claude-opus-5" }, lastEffort: {}, lastMode: "bypassPermissions", lastProject: null }),
   setPrefs: vi.fn(),
 }));
 const local = { path: "/repos/raccoon", name: "raccoon" } as Project;
@@ -124,6 +127,9 @@ describe("new session in a cloud project", () => {
     type("Fix the login redirect");
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
     await waitFor(() => expect(flow.startInWorkspace).toHaveBeenCalledTimes(1));
+    // The reader last pinned Opus 5 for local work. The workspace's CLI may not have it, so the alias goes instead,
+    // and the button claims no version for it.
+    expect(screen.getByRole("button", { name: "Opus (latest)" })).toBeTruthy();
     expect(flow.startInWorkspace).toHaveBeenCalledWith({ kind: "wake", node }, { agent: "claude", model: "opus", effort: null, mode: "bypassPermissions", prompt: "Fix the login redirect", useWorktree: true });
     expect(flow.prepareCloudCreate).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalled();

@@ -15,7 +15,7 @@ import {
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
 import { keycaps, useHotkey } from "@/lib/hotkeys";
-import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, modeLabel, modelGroups, modelNote, prettyModelId, refreshModels, runningModelName, useModels } from "@/lib/models";
+import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, modeLabel, modelForTab, modelGroups, modelNote, offeredOn, prettyModelId, refreshModels, runningModelName, useModels } from "@/lib/models";
 import { chooseMode } from "@/lib/dialogs";
 import { files as filesApi, type FileHit, type ImageInput, type SlashCommand } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
@@ -95,9 +95,13 @@ export function Composer({
   canStop?: boolean;
   autoFocus?: boolean;
 }) {
-  const models = useModels(tab.harness);
-  // A pinned Claude version the list no longer carries is still what the tab runs; it is not shown as the default.
-  const model = models.find((m) => m.id === tab.model) ?? (tab.model.startsWith("claude-") ? undefined : models.find((m) => m.isDefault));
+  const listed = useModels(tab.harness);
+  const model = modelForTab(listed, tab.model);
+  // What may be chosen here, plus what the tab is already on if that is not among them.
+  const models = useMemo(() => {
+    const offered = offeredOn(listed, modelsAreLocal);
+    return model && !offered.some((m) => m.id === model.id) ? [...offered, model] : offered;
+  }, [listed, modelsAreLocal, model?.id]);
   const [caret, setCaret] = useState(0);
   const [commands, setCommands] = useState<SlashCommand[]>(() => commandCache.get(`${cwd}|${tab.harness}`) ?? []);
   const [fileHits, setFileHits] = useState<FileHit[]>([]);
@@ -404,6 +408,8 @@ export function Composer({
               <Button variant="ghost" size="sm" className="min-w-12 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? modelTitle} aria-label={settingsLockedReason ? `Model: ${settingsLockedReason}` : undefined}>
                 <AgentMark id={tab.harness} className="size-3.5 shrink-0" />
                 <span className="min-w-0 truncate text-foreground">{modelName}</span>
+                {/* An alias and the same version pinned read alike otherwise. */}
+                {model?.alias ? <span className="shrink-0 text-faint">latest</span> : null}
                 {effortName ? <span className="min-w-0 truncate text-faint">{effortName}</span> : null}
                 <ChevronDown className="size-3 text-faint" />
               </Button>

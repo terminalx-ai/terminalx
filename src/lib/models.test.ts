@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ModelInfo } from "@/lib/api";
-import { EFFORT_LABEL, aliasRuns, modelGroups, modelLabel, modelNote, modelOptionText, prettyModelId, runningModelName, upgradeHint } from "@/lib/models";
+import { EFFORT_LABEL, aliasRuns, modelForTab, modelGroups, modelLabel, modelNote, modelOptionText, offeredOn, prettyModelId, runningModelName, upgradeHint } from "@/lib/models";
 
 const model = (id: string, label: string, upgrade: string | null = null): ModelInfo => ({
   id,
@@ -100,6 +100,24 @@ describe("a Claude alias and its pinned versions", () => {
     expect(aliasRuns(opus, "claude-sonnet-5-5")).toBe("claude-opus-5-5");
     expect(aliasRuns(pinned, "claude-opus-5-5")).toBeNull();
     expect(runningModelName(pinned, "claude-opus-5-5")).toBe("Opus 5");
+  });
+
+  it("offers only the aliases for another machine, whose CLI may not run a version pinned here", () => {
+    const codex = model("gpt-5.6-sol", "GPT-5.6 Sol");
+    expect(offeredOn([...all, codex], true).map((m) => m.id)).toEqual(["opus", "sonnet", "claude-opus-5", "gpt-5.6-sol"]);
+    // A harness with no aliases is left as it is.
+    expect(offeredOn([...all, codex], false).map((m) => m.id)).toEqual(["opus", "sonnet", "gpt-5.6-sol"]);
+  });
+
+  it("gives a pinned id the list does not carry its own entry, with its family's efforts", () => {
+    const withEfforts = [{ ...opus, isDefault: true, efforts: ["low", "high"], defaultEffort: "high" }, { ...unasked, efforts: ["low"] }, pinned];
+    expect(modelForTab(withEfforts, "opus")?.id).toBe("opus");
+    expect(modelForTab(withEfforts, "claude-opus-4-8")).toMatchObject({ id: "claude-opus-4-8", label: "Opus 4.8", alias: false, isDefault: false, efforts: ["low", "high"], defaultEffort: "high" });
+    expect(modelForTab(withEfforts, "claude-sonnet-4-6")).toMatchObject({ label: "Sonnet 4.6", efforts: ["low"] });
+    // Anything else unknown still reads as the default, and so does no model at all.
+    expect(modelForTab(withEfforts, "gpt-stale")?.id).toBe("opus");
+    expect(modelForTab(withEfforts, "")?.id).toBe("opus");
+    expect(modelForTab([], "claude-opus-4-8")).toMatchObject({ label: "Opus 4.8", efforts: [] });
   });
 
   it("lists the aliases, then the versions that can be pinned", () => {

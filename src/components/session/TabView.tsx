@@ -24,7 +24,7 @@ import { clearTabViewError, isPtyFirst, leaveTerminalView, startTabAgent, termin
 import { classifyRecovery, RECOVERY_MESSAGES, RECOVERY_PROMPT, recoveryFromEvents } from "@/lib/recovery";
 import { RecoveryBanner } from "./RecoveryBanner";
 import { ContinuationDialog } from "./ContinuationDialog";
-import { useModels } from "@/lib/models";
+import { offeredOn, useModels } from "@/lib/models";
 import { TAB_STATUS_LABEL, type SessionEntry, type TabEntry } from "@/types/session";
 
 /**
@@ -366,7 +366,7 @@ export function TabView({
       <Button size="sm" disabled={recovering} onClick={() => void retry()}>Resume safely</Button>
     </div>}
     <RecoveryBanner kind={recovery} waiting={tab.status === "waiting"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding} answerBlockedReason={backend.approveBlockedReason ?? null} askDetail={!!shared}
-      models={models.filter(m => m.id !== tab.model && !m.upgrade)} onPermission={answerPermission} onQuestions={answerQuestions}
+      models={offeredOn(models, local).filter(m => m.id !== tab.model && !m.upgrade)} modelsAreLocal={local} onPermission={answerPermission} onQuestions={answerQuestions}
       onRetry={retry} onStop={stop} onContinue={() => {
         if (recoveryLock.current) return;
         recoveryLock.current = true;

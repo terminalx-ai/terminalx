@@ -33,7 +33,7 @@ import {
 } from "@/lib/cloudCreate";
 import { cloudOrgArg, rememberCreatedWorkspace } from "@/lib/cloudCatalog";
 import { errorCode } from "@/lib/cloudTerminals";
-import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, modelOptionText, useModels } from "@/lib/models";
+import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, modelOptionText, offeredOn, useModels } from "@/lib/models";
 
 const AGENTS = [
   { id: "claude", label: "Claude Code" },
@@ -93,7 +93,8 @@ export function CloudCreateWorkspace({
     setTrackedState(snapshot);
     if (snapshot) progress.current?.(snapshot);
   }, []);
-  const models = useModels(form.agent);
+  // Aliases only: this list is the desktop's, and the new workspace's CLI may not run a version pinned from it.
+  const models = offeredOn(useModels(form.agent), false);
   const model = models.find((item) => item.id === form.model) ?? null;
 
   const [repositoriesError, setRepositoriesError] = useState<string | null>(null);

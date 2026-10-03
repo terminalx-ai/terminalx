@@ -1665,8 +1665,10 @@ impl WorkspaceRpc {
         } else {
             Vec::new()
         };
-        // This runtime's own CLI, which need not be the desktop's version.
-        let claude = if installed.iter().any(|agent| agent.id == "claude") { crate::harness::claude::models::get(false) } else { Vec::new() };
+        // This runtime's own CLI, which need not be the desktop's version. A
+        // VM lives long: the list is re-read once it has aged, as the desktop
+        // does when a picker opens, so a CLI update here is noticed.
+        let claude = if installed.iter().any(|agent| agent.id == "claude") { crate::harness::claude::models::get(true) } else { Vec::new() };
         let models = crate::models::offered(claude, codex);
         let agents: Vec<Value> = installed
             .into_iter()

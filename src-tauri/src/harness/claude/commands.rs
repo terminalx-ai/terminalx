@@ -77,7 +77,8 @@ pub fn parse_commands(reply: &Value) -> Vec<SlashCommand> {
 }
 
 fn probe(cwd: &Path) -> Result<Vec<SlashCommand>> {
-    Ok(parse_commands(&super::ask_initialize(cwd)?))
+    // The reader's own setup is the point here: plugin and user commands come from it.
+    Ok(parse_commands(&super::ask_initialize(cwd, &[])?))
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { runningLimitReached } from "@/lib/runningLimit";
 import { useTabLog } from "@/lib/agentEvents";
 import { buildTranscript } from "@/lib/transcript";
-import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, modelOptionText, useModels } from "@/lib/models";
+import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, modelOptionText, offeredOn, useModels } from "@/lib/models";
 import {
   attachCloudAgentTab,
   closeCloudAgentTab,
@@ -321,7 +321,8 @@ function NewAgentForm({
   onCancel: () => void;
 }) {
   const [agent, setAgent] = useState("claude");
-  const models = useModels(agent);
+  // Aliases only: this list is the desktop's, and the workspace's CLI may not run a version pinned from it.
+  const models = offeredOn(useModels(agent), false);
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
   const [mode, setMode] = useState(DEFAULT_PERMISSION_MODE);

@@ -108,6 +108,46 @@ export function modelOptionText(m: ModelInfo, all: ModelInfo[], here = true): st
   return note ? `${m.label} (${note})` : m.label;
 }
 
+/**
+ * The models to offer for a tab on this machine (`here`) or on another one (a
+ * cloud workspace). Elsewhere only the family aliases are offered where a
+ * harness has them: every CLI version takes `opus`, but a pinned version from
+ * this machine's list may be one the other machine's CLI cannot run, and it
+ * would fail at the first turn.
+ */
+export function offeredOn(models: ModelInfo[], here: boolean): ModelInfo[] {
+  if (here) return models;
+  return models.filter((m) => m.alias || !models.some((x) => x.harness === m.harness && x.alias));
+}
+
+/**
+ * The entry for the model a tab is on. A full Claude id the list does not
+ * carry (a version pinned earlier, or on another machine) is still what the
+ * tab runs, so it gets an entry of its own, named after the id and taking the
+ * efforts of its family, rather than being shown as the default. Any other
+ * unknown id reads as the default, as it always has.
+ */
+export function modelForTab(models: ModelInfo[], id: string): ModelInfo | undefined {
+  const listed = models.find((m) => m.id === id);
+  if (listed) return listed;
+  const fallback = models.find((m) => m.isDefault);
+  if (!id.startsWith("claude-")) return fallback;
+  const family = models.find((m) => m.alias && id.includes(`-${m.id}-`)) ?? fallback;
+  return {
+    id,
+    label: prettyModelId(id),
+    harness: family?.harness ?? "claude",
+    efforts: family?.efforts ?? [],
+    defaultEffort: family?.defaultEffort ?? null,
+    acceptsImages: family?.acceptsImages ?? true,
+    isDefault: false,
+    upgrade: null,
+    description: null,
+    alias: false,
+    resolved: null,
+  };
+}
+
 /** A menu's models as the reader chooses between them: the aliases, then the versions that can be pinned. */
 export function modelGroups(models: ModelInfo[]): { title: string | null; models: ModelInfo[] }[] {
   const latest = models.filter((m) => m.alias);
