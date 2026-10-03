@@ -67,6 +67,16 @@ jobs:
       - name: vitest
         run: pnpm vitest run
 
+      # Layout checks that jsdom cannot make: the built app in WebKit, measured.
+      - name: Build the frontend
+        run: pnpm build
+
+      - name: Install WebKit for the layout checks
+        run: pnpm exec playwright install webkit
+
+      - name: WebKit layout checks
+        run: pnpm test:webkit-layout
+
       # The computer-use helper is a Swift package with its own unit tests.
       # It is built before the Rust checks so tauri-build packages a real
       # helper rather than the empty stand-in build.rs creates.
