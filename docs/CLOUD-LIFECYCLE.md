@@ -35,9 +35,14 @@ an archive's `checkpoint`, a delete's `cleanup` report and the list's
   `unconfirmed`) until the provider confirms. A delete that stopped (a
   provider credential needing repair) is retried from the row; the retry
   resumes the same operation.
-- The workspace list shows archived workspaces apart, with their deadline,
-  what the final save did, Read conversations (never wakes), Unarchive (it
-  stays suspended), Delete now, and Retry archive for an archive that failed.
+- The sidebar shows archived workspaces apart, under each organization's
+  "Archived workspaces" node, with their deadline and what the final save
+  did. A row's menu has Read conversations (it selects the workspace, which
+  connects without waking), Unarchive (it stays suspended), Delete, and Retry
+  archive for an archive that failed (the row says why it did not finish).
+  What this Mac dropped of a workspace deleted elsewhere is said once above
+  the organization sections. The full-window cloud page that used to hold
+  this list is gone (PRO-68).
 - Tombstones (`src/lib/cloudLifecycle.ts` `purgeTombstones`): for each deleted
   workspace the desktop closes its connection, drops its terminals, agent
   tabs and cloud editors (unsaved text included) and, natively, its agent
@@ -81,7 +86,7 @@ either way). Refreshing sooner while an archive is pending is a follow-up.
   only once confirmed; a refusal for new work; an offline workspace; a
   provider without permanent delete; cleanup progress; retry after a
   provider failure.
-- `src/components/cloud/CloudSessionPage.test.tsx`: the archive list,
+- `src/components/layout/cloud/CloudSections.test.tsx`: the archive list,
   unarchive without compute, a failed archive, a tombstone's notice.
 - `src/lib/cloudLifecycle.test.ts`: purging a deleted workspace and only it;
   an already-purged tombstone; a failed native purge retried.

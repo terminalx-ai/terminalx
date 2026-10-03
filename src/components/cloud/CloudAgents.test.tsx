@@ -8,7 +8,9 @@ const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
-vi.mock("@/lib/models", () => ({
+vi.mock("@/lib/models", async (original) => ({
+  // The pure helpers stay real; only the list and its loading are stubbed.
+  ...(await original<typeof import("@/lib/models")>()),
   EFFORT_LABEL: {},
   DEFAULT_PERMISSION_MODE: "bypassPermissions",
   PERMISSION_MODES: [
@@ -33,7 +35,7 @@ vi.mock("@/components/chat/Composer", () => ({
 // jsdom has no canvas for the chat's idle animation.
 vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonRunner: () => null, RaccoonScene: () => null }));
 
-import { CloudAgentsView, provisioningLabel } from "./CloudAgents";
+import { CloudAgentsView, connectionLabel, provisioningLabel, stoppedAndStaying } from "./CloudAgents";
 import { resetCloudAgents } from "@/lib/cloudAgents";
 import { rememberYou, resetCollab, startCollab, TYPING_IDLE_MS } from "@/lib/cloudCollab";
 import { rememberPeople, resetPeople } from "@/lib/cloudPeople";
@@ -602,6 +604,47 @@ describe("wake refused at the running limit (saas PRO-76)", () => {
     const waiting = { state: "waitingForRuntime" } as WorkspaceConnectionState;
     expect(provisioningLabel("ready", null, waiting)).toBe("Ready");
     expect(provisioningLabel("provisioning", null, waiting)).toBe("Starting");
-    expect(provisioningLabel("suspended", null, waiting)).toBe("Starting");
+    // A stopped workspace is Starting only once someone resumes it.
+    expect(provisioningLabel("suspended", null, waiting, false, true)).toBe("Starting");
+  });
+
+  // PRO-84: both chips flipped every few seconds while the workspace was simply stopped.
+  it("reads one stable state while a stopped workspace's connection keeps retrying", () => {
+    const tries = ["opening", "waitingForRuntime", "opening", "suspended"].map((state) => ({ state }) as WorkspaceConnectionState);
+    for (const state of tries) {
+      expect(stoppedAndStaying(state, "suspended", false)).toBe(true);
+      expect(connectionLabel(state, "asleep")).toBe("Offline (workspace asleep)");
+      expect(provisioningLabel("suspended", null, state)).toBe("Asleep");
+    }
+    // Being woken: one wait, not "Checking" and "Waiting for runtime" in turn.
+    expect(stoppedAndStaying(tries[0]!, "suspended", true)).toBe(false);
+    expect(new Set(tries.slice(0, 3).map((state) => connectionLabel(state)))).toEqual(new Set(["Waiting for runtime"]));
+    expect(new Set(tries.slice(0, 3).map((state) => provisioningLabel("suspended", null, state, false, true)))).toEqual(new Set(["Starting"]));
+  });
+
+  // Review of #272: a Resume refused at the running limit left "Starting" / "Waiting for runtime" on a stopped workspace.
+  it("reads stopped again when the wake stops or is refused", async () => {
+    const at = (waking: boolean) => (
+      <TooltipProvider>
+        <CloudAgentsView scope={scope} client={client as unknown as WorkspaceRpcClient} state={{ state: "waitingForRuntime" } as WorkspaceConnectionState} workspaceState="suspended" waking={waking} />
+      </TooltipProvider>
+    );
+    const { rerender } = render(at(true));
+    expect(screen.getByTestId("cloud-agent-provisioning").textContent).toContain("Starting");
+    expect(screen.getByTestId("cloud-agent-connection").textContent).toContain("Waiting for runtime");
+    rerender(at(false));
+    expect(screen.getByTestId("cloud-agent-provisioning").textContent).toContain("Asleep");
+    expect(screen.getByTestId("cloud-agent-connection").textContent).toContain("Offline (workspace asleep)");
+    // No Resume control here: the workspace header has the one Resume button.
+    expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
+  });
+
+  it("reads an archived workspace opened to read as offline, not as waiting for its runtime", () => {
+    const tries = ["opening", "waitingForRuntime", "idle"].map((state) => ({ state }) as WorkspaceConnectionState);
+    for (const state of tries) {
+      expect(stoppedAndStaying(state, "archived", false)).toBe(true);
+      expect(provisioningLabel("archived", null, state)).toBe("Archived (unarchive it to resume)");
+    }
+    expect(connectionLabel(tries[1]!, "archived")).toBe("Offline (workspace archived)");
   });
 });

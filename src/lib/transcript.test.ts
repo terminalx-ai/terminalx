@@ -86,4 +86,35 @@ describe("buildTranscript", () => {
     expect(t.contextUsed).toBe(5000);
     expect(t.contextMax).toBe(200000);
   });
+
+  it("keeps the model the agent last said it ran", () => {
+    const events = [
+      ev({ type: "user_message", text: "go", queued: false }),
+      ev({ type: "usage_update", contextUsed: 1000, model: "claude-opus-5" }),
+      ev({ type: "usage_update", contextUsed: 2000 }),
+      ev({ type: "usage_update", contextUsed: 3000, model: "claude-opus-5-5" }),
+    ];
+    expect(buildTranscript(events, true).model).toBe("claude-opus-5-5");
+    expect(buildTranscript(events.slice(0, 1), true).model).toBeUndefined();
+  });
+
+  // PRO-84: a runtime that restarted three times left the same notice three times in one turn.
+  it("leaves every other repeated notice alone, as in a local session", () => {
+    const events = [ev({ type: "user_message", text: "go", queued: false }), ev({ type: "status", text: "Retrying" }), ev({ type: "status", text: "Retrying" })];
+    expect(buildTranscript(events, false).turns[0].work.map((item) => item.kind)).toEqual(["status", "status"]);
+  });
+
+  it("shows the restart notice repeated back to back once, and again after something else happened", () => {
+    const notice = "The workspace runtime restarted and the agent process running this turn ended.";
+    const events = [
+      ev({ type: "user_message", text: "go", queued: false }),
+      ev({ type: "status", text: notice }),
+      ev({ type: "status", text: notice }),
+      ev({ type: "status", text: notice }),
+      ev({ type: "assistant_text", text: "back" }),
+      ev({ type: "status", text: notice }),
+    ];
+    const work = buildTranscript(events, false).turns[0].work;
+    expect(work.map((item) => item.kind)).toEqual(["status", "text", "status"]);
+  });
 });
