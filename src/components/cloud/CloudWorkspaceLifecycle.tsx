@@ -20,11 +20,13 @@ import {
   remaining,
   repositoryLabel,
   repositoryRiskLines,
+  resumeBehaviourText,
   risksOf,
   type RuntimeCheck,
 } from "@/lib/cloudLifecycle";
 import { errorCode } from "@/lib/cloudTerminals";
 import { cloudOrgArg } from "@/lib/cloudCatalog";
+import { cloudProviderName } from "@/lib/cloudSession";
 
 export type LifecycleAction = "stop" | "archive" | "delete";
 
@@ -169,7 +171,13 @@ export function CloudWorkspaceLifecycleDialog({
             options={actions.map((value) => ({ value, label: LABELS[value] }))}
           />
         )}
-        <ActionSummary action={action} retentionDays={retentionDays} removedOnDelete={server?.removedOnDelete ?? []} />
+        <ActionSummary
+          action={action}
+          retentionDays={retentionDays}
+          removedOnDelete={server?.removedOnDelete ?? []}
+          // Until the server has answered, nothing is said about the resume that might be wrong.
+          resume={server === undefined ? null : resumeBehaviourText(cloudProviderName(server?.provider ?? workspace.provider), server?.providerCapabilities.preservesProcessesOnResume)}
+        />
 
         {destructive && (
           <section className="mt-3 flex flex-col gap-1.5 rounded-lg bg-well px-3 py-2 text-xs" aria-label="Before this action" data-testid="cloud-lifecycle-facts">
@@ -260,7 +268,7 @@ export function CloudWorkspaceLifecycleDialog({
   );
 }
 
-function ActionSummary({ action, retentionDays, removedOnDelete }: { action: LifecycleAction; retentionDays: number; removedOnDelete: string[] }) {
+function ActionSummary({ action, retentionDays, removedOnDelete, resume }: { action: LifecycleAction; retentionDays: number; removedOnDelete: string[]; resume: string | null }) {
   const until = dateText(Date.now() + retentionDays * DAY_MS);
   return (
     <dl className="mt-3 grid grid-cols-[6rem_1fr] gap-x-3 gap-y-1 text-xs" data-testid="cloud-lifecycle-summary" data-action={action}>
@@ -276,7 +284,7 @@ function ActionSummary({ action, retentionDays, removedOnDelete }: { action: Lif
       <dt className="text-muted-foreground">Charges</dt>
       <dd>{action === "delete" ? "Stop once the provider confirms the removal." : "Storage keeps billing at the provider while it is kept."}</dd>
       <dt className="text-muted-foreground">Undo</dt>
-      <dd>{action === "stop" ? "Resume at any time." : action === "archive" ? "Unarchive, then resume." : "Not possible."}</dd>
+      <dd data-testid="cloud-lifecycle-undo">{action === "stop" ? (resume ?? "Resume at any time.") : action === "archive" ? "Unarchive, then resume." : "Not possible."}</dd>
     </dl>
   );
 }

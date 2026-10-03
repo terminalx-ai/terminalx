@@ -12,6 +12,14 @@ an archive's `checkpoint`, a delete's `cleanup` report and the list's
 | Archive | stops   | kept until `deleteAfter` (30 days)       | storage keeps billing          | unarchive, then resume |
 | Delete  | removed | removed once the provider confirms       | stop once the provider confirms | none; a tombstone stays |
 
+What "resume" brings back depends on the provider, and the Stop tab says
+which (PRO-33): `providerCapabilities.preservesProcessesOnResume` in the
+disposition facts is `false` for Boat, Hetzner and Machine0 (a cold boot from
+the disk: files, repositories and conversations come back, running programs
+and terminals do not) and `true` only where the machine is frozen as it is
+(local Docker in pause mode). An older server does not send it, and the
+dialog then promises neither (`resumeBehaviourText`).
+
 ## Desktop
 
 - `src/components/cloud/CloudWorkspaceLifecycle.tsx`: one dialog for all
@@ -81,7 +89,8 @@ either way). Refreshing sooner while an archive is pending is a follow-up.
 
 ## Tests
 
-- `src/components/cloud/CloudWorkspaceLifecycle.test.tsx`: dirty files,
+- `src/components/cloud/CloudWorkspaceLifecycle.test.tsx`: what a resume
+  brings back, per provider; dirty files,
   unpushed commits, an open PR and a running turn before an archive; force
   only once confirmed; a refusal for new work; an offline workspace; a
   provider without permanent delete; cleanup progress; retry after a
