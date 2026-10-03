@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AccountStatus, CloudSelectedRepository, CloudWorkspaceList, CloudWorkspaceListItem } from "@/lib/api";
+import type { AccountStatus, CloudCatalogFeed, CloudSelectedRepository, CloudWorkspaceList, CloudWorkspaceListItem } from "@/lib/api";
 
 const mocks = vi.hoisted(() => ({
   api: {
     cloudWorkspaces: vi.fn(),
+    cloudCatalogFeed: vi.fn(),
     cloudWorkspaceRepositories: vi.fn(),
     cloudWorkspaceResume: vi.fn(),
     cloudWorkspaceUnarchive: vi.fn(),
@@ -38,6 +39,7 @@ vi.mock("@/lib/account", () => ({
 import {
   applyCloudSnapshot,
   bootCloudCatalog,
+  cacheCloudSessions,
   cloudOrgArg,
   cloudOrganizations,
   defaultOrgId,
@@ -47,19 +49,25 @@ import {
   lastKnownWorkspace,
   listedOrgManages,
   liveCloudOrgIds,
+  mergeFeedDelta,
   parseCatalog,
   placeCloudProjects,
   pollDelay,
   ACCESS_REFRESH_DELAY_MS,
+  FEED_FAILURES_BEFORE_FALLBACK,
+  FEED_RETRY_AFTER_MS,
   POLL_BACKGROUND_MS,
   POLL_CHANGING_MS,
   POLL_FOCUSED_MS,
   REFRESH_ON_RETURN_FLOOR_MS,
   refreshCloudCatalog,
+  refreshCloudFeed,
   refreshCloudWorkspaces,
   rememberCreatedWorkspace,
   resetCloudCatalog,
   serializeCatalog,
+  subscribeCloudCatalog,
+  usesCatalogFeed,
   type OrgCatalog,
 } from "./cloudCatalog";
 import { resetPurged } from "./cloudLifecycle";
@@ -739,6 +747,380 @@ describe("every organization live (CS-18)", () => {
     bootCloudCatalog();
     await vi.waitFor(() => expect(getCloudCatalog().orgs[ORG_B]?.error).toBe("cloud_workspace_invalid_response"));
     expect(mocks.refreshAccount).not.toHaveBeenCalled();
+  });
+});
+
+describe("the cross-organization catalog feed (PRO-74)", () => {
+  const ORG_B = "org-b";
+  const ORG_C = "org-c";
+  const orgs = [ORG, ORG_B, ORG_C].map((id) => ({ id, name: id, role: id === ORG ? "admin" : "member", isPersonal: false, cloud: { enabled: true, flags: {} } }));
+  const inOrg = (orgId: string, id: string, fields: Record<string, unknown> = {}): CloudWorkspaceListItem => ({ ...item(id, fields), workspace: { ...item(id, fields).workspace, orgId } });
+  // 3 organizations, 30 workspaces.
+  const rows = (orgId: string) => Array.from({ length: 10 }, (_, index) => inOrg(orgId, `${orgId}-w${index}`));
+  const whole = (cursor: string, patch: Partial<Record<string, CloudWorkspaceListItem[]>> = {}): CloudCatalogFeed => ({
+    changed: true,
+    cursor,
+    reset: true,
+    organizations: [ORG, ORG_B, ORG_C].map((orgId) => ({ orgId, workspaces: patch[orgId] ?? rows(orgId), tombstones: [], quota: { used: 1, limit: 2 } })),
+    deletedWorkspaceIds: [],
+  });
+  const unchanged = (cursor: string): CloudCatalogFeed => ({ changed: false, cursor, reset: false, organizations: [], deletedWorkspaceIds: [] });
+  // One status, announced once: a server with the feed never reports a status without it in between.
+  const withFeed = (patch: Partial<AccountStatus> = {}) => {
+    mocks.account.status = {
+      state: "signed-in",
+      identity: { name: "A", email: "a@example.com", organization: "Acme", organizationId: ORG },
+      expiresAt: null,
+      lastError: null,
+      organizations: orgs,
+      multiOrg: true,
+      catalogFeed: true,
+      context: { scope: "s", revision: "s:1", account: "acct" },
+      ...patch,
+    };
+    for (const listener of mocks.listeners) listener();
+  };
+  const idsIn = (orgId: string) => getCloudCatalog().orgs[orgId]?.workspaces.map((w) => w.workspace.id);
+  /** The server as it behaves: the whole catalog once, then 304 while the cursor is current. */
+  const serve = (current: () => CloudCatalogFeed) => mocks.api.cloudCatalogFeed.mockImplementation(async (cursor: string | null) => (cursor === current().cursor ? unchanged(cursor!) : current()));
+
+  it("is used only on a server that advertises it, with every organization live", () => {
+    signIn(orgs);
+    expect(usesCatalogFeed()).toBe(false);
+    mocks.account.status = { ...mocks.account.status, catalogFeed: true };
+    // The feed spans organizations: without membership authorization it is not used.
+    expect(usesCatalogFeed()).toBe(false);
+    mocks.account.status = { ...mocks.account.status, multiOrg: true };
+    expect(usesCatalogFeed()).toBe(true);
+  });
+
+  it("with 3 organizations and 30 workspaces, an idle desktop sends one request per interval, mostly answered 304, and no per-organization list", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    serve(() => whole("c1"));
+    withFeed();
+    bootCloudCatalog();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.api.cloudCatalogFeed).toHaveBeenCalledTimes(1);
+    expect(mocks.api.cloudCatalogFeed).toHaveBeenLastCalledWith(null);
+    expect([ORG, ORG_B, ORG_C].map((orgId) => idsIn(orgId)?.length)).toEqual([10, 10, 10]);
+    const answers: boolean[] = [];
+    const feed = mocks.api.cloudCatalogFeed.getMockImplementation()!;
+    mocks.api.cloudCatalogFeed.mockImplementation(async (cursor: string | null) => {
+      const answer = await feed(cursor);
+      answers.push(answer.changed);
+      return answer;
+    });
+    const before = getCloudCatalog().orgs;
+    for (let interval = 1; interval <= 5; interval++) {
+      await vi.advanceTimersByTimeAsync(POLL_FOCUSED_MS);
+      expect(mocks.api.cloudCatalogFeed).toHaveBeenCalledTimes(1 + interval);
+      expect(mocks.api.cloudCatalogFeed).toHaveBeenLastCalledWith("c1");
+    }
+    expect(answers).toEqual([false, false, false, false, false]);
+    expect(mocks.api.cloudWorkspaces).not.toHaveBeenCalled();
+    // A 304 keeps every row object as it was: nothing is redrawn.
+    for (const orgId of [ORG, ORG_B, ORG_C]) expect(getCloudCatalog().orgs[orgId].workspaces).toBe(before[orgId].workspaces);
+    // The selected repositories are read once per organization (and again only after five minutes), not per interval.
+    expect(mocks.api.cloudWorkspaceRepositories).toHaveBeenCalledTimes(3);
+    // Looking never wakes compute.
+    expect(mocks.api.cloudRemoteAttach).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+  });
+
+  it("shows a change made on another device within one interval", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    let current = whole("c1");
+    serve(() => current);
+    withFeed();
+    bootCloudCatalog();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(idsIn(ORG_B)).not.toContain("made-elsewhere");
+    // Someone creates a workspace in Beta from another machine.
+    current = whole("c2", { [ORG_B]: [inOrg(ORG_B, "made-elsewhere"), ...rows(ORG_B)] });
+    await vi.advanceTimersByTimeAsync(POLL_FOCUSED_MS);
+    expect(idsIn(ORG_B)).toContain("made-elsewhere");
+    expect(mocks.api.cloudCatalogFeed).toHaveBeenCalledTimes(2);
+    // The new cursor is the one sent from now on.
+    await vi.advanceTimersByTimeAsync(POLL_FOCUSED_MS);
+    expect(mocks.api.cloudCatalogFeed).toHaveBeenLastCalledWith("c2");
+  });
+
+  it("polls every 3 s while a workspace in any organization is changing state", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    serve(() => whole("c1", { [ORG_C]: [inOrg(ORG_C, "starting", { state: "provisioning" })] }));
+    withFeed();
+    bootCloudCatalog();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(POLL_CHANGING_MS);
+    expect(mocks.api.cloudCatalogFeed).toHaveBeenCalledTimes(2);
+  });
+
+  it("a reset rebuilds the catalog in one step per organization, keeps the session lists, and never passes through an empty state", async () => {
+    let current = whole("c1");
+    serve(() => current);
+    withFeed();
+    bootCloudCatalog();
+    await vi.waitFor(() => expect(idsIn(ORG_C)).toHaveLength(10));
+    const kept = `${ORG_B}-w3`;
+    cacheCloudSessions(ORG_B, kept, [{ id: "s1", title: "Selected session" }] as never, null);
+    const seen: (number | undefined)[] = [];
+    const stop = subscribeCloudCatalog(() => seen.push(getCloudCatalog().orgs[ORG_B]?.workspaces.length));
+    // The whole catalog again, with a row renamed and one gone.
+    current = whole("c2", { [ORG_B]: rows(ORG_B).filter((row) => row.workspace.id !== `${ORG_B}-w9`).map((row) => (row.workspace.id === kept ? inOrg(ORG_B, kept, { name: "renamed" }) : row)) });
+    await refreshCloudFeed();
+    stop();
+    expect(idsIn(ORG_B)).toHaveLength(9);
+    expect(getCloudCatalog().orgs[ORG_B].workspaces.find((w) => w.workspace.id === kept)?.workspace.name).toBe("renamed");
+    // The selected session's workspace is still there with its cached sessions: what is selected stays openable.
+    expect(getCloudCatalog().orgs[ORG_B].sessions[kept]?.sessions.map((session) => session.id)).toEqual(["s1"]);
+    // No listener ever saw the organization without rows.
+    expect(seen.every((count) => count !== undefined && count >= 9)).toBe(true);
+    expect(mocks.closeWorkspaceConnection).not.toHaveBeenCalled();
+  });
+
+  it("applies a delta: changed rows replace theirs, deleted ones leave, the rest stay", async () => {
+    serve(() => whole("c1"));
+    withFeed();
+    bootCloudCatalog();
+    await vi.waitFor(() => expect(idsIn(ORG)).toHaveLength(10));
+    mocks.api.cloudCatalogFeed.mockResolvedValueOnce({
+      changed: true,
+      cursor: "c2",
+      reset: false,
+      organizations: [{ orgId: ORG, workspaces: [inOrg(ORG, `${ORG}-w1`, { state: "suspended" }), inOrg(ORG, "new")], tombstones: [] }],
+      deletedWorkspaceIds: [`${ORG}-w2`],
+    } satisfies CloudCatalogFeed);
+    await refreshCloudFeed();
+    expect(idsIn(ORG)).toHaveLength(10);
+    expect(idsIn(ORG)).toContain("new");
+    expect(idsIn(ORG)).not.toContain(`${ORG}-w2`);
+    expect(getCloudCatalog().orgs[ORG].workspaces.find((w) => w.workspace.id === `${ORG}-w1`)?.workspace.state).toBe("suspended");
+    // An organization the delta does not mention is untouched.
+    expect(idsIn(ORG_B)).toHaveLength(10);
+    expect(getCloudCatalog().orgs[ORG_B].error).toBeNull();
+
+    const merged = mergeFeedDelta([item("a"), item("b"), item("c")], { workspaces: [item("b", { name: "B2" }), item("d")], tombstones: [{ id: "c", orgId: ORG, deletedAt: 1, expiresAt: 2 }] }, ["a"]);
+    expect(merged.workspaces.map((w) => [w.workspace.id, w.workspace.name])).toEqual([["d", "ws d"], ["b", "B2"]]);
+  });
+
+  it("purges what this desktop kept of a workspace the feed reports deleted", async () => {
+    serve(() => whole("c1"));
+    withFeed();
+    bootCloudCatalog();
+    await vi.waitFor(() => expect(idsIn(ORG)).toHaveLength(10));
+    const gone = `${ORG}-w4`;
+    const next = whole("c2", { [ORG]: rows(ORG) });
+    next.organizations[0].tombstones = [{ id: gone, orgId: ORG, deletedAt: 1, expiresAt: 2 }];
+    next.deletedWorkspaceIds = [gone];
+    mocks.api.cloudCatalogFeed.mockResolvedValueOnce(next);
+    await refreshCloudFeed();
+    expect(idsIn(ORG)).not.toContain(gone);
+    expect(mocks.api.cloudAgentPurgeWorkspace).toHaveBeenCalledWith(ORG, gone);
+  });
+
+  it("keeps what an organization showed when the server could not list it, and the others update", async () => {
+    serve(() => whole("c1"));
+    withFeed();
+    bootCloudCatalog();
+    await vi.waitFor(() => expect(idsIn(ORG_C)).toHaveLength(10));
+    const partial = whole("c2", { [ORG]: [inOrg(ORG, "only")] });
+    partial.organizations[1] = { orgId: ORG_B, workspaces: [], tombstones: [], error: "cloud_provider_unavailable" };
+    mocks.api.cloudCatalogFeed.mockResolvedValueOnce(partial).mockResolvedValue({ changed: false, cursor: "c2", reset: false, organizations: [], deletedWorkspaceIds: [] });
+    await refreshCloudFeed();
+    expect(idsIn(ORG)).toEqual(["only"]);
+    expect(idsIn(ORG_B)).toHaveLength(10);
+    expect(getCloudCatalog().orgs[ORG_B].error).toBe("cloud_provider_unavailable");
+    // A 304 for that same answer does not say the organization is listed now.
+    await refreshCloudFeed();
+    expect(getCloudCatalog().orgs[ORG_B].error).toBe("cloud_provider_unavailable");
+    expect(getCloudCatalog().orgs[ORG].error).toBeNull();
+  });
+
+  it("a failed request never replaces valid rows, and the next one reads on", async () => {
+    serve(() => whole("c1"));
+    withFeed();
+    bootCloudCatalog();
+    await vi.waitFor(() => expect(idsIn(ORG)).toHaveLength(10));
+    mocks.api.cloudCatalogFeed.mockRejectedValueOnce({ code: "cloud_workspace_unavailable" });
+    await refreshCloudFeed();
+    for (const orgId of [ORG, ORG_B, ORG_C]) {
+      expect(idsIn(orgId)).toHaveLength(10);
+      expect(getCloudCatalog().orgs[orgId].error).toBe("cloud_workspace_unavailable");
+    }
+    expect(usesCatalogFeed()).toBe(true);
+    serve(() => whole("c1"));
+    await refreshCloudFeed();
+    expect(getCloudCatalog().orgs[ORG].error).toBeNull();
+  });
+
+  it("drops rows that name another organization than the one they were listed under", async () => {
+    mocks.api.cloudCatalogFeed.mockResolvedValue(whole("c1", { [ORG_B]: [inOrg(ORG, "misfiled")] }));
+    withFeed();
+    bootCloudCatalog();
+    await vi.waitFor(() => expect(getCloudCatalog().orgs[ORG_B]?.error).toBe("cloud_workspace_invalid_response"));
+    expect(idsIn(ORG_B)).toEqual([]);
+    expect(idsIn(ORG)).toHaveLength(10);
+  });
+
+  it("gives nothing to an organization the user left while the request was in flight, or after signing out", async () => {
+    let answer!: (feed: CloudCatalogFeed) => void;
+    mocks.api.cloudCatalogFeed.mockImplementation(() => new Promise<CloudCatalogFeed>((resolve) => (answer = resolve)));
+    withFeed();
+    bootCloudCatalog();
+    await vi.waitFor(() => expect(mocks.api.cloudCatalogFeed).toHaveBeenCalledTimes(1));
+    const first = answer;
+    withFeed({ organizations: orgs.filter((org) => org.id !== ORG_C) });
+    first(whole("c1"));
+    await vi.waitFor(() => expect(idsIn(ORG)).toHaveLength(10));
+    expect(getCloudCatalog().orgs[ORG_C]).toBeUndefined();
+
+    resetCloudCatalog();
+    withFeed();
+    bootCloudCatalog();
+    await vi.waitFor(() => expect(mocks.api.cloudCatalogFeed).toHaveBeenCalledTimes(2));
+    const second = answer;
+    mocks.account.status = { state: "signed-out", identity: null, expiresAt: null, lastError: null };
+    for (const listener of mocks.listeners) listener();
+    second(whole("c1"));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(getCloudCatalog().orgs).toEqual({});
+  });
+
+  it("an older server keeps per-organization polling, and a server that refuses the feed falls back to it", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    mocks.api.cloudWorkspaces.mockImplementation(async (orgId: string | null) => ({ workspaces: [inOrg(orgId!, `${orgId}-listed`)] }));
+    // No capability: the feed is never asked.
+    signIn(orgs);
+    mocks.account.status = { ...mocks.account.status, multiOrg: true, context: { scope: "s", revision: "s:1", account: "acct" } };
+    for (const listener of mocks.listeners) listener();
+    bootCloudCatalog();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(POLL_FOCUSED_MS);
+    expect(mocks.api.cloudCatalogFeed).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(6);
+    resetCloudCatalog();
+
+    // Advertised, but the native side says it is not there after all.
+    mocks.api.cloudWorkspaces.mockClear();
+    mocks.api.cloudCatalogFeed.mockRejectedValue({ code: "cloud_catalog_feed_unavailable" });
+    withFeed();
+    bootCloudCatalog();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.api.cloudCatalogFeed).toHaveBeenCalledTimes(1);
+    expect(usesCatalogFeed()).toBe(false);
+    expect([ORG, ORG_B, ORG_C].map((orgId) => idsIn(orgId))).toEqual([[`${ORG}-listed`], [`${ORG_B}-listed`], [`${ORG_C}-listed`]]);
+    await vi.advanceTimersByTimeAsync(POLL_FOCUSED_MS);
+    // Per-organization polling from then on; the feed is not tried again for this account.
+    expect(mocks.api.cloudCatalogFeed).toHaveBeenCalledTimes(1);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(6);
+  });
+
+  it("a server that advertises the feed and answers 404 falls back to per-organization lists at once", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    mocks.api.cloudWorkspaces.mockImplementation(async (orgId: string | null) => ({ workspaces: [inOrg(orgId!, `${orgId}-listed`)] }));
+    // What the native side hands over for an unknown 404: its own code, with the status beside it.
+    mocks.api.cloudCatalogFeed.mockRejectedValue({ code: "cloud_workspace_unavailable", status: 404, retryable: true });
+    withFeed();
+    bootCloudCatalog();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(usesCatalogFeed()).toBe(false);
+    expect([ORG, ORG_B, ORG_C].map((orgId) => idsIn(orgId))).toEqual([[`${ORG}-listed`], [`${ORG_B}-listed`], [`${ORG_C}-listed`]]);
+    expect([ORG, ORG_B, ORG_C].map((orgId) => getCloudCatalog().orgs[orgId].error)).toEqual([null, null, null]);
+    await vi.advanceTimersByTimeAsync(POLL_FOCUSED_MS * 3);
+    expect(mocks.api.cloudCatalogFeed).toHaveBeenCalledTimes(1);
+  });
+
+  it("after a few feed failures in a row each organization is listed on its own, and the feed is tried again later", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    serve(() => whole("c1"));
+    mocks.api.cloudWorkspaces.mockImplementation(async (orgId: string | null) => ({ workspaces: [inOrg(orgId!, `${orgId}-listed`)] }));
+    withFeed();
+    bootCloudCatalog();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(idsIn(ORG)).toHaveLength(10);
+
+    // The feed starts failing (a 5xx, or a catalog over the size cap).
+    mocks.api.cloudCatalogFeed.mockRejectedValue({ code: "cloud_provider_unavailable", status: 503 });
+    for (let failure = 1; failure < FEED_FAILURES_BEFORE_FALLBACK; failure++) {
+      await vi.advanceTimersByTimeAsync(POLL_FOCUSED_MS);
+      // Still the feed's job: the rows stay, with the reason.
+      expect(usesCatalogFeed()).toBe(true);
+      expect(idsIn(ORG)).toHaveLength(10);
+      expect(getCloudCatalog().orgs[ORG].error).toBe("cloud_provider_unavailable");
+      expect(mocks.api.cloudWorkspaces).not.toHaveBeenCalled();
+    }
+    await vi.advanceTimersByTimeAsync(POLL_FOCUSED_MS);
+    // The third failure: per-organization lists take over and the rows are current again.
+    expect(usesCatalogFeed()).toBe(false);
+    expect([ORG, ORG_B, ORG_C].map((orgId) => idsIn(orgId))).toEqual([[`${ORG}-listed`], [`${ORG_B}-listed`], [`${ORG_C}-listed`]]);
+    expect(getCloudCatalog().orgs[ORG].error).toBeNull();
+    const feedCalls = mocks.api.cloudCatalogFeed.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(POLL_FOCUSED_MS * 2);
+    expect(mocks.api.cloudCatalogFeed).toHaveBeenCalledTimes(feedCalls);
+    expect(mocks.api.cloudWorkspaces.mock.calls.length).toBeGreaterThanOrEqual(9);
+
+    // Later the feed is tried again, from the start (no stale cursor), and takes over when it answers.
+    serve(() => whole("c9"));
+    await vi.advanceTimersByTimeAsync(FEED_RETRY_AFTER_MS + POLL_FOCUSED_MS);
+    expect(mocks.api.cloudCatalogFeed.mock.calls.length).toBeGreaterThan(feedCalls);
+    expect(mocks.api.cloudCatalogFeed.mock.calls[feedCalls]).toEqual([null]);
+    expect(usesCatalogFeed()).toBe(true);
+    expect(idsIn(ORG)).toHaveLength(10);
+  });
+
+  it("a delta that only names deleted workspaces removes them, in an organization it has no entry for", async () => {
+    serve(() => whole("c1"));
+    withFeed();
+    bootCloudCatalog();
+    await vi.waitFor(() => expect(idsIn(ORG_B)).toHaveLength(10));
+    mocks.api.cloudCatalogFeed.mockResolvedValueOnce({ changed: true, cursor: "c2", reset: false, organizations: [], deletedWorkspaceIds: [`${ORG_B}-w3`] } satisfies CloudCatalogFeed);
+    await refreshCloudFeed();
+    expect(idsIn(ORG_B)).toHaveLength(9);
+    expect(idsIn(ORG_B)).not.toContain(`${ORG_B}-w3`);
+    expect(idsIn(ORG)).toHaveLength(10);
+  });
+
+  it("does not keep the cursor of an answer it could not take whole, so the next request reads everything again", async () => {
+    let answer!: (feed: CloudCatalogFeed) => void;
+    serve(() => whole("c1"));
+    withFeed();
+    bootCloudCatalog();
+    await vi.waitFor(() => expect(idsIn(ORG_B)).toHaveLength(10));
+    // A feed request is in flight; meanwhile Beta is listed on its own (asked later, answered first).
+    mocks.api.cloudCatalogFeed.mockImplementationOnce(() => new Promise<CloudCatalogFeed>((resolve) => (answer = resolve)));
+    const later = Date.now() + 60_000;
+    const flight = refreshCloudFeed(() => later);
+    await vi.waitFor(() => expect(answer).toBeDefined());
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [inOrg(ORG_B, "own-list")] });
+    await refreshCloudCatalog(ORG_B, () => later + 1_000);
+    answer(whole("c2", { [ORG_B]: [inOrg(ORG_B, "from-the-feed")] }));
+    await flight;
+    // The newer per-organization rows stand.
+    expect(idsIn(ORG_B)).toEqual(["own-list"]);
+    // The desktop does not hold catalog c2, so it does not claim to: the next request sends no cursor.
+    mocks.api.cloudCatalogFeed.mockResolvedValueOnce(whole("c3", { [ORG_B]: [inOrg(ORG_B, "from-the-feed")] }));
+    await refreshCloudFeed(() => later + 5_000);
+    expect(mocks.api.cloudCatalogFeed).toHaveBeenLastCalledWith(null);
+    expect(idsIn(ORG_B)).toEqual(["from-the-feed"]);
+  });
+
+  it("one organization's own refresh still lists that organization directly", async () => {
+    serve(() => whole("c1"));
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [inOrg(ORG_B, "fresh")] });
+    withFeed();
+    bootCloudCatalog();
+    await vi.waitFor(() => expect(idsIn(ORG_B)).toHaveLength(10));
+    await refreshCloudCatalog(ORG_B);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledWith(ORG_B);
+    expect(idsIn(ORG_B)).toEqual(["fresh"]);
   });
 });
 
