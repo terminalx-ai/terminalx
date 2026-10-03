@@ -19,6 +19,15 @@ vi.mock("@/lib/account", () => ({ refreshAccount: vi.fn() }));
 vi.mock("./ProviderControls", () => ({
   ProviderControls: () => <div>Provider setup</div>,
 }));
+vi.mock("./OrganizationSetupSteps", () => ({
+  OrganizationSetupSteps: ({ record }: { record: { organizationId: string; step: string } }) => (
+    <div data-testid="steps">
+      {record.organizationId}:{record.step}
+    </div>
+  ),
+}));
+const KEY = "terminalx.organization-setup.v2.owner%40example%2Etest";
+const stored = () => JSON.parse(localStorage.getItem(KEY) ?? "null") as { v: number; records: Record<string, unknown>[] } | null;
 const props = {
   accountEmail: "owner@example.test",
   contextRevision: "session-1",
@@ -159,4 +168,51 @@ it("names the selector for what it decides once every organization is live (CS-1
   expect(screen.getByRole("combobox", { name: "Organization" })).toBeTruthy();
   view.rerender(<OrganizationOnboarding {...props} organizationName="Acme" organizations={organizations} multiOrg />);
   expect(screen.getByRole("combobox", { name: "Default organization for new cloud work" })).toBeTruthy();
+});
+
+
+it("keeps a created organization that could not be selected, and only selects it on resume (PRO-16)", async () => {
+  vi.mocked(api.organizationCreate).mockResolvedValue({ ...organization, selected: false });
+  render(<OrganizationOnboarding {...props} />);
+  start();
+  await screen.findByText("The organization was created, but could not be selected. Resume setup to select it; it will not be created again.");
+  const [record] = stored()!.records;
+  expect(record).toMatchObject({ v: 2, organizationId: "org-1", step: "select", name: "Team", requestId: vi.mocked(api.organizationCreate).mock.calls[0]![1] });
+  cleanup();
+
+  vi.mocked(api.organizationSelect).mockRejectedValueOnce(new Error("Still offline"));
+  render(<OrganizationOnboarding {...props} contextRevision="later" />);
+  fireEvent.click(screen.getByRole("button", { name: "Resume setup" }));
+  await screen.findByText("Still offline");
+  fireEvent.click(screen.getByRole("button", { name: "Resume setup" }));
+  await waitFor(() => expect(api.organizationSelect).toHaveBeenCalledTimes(2));
+  expect(api.organizationSelect).toHaveBeenLastCalledWith("org-1", "later");
+  // Selection failing never runs creation again.
+  expect(api.organizationCreate).toHaveBeenCalledOnce();
+  await waitFor(() => expect(stored()!.records[0]).toMatchObject({ organizationId: "org-1", step: "compute" }));
+});
+
+it("never applies a setup record to a different active organization, and keeps it through a profile switch (PRO-16)", async () => {
+  vi.mocked(api.organizationCreate).mockResolvedValue(organization);
+  const other = { id: "org-other", name: "Team", role: "owner" };
+  const view = render(<OrganizationOnboarding {...props} />);
+  start();
+  await waitFor(() => expect(refreshAccount).toHaveBeenCalledOnce());
+  // Another organization with the same name is active: the record is not its.
+  view.rerender(<OrganizationOnboarding {...props} organizationName="Team" organizationId="org-other" organizations={[other, organization]} />);
+  expect(screen.queryByTestId("steps")).toBeNull();
+  expect(screen.getByText("Provider setup")).toBeTruthy();
+  expect(stored()!.records).toHaveLength(1);
+  // Back on the organization it was made for, its setup carries on.
+  view.rerender(<OrganizationOnboarding {...props} organizationName="Team" organizationId="org-1" organizations={[other, organization]} />);
+  expect(screen.getByTestId("steps").textContent).toBe("org-1:compute");
+});
+
+it("reads the record left by the previous version once, as the same creation request", async () => {
+  localStorage.setItem("terminalx.organization-setup.v1.owner@example.test", JSON.stringify({ name: "Team", key: "key-from-v1" }));
+  vi.mocked(api.organizationCreate).mockResolvedValue(organization);
+  render(<OrganizationOnboarding {...props} />);
+  fireEvent.click(screen.getByRole("button", { name: "Resume setup" }));
+  await waitFor(() => expect(api.organizationCreate).toHaveBeenCalledWith("Team", "key-from-v1"));
+  expect(localStorage.getItem("terminalx.organization-setup.v1.owner@example.test")).toBeNull();
 });

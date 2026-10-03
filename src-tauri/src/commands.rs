@@ -96,7 +96,7 @@ pub async fn organization_create(
     name: String,
     idempotency_key: String,
     state: tauri::State<'_, crate::AppState>,
-) -> CmdResult<crate::account::OrganizationSummary> {
+) -> CmdResult<crate::account::OrganizationCreated> {
     let account = state.account.clone();
     tauri::async_runtime::spawn_blocking(move || account.create_organization(&name, &idempotency_key))
         .await

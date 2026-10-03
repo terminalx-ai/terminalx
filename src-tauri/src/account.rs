@@ -119,6 +119,17 @@ pub struct OrganizationSummary {
     pub cloud: Option<OrganizationCloud>,
 }
 
+/// What creating an organization did (PRO-16): the organization, and whether
+/// it is now the selected one. `selected: false` is "created, not selected":
+/// the organization exists and must only be selected, never created again.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationCreated {
+    #[serde(flatten)]
+    pub organization: OrganizationSummary,
+    pub selected: bool,
+}
+
 /// Per-organization cloud capabilities, as the desktop session reports them.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -660,11 +671,14 @@ impl AccountManager {
     /// Create an organization with a caller-owned idempotency key, then select
     /// it through the server-authoritative profile endpoint. The key is never
     /// persisted in the account session and is safe to reuse after a timeout.
+    /// A create whose selection failed is still a create: it is returned with
+    /// `selected: false`, so the caller keeps the organization's id and only
+    /// selects it next time (PRO-16).
     pub(crate) fn create_organization(
         &self,
         name: &str,
         idempotency_key: &str,
-    ) -> Result<OrganizationSummary> {
+    ) -> Result<OrganizationCreated> {
         let context = self
             .context()
             .ok_or_else(|| anyhow!("account is signed out"))?;
@@ -678,8 +692,15 @@ impl AccountManager {
             Some(&context.access_token),
             Some(idempotency_key),
         )?;
-        self.select_organization(&organization.id, &context)?;
-        Ok(organization)
+        // Why it failed stays in the log: the interface says what to do next.
+        let selected = match self.select_organization(&organization.id, &context) {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("created organization {} but could not select it: {error:#}", organization.id);
+                false
+            }
+        };
+        Ok(OrganizationCreated { organization, selected })
     }
 
     fn select_organization(&self, organization_id: &str, context: &AccountContext) -> Result<()> {
@@ -1445,6 +1466,18 @@ fn should_refresh(expires_at: i64, now: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_created_organization_says_whether_it_was_selected() {
+        let organization = OrganizationSummary { id: "org-1".into(), name: "Team".into(), role: "owner".into(), is_personal: false, cloud: None };
+        let unselected = OrganizationCreated { organization: organization.clone(), selected: false };
+        assert_eq!(
+            serde_json::to_value(&unselected).unwrap(),
+            serde_json::json!({ "id": "org-1", "name": "Team", "role": "owner", "isPersonal": false, "selected": false })
+        );
+        let selected = OrganizationCreated { organization, selected: true };
+        assert_eq!(serde_json::to_value(&selected).unwrap()["selected"], true);
+    }
 
     fn pending() -> PendingAuth {
         PendingAuth {
