@@ -45,10 +45,12 @@ export function SettingsPage({
   onBack: () => void;
   initialTab?: SettingsTab;
 }) {
-  const [tab, setTab] = useState<Tab>(initialTab);
+  // Settings always opens on a section: a value that names none is the default one.
+  const initial: Tab = TABS.includes(initialTab) ? initialTab : "general";
+  const [tab, setTab] = useState<Tab>(initial);
   useEffect(() => {
-    setTab(initialTab);
-  }, [initialTab]);
+    setTab(initial);
+  }, [initial]);
 
   useHotkey("escape", () => {
     if (hasEscapeOverlay()) return false;

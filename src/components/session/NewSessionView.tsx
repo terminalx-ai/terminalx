@@ -286,7 +286,8 @@ export function NewSessionView({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start">
-                <DropdownMenuLabel>{cloudChoices.length ? "Local" : "Projects"}</DropdownMenuLabel>
+                {/* A heading only over something: no "Local" above nothing when there are no local projects. */}
+                {store.projects.length > 0 && <DropdownMenuLabel>{cloudChoices.length ? "Local" : "Projects"}</DropdownMenuLabel>}
                 {store.projects.map((p) => (
                   <DropdownMenuItem
                     key={p.path}
@@ -301,9 +302,9 @@ export function NewSessionView({
                     <span className="truncate">{p.name}</span>
                   </DropdownMenuItem>
                 ))}
-                {cloudChoices.map((section) => (
+                {cloudChoices.map((section, index) => (
                   <DropdownMenuGroup key={section.orgId} aria-label={`${section.orgName} cloud projects`}>
-                    <DropdownMenuSeparator />
+                    {(index > 0 || store.projects.length > 0) && <DropdownMenuSeparator />}
                     <DropdownMenuLabel>{section.orgName} cloud</DropdownMenuLabel>
                     {/* A member's cloud projects are listed but not startable: the server keeps new cloud sessions for owners and admins. */}
                     {section.mayStart === false && (
