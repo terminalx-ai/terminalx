@@ -457,15 +457,15 @@ mod tests {
 
     /// Give the session's first tab a conversation and write its Claude
     /// transcript where the CLI would, under the temporary home.
-    fn claude_transcript(session: &SessionEntry) -> PathBuf {
+    fn claude_transcript(session: &SessionEntry, conversation: &str) -> PathBuf {
         index::update_tab(&session.id, &session.tabs[0].id, |tab| {
-            tab.provider_session_id = Some(CONVERSATION.into());
+            tab.provider_session_id = Some(conversation.into());
             Ok(())
         })
         .unwrap();
         let folder = crate::agent_data::claude_projects_root().unwrap().join(crate::harness::claude::transcript::encoded_cwd(&session.cwd));
         std::fs::create_dir_all(&folder).unwrap();
-        let file = folder.join(format!("{CONVERSATION}.jsonl"));
+        let file = folder.join(format!("{conversation}.jsonl"));
         std::fs::write(&file, format!("{}\n", serde_json::json!({ "type": "user", "cwd": session.cwd }))).unwrap();
         file
     }
@@ -479,14 +479,14 @@ mod tests {
 
         // The worktree goes but the session is kept: resume still needs the transcript.
         let kept = worktree_session(dir.path());
-        let transcript = claude_transcript(&kept);
-        git::remove_worktree(Path::new(&kept.project_path), kept.worktree_name.as_deref().unwrap()).unwrap();
+        let transcript = claude_transcript(&kept, "22222222-2222-4222-8222-222222222222");
+        git::remove_worktree(Path::new(&kept.project_path), kept.worktree_name.as_deref().unwrap(), git::DirectDelete::Allowed).unwrap();
         assert!(transcript.exists());
 
         // The session goes: so does the folder for its removed worktree.
         let doomed = worktree_session(dir.path());
-        let transcript = claude_transcript(&doomed);
-        delete_session_blocking(&sink, &doomed.id, true, &stop).unwrap();
+        let transcript = claude_transcript(&doomed, CONVERSATION);
+        delete_session_blocking(&sink, &doomed.id, true, git::DirectDelete::Allowed, &stop).unwrap();
         assert!(!Path::new(&doomed.cwd).exists());
         assert!(!transcript.parent().unwrap().exists());
     }
@@ -497,9 +497,9 @@ mod tests {
         let dir = repo();
         let sink = crate::sink::BroadcastSink::new(16);
         let session = worktree_session(dir.path());
-        let transcript = claude_transcript(&session);
+        let transcript = claude_transcript(&session, CONVERSATION);
         let locked = ReadOnly::new(Path::new(&session.cwd));
-        assert!(delete_session_blocking(&sink, &session.id, true, &|_| {}).is_err());
+        assert!(delete_session_blocking(&sink, &session.id, true, git::DirectDelete::Allowed, &|_| {}).is_err());
         drop(locked);
         assert!(transcript.exists());
     }
