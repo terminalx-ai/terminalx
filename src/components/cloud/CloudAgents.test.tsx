@@ -8,7 +8,9 @@ const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
-vi.mock("@/lib/models", () => ({
+vi.mock("@/lib/models", async (original) => ({
+  // The pure helpers stay real; only the list and its loading are stubbed.
+  ...(await original<typeof import("@/lib/models")>()),
   EFFORT_LABEL: {},
   DEFAULT_PERMISSION_MODE: "bypassPermissions",
   PERMISSION_MODES: [

@@ -383,12 +383,13 @@ export async function setProjectLogo(path: string, source: string | null) {
 
 /** Delete a workspace; the sessions that ran in it are removed with it. */
 export async function deleteWorkspace(projectPath: string, path: string, deleteBranch: boolean) {
-  const removed = await api.deleteWorkspace(projectPath, path, deleteBranch);
+  const report = await api.deleteWorkspace(projectPath, path, deleteBranch);
   if (state.newSessionPreset?.projectPath === projectPath && state.newSessionPreset.cwd === path) {
     set({ newSessionPreset: { projectPath, cwd: projectPath } });
   }
-  removeSessions(removed.map((s) => s.id));
+  removeSessions(report.sessions.map((s) => s.id));
   await refreshWorkspaces(projectPath);
+  return report;
 }
 
 export async function refreshHarnesses() {
@@ -449,15 +450,16 @@ export async function renameSession(id: string, title: string) {
 }
 
 export async function deleteSession(id: string, removeWorktree: boolean) {
-  await api.deleteSession(id, removeWorktree);
+  const report = await api.deleteSession(id, removeWorktree);
   // Siblings taken along with a removed worktree arrive as session_deleted events.
   removeSessions([id]);
+  return report;
 }
 
 export async function settleSession(id: string, action: "delete" | "relocate") {
-  const s = await api.settleSession(id, action);
-  upsertSession(s);
-  return s;
+  const report = await api.settleSession(id, action);
+  upsertSession(report.session);
+  return report;
 }
 
 export async function forkSession(id: string, tabId: string) {

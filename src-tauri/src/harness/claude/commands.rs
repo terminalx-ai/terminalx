@@ -6,13 +6,11 @@
 //! once, and killed: ~1.5s, no model call. Cached per directory.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -79,36 +77,8 @@ pub fn parse_commands(reply: &Value) -> Vec<SlashCommand> {
 }
 
 fn probe(cwd: &Path) -> Result<Vec<SlashCommand>> {
-    let program = crate::binpath::resolve("claude").ok_or_else(|| anyhow!("Claude Code is not installed"))?;
-    let mut child = Command::new(program)
-        .args(["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose"])
-        .current_dir(cwd)
-        .env("PATH", crate::binpath::login_path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("spawn claude for command list")?;
-    let mut stdin = child.stdin.take().context("stdin")?;
-    let line = super::initialize_line("raccoon-init");
-    stdin.write_all(line.as_bytes())?;
-    stdin.write_all(b"\n")?;
-    stdin.flush()?;
-    let stdout = child.stdout.take().context("stdout")?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        for l in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if l.contains("\"control_response\"") && tx.send(l).is_err() {
-                break;
-            }
-        }
-    });
-    let reply = rx.recv_timeout(Duration::from_secs(15));
-    let _ = child.kill();
-    let _ = child.wait();
-    let line = reply.context("no initialize reply from Claude Code")?;
-    let v: Value = serde_json::from_str(&line)?;
-    Ok(parse_commands(&v))
+    // The reader's own setup is the point here: plugin and user commands come from it.
+    Ok(parse_commands(&super::ask_initialize(cwd, &[])?))
 }
 
 #[cfg(test)]

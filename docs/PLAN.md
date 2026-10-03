@@ -46,8 +46,10 @@ src-tauri/src
     mod.rs           the harness list, availability, HIDDEN_HARNESSES
     host.rs          child spawn/write/kill with epoch + kill-gen guards
     tui.rs           what the two PTY-first harnesses share (paste, readiness, tails)
-    claude/          pty.rs, transcript.rs, mapper.rs, trust.rs, commands.rs
-                     + fixtures/interactive_session.jsonl
+    claude/          pty.rs, transcript.rs, mapper.rs, trust.rs, commands.rs,
+                     models.rs (the account's models and what each alias runs,
+                     asked of the CLI) + fixtures/interactive_session.jsonl,
+                     fixtures/initialize_models.json
     codex/           pty.rs, rollout.rs, home.rs (managed CODEX_HOME), appserver.rs,
                      models.rs + fixtures/rollout.jsonl, fixtures/model_list.json
     acp/             generic Agent Client Protocol adapter — hidden
@@ -62,7 +64,8 @@ src-tauri/src
   issues.rs          GitHub (gh) and Linear (GraphQL) issues in one shape
   files.rs           in-memory file index + fuzzy search + watcher
   summaries.rs       last prompt and reply per session, read backwards, for the dashboard
-  models.rs          the model list per harness: ids, labels, efforts, defaults
+  models.rs          the model list per harness: ids, labels, efforts, defaults;
+                     the built-in Claude list used when the CLI cannot be asked
   names.rs           worktree names: adjective-color-animal
   binpath.rs         CLI resolution incl. login-shell PATH
   dictation.rs       microphone to text, out as events

@@ -107,7 +107,7 @@ describe("worktree deletion events", () => {
     sessions.upsertSession(other);
     sessions.selectSession(other.id);
     mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "delete_workspace") return [attached];
+      if (command === "delete_workspace") return { sessions: [attached], keptBranch: null, rescuedBranch: null };
       if (command === "list_workspaces") return [main];
       if (command === "list_harnesses") return [];
       throw new Error(`Unexpected command: ${command}`);

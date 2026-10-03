@@ -144,6 +144,7 @@ fn decode_event(p: &Value, out: &mut Vec<Payload>) {
                     context_used: Some(used),
                     context_max: info["model_context_window"].as_u64(),
                     cost_usd: None,
+                    model: None,
                 }));
             }
         }

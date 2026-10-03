@@ -186,7 +186,7 @@ describe("complete navigation hierarchy", () => {
     mount();
     expect(screen.getByRole("treeitem", { name: "deleted-feature" })).toBeTruthy();
     mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "delete_workspace") return doomed;
+      if (command === "delete_workspace") return { sessions: doomed, keptBranch: null, rescuedBranch: null };
       if (command === "list_workspaces") return [workspace("/alpha")];
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -271,7 +271,7 @@ describe("complete navigation hierarchy", () => {
         return { name: "renamed", path: "/alpha/renamed", branch: "renamed", sessions: [] };
       }
       if (command === "list_workspaces") return [...workspaces[args!.projectPath]];
-      if (command === "delete_workspace") { workspaces["/alpha"] = [workspace("/alpha")]; return []; }
+      if (command === "delete_workspace") { workspaces["/alpha"] = [workspace("/alpha")]; return { sessions: [], keptBranch: null, rescuedBranch: null }; }
       throw new Error(`Unexpected command: ${command}`);
     });
     await act(async () => store.renameWorkspace("/alpha", managed.path, "renamed"));

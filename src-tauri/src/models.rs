@@ -1,10 +1,11 @@
 //! The model list per harness, one source for ids, labels, efforts and
-//! defaults. Ids are the aliases the CLI accepts, so sessions follow the
-//! latest model of a family.
+//! defaults.
 //!
-//! Codex is the exception: which models a ChatGPT account may run is decided
-//! by the account, not by us, so those come from the CLI itself (see
-//! `harness::codex::models`) and are spliced in by the `list_models` command.
+//! Claude and Codex are read from their CLIs: which models an account may
+//! run, and what a family alias like `opus` runs today, is decided there and
+//! not by us (see `harness::claude::models` and `harness::codex::models`).
+//! Both are spliced in by the `list_models` command. The Claude entries here
+//! are only what is offered when the CLI cannot be asked.
 
 use serde::Serialize;
 
@@ -23,6 +24,15 @@ pub struct Model {
     pub upgrade: Option<String>,
     /// The provider's own one-line description, when it gives one.
     pub description: Option<String>,
+    /// A family alias (`opus`): a session on it follows the latest release
+    /// instead of staying on one version.
+    #[serde(default)]
+    pub alias: bool,
+    /// The full model id an alias runs now, as the CLI on this machine
+    /// reports it. `None` for a pinned version, and for an alias when the CLI
+    /// could not be asked: we do not guess.
+    #[serde(default)]
+    pub resolved: Option<String>,
 }
 
 fn m(harness: &str, id: &str, label: &str, efforts: &[&str], default_effort: Option<&str>, is_default: bool) -> Model {
@@ -36,15 +46,17 @@ fn m(harness: &str, id: &str, label: &str, efforts: &[&str], default_effort: Opt
         is_default,
         upgrade: None,
         description: None,
+        alias: false,
+        resolved: None,
     }
 }
 
 /// What each Claude alias ran when this list was written, read from the CLI
-/// itself (claude 2.1.288) rather than assumed. The alias is what we store and
-/// pass to `--model`, so a session follows the family; the label in `catalog`
-/// is read off the version below, so the two cannot drift apart. A new release
-/// means changing the id here and adding its price in `stats::pricing`; tests
-/// fail until both are done.
+/// itself (claude 2.1.288) rather than assumed. Used only when the CLI cannot
+/// be asked: the versions are offered pinned under their own ids, which stay
+/// true whatever the aliases move to, and the aliases are offered without a
+/// version. A new release means changing the id here and adding its price in
+/// `stats::pricing`; tests fail until both are done.
 pub const CLAUDE_ALIASES: &[(&str, &str)] = &[
     ("fable", "claude-fable-5-1"),
     ("opus", "claude-opus-5-5"),
@@ -68,20 +80,47 @@ pub fn claude_label(id: &str) -> Option<String> {
     Some(format!("{name} {}", version.join(".")))
 }
 
+/// `opus` → `Opus`: how a family alias reads. The version it runs is kept
+/// apart, in `resolved`.
+pub fn family_label(alias: &str) -> String {
+    let mut name = alias.to_string();
+    if let Some(first) = name.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    name
+}
+
+/// The Claude models to offer when the CLI cannot be asked: each alias with no
+/// claim about what it runs, then the versions known when this was written,
+/// pinned.
+pub fn claude_fallback() -> Vec<Model> {
+    let full = ["low", "medium", "high", "xhigh", "max"];
+    let efforts = |alias: &str| -> (&[&str], Option<&str>) {
+        if alias == "haiku" {
+            (&[], None)
+        } else {
+            (&full, Some("high"))
+        }
+    };
+    let mut out: Vec<Model> = CLAUDE_ALIASES
+        .iter()
+        .map(|(alias, _)| {
+            let (efforts, default_effort) = efforts(alias);
+            Model { alias: true, ..m("claude", alias, &family_label(alias), efforts, default_effort, *alias == "opus") }
+        })
+        .collect();
+    out.extend(CLAUDE_ALIASES.iter().map(|(alias, runs)| {
+        let (efforts, default_effort) = efforts(alias);
+        m("claude", runs, &claude_label(runs).unwrap_or_else(|| runs.to_string()), efforts, default_effort, false)
+    }));
+    out
+}
+
 /// Every model we know statically, hidden harnesses included. Codex is absent
 /// by design.
 pub fn catalog() -> Vec<Model> {
-    let claude_efforts = ["low", "medium", "high", "xhigh", "max"];
-    let claude = |alias: &str, efforts: &[&str], default_effort: Option<&str>, is_default: bool| {
-        let runs = CLAUDE_ALIASES.iter().find(|(a, _)| *a == alias).map(|(_, id)| *id).unwrap_or(alias);
-        let label = claude_label(runs).unwrap_or_else(|| alias.to_string());
-        m("claude", alias, &label, efforts, default_effort, is_default)
-    };
-    vec![
-        claude("fable", &claude_efforts, Some("high"), false),
-        claude("opus", &claude_efforts, Some("high"), true),
-        claude("sonnet", &claude_efforts, Some("high"), false),
-        claude("haiku", &[], None, false),
+    let mut out = claude_fallback();
+    out.extend([
         m("cursor", "auto", "Auto", &[], None, true),
         m("cursor", "sonnet-4.5", "Sonnet 4.5", &[], None, false),
         m("cursor", "sonnet-4.5-thinking", "Sonnet 4.5 Thinking", &[], None, false),
@@ -91,20 +130,20 @@ pub fn catalog() -> Vec<Model> {
         m("opencode", "anthropic/claude-sonnet-4-5", "Claude Sonnet 4.5", &[], None, false),
         m("opencode", "anthropic/claude-opus-4-5", "Claude Opus 4.5", &[], None, false),
         m("opencode", "openai/gpt-5", "GPT-5", &[], None, false),
-    ]
+    ]);
+    out
 }
 
-/// The list the pickers see: Claude's statics first, the models this account
-/// can actually run on Codex spliced in after them, then whatever else is
-/// static — minus the harnesses the UI does not offer, which is decided in
-/// one place (`harness::HIDDEN_HARNESSES`) rather than by leaving them out of
-/// the catalogue. A tab already on a hidden harness keeps its stored model id;
-/// the pickers just have nothing to offer it.
-pub fn offered(codex: Vec<Model>) -> Vec<Model> {
-    let statics = catalog();
-    let mut out: Vec<Model> = statics.iter().filter(|m| m.harness == "claude").cloned().collect();
+/// The list the pickers see: Claude's models first, then the models this
+/// account can actually run on Codex, then whatever else is static — minus the
+/// harnesses the UI does not offer, which is decided in one place
+/// (`harness::HIDDEN_HARNESSES`) rather than by leaving them out of the
+/// catalogue. A tab already on a hidden harness keeps its stored model id; the
+/// pickers just have nothing to offer it.
+pub fn offered(claude: Vec<Model>, codex: Vec<Model>) -> Vec<Model> {
+    let mut out = if claude.is_empty() { claude_fallback() } else { claude };
     out.extend(codex);
-    out.extend(statics.into_iter().filter(|m| m.harness != "claude"));
+    out.extend(catalog().into_iter().filter(|m| m.harness != "claude"));
     out.retain(|m| crate::harness::visible(&m.harness));
     out
 }
@@ -114,19 +153,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_claude_label_names_the_version_its_alias_runs() {
-        let claude: Vec<Model> = catalog().into_iter().filter(|m| m.harness == "claude").collect();
-        // The picker and the alias table list the same models, in the same order.
-        let offered: Vec<&str> = claude.iter().map(|m| m.id.as_str()).collect();
-        let aliases: Vec<&str> = CLAUDE_ALIASES.iter().map(|(alias, _)| *alias).collect();
-        assert_eq!(offered, aliases);
-        for (model, (alias, runs)) in claude.iter().zip(CLAUDE_ALIASES) {
-            assert_eq!(Some(model.label.clone()), claude_label(runs), "the label for `{alias}` should name {runs}");
-            // The id stays the alias: tabs stored with it keep working.
+    fn the_built_in_claude_list_offers_each_alias_and_each_version_pinned() {
+        let claude = claude_fallback();
+        let (aliases, pinned): (Vec<&Model>, Vec<&Model>) = claude.iter().partition(|m| m.alias);
+        // The ids stored on existing tabs are still offered.
+        assert_eq!(aliases.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["fable", "opus", "sonnet", "haiku"]);
+        assert_eq!(aliases.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(), vec!["Fable", "Opus", "Sonnet", "Haiku"]);
+        // Without the CLI, an alias makes no claim about its version.
+        assert!(aliases.iter().all(|m| m.resolved.is_none()));
+        assert_eq!(claude.iter().filter(|m| m.is_default).map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["opus"]);
+        // Each pinned entry is named after its own id, so the two cannot disagree.
+        for (model, (alias, runs)) in pinned.iter().zip(CLAUDE_ALIASES) {
+            assert_eq!(model.id, *runs);
+            assert_eq!(Some(model.label.clone()), claude_label(runs));
             assert!(runs.contains(alias), "{runs} is not a {alias} model");
         }
         // What the menu reads today. A release changes this line and the table together.
-        assert_eq!(claude.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(), vec!["Fable 5.1", "Opus 5.5", "Sonnet 5.5", "Haiku 4.5"]);
+        assert_eq!(pinned.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(), vec!["Fable 5.1", "Opus 5.5", "Sonnet 5.5", "Haiku 4.5"]);
     }
 
     #[test]
@@ -145,7 +188,7 @@ mod tests {
         for h in hidden {
             assert!(catalog().iter().any(|m| &m.harness == h), "{h} models should still be in the catalog");
         }
-        let offered = offered(vec![m("codex", "gpt-5.6-codex", "GPT-5.6 Codex", &[], None, true)]);
+        let offered = offered(Vec::new(), vec![m("codex", "gpt-5.6-codex", "GPT-5.6 Codex", &[], None, true)]);
         assert!(offered.iter().all(|m| !hidden.contains(&m.harness.as_str())));
         // Claude first, then the account's Codex models.
         assert_eq!(offered.first().map(|m| m.harness.as_str()), Some("claude"));
