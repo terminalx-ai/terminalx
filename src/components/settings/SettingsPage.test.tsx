@@ -70,6 +70,25 @@ describe("the section Settings opens on", () => {
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Agents");
   });
 
+  // Review of #269: with Settings open and another section picked by hand, the shortcut did nothing.
+  it("goes back to the section asked for when Settings is asked for again while open", () => {
+    const { rerender } = render(<SettingsPage openRequest={1} onBack={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Appearance");
+    // Re-rendering alone keeps the reader's choice…
+    rerender(<SettingsPage openRequest={1} onBack={vi.fn()} />);
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Appearance");
+    // …asking for Settings again does not.
+    rerender(<SettingsPage openRequest={2} onBack={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Account" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Account");
+    // The same for a section asked for by name twice.
+    rerender(<SettingsPage initialTab="agents" openRequest={3} onBack={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "General" }));
+    rerender(<SettingsPage initialTab="agents" openRequest={4} onBack={vi.fn()} />);
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Agents");
+  });
+
   it("is Account, not a blank page, when it is handed something that names no section", () => {
     // What a click handler passes along: the click's event (O1 of the live check).
     const event = { type: "click" } as unknown as Parameters<typeof SettingsPage>[0]["initialTab"];

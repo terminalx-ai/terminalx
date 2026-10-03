@@ -142,6 +142,7 @@ const MESSAGES: Record<string, string> = {
   cloud_provider_credential_invalid: "The provider credential is no longer valid. An admin can repair it, then retry.",
   cloud_provider_permission_denied: "The provider refused this action, though its credential is still valid. Retry, or check the key's permissions at the provider.",
   cloud_workspace_runtime_bootstrap_failed: "The workspace's runtime could not be set up on its machine. Retry; the provider credential is fine.",
+  cloud_provider_state_conflict: "The provider reports this resource in a state that does not allow the action yet. Retry in a moment; if it keeps failing, check the resource in the provider's console.",
   cloud_provider_unavailable: "The provider did not answer. Retry resumes where it stopped.",
   cloud_provider_rate_limited: "The provider is rate limiting. Retry resumes where it stopped.",
   provider_permanent_delete_unavailable: "This provider connection cannot delete workspaces permanently.",
@@ -164,6 +165,67 @@ export function lifecycleErrorMessage(code: string): string {
 export function operationFailureText(operation: Pick<CloudWorkspaceOperation, "errorCode" | "providerErrorCode">): string {
   const message = lifecycleErrorMessage(operation.errorCode ?? "cloud_workspace_unknown_error");
   return operation.providerErrorCode ? `${message} (Provider code: ${operation.providerErrorCode})` : message;
+}
+
+/** Boat's provider id. */
+const BOAT = "box";
+/** Boat accepted a deletion but still reports the sandbox: only Boat can finish it. */
+const DELETED_SANDBOX_PRESENT = "box_deleted_sandbox_present";
+/** What a scoped Boat key needs before TerminalX can delete a sandbox. */
+const BOAT_DELETE_SCOPES = "sandbox.read and sandbox.delete";
+
+/**
+ * Why a permanent delete stopped, and whether deleting again can help
+ * (PRO-52). The sentence names only what the row shows: "Retry delete" is the
+ * one button under it, and it is named only when it is offered.
+ *
+ * - Boat accepted the deletion but still reports the sandbox
+ *   (`box_deleted_sandbox_present`): neither a retry nor a broader key helps,
+ *   so neither is advised and no retry is offered. The deletion's operation
+ *   id is what Boat's support asks for; the server gives it to admins only.
+ * - Boat refused the delete (or the read of its sandbox): the connected key's
+ *   scope is what is missing.
+ */
+export function deleteFailure(
+  operation: Pick<CloudWorkspaceOperation, "errorCode" | "providerErrorCode" | "detailCode" | "cleanup">,
+  provider: string,
+  /**
+   * `idRead`: the operation was read with its cleanup report, so a missing
+   * id means this person may not see it. Until then (a list row, or before
+   * the first read) nothing is said about who can, so the sentence does not
+   * change under an admin once the id arrives.
+   */
+  options: { idRead?: boolean } = {},
+): { text: string; retry: boolean } {
+  if (deleteAwaitsProvider(operation)) {
+    const id = operation.cleanup?.items.find((entry) => entry.providerOperationId)?.providerOperationId;
+    const which = id ? `: ${id}` : options.idRead ? "; an organization owner or admin can see it here" : "";
+    return { text: `Boat accepted the deletion but still reports the sandbox. Contact Boat support with the deletion operation id${which}.`, retry: false };
+  }
+  if (provider === BOAT && operation.errorCode === "cloud_provider_permission_denied") {
+    return {
+      text: `Boat refused to delete this workspace (${operation.providerErrorCode ?? "permission_denied"}): the connected key is not allowed to read or delete it. An owner or admin can connect a key with ${BOAT_DELETE_SCOPES} that covers all sandboxes in Settings, then press ${RETRY_DELETE}.`,
+      retry: true,
+    };
+  }
+  return { text: operationFailureText(operation), retry: true };
+}
+
+/** The one button under a stopped delete; a failure sentence that names a button names this one. */
+export const RETRY_DELETE = "Retry delete";
+
+/** A delete only the provider can finish: deleting again, from anywhere, cannot help. */
+export function deleteAwaitsProvider(operation: Pick<CloudWorkspaceOperation, "detailCode"> | null | undefined): boolean {
+  return operation?.detailCode === DELETED_SANDBOX_PRESENT;
+}
+
+/**
+ * Why a workspace's last operation failed, wherever it is said (the stopped
+ * delete's own line, the row's tooltip, the main view): a failed delete gets
+ * the same sentence in all of them.
+ */
+export function workspaceFailureText(item: Pick<CloudWorkspaceListItem, "workspace">, operation: CloudWorkspaceOperation): string {
+  return operation.action === "delete" ? deleteFailure(operation, item.workspace.provider).text : operationFailureText(operation);
 }
 
 // ---- what a destructive action would put at risk
