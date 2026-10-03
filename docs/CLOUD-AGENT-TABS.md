@@ -137,9 +137,24 @@ with the same token; `stale-lease` is final; `stale-generation` leases again.
   "process",       // running | exited | not-started
   "pendingPermissions": [{ "requestId", "toolName", "input", "options" }],
   "followUps": [{ "clientCommandId", "text" }],
+  "signIn": { "provider", "state", "reason" },  // only when the agent cannot sign in
   "lastSeq": 0,    // newest committed event seq
   "created", "modified" }
 ```
+
+`signIn` (PRO-78) is present only when the tab's agent has no way to sign in:
+the server's last grant answer listed no usable login for its provider
+(`claude`, `codex`, `cursor`), the workspace configuration sets no key for it,
+and the session did not start with a credential. `state` is `not-connected`
+when the organization has no login for the provider, else the server's state
+for the one it has (`revoked`, `disconnected`, `unavailable`, with a `reason`
+such as `token-expired` or `shared-use-policy`). It is never set on a guess:
+not before the first grant sync, not after a failed one, and never for an
+agent the runtime cannot rule out a hand sign-in for (Cursor). Such a tab does not
+count as an active turn in the activity report, so it does not hold off the
+idle suspend, and the desktop shows it as "Needs sign-in", not "Working". A
+first prompt for such an agent fails with the launch category
+`agent-sign-in-required` instead of being typed into a sign-in screen.
 
 Subscribers of `session.subscribe` also get `session.status` notifications:
 `{ subscriptionId, sessionId, tabId, status }` (the process state comes with

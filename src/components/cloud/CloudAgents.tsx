@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Bot, Loader2, Plus, X } from "lucide-react";
-import type { WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
+import type { AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { Chat } from "@/components/chat/Chat";
 import { Composer } from "@/components/chat/Composer";
 import { sentMessages } from "@/components/chat/useComposerHistory";
 import { Button } from "@/components/ui/button";
 import { runningLimitReached } from "@/lib/runningLimit";
+import { useAccount } from "@/lib/account";
+import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
+import { AGENT_LOGIN_PLACE } from "@/lib/cloudCreate";
+import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { useTabLog } from "@/lib/agentEvents";
 import { buildTranscript } from "@/lib/transcript";
 import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, modelOptionText, offeredOn, useModels } from "@/lib/models";
@@ -75,6 +79,8 @@ export function CloudAgentsView({
   active?: boolean;
 }) {
   const snapshot = useCloudAgents(scope);
+  const { status: account } = useAccount();
+  const mayManage = mayStartCloudSessions(account, scope.organizationId);
   const [selected, setSelected] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -147,7 +153,7 @@ export function CloudAgentsView({
               onClick={() => setSelected(tab.tabId)}
             >
               <Bot className="size-3.5" /> {tabTitle(tab, index)}
-              {tab.info.status === "in_progress" && tab.info.process !== "exited" && <Loader2 className="size-3 animate-spin" aria-label="working" />}
+              {tab.info.status === "in_progress" && tab.info.process !== "exited" && !tab.info.signIn && <Loader2 className="size-3 animate-spin" aria-label="working" />}
               {tab.unread && <span className="size-1.5 rounded-full bg-accent" data-testid="cloud-agent-unread" aria-label="unread" />}
             </Button>
             {manage && (
@@ -179,6 +185,11 @@ export function CloudAgentsView({
         />
       )}
       {error && <p className="px-4 py-1 text-xs text-red-500">Agent: {error}</p>}
+      {active?.info.signIn && (
+        <p className="border-b border-hairline px-4 py-1.5 text-xs text-amber-600 dark:text-amber-400" role="status" data-testid="cloud-agent-sign-in">
+          {signInMessage(active.info, mayManage)}
+        </p>
+      )}
       {active ? (
         <CloudAgentPane
           key={active.tabId}
@@ -298,8 +309,44 @@ export function connectionLabel(state: WorkspaceConnectionState, stopped: false 
   }
 }
 
+/**
+ * What to tell someone whose agent has no way to sign in (PRO-78): what is
+ * wrong and who can fix it where. `mayManage` is the viewer's owner-or-admin
+ * role in the organization, null while it is not known.
+ */
+/** The server's words for a login it will not hand out. A word this app does not know is never shown as is. */
+const SIGN_IN_STATES: Record<string, string> = {
+  revoked: "was revoked",
+  disconnected: "was disconnected",
+  unavailable: "is not available",
+};
+
+export function signInMessage(info: Pick<AgentTabInfo, "harness" | "signIn">, mayManage: boolean | null): string | null {
+  const signIn = info.signIn;
+  if (!signIn) return null;
+  const agent = cloudAgentLabel(info.harness);
+  const what =
+    signIn.reason === "token-expired"
+      ? `The organization's ${agent} login has expired`
+      : signIn.reason === "shared-use-policy"
+        ? `The organization's ${agent} login is limited to workspaces its owners and admins create`
+        : signIn.state === "not-connected"
+          ? `${agent} isn't connected for this organization`
+          : `The organization's ${agent} login ${SIGN_IN_STATES[signIn.state] ?? "is not available"}`;
+  const fix =
+    signIn.reason === "shared-use-policy"
+      ? mayManage
+        ? `Allow it for the whole organization in ${AGENT_LOGIN_PLACE}.`
+        : "An owner or admin can allow it for the whole organization."
+      : mayManage
+        ? `Connect it in ${AGENT_LOGIN_PLACE}, then send again.`
+        : "Ask an owner or admin to connect it, then send again.";
+  return `Needs sign-in: ${what}, so it can't take prompts here. ${fix}`;
+}
+
 export function turnLabel(tab: CloudAgentTab): string {
   const { status, process } = tab.info;
+  if (tab.info.signIn) return "Needs sign-in";
   if (process === "exited" && (status === "in_progress" || status === "waiting")) return "Process ended mid-turn";
   if (process === "exited") return "Process ended";
   switch (status) {

@@ -8,6 +8,7 @@ import {
   createWorkspace,
   launchInput,
   phaseOf,
+  preflightCreate,
   repositoriesInput,
   savePending,
   usableProviders,
@@ -212,11 +213,7 @@ export async function prepareCloudCreate(project: CloudProject, request: CloudSe
   const errors = Object.values(validateForm(form));
   if (errors[0]) throw new CreateRefused("cloud_workspace_form_invalid", errors[0]);
   const repositories = repositoriesInput(form);
-  if (repositories.length) {
-    const preflight = await api.cloudWorkspacePreflight(repositories, org);
-    const failed = preflight.checks.find((check) => check.status === "failed" && check.kind !== "agent-credential");
-    if (failed) throw new CreateRefused(failed.errorCode ?? "cloud_workspace_request_invalid", failed.cloneUrl);
-  }
+  await preflightCreate(api, form, org);
   const setup = provider.setup ?? (await api.cloudWorkspaceSetup(provider.id, org));
   const quote = await api.cloudWorkspaceQuote({ provider: provider.id, ...setup.defaults }, org);
   const idempotencyKey = crypto.randomUUID();
