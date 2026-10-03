@@ -26,8 +26,12 @@ it is created (`src/components/terminal/TerminalView.tsx`).
 - `backend`: PTY panes, how many are running, scrollback bytes held, and the
   `pty_data` events and bytes sent since launch.
 - `webview`: live xterm instances and how many are in the document, how many
-  are on WebGL and how many fell back to the DOM renderer, WebGL contexts
-  created / lost / refused since the window loaded, buffer lines held, replay
+  are on WebGL and how many on the DOM renderer, how many a view is showing
+  (`onScreen`), how many of those are on the DOM fallback (`domOnScreen`,
+  which should be 0) and how many are in the document with no view showing
+  them (`hiddenInDocument`, which should be 0: such a terminal draws all its
+  output for nobody), WebGL contexts created / lost / refused since the window
+  loaded, buffer lines held, replay
   buffers and their bytes, and output events and bytes per second (local and
   cloud). It is `null` when the window did not answer within 500 ms.
 
@@ -81,10 +85,23 @@ What a run does:
   500 ms samples) and 5 s after each run. WebKit's processes are children of
   launchd, so the script finds them by asking which app each is responsible
   to. There is no JavaScript heap figure: WKWebView does not expose one.
+- **Churn** (`--scenarios churn`). 30 terminals are created, filled with
+  10,000 lines and disposed, with no process and no view, in five variants
+  (never shown; on screen; with WebGL; focused; with a process and closed
+  through the store). A `FinalizationRegistry` counts how many the garbage
+  collector takes back. This is what separates a leak in xterm or its renderer
+  from one in the app.
+- **Covered** (`--scenarios covered`). A real session with two shell tabs:
+  the one behind prints an agent-style stream for 10 s while the other is
+  selected. Counted: how often xterm draws the covered one (`onRender`). The
+  other scenarios host their terminals themselves, so only this one and the
+  soak go through the app's views.
 - **Soak.** Through the app's own stores and views: open 4 sessions, each with
   a terminal that fills its 10,000-line scrollback; open and close 50 terminal
-  tabs; switch sessions 200 times; delete the sessions. The same terminals are
-  open after the first three steps, so memory should be flat across them.
+  tabs; open and close 20 agent tabs (against a stand-in CLI); switch
+  sessions 200 times; delete the sessions. The same terminals are
+  open after the first three steps, so memory should be flat across them. The
+  terminals the tab step closes are tracked the same way as in the churn.
 
 ## Baseline
 
@@ -202,3 +219,128 @@ rather than a heap snapshot, so memory that WebKit would give back under
 pressure counts as held; the soak uses shell terminals, not agent CLIs; cloud
 terminals are counted (`data.cloud`) but no cloud scenario was run, because
 the local cloud stack was in use by another session.
+
+## Changes since the baseline
+
+Each entry is one pull request, measured with the same benchmark on the same
+machine, with the matrix and the soak each on a fresh app.
+
+### WebGL contexts are budgeted and released; closed terminals are freed
+
+**Cause of the memory growth.** `@xterm/addon-webgl` 0.19.0 never disposes its
+cursor-blink timer: the field that holds it is not registered with the
+renderer's disposables. A terminal that has focus when it is closed, which is
+the usual way to close one, leaves an interval running for good. The interval
+keeps the renderer, its WebGL context and the terminal with its whole
+scrollback reachable. The churn scenario isolates it: every variant gave its
+terminals back except the focused one.
+
+| Churn variant (30 terminals) | Collected before | Collected after |
+| --- | --- | --- |
+| Never shown | 24 of 30 | 24 of 30 |
+| On screen, DOM renderer | 29 of 30 | 29 of 30 |
+| On screen, WebGL | 29 of 30 | 29 of 30 |
+| On screen, WebGL, focused | **0 of 30** (WebContent 344 → 1,222 MB) | 29 of 30 (161 → 171 MB) |
+| On screen, WebGL, with a process, closed through the store | 29 of 30 | 29 of 30 |
+
+**What changed:**
+
+- The blink timer is stopped when a terminal lets go of its renderer
+  (`src/lib/terminalWebgl.ts`).
+- A terminal gets a WebGL context when a view shows it, not when it is
+  created. The 6 most recently shown hidden terminals keep theirs.
+- A context is released (`WEBGL_lose_context`) when its terminal is closed or
+  goes over the budget.
+- When WebKit takes a context from a terminal that is on screen, it gets a new
+  one at once, on the `webglcontextlost` event, instead of staying on the DOM
+  renderer. A hidden one gets a new one when it is next shown.
+- **A terminal that is not shown is not in the document**
+  (`src/components/terminal/TerminalView.tsx`). A covered terminal (an
+  agent's terminal under its chat, a shell tab behind another) used to stay
+  in the document with `visibility: hidden`, and xterm pauses drawing only
+  for what an IntersectionObserver calls hidden, which that is not. It drew
+  every frame of output for nobody.
+- **A terminal's size no longer depends on its renderer**
+  (`src/lib/terminalFit.ts`). xterm's fit addon uses the active renderer's
+  cell width, and WebGL floors it to device pixels where the DOM renderer
+  does not, so a renderer swap could change the column count and resize the
+  program. The size is now computed from the measured character size, as
+  WebGL draws it, from the view's box alone. That is also what lets a
+  terminal follow its box while it is out of the document.
+
+**Covered terminal** (`--scenarios covered`: a shell tab behind the selected
+one prints an agent-style stream for 10 s):
+
+| | Times xterm drew it | Renderer | In the document |
+| --- | --- | --- | --- |
+| Baseline (`a68e6e1`) | 86 | WebGL | yes |
+| After | 0 | none needed | no |
+
+**Soak, before → after:**
+
+| After | WebContent (MB) | Terminals on screen that are on the DOM renderer | Live terminals on WebGL / DOM | Closed terminals collected |
+| --- | --- | --- | --- | --- |
+| 4 sessions open (baseline) | 347 → 300 | 0 → 0 | 8 / 0 → 6 / 2 | |
+| 50 tabs opened and closed | 1,209 → 1,143 | 1 → 0 | 0 / 8 → 1 / 7 | not measured → 4 of 50 |
+| 200 session switches | 1,231 → **344** | 1 → 0 | 0 / 8 → 4 / 4 | not measured → 50 of 50 |
+| Sessions deleted, terminals closed | 1,247 → 350 | | | 50 of 50 |
+
+- Memory after the soak is 1.15 times the baseline in this run (was 3.5
+  times). Three runs of an earlier revision of the same change gave 0.93 to
+  0.96 times; the readings move by some 30 MB with when WebKit collects.
+  The 1,143 MB right after the tab step is garbage it had not collected yet
+  (4 of 50 terminals at that point); it is gone by the next reading.
+- No terminal on screen is on the DOM renderer at any point, in the soak or
+  with 20 terminals open (was 4 of 20, and 8 of 8 after the soak).
+- WebKit still took 6 contexts during the tab step, all from the hidden
+  terminals holding one under the budget. `loseContext()` is called for every
+  closed terminal, yet the closed terminals' contexts keep counting against
+  WebKit's limit until they are collected, and that lags. The terminals
+  affected get a new context when shown.
+- Throughput, typing echo and Ctrl+C are unchanged, as expected: `cat` of
+  50 MB in 0.56–0.66 s, echo p95 31 ms under a flood, output for about
+  600 ms after Ctrl+C.
+- 200 session switches created 3 contexts, so switching between recently
+  used terminals does not pay for a new context.
+
+### A deleted session's terminals are closed; stray output is dropped
+
+- Deleting a session, or the workspace it ran in, now closes its terminals:
+  the window drops their panes and xterm instances, and the backend kills the
+  session's shells (it already stopped the agent tabs). Before, the shells
+  kept running and their buffers stayed in the window until it was reloaded.
+- When a session's worktree is removed and the session stays listed, its
+  shells are closed; its agent panes are left to their tabs.
+- Output that arrives within 5 s after a pane was closed is dropped instead of
+  starting a replay buffer. Opening a pane under the same id again keeps its
+  output from that moment.
+
+| Soak | Before | After |
+| --- | --- | --- |
+| Panes and xterm instances still held right after the sessions were deleted | 8 and 8 | 0 and 0 |
+| Replay buffers left after 50 tabs were closed | 45–48 | 0 |
+| Replay buffers left at the end of the run | 48–51 | 0 |
+
+Memory is as in the entry above (344 MB baseline, 320 MB after the soak).
+
+### A closed agent tab's terminal is dropped
+
+Closing an agent tab stopped its CLI but left its pane and its xterm in the
+window, with the whole scrollback, until its session was deleted. The window
+now drops both when a tab is closed, and when the backend reports a session
+with fewer tabs.
+
+The soak has a step for it: 20 agent tabs opened and closed through the
+app's own tab functions. They run `scripts/remote-runtime/fake-claude`, which
+`bench-app.sh` puts first on the app's path together with a `HOME` of its
+own, so no real agent runs and nothing is written under the real home.
+
+| After 20 agent tabs were opened and closed | Before | After |
+| --- | --- | --- |
+| xterm instances (8 belong to the open sessions) | 28 | 8 |
+| Panes | 28 | 8 |
+| Of the 20 closed terminals, collected by the end of the run | 0 | 20 |
+
+An archived session still keeps its terminals.
+
+Still open from the baseline: findings 5, 6 and 8.

@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { api } from "@/lib/api";
 import { getAccount } from "@/lib/account";
 import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
-import { setSelectedAgent } from "@/lib/terminal";
+import { closeSessionShells, dropSessionTerminals, dropTabTerminals, setSelectedAgent } from "@/lib/terminal";
 import { buildPaletteIndex, type PaletteIndex } from "@/lib/commandPalette";
 import type {
   ProjectPatch,
@@ -142,8 +142,13 @@ export async function refreshSessions() {
 
 export function upsertSession(s: SessionEntry) {
   const i = state.sessions.findIndex((x) => x.id === s.id);
+  // Its checkout was just removed: a shell left running there has no directory.
+  if (s.worktreeRemoved && i >= 0 && !state.sessions[i].worktreeRemoved) void closeSessionShells(s.id);
   const sessions = i >= 0 ? state.sessions.map((x) => (x.id === s.id ? s : x)) : [...state.sessions, s];
+  const closed = i >= 0 ? state.sessions[i].tabs.filter((tab) => !s.tabs.some((kept) => kept.id === tab.id)).map((tab) => tab.id) : [];
   set({ sessions });
+  // After the list changed, so no view of a closed tab is left to ask for its terminal again.
+  if (closed.length) queueMicrotask(() => dropTabTerminals(closed));
   // A session that just cut its own worktree is ahead of the cached workspace
   // list, and the sidebar files an unknown cwd under "missing". Every creation
   // path lands here, so the catch-up belongs here rather than in each caller.
@@ -154,6 +159,7 @@ export function upsertSession(s: SessionEntry) {
 
 /** Forget sessions the backend has deleted, dropping the selection if it was one of them. */
 export function removeSessions(ids: string[]) {
+  dropSessionTerminals(ids);
   const gone = new Set(ids);
   const selectedGone = !!state.selectedSessionId && gone.has(state.selectedSessionId);
   if (!selectedGone && !state.sessions.some((s) => gone.has(s.id))) return;
@@ -463,6 +469,8 @@ export async function removeTab(sessionId: string, tabId: string) {
   const idx = s.tabs.findIndex((t) => t.id === tabId);
   const next = s.activeTab === tabId ? (tabs[Math.min(idx, tabs.length - 1)]?.id ?? null) : s.activeTab;
   patchSession(sessionId, { tabs, activeTab: next });
+  // The backend stopped the tab's CLI; its pane and xterm are this window's to drop.
+  queueMicrotask(() => dropTabTerminals([tabId]));
 }
 
 export async function setActiveTab(sessionId: string, tabId: string) {

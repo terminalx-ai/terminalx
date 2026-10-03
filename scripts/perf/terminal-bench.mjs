@@ -7,8 +7,8 @@
 // writes the workload files, builds the commands and prints the results.
 //
 //   node scripts/perf/terminal-bench.mjs --home ~/.txperf --pid 12345 \
-//     [--scenarios yes,cat,tui,echo,interrupt,soak] [--terminals 1,8,20] [--out results.json]
-//     [--interrupt-after 2000] [--soak sessions,tabs,switches] [--work dir] [--label text]
+//     [--scenarios yes,cat,tui,echo,interrupt,soak,churn,covered] [--terminals 1,8,20] [--out results.json]
+//     [--interrupt-after 2000] [--soak sessions,tabs,switches,agents] [--work dir] [--label text]
 import { execFileSync } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
@@ -16,13 +16,13 @@ import { cpus, homedir, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
 
-const SCENARIOS = ["yes", "cat", "tui", "echo", "interrupt", "soak"];
+const SCENARIOS = ["yes", "cat", "tui", "echo", "interrupt", "soak", "churn", "covered"];
 const LOG_BYTES = 50 * 1024 * 1024;
 const TUI_FRAMES = 4000;
 const YES_LINES = 2_000_000;
 
 function parseArgs(argv) {
-  const options = { scenarios: SCENARIOS, terminals: [1, 8, 20], interruptAfterMs: 2000, soak: { sessions: 4, tabs: 50, switches: 200 } };
+  const options = { scenarios: SCENARIOS, terminals: [1, 8, 20], interruptAfterMs: 2000, soak: { sessions: 4, tabs: 50, switches: 200, agents: 20 } };
   for (let i = 0; i < argv.length; i++) {
     const value = () => argv[++i] ?? fail(`${argv[i - 1]} needs a value`);
     switch (argv[i]) {
@@ -33,8 +33,8 @@ function parseArgs(argv) {
       case "--out": options.out = value(); break;
       case "--work": options.work = value(); break;
       case "--soak": {
-        const [sessions, tabs, switches] = value().split(",").map(Number);
-        options.soak = { sessions, tabs, switches };
+        const [sessions, tabs, switches, agents = 20] = value().split(",").map(Number);
+        options.soak = { sessions, tabs, switches, agents };
         break;
       }
       case "--interrupt-after": options.interruptAfterMs = Number(value()); break;
@@ -249,12 +249,28 @@ function markdown(results) {
     for (const { request, result: r, memory: m } of interrupts) lines.push(`| ${r.terminals} | ${r.renderer} | ${request.afterMs / 1000} | ${r.exitMs} | ${r.outputStoppedMs} | ${(r.bytesAfter / 1024 / 1024).toFixed(1)} | ${r.mainThread.longTasks} | ${r.mainThread.longestMs} | ${r.mainThread.framesPerSecond} | ${web(m.before)} → ${web(m.peak)} → ${web(m.after)} |`);
     lines.push("");
   }
+  const covers = results.filter((r) => r.result.scenario === "covered");
+  if (covers.length) {
+    lines.push("| Covered terminal | Times drawn | Renderer | In the document | Output (KB/s) | Long tasks | Frames/s | Hidden terminals in the document |", "| --- | --- | --- | --- | --- | --- | --- | --- |");
+    for (const { name, result: r } of covers) {
+      lines.push(`| ${name} | ${r.renders} | ${r.renderer} | ${r.inDocument ? "yes" : "no"} | ${(r.bytes / 1024 / r.seconds).toFixed(0)} | ${r.mainThread.longTasks} | ${r.mainThread.framesPerSecond} | ${r.counters.hiddenInDocument ?? "n/a"} |`);
+    }
+    lines.push("");
+  }
+  const churns = results.filter((r) => r.result.scenario === "churn");
+  if (churns.length) {
+    lines.push("| Run | Collected | WebContent before → after (MB) | GPU before → after (MB) | Contexts created / lost |", "| --- | --- | --- | --- | --- |");
+    for (const { name, result: r, memory: m } of churns) {
+      lines.push(`| ${name} | ${r.collected} of ${r.count} | ${mb(m.before?.WebContent)} → ${mb(m.after?.WebContent)} | ${mb(m.before?.GPU)} → ${mb(m.after?.GPU)} | ${r.counters.webglContexts.created - r.before.webglContexts.created} / ${r.counters.webglContexts.lost - r.before.webglContexts.lost} |`);
+    }
+    lines.push("");
+  }
   const soak = results.filter((r) => r.result.scenario === "soak");
   if (soak.length) {
-    lines.push("| After | WebContent (MB) | GPU (MB) | Main (MB) | xterm instances | WebGL / DOM | Contexts created / lost | Buffer lines | Replay buffers (bytes) | Panes |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    lines.push("| After | WebContent (MB) | GPU (MB) | Main (MB) | xterm instances | WebGL / DOM | On screen (on DOM) | Contexts created / lost | Buffer lines | Replay buffers (bytes) | Panes | Closed terminals collected |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
     for (const { name, result: r, memory: m } of soak) {
       const c = r.counters;
-      lines.push(`| ${name} | ${mb(m.after?.WebContent)} | ${mb(m.after?.GPU)} | ${mb(m.after?.main)} | ${c.instances} | ${c.webgl} / ${c.dom} | ${c.webglContexts.created} / ${c.webglContexts.lost} | ${c.bufferLines} | ${c.replayBuffers} (${c.replayBytes}) | ${c.panes} |`);
+      lines.push(`| ${name} | ${mb(m.after?.WebContent)} | ${mb(m.after?.GPU)} | ${mb(m.after?.main)} | ${c.instances} | ${c.webgl} / ${c.dom} | ${c.onScreen} (${c.domOnScreen}) | ${c.webglContexts.created} / ${c.webglContexts.lost} | ${c.bufferLines} | ${c.replayBuffers} (${c.replayBytes}) | ${c.panes} | ${r.closed.collected} of ${r.closed.tracked}${r.stepClosed ? ` (this step: ${r.stepClosed.collected} of ${r.stepClosed.tracked})` : ""} |`);
     }
     const left = soak.find((r) => r.result.leftAfterDelete)?.result.leftAfterDelete;
     if (left) lines.push("", `Right after deleting the sessions, ${left.panes} of their panes and ${left.counters.instances} xterm instances were still held.`);
@@ -266,7 +282,9 @@ function markdown(results) {
 const options = parseArgs(process.argv.slice(2));
 const status = await control(options.home, "status").catch((error) => fail(`no app answers under ${options.home}: ${error.message}`));
 if (options.pid && status.pid !== options.pid) fail(`the app under ${options.home} is pid ${status.pid}, not ${options.pid}`);
-console.error(`terminal-bench: app ${status.appVersion} pid ${status.pid}, workloads in ${options.work}`);
+// Agent tabs are only opened against the stand-in CLI that bench-app.sh puts on the app's path, never a real one.
+status.agent = existsSync(join(options.home, "bin/claude"));
+console.error(`terminal-bench: app ${status.appVersion} pid ${status.pid}, workloads in ${options.work}${status.agent ? "" : "; no stand-in agent CLI, so no agent tabs"}`);
 const files = writeWorkloads(options.work);
 await writeLog(files.log);
 const background = `sh "${files.agent}"`;
@@ -285,18 +303,39 @@ const record = async (name, bytes, request) => {
   results.push({ name, bytes, request, ...(await run(options, status.pid, request)) });
 };
 
+/** A small repository of the benchmark's own, for the scenarios that open real sessions. */
+function soakProject() {
+  const project = join(options.work, "soak-project");
+  if (!existsSync(join(project, ".git"))) {
+    mkdirSync(project, { recursive: true });
+    execFileSync("git", ["init", "-q", project]);
+    execFileSync("git", ["-C", project, "-c", "user.name=bench", "-c", "user.email=bench@localhost", "commit", "-q", "--allow-empty", "-m", "init"]);
+  }
+  return project;
+}
+
 for (const scenario of options.scenarios) {
+  if (scenario === "covered") {
+    await record("agent-style stream in a covered terminal, 10 s", null, { scenario: "covered", projectPath: soakProject(), stream: background, seconds: 10 });
+    continue;
+  }
+  if (scenario === "churn") {
+    // No process and no view: what xterm and its renderer alone give back.
+    const churn = { scenario: "churn", count: 30, lines: 10_000 };
+    await record("never shown", null, { ...churn, attach: false, webgl: false });
+    await record("on screen, DOM renderer", null, { ...churn, attach: true, webgl: false });
+    await record("on screen, WebGL", null, { ...churn, attach: true, webgl: true });
+    await record("on screen, WebGL, focused", null, { ...churn, attach: true, webgl: true, focus: true });
+    await record("on screen, WebGL, with a process, closed through the store", null, { ...churn, attach: true, webgl: true, pty: { cwd: options.work, command: sh("seq 1 2000; exec cat") } });
+    continue;
+  }
   if (scenario === "soak") {
-    const project = join(options.work, "soak-project");
-    if (!existsSync(join(project, ".git"))) {
-      mkdirSync(project, { recursive: true });
-      execFileSync("git", ["init", "-q", project]);
-      execFileSync("git", ["-C", project, "-c", "user.name=bench", "-c", "user.email=bench@localhost", "commit", "-q", "--allow-empty", "-m", "init"]);
-    }
+    const project = soakProject();
     // Each terminal fills its scrollback, then waits: the most a terminal holds.
     const soak = { scenario: "soak", projectPath: project, fill: sh("seq 1 20000; exec cat") };
     await record(`${options.soak.sessions} sessions open (baseline)`, null, { ...soak, step: "open", sessions: options.soak.sessions });
     await record(`${options.soak.tabs} tabs opened and closed`, null, { ...soak, step: "tabs", count: options.soak.tabs });
+    if (status.agent) await record(`${options.soak.agents} agent tabs opened and closed`, null, { ...soak, step: "agents", count: options.soak.agents, harness: "claude" });
     await record(`${options.soak.switches} session switches`, null, { ...soak, step: "switches", count: options.soak.switches });
     await record("sessions deleted, terminals closed", null, { ...soak, step: "cleanup" });
     continue;
