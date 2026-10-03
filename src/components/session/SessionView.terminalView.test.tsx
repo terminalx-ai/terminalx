@@ -63,7 +63,8 @@ import { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { SessionView } from "./SessionView";
 import { useCloudSession } from "@/lib/cloudSession";
 import { resetCloudAgents } from "@/lib/cloudAgents";
-import { agentTerminalId, resetCloudTerminals, typeIntoCloudTerminal } from "@/lib/cloudTerminals";
+import { agentTerminalId, cloudTerminalFactory, ensureAgentTerminal, resetCloudTerminals, typeIntoCloudTerminal } from "@/lib/cloudTerminals";
+import { getInstance } from "@/lib/terminal";
 import { resetCloudConnections } from "@/lib/cloudConnections";
 import { TERMINAL_APPROVAL_REASON, VIEWER_REASON, resetCollab } from "@/lib/cloudCollab";
 import { selectSessionTab } from "@/lib/terminal";
@@ -324,6 +325,50 @@ describe("the chat / terminal switch on a cloud agent tab (PRO-86)", () => {
     await waitFor(() => expect(xterm.screen()).toBe("agent screen\r\n"));
     expect(runtime.typed).toEqual([]);
     expect(guard.violations).toEqual([]);
+  });
+
+  it("clicking in and out of a stopped workspace's terminal view wakes nothing; a key does (review M1)", async () => {
+    setCatalog(workspaceItem("suspended"));
+    cached();
+    await open(null);
+    await act(async () => runtime.emit({ state: "suspended" }));
+    await screen.findByText("cached question");
+    showTerminal();
+    await screen.findByTestId("cloud-agent-terminal");
+    // The view's xterm, as TerminalView makes it; the program had asked for focus and mouse reports.
+    act(() => void getInstance(TERMINAL, cloudTerminalFactory(WORKSPACE, ensureAgentTerminal(WORKSPACE, "t-1"), () => xterm)));
+    for (const report of ["\x1b[I", "\x1b[O", "\x1b[I", "\x1b[<0;10;5M", "\x1b[?1;2c"]) act(() => xterm.report(report));
+    await settle();
+    expect(activate).not.toHaveBeenCalled();
+    expect(status()).toBe("Stopped: the workspace is asleep. Typing here wakes it, as sending a message does.");
+    expect(mocks.workspaceConnection.mock.calls.map((call) => call[1])).toEqual(["connect"]);
+    act(() => xterm.type("x"));
+    await waitFor(() => expect(activate).toHaveBeenCalledTimes(1));
+    expect(activate).toHaveBeenCalledWith("wake");
+  });
+
+  it("a focus report or a query in the replay never starts the agent, takes control or types; a key does (review M1)", async () => {
+    runtime.tabs = [agentTab({ process: "exited" })];
+    runtime.agent.running = false;
+    // What the last CLI left on screen asks the terminal who it is.
+    runtime.agent.screen = "bye \x1b[c\x1b[6n\r\n";
+    await open();
+    showTerminal();
+    await waitFor(() => expect(xterm.screen()).toContain("bye "));
+    act(() => xterm.report("\x1b[I"));
+    act(() => xterm.report("\x1b[O"));
+    await settle();
+    for (const method of ["pty.control", "pty.write"]) expect(runtime.methods(method)).toEqual([]);
+    // A key starts it and takes control; the next one is typed.
+    act(() => xterm.type("x"));
+    await waitFor(() => expect(runtime.params("pty.control")).toEqual([{ ptyId: "tab:t-1", cols: 100, rows: 40, start: true, epoch: "e1" }]));
+    await waitFor(() => expect(screen.queryByTestId("cloud-agent-terminal-status")).toBeNull());
+    act(() => xterm.type("y"));
+    await waitFor(() => expect(runtime.typed).toEqual(["y"]));
+    // Controlling now: its focus report reaches the program, as a report.
+    act(() => xterm.report("\x1b[I"));
+    await waitFor(() => expect(runtime.reports).toEqual(["\x1b[I"]));
+    expect(runtime.typed).toEqual(["y"]);
   });
 
   it("never wakes a stopped workspace for a viewer's keystrokes", async () => {

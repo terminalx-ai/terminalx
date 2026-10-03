@@ -45,6 +45,8 @@ const AGENT_PTY_PREFIX: &str = "tab:";
 /// Typing into an agent's terminal extends the typist's tab lease once it
 /// has less than the full idle time minus this left, not on every keystroke.
 const AGENT_LEASE_REFRESH_MS: u64 = 15_000;
+/// Removed agent tabs whose late output is still turned away.
+const MAX_REMOVED_AGENT_TABS: usize = 256;
 /// Largest single `pty.write`; a paste is split by the client.
 pub const MAX_WRITE_BYTES: usize = 64 * 1024;
 /// Input accepted but not yet read by the program. Past it a write is
@@ -261,7 +263,9 @@ pub struct WorkspaceRpc {
     ptys: Mutex<HashMap<String, PtyState>>,
     /// Agent tabs that were removed. Tab ids are never reused, and the last
     /// output of a CLI that was just stopped must not bring its terminal back.
-    removed_agent_tabs: Mutex<HashSet<String>>,
+    /// The newest [`MAX_REMOVED_AGENT_TABS`] are remembered: by the time one
+    /// falls off, its CLI has long stopped writing.
+    removed_agent_tabs: Mutex<VecDeque<String>>,
     session_subs: Mutex<HashMap<String, SessionSubscription>>,
     subscriptions: Mutex<HashMap<String, Subscription>>,
     idempotency: Mutex<IdempotencyCache>,
@@ -283,6 +287,10 @@ pub struct WorkspaceRpc {
     /// Stands in for `harness::offered` in tests, which cannot install agents.
     #[cfg(test)]
     offered_for_tests: Mutex<Option<Vec<crate::harness::HarnessInfo>>>,
+    /// Terminal input this runtime counted as use of the workspace (the
+    /// process-wide activity flag is shared by every test).
+    #[cfg(test)]
+    pub(super) input_activity: AtomicUsize,
 }
 
 impl WorkspaceRpc {
@@ -308,7 +316,7 @@ impl WorkspaceRpc {
             terminals,
             sessions,
             ptys: Mutex::new(HashMap::new()),
-            removed_agent_tabs: Mutex::new(HashSet::new()),
+            removed_agent_tabs: Mutex::new(VecDeque::new()),
             session_subs: Mutex::new(HashMap::new()),
             subscriptions: Mutex::new(HashMap::new()),
             idempotency: Mutex::new(IdempotencyCache::default()),
@@ -320,6 +328,8 @@ impl WorkspaceRpc {
             sessions_changed: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
             offered_for_tests: Mutex::new(None),
+            #[cfg(test)]
+            input_activity: AtomicUsize::new(0),
         });
         // Listeners run inline on the emitting thread, so no output is lost
         // to a lagging broadcast and offsets stay exact.
@@ -577,10 +587,14 @@ impl WorkspaceRpc {
     /// A participant who may no longer drive loses the terminals they
     /// control; everyone watching is told.
     fn revalidate_terminal_control(&self) {
+        let mut released = Vec::new();
         let mut ptys = self.ptys.lock().unwrap();
         for (pty_id, pty) in ptys.iter_mut() {
             let Some((user, authority)) = pty.controller_user.clone() else { continue };
-            if self.collab.access_for(authority, user.as_deref()).can_drive() {
+            let access = self.collab.access_for(authority, user.as_deref());
+            // An agent's terminal also needs the right to approve (`agent_input_refusal`).
+            let may_type = access.can_drive() && (pty.agent.is_none() || access.role == Role::Manager || access.can_approve);
+            if may_type {
                 continue;
             }
             pty.controller = None;
@@ -591,6 +605,14 @@ impl WorkspaceRpc {
                     json!({ "subscriptionId": subscription_id, "ptyId": pty_id, "control": "none", "controllerId": Value::Null }),
                 );
             }
+            if let (Some(agent), Some(user)) = (&pty.agent, user) {
+                released.push((agent.tab_id.clone(), user));
+            }
+        }
+        drop(ptys);
+        // The tab they held by typing into its terminal is free again.
+        for (tab_id, user) in released {
+            self.collab.release(&tab_id, &user, false);
         }
     }
 
@@ -1033,7 +1055,7 @@ impl WorkspaceRpc {
     fn agent_entry<'a>(&self, ptys: &'a mut HashMap<String, PtyState>, pty_id: &str) -> Result<&'a mut PtyState, RpcError> {
         if !ptys.contains_key(pty_id) {
             let tab_id = pty_id.strip_prefix(AGENT_PTY_PREFIX).ok_or_else(|| RpcError::not_found("no such terminal"))?;
-            if self.removed_agent_tabs.lock().unwrap().contains(tab_id) {
+            if self.removed_agent_tabs.lock().unwrap().iter().any(|removed| removed == tab_id) {
                 return Err(RpcError::not_found("the terminal closed with its tab"));
             }
             let (input, queue) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -1151,7 +1173,16 @@ impl WorkspaceRpc {
     /// The terminals of tabs that are gone go with them.
     fn close_agent_ptys<'a>(&self, tab_ids: impl Iterator<Item = &'a String>) {
         let tab_ids: Vec<&String> = tab_ids.collect();
-        self.removed_agent_tabs.lock().unwrap().extend(tab_ids.iter().map(|tab_id| tab_id.to_string()));
+        {
+            let mut removed = self.removed_agent_tabs.lock().unwrap();
+            for tab_id in &tab_ids {
+                if !removed.iter().any(|known| known == *tab_id) {
+                    removed.push_back(tab_id.to_string());
+                }
+            }
+            let excess = removed.len().saturating_sub(MAX_REMOVED_AGENT_TABS);
+            removed.drain(..excess);
+        }
         let ended: Vec<String> = {
             let mut ptys = self.ptys.lock().unwrap();
             tab_ids.into_iter().flat_map(|tab_id| Self::remove_pty(&mut ptys, &format!("{AGENT_PTY_PREFIX}{tab_id}"))).collect()
@@ -1348,7 +1379,16 @@ impl WorkspaceRpc {
         if writer.len() > 128 {
             return Err(RpcError::invalid("writerId is too long"));
         }
+        // `report`: bytes the client's terminal emulator produced by itself
+        // (a focus report, the answer to a device or colour query), not
+        // something a person typed. The program still needs them, so the
+        // controller's are delivered, but they are neither use of the
+        // workspace nor driving: no activity, and no lease claimed or extended.
+        let report = params.get("report").and_then(Value::as_bool) == Some(true);
         let agent = self.agent_pty(peer, &params)?;
+        // Decided before the terminals are locked: it reads the tab's own
+        // state, which a restarting CLI can hold for seconds.
+        let refusal = agent.as_ref().and_then(|(session_id, tab_id)| self.agent_input_refusal(peer, session_id, tab_id));
         let mut ptys = self.ptys.lock().unwrap();
         let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
         let key = (peer.device_id.clone(), writer.to_string());
@@ -1364,13 +1404,11 @@ impl WorkspaceRpc {
         if pty.exit.is_some() {
             return Err(RpcError::new("unavailable", "the terminal has exited"));
         }
-        if let Some((session_id, tab_id)) = &agent {
-            if let Some(refusal) = self.agent_input_refusal(peer, session_id, tab_id) {
-                return Err(refusal);
-            }
-            if !self.terminals.is_running(&pty_id) {
-                return Err(RpcError::new("unavailable", "the agent is not running"));
-            }
+        if let Some(refusal) = refusal {
+            return Err(refusal);
+        }
+        if agent.is_some() && !self.terminals.is_running(&pty_id) {
+            return Err(RpcError::new("unavailable", "the agent is not running"));
         }
         if pty.controller.as_deref() != Some(peer.device_id.as_str()) {
             return Err(RpcError::new("not_controller", "another device controls this terminal's input"));
@@ -1389,10 +1427,15 @@ impl WorkspaceRpc {
                 pty.applied_seq.remove(&oldest);
             }
         }
-        // Accepted input is use of the workspace (a resend or refusal is not).
-        crate::cloud_activity::note(crate::cloud_activity::Kind::TerminalInput);
         drop(ptys);
-        // Only what reached the agent claims its tab, as with a send.
+        if report {
+            return Ok(json!({ "applied": true, "seq": seq }));
+        }
+        // Accepted input is use of the workspace (a resend, a refusal or a terminal's own report is not).
+        crate::cloud_activity::note(crate::cloud_activity::Kind::TerminalInput);
+        #[cfg(test)]
+        self.input_activity.fetch_add(1, Ordering::SeqCst);
+        // Only what a person typed to the agent claims its tab, as with a send.
         if let (Some((session_id, tab_id)), Some(user)) = (&agent, peer.user_id.as_deref()) {
             let now = crate::cloud_agents::now_ms();
             let busy = agents_busy(&self.agents, session_id, tab_id);
@@ -1463,7 +1506,18 @@ impl WorkspaceRpc {
         let size = Self::size_params(&params)?;
         let scope = self.pty_session_scope(peer);
         let agent = self.agent_pty(peer, &params)?;
+        let wants_start = params.get("start").and_then(Value::as_bool) == Some(true);
         if let Some((session_id, tab_id)) = &agent {
+            // Everything that can refuse the call is checked before anything
+            // moves: the terminal named (its runtime process), and that a
+            // start can be served at all.
+            let pty_id = {
+                let mut ptys = self.ptys.lock().unwrap();
+                self.live_pty(&mut ptys, &params)?.0
+            };
+            if wants_start && !self.terminals.is_running(&pty_id) {
+                self.manager()?;
+            }
             match self.agent_input_refusal(peer, session_id, tab_id) {
                 // Taking the terminal is how a manager takes the tab over.
                 Some(refusal) if refusal.code == "lease_held" && self.access(peer).role == Role::Manager => {
@@ -1502,7 +1556,7 @@ impl WorkspaceRpc {
         // or "Start" in the terminal view), as opening a local tab does.
         // Watching, or taking control without it, never starts a process.
         let start = match &agent {
-            Some(tab) if params.get("start").and_then(Value::as_bool) == Some(true) && !self.terminals.is_running(&pty_id) => Some(tab),
+            Some(tab) if wants_start && !self.terminals.is_running(&pty_id) => Some(tab),
             _ => None,
         };
         let Some((session_id, tab_id)) = start else { return Ok(self.describe_pty(&pty_id, pty, peer, scope.as_ref())) };
@@ -1597,6 +1651,9 @@ impl WorkspaceRpc {
         result["subscriptionId"] = json!(subscription_id);
         result["offset"] = json!(from);
         result["end"] = json!(from + first.len() as u64);
+        // Everything before this was written before the attach: a client's
+        // terminal must not answer queries it finds in it.
+        result["replayEnd"] = json!(pty.end);
         result["data"] = json!(STANDARD.encode(first));
         result["truncated"] = json!(since.is_some_and(|since| since < start));
         result["runtimeGeneration"] = json!(self.generation());

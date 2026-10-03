@@ -47,7 +47,7 @@ import {
   type AccessLoss,
 } from "@/lib/cloudCollab";
 import { cloudAgentLabel, cloudTabTitle } from "@/lib/cloudRowState";
-import { createCloudTerminal, detachCloudTerminals, followCloudTerminals, sessionTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
+import { createCloudTerminal, detachCloudTerminals, followCloudTerminals, quietCloudTerminals, sessionTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
 import { cloudGitSource, desktopGitIdentity, type GitSource } from "@/lib/gitSource";
 import { agentPtyServed, clearCloudWake, cloudAsleep, cloudSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
 import { selectSessionTab } from "@/lib/terminal";
@@ -534,6 +534,10 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   }, [fileSource]);
 
   const asleep = cloudAsleep(state, workspaceState);
+  // Stopped: its terminals' views keep their picture and nothing else, so looking at one says nothing to anyone.
+  useEffect(() => {
+    if (asleep) quietCloudTerminals(workspaceKey);
+  }, [asleep, workspaceKey]);
   // The header chip: Live only while the transport is up, never for a stopped workspace, and monotonic while this desktop wakes it.
   const wakeFloor = useRef(0);
   if (!managed.woke || state.state === "connected") wakeFloor.current = 0;

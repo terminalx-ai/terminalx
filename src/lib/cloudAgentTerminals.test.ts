@@ -10,7 +10,11 @@ const {
   agentTerminalId,
   agentTerminalOf,
   attachAgentTerminal,
+  cloudTerminalFactory,
   cloudTerminalsOf,
+  isMouseReport,
+  isTerminalReport,
+  quietCloudTerminals,
   detachAgentTerminal,
   dropCloudTerminals,
   ensureAgentTerminal,
@@ -22,6 +26,7 @@ const {
 } = await import("./cloudTerminals");
 const { cloudReadOnlyReason, cloudSessionBackend, localSessionBackend, resetCloudWakes, terminalViewOf, TERMINAL_VIEW_NO_TERMINAL, TERMINAL_VIEW_OLD_RUNTIME } = await import("./sessionBackend");
 const { enterTerminalView, resetTabViews, tabViewOf, toggleTabView } = await import("./tabViews");
+const { getInstance } = await import("./terminal");
 
 const WS = "cloud:org-1:ws-1";
 const ID = agentTerminalId(WS, "t-1");
@@ -170,6 +175,128 @@ describe("an agent tab's own terminal in the cloud terminal store", () => {
     expect(agentTerminalOf(WS, "t-1")).toBeUndefined();
     runtime.output("after\r\n");
     expect(xterm.screen()).toBe("agent screen\r\n");
+  });
+});
+
+describe("what a terminal says by itself is not typing (review M1)", () => {
+  const FOCUS_IN = "\x1b[I";
+  const FOCUS_OUT = "\x1b[O";
+
+  it("tells reports from keys", () => {
+    for (const report of [FOCUS_IN, FOCUS_OUT, "\x1b[?1;2c", "\x1b[>0;276;0c", "\x1b[12;40R", "\x1b[?2004;1$y", "\x1b]11;rgb:1c1c/1c1c/1f1f\x1b\\", "\x1b]10;rgb:ff/ff/ff\x07", "\x1b[4;600;800t", `${FOCUS_IN}\x1b[?1;2c`]) {
+      expect(isTerminalReport(report), JSON.stringify(report)).toBe(true);
+    }
+    for (const typed of ["a", "\r", "\x1b", "\x1b[A", "\x1bOP", "\x1b[15~", "\x1b[200~pasted\x1b[201~", "ls -la\r", `${FOCUS_IN}x`]) {
+      expect(isTerminalReport(typed), JSON.stringify(typed)).toBe(false);
+    }
+    expect(isMouseReport("\x1b[<0;10;5M")).toBe(true);
+    expect(isMouseReport("\x1b[<35;11;5m\x1b[<35;12;5m")).toBe(true);
+    expect(isMouseReport("\x1b[A")).toBe(false);
+  });
+
+  it("a report never asks the gate, takes control or types: with nobody controlling it goes nowhere", async () => {
+    await attachAgentTerminal(WS, client, "t-1", base);
+    const gate = vi.fn(() => true);
+    setCloudTerminalInputGate(ID, gate);
+    xterm.report(FOCUS_IN);
+    xterm.report(FOCUS_OUT);
+    xterm.report("\x1b[<0;10;5M");
+    await settle();
+    expect(gate).not.toHaveBeenCalled();
+    expect(runtime.sent.map((frame) => frame.method)).toEqual(["pty.attach"]);
+    expect(agentTerminalOf(WS, "t-1")?.inputError).toBeNull();
+    // A key does ask.
+    xterm.type("x");
+    await settle();
+    expect(gate).toHaveBeenCalledTimes(1);
+  });
+
+  it("the controller's reports reach the program marked as reports, apart from what was typed", async () => {
+    await attachAgentTerminal(WS, client, "t-1", base);
+    await takeControl(WS, client, ID, null);
+    xterm.type("a");
+    xterm.report(FOCUS_IN);
+    xterm.type("b");
+    await settle();
+    expect(runtime.typed.join("")).toBe("ab");
+    expect(runtime.reports).toEqual([FOCUS_IN]);
+    const writes = runtime.params("pty.write");
+    expect(writes.filter((write) => write.report === true).map((write) => write.data)).toEqual([FOCUS_IN]);
+    expect(writes.filter((write) => write.data === "a" || write.data === "b").every((write) => !("report" in write))).toBe(true);
+    // Control moves to someone else: this view's reports stop, without an error.
+    runtime.controlledBy("other", "u-alice");
+    xterm.report(FOCUS_OUT);
+    await settle();
+    expect(runtime.reports).toEqual([FOCUS_IN]);
+    expect(agentTerminalOf(WS, "t-1")?.inputError).toBeNull();
+  });
+
+  it("answers no query found in the replay, and answers a live one", async () => {
+    runtime.agent.control = "you";
+    runtime.agent.screen = "old \x1b[c and \x1b[6n\r\n";
+    await attachAgentTerminal(WS, client, "t-1", base);
+    await settle();
+    expect(xterm.screen()).toContain("old ");
+    expect(runtime.methods("pty.write")).toEqual([]);
+    // The program asks now, and is waiting for the answer.
+    runtime.output("\x1b[c");
+    await settle();
+    expect(runtime.reports).toEqual(["\x1b[?1;2c"]);
+    expect(runtime.typed).toEqual([]);
+
+    // Coming back later: what was written while away is replay too.
+    detachAgentTerminal(WS, "t-1");
+    runtime.agent.screen += "\x1b[6n";
+    await attachAgentTerminal(WS, client, "t-1", base);
+    await settle();
+    expect(runtime.reports).toEqual(["\x1b[?1;2c"]);
+  });
+
+  it("goes by xterm's own mark where there is one: Shift+F3 is typed, the same bytes as a cursor report are not", async () => {
+    const marks: (() => void)[] = [];
+    (xterm.term as unknown as { _core: unknown })._core = { coreService: { onUserInput: (listener: () => void) => void marks.push(listener) } };
+    await attachAgentTerminal(WS, client, "t-1", base);
+    await takeControl(WS, client, ID, null);
+    const press = (data: string) => {
+      marks.forEach((mark) => mark());
+      xterm.type(data);
+    };
+    press("\x1b[1;2R");
+    xterm.report("\x1b[1;2R");
+    // A mouse report is marked as the user's by xterm, and is still not typing.
+    press("\x1b[<0;10;5M");
+    await settle();
+    expect(runtime.typed).toEqual(["\x1b[1;2R"]);
+    expect(runtime.reports.join("")).toBe("\x1b[1;2R\x1b[<0;10;5M");
+  });
+
+  it("holds for cloud shell terminals too: a watcher's reports are dropped quietly, the controller's are marked", async () => {
+    const shell = { ptyId: "p1", number: 1, epoch: "e1", pid: 1, cwd: "/w", cols: 80, rows: 24, createdAt: 1, offset: 0, exited: false, exitCode: null, control: "other" as const, controllerId: "u-alice" };
+    const writes: { data: string; report: boolean }[] = [];
+    const shellClient = {
+      connection: { state: "connected" },
+      listPtys: async () => ({ epoch: "e1", terminals: [shell] }),
+      attachPty: async () => ({ cursor: () => undefined, detach: () => undefined }),
+      write: async (_ptyId: string, data: string, options: { report?: boolean } = {}) => void writes.push({ data, report: options.report === true }),
+      controlPty: async () => ({ ...shell, control: "you" as const, controllerId: "u-me" }),
+    } as never;
+    const [terminal] = await syncCloudTerminals(WS, shellClient, base);
+    xterm.report(FOCUS_IN);
+    await settle();
+    expect(writes).toEqual([]);
+    expect(cloudTerminalsOf(WS).terminals[0]?.inputError).toBeNull();
+    await takeControl(WS, shellClient, terminal!.id, null);
+    xterm.report(FOCUS_IN);
+    xterm.type("ls\r");
+    await settle();
+    expect(writes).toEqual([{ data: FOCUS_IN, report: true }, { data: "ls\r", report: false }]);
+  });
+
+  it("a stopped workspace's terminals forget the modes their programs set", () => {
+    const made = cloudTerminalFactory(WS, ensureAgentTerminal(WS, "t-1"), base);
+    getInstance(ID, made);
+    quietCloudTerminals(WS);
+    for (const off of ["\x1b[?1004l", "\x1b[?1000l", "\x1b[?1003l", "\x1b[?1006l"]) expect(xterm.screen()).toContain(off);
   });
 });
 

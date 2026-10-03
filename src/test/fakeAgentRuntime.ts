@@ -63,6 +63,8 @@ export class FakeAgentRuntime implements WorkspaceTransport {
   agent = { control: "none" as PtyControl, controllerId: null as string | null, cols: 120, rows: 30, screen: "agent screen\r\n", running: true };
   /** Input the agent's CLI received, in order. */
   typed: string[] = [];
+  /** What a client's terminal emulator said by itself (`report: true`): delivered, never driving. */
+  reports: string[] = [];
   private messages = new Set<(message: unknown) => void>();
   private states = new Set<(state: WorkspaceConnectionState) => void>();
   private subscription = 0;
@@ -192,7 +194,7 @@ export class FakeAgentRuntime implements WorkspaceTransport {
       case "pty.attach": {
         this.ptySubscription = `sub-${++this.subscription}`;
         const from = Math.min(Number(params.sinceOffset ?? 0), this.agent.screen.length);
-        return ok({ ...this.describe(), subscriptionId: this.ptySubscription, offset: from, end: this.agent.screen.length, data: b64(this.agent.screen.slice(from)), truncated: false, runtimeGeneration: this.generation });
+        return ok({ ...this.describe(), subscriptionId: this.ptySubscription, offset: from, end: this.agent.screen.length, data: b64(this.agent.screen.slice(from)), replayEnd: this.agent.screen.length, truncated: false, runtimeGeneration: this.generation });
       }
       case "pty.control": {
         const refused = this.inputRefusal(frame.id);
@@ -215,7 +217,8 @@ export class FakeAgentRuntime implements WorkspaceTransport {
         if (refused) return refused;
         if (!this.agent.running) return refusal(frame.id, "unavailable");
         if (this.agent.control !== "you") return refusal(frame.id, "not_controller");
-        this.typed.push(String(params.data));
+        if (params.report === true) this.reports.push(String(params.data));
+        else this.typed.push(String(params.data));
         return ok({ applied: true, seq: params.seq });
       }
       case "pty.resize": {
@@ -238,6 +241,10 @@ export interface FakeXterm extends TerminalInstance {
   screen(): string;
   /** The reader presses keys. */
   type(data: string): void;
+  /** The emulator says something by itself: a focus report, the answer to a query. */
+  report(data: string): void;
+  /** Queries (`ESC[c`, `ESC[6n`) found in output are answered once the output is parsed, as xterm does. */
+  answers: boolean;
   /** The view's box changed and this view fits itself to it. */
   fitTo(cols: number, rows: number): void;
 }
@@ -247,11 +254,22 @@ export function fakeXterm(size: { cols: number; rows: number } = { cols: 100, ro
   const data: ((value: string) => void)[] = [];
   const resized: ((size: { cols: number; rows: number }) => void)[] = [];
   const decoder = new TextDecoder();
+  let parsing = Promise.resolve();
   const term = {
     cols: 80,
     rows: 24,
     options: {} as Record<string, unknown>,
-    write: (chunk: Uint8Array | string) => void written.push(typeof chunk === "string" ? chunk : decoder.decode(chunk)),
+    write: (chunk: Uint8Array | string, done?: () => void) => {
+      const text = typeof chunk === "string" ? chunk : decoder.decode(chunk);
+      written.push(text);
+      // Like xterm: output is parsed a little later, in order, and the answer
+      // to a query in it is emitted then, before the write's callback.
+      parsing = parsing.then(() => {
+        if (fake.answers && text.includes("\x1b[c")) emit("\x1b[?1;2c");
+        if (fake.answers && text.includes("\x1b[6n")) emit("\x1b[1;1R");
+        done?.();
+      });
+    },
     reset: vi.fn(() => void (written.length = 0)),
     onData: (listener: (value: string) => void) => void data.push(listener),
     onBinary: () => undefined,
@@ -263,16 +281,20 @@ export function fakeXterm(size: { cols: number; rows: number } = { cols: 100, ro
     focus: () => undefined,
     dispose: () => undefined,
   };
-  return {
+  const emit = (value: string) => data.forEach((listener) => listener(value));
+  const fake = {
     el: document.createElement("div"),
     term,
     fit: { fit: () => undefined, proposeDimensions: () => size },
+    answers: true,
     screen: () => written.join(""),
-    type: (value: string) => data.forEach((listener) => listener(value)),
+    type: emit,
+    report: emit,
     fitTo: (cols: number, rows: number) => {
       term.cols = cols;
       term.rows = rows;
       resized.forEach((listener) => listener({ cols, rows }));
     },
   } as unknown as FakeXterm;
+  return fake;
 }

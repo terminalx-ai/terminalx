@@ -501,7 +501,7 @@ shell terminals' own methods, as `ptyId: "tab:<tabId>"`. It adds no method.
 | Call | On an agent's terminal |
 | --- | --- |
 | `pty.attach` | Replays recent output (the runtime keeps the last 1 MiB from the CLI's first byte, in memory), then streams. `sinceOffset` resumes. The result also carries `tabId` and `running`. Starts nothing. |
-| `pty.write` | The controller's input, numbered and applied once, as for a shell. |
+| `pty.write` | The controller's input, numbered and applied once, as for a shell. With `report: true` (shells too) the bytes are the client's terminal emulator speaking for itself (a focus report, the answer to a query): delivered from the controller only, and neither activity nor a lease claim. |
 | `pty.resize` | The controller's size. Anyone else gets `not_controller`. |
 | `pty.control` | Take the input and size, optionally at this view's size. `start: true` also starts the tab's CLI when it is not running (`ensure_started`); without it nothing is ever started. |
 | `pty.detach` | End the stream. |
@@ -523,16 +523,28 @@ Who may do what (checked on every call, against the latest member list):
   refusal a send gets). Accepted input claims or extends the typist's lease,
   as a send does. A manager takes a held lease over by taking the terminal
   (`pty.control`), never by a keystroke.
-- **Approval rights**: a driver also needs `canApprove`. The agent's own
-  screen answers its permission prompts and changes its mode and model, which
-  a plain driver's messages never do, so a driver who may not approve watches
-  (`forbidden`, `data.needs: "canApprove"`).
+- **Approval rights**: a driver also needs `canApprove`. This matches the
+  rule that only a manager or an approver changes a tab's model, effort and
+  permission mode, all of which the agent's own screen can change. It is that
+  rule applied to the terminal, not a complete barrier: someone who may type
+  can do whatever the CLI lets its user do. A driver who may not approve
+  watches (`forbidden`, `data.needs: "canApprove"`), and one whose approval
+  rights are withdrawn stops being the terminal's controller (announced) and
+  the tab's lease they held is released.
 - **One controller**: input and size follow one device, as for shells
   (`control`, `controllerId`, `pty.control` and `pty.resized` notifications).
   A second viewer's window never resizes the program.
 - **Revocation** is the shells': a person who lost access has their
   connection closed and their streams ended; one who may no longer drive
   loses control, announced.
+
+**What a later viewer can read.** Attaching replays the terminal's last
+1 MiB, to anyone who has a role at that moment, including someone the
+workspace was shared with afterwards. That can include things the transcript
+never holds: a `/login` code or URL, the output of a `!` shell command, text
+typed into the CLI's composer and not sent. The ring exists only in the
+runtime's memory: it is gone when the tab is removed, and when the runtime
+process ends (a stop, a restart).
 
 Nothing new is stored. Output is kept only in the runtime's memory, and
 keystrokes go from the desktop to the runtime as `pty.write` over the same
@@ -571,6 +583,14 @@ point) beside the shell terminals' but apart from them, and
   and for a driver who may not approve; the view says which, and sends no
   input, size or control request.
 - Escape is the agent's in this view (it does not stop the turn from here).
+- **Only what a person does is input.** Key presses, paste and IME text may
+  wake a stopped workspace, take control or start the agent. What the
+  terminal emulator says by itself (focus in and out, answers to cursor,
+  device and colour queries, mouse reports) never does: it is forwarded as a
+  `report` only from a view that controls the terminal, and dropped
+  otherwise. Queries found in replayed output are not answered at all. When
+  the workspace stops, its terminals' views forget the focus and mouse modes
+  their programs had set. The same holds for cloud shell terminals.
 
 Not done here: the phone, and keeping the stream attached while the chat
 shows.

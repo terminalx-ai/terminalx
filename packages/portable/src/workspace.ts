@@ -258,7 +258,12 @@ export interface PtyCursor {
 }
 
 export interface PtyHandlers {
-  onData(bytes: Uint8Array, offset: number): void;
+  /**
+   * `replay`: the bytes were written before this attach (the ring's replay,
+   * or what was missed while away). A terminal emulator must not answer the
+   * queries it finds in them: the program that asked is long past them.
+   */
+  onData(bytes: Uint8Array, offset: number, replay: boolean): void;
   onExit?(code: number | null): void;
   onControl?(control: PtyControl, controllerId?: string | null): void;
   /** The controller resized the terminal; a viewer should match it. */
@@ -314,7 +319,7 @@ class PtyInput {
   /** Last seq the runtime accepted from this writer. */
   seq = 0;
   running = false;
-  pending: { data: string; resolve: () => void; reject: (error: unknown) => void }[] = [];
+  pending: { data: string; report: boolean; resolve: () => void; reject: (error: unknown) => void }[] = [];
 
   reset(): void {
     this.writerId = randomRequestId();
@@ -399,11 +404,16 @@ export class WorkspaceRpcClient {
    * runtime refuses it, e.g. `not_controller`, an exited terminal, or one
    * whose runtime restarted.
    */
-  write(ptyId: string, data: string): Promise<void> {
+  write(ptyId: string, data: string, options: { report?: boolean } = {}): Promise<void> {
     let input = this.inputs.get(ptyId);
     if (!input) this.inputs.set(ptyId, (input = new PtyInput()));
+    // `report`: bytes the terminal emulator produced by itself (a focus
+    // report, the answer to a query), not typed by a person. The runtime
+    // delivers the controller's, and counts them neither as use of the
+    // workspace nor as driving an agent tab.
+    const report = options.report === true;
     return new Promise<void>((resolve, reject) => {
-      input.pending.push({ data, resolve, reject });
+      input.pending.push({ data, report, resolve, reject });
       if (!input.running) void this.pumpInput(ptyId, input);
     });
   }
@@ -412,14 +422,17 @@ export class WorkspaceRpcClient {
     input.running = true;
     try {
       while (input.pending.length && !this.closed) {
-        const batch = input.pending.splice(0);
+        // One write carries input of one kind: what was typed is never sent as a report, nor the other way round.
+        const report = input.pending[0]!.report;
+        const run = input.pending.findIndex((entry) => entry.report !== report);
+        const batch = input.pending.splice(0, run < 0 ? input.pending.length : run);
         try {
           const text = batch.map((entry) => entry.data).join("");
           for (let start = 0; start < text.length; ) {
             let end = Math.min(text.length, start + WRITE_CHUNK);
             // Never split a surrogate pair across two writes.
             if (end < text.length && /[\uDC00-\uDFFF]/.test(text[end]!)) end--;
-            await this.sendInput(ptyId, input, text.slice(start, end));
+            await this.sendInput(ptyId, input, text.slice(start, end), report);
             start = end;
           }
           for (const entry of batch) entry.resolve();
@@ -433,7 +446,7 @@ export class WorkspaceRpcClient {
     }
   }
 
-  private async sendInput(ptyId: string, input: PtyInput, data: string): Promise<void> {
+  private async sendInput(ptyId: string, input: PtyInput, data: string, report: boolean): Promise<void> {
     const seq = input.seq + 1;
     for (;;) {
       const epoch = this.ptyEpochs.get(ptyId);
@@ -441,7 +454,7 @@ export class WorkspaceRpcClient {
         throw new WorkspaceRpcError("not_found", "the terminal's runtime restarted", "pty.write");
       }
       try {
-        const params = { ptyId, data, seq, writerId: input.writerId, ...(epoch ? { epoch } : {}) };
+        const params = { ptyId, data, seq, writerId: input.writerId, ...(epoch ? { epoch } : {}), ...(report ? { report: true } : {}) };
         await this.resending(() => this.untilDropped(this.rpc.request("pty.write", params)).then((value) => unwrap("pty.write", value)));
         input.seq = seq;
         return;
@@ -539,6 +552,8 @@ export class WorkspaceRpcClient {
     let cursor: PtyCursor | undefined = handlers.since;
     if (cursor && !this.ptyEpochs.has(ptyId)) this.ptyEpochs.set(ptyId, cursor.epoch);
     let gone = false;
+    /** Output before this offset was written before the attach. */
+    let replayUntil = 0;
     const markGone = (reason: "closed" | "runtime-restarted") => {
       if (gone) return;
       gone = true;
@@ -549,7 +564,7 @@ export class WorkspaceRpcClient {
       const bytes = decodeBase64(dataB64);
       // Replay and live output can overlap by a chunk around a reconnect.
       const skip = cursor === undefined ? 0 : Math.max(0, cursor.offset - offset);
-      if (skip < bytes.length) handlers.onData(bytes.subarray(skip), offset + skip);
+      if (skip < bytes.length) handlers.onData(bytes.subarray(skip), offset + skip, offset + skip < replayUntil);
       cursor = { offset: Math.max(cursor?.offset ?? 0, offset + bytes.length), epoch: this.ptyEpochs.get(ptyId) ?? cursor?.epoch ?? "" };
     };
     const stop = await this.subscribe({
@@ -580,8 +595,11 @@ export class WorkspaceRpcClient {
         cursor = undefined;
       },
       onReplay: (result) => {
-        const info = result as Partial<PtyInfo> & { data?: string; truncated?: boolean };
+        const info = result as Partial<PtyInfo> & { data?: string; truncated?: boolean; end?: number; replayEnd?: number };
         if (typeof info.epoch === "string") this.ptyEpochs.set(ptyId, info.epoch);
+        // An older runtime does not say where the replay ends: then it is the slice in the answer.
+        const sliceEnd = Number(info.offset ?? 0) + decodeBase64(String(info.data ?? "")).length;
+        replayUntil = Math.max(Number(info.replayEnd ?? 0), Number(info.end ?? 0), sliceEnd);
         if (info.truncated === true) handlers.onTruncated?.();
         emit(String(info.data ?? ""), Number(info.offset ?? 0));
         if (info.control) handlers.onControl?.(info.control, info.controllerId);
