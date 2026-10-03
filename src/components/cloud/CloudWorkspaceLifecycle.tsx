@@ -14,7 +14,9 @@ import {
   deletion,
   isOpen,
   lifecycleErrorMessage,
-  operationFailureText,
+  deleteAwaitsProvider,
+  deleteFailure,
+  RETRY_DELETE,
   remaining,
   repositoryLabel,
   repositoryRiskLines,
@@ -35,7 +37,8 @@ export function actionsFor(item: CloudWorkspaceListItem): LifecycleAction[] {
   if (state === "ready") actions.push("stop");
   // A failed archive stays in the archive list and is retried by archiving again.
   if (["ready", "suspended", "attention-required"].includes(state)) actions.push("archive");
-  if (state !== "destroyed") actions.push("delete");
+  // A delete only the provider can finish is not offered again (PRO-52).
+  if (state !== "destroyed" && !(item.latestOperation?.action === "delete" && item.latestOperation.state === "failed" && deleteAwaitsProvider(item.latestOperation))) actions.push("delete");
   return actions;
 }
 
@@ -322,6 +325,8 @@ export function DeletionProgress({
   const [operation, setOperation] = useState<CloudWorkspaceOperation>(initial);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The operation was read here, cleanup report included (a list row carries none).
+  const [readId, setReadId] = useState<string | null>(null);
   const changed = useRef(onChanged);
   changed.current = onChanged;
   const running = isOpen(operation);
@@ -340,6 +345,7 @@ export function DeletionProgress({
         .then((snapshot) => {
           if (!live) return;
           setOperation(snapshot.operation);
+          setReadId(snapshot.operation.id);
           if (!isOpen(snapshot.operation)) changed.current();
         })
         .catch((e: unknown) => {
@@ -373,6 +379,7 @@ export function DeletionProgress({
 
   const items = operation.cleanup?.items ?? [];
   const left = operation.cleanup ? remaining(operation.cleanup) : [];
+  const failure = operation.state === "failed" ? deleteFailure(operation, item.workspace.provider, { idRead: readId === operation.id }) : null;
   return (
     <div className="flex flex-col gap-1 text-xs" data-testid="cloud-deletion-progress" data-state={operation.state}>
       <span className={running ? "text-muted-foreground" : "text-destructive"}>
@@ -380,8 +387,8 @@ export function DeletionProgress({
           ? items.length
             ? `Deleting: ${items.length - left.length} of ${items.length} removed.`
             : "Deleting…"
-          : operation.state === "failed"
-            ? `The delete stopped: ${operationFailureText(operation)}`
+          : failure
+            ? `The delete stopped: ${failure.text}`
             : "Deleted."}
       </span>
       {left.length > 0 && (
@@ -396,10 +403,10 @@ export function DeletionProgress({
           ))}
         </ul>
       )}
-      {operation.state === "failed" && (
+      {failure?.retry && (
         <div className="flex items-center gap-2">
           <Button size="xs" variant="outline" disabled={busy} onClick={() => void retry()}>
-            {busy && <Loader2 className="animate-spin" />} Retry delete
+            {busy && <Loader2 className="animate-spin" />} {RETRY_DELETE}
           </Button>
           <span className="text-muted-foreground">Resumes the same cleanup; nothing is created again.</span>
         </div>
@@ -418,7 +425,8 @@ export function deletionLine(item: CloudWorkspaceListItem): string | null {
   const state = deletion(item);
   const operation = item.latestOperation;
   if (!state || !operation) return null;
-  if (state !== "running") return `The delete stopped: ${operationFailureText(operation)}`;
+  // The same sentence as the stopped delete's own view gives (PRO-52).
+  if (state !== "running") return `The delete stopped: ${deleteFailure(operation, item.workspace.provider).text}`;
   const items = operation.cleanup?.items ?? [];
   return items.length ? `Deleting: ${items.length - remaining(operation.cleanup!).length} of ${items.length} removed.` : "Deleting…";
 }

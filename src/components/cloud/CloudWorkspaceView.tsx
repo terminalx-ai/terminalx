@@ -10,7 +10,7 @@ import { CloudGitView } from "./CloudGit";
 import { NotSharedNotice, ParticipantsBar } from "./CloudCollab";
 import { CloudShareDialog } from "./CloudShareDialog";
 import { failureMessage, PHASES, phaseOf, runtimeNotPickedUp, settled } from "@/lib/cloudCreate";
-import { archiving, deletion, isOpen, operationFailureText } from "@/lib/cloudLifecycle";
+import { archiving, deletion, isOpen, workspaceFailureText } from "@/lib/cloudLifecycle";
 import { api, workspaceTargetKey, type CloudWorkspaceConnection, type CloudWorkspaceListItem } from "@/lib/api";
 import {
   closeCloudTerminal,
@@ -81,7 +81,7 @@ export function describeWorkspace(item: CloudWorkspaceListItem, now = Date.now()
   const phase = phaseOf(item);
   if (state === "attention-required") {
     if (phase === "failed" && launch) return `Needs attention: ${failureMessage(item)}`;
-    if (operation?.state === "failed" && operation.errorCode) return `Needs attention: ${operationFailureText(operation)}`;
+    if (operation?.state === "failed" && operation.errorCode) return `Needs attention: ${workspaceFailureText(item, operation)}`;
     return "Needs attention";
   }
   if (state === "suspended" || state === "archived" || state === "destroyed") return STATE_TEXT[state];

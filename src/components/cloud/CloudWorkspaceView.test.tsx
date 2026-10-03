@@ -293,6 +293,16 @@ describe("the list's state line", () => {
     expect(describeWorkspace(row("suspended", { launch: launch("authenticating-runtime") }))).toBe("Stopped");
     expect(describeWorkspace(row("attention-required", { launch: launch("authenticating-runtime") }))).toBe("Needs attention");
     expect(describeWorkspace(row("attention-required"))).toBe("Needs attention");
+    // PRO-52: a stopped Boat delete reads the same in the row's tooltip and the main view as on its own line, never a raw code.
+    const stopped = (fields: object, provider = "box") => describeWorkspace(row("attention-required", { provider }, { id: "op", action: "delete", state: "failed", ...fields }));
+    expect(stopped({ errorCode: "cloud_provider_state_conflict", detailCode: "box_deleted_sandbox_present" })).toBe(
+      "Needs attention: Boat accepted the deletion but still reports the sandbox. Contact Boat support with the deletion operation id.",
+    );
+    expect(stopped({ errorCode: "cloud_provider_permission_denied", providerErrorCode: "forbidden" })).toMatch(/^Needs attention: Boat refused to delete this workspace \(forbidden\).*sandbox\.read and sandbox\.delete.*then press Retry delete\.$/);
+    expect(stopped({ errorCode: "cloud_provider_permission_denied" }, "machine0")).toMatch(/refused this action, though its credential is still valid/);
+    expect(stopped({ errorCode: "cloud_provider_state_conflict" })).not.toMatch(/cloud_provider_state_conflict|The action failed/);
+    // A failed resume's state conflict has words too.
+    expect(describeWorkspace(row("attention-required", {}, { id: "op", action: "resume", state: "failed", errorCode: "cloud_provider_state_conflict" }))).toMatch(/^Needs attention: The provider reports this resource in a state/);
     expect(describeWorkspace(row("attention-required", {}, { id: "op", action: "resume", state: "failed", errorCode: "cloud_provider_unavailable" }))).toBe(
       "Needs attention: The provider did not answer. Retry resumes where it stopped.",
     );
