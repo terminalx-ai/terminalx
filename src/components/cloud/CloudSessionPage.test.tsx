@@ -597,10 +597,10 @@ describe("shared cloud workspaces (PRO-30)", () => {
     expect(screen.queryByText(/Terminal: /)).toBeNull();
   });
 
-  it("names the person typing in a terminal and lets a driver take control", async () => {
+  it("names the person typing in a terminal and lets a driver who can approve take control", async () => {
     listed = [info({ control: "other", controllerId: "u-alice" })];
     await openReady();
-    act(() => emit(shared({ userId: "u-me", role: "driver", canApprove: false }, { authority: "participate" })));
+    act(() => emit(shared({ userId: "u-me", role: "driver", canApprove: true }, { authority: "participate" })));
     const viewer = await screen.findByTestId("cloud-terminal-viewer");
     // Holding control is not typing: the banner says who has the input.
     await waitFor(() => expect(viewer.textContent).toContain("Alice controls this terminal; you are watching."));
@@ -609,6 +609,17 @@ describe("shared cloud workspaces (PRO-30)", () => {
     await waitFor(() => expect(client.controlPty).toHaveBeenCalledWith("remote-pty-1", 132, 40));
     // Creating terminals stays with manage attachments.
     expect(screen.queryByRole("button", { name: "New cloud terminal" })).toBeNull();
+  });
+
+  it("PRO-88: a driver who cannot approve permissions watches a terminal, with the reason", async () => {
+    listed = [info({ control: "other", controllerId: "u-alice" })];
+    await openReady();
+    act(() => emit(shared({ userId: "u-me", role: "driver", canApprove: false }, { authority: "participate" })));
+    const viewer = await screen.findByTestId("cloud-terminal-viewer");
+    await waitFor(() => expect(viewer.textContent).toContain("Alice controls this terminal. You can watch; typing in a terminal needs the right to approve permissions"));
+    expect(viewer.textContent).not.toContain("driver access");
+    expect(screen.queryByRole("button", { name: "Take control" })).toBeNull();
+    expect(client.controlPty).not.toHaveBeenCalled();
   });
 
   it("never offers a viewer control of a terminal", async () => {

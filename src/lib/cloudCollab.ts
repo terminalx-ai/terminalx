@@ -401,6 +401,28 @@ export function canApprove(you: WorkspaceYou | null): boolean {
   return you?.role === "manager" || !!you?.canApprove;
 }
 
+/**
+ * A shell is arbitrary code as the workspace's user, so typing into a
+ * terminal needs what changing an agent's settings needs: a manager, or a
+ * driver who may approve permissions (PRO-88; the runtime refuses the rest).
+ */
+export function canTypeInTerminals(you: WorkspaceYou | null): boolean {
+  return you?.role === "manager" || (canDrive(you) && !!you?.canApprove);
+}
+
+/** Why a driver without the approval right only watches terminals. */
+export const TERMINAL_APPROVER_REASON = "typing in a terminal needs the right to approve permissions; ask an admin.";
+
+/**
+ * A slash command the runtime refused (category `slash-command-forbidden`):
+ * only a manager or an approver sends the ones that change what the agent
+ * may do. `receipt.command` is the command as this person typed it.
+ */
+export function slashRefusalText(receipt: Record<string, unknown> | null | undefined): string {
+  const command = typeof receipt?.command === "string" && receipt.command ? receipt.command : "That command";
+  return `Not sent: ${command} needs someone who can approve permissions. You can send /clear, /compact, /help and this project's own commands.`;
+}
+
 /** A participate connection the workspace is not shared with: it sees no content. */
 export function notShared(state: WorkspaceConnectionState, you: WorkspaceYou | null): boolean {
   // `listed: false`: the runtime has no member list yet and serves what it

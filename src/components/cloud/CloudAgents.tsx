@@ -40,7 +40,7 @@ import { TERMINAL_OUTBOX_STATES, type CloudAgentScope, type OutboxEntry, type Wa
 import type { ImageInput } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
 import { cn } from "@/lib/cn";
-import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
+import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, slashRefusalText, tabGate, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
 import { LeaseBar, NotesPanel, NotSharedNotice, useNowUntil } from "./CloudCollab";
 
@@ -705,6 +705,7 @@ function outboxStateText(entry: OutboxEntry, nameOf: (userId: string | null | un
     return `${typeof holder === "string" ? nameOf(holder) : "Someone else"} is driving — your message was not sent`;
   }
   if (entry.state === "rejected" && entry.category === "access-revoked") return "Not sent: your access changed";
+  if (entry.state === "rejected" && entry.category === "slash-command-forbidden") return slashRefusalText(entry.receipt);
   const text = STATE_TEXT[entry.state] ?? entry.state;
   return entry.state === "rejected" && entry.category ? `${text} (${entry.category})` : text;
 }

@@ -27,7 +27,7 @@ use super::files::WorkspaceFiles;
 use super::git::WorkspaceGit;
 use super::collab::{self, Access, Change, Collaboration, LeaseRefusal, Role};
 use super::protocol::{self, Authority, IdempotencyCache, RpcError, PROTOCOL};
-use crate::cloud_agents::CloudAgents;
+use crate::cloud_agents::{slash, CloudAgents};
 use crate::events::AgentEvent;
 use crate::pty::{PaneSpec, PtyData, PtyExit, Terminals};
 use crate::session::SessionManager;
@@ -553,13 +553,14 @@ impl WorkspaceRpc {
         self.tabs_changed.notify_one();
     }
 
-    /// A participant who may no longer drive loses the terminals they
-    /// control; everyone watching is told.
+    /// A participant who may no longer type into terminals (no longer a
+    /// driver, or no longer an approver) loses the ones they control;
+    /// everyone watching is told.
     fn revalidate_terminal_control(&self) {
         let mut ptys = self.ptys.lock().unwrap();
         for (pty_id, pty) in ptys.iter_mut() {
             let Some((user, authority)) = pty.controller_user.clone() else { continue };
-            if self.collab.access_for(authority, user.as_deref()).can_drive() {
+            if self.collab.access_for(authority, user.as_deref()).can_configure() {
                 continue;
             }
             pty.controller = None;
@@ -741,6 +742,14 @@ impl WorkspaceRpc {
             _ => Role::Viewer,
         };
         let access = self.access(peer);
+        // A shell is arbitrary code as the workspace's user: it can edit the
+        // agent's settings, read its tokens or start an agent with other
+        // flags. So typing into one needs what changing those settings
+        // needs (PRO-88): a manager, or a driver who may approve permissions.
+        if matches!(method, "pty.write" | "pty.resize" | "pty.control") && access.can_drive() && !access.can_configure() {
+            return Err(RpcError::forbidden(format!("{method} needs the right to approve permissions: a terminal runs anything as the workspace's user"))
+                .with_data(json!({ "role": access.role, "canApprove": false, "reason": "approval-required" })));
+        }
         if access.role >= needed {
             return Ok(());
         }
@@ -1878,6 +1887,13 @@ impl WorkspaceRpc {
         // too: they take a held lease over explicitly.
         if self.authority(peer) == Authority::Participate && !self.access(peer).can_drive() {
             return Err(RpcError::forbidden("sending needs driver access to the workspace"));
+        }
+        // And the same rule for slash commands (PRO-88): typed as keys, they
+        // change what only a manager or an approver may change.
+        if !self.access(peer).can_configure() {
+            if let Err(refusal) = slash::check(text, Some(Path::new(&session.cwd))) {
+                return Err(RpcError::forbidden(refusal.message()).with_data(json!({ "reason": slash::CATEGORY, "command": refusal.command })));
+            }
         }
         let busy = agents_busy(&self.agents, &session.id, &tab.id);
         let now = crate::cloud_agents::now_ms();

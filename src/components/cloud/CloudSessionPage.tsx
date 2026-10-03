@@ -46,7 +46,7 @@ import {
   useCloudTerminals,
   type CloudTerminal,
 } from "@/lib/cloudTerminals";
-import { canDrive, sharingKnown, effectiveYou, notShared, presenceTab, rememberYou, startCollab, useCollab } from "@/lib/cloudCollab";
+import { canTypeInTerminals, sharingKnown, effectiveYou, notShared, presenceTab, rememberYou, startCollab, useCollab } from "@/lib/cloudCollab";
 import { rememberPeople } from "@/lib/cloudPeople";
 import { getCloudAgents } from "@/lib/cloudAgents";
 import { useTheme } from "@/lib/theme";
@@ -538,8 +538,8 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
   const shared = connected && collab.available ? you : null;
   // A demoted admin's manage attachment is not a manager's any more.
   const manage = connected && state.authority === "manage" && (!sharingKnown(shared) || shared.role === "manager");
-  // Drivers and managers of a shared workspace may take a terminal over; viewers never.
-  const mayControl = manage || canDrive(shared);
+  // Managers and approving drivers of a shared workspace may take a terminal over; viewers and plain drivers never.
+  const mayControl = manage || canTypeInTerminals(shared);
   const [sharing, setSharing] = useState(false);
   const cloudTarget = connection.target.kind === "cloud" ? connection.target : null;
 

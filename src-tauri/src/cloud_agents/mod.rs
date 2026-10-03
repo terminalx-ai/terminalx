@@ -15,6 +15,7 @@ pub mod keys;
 pub mod launch;
 pub mod mailbox;
 pub mod receipts;
+pub mod slash;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -114,6 +115,10 @@ pub trait AgentOps: Send + Sync {
     fn events(&self, session_id: &str, tab_id: &str) -> Result<Vec<Value>>;
     /// The session a tab belongs to, for the checkpoint projection.
     fn session(&self, _session_id: &str) -> Option<SessionSummary> {
+        None
+    }
+    /// Where the session's agents run, for the project's own slash commands.
+    fn cwd(&self, _session_id: &str) -> Option<PathBuf> {
         None
     }
 }
@@ -240,6 +245,10 @@ impl AgentOps for ManagerOps {
     fn session(&self, session_id: &str) -> Option<SessionSummary> {
         let entry = index::get(session_id).ok().filter(|entry| entry.project_path == self.root)?;
         Some(SessionSummary { title: entry.title, branch: entry.branch })
+    }
+
+    fn cwd(&self, session_id: &str) -> Option<PathBuf> {
+        index::get(session_id).ok().map(|entry| PathBuf::from(entry.cwd))
     }
 
     fn busy(&self, session_id: &str, tab_id: &str) -> bool {
@@ -482,16 +491,35 @@ impl CloudAgents {
         }
     }
 
-    /// Whether a queued follow-up's sender may still drive. One queued
-    /// before sharing existed, or before the API listed anyone, is kept.
-    fn follow_up_allowed(&self, follow_up: &FollowUp) -> bool {
-        match self.collab.get() {
-            Some(collab) if collab.known() && !follow_up.actor_id.is_empty() => collab.access_of(Some(&follow_up.actor_id)).can_drive(),
-            _ => true,
+    /// A slash command in `text` that this person may not send (PRO-88).
+    pub fn slash_refusal(&self, access: Access, session_id: &str, text: &str) -> Option<slash::Refusal> {
+        if access.can_configure() {
+            return None;
         }
+        slash::check(text, self.ops.cwd(session_id).as_deref()).err()
     }
 
-    /// Drop queued follow-ups whose sender lost driver access, saying so in
+    /// Why a queued follow-up may not be typed any more, as the note its
+    /// transcript gets: its sender no longer drives, or it is a slash
+    /// command and they no longer approve. One queued before sharing
+    /// existed, or before the API listed anyone, is kept.
+    fn follow_up_refusal(&self, follow_up: &FollowUp) -> Option<&'static str> {
+        let access = match self.collab.get() {
+            Some(collab) if collab.known() && !follow_up.actor_id.is_empty() => collab.access_of(Some(&follow_up.actor_id)),
+            _ => return None,
+        };
+        if !access.can_drive() {
+            return Some("Dropped a queued message from a person who no longer has driver access.");
+        }
+        self.slash_refusal(access, &follow_up.session_id, &follow_up.text)
+            .map(|_| "Dropped a queued slash command from a person who can no longer approve permissions.")
+    }
+
+    fn follow_up_allowed(&self, follow_up: &FollowUp) -> bool {
+        self.follow_up_refusal(follow_up).is_none()
+    }
+
+    /// Drop queued follow-ups their sender may no longer send, saying so in
     /// their transcripts (contract §21.5). False when the queue could not
     /// be rewritten.
     pub fn revalidate_follow_ups(&self) -> bool {
@@ -503,7 +531,8 @@ impl CloudAgents {
             }
         };
         for (tab_id, follow_up) in dropped {
-            self.ops.note(&follow_up.session_id, &tab_id, "Dropped a queued message from a person who no longer has driver access.");
+            let why = self.follow_up_refusal(&follow_up).unwrap_or("Dropped a queued message its sender may no longer send.");
+            self.ops.note(&follow_up.session_id, &tab_id, why);
             self.changed(Some(&tab_id), true);
         }
         true

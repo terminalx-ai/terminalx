@@ -705,7 +705,8 @@ async fn roles_decide_what_a_participant_reads_types_and_holds() {
     let agents = with_tab(&f);
     f.rpc.set_collaboration(members(json!([
         { "userId": "admin", "role": "manager", "canApprove": true },
-        { "userId": "alice", "role": "driver", "canApprove": false },
+        // A driver types into a terminal only with the approval right (PRO-88).
+        { "userId": "alice", "role": "driver", "canApprove": true },
         { "userId": "bob", "role": "viewer", "canApprove": true },
     ])));
     let (admin, mut admin_events, hello) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
@@ -980,6 +981,110 @@ async fn a_key_holder_removed_while_the_runtime_was_down_triggers_a_rotation() {
     let current = reopened.keys.current().unwrap().0;
     restarted.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }, { "userId": "bob", "role": "viewer" }])));
     assert_eq!(reopened.keys.current().unwrap().0, current);
+}
+
+/// PRO-88: a shell is arbitrary code as the workspace's user, so typing into
+/// one needs what changing the agent's settings needs. A plain driver
+/// watches; an approving viewer still only watches; and a driver whose
+/// approval right is withdrawn loses the terminal they controlled.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shell_needs_the_approval_right_and_loses_its_controller_when_it_is_withdrawn() {
+    let f = fixture();
+    let list = |erin_approves: bool| {
+        members(json!([
+            { "userId": "admin", "role": "manager" },
+            { "userId": "alice", "role": "driver", "canApprove": false },
+            { "userId": "bob", "role": "viewer", "canApprove": true },
+            { "userId": "erin", "role": "driver", "canApprove": erin_approves },
+        ]))
+    };
+    f.rpc.set_collaboration(list(true));
+    let (admin, mut admin_events, _) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    let (alice, mut alice_events, _) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (bob, _bob_events, _) = person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
+    let (erin, _erin_events, _) = person(&f.rpc, "d-erin", Authority::Participate, "erin").await;
+    // An admin's phone: a participate attachment of a manager.
+    let (phone, _phone_events, _) = person(&f.rpc, "d-phone", Authority::Participate, "admin").await;
+
+    let created = call(&f.rpc, &admin, "pty.create", json!({ "clientRequestId": "request-shell-1" })).await.unwrap();
+    let pty_id = created["ptyId"].as_str().unwrap().to_string();
+    call(&f.rpc, &admin, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    // The plain driver watches the shell, and can do nothing else to it.
+    call(&f.rpc, &alice, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    for (method, params) in [
+        ("pty.control", json!({ "ptyId": pty_id })),
+        ("pty.control", json!({ "ptyId": pty_id, "cols": 100, "rows": 30 })),
+        ("pty.write", json!({ "ptyId": pty_id, "data": "echo plain-driver\n", "seq": 1, "writerId": "a" })),
+        ("pty.resize", json!({ "ptyId": pty_id, "cols": 100, "rows": 30 })),
+    ] {
+        let (refusal, message) = call(&f.rpc, &alice, method, params).await.unwrap_err();
+        assert_eq!(refusal, "forbidden", "{method}");
+        assert!(message.contains("approve permissions"), "{method}: the refusal says what is missing: {message}");
+        assert_eq!(code(call(&f.rpc, &bob, method, json!({ "ptyId": pty_id, "data": "x", "seq": 1, "cols": 80, "rows": 24 })).await), "forbidden", "{method}: an approving viewer");
+    }
+    assert_eq!(call(&f.rpc, &admin, "pty.list", json!({})).await.unwrap()["terminals"][0]["controllerId"], "admin", "nothing moved");
+
+    // A driver who may approve takes it and types; so does a manager's phone.
+    let taken = call(&f.rpc, &erin, "pty.control", json!({ "ptyId": pty_id })).await.unwrap();
+    assert_eq!((taken["control"].as_str(), taken["controllerId"].as_str()), (Some("you"), Some("erin")));
+    assert_eq!(next_event(&mut admin_events, "pty.control").await["controllerId"], "erin");
+    assert_eq!(next_event(&mut alice_events, "pty.control").await["controllerId"], "erin");
+    call(&f.rpc, &erin, "pty.write", json!({ "ptyId": pty_id, "data": "echo approver-$((40+2))\n", "seq": 1, "writerId": "e" })).await.unwrap();
+    output_until(&mut admin_events, "approver-42").await;
+    assert_eq!(call(&f.rpc, &phone, "pty.control", json!({ "ptyId": pty_id })).await.unwrap()["control"], "you");
+    assert_eq!(next_event(&mut admin_events, "pty.control").await["controllerId"], "admin");
+    call(&f.rpc, &erin, "pty.control", json!({ "ptyId": pty_id })).await.unwrap();
+    assert_eq!(next_event(&mut admin_events, "pty.control").await["controllerId"], "erin");
+
+    // Still a driver, no longer an approver: control goes, and the next
+    // write is refused for the missing right, not as `not_controller`.
+    f.rpc.set_collaboration(list(false));
+    let told = next_event(&mut admin_events, "pty.control").await;
+    assert_eq!((told["control"].as_str(), told["controllerId"].clone()), (Some("none"), Value::Null));
+    let (refusal, message) = call(&f.rpc, &erin, "pty.write", json!({ "ptyId": pty_id, "data": "x", "seq": 2, "writerId": "e" })).await.unwrap_err();
+    assert_eq!(refusal, "forbidden");
+    assert!(message.contains("approve permissions"), "{message}");
+    assert_eq!(code(call(&f.rpc, &erin, "pty.control", json!({ "ptyId": pty_id })).await), "forbidden");
+    assert!(tokio::time::timeout(Duration::from_millis(50), erin.closed()).await.is_err(), "a driver stays connected");
+}
+
+/// PRO-88: the live `session.send` applies the mailbox's slash command rule.
+/// (The fixture runs no agents: a send that passed every check is
+/// `unavailable`.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plain_drivers_slash_command_is_refused_on_the_live_send_too() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    std::fs::create_dir_all(f.root.join(".claude/commands")).unwrap();
+    std::fs::write(f.root.join(".claude/commands/deploy.md"), "Deploy").unwrap();
+    let session = seed_session(&f.root, "Fix login", None);
+    let tab_id = session.tabs[0].id.clone();
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager" },
+        { "userId": "alice", "role": "driver", "canApprove": false },
+        { "userId": "erin", "role": "driver", "canApprove": true },
+    ])));
+    let (admin, _admin_events, _) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    let (alice, _alice_events, _) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (erin, _erin_events, _) = person(&f.rpc, "d-erin", Authority::Participate, "erin").await;
+    let sends = AtomicUsize::new(0);
+    let send = |peer: &Arc<Peer>, text: &str| {
+        let (rpc, peer) = (f.rpc.clone(), peer.clone());
+        let request = format!("request-slash-{}", sends.fetch_add(1, Ordering::SeqCst));
+        let params = json!({ "sessionId": session.id, "tabId": tab_id, "text": text, "clientRequestId": request });
+        async move { call(&rpc, &peer, "session.send", params).await }
+    };
+    for text in ["/model opus", "  /model opus", "\n/permissions", "look at this\n/login\nthanks", "/mod", "/help \u{15}/model opus"] {
+        let (refusal, message) = send(&alice, text).await.unwrap_err();
+        assert_eq!(refusal, "forbidden", "{text:?}");
+        assert!(message.contains("approve permissions") && message.contains("was not sent"), "{text:?}: {message}");
+    }
+    for text in ["fix the login", "/clear", "/compact", "/help", "/deploy staging", "see /usr/bin/env"] {
+        assert_eq!(code(send(&alice, text).await), "unavailable", "a plain driver may send {text:?}");
+    }
+    for peer in [&erin, &admin] {
+        assert_eq!(code(send(peer, "/model opus").await), "unavailable", "an approver's and a manager's commands pass");
+    }
 }
 
 // ---- CS-12: agents/1, session/2, pty/2 ---------------------------------------

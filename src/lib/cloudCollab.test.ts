@@ -8,6 +8,7 @@ import {
   accessLoss,
   accessLostReason,
   applyCollabEvent,
+  canTypeInTerminals,
   clearCollabAccess,
   getCollab,
   listedYou,
@@ -16,6 +17,7 @@ import {
   resetCollab,
   roleBlockReason,
   setNotesOpen,
+  slashRefusalText,
   tabGate,
   workspaceAuthority,
 } from "./cloudCollab";
@@ -78,6 +80,26 @@ describe("one agent tab's lease and approvals", () => {
   it("never calls a lease someone else's while this person's own id is unknown (the list's role, before a connection)", () => {
     const fromList = listedYou({ role: "driver", canApprove: false })!;
     expect(tabGate(fromList, lease("u-me", now + 1), now, false, nameOf).blocked).toBeNull();
+  });
+});
+
+describe("PRO-88: what the approval right guards beyond permission requests", () => {
+  it("lets only a manager or an approving driver type in a terminal", () => {
+    expect(canTypeInTerminals(you("manager"))).toBe(true);
+    expect(canTypeInTerminals(you("driver", { canApprove: true }))).toBe(true);
+    expect(canTypeInTerminals(you("driver"))).toBe(false);
+    // Approving permission requests does not make a viewer a driver.
+    expect(canTypeInTerminals(you("viewer", { canApprove: true }))).toBe(false);
+    expect(canTypeInTerminals(you("none"))).toBe(false);
+    expect(canTypeInTerminals(null)).toBe(false);
+  });
+
+  it("says which slash command the runtime refused, and what may be sent instead", () => {
+    expect(slashRefusalText({ command: "/model" })).toBe(
+      "Not sent: /model needs someone who can approve permissions. You can send /clear, /compact, /help and this project's own commands.",
+    );
+    // A receipt that could not be read (its key is gone) still gives the reason.
+    expect(slashRefusalText(null)).toMatch(/^Not sent: That command needs someone who can approve permissions\./);
   });
 });
 
