@@ -338,6 +338,48 @@ impl Terminals {
     /// Kill the shells opened for a session, whose pane ids are
     /// `<session id>:<suffix>`. An agent tab's pane (`tab:<tab id>`) is its
     /// tab's to stop.
+    /// Kill several panes at once and wait for all of their processes to be
+    /// gone, so a directory they ran in can be removed. Signalling them all
+    /// before waiting keeps the wait to one grace period rather than one each.
+    pub fn kill_all_and_wait(&self, ids: &[String], timeout: Duration) {
+        let mut pids = Vec::new();
+        {
+            let mut panes = self.panes.lock().unwrap();
+            for id in ids {
+                if let Some(pane) = panes.remove(id) {
+                    if let Some(pid) = pane.pid {
+                        crate::harness::host::terminate(pid);
+                        pids.push(pid);
+                    }
+                }
+            }
+        }
+        self.changed();
+        let start = Instant::now();
+        let mut forced = false;
+        while start.elapsed() < timeout {
+            pids.retain(|pid| crate::harness::host::is_alive(*pid));
+            if pids.is_empty() {
+                return;
+            }
+            if !forced && start.elapsed() >= TERM_GRACE {
+                for pid in &pids {
+                    crate::harness::host::kill_now(*pid);
+                }
+                forced = true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        log::warn!("{} process(es) did not exit within {timeout:?}", pids.len());
+    }
+
+    /// The panes a session owns: each tab's CLI and the shells opened for it.
+    pub fn session_pane_ids(&self, session_id: &str, tab_ids: &[String]) -> Vec<String> {
+        let prefix = format!("{session_id}:");
+        let tabs: Vec<String> = tab_ids.iter().map(|tab| format!("tab:{tab}")).collect();
+        self.panes.lock().unwrap().keys().filter(|id| id.starts_with(&prefix) || tabs.contains(id)).cloned().collect()
+    }
+
     pub fn kill_session_shells(&self, session_id: &str) {
         let prefix = format!("{session_id}:");
         let ids: Vec<String> = self.panes.lock().unwrap().keys().filter(|id| id.starts_with(&prefix)).cloned().collect();

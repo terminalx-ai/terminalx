@@ -293,11 +293,16 @@ pub(crate) fn add_tab_entry(session_id: &str, tab: &NewTab) -> Result<TabEntry> 
     Ok(out)
 }
 
-/// Delete a session, its logs, attachments and (best effort) its worktree.
+/// Delete a session, its logs, attachments and, when asked, its worktree.
 /// Removing the worktree takes every session that ran in it along, since a
 /// checkout that no longer exists has nothing left for them to run in.
-/// `stop` ends whatever each doomed session's tabs are running before
-/// anything is removed. Returns the removed sessions.
+/// `stop` ends whatever each doomed session's tabs are running, and waits for
+/// it, before anything is removed. Returns the removed sessions.
+///
+/// A worktree that cannot be removed fails the whole delete: the error names
+/// the directory and the reason, and every session stays in the index, so
+/// the directory is never left on disk with nothing pointing at it and the
+/// delete can simply be tried again.
 pub(crate) fn delete_session_blocking(
     sink: &dyn EventSink,
     session_id: &str,
@@ -305,28 +310,109 @@ pub(crate) fn delete_session_blocking(
     stop: &dyn Fn(&SessionEntry),
 ) -> Result<Vec<SessionEntry>> {
     let entry = index::get(session_id).map_err(err)?;
-    let worktree = remove_worktree.then(|| entry.worktree_name.clone()).flatten();
-    let attached = if worktree.is_some() { sessions_in_workspace(Path::new(&entry.cwd))? } else { vec![entry.clone()] };
-    for session in &attached {
+    let worktree = remove_worktree.then(|| entry.worktree_name.clone()).flatten().filter(|_| !entry.worktree_removed);
+    let doomed = if worktree.is_some() { sessions_in_workspace(Path::new(&entry.cwd))? } else { vec![entry.clone()] };
+    for session in &doomed {
         stop(session);
     }
-    let worktree_removed = match worktree.as_deref() {
-        Some(name) => match git::remove_worktree(Path::new(&entry.project_path), name) {
-            Ok(()) => true,
-            Err(e) => {
-                log::warn!("worktree cleanup for {session_id} failed: {e:#}");
-                false
-            }
-        },
-        None => false,
-    };
-    // A worktree that survived keeps hosting its other sessions.
-    let doomed: Vec<SessionEntry> = if worktree_removed { attached } else { vec![entry.clone()] };
+    if let Some(name) = worktree.as_deref() {
+        git::remove_worktree(Path::new(&entry.project_path), name).map_err(err)?;
+    }
     remove_session_entries(&doomed)?;
-    if worktree_removed {
+    if worktree.is_some() {
         notify_workspace_deleted(sink, &entry.project_path, &doomed);
     } else {
         notify_sessions_deleted(sink, &doomed);
     }
     Ok(doomed)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git::run(p, &["init", "-q", "-b", "main"]).unwrap();
+        git::run(p, &["config", "user.email", "t@example.com"]).unwrap();
+        git::run(p, &["config", "user.name", "T"]).unwrap();
+        std::fs::write(p.join("a.txt"), "hello\n").unwrap();
+        git::run(p, &["add", "."]).unwrap();
+        git::run(p, &["commit", "-q", "-m", "init"]).unwrap();
+        dir
+    }
+
+    fn worktree_session(project: &Path) -> SessionEntry {
+        create_session_entry(NewSession {
+            project_path: project.to_string_lossy().into_owned(),
+            title: None,
+            use_worktree: true,
+            base_ref: None,
+            worktree_name: None,
+            on_main: false,
+            issue: None,
+            automation: None,
+            cwd: None,
+            tab: Some(NewTab { harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+        })
+        .unwrap()
+    }
+
+    /// Makes a directory read-only for the length of a test, so nothing in it
+    /// can be unlinked, and writable again afterwards so the temp dir can go.
+    struct ReadOnly(PathBuf);
+
+    impl ReadOnly {
+        fn new(dir: &Path) -> Self {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            Self(dir.to_path_buf())
+        }
+    }
+
+    impl Drop for ReadOnly {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    #[test]
+    fn a_worktree_that_cannot_be_removed_keeps_its_session_and_says_why() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let sink = crate::sink::BroadcastSink::new(16);
+        let session = worktree_session(dir.path());
+        let worktree = PathBuf::from(&session.cwd);
+        let companion = create_session_entry(NewSession {
+            project_path: dir.path().to_string_lossy().into_owned(),
+            title: None,
+            use_worktree: false,
+            base_ref: None,
+            worktree_name: None,
+            on_main: false,
+            issue: None,
+            automation: None,
+            cwd: Some(session.cwd.clone()),
+            tab: None,
+        })
+        .unwrap();
+        let stopped = std::cell::Cell::new(0);
+        let stop = |_: &SessionEntry| stopped.set(stopped.get() + 1);
+
+        let locked = ReadOnly::new(&worktree);
+        let error = delete_session_blocking(&sink, &session.id, true, &stop).unwrap_err();
+        assert!(error.contains(&session.cwd), "the message names the directory: {error}");
+        assert_eq!(stopped.get(), 2, "every session in the worktree is stopped before the removal is tried");
+        assert!(worktree.join("a.txt").exists());
+        assert!(index::get(&session.id).is_ok(), "the session still points at the leftover worktree");
+        assert!(index::get(&companion.id).is_ok());
+
+        // Once whatever held the directory lets go, the same delete works.
+        drop(locked);
+        let removed = delete_session_blocking(&sink, &session.id, true, &stop).unwrap();
+        assert_eq!(removed.len(), 2);
+        assert!(!worktree.exists());
+        assert!(index::load().unwrap().is_empty());
+    }
 }

@@ -1764,14 +1764,16 @@ impl WorkspaceRpc {
         let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
         let remove_worktree = params.get("removeWorktree").and_then(Value::as_bool).unwrap_or(false);
         let stop = |doomed: &SessionEntry| {
-            let Some(manager) = &self.sessions else { return };
             for tab in &doomed.tabs {
+                let Some(manager) = &self.sessions else { break };
                 if manager.is_running(&doomed.id, &tab.id) {
                     if let Err(error) = manager.stop(&doomed.id, &tab.id) {
                         log::warn!("stop {}/{} before delete: {error:#}", doomed.id, tab.id);
                     }
                 }
             }
+            // Its shells go before the worktree does, so nothing holds the directory.
+            self.close_session_ptys(&HashSet::from([doomed.id.clone()]));
         };
         let removed = crate::session_ops::delete_session_blocking(&*self.sink, &session.id, remove_worktree, &stop)
             .map_err(RpcError::internal)?;

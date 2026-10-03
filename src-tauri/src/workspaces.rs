@@ -180,7 +180,13 @@ pub fn delete(project: &Path, path: &Path, delete_branch: bool) -> Result<()> {
     }
     let branch = git::current_branch(&p);
     let _ = git::run(project, &["worktree", "unlock", p.to_str().unwrap_or_default()]);
-    git::run(project, &["worktree", "remove", "--force", p.to_str().unwrap_or_default()])?;
+    if let Err(git_error) = git::run(project, &["worktree", "remove", "--force", p.to_str().unwrap_or_default()]) {
+        // Only a worktree Raccoon made is deleted directly; one made by hand
+        // elsewhere stays git's to remove.
+        if let Err(direct_error) = git::remove_managed_worktree_dir(project, &p) {
+            anyhow::bail!("Could not remove the worktree at {}: {direct_error:#} ({git_error:#})", p.display());
+        }
+    }
     let _ = git::run(project, &["worktree", "prune"]);
     if delete_branch {
         if let Some(b) = branch {
@@ -228,5 +234,27 @@ mod tests {
         delete(p, &wt, true).unwrap();
         assert_eq!(list(p).unwrap().len(), 1);
         assert!(delete(p, p, false).is_err());
+    }
+
+    #[test]
+    fn a_worktree_git_cannot_remove_is_deleted_directly_only_when_managed() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        sh(p, &["init", "-q", "-b", "main"]);
+        sh(p, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        let managed = git::create_worktree(p, "quiet-amber-fox", None).unwrap();
+        let by_hand = p.join("wt-feature");
+        sh(p, &["worktree", "add", "-q", "-b", "feature", by_hand.to_str().unwrap()]);
+        // Without its `.git` file git no longer accepts a directory as a worktree.
+        std::fs::remove_file(Path::new(&managed.path).join(".git")).unwrap();
+        std::fs::remove_file(by_hand.join(".git")).unwrap();
+
+        delete(p, Path::new(&managed.path), false).unwrap();
+        assert!(!Path::new(&managed.path).exists());
+
+        let error = format!("{:#}", delete(p, &by_hand, false).unwrap_err());
+        assert!(error.contains("wt-feature"), "{error}");
+        assert!(by_hand.exists(), "a directory outside the worktree folder is never deleted directly");
     }
 }

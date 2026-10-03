@@ -71,7 +71,7 @@ export function WorkspaceDeleteDialog() {
                 on <span className="font-mono text-foreground">{disp.branch}</span>
               </>
             )}
-            . Every session that ran here is stopped and removed, along with its transcripts.
+            . Every session that ran here is stopped and removed, along with its transcripts. This deletes the directory; it is not moved to the Trash.
           </DialogDescription>
         </DialogHeader>
 

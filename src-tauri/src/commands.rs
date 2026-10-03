@@ -25,6 +25,25 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 
 /// Stop whatever a tab is running: a headless child, or the terminal pane a
 /// PTY-first tab's own CLI lives in.
+/// How long a delete waits for a session's processes to exit before it
+/// tries to remove their directory anyway.
+const STOP_BEFORE_REMOVE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Stop everything the sessions run (agents, their shells and whatever those
+/// started, such as a dev server) and wait for it to exit, so nothing still
+/// holds the directory that is about to be removed.
+fn stop_sessions_and_wait(state: &tauri::State<'_, crate::AppState>, sessions: &[SessionEntry]) {
+    let mut panes = Vec::new();
+    for session in sessions {
+        for tab in &session.tabs {
+            state.host.kill(&format!("{}/{}", session.id, tab.id));
+        }
+        let tabs: Vec<String> = session.tabs.iter().map(|tab| tab.id.clone()).collect();
+        panes.extend(state.terminals.session_pane_ids(&session.id, &tabs));
+    }
+    state.terminals.kill_all_and_wait(&panes, STOP_BEFORE_REMOVE_WAIT);
+}
+
 fn kill_tab(state: &tauri::State<'_, crate::AppState>, session_id: &str, tab_id: &str) {
     state.host.kill(&format!("{session_id}/{tab_id}"));
     state.terminals.kill(&crate::session::SessionManager::pane_id(tab_id));
@@ -948,12 +967,7 @@ pub fn set_active_tab(session_id: String, tab_id: String) -> CmdResult<()> {
 pub async fn delete_session(app: AppHandle, session_id: String, remove_worktree: bool) -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let stop = |session: &SessionEntry| {
-            for tab in &session.tabs {
-                kill_tab(&state, &session.id, &tab.id);
-            }
-            state.terminals.kill_session_shells(&session.id);
-        };
+        let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));
         crate::session_ops::delete_session_blocking(&app, &session_id, remove_worktree, &stop).map(|_| ())
     })
     .await
@@ -1018,11 +1032,7 @@ pub async fn remove_session_worktree(app: AppHandle, session_id: String) -> CmdR
         let s = index::get(&session_id).map_err(err)?;
         let name = s.worktree_name.clone().ok_or("session has no worktree")?;
         let attached = sessions_in_workspace(Path::new(&s.cwd))?;
-        for session in &attached {
-            for tab in &session.tabs {
-                kill_tab(&state, &session.id, &tab.id);
-            }
-        }
+        stop_sessions_and_wait(&state, &attached);
         git::remove_worktree(Path::new(&s.project_path), &name).map_err(err)?;
         let moved = mark_workspace_sessions_removed(&s.project_path, &attached)?;
         notify_workspace_settled(&app, &s.project_path, &moved);
@@ -1047,11 +1057,7 @@ pub async fn settle_session(app: AppHandle, session_id: String, action: String) 
         let out = match action.as_str() {
             "delete" => {
                 let attached = sessions_in_workspace(Path::new(&s.cwd))?;
-                for session in &attached {
-                    for tab in &session.tabs {
-                        kill_tab(&state, &session.id, &tab.id);
-                    }
-                }
+                stop_sessions_and_wait(&state, &attached);
                 git::remove_worktree(Path::new(&s.project_path), &name).map_err(err)?;
                 let moved = mark_workspace_sessions_removed(&s.project_path, &attached)?;
                 notify_workspace_settled(&app, &s.project_path, &moved);
@@ -2446,12 +2452,7 @@ pub async fn delete_workspace(app: AppHandle, project_path: String, path: String
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
         let affected = sessions_in_workspace(Path::new(&path))?;
-        for s in &affected {
-            for t in &s.tabs {
-                kill_tab(&state, &s.id, &t.id);
-            }
-            state.terminals.kill_session_shells(&s.id);
-        }
+        stop_sessions_and_wait(&state, &affected);
         state.browser.forget_workspace(&crate::browser::control::canonical(&path));
         let removed = delete_workspace_entries(&project_path, &path, delete_branch)?;
         notify_workspace_deleted(&app, &project_path, &removed);

@@ -478,22 +478,66 @@ pub fn worktree_disposition(project: &Path, name: &str) -> WorktreeDisposition {
     WorktreeDisposition { exists: true, uncommitted, unpushed, branch: Some(branch) }
 }
 
-/// Remove a worktree and its branch. The path guard keys on shape: a direct
+/// Where the managed worktree `name` lives. The guard keys on shape: a direct
 /// child of the worktree root or nothing, so an empty name can never resolve
-/// to the project itself.
-pub fn remove_worktree(project: &Path, name: &str) -> Result<()> {
-    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+/// to the project itself and a name with a separator can never climb out.
+pub fn managed_worktree_path(project: &Path, name: &str) -> Result<PathBuf> {
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', '\0']) {
         bail!("refusing to remove: bad worktree name");
     }
-    let path = worktree_path(project, name);
     let root = worktree_root(project);
-    if path.parent() != Some(root.as_path()) {
+    let path = root.join(name);
+    if path.parent() != Some(root.as_path()) || path.file_name().and_then(|part| part.to_str()) != Some(name) {
         bail!("refusing to remove: not under the worktree directory");
     }
-    if path.exists() {
-        let path = arg(&path)?;
-        let _ = run(project, &["worktree", "unlock", path]);
-        run(project, &["worktree", "remove", "--force", path])?;
+    Ok(path)
+}
+
+/// Delete a managed worktree's directory without git's help, for one git
+/// could not remove (its `.git` file is gone, or git never knew it). The
+/// directory goes for good; nothing is moved to the Trash.
+///
+/// The guard is checked on what is really on disk: `path` must be a real
+/// directory, not a symlink, and once both are resolved it must still be a
+/// direct child of the project's worktree root.
+pub fn remove_managed_worktree_dir(project: &Path, path: &Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(path).with_context(|| format!("{} cannot be read", path.display()))?;
+    if meta.file_type().is_symlink() {
+        bail!("refusing to remove: {} is a symbolic link", path.display());
+    }
+    if !meta.is_dir() {
+        bail!("refusing to remove: {} is not a directory", path.display());
+    }
+    let root = std::fs::canonicalize(worktree_root(project)).context("the worktree directory cannot be resolved")?;
+    let resolved = std::fs::canonicalize(path).with_context(|| format!("{} cannot be resolved", path.display()))?;
+    if resolved.parent() != Some(root.as_path()) {
+        bail!("refusing to remove: {} is not directly under the worktree directory", path.display());
+    }
+    let project = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    if resolved == project || project.starts_with(&resolved) {
+        bail!("refusing to remove: {} holds the project itself", path.display());
+    }
+    std::fs::remove_dir_all(&resolved).with_context(|| format!("delete {}", resolved.display()))
+}
+
+/// Remove a worktree and its branch. When `git worktree remove --force`
+/// fails the directory is deleted directly, behind the same guard, and the
+/// stale record pruned. An error names the directory and both reasons, and
+/// leaves the branch alone so the removal can be tried again.
+pub fn remove_worktree(project: &Path, name: &str) -> Result<()> {
+    let path = managed_worktree_path(project, name)?;
+    // `symlink_metadata` so a dangling link still counts as something there.
+    if let Ok(meta) = std::fs::symlink_metadata(&path) {
+        if meta.file_type().is_symlink() {
+            bail!("refusing to remove: {} is a symbolic link", path.display());
+        }
+        let target = arg(&path)?;
+        let _ = run(project, &["worktree", "unlock", target]);
+        if let Err(git_error) = run(project, &["worktree", "remove", "--force", target]) {
+            if let Err(direct_error) = remove_managed_worktree_dir(project, &path) {
+                bail!("Could not remove the worktree at {}: {direct_error:#} ({git_error:#})", path.display());
+            }
+        }
     }
     let _ = run(project, &["worktree", "prune"]);
     let branch = worktree_branch(name);
@@ -711,6 +755,108 @@ mod tests {
         remove_worktree(p, "quiet-amber-fox").unwrap();
         assert!(!Path::new(&wt.path).exists());
         assert!(!worktree_branch_names(p).contains(&"quiet-amber-fox".to_string()));
+    }
+
+    #[test]
+    fn a_bad_worktree_name_is_refused_before_anything_is_touched() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        let wt = create_worktree(p, "quiet-amber-fox", None).unwrap();
+        std::fs::create_dir_all(p.join(".raccoon/outside")).unwrap();
+        for name in ["", ".", "..", "../outside", "../../a.txt", "a/b", "/tmp", "a\\b", "quiet-amber-fox/..", "x\0y"] {
+            assert!(managed_worktree_path(p, name).is_err(), "{name:?} names a worktree");
+            assert!(remove_worktree(p, name).is_err(), "{name:?} was removed");
+        }
+        assert!(p.join("a.txt").exists());
+        assert!(p.join(".git").exists());
+        assert!(p.join(".raccoon/outside").exists());
+        assert!(Path::new(&wt.path).join("a.txt").exists());
+    }
+
+    #[test]
+    fn a_worktree_git_cannot_remove_is_deleted_directly() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        let wt = create_worktree(p, "quiet-amber-fox", None).unwrap();
+        // Without its `.git` file git no longer accepts the directory as a worktree.
+        std::fs::remove_file(Path::new(&wt.path).join(".git")).unwrap();
+        assert!(run(p, &["worktree", "remove", "--force", &wt.path]).is_err());
+        remove_worktree(p, "quiet-amber-fox").unwrap();
+        assert!(!Path::new(&wt.path).exists());
+        assert!(!run(p, &["worktree", "list", "--porcelain"]).unwrap().contains("quiet-amber-fox"), "the record is pruned");
+        assert!(!worktree_branch_names(p).contains(&"quiet-amber-fox".to_string()));
+
+        // A directory git never knew about goes the same way.
+        let stray = worktree_path(p, "stray");
+        std::fs::create_dir_all(stray.join("node_modules")).unwrap();
+        remove_worktree(p, "stray").unwrap();
+        assert!(!stray.exists());
+        assert!(p.join("a.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_in_the_worktree_directory_is_never_followed() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("keep.txt"), "keep").unwrap();
+        std::fs::create_dir_all(worktree_root(p)).unwrap();
+        let link = worktree_path(p, "link");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+
+        assert!(remove_worktree(p, "link").is_err());
+        assert!(remove_managed_worktree_dir(p, &link).is_err());
+        assert!(outside.path().join("keep.txt").exists());
+        assert!(link.symlink_metadata().is_ok(), "the link itself is left alone");
+
+        // A link to the project must not take the project with it either.
+        let to_project = worktree_path(p, "project");
+        std::os::unix::fs::symlink(p, &to_project).unwrap();
+        assert!(remove_worktree(p, "project").is_err());
+        assert!(p.join("a.txt").exists());
+    }
+
+    #[test]
+    fn the_direct_delete_only_takes_a_child_of_the_worktree_directory() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        let wt = create_worktree(p, "quiet-amber-fox", None).unwrap();
+        let nested = Path::new(&wt.path).join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let sibling = p.join(".raccoon/outside");
+        std::fs::create_dir_all(&sibling).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+
+        for path in [p.to_path_buf(), worktree_root(p), nested, sibling, elsewhere.path().to_path_buf(), worktree_root(p).join("../worktrees"), worktree_path(p, "missing")] {
+            assert!(remove_managed_worktree_dir(p, &path).is_err(), "{} was deleted", path.display());
+        }
+        assert!(p.join("a.txt").exists());
+        assert!(Path::new(&wt.path).join("nested").exists());
+        assert!(elsewhere.path().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_removal_that_fails_says_where_and_why_and_keeps_the_branch() {
+        use std::os::unix::fs::PermissionsExt;
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        let wt = create_worktree(p, "quiet-amber-fox", None).unwrap();
+        std::fs::set_permissions(&wt.path, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let error = remove_worktree(p, "quiet-amber-fox").map_err(|e| format!("{e:#}"));
+        std::fs::set_permissions(&wt.path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = error.unwrap_err();
+        assert!(error.contains(&wt.path), "{error}");
+        assert!(Path::new(&wt.path).join("a.txt").exists());
+        assert!(worktree_branch_names(p).contains(&"quiet-amber-fox".to_string()));
+        remove_worktree(p, "quiet-amber-fox").unwrap();
+        assert!(!Path::new(&wt.path).exists());
     }
 
     #[test]
