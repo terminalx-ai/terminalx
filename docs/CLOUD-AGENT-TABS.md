@@ -313,12 +313,52 @@ never attached holds no workspace content key to encrypt a command with.
 
 The runtime half is `src-tauri/src/cloud_agents/launch.rs`:
 
-1. Claim the intent with the receipt store's `storageIncarnationId`.
-2. For each repository, switch to its base ref, then create the workspace's
+1. Claim the intent with the receipt store's `storageIncarnationId`,
+   declaring `launch-clone-v1`.
+2. Clone every repository the claim marks `clone` (see below).
+3. For each repository, switch to its base ref, then create the workspace's
    own work branch. If the branch already exists, it came from an earlier
    attempt of this same workspace, so switch to it instead.
-3. Start the agent tab in the primary repository and send the prompt.
-4. Report the outcome.
+4. Start the agent tab in the primary repository and send the prompt.
+5. Report the outcome.
+
+### Cloning at launch (Boat, Hetzner, Machine0)
+
+A workspace launched from an Environment image already holds its checkouts.
+Boat, Hetzner and Machine0 have no Environment images, so their workspaces
+start with an empty project root and the claim marks each repository
+`"clone": { "provider": "github" }` with a `path` directly inside the
+project root. The runtime then:
+
+- builds the URL itself, `https://github.com/<owner>/<name>.git`. The claim
+  carries no URL and no credential;
+- clones into `.terminalx-clone-<dir>` next to the final path, at the base
+  branch, and moves the finished clone into place. A clone that died halfway
+  is never mistaken for a checkout, and its leftover is removed on the next
+  attempt;
+- keeps a checkout that is already there (an earlier attempt of the same
+  workspace) when its `origin` is that repository, and refuses anything else
+  at the path without deleting it;
+- makes a full clone (all history and branches, as a local checkout has),
+  capped by time instead of depth: a transfer that stalls for a minute is
+  given up, and all of a launch's clones together get 30 minutes
+  (`CLONE_BUDGET`). At the deadline Git's whole process group is killed;
+- counts as work while it runs (`cloud_activity::launching`): the activity
+  report carries it as a running turn, so the server's idle suspend does not
+  stop a workspace whose clone is still going with nobody attached;
+- reports `repository-clone-failed` when a clone cannot be made. The agent is
+  not started and the prompt is not sent.
+
+**The GitHub token.** `launch.rs` never holds one. Git asks the credential
+helper `cloud_github` installs at boot (PRO-14), which gets a short-lived
+token from the API for this workspace's repositories only. The token is not
+in the clone URL, the `origin` remote, the Git config, the environment or a
+log line; it exists in Git's memory and in the helper's tmpfs cache (or
+nowhere, without tmpfs). A public repository clones without asking for one.
+
+A plan that names another provider, an owner or name that is not a plain
+GitHub name, or a path that is not a new directory directly in the project
+root is refused before Git runs (`payload-invalid`).
 
 `launch.json` (next to `receipts.jsonl`) records `applying` durably before
 the agent is touched, and the outcome after. So a restart or a lost

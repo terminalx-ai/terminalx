@@ -156,6 +156,18 @@ export function dateTimeText(at: number): string {
   return new Date(at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
+/**
+ * What resuming a stopped workspace brings back, in the provider's terms
+ * (PRO-33): the same processes again, or a cold boot from the disk. `name`
+ * is the provider's display name; `null` is a server that does not say.
+ */
+export function resumeBehaviourText(name: string, preservesProcesses: boolean | null | undefined): string {
+  if (preservesProcesses === true) return `Resume at any time. ${name} freezes the machine as it is: programs and terminals that are running continue where they were.`;
+  if (preservesProcesses === false)
+    return `Resume at any time. ${name} starts the machine again from its disk (a cold boot): files, repositories and conversations come back; programs and terminals that are running now do not.`;
+  return "Resume at any time. Files, repositories and conversations come back; programs and terminals that are running now may not.";
+}
+
 const MESSAGES: Record<string, string> = {
   cloud_workspace_concurrency_exceeded: "Your organization is running as many cloud workspaces as its limit allows. Stop one to start another.",
   cloud_workspace_active_work: "An agent is still working in this workspace.",

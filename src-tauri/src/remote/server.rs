@@ -845,6 +845,7 @@ impl WorkspaceRpc {
             "fs.cancel" => self.files.cancel(peer.id, &params),
             "fs.watch" => self.fs_watch(peer, params),
             "lifecycle.dispositionFacts" => self.disposition_facts(),
+            "lifecycle.resources" => Ok(crate::cloud_resources::observe(&self.root)),
             git if git.starts_with("git.") => self
                 .git
                 .handle(git, &params)
