@@ -96,7 +96,7 @@ pub async fn organization_create(
     name: String,
     idempotency_key: String,
     state: tauri::State<'_, crate::AppState>,
-) -> CmdResult<crate::account::OrganizationSummary> {
+) -> CmdResult<crate::account::OrganizationCreated> {
     let account = state.account.clone();
     tauri::async_runtime::spawn_blocking(move || account.create_organization(&name, &idempotency_key))
         .await
@@ -579,6 +579,14 @@ pub async fn cloud_workspaces(
     org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceList, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.workspaces(org_id.as_deref()))
+}
+
+#[tauri::command]
+pub async fn cloud_catalog_feed(
+    state: tauri::State<'_, crate::AppState>,
+    cursor: Option<String>,
+) -> Result<crate::cloud_workspaces::CloudCatalogFeed, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.catalog_feed(cursor.as_deref()))
 }
 
 async fn cloud_workspace_lifecycle(

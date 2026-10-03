@@ -295,6 +295,130 @@ describe("sessions under the project", () => {
     });
   });
 
+  describe("the sidebar's Unread / Needs you filter (PRO-23)", () => {
+    const sessionsStore = () => import("@/lib/sessions");
+    const { resetCloudDashboard } = { resetCloudDashboard: () => import("@/lib/cloudDashboard").then((module) => module.resetCloudDashboard()) };
+    const tab = (id: string, status: string) => ({ id: `${id}-tab`, harness: "claude", title: null, model: "opus", permissionMode: "bypassPermissions", status, created: "2026-09-30T10:00:00.000Z", modified: "2026-09-30T10:00:00.000Z" });
+    const pending = { online: true, reportedAt: Date.now(), activeTurns: 0, pendingApprovals: 1 };
+    const seed = async () => {
+      await load(
+        [
+          // The list says an approval waits in this running workspace.
+          item("asks", { repositories: [acmeApi], lastActivityAt: 50, runtimeActivity: pending }),
+          item("quiet", { repositories: [acmeApi], lastActivityAt: 40 }),
+          // Stopped: its finished answer was never read.
+          item("answered", { state: "suspended", repositories: [acmeWeb] }),
+        ],
+        {
+          asks: { sessions: [session("a1", "Approve the deploy", { tabs: [tab("a1", "waiting")] })], capabilities: ["session/2"] },
+          quiet: { sessions: [session("q1", "Nothing new")], capabilities: ["session/2"] },
+          answered: { sessions: [session("w1", "Draft the changelog", { tabs: [tab("w1", "completed")] }), session("w2", "Read already")], capabilities: ["session/2"] },
+        },
+      );
+    };
+    const titles = () => screen.queryAllByTestId("cloud-session-node").map((node) => node.getAttribute("data-session"));
+    const filterTo = async (filter: "all" | "unread" | "needs") => {
+      const { setSidebarFilter } = await import("@/lib/sidebarFilter");
+      await act(async () => {
+        setSidebarFilter(filter);
+        // The dashboard's projection, which the filter reads, settles a microtask later.
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    };
+
+    afterEach(async () => {
+      await filterTo("all");
+      await resetCloudDashboard();
+    });
+
+    it("Needs you shows only the cloud session waiting for a person, and no attach or resume happens", async () => {
+      await seed();
+      mount();
+      expect(titles()).toHaveLength(4);
+      await filterTo("needs");
+      await waitFor(() => expect(titles()).toEqual([`cloud:${ORG}:asks:a1`]));
+      // The other project has nothing waiting: it is not listed at all.
+      expect(projectRow(`cloud:${ORG}:github.com/acme/web`)).toBeUndefined();
+      // Nor the sibling workspace of the same project, nor a placeholder line for it.
+      expect(screen.queryAllByTestId("cloud-workspace-node").map((node) => node.getAttribute("data-workspace"))).toEqual(["asks"]);
+      expect(screen.queryByTestId("cloud-workspace-empty")).toBeNull();
+      expectNoAttachOrResume();
+    });
+
+    it("Unread shows only the finished answer nobody has read, in a stopped workspace too, without waking it", async () => {
+      await seed();
+      mount();
+      await filterTo("unread");
+      await waitFor(() => expect(titles()).toEqual([`cloud:${ORG}:answered:w1`]));
+      expect(projectRow(`cloud:${ORG}:github.com/acme/api`)).toBeUndefined();
+      expectNoAttachOrResume();
+    });
+
+    it("opens a collapsed project that holds a match, and says so when an organization has none", async () => {
+      await seed();
+      const prefs = await import("@/lib/prefs");
+      act(() => prefs.setPrefs({ cloudCollapsed: { [`cloud:${ORG}:github.com/acme/api`]: true } }));
+      try {
+        mount();
+        expect(projectTree(`cloud:${ORG}:github.com/acme/api`).getAttribute("aria-expanded")).toBe("false");
+        await filterTo("needs");
+        await waitFor(() => expect(titles()).toEqual([`cloud:${ORG}:asks:a1`]));
+        expect(projectTree(`cloud:${ORG}:github.com/acme/api`).getAttribute("aria-expanded")).toBe("true");
+        // The approval is answered elsewhere: the list no longer reports it.
+        await load([item("asks", { repositories: [acmeApi], lastActivityAt: 50 }), item("quiet", { repositories: [acmeApi], lastActivityAt: 40 })], {
+          asks: { sessions: [session("a1", "Approve the deploy")], capabilities: ["session/2"] },
+        });
+        await waitFor(() => expect(screen.getByTestId("cloud-org-filtered-empty").textContent).toBe("Nothing needs you."));
+        expect(titles()).toEqual([]);
+        expect(screen.queryByTestId("cloud-node-archived")).toBeNull();
+      } finally {
+        act(() => prefs.setPrefs({ cloudCollapsed: {} }));
+      }
+    });
+
+    it("Needs you shows a workspace the list says is waiting although this desktop has never opened it", async () => {
+      // No session of it is known here: only the server's count of pending approvals.
+      await load([item("never-opened", { repositories: [acmeApi], runtimeActivity: pending }), item("quiet", { repositories: [acmeWeb] })], {
+        quiet: { sessions: [session("q1", "Nothing new")], capabilities: ["session/2"] },
+      });
+      mount();
+      await filterTo("needs");
+      await waitFor(() => expect(projectRow(`cloud:${ORG}:github.com/acme/api`)).toBeTruthy());
+      expect(screen.queryByTestId("cloud-org-filtered-empty")).toBeNull();
+      // Its line offers to open it (which connects, never wakes); the other project is not listed.
+      const line = screen.getByTestId("cloud-workspace-empty");
+      expect(line.getAttribute("data-workspace")).toBe("never-opened");
+      expect(line.textContent).toContain("Open to load sessions");
+      expect(projectRow(`cloud:${ORG}:github.com/acme/web`)).toBeUndefined();
+      expectNoAttachOrResume();
+    });
+
+    it("does not count a stopped workspace, one that is offline, or one not shared with this person as needing them", async () => {
+      await load([
+        item("stopped", { state: "suspended", repositories: [acmeApi], runtimeActivity: pending }),
+        item("offline", { repositories: [acmeApi], runtimeActivity: { ...pending, online: false } }),
+        item("unshared", { repositories: [acmeWeb], runtimeActivity: pending, you: { role: "none", canApprove: false, canManageShares: false } }),
+      ]);
+      mount();
+      await filterTo("needs");
+      await waitFor(() => expect(screen.getByTestId("cloud-org-filtered-empty").textContent).toBe("Nothing needs you."));
+    });
+
+    it("keeps the selected cloud session in view under a filter it does not match", async () => {
+      await seed();
+      const { selectCloudSession, selectSession } = await sessionsStore();
+      act(() => selectCloudSession(`cloud:${ORG}:quiet:q1`));
+      try {
+        mount();
+        await filterTo("needs");
+        await waitFor(() => expect(titles().sort()).toEqual([`cloud:${ORG}:asks:a1`, `cloud:${ORG}:quiet:q1`].sort()));
+      } finally {
+        act(() => selectSession(null));
+      }
+    });
+  });
+
   it("groups by VM only when a project has more than one workspace", async () => {
     await load(
       [item("fix-login", { repositories: [acmeApi], lastActivityAt: 50 }), item("perf", { repositories: [acmeApi], state: "suspended", lastActivityAt: 40 }), item("web-1", { repositories: [acmeWeb] })],

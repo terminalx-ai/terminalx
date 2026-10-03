@@ -20,7 +20,8 @@ let failed = 0;
 
 const openShortcuts = async (page) => {
   await page.locator('[role="tree"]').waitFor();
-  await page.locator(`[data-testid="sidebar-rail"] button`, { hasText: "Settings" }).click();
+  // The gear at the end of the account row (PRO-49): icon-only, named for assistive technology.
+  await page.locator('[data-testid="sidebar-rail"]').getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("button", { name: "Shortcuts", exact: true }).click();
   await page.locator('[data-testid="shortcuts-tab"]').waitFor();
 };

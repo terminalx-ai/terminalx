@@ -343,6 +343,41 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
         class="flex items-center"
       >
         <button
+          aria-expanded="false"
+          aria-haspopup="menu"
+          aria-label="Filter sessions"
+          class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
+          data-filter="all"
+          data-state="closed"
+          data-testid="sidebar-filter"
+          id="radix-_r_v_"
+          type="button"
+        >
+          <svg
+            aria-hidden="true"
+            class="lucide lucide-list-filter"
+            fill="none"
+            height="24"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            viewBox="0 0 24 24"
+            width="24"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <path
+              d="M2 5h20"
+            />
+            <path
+              d="M6 12h12"
+            />
+            <path
+              d="M9 19h6"
+            />
+          </svg>
+        </button>
+        <button
           aria-label="Show archived sessions"
           aria-pressed="false"
           class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
@@ -586,7 +621,7 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
               aria-label="Project menu for Raccoon"
               class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
               data-state="closed"
-              id="radix-_r_v_"
+              id="radix-_r_15_"
               type="button"
             >
               <svg
@@ -751,7 +786,7 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
                   aria-label="Workspace menu for main"
                   class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
                   data-state="closed"
-                  id="radix-_r_13_"
+                  id="radix-_r_19_"
                   type="button"
                 >
                   <svg
@@ -854,7 +889,7 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
                       aria-label="New tab in Fix scroll snapping"
                       class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
                       data-state="closed"
-                      id="radix-_r_17_"
+                      id="radix-_r_1d_"
                       type="button"
                     >
                       <svg
@@ -884,7 +919,7 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
                       aria-label="Session menu for Fix scroll snapping"
                       class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
                       data-state="closed"
-                      id="radix-_r_15_"
+                      id="radix-_r_1b_"
                       type="button"
                     >
                       <svg
@@ -1114,7 +1149,7 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
               aria-label="Project menu for Notes"
               class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
               data-state="closed"
-              id="radix-_r_19_"
+              id="radix-_r_1f_"
               type="button"
             >
               <svg
@@ -1270,7 +1305,7 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
                   aria-label="Workspace menu for main"
                   class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
                   data-state="closed"
-                  id="radix-_r_1d_"
+                  id="radix-_r_1j_"
                   type="button"
                 >
                   <svg
@@ -1738,6 +1773,41 @@ exports[`sidebar rail DOM > signed out 1`] = `
         class="flex items-center"
       >
         <button
+          aria-expanded="false"
+          aria-haspopup="menu"
+          aria-label="Filter sessions"
+          class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
+          data-filter="all"
+          data-state="closed"
+          data-testid="sidebar-filter"
+          id="radix-_r_4_"
+          type="button"
+        >
+          <svg
+            aria-hidden="true"
+            class="lucide lucide-list-filter"
+            fill="none"
+            height="24"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            viewBox="0 0 24 24"
+            width="24"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <path
+              d="M2 5h20"
+            />
+            <path
+              d="M6 12h12"
+            />
+            <path
+              d="M9 19h6"
+            />
+          </svg>
+        </button>
+        <button
           aria-label="Show archived sessions"
           aria-pressed="false"
           class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
@@ -1981,7 +2051,7 @@ exports[`sidebar rail DOM > signed out 1`] = `
               aria-label="Project menu for Raccoon"
               class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
               data-state="closed"
-              id="radix-_r_7_"
+              id="radix-_r_a_"
               type="button"
             >
               <svg
@@ -2146,7 +2216,7 @@ exports[`sidebar rail DOM > signed out 1`] = `
                   aria-label="Workspace menu for main"
                   class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
                   data-state="closed"
-                  id="radix-_r_b_"
+                  id="radix-_r_e_"
                   type="button"
                 >
                   <svg
@@ -2249,7 +2319,7 @@ exports[`sidebar rail DOM > signed out 1`] = `
                       aria-label="New tab in Fix scroll snapping"
                       class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
                       data-state="closed"
-                      id="radix-_r_f_"
+                      id="radix-_r_i_"
                       type="button"
                     >
                       <svg
@@ -2279,7 +2349,7 @@ exports[`sidebar rail DOM > signed out 1`] = `
                       aria-label="Session menu for Fix scroll snapping"
                       class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
                       data-state="closed"
-                      id="radix-_r_d_"
+                      id="radix-_r_g_"
                       type="button"
                     >
                       <svg
@@ -2509,7 +2579,7 @@ exports[`sidebar rail DOM > signed out 1`] = `
               aria-label="Project menu for Notes"
               class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
               data-state="closed"
-              id="radix-_r_h_"
+              id="radix-_r_k_"
               type="button"
             >
               <svg
@@ -2665,7 +2735,7 @@ exports[`sidebar rail DOM > signed out 1`] = `
                   aria-label="Workspace menu for main"
                   class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
                   data-state="closed"
-                  id="radix-_r_l_"
+                  id="radix-_r_o_"
                   type="button"
                 >
                   <svg
