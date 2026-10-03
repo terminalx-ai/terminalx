@@ -139,9 +139,28 @@ const id = (value: string) => encodeURIComponent(value);
 export class CloudApi {
   private readonly fetcher: typeof fetch;
 
+  /** The server's clock minus this phone's, from the last answer's `Date` header; 0 until one was read. */
+  private clockOffsetMs = 0;
+
   constructor(private readonly options: CloudApiOptions) {
     this.fetcher = options.fetch ?? fetch;
+    // An answer in a shape this app does not know is one thing to every caller: `cloud_workspace_invalid_response`.
+    for (const name of ["organizations", "workspaces", "open", "enqueue", "commands", "commandStatuses", "cancelCommand", "checkpoints", "checkpoint", "members", "shares", "putShare", "revokeShare"] as const) {
+      const self = this as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+      const original = self[name]!.bind(this);
+      self[name] = (...args) =>
+        original(...args).catch((error: unknown) => {
+          throw error instanceof z.ZodError ? new CloudApiError("cloud_workspace_invalid_response", 200) : error;
+        });
+    }
   }
+
+  /**
+   * The time by the server's clock. Expiry times the server hands out (an
+   * attach ticket, a relay invite) are compared with this, never with the
+   * phone's own clock, which may be minutes off.
+   */
+  serverNow = (): number => Date.now() + this.clockOffsetMs;
 
   /** The organizations this account belongs to, with its role in each. */
   async organizations(): Promise<CloudOrganization[]> {
@@ -247,6 +266,9 @@ export class CloudApi {
     } finally {
       clearTimeout(timer);
     }
+    const stamp = Date.parse(response.headers?.get?.("date") ?? "");
+    // The header has whole seconds; a difference that small is noise, not skew.
+    if (Number.isFinite(stamp)) this.clockOffsetMs = Math.abs(stamp - Date.now()) < 2_000 ? 0 : stamp - Date.now();
     const text = await response.text().catch(() => "");
     let parsed: unknown = null;
     try {

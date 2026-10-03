@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { leaseLine, outboxLine, presenceLine } from "./words";
+import { codeText, leaseLine, outboxLine, presenceLine } from "./words";
 
 const nameOf = (userId: string | null | undefined) => ({ "u-alice": "Alice", "u-bob": "Bob" })[userId ?? ""] ?? "Someone";
 const lease = (holderId: string, expiresAt = 2_000) => ({ tabId: "t1", holderId, acquiredAt: 0, expiresAt });
@@ -22,9 +22,24 @@ describe("sharing, in words", () => {
     expect(presenceLine([person("u-me"), person("u-alice", { activity: "typing", tabId: "t1" }), person("u-bob", { role: "viewer" })], "u-me", (tabId) => (tabId === "t1" ? "Fix login" : null), nameOf)).toBe("Also here: Alice · typing · on Fix login, Bob (viewing only)");
   });
 
+  it("never ends the presence line in the middle of a name: three in full, then a count", () => {
+    const people = ["u-alice", "u-bob", "u-c", "u-d", "u-e"].map((userId) => ({ userId, role: "driver" as const, canApprove: false, surfaces: 1, tabId: null, activity: "viewing" as const, since: 1 }));
+    expect(presenceLine(people, "u-me", () => null, nameOf)).toBe("Also here: Alice, Bob, Someone and 2 more");
+  });
+
+  it("has a sentence for every share and lease refusal, and shows no code", () => {
+    for (const code of ["cloud_workspace_share_redundant", "cloud_workspace_share_requires_organization_access", "cloud_workspace_share_limit", "cloud_workspace_share_forbidden", "organization_member_not_found", "lease_cooldown"]) {
+      const text = codeText(code)!;
+      expect(text).not.toContain("_");
+      expect(text).not.toBe(codeText("a_code_nobody_knows"));
+    }
+    expect(codeText("cloud_workspace_share_limit")).toContain("maximum number of people (64)");
+    expect(codeText("lease_cooldown")).toBe("You drove this tab moments ago; others get the first chance. Try again in two minutes.");
+  });
+
   it("puts a refusal because of sharing in words", () => {
-    expect(outboxLine(entry({ category: "lease-held", receipt: { outcome: "rejected", holderId: "u-alice" } }), nameOf)).toEqual({ tone: "warn", text: "Alice is driving. Your message was not sent." });
-    expect(outboxLine(entry({ category: "lease-held" }), nameOf)?.text).toBe("Someone else is driving. Your message was not sent.");
-    expect(outboxLine(entry({ category: "access-revoked" }), nameOf)?.text).toBe("Not sent: your access changed.");
+    expect(outboxLine(entry({ category: "lease-held", receipt: { outcome: "rejected", holderId: "u-alice" } }), false, nameOf)).toEqual({ tone: "warn", text: "Alice is driving. Your message was not sent." });
+    expect(outboxLine(entry({ category: "lease-held" }), false, nameOf)?.text).toBe("Someone else is driving. Your message was not sent.");
+    expect(outboxLine(entry({ category: "access-revoked" }), false, nameOf)?.text).toBe("Not sent: your access changed.");
   });
 });

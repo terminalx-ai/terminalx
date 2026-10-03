@@ -196,6 +196,10 @@ export interface RuntimeAgentModel {
   isDefault: boolean;
   upgrade: string | null;
   description: string | null;
+  /** A family alias (`opus`): it follows the latest release rather than staying on one version. */
+  alias?: boolean;
+  /** The full model id an alias runs now, per the runtime's own CLI. */
+  resolved?: string | null;
 }
 
 /** An agent installed on the runtime (`runtime.agents`, `agents/1`). */

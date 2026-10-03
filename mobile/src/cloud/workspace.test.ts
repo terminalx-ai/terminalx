@@ -43,6 +43,8 @@ function harness(options: { state?: string | null; role?: string; canApprove?: b
     }),
   };
   const nudges = { count: 0 };
+  /** The list read again for a send: what it then says, and whether it could be read. */
+  const refresh = { calls: 0, state: undefined as string | null | undefined, ok: true };
   let configure: ((runtime: Runtime) => void) | null = null;
   const session = new CloudWorkspaceSession({
     scope,
@@ -50,6 +52,11 @@ function harness(options: { state?: string | null; role?: string; canApprove?: b
     secrets: { get: async (name) => secrets.get(name) ?? null, set: async (name, value) => void secrets.set(name, value), delete: async (name) => void secrets.delete(name) },
     storage: { getItem: async (name) => blobs.get(name) ?? null, setItem: async (name, value) => void blobs.set(name, value), removeItem: async (name) => void blobs.delete(name) },
     listed: () => listed,
+    refreshList: async () => {
+      refresh.calls += 1;
+      if (refresh.ok && refresh.state !== undefined) listed = refresh.state === null ? null : ({ ...listed!, state: refresh.state } as CloudWorkspace);
+      return refresh.ok;
+    },
     clientInstallationId: "install-1",
     appVersion: "0.1.0",
     link: {
@@ -71,11 +78,23 @@ function harness(options: { state?: string | null; role?: string; canApprove?: b
       },
     },
   });
-  return { session, api, posted, runtimes, secrets, blobs, nudges, list: (state: string | null) => (listed = state === null ? null : ({ ...listed!, state } as CloudWorkspace)), each: (run: (runtime: Runtime) => void) => (configure = run) };
+  return { session, api, posted, runtimes, secrets, blobs, nudges, refresh, list: (state: string | null) => (listed = state === null ? null : ({ ...listed!, state } as CloudWorkspace)), each: (run: (runtime: Runtime) => void) => (configure = run) };
 }
 
+const settle = async () => {
+  for (let index = 0; index < 40; index++) await Promise.resolve();
+};
 const connected = (h: ReturnType<typeof harness>) => vi.waitFor(() => expect(h.session.getSnapshot().tabs[0]?.source).toBe("live"));
 const tab = (h: ReturnType<typeof harness>) => h.session.getSnapshot().tabs[0];
+
+/** A phone that connected once before, so it holds the workspace key. */
+async function keyed() {
+  const earlier = harness();
+  await earlier.session.start();
+  await connected(earlier);
+  earlier.session.close();
+  return earlier;
+}
 
 beforeEach(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] }));
 afterEach(() => vi.useRealTimers());
@@ -177,7 +196,7 @@ describe("a cloud workspace on the phone", () => {
     h.session.close();
   });
 
-  it("lets a viewer read and nothing else, and only an approver decide", async () => {
+  it("lets a viewer read, and answer a permission request only with the right to approve; a driver without it cannot", async () => {
     const viewer = harness({ role: "viewer" });
     await viewer.session.start();
     await connected(viewer);
@@ -187,6 +206,15 @@ describe("a cloud workspace on the phone", () => {
     await expect(viewer.session.decide("t1", { requestId: "r1", optionId: "allow" })).rejects.toMatchObject({ code: "cannot-approve" });
     expect(viewer.api.enqueue).not.toHaveBeenCalled();
     viewer.session.close();
+
+    // The right to approve is its own right: a viewer who has it decides, and still cannot send.
+    const approvingViewer = harness({ role: "viewer", canApprove: true });
+    await approvingViewer.session.start();
+    await connected(approvingViewer);
+    expect(await approvingViewer.session.decide("t1", { requestId: "r1", optionId: "allow" })).toMatchObject({ kind: "permission-decision", requestId: "r1", state: "queued" });
+    expect(approvingViewer.posted).toMatchObject([{ kind: "permission-decision" }]);
+    await expect(approvingViewer.session.send("t1", "hi")).rejects.toMatchObject({ code: "read-only" });
+    approvingViewer.session.close();
 
     const driver = harness({ role: "driver", canApprove: false });
     await driver.session.start();
@@ -199,6 +227,115 @@ describe("a cloud workspace on the phone", () => {
     await connected(approver);
     expect(await approver.session.decide("t1", { requestId: "r1", optionId: "allow" })).toMatchObject({ kind: "permission-decision", requestId: "r1" });
     approver.session.close();
+  });
+
+  it("holds a message that never left the phone when the workspace is found stopped: opening it posts nothing", async () => {
+    // Yesterday: sent while offline, to a running workspace. It stays on the phone.
+    const before = harness();
+    await before.session.start();
+    await connected(before);
+    before.api.enqueue.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null));
+    expect(await before.session.send("t1", "written offline")).toMatchObject({ state: "unsent" });
+    before.session.close();
+
+    // Today the workspace is stopped, and it is opened only to read.
+    const h = harness({ state: "suspended", secrets: before.secrets, blobs: before.blobs });
+    await h.session.start();
+    const stop = h.session.view("t1");
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(h.api.enqueue).not.toHaveBeenCalled();
+    expect(h.api.open).not.toHaveBeenCalled();
+    expect(h.session.getSnapshot().outbox).toMatchObject([{ text: "written offline", state: "unsent" }]);
+    // Nothing polls for it either.
+    expect(h.api.commandStatuses).not.toHaveBeenCalled();
+
+    // Delivering it starts the workspace, so it needs the person's word.
+    await expect(h.session.deliverHeld()).rejects.toMatchObject({ code: "would-wake" });
+    expect(h.api.enqueue).not.toHaveBeenCalled();
+    await h.session.deliverHeld({ allowWake: true });
+    expect(h.posted).toHaveLength(1);
+    expect(h.session.getSnapshot().outbox).toMatchObject([{ state: "queued", wake: "queued" }]);
+    stop();
+    h.session.close();
+  });
+
+  it("delivers a held message by itself once the workspace is seen running", async () => {
+    const before = harness();
+    await before.session.start();
+    await connected(before);
+    before.api.enqueue.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null));
+    await before.session.send("t1", "written offline");
+    before.session.close();
+
+    const h = harness({ secrets: before.secrets, blobs: before.blobs });
+    await h.session.start();
+    await connected(h);
+    await vi.waitFor(() => expect(h.posted).toHaveLength(1));
+    expect(h.session.getSnapshot().outbox).toMatchObject([{ state: "queued", wake: "not-needed" }]);
+    h.session.close();
+  });
+
+  it("does not trust a list that says running when it is not connected: it reads the list again before a send", async () => {
+    // The screen has been open a while; the workspace was stopped from a desktop meanwhile.
+    const h = harness({ secrets: (await keyed()).secrets });
+    h.api.open.mockRejectedValue(new CloudApiError("cloud_workspace_not_found", 404));
+    await h.session.start();
+    await vi.waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("stopped"));
+    h.refresh.state = "suspended";
+    await expect(h.session.send("t1", "are you there")).rejects.toMatchObject({ code: "would-wake" });
+    expect(h.refresh.calls).toBe(1);
+    expect(h.api.enqueue).not.toHaveBeenCalled();
+    // With the person's word it goes, and starts the workspace.
+    expect(await h.session.send("t1", "are you there", { allowWake: true })).toMatchObject({ wake: "queued" });
+    h.session.close();
+  });
+
+  it("keeps a command on the phone, unposted, when it cannot tell whether the workspace runs", async () => {
+    const h = harness({ secrets: (await keyed()).secrets });
+    h.api.open.mockRejectedValue(new CloudApiError("cloud_workspace_unavailable", null));
+    await h.session.start();
+    await settle();
+    h.refresh.ok = false;
+    expect(await h.session.send("t1", "maybe")).toMatchObject({ state: "unsent" });
+    expect(h.api.enqueue).not.toHaveBeenCalled();
+    // The list is read and says running: now it goes.
+    h.refresh.ok = true;
+    await vi.advanceTimersByTimeAsync(1_100);
+    await vi.waitFor(() => expect(h.posted).toHaveLength(1));
+    h.session.close();
+  });
+
+  it("says the list should be followed while the workspace changes state or was asked to start", async () => {
+    const before = harness();
+    await before.session.start();
+    await connected(before);
+    before.session.close();
+
+    const h = harness({ state: "suspended", secrets: before.secrets });
+    await h.session.start();
+    expect(h.session.changing).toBe(false);
+    await h.session.send("t1", "start", { allowWake: true });
+    expect(h.session.changing).toBe(true);
+    h.list("resuming");
+    expect(h.session.changing).toBe(true);
+    h.list("ready");
+    expect(h.session.changing).toBe(false);
+    h.session.close();
+  });
+
+  it("lets go of the connection in the background and takes it up again in the foreground", async () => {
+    const h = harness();
+    await h.session.start();
+    await connected(h);
+    h.session.pause();
+    expect(h.session.getSnapshot().connection.state).toBe("idle");
+    expect(h.runtimes[0].readyState).toBe(3);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(h.api.open).toHaveBeenCalledTimes(1);
+    h.session.resume();
+    await connected(h);
+    expect(h.api.open).toHaveBeenCalledTimes(2);
+    h.session.close();
   });
 
   it("refuses to send to a workspace that is not listed for this person or is archived", async () => {
@@ -401,6 +538,30 @@ describe("a cloud workspace on the phone", () => {
       await vi.advanceTimersByTimeAsync(1_000);
       expect(refused).toHaveBeenCalledTimes(1);
       expect(h.session.getSnapshot().collab).toMatchObject({ available: false, participants: [] });
+      h.session.close();
+    });
+
+    it("asks as before of a runtime from before sharing, which reports role none without a member list", async () => {
+      const h = shared({ role: "driver" });
+      h.each((runtime) => {
+        runtime.you = { userId: "u-me", role: "none", canApprove: false, listed: false };
+        runtime.methods["collab.state"] = () => undefined;
+      });
+      await h.session.start();
+      await connected(h);
+      // Keys and tabs were asked for, and the role is the list's.
+      expect(h.session.getSnapshot()).toMatchObject({ hasKey: true, role: "driver", tabs: [{ tabId: "t1" }] });
+      h.session.close();
+    });
+
+    it("reads the list again when the runtime says access was taken away", async () => {
+      const h = shared();
+      await h.session.start();
+      await connected(h);
+      h.runtimes[0].you = { userId: "u-me", role: "none", canApprove: false };
+      h.runtimes[0].encrypted({ event: "collab.you", params: { you: { userId: "u-me", role: "none", canApprove: false } } });
+      await vi.waitFor(() => expect(h.refresh.calls).toBe(1));
+      expect(h.session.getSnapshot().role).toBe("none");
       h.session.close();
     });
 

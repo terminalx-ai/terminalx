@@ -33,13 +33,13 @@ vi.mock("react-native", () => {
     Platform: { OS: "web", select: ({ default: fallback }: any) => fallback },
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
     Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
-    TextInput: ({ value, onChangeText, placeholder, editable }: any) => <input type="text" value={value} disabled={editable === false} onInput={(event) => onChangeText(event.currentTarget.value)} placeholder={placeholder} />,
+    TextInput: ({ value, onChangeText, placeholder, editable, accessibilityLabel }: any) => <input type="text" aria-label={accessibilityLabel} value={value} disabled={editable === false} onInput={(event) => onChangeText(event.currentTarget.value)} placeholder={placeholder} />,
     FlatList: ({ data, renderItem, ListHeaderComponent, ListEmptyComponent, ListFooterComponent }: any) => <div>{ListHeaderComponent}{data.length ? data.map((item: unknown, index: number) => <div key={index}>{renderItem({ item })}</div>) : ListEmptyComponent}{ListFooterComponent}</div>,
     SectionList: ({ sections, renderItem, renderSectionHeader, renderSectionFooter, ListHeaderComponent, ListEmptyComponent }: any) => <div>{ListHeaderComponent}{sections.length ? sections.map((section: any) => <div key={section.key}>{renderSectionHeader({ section })}{section.data.map((item: any) => <div key={item.workspace.id}>{renderItem({ item })}</div>)}{renderSectionFooter({ section })}</div>) : ListEmptyComponent}</div>,
   };
 });
 vi.mock("@mobile/ui/primitives", () => ({
-  Button: ({ label, onPress, disabled }: any) => <button disabled={disabled} onClick={onPress}>{label}</button>,
+  Button: ({ label, onPress, disabled, accessibilityLabel }: any) => <button disabled={disabled} aria-label={accessibilityLabel} onClick={onPress}>{label}</button>,
   Card: ({ children }: any) => <div>{children}</div>,
   EmptyState: ({ title, detail }: any) => <div>{title} {detail}</div>, StatusDot: () => null,
   Screen: ({ children }: any) => <div>{children}</div>, SectionTitle: ({ children }: any) => <h2>{children}</h2>,
@@ -54,11 +54,11 @@ const item = (id: string, fields: Record<string, unknown> = {}) => ({ workspace:
 
 const NAMES: Record<string, string> = { "u-alice": "Alice", "u-bob": "Bob" };
 
-function world(options: { state?: string | null; role?: string | null; canApprove?: boolean; hasKey?: boolean; events?: unknown[]; outbox?: unknown[]; connection?: string; noKey?: boolean; tabs?: number; collab?: Record<string, unknown> } = {}) {
+function world(options: { state?: string | null; role?: string | null; canApprove?: boolean; hasKey?: boolean; events?: unknown[]; outbox?: unknown[]; connection?: string; noKey?: boolean; tabs?: number; access?: string; problem?: unknown; collab?: Record<string, unknown> } = {}) {
   const state = options.state === undefined ? "ready" : options.state;
   const snapshot = {
     connection: { state: options.connection ?? (state === "ready" ? "connected" : "suspended") },
-    problem: null,
+    problem: options.problem ?? null,
     collab: { available: false, userId: "u-me", participants: [], leases: {}, notes: {}, ...options.collab },
     role: options.role === undefined ? "driver" : options.role,
     canApprove: options.canApprove ?? false,
@@ -80,6 +80,8 @@ function world(options: { state?: string | null; role?: string | null; canApprov
     takeWheel: vi.fn(async () => undefined),
     releaseWheel: vi.fn(async () => undefined),
     takeOverWheel: vi.fn(async () => undefined),
+    deliverHeld: vi.fn(async () => undefined),
+    reconnect: vi.fn(),
     outbox: { isDeciding: () => false },
   };
   const release = vi.fn();
@@ -89,6 +91,7 @@ function world(options: { state?: string | null; role?: string | null; canApprov
     getSnapshot: () => ({ organizations, loading: false, error: null, refreshedAt: 1 }),
     refresh: vi.fn(async () => undefined),
     workspace: () => listed,
+    access: () => options.access ?? (listed ? (options.role === "none" ? "not-shared" : "ok") : "gone"),
     retain: vi.fn(() => release),
     opened: () => session,
     people: { subscribe: () => () => undefined, getVersion: () => 1, name: (userId: string | null | undefined) => NAMES[userId ?? ""] ?? "Someone", roster: vi.fn(async () => [{ userId: "u-me", email: "me@example.com", role: "admin" }, { userId: "u-alice", email: "alice@example.com", displayName: "Alice", role: "member" }, { userId: "u-bob", email: "bob@example.com", displayName: "Bob", role: "member" }]), remember: vi.fn() },
@@ -189,6 +192,7 @@ describe("a cloud workspace screen", () => {
     expect(title).toBe("Start this workspace?");
     expect(message).toContain("billed");
     expect(buttons.map((entry: { text: string }) => entry.text)).toEqual(["Cancel", "Start and send"]);
+    expect(container.querySelector("input")!.getAttribute("aria-label")).toBe("Message for the agent. Sending starts the workspace.");
     // Cancel does nothing.
     buttons[0].onPress?.();
     expect(session.send).not.toHaveBeenCalled();
@@ -228,7 +232,7 @@ describe("a cloud workspace screen", () => {
     expect(text()).toContain("Not delivered yet. It is sent when the phone is back online.");
     expect(text()).toContain("Starting the workspace…");
     expect(text()).toContain("Your role in this workspace does not allow that.");
-    await act(async () => { [...container.querySelectorAll("button")].find((found) => found.textContent === "Cancel")!.click(); });
+    await click("Cancel the message: message b");
     expect(session.cancel).toHaveBeenCalledWith("b");
   });
 
@@ -254,10 +258,96 @@ describe("a cloud workspace screen", () => {
     expect(text()).toContain("This workspace is archived. Its conversation can be read.");
     expect(container.querySelector("input")).toBeNull();
 
-    world({ state: null, connection: "stopped" });
+  });
+
+  it("says why a workspace cannot be shown, opens nothing for it, and clears the conversation when access ends while open", async () => {
+    const first = world();
     await show(<CloudWorkspaceScreen />);
-    expect(text()).toContain("This workspace is no longer available to you.");
+    expect(text()).toContain("run the tests");
+    // The list now says access was taken away: the same screen, re-rendered.
+    mocks.catalog.access = () => "gone";
+    mocks.catalog.opened = () => null;
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("This workspace is no longer shared with you");
+    expect(text()).not.toContain("run the tests");
+    expect(text()).not.toContain("Sign in");
     expect(container.querySelector("input")).toBeNull();
+    expect(first.release).toHaveBeenCalled();
+
+    for (const [access, words] of [["not-shared", "This workspace has not been shared with you"], ["deleted", "This workspace was deleted"], ["gone", "This workspace is no longer shared with you"]] as const) {
+      world({ access });
+      mocks.params = { workspaceId: `ws-${++counter}`, orgId: "org-1" };
+      await show(<CloudWorkspaceScreen />);
+      expect(text()).toContain(words);
+      // Nothing is opened for a workspace this person may not open: no session, no connection.
+      expect(mocks.catalog.retain).not.toHaveBeenCalled();
+      expect(text()).not.toContain("Fix login");
+    }
+
+    world({ access: "unknown" });
+    mocks.catalog.opened = () => null;
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Checking access…");
+  });
+
+  it("holds a message that never left the phone for a workspace that is stopped now, and sends it only after the person confirms", async () => {
+    const entry = { clientCommandId: "a", tabId: "t1", kind: "send", text: "written offline", requestId: null, wake: null, category: null, receipt: null, createdAt: 1, updatedAt: 1, error: null, state: "unsent" };
+    const { session } = world({ state: "suspended", outbox: [entry] });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("written offline");
+    expect(text()).toContain("Not sent. This workspace is stopped, and sending starts it.");
+    expect(session.deliverHeld).not.toHaveBeenCalled();
+    await click("Send it and start the workspace");
+    expect(session.deliverHeld).not.toHaveBeenCalled();
+    const [title, message, buttons] = mocks.alert.mock.calls[0];
+    expect(title).toBe("Start this workspace?");
+    expect(message).toContain("billed");
+    await act(async () => buttons[1].onPress());
+    expect(session.deliverHeld).toHaveBeenCalledWith({ allowWake: true });
+    // It can also just be dropped.
+    await click("Cancel the message: written offline");
+    expect(session.cancel).toHaveBeenCalledWith("a");
+  });
+
+  it("asks before starting when the workspace turns out to have stopped since the screen last heard", async () => {
+    const { session } = world();
+    session.send.mockRejectedValueOnce(Object.assign(new Error("would-wake"), { code: "would-wake" }));
+    await show(<CloudWorkspaceScreen />);
+    await type("still there?");
+    await click("Send");
+    expect(session.send).toHaveBeenCalledTimes(1);
+    expect(session.send).toHaveBeenLastCalledWith("t1", "still there?");
+    const [title, , buttons] = mocks.alert.mock.calls[0];
+    expect(title).toBe("Start this workspace?");
+    // The draft waits for the answer.
+    expect(container.querySelector("input")!.value).toBe("still there?");
+    await act(async () => buttons[1].onPress());
+    expect(session.send).toHaveBeenLastCalledWith("t1", "still there?", { allowWake: true });
+  });
+
+  it("says a workspace is starting once it was asked to, offers Reconnect when the link stopped trying, and never shows a raw code", async () => {
+    const entry = { clientCommandId: "a", tabId: "t1", kind: "send", text: "go", requestId: null, wake: "queued", category: null, receipt: null, createdAt: 1, updatedAt: 1, error: null, state: "queued" };
+    world({ state: "suspended", outbox: [entry] });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Starting the workspace…");
+    expect(text()).not.toContain("Stopped. Showing");
+
+    const stuck = world({ connection: "stopped", problem: { kind: "gave-up" } });
+    mocks.params = { workspaceId: `ws-${++counter}`, orgId: "org-1" };
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Could not connect to this workspace.");
+    await click("Reconnect");
+    expect(stuck.session.reconnect).toHaveBeenCalled();
+    expect(mocks.catalog.refresh).toHaveBeenCalled();
+
+    const odd = world({ outbox: [{ ...entry, state: "rejected", wake: null, category: "some_new_refusal_code" }], connection: "updateRequired" });
+    mocks.params = { workspaceId: `ws-${++counter}`, orgId: "org-1" };
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Update the app to connect to this workspace.");
+    expect(text()).toContain("That did not work. Try again in a moment.");
+    expect(text()).not.toContain("some_new_refusal_code");
+    expect(text()).not.toContain("some new refusal code");
+    expect(odd.session.reconnect).not.toHaveBeenCalled();
   });
 
   it("switches between a workspace's agent tabs", async () => {
@@ -344,6 +434,34 @@ describe("a shared cloud workspace on the phone", () => {
     expect(() => button("Notes")).toThrow();
   });
 
+  it("reads the list once more before telling someone a workspace is not shared with them (they may just have been added)", async () => {
+    world({ role: "none", access: "not-shared" });
+    let finish!: () => void;
+    mocks.catalog.refresh = vi.fn(() => new Promise<void>((resolve) => (finish = resolve)));
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Checking access…");
+    expect(text()).not.toContain("has not been shared");
+    // Nothing is opened, and no agent tab is named, for someone with no role.
+    expect(mocks.catalog.retain).not.toHaveBeenCalled();
+    expect(text()).not.toContain("Fix login");
+    await act(async () => finish());
+    expect(text()).toContain("This workspace has not been shared with you");
+    expect(mocks.catalog.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the driver once to a screen reader, and says why the wheel was refused", async () => {
+    const { session } = world({ collab: { available: true, leases: { t1: lease("u-alice") } }, role: "manager" });
+    await show(<CloudWorkspaceScreen />);
+    expect(container.innerHTML).not.toContain("Driver: Driving");
+    const free = world({ collab: { available: true } });
+    free.session.takeWheel.mockRejectedValueOnce(Object.assign(new Error("x"), { code: "lease_cooldown" }));
+    mocks.params = { workspaceId: `ws-${++counter}`, orgId: "org-1" };
+    await show(<CloudWorkspaceScreen />);
+    await click("Take the wheel");
+    expect(container.querySelector('[role="alert"]')!.textContent).toBe("You drove this tab moments ago; others get the first chance. Try again in two minutes.");
+    expect(session.takeWheel).not.toHaveBeenCalled();
+  });
+
   it("says a workspace has not been shared with this person instead of an empty conversation", async () => {
     world({ role: "none", collab: { available: true } });
     await show(<CloudWorkspaceScreen />);
@@ -410,19 +528,48 @@ describe("the sharing screen", () => {
     await act(async () => buttons[1].onPress());
     expect(mocks.catalog.api.revokeShare).toHaveBeenCalledWith("org-1", mocks.params.workspaceId, "u-alice");
 
-    await click("Add: view only");
+    await click("Add Bob as view only");
     expect(mocks.catalog.api.putShare).toHaveBeenLastCalledWith("org-1", mocks.params.workspaceId, "u-bob", { role: "viewer", canApprove: false });
   });
 
-  it("does not let a viewer be made an approver, and says why a change was refused", async () => {
+  it("lets someone who only views approve, and keeps that right when their role is changed", async () => {
+    world();
+    mocks.catalog.api.shares.mockResolvedValue({ shares: [share("u-bob", { role: "viewer" }), share("u-alice", { canApprove: true })], you: { role: "manager", canApprove: true, canManageShares: true } });
+    await show(<CloudSharesScreen />);
+    const bob = container.querySelector('input[aria-label="Bob: can approve permissions"]') as HTMLInputElement;
+    expect(bob.disabled).toBe(false);
+    expect(text()).not.toContain("cannot approve");
+    await act(async () => { bob.click(); });
+    expect(mocks.catalog.api.putShare).toHaveBeenLastCalledWith("org-1", mocks.params.workspaceId, "u-bob", { role: "viewer", canApprove: true });
+    // Making an approver view-only does not take the approval right away without being asked.
+    await click("Alice: View only");
+    expect(mocks.catalog.api.putShare).toHaveBeenLastCalledWith("org-1", mocks.params.workspaceId, "u-alice", { role: "viewer", canApprove: true });
+  });
+
+  it("says in words why a change was refused, naming the person, and never shows a code", async () => {
     world();
     mocks.catalog.api.shares.mockResolvedValue({ shares: [share("u-bob", { role: "viewer" })], you: { role: "manager", canApprove: true, canManageShares: true } });
     await show(<CloudSharesScreen />);
-    expect((container.querySelector('input[aria-label="Bob: can approve permissions"]') as HTMLInputElement).disabled).toBe(true);
-    expect(text()).toContain("Someone who only views cannot approve.");
-    mocks.catalog.api.putShare.mockRejectedValueOnce(Object.assign(new Error("x"), { code: "cloud_workspace_collaboration_forbidden" }));
+    const alert = () => container.querySelector('[role="alert"]')!.textContent;
+    const refuse = (code: string) => mocks.catalog.api.putShare.mockRejectedValueOnce(Object.assign(new Error("x"), { code }));
+    refuse("cloud_workspace_share_redundant");
     await click("Bob: Can send");
-    expect(container.querySelector('[role="alert"]')!.textContent).toBe("Your role in this workspace does not allow that.");
+    expect(alert()).toBe("Bob already has access as owner, admin or creator.");
+    refuse("organization_member_not_found");
+    await click("Bob: Can send");
+    expect(alert()).toBe("Bob is no longer a member of this organization.");
+    refuse("cloud_workspace_share_limit");
+    await click("Add Alice as view only");
+    expect(alert()).toBe("This workspace is already shared with the maximum number of people (64). Remove someone first.");
+    refuse("cloud_workspace_share_requires_organization_access");
+    await click("Add Alice, can send");
+    expect(alert()).toBe("Make the workspace visible to the organization first.");
+    refuse("cloud_workspace_share_forbidden");
+    await click("Bob: Can send");
+    expect(alert()).toBe("Only organization admins and the workspace's creator can change who it is shared with.");
+    refuse("something_new_entirely");
+    await click("Bob: Can send");
+    expect(alert()).toBe("That did not work. Try again in a moment.");
   });
 
   it("says when the list cannot be read and offers to try again", async () => {

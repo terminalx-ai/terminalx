@@ -64,30 +64,44 @@ describe("the phone's command outbox", () => {
     expect(JSON.parse(storedAtPost).items[0].state).toBe("unsent");
   });
 
-  it("keeps a message offline and delivers the same bytes later, also after a relaunch", async () => {
+  it("keeps a message offline, and a later launch only reads: nothing is posted until delivery is allowed", async () => {
     const h = await harness();
     h.api.enqueue.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null));
     const entry = await h.outbox.enqueue("tab-1", "send", { text: "while offline" });
     expect(entry).toMatchObject({ state: "unsent", error: "cloud_workspace_unavailable" });
-    expect(h.outbox.pending).toBe(true);
+    expect(h.outbox).toMatchObject({ pending: true, unsent: true, awaiting: false });
 
-    // A new launch reads the outbox back and sends the very same envelope.
+    // A new launch reads the outbox back. Looking posts nothing: a post to a
+    // workspace that stopped meanwhile would start it.
     const again = await harness({ blobs: h.blobs });
-    expect(await again.outbox.sync()).toBe(true);
+    expect(await again.outbox.sync()).toBe(false);
+    expect(await again.outbox.sync({ deliver: false })).toBe(false);
+    expect(again.posted).toEqual([]);
+    expect(again.outbox.entries()).toMatchObject([{ clientCommandId: entry.clientCommandId, text: "while offline", state: "unsent" }]);
+
+    // Allowed (the workspace runs, or the person agreed to start it): the very same envelope goes out.
+    expect(await again.outbox.sync({ deliver: true })).toBe(true);
     expect(again.posted).toHaveLength(1);
-    expect(again.outbox.entries()).toMatchObject([{ clientCommandId: entry.clientCommandId, text: "while offline", state: "queued", error: null }]);
+    expect(again.outbox.entries()).toMatchObject([{ clientCommandId: entry.clientCommandId, state: "queued", error: null }]);
     const first = JSON.parse([...h.blobs.values()][0]).items[0].envelope;
     expect(again.posted[0]).toEqual(first);
     // Delivered: not posted again.
-    await again.outbox.sync();
+    await again.outbox.sync({ deliver: true });
     expect(again.posted).toHaveLength(1);
+  });
+
+  it("can keep a command without posting it at all", async () => {
+    const h = await harness();
+    expect(await h.outbox.enqueue("tab-1", "send", { text: "later" }, { post: false })).toMatchObject({ state: "unsent", error: null });
+    expect(h.api.enqueue).not.toHaveBeenCalled();
+    expect([...h.blobs.values()].join("")).toContain("unsent");
   });
 
   it("takes a refusal as the answer and does not retry it", async () => {
     const h = await harness();
     h.api.enqueue.mockRejectedValueOnce(new CloudApiError("cloud_workspace_collaboration_forbidden", 403));
     expect(await h.outbox.enqueue("tab-1", "send", { text: "as a viewer" })).toMatchObject({ state: "rejected", category: "cloud_workspace_collaboration_forbidden" });
-    await h.outbox.sync();
+    await h.outbox.sync({ deliver: true });
     expect(h.api.enqueue).toHaveBeenCalledTimes(1);
     expect(h.outbox.pending).toBe(false);
   });
@@ -171,7 +185,7 @@ describe("the phone's command outbox", () => {
     h.api.cancelCommand.mockRejectedValueOnce(new CloudApiError("cloud_workspace_agent_command_not_found", 404));
     await h.outbox.cancel(unsent.clientCommandId);
     expect(h.outbox.entries()[1].state).toBe("cancelled");
-    await h.outbox.sync();
+    await h.outbox.sync({ deliver: true });
     expect(h.posted).toHaveLength(1);
   });
 

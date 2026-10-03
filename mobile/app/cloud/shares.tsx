@@ -32,7 +32,11 @@ interface Read {
   rosterFailure: string | null;
 }
 
-const explain = (error: unknown) => codeText(typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : null) ?? "That did not work.";
+/** A refused change in words; where the sentence is about a person, it names them. */
+const explain = (error: unknown, who?: string) => {
+  const text = codeText(typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : null) ?? "That did not work.";
+  return who ? text.replace(/^This person/, who) : text;
+};
 
 function Shares({ catalog, orgId, workspaceId }: { catalog: CloudCatalog; orgId: string; workspaceId: string }) {
   const { palette } = useTheme();
@@ -76,6 +80,7 @@ function Shares({ catalog, orgId, workspaceId }: { catalog: CloudCatalog; orgId:
   }, [read]);
 
   const change = async (key: string, action: () => Promise<unknown>) => {
+    const who = catalog.people.name(key);
     if (busy) return;
     setBusy(key);
     setFailure(null);
@@ -86,7 +91,7 @@ function Shares({ catalog, orgId, workspaceId }: { catalog: CloudCatalog; orgId:
       // The list of workspaces carries "shared with N".
       void catalog.refresh();
     } catch (error) {
-      setFailure(explain(error));
+      setFailure(explain(error, who));
     } finally {
       setBusy(null);
     }
@@ -112,12 +117,11 @@ function Shares({ catalog, orgId, workspaceId }: { catalog: CloudCatalog; orgId:
       <Text numberOfLines={1} style={[styles.name, { color: palette.ink }]}>{catalog.people.name(share.userId)}</Text>
       <Text numberOfLines={1} style={[styles.meta, { color: palette.muted }]}>{share.email}</Text>
       {manage ? <>
-        <View style={styles.roles}>{(["viewer", "driver"] as const).map((role) => <Pressable key={role} accessibilityRole="button" accessibilityLabel={`${catalog.people.name(share.userId)}: ${role === "viewer" ? "View only" : "Can send"}`} accessibilityState={{ selected: share.role === role }} disabled={busy !== null || share.role === role} onPress={() => void put(share, { role, canApprove: role === "viewer" ? false : share.canApprove })} style={[styles.role, { backgroundColor: share.role === role ? palette.selected : palette.raised }]}><Text style={[styles.roleText, { color: palette.ink }]}>{role === "viewer" ? "View only" : "Can send"}</Text></Pressable>)}</View>
+        <View style={styles.roles}>{(["viewer", "driver"] as const).map((role) => <Pressable key={role} accessibilityRole="button" accessibilityLabel={`${catalog.people.name(share.userId)}: ${role === "viewer" ? "View only" : "Can send"}`} accessibilityState={{ selected: share.role === role }} disabled={busy !== null || share.role === role} onPress={() => void put(share, { role, canApprove: share.canApprove })} style={[styles.role, { backgroundColor: share.role === role ? palette.selected : palette.raised }]}><Text style={[styles.roleText, { color: palette.ink }]}>{role === "viewer" ? "View only" : "Can send"}</Text></Pressable>)}</View>
         <View style={styles.approve}>
           <Text style={[styles.meta, styles.flex, { color: palette.ink }]}>Can approve permissions</Text>
-          <Switch accessibilityLabel={`${catalog.people.name(share.userId)}: can approve permissions`} value={share.canApprove} disabled={busy !== null || share.role === "viewer"} onValueChange={(value) => void put(share, { role: share.role, canApprove: value })} />
+          <Switch accessibilityLabel={`${catalog.people.name(share.userId)}: can approve permissions`} value={share.canApprove} disabled={busy !== null} onValueChange={(value) => void put(share, { role: share.role, canApprove: value })} />
         </View>
-        {share.role === "viewer" ? <Text style={[styles.hint, { color: palette.muted }]}>Someone who only views cannot approve.</Text> : null}
         <Button label="Remove" kind="danger" disabled={busy !== null} onPress={() => remove(share)} />
       </> : <Text style={[styles.meta, { color: palette.muted }]}>{share.role === "viewer" ? "View only" : "Can send"}{share.canApprove ? " · can approve permissions" : ""}</Text>}
     </Card>)}
@@ -128,9 +132,9 @@ function Shares({ catalog, orgId, workspaceId }: { catalog: CloudCatalog; orgId:
       {candidates.map((member) => <Card key={member.userId} style={styles.card}>
         <Text numberOfLines={1} style={[styles.name, { color: palette.ink }]}>{member.displayName?.trim() || member.email}</Text>
         <Text numberOfLines={1} style={[styles.meta, { color: palette.muted }]}>{member.email}</Text>
-        <View style={styles.roles}>
-          <Button label="Add: view only" kind="secondary" disabled={busy !== null} onPress={() => void put(member, { role: "viewer", canApprove: false })} style={styles.flex} />
-          <Button label="Add: can send" kind="secondary" disabled={busy !== null} onPress={() => void put(member, { role: "driver", canApprove: false })} style={styles.flex} />
+        <View style={styles.add}>
+          <Button label="Add: view only" kind="secondary" accessibilityLabel={`Add ${member.displayName?.trim() || member.email} as view only`} disabled={busy !== null} onPress={() => void put(member, { role: "viewer", canApprove: false })} />
+          <Button label="Add: can send" kind="secondary" accessibilityLabel={`Add ${member.displayName?.trim() || member.email}, can send`} disabled={busy !== null} onPress={() => void put(member, { role: "driver", canApprove: false })} />
         </View>
       </Card>)}
     </> : <Text style={[styles.notice, { color: palette.muted }]}>{"Only managers and the workspace's creator can change who it is shared with."}</Text>}
@@ -143,8 +147,9 @@ const styles = StyleSheet.create({
   card: { padding: 14, gap: 8 },
   name: { fontSize: 16, fontWeight: "700" },
   meta: { fontSize: 13, lineHeight: 18 },
-  hint: { fontSize: 12, lineHeight: 17 },
   roles: { flexDirection: "row", gap: 8 },
+  // One under the other: two labelled buttons side by side do not fit a small phone.
+  add: { gap: 8 },
   role: { flex: 1, minHeight: 44, borderRadius: 10, alignItems: "center", justifyContent: "center" },
   roleText: { fontSize: 14, fontWeight: "600" },
   approve: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 44 },

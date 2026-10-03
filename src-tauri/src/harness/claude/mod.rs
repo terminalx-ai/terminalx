@@ -5,10 +5,17 @@
 
 pub mod commands;
 pub mod mapper;
+pub mod models;
 pub mod pty;
 pub mod transcript;
 pub mod trust;
 
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+
+use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 
 /// What `--permission-mode` accepts. No mode at all is the product default
@@ -32,6 +39,53 @@ pub fn control_line(request_id: &str, request: Value) -> String {
 
 pub fn initialize_line(request_id: &str) -> String {
     control_line(request_id, json!({"subtype": "initialize"}))
+}
+
+/// The CLI's answer to `initialize`, from a throwaway child run in `cwd`. It
+/// answers before any turn, so there is no model call: the child is spawned,
+/// asked once, and killed (~1s). The reply names the slash commands and the
+/// models this account may run.
+///
+/// A plain child loads the reader's whole setup on the way: it starts their
+/// MCP servers and runs their SessionStart hooks. A caller that does not need
+/// what those add passes `--safe-mode` in `extra`.
+pub fn ask_initialize(cwd: &Path, extra: &[&str]) -> Result<Value> {
+    let program = crate::binpath::resolve("claude").ok_or_else(|| anyhow!("Claude Code is not installed"))?;
+    let mut child = Command::new(program)
+        .args(["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose"])
+        .args(extra)
+        .current_dir(cwd)
+        .env("PATH", crate::binpath::login_path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("spawn claude for its initialize reply")?;
+    let reply = initialize_reply(&mut child);
+    // Whatever happened above, the child does not outlive the question.
+    let _ = child.kill();
+    let _ = child.wait();
+    reply
+}
+
+fn initialize_reply(child: &mut Child) -> Result<Value> {
+    let mut stdin = child.stdin.take().context("stdin")?;
+    let stdout = child.stdout.take().context("stdout")?;
+    let line = initialize_line("raccoon-init");
+    stdin.write_all(line.as_bytes())?;
+    stdin.write_all(b"\n")?;
+    stdin.flush()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for l in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if l.contains("\"control_response\"") && tx.send(l).is_err() {
+                break;
+            }
+        }
+    });
+    // `stdin` is still open here: closing it would end the child before it answers.
+    let line = rx.recv_timeout(Duration::from_secs(15)).context("no initialize reply from Claude Code")?;
+    Ok(serde_json::from_str(&line)?)
 }
 
 #[cfg(test)]

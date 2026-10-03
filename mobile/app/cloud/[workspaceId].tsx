@@ -6,7 +6,7 @@ import { buildTranscript, type PendingAsk } from "@terminalx/portable/transcript
 import { leaseHeldBy, NOTE_MAX_CHARS } from "@terminalx/portable/workspaceCollab";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import type { CloudCatalog } from "@mobile/cloud/catalog";
-import { codeText, connectionLine, leaseLine, NOT_SHARED_DETAIL, NOT_SHARED_TITLE, outboxLine, presenceLine, roleLabel } from "@mobile/cloud/words";
+import { accessText, codeText, connectionLine, leaseLine, outboxLine, presenceLine, roleLabel } from "@mobile/cloud/words";
 import type { CloudWorkspaceSession } from "@mobile/cloud/workspace";
 import { useConversationState } from "@mobile/state/conversation-state";
 import { Button, EmptyState, StatusDot } from "@mobile/ui/primitives";
@@ -25,14 +25,31 @@ export default function CloudWorkspaceScreen() {
   const catalog = useCloudCatalog();
   const snapshot = useCatalogSnapshot(catalog);
   const orgId = params.orgId ?? snapshot.organizations.find((entry) => entry.workspaces.some((item) => item.workspace.id === params.workspaceId))?.organization.orgId ?? null;
+  // What the list says of this person's access decides whether anything is opened at all.
+  const access = catalog && orgId ? catalog.access(orgId, params.workspaceId) : "unknown";
   // Leaving lets go of the connection; nothing keeps a phone attached unseen.
-  useEffect(() => (catalog && orgId ? catalog.retain(orgId, params.workspaceId) : undefined), [catalog, orgId, params.workspaceId]);
-  const session = catalog && orgId ? catalog.opened(orgId, params.workspaceId) : null;
+  useEffect(() => (catalog && orgId && access === "ok" ? catalog.retain(orgId, params.workspaceId) : undefined), [catalog, orgId, params.workspaceId, access]);
+  const session = catalog && orgId && access === "ok" ? catalog.opened(orgId, params.workspaceId) : null;
 
   const listed = catalog && orgId ? catalog.workspace(orgId, params.workspaceId) : null;
+  // Just shared? The list this phone holds may be from before: read it once before saying no.
+  const [checked, setChecked] = useState<string | null>(null);
+  const key = `${orgId}/${params.workspaceId}`;
+  useEffect(() => {
+    if (!catalog || access !== "not-shared" || checked === key) return;
+    let current = true;
+    void catalog.refresh().then(() => { if (current) setChecked(key); });
+    return () => { current = false; };
+  }, [catalog, access, checked, key]);
+  const checking = access === "not-shared" && checked !== key;
+  const closed = !checking && (access === "not-shared" || access === "deleted" || access === "gone") ? accessText(access) : null;
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
     <Stack.Screen options={{ title: listed?.name ?? params.title ?? "Workspace" }} />
-    {catalog && session && orgId ? <Workspace key={`${orgId}/${params.workspaceId}`} catalog={catalog} session={session} orgId={orgId} workspaceId={params.workspaceId} listedState={listed?.state ?? null} initialTabId={params.tabId ?? null} /> : <EmptyState title="Workspace unavailable" detail="Sign in, then open it again from the Cloud tab." />}
+    {!catalog ? <EmptyState title="Workspace unavailable" detail="Sign in, then open it again from the Cloud tab." />
+      // Access ended, also while this screen was open: the conversation goes at once, with the reason.
+      : closed ? <EmptyState title={closed.title} detail={closed.detail} />
+      : session && orgId ? <Workspace key={`${orgId}/${params.workspaceId}`} catalog={catalog} session={session} orgId={orgId} workspaceId={params.workspaceId} listedState={listed?.state ?? null} initialTabId={params.tabId ?? null} />
+      : <EmptyState title="Checking access…" detail="Reading the list of workspaces from your account." busy />}
   </View>;
 }
 
@@ -62,7 +79,10 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
   const tab = snapshot.tabs.find((entry) => entry.tabId === chosen) ?? snapshot.tabs[0] ?? null;
   const tabId = tab?.tabId ?? null;
   const live = snapshot.connection.state === "connected";
-  const banner = connectionLine(snapshot.connection, listedState, snapshot.problem);
+  const starting = listedState === "suspended" && snapshot.outbox.some((entry) => (entry.state === "queued" || entry.state === "leased") && (entry.wake === "queued" || entry.wake === "in-progress"));
+  const banner = connectionLine(snapshot.connection, listedState, snapshot.problem, starting);
+  // The link stopped trying by itself, or was refused: it tries again only when asked.
+  const canReconnect = snapshot.connection.state === "stopped" && listedState === "ready";
   const role = roleLabel(snapshot.role);
 
   useEffect(() => (tabId ? session.view(tabId) : undefined), [session, tabId]);
@@ -75,12 +95,13 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
       <StatusDot color={banner.tone === "live" ? palette.success : banner.tone === "warn" ? palette.warning : palette.faint} />
       <Text style={[styles.bannerText, { color: palette.ink }]}>{banner.text}</Text>
       {role ? <Text style={[styles.role, { color: palette.muted }]}>{role}</Text> : null}
+      {canReconnect ? <Pressable accessibilityRole="button" accessibilityLabel="Reconnect" onPress={() => { session.reconnect(); void catalog.refresh(); }} style={[styles.reconnect, { backgroundColor: palette.raised }]}><Text style={[styles.role, { color: palette.ink }]}>Reconnect</Text></Pressable> : null}
       {listedState !== null ? <Pressable accessibilityRole="button" accessibilityLabel="Sharing" onPress={() => router.push({ pathname: "/cloud/shares", params: { orgId, workspaceId } })} style={[styles.sharing, { backgroundColor: palette.raised }]}><Text style={[styles.role, { color: palette.ink }]}>Sharing</Text></Pressable> : null}
     </View>
-    {presence ? <Text accessibilityLabel={presence} numberOfLines={2} style={[styles.presence, { color: palette.muted }]}>{presence}</Text> : null}
+    {presence ? <Text accessibilityLabel={presence} style={[styles.presence, { color: palette.muted }]}>{presence}</Text> : null}
     {snapshot.error ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.warning }]}>{codeText(snapshot.error)}</Text> : null}
     {snapshot.tabs.length > 1 ? <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabs} contentContainerStyle={styles.tabsContent}>{snapshot.tabs.map((entry, index) => <Pressable key={entry.tabId} accessibilityRole="tab" accessibilityState={{ selected: entry.tabId === tabId }} onPress={() => setChosen(entry.tabId)} style={[styles.tab, { backgroundColor: entry.tabId === tabId ? palette.selected : palette.raised }]}><Text numberOfLines={1} style={[styles.tabText, { color: palette.ink }]}>{entry.title ?? `Agent ${index + 1}`}</Text></Pressable>)}</ScrollView> : null}
-    {snapshot.role === "none" ? <EmptyState title={NOT_SHARED_TITLE} detail={NOT_SHARED_DETAIL} /> : tab ? <Conversation key={tab.tabId} catalog={catalog} session={session} scope={`${orgId}/${workspaceId}`} tabId={tab.tabId} live={live} listedState={listedState} /> : <EmptyState title={live ? "No agent tabs" : "Nothing saved yet"} detail={live ? "This workspace has no agent conversation." : "There is no saved conversation for this workspace to show while it is not running."} />}
+    {snapshot.role === "none" ? <EmptyState title={accessText("not-shared").title} detail={accessText("not-shared").detail} /> : tab ? <Conversation key={tab.tabId} catalog={catalog} session={session} scope={`${orgId}/${workspaceId}`} tabId={tab.tabId} live={live} listedState={listedState} /> : <EmptyState title={live ? "No agent tabs" : "Nothing saved yet"} detail={live ? "This workspace has no agent conversation." : "There is no saved conversation for this workspace to show while it is not running."} />}
   </>;
 }
 
@@ -95,16 +116,19 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
   const [notesOpen, setNotesOpen] = useState(false);
   const [note, setNote] = useConversationState(`cloud:${scope}:${tabId}:note`, "");
   const shared = snapshot.collab.available;
-  const held = snapshot.collab.leases[tabId] ?? null;
-  const now = useNowUntil(held?.expiresAt ?? null);
-  const wheel = leaseLine(held, snapshot.collab.userId, snapshot.role, now, nameOf);
+  const lease = snapshot.collab.leases[tabId] ?? null;
+  const now = useNowUntil(lease?.expiresAt ?? null);
+  const wheel = leaseLine(lease, snapshot.collab.userId, snapshot.role, now, nameOf);
   const notes = snapshot.collab.notes[tabId] ?? [];
   const events = tab?.events;
   const transcript = useMemo(() => buildTranscript(events ?? [], live), [events, live]);
   const outbox = snapshot.outbox.filter((entry) => entry.tabId === tabId);
-  const pending = outbox.filter((entry) => entry.kind !== "permission-decision" && outboxLine(entry, nameOf));
+  const pending = outbox.filter((entry) => entry.kind !== "permission-decision" && outboxLine(entry, listedState === "suspended", nameOf));
+
   const mayWrite = snapshot.role === "manager" || snapshot.role === "driver";
   const stopped = listedState === "suspended";
+  // Written earlier and still on the phone, for a workspace that is stopped now: held until the person says to start it.
+  const held = stopped ? outbox.filter((entry) => entry.state === "unsent") : [];
   const working = tab?.status === "in_progress";
 
   const run = async (action: () => Promise<unknown>, done?: () => void) => {
@@ -124,16 +148,35 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
     }
   };
 
-  const send = () => {
+  /** The one question that comes before anything here starts a stopped workspace. */
+  const confirmStart = (what: string, go: () => Promise<unknown>, done?: () => void) =>
+    Alert.alert("Start this workspace?", `It is stopped. ${what} starts it, and it is billed to the organization while it runs.`, [
+      { text: "Cancel", style: "cancel" },
+      { text: "Start and send", onPress: () => void run(go, done) },
+    ]);
+
+  const send = async () => {
     const text = draft.trim();
     if (!text || sending) return;
-    if (!stopped) return void run(() => session.send(tabId, text), () => setDraft(""));
-    // The one thing on this screen that starts a stopped workspace, and never without asking.
-    Alert.alert("Start this workspace?", "It is stopped. Sending this message starts it, and it is billed to the organization while it runs.", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Start and send", onPress: () => void run(() => session.send(tabId, text, { allowWake: true }), () => setDraft("")) },
-    ]);
+    const start = () => confirmStart("Sending this message", () => session.send(tabId, text, { allowWake: true }), () => setDraft(""));
+    if (stopped) return start();
+    setSending(true);
+    setFailure(null);
+    try {
+      await session.send(tabId, text);
+      setDraft("");
+      void catalog.refresh();
+    } catch (error) {
+      const code = (error as { code?: unknown })?.code;
+      // It was stopped from elsewhere since this screen last heard: ask, as for any stopped workspace.
+      if (code === "would-wake") start();
+      else setFailure(codeText(typeof code === "string" ? code : null) ?? "That did not work.");
+    } finally {
+      setSending(false);
+    }
   };
+
+  const sendHeld = () => confirmStart(held.length === 1 ? "Sending the message that is waiting" : `Sending the ${held.length} messages that are waiting`, () => session.deliverHeld({ allowWake: true }));
 
   const decide = (ask: PendingAsk, optionId: string) => void run(() => session.decide(tabId, { requestId: ask.requestId, optionId }));
 
@@ -145,7 +188,7 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
 
   return <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={92}>
     {shared ? <View style={[styles.wheel, { borderBottomColor: palette.border }]}>
-      <Text accessibilityLabel={`Driver: ${wheel.text}`} numberOfLines={1} style={[styles.wheelText, { color: wheel.mine ? palette.accent : palette.muted }]}>{wheel.text}</Text>
+      <Text accessibilityLabel={wheel.text} numberOfLines={1} style={[styles.wheelText, { color: wheel.mine ? palette.accent : palette.muted }]}>{wheel.text}</Text>
       {wheel.canTake ? <Pressable accessibilityRole="button" disabled={sending} onPress={() => void run(() => session.takeWheel(tabId))} style={styles.wheelAction}><Text style={[styles.wheelActionText, { color: palette.accent }]}>Take the wheel</Text></Pressable> : null}
       {wheel.canRelease ? <Pressable accessibilityRole="button" disabled={sending} onPress={() => void run(() => session.releaseWheel(tabId))} style={styles.wheelAction}><Text style={[styles.wheelActionText, { color: palette.accent }]}>Release</Text></Pressable> : null}
       {wheel.canTakeOver ? <Pressable accessibilityRole="button" disabled={sending} onPress={() => void run(() => session.takeOverWheel(tabId))} style={styles.wheelAction}><Text style={[styles.wheelActionText, { color: palette.accent }]}>Take over</Text></Pressable> : null}
@@ -167,25 +210,25 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
         {transcript.pendingAsks.map((ask) => snapshot.canApprove
           ? <PermissionCard key={ask.requestId} ask={ask} connected={!stopped} answering={sending || session.outbox.isDeciding(ask.requestId)} onRespond={(optionId) => decide(ask, optionId)} />
           : <Text key={ask.requestId} style={[styles.notice, { color: palette.warning }]}>The agent is waiting for a permission ({ask.title ?? ask.toolName ?? "request"}). Waiting for someone who can approve.</Text>)}
-        {pending.map((entry) => { const line = outboxLine(entry, nameOf)!; return <View key={entry.clientCommandId} style={styles.pending}>
+        {pending.map((entry) => { const line = outboxLine(entry, stopped, nameOf)!; return <View key={entry.clientCommandId} style={styles.pending}>
           {entry.text ? <Text numberOfLines={3} style={[styles.pendingText, { color: palette.ink, backgroundColor: palette.selected }]}>{entry.text}</Text> : null}
           <Text style={[styles.pendingState, { color: line.tone === "warn" ? palette.warning : palette.muted }]}>{entry.kind === "stop" ? "Stop: " : ""}{line.text}</Text>
-          {entry.state === "unsent" || entry.state === "queued" ? <Pressable accessibilityRole="button" onPress={() => void run(() => session.cancel(entry.clientCommandId))}><Text style={[styles.pendingState, { color: palette.accent }]}>Cancel</Text></Pressable> : null}
+          {entry.state === "unsent" || entry.state === "queued" ? <Pressable accessibilityRole="button" accessibilityLabel={entry.text ? `Cancel the message: ${entry.text.slice(0, 60)}` : "Cancel this command"} onPress={() => void run(() => session.cancel(entry.clientCommandId))} style={styles.cancel}><Text style={[styles.pendingState, { color: palette.accent }]}>Cancel</Text></Pressable> : null}
         </View>; })}
+        {held.length && mayWrite ? <Button label={held.length === 1 ? "Send it and start the workspace" : `Send ${held.length} messages and start the workspace`} kind="secondary" disabled={sending} onPress={sendHeld} style={styles.held} /> : null}
       </>} />
     {failure ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.danger }]}>{failure}</Text> : null}
     {mayWrite && listedState !== "archived" && listedState !== null
       ? <View style={[styles.composer, { backgroundColor: palette.card, borderTopColor: palette.border }]}>
         {!snapshot.hasKey ? <Text style={[styles.notice, { color: palette.muted }]}>{codeText("no-key")}</Text> : null}
-        {wheel.heldByOther ? <Text style={[styles.notice, { color: palette.warning }]}>{`${nameOf(held?.holderId)} is driving this tab. ${wheel.canTakeOver ? "Take over to send." : "You can send when they release it."}`}</Text> : null}
+        {wheel.heldByOther ? <Text style={[styles.notice, { color: palette.warning }]}>{`${nameOf(lease?.holderId)} is driving this tab. ${wheel.canTakeOver ? "Take over to send." : "You can send when they release it."}`}</Text> : null}
         <View style={styles.composeLine}>
-          <TextInput value={draft} onChangeText={(value) => { setDraft(value); if (value) session.typingIn(tabId); }} multiline editable={snapshot.hasKey && !wheel.heldByOther} placeholder={stopped ? "Message (starts the workspace)" : "Message the agent"} placeholderTextColor={palette.faint} style={[styles.input, { color: palette.ink }]} />
+          <TextInput accessibilityLabel={stopped ? "Message for the agent. Sending starts the workspace." : "Message for the agent"} value={draft} onChangeText={(value) => { setDraft(value); if (value) session.typingIn(tabId); }} multiline editable={snapshot.hasKey && !wheel.heldByOther} placeholder={stopped ? "Message (starts the workspace)" : "Message the agent"} placeholderTextColor={palette.faint} style={[styles.input, { color: palette.ink }]} />
           {working && !stopped && (!wheel.heldByOther || snapshot.role === "manager") ? <Pressable accessibilityRole="button" accessibilityLabel="Stop the agent" disabled={sending} onPress={() => void run(() => session.stop(tabId))} style={[styles.round, { backgroundColor: palette.raised }]}><Square size={16} color={palette.ink} /></Pressable> : null}
-          <Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={!draft.trim() || sending || !snapshot.hasKey || wheel.heldByOther} onPress={send} style={[styles.round, { backgroundColor: palette.accent }, (!draft.trim() || sending || !snapshot.hasKey || wheel.heldByOther) && styles.disabled]}><Send size={17} color={palette.accentInk} /></Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={!draft.trim() || sending || !snapshot.hasKey || wheel.heldByOther} onPress={() => void send()} style={[styles.round, { backgroundColor: palette.accent }, (!draft.trim() || sending || !snapshot.hasKey || wheel.heldByOther) && styles.disabled]}><Send size={17} color={palette.accentInk} /></Pressable>
         </View>
       </View>
       : <View style={[styles.composer, { backgroundColor: palette.card, borderTopColor: palette.border }]}><Text style={[styles.notice, { color: palette.muted }]}>{listedState === "archived" ? "This workspace is archived. Its conversation can be read." : listedState === null ? codeText("cloud_workspace_not_found") : codeText("read-only")}</Text></View>}
-    {mayWrite && snapshot.connection.state === "stopped" && listedState === "ready" ? <Button label="Try again" kind="secondary" onPress={() => void catalog.refresh()} style={styles.retry} /> : null}
   </KeyboardAvoidingView>;
 }
 
@@ -197,8 +240,9 @@ const styles = StyleSheet.create({
   role: { fontSize: 12, fontWeight: "600" },
   sharing: { minHeight: 32, paddingHorizontal: 11, borderRadius: 9, justifyContent: "center" },
   presence: { fontSize: 12, lineHeight: 17, paddingHorizontal: 16, paddingTop: 6 },
-  wheel: { flexDirection: "row", alignItems: "center", gap: 4, paddingLeft: 16, paddingRight: 6, borderBottomWidth: StyleSheet.hairlineWidth },
-  wheelText: { flex: 1, minWidth: 0, fontSize: 13, fontWeight: "600" },
+  // Wraps on a narrow phone: the buttons go under the driver's name rather than squeezing it.
+  wheel: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 4, paddingLeft: 16, paddingRight: 6, borderBottomWidth: StyleSheet.hairlineWidth },
+  wheelText: { flexGrow: 1, flexShrink: 1, minWidth: 120, fontSize: 13, fontWeight: "600" },
   wheelAction: { minHeight: 44, paddingHorizontal: 10, justifyContent: "center" },
   wheelActionText: { fontSize: 13, fontWeight: "600" },
   notes: { paddingHorizontal: 16, paddingVertical: 10, gap: 8, borderBottomWidth: StyleSheet.hairlineWidth },
@@ -219,5 +263,7 @@ const styles = StyleSheet.create({
   input: { flex: 1, maxHeight: 120, minHeight: 42, paddingHorizontal: 10, paddingVertical: 9, fontSize: 16 },
   round: { width: 44, height: 44, borderRadius: 12, alignItems: "center", justifyContent: "center" },
   disabled: { opacity: 0.4 },
-  retry: { margin: 10 },
+  reconnect: { minHeight: 32, paddingHorizontal: 11, borderRadius: 9, justifyContent: "center" },
+  cancel: { minHeight: 44, minWidth: 44, justifyContent: "center", alignItems: "flex-end" },
+  held: { marginTop: 10 },
 });
