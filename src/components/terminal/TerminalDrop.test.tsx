@@ -10,7 +10,14 @@ const { dragDropListener, write, readImage, droppedText } = vi.hoisted(() => ({
 }));
 vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ onDragDropEvent: dragDropListener }) }));
 vi.mock("@/lib/terminalWebgl", () => ({ showWebgl: vi.fn(), hideWebgl: vi.fn() }));
-vi.mock("@/lib/api", () => ({ pty: { write, resize: vi.fn(async () => {}) }, files: { readImage, droppedText } }));
+// A local pane's xterm attaches to its output and detaches when it is disposed; only what it types matters here.
+vi.mock("@/lib/api", () => {
+  const quiet = () => vi.fn(async () => {});
+  return {
+    pty: { write, resize: quiet(), attach: quiet(), detach: quiet(), detachAll: quiet(), ack: quiet() },
+    files: { readImage, droppedText },
+  };
+});
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
