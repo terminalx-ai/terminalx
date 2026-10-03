@@ -11,13 +11,13 @@ import {
   canTypeInTerminals,
   clearCollabAccess,
   getCollab,
+  inputRefusalText,
   listedYou,
   mayConfigure,
   onAccessChanged,
   resetCollab,
   roleBlockReason,
   setNotesOpen,
-  slashRefusalText,
   tabGate,
   workspaceAuthority,
 } from "./cloudCollab";
@@ -94,12 +94,21 @@ describe("PRO-88: what the approval right guards beyond permission requests", ()
     expect(canTypeInTerminals(null)).toBe(false);
   });
 
-  it("says which slash command the runtime refused, and what may be sent instead", () => {
-    expect(slashRefusalText({ command: "/model" })).toBe(
-      "Not sent: /model needs someone who can approve permissions. You can send /clear, /compact, /help and this project's own commands.",
+  it("says what the runtime refused, in the runtime's words when the receipt can be read", () => {
+    const message = "/model was not sent: only someone who can approve permissions may send it. Without that right you can send /clear, /compact.";
+    expect(inputRefusalText("slash-command-forbidden", { command: "/model", message })).toBe(
+      "Not sent: /model: only someone who can approve permissions may send it. Without that right you can send /clear, /compact.",
     );
+    const shell = "Not sent: a message that starts with ! runs as a shell command in the agent's terminal, which needs someone who can approve permissions.";
+    expect(inputRefusalText("shell-command-forbidden", { command: "!", message: shell })).toBe(shell);
     // A receipt that could not be read (its key is gone) still gives the reason.
-    expect(slashRefusalText(null)).toMatch(/^Not sent: That command needs someone who can approve permissions\./);
+    expect(inputRefusalText("slash-command-forbidden", null)).toBe("Not sent: that command needs someone who can approve permissions.");
+    expect(inputRefusalText("shell-command-forbidden", null)).toMatch(/starts with ! runs as a shell command/);
+    expect(inputRefusalText("file-mention-forbidden", {})).toMatch(/outside the project/);
+    // An oversized or empty message is not shown; another category is not this function's.
+    expect(inputRefusalText("slash-command-forbidden", { message: "x".repeat(500) })).toBe("Not sent: that command needs someone who can approve permissions.");
+    expect(inputRefusalText("lease-held", { message: "anything" })).toBeNull();
+    expect(inputRefusalText(null, null)).toBeNull();
   });
 });
 

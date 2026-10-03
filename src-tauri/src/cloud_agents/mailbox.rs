@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use super::api::{Ack, AckOutcome, CallError, Lease};
 use super::receipts::{FollowUp, Known, Receipt};
-use super::{crypto, now_ms, slash, CloudAgents, DecisionError, Settings};
+use super::{crypto, now_ms, CloudAgents, DecisionError, Settings};
 use crate::remote::collab::Role;
 
 const LEASE_LIMIT: u32 = 16;
@@ -153,13 +153,14 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
             return finish(agents, lease, "rejected", Some("lease-held"), json!({ "holderId": held.holder_id }));
         }
     }
-    // A slash command is typed into the CLI as keys and can change the same
+    // The CLI runs a slash command, a `!` shell command or an `@/path`
+    // mention by itself, and each can change or get around the same
     // settings: from a plain driver only the harmless ones go through
     // (PRO-88). Refused before the applying mark: nothing reached the agent.
     if matches!(lease.kind.as_str(), "send" | "steer") {
         let text = plaintext.get("text").and_then(Value::as_str).unwrap_or("");
-        if let Some(refusal) = agents.slash_refusal(access, &tab.session_id, text) {
-            return finish(agents, lease, "rejected", Some(slash::CATEGORY), json!({ "command": refusal.command, "message": refusal.message() }));
+        if let Some(refusal) = agents.slash_refusal(access, &tab.harness, text) {
+            return finish(agents, lease, "rejected", Some(refusal.category()), json!({ "command": refusal.command, "message": refusal.message() }));
         }
     }
     if let Err(error) = agents.receipts.applying(id) {
