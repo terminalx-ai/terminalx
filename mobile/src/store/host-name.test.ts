@@ -42,16 +42,22 @@ describe("a paired computer's name", () => {
     // An account pairing's own label stays the fallback under the computer's name.
     expect(hostDisplayName(host({ label: "Office iMac" }))).toBe("Office iMac");
     // A name that cleans to nothing is no name.
-    expect(hostDisplayName(host({ hostName: "\u0000‮", customName: "  " }))).toBe("Paired Mac");
+    expect(hostDisplayName(host({ hostName: "\u0000\u202e", customName: "  " }))).toBe("Paired Mac");
   });
 
   it("is cleaned and bounded: controls and invisible characters go, whitespace collapses, length is capped", () => {
     expect(cleanHostName("  Paresh’s\tMac\n mini  ")).toBe("Paresh’s Mac mini");
-    expect(cleanHostName("Mac\u0007‮evil​")).toBe("Macevil");
+    expect(cleanHostName("Mac\u0007\u202eevil\u200b")).toBe("Macevil");
     expect([...cleanHostName("n".repeat(500))!]).toHaveLength(HOST_NAME_MAX);
     // A character outside the basic plane is one character, never half of one.
     expect([...cleanHostName("😀".repeat(100))!]).toHaveLength(HOST_NAME_MAX);
     for (const nothing of ["", "   ", "\u0000\n", null, undefined, 7, { name: "x" }]) expect(cleanHostName(nothing)).toBeNull();
+  });
+
+  it("keeps its cleaning rule readable: the pattern is written with escapes, not invisible characters", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("./host-name.ts", import.meta.url), "utf8");
+    expect([...source].filter((c) => { const o = c.codePointAt(0)!; return (o < 0x20 && c !== "\n") || (o >= 0x7f && o <= 0x9f) || (o >= 0x200b && o <= 0x200f) || (o >= 0x202a && o <= 0x202e) || (o >= 0x2060 && o <= 0x2069) || o === 0xfeff; })).toEqual([]);
   });
 
   it("tells two computers of the same name apart, and leaves a unique name alone", () => {

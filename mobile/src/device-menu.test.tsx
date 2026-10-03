@@ -23,10 +23,13 @@ vi.mock("react-native", () => {
     Modal: ({ visible, children }: any) => visible ? <div data-modal>{children}</div> : null,
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
     // A long press is a right-click here: a different gesture from the press.
-    Pressable: ({ children, onPress, onLongPress, disabled, accessibilityLabel }: any) => (
+    Pressable: ({ children, onPress, onLongPress, disabled, accessibilityLabel, accessibilityActions, onAccessibilityAction }: any) => (
       <button
         disabled={disabled}
         aria-label={accessibilityLabel}
+        data-actions={accessibilityActions?.map((action: { name: string }) => action.name).join(",")}
+        // An assistive-technology action, as VoiceOver's actions rotor would send it.
+        onDoubleClick={accessibilityActions ? () => onAccessibilityAction?.({ nativeEvent: { actionName: accessibilityActions[0].name } }) : undefined}
         // As on the device: the innermost pressable takes the touch, and the row under it does not also fire.
         onClick={(event) => { event.stopPropagation(); onPress?.(); }}
         onContextMenu={onLongPress ? (event) => { event.preventDefault(); event.stopPropagation(); onLongPress(); } : undefined}
@@ -166,4 +169,20 @@ it("keeps the fallback for a desktop that never sent its name, and tells two sam
   expect(button("Device options for Paired Mac"), container.textContent ?? "").toBeDefined();
   expect(button("Device options for Paresh’s Mac mini · 1111")).toBeDefined();
   expect(button("Device options for Paresh’s Mac mini · 2222")).toBeDefined();
+});
+
+// Review of #310: nested in the row, the three-dot button was hidden from VoiceOver on the device list.
+it("keeps the options button out of the row that connects, and gives the row an options action too", async () => {
+  await show(<MachinesScreen />);
+  const options = button("Device options for Paresh’s Mac mini")!;
+  // A sibling of the row, not inside it: each is its own accessibility element.
+  expect(options.parentElement!.closest("button")).toBeNull();
+  const row = [...container.querySelectorAll("button")].find((b) => b.dataset.actions === "options")!;
+  expect(row.textContent).toContain("Paresh’s Mac mini");
+  expect(row.contains(options)).toBe(false);
+  // The row still connects on a press, and opens the menu from its accessibility action.
+  await act(async () => row.click());
+  expect(mocks.app.connectHost).toHaveBeenCalledTimes(1);
+  await act(async () => row.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+  expect(menuOpen()).toBe(true);
 });
