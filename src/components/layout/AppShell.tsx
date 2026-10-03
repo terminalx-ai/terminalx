@@ -42,6 +42,8 @@ const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((modul
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
 const CloudWorkspaceMain = lazy(() => import("@/components/cloud/CloudWorkspaceMain").then((module) => ({ default: module.CloudWorkspaceMain })));
 const CloudSessionPage = lazy(() => import("@/components/cloud/CloudSessionPage").then((module) => ({ default: module.CloudSessionPage })));
+/** Where Settings opens when no section is asked for: Account (PRO-81). SettingsPage falls back to the same one. */
+const GENERAL_SETTINGS_TAB: SettingsTab = "account";
 const SettingsPage = lazy(() => import("@/components/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const statusBarFallback = <div aria-hidden className="h-[22px] shrink-0 border-t border-hairline bg-background/70" />;
 const viewFallback = <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-faint">Loading view…</div>;
@@ -65,7 +67,7 @@ export function AppShell() {
   const status = useStatus();
   const store = useSessionStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>(GENERAL_SETTINGS_TAB);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [cloudSessionOpen, setCloudSessionOpen] = useState(false);
 
@@ -93,10 +95,12 @@ export function AppShell() {
 
   const toggleSidebar = useCallback(() => setPrefs({ sidebarOpen: !prefs.sidebarOpen }), [prefs.sidebarOpen]);
   const togglePanel = useCallback(() => setPrefs({ panelOpen: !prefs.panelOpen }), [prefs.panelOpen]);
-  // Also a click handler (the sidebar's Settings button), which is handed the click's event:
-  // anything that is not a section's name opens the default section, never a blank page.
+  // The general way in (the Settings button, the shortcut) names no section and opens Account,
+  // whichever section was open last; an action that names one (Agent settings, the palette) gets it.
+  // Also a click handler, which is handed the click's event: anything that is not a section's
+  // name opens Account too, never a blank page.
   const openSettings = useCallback((tab?: unknown) => {
-    setSettingsTab(typeof tab === "string" ? (tab as SettingsTab) : "general");
+    setSettingsTab(typeof tab === "string" ? (tab as SettingsTab) : GENERAL_SETTINGS_TAB);
     setSettingsOpen(true);
   }, []);
   const openAccountSettings = useCallback(() => {

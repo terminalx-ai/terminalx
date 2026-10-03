@@ -8,7 +8,7 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
   const projects = Array.from({ length: f.localProjects }, (_, i) => ({ path: `/repos/p${i}`, name: `local-${i}` }));
   const orgs = f.cloud ? [{ id: ORG, name: "Demo", role: "admin", isPersonal: false, cloud: { enabled: true, flags: {} } },
     ...Array.from({ length: 10 }, (_, i) => ({ id: `o${i}`, name: `Other ${i}`, role: "member", isPersonal: false, cloud: { enabled: true, flags: {} } }))] : [];
-  const status = { state: "signed-in", identity: { name: "A", email: "a@b.c", organization: "Demo", organizationId: ORG }, expiresAt: null, lastError: null, context: { scope: "s", revision: "s:1" }, organizations: orgs };
+  const status = { state: "signed-in", identity: { name: f.accountName ?? "A", email: "a@b.c", organization: "Demo", organizationId: ORG }, expiresAt: null, lastError: null, context: { scope: "s", revision: "s:1" }, organizations: orgs };
   const ws = (id, name) => ({ workspace: { id, orgId: ORG, name, provider: "box", state: "ready", accessMode: "private", createdAt: 1, updatedAt: now, releaseDisposition: null, repositories: [] }, latestOperation: null });
   const session = (id, title) => ({ id, projectPath: "/w", cwd: "/w", title, created: "2026-09-30T10:00:00Z", modified: "2026-09-30T11:00:00Z", archived: false, pinned: false, tabs: [{ id: id + "t", harness: "claude", model: "", permissionMode: "x", status: "idle", created: "", modified: "" }] });
   const catalog = { version: 1, createMemory: {}, orgs: { [ORG]: { workspaces: [ws("w1", "parity-test"), ws("w2", "demo workspace")], repositories: [], quota: { used: 2, limit: 3 }, fetchedAt: now,

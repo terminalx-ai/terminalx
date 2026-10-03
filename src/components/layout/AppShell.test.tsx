@@ -49,7 +49,21 @@ vi.mock("@/lib/sessions", () => ({
   selectSession: vi.fn(),
   useSessionStore: () => sessionStore,
 }));
-vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn(), useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
+// The latest handler registered for each shortcut, so a test can press one.
+const shortcuts = vi.hoisted(() => new Map<string, () => void>());
+vi.mock("@/lib/hotkeys", () => ({
+  keycaps: () => [],
+  useHotkey: vi.fn(),
+  useShortcut: (id: string, handler: () => void) => void shortcuts.set(id, handler),
+  useShortcutKeys: () => [],
+  useShortcutKeycaps: () => () => [],
+}));
+vi.mock("@/lib/status", () => ({ bootStatus: vi.fn(), useStatus: () => ({ settings: { visible: true } }) }));
+vi.mock("@/components/layout/StatusBar", () => ({
+  StatusBar: ({ onOpenAgentSettings }: { onOpenAgentSettings: () => void }) => (
+    <button type="button" onClick={onOpenAgentSettings}>Agent settings</button>
+  ),
+}));
 vi.mock("@/lib/agentEvents", () => ({ applyEvent: vi.fn(), subscribeAgentEvents: vi.fn() }));
 vi.mock("@/lib/api", () => ({ agent: { send: vi.fn() } }));
 vi.mock("@/lib/models", () => ({ loadModels: vi.fn() }));
@@ -88,7 +102,11 @@ vi.mock("@/components/settings/SettingsPage", () => ({
     </div>
   ),
 }));
-vi.mock("@/components/command/CommandPalette", () => ({ CommandPalette: () => null }));
+vi.mock("@/components/command/CommandPalette", () => ({
+  CommandPalette: ({ onOpenSettings }: { onOpenSettings: (tab?: string) => void }) => (
+    <button type="button" onClick={() => onOpenSettings("appearance")}>Open Appearance settings</button>
+  ),
+}));
 vi.mock("@/components/ui/StarReminder", () => ({ StarReminder: () => null }));
 vi.mock("@/components/ui/Toasts", () => ({ Toasts: () => null }));
 vi.mock("@/components/session/BypassDialog", () => ({ BypassDialog: () => null }));
@@ -187,10 +205,50 @@ describe("settings page navigation", () => {
     expect(screen.queryByTestId("settings-page")).toBeNull();
   });
 
-  it("opens on the default section when the sidebar's button hands it the click's event", async () => {
+  // PRO-81: the general ways in open Account; an action that names a section gets that section.
+  const section = async () => (await screen.findByTestId("settings-page")).dataset.initialTab;
+  const close = () => fireEvent.click(screen.getByRole("button", { name: "Back to previous page" }));
+  const pressSettingsShortcut = () => act(() => shortcuts.get("app.settings")!());
+
+  it("opens on Account when the sidebar's button hands it the click's event", async () => {
     render(<AppShell />);
     // The mocked sidebar wires the button as `onClick={onOpenSettings}`, so the opener receives the event.
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
-    expect((await screen.findByTestId("settings-page")).dataset.initialTab).toBe("general");
+    expect(await section()).toBe("account");
+  });
+
+  it("opens on Account from the Settings shortcut", async () => {
+    render(<AppShell />);
+    pressSettingsShortcut();
+    expect(await section()).toBe("account");
+  });
+
+  it("opens the section an action asks for, and Account again on the next general open", async () => {
+    render(<AppShell />);
+    fireEvent.click(screen.getByRole("button", { name: "Agent settings" }));
+    expect(await section()).toBe("agents");
+    close();
+    expect(screen.queryByTestId("settings-page")).toBeNull();
+
+    // The section that was open last does not replace the default: the button…
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+    expect(await section()).toBe("account");
+    close();
+
+    // …and the shortcut, after another section was asked for by name.
+    act(() => shortcuts.get("app.commandPalette")!());
+    fireEvent.click(screen.getByRole("button", { name: "Open Appearance settings" }));
+    expect(await section()).toBe("appearance");
+    close();
+    pressSettingsShortcut();
+    expect(await section()).toBe("account");
+  });
+
+  it("goes from a named section straight to Account when the shortcut is pressed with Settings open", async () => {
+    render(<AppShell />);
+    fireEvent.click(screen.getByRole("button", { name: "Agent settings" }));
+    expect(await section()).toBe("agents");
+    pressSettingsShortcut();
+    await waitFor(() => expect(screen.getByTestId("settings-page").dataset.initialTab).toBe("account"));
   });
 });
