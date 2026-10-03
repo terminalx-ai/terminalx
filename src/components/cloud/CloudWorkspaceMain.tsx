@@ -12,7 +12,7 @@ import { ExecutionLocation, WorkspaceView, describe, describeWorkspace, type Ope
 import { workspaceTargetKey, type CloudWorkspaceListItem } from "@/lib/api";
 import { retainCloudConnection, setSelectedCloudConnection, subscribeCloudConnections, type CloudLease } from "@/lib/cloudConnections";
 import { findCloudWorkspace, refreshCloudCatalog, resumeCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
-import { archiving, deletion, isOpen, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
+import { archiving, deletion, isOpen, lastSavedText, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 import { errorCode } from "@/lib/cloudTerminals";
 import { selectSession } from "@/lib/sessions";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
@@ -104,6 +104,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
 
   const rowState = item ? workspaceRowState(item) : null;
   const stopped = item?.workspace.state === "suspended";
+  const saved = item ? lastSavedText(item) : null;
   const deleting = item ? deletion(item) : null;
   const org = parsed ? catalog.orgs[parsed.orgId] : undefined;
 
@@ -137,6 +138,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
       {stopped && (
         <div className="shrink-0 border-b border-hairline bg-well px-4 py-1.5 text-xs text-muted-foreground" role="status" data-testid="cloud-stopped-banner">
           Stopped. Saved agent conversations are shown; nothing runs until you resume it.
+          {saved && <span data-testid="cloud-last-saved"> {saved}</span>}
         </div>
       )}
       {error && <p className="shrink-0 px-4 py-1 text-xs text-destructive">Could not open: {error}</p>}
