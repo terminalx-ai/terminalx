@@ -15,7 +15,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import { AgentMark } from "@/components/AgentMark";
-import { DictationStatus, MicButton, NEW_SESSION_TARGET, useDictationInto } from "@/components/chat/Dictation";
+import { DictationStatus, MicButton, NEW_SESSION_TARGET, useDictationInto, useDictationShortcuts } from "@/components/chat/Dictation";
+import { insertNewLine } from "@/components/chat/Composer";
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "@/components/chat/useImageAttachments";
 import { RaccoonScene } from "@/components/raccoon/Raccoon";
 import { isRoleRefusal, refreshAccountRoles } from "@/lib/accountRoles";
@@ -24,7 +25,7 @@ import { addProject, clearNewSessionPreset, startCloudSessionIn, selectProject, 
 import { EFFORT_LABEL, PERMISSION_MODES, refreshModels, upgradeHint, useModels } from "@/lib/models";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { chooseMode } from "@/lib/dialogs";
-import { useHotkey } from "@/lib/hotkeys";
+import { keycaps, matchesShortcut, useKeymap } from "@/lib/shortcuts";
 import { stopDictation } from "@/lib/dictation";
 import { cn } from "@/lib/cn";
 import type { WorkStatus } from "@/types/session";
@@ -134,7 +135,10 @@ export function NewSessionView({
   };
 
   const dictation = useDictationInto(NEW_SESSION_TARGET, text, setText, ref);
-  useHotkey("mod+shift+d", dictation.toggle);
+  useDictationShortcuts(dictation);
+  const keymap = useKeymap();
+  const sendKeys = keymap["composer.send"][0];
+  const newLineKeys = keymap["composer.newLine"][0];
   const attach = useImageAttachments({ textareaRef: ref, draft: text, onDraftChange: setText });
   const hasImages = attach.attachments.length > 0;
 
@@ -495,9 +499,13 @@ export function NewSessionView({
               value={text}
               onChange={(e) => setText(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                if (e.nativeEvent.isComposing) return;
+                if (matchesShortcut(e.nativeEvent, "composer.send")) {
                   e.preventDefault();
                   void create();
+                } else if (matchesShortcut(e.nativeEvent, "composer.newLine") && e.key !== "Enter") {
+                  e.preventDefault();
+                  insertNewLine(e.currentTarget);
                 }
               }}
               rows={3}
@@ -524,7 +532,17 @@ export function NewSessionView({
                   </span>
                 ) : (
                   <>
-                    <kbd className="rounded-sm bg-veil-raised px-1 font-sans">⏎</kbd> to send, <kbd className="rounded-sm bg-veil-raised px-1 font-sans">⇧⏎</kbd> for a new line
+                    {sendKeys && (
+                      <>
+                        <kbd className="rounded-sm bg-veil-raised px-1 font-sans">{keycaps(sendKeys).join("")}</kbd> to send
+                      </>
+                    )}
+                    {sendKeys && newLineKeys && ", "}
+                    {newLineKeys && (
+                      <>
+                        <kbd className="rounded-sm bg-veil-raised px-1 font-sans">{keycaps(newLineKeys).join("")}</kbd> for a new line
+                      </>
+                    )}
                   </>
                 )}
               </div>

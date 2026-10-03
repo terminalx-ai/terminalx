@@ -6,7 +6,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { WithTooltip } from "@/components/ui/tooltip";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { closeEditor, useEditors } from "@/lib/editors";
-import { keycaps, useHotkey } from "@/lib/hotkeys";
+import { useShortcut } from "@/lib/hotkeys";
 import { getPrefs } from "@/lib/prefs";
 import { openBrowserTab, pagesFor, useBrowser } from "@/lib/browser";
 import { activatePeer, closePeer, peerOrder } from "@/lib/sessionTabs";
@@ -22,7 +22,7 @@ import type { SessionEntry } from "@/types/session";
  */
 function NewTabTrigger({ trigger }: { trigger: ReturnType<typeof useRowMenu>["trigger"] }) {
   return (
-    <WithTooltip label="New tab" keys={keycaps("mod+t")}>
+    <WithTooltip label="New tab" shortcut="session.newTab">
       <DropdownMenuTrigger asChild {...trigger}>
         <Button variant="ghost" size="icon-sm" aria-label="New tab">
           <Plus />
@@ -65,10 +65,10 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
     const prefs = getPrefs();
     await addTab(session.id, harness, prefs.lastModel[harness] ?? "", prefs.lastEffort[harness] ?? null, prefs.lastMode);
   };
-  useHotkey("mod+t", () => picker.setOpen(true));
-  useHotkey("mod+w", closeActive);
-  useHotkey("mod+shift+]", () => step(1));
-  useHotkey("mod+shift+[", () => step(-1));
+  useShortcut("session.newTab", () => picker.setOpen(true));
+  useShortcut("session.closeTab", closeActive);
+  useShortcut("session.nextTab", () => step(1));
+  useShortcut("session.previousTab", () => step(-1));
 
   return (
     <DropdownMenu {...picker.root}>
@@ -116,9 +116,9 @@ function CloudTabActions({ session, selected, cloud }: { session: SessionEntry; 
     },
     [selected, session.id, tabs],
   );
-  useHotkey("mod+t", () => picker.setOpen(true));
-  useHotkey("mod+shift+]", () => step(1));
-  useHotkey("mod+shift+[", () => step(-1));
+  useShortcut("session.newTab", () => picker.setOpen(true));
+  useShortcut("session.nextTab", () => step(1));
+  useShortcut("session.previousTab", () => step(-1));
   const blocked =
     cloud.backend.readOnlyReason ??
     (!cloud.connected

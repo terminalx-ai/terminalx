@@ -4,7 +4,7 @@ import { applyEvent, useTabLog } from "@/lib/agentEvents";
 import { buildTranscript, type Transcript } from "@/lib/transcript";
 import { getDraft, setDraft, useDraft } from "@/lib/drafts";
 import { useSessionStore } from "@/lib/sessions";
-import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
+import { hasEscapeOverlay, useShortcut } from "@/lib/hotkeys";
 import { changeRange, useChanges } from "@/lib/changes";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { CLOUD_IMAGES_UNSUPPORTED, localSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
@@ -194,7 +194,7 @@ export function TabView({
   };
 
   // Editors, dialogs and pickers own Escape before the agent-stop shortcut.
-  useHotkey("escape", () => (live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane") ? (stop(), true) : false), { enabled: active && !continuationOpen });
+  useShortcut("session.stop", () => (live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane") ? (stop(), true) : false), { enabled: active && !continuationOpen });
 
   const answerPermission = useCallback(
     async (requestId: string, optionId: string) => {
