@@ -23,6 +23,8 @@ import { subscribeTabPty } from "@/lib/tabViews";
 import { StarReminder } from "@/components/ui/StarReminder";
 import { Toasts } from "@/components/ui/Toasts";
 import { CloudShareDialogHost } from "@/components/cloud/CloudShareDialog";
+import { NewCloudWorkspaceDialogHost } from "@/components/cloud/NewCloudWorkspaceDialog";
+import { DEV_RUNTIME_KEY } from "@/lib/devRuntime";
 import { BypassDialog } from "@/components/session/BypassDialog";
 import { SettleDialog } from "@/components/session/SettleDialog";
 import { WorkspaceDeleteDialog } from "@/components/session/WorkspaceDeleteDialog";
@@ -42,7 +44,7 @@ import { EditorSplit } from "@/components/editor/EditorSplit";
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
 const CloudWorkspaceMain = lazy(() => import("@/components/cloud/CloudWorkspaceMain").then((module) => ({ default: module.CloudWorkspaceMain })));
-const CloudSessionPage = lazy(() => import("@/components/cloud/CloudSessionPage").then((module) => ({ default: module.CloudSessionPage })));
+const DevRuntimeMain = lazy(() => import("@/components/cloud/DevRuntime").then((module) => ({ default: module.DevRuntimeMain })));
 /** Where Settings opens when no section is asked for: Account (PRO-81). SettingsPage falls back to the same one. */
 const GENERAL_SETTINGS_TAB: SettingsTab = "account";
 const SettingsPage = lazy(() => import("@/components/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
@@ -69,8 +71,9 @@ export function AppShell() {
   const store = useSessionStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(GENERAL_SETTINGS_TAB);
+  // Every request for Settings, so asking again with it open still lands on the section asked for.
+  const [settingsRequest, setSettingsRequest] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [cloudSessionOpen, setCloudSessionOpen] = useState(false);
 
   useEffect(() => {
     void subscribeAgentEvents();
@@ -104,14 +107,17 @@ export function AppShell() {
   const openSettings = useCallback((tab?: unknown) => {
     setSettingsTab(typeof tab === "string" ? (tab as SettingsTab) : GENERAL_SETTINGS_TAB);
     setSettingsOpen(true);
+    setSettingsRequest((count) => count + 1);
   }, []);
   const openAccountSettings = useCallback(() => {
     setSettingsTab("account");
     setSettingsOpen(true);
+    setSettingsRequest((count) => count + 1);
   }, []);
   const openAgentSettings = useCallback(() => {
     setSettingsTab("agents");
     setSettingsOpen(true);
+    setSettingsRequest((count) => count + 1);
   }, []);
   const newSession = useCallback(() => selectSession(null), []);
   const showIssues = useCallback(() => openIssues(), []);
@@ -133,10 +139,10 @@ export function AppShell() {
 
   const sidebarOpen = prefs.sidebarOpen;
   const selected = store.sessions.find((s) => s.id === store.selectedSessionId) ?? null;
-  // A cloud workspace in the main slot (PRO-23), unless the kill switch hides cloud rows.
-  const cloudWorkspace = prefs.cloudSidebar ? (store.selectedCloudWorkspace ?? null) : null;
+  // A cloud workspace in the main slot (PRO-23).
+  const cloudWorkspace = store.selectedCloudWorkspace ?? null;
   // A cloud session (`cloud:…`) renders in the same slot, with the sidebar kept.
-  const cloudKey = prefs.cloudSidebar && isCloudKey(store.selectedSessionId) ? store.selectedSessionId : null;
+  const cloudKey = isCloudKey(store.selectedSessionId) ? store.selectedSessionId : null;
 
   return (
     <div data-app-shell className="flex h-full w-full flex-col">
@@ -146,16 +152,13 @@ export function AppShell() {
       </div>
       <BypassDialog />
       <CloudShareDialogHost />
+      <NewCloudWorkspaceDialogHost />
       <SettleDialog />
       <WorkspaceDeleteDialog />
       <div className="flex min-h-0 flex-1">
         {settingsOpen ? (
           <Suspense fallback={viewFallback}>
-            <SettingsPage initialTab={settingsTab} onBack={() => setSettingsOpen(false)} />
-          </Suspense>
-        ) : cloudSessionOpen ? (
-          <Suspense fallback={viewFallback}>
-            <CloudSessionPage onBack={() => setCloudSessionOpen(false)} />
+            <SettingsPage initialTab={settingsTab} openRequest={settingsRequest} onBack={() => setSettingsOpen(false)} />
           </Suspense>
         ) : (
           <>
@@ -170,7 +173,6 @@ export function AppShell() {
                 onOpenAutomations={showAutomations}
                 onOpenSkills={showSkills}
                 onSearch={() => setPaletteOpen(true)}
-                onOpenCloudPage={() => setCloudSessionOpen(true)}
               />
             )}
 
@@ -189,7 +191,11 @@ export function AppShell() {
             ) : cloudWorkspace ? (
               <ErrorBoundary key={cloudWorkspace} label="the cloud workspace">
                 <Suspense fallback={viewFallback}>
-                  <CloudWorkspaceMain workspaceKey={cloudWorkspace} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                  {cloudWorkspace === DEV_RUNTIME_KEY ? (
+                    <DevRuntimeMain sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                  ) : (
+                    <CloudWorkspaceMain workspaceKey={cloudWorkspace} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                  )}
                 </Suspense>
               </ErrorBoundary>
             ) : (
@@ -213,7 +219,7 @@ export function AppShell() {
         </ErrorBoundary>
       ) : null}
 
-      {paletteOpen ? <CommandPalette open onOpenChange={setPaletteOpen} onOpenSettings={openSettings} onOpenCloudSession={() => setCloudSessionOpen(true)} onCreated={onCreated} /> : null}
+      {paletteOpen ? <CommandPalette open onOpenChange={setPaletteOpen} onOpenSettings={openSettings} onCreated={onCreated} /> : null}
     </div>
   );
 }
