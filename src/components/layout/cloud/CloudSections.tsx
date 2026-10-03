@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent 
 import {
   Archive,
   ArrowLeftRight,
+  BookOpen,
   Cloud,
   Ellipsis,
   Folder,
@@ -31,13 +32,15 @@ import {
 } from "@/components/ui/menu";
 import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { AgentTabRow, ItemTitle, RowChip, RowTime, ShellTabRow, StatusStripe, TreeGroup, TreeNode, TreeRow, TreeToggle } from "@/components/layout/SidebarRows";
-import { archiveLine } from "@/components/cloud/CloudWorkspaceLifecycle";
-import { describeWorkspace } from "@/components/cloud/CloudSessionPage";
+import { archiveLine, deletionLine } from "@/components/cloud/CloudWorkspaceLifecycle";
+import { archivingText, describeWorkspace } from "@/components/cloud/CloudWorkspaceView";
+import { openNewCloudWorkspace } from "@/components/cloud/NewCloudWorkspaceDialog";
 import { api, errorMessage, type CloudWorkspaceListItem, type OrganizationSummary } from "@/lib/api";
 import { refreshAccount, useAccount } from "@/lib/account";
 import {
   cloudOrganizations,
   defaultOrgId,
+  dismissCloudNotice,
   liveCloudOrgIds,
   placeCloudProjects,
   refreshCloudWorkspaces,
@@ -46,7 +49,7 @@ import {
 } from "@/lib/cloudCatalog";
 import { NEW_SESSION_ADMIN_REASON, NEW_WORKSPACE_ADMIN_REASON } from "@/lib/cloudCollab";
 import { useCloudConnection } from "@/lib/cloudConnections";
-import { lifecycleErrorMessage } from "@/lib/cloudLifecycle";
+import { archiving, checkpointText, deletion, lifecycleErrorMessage, operationFailureText, purgeNoticeText } from "@/lib/cloudLifecycle";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { cloudAgentLabel, deriveCloudActivity, type CloudActivity, type RowTone } from "@/lib/cloudRowState";
 import { workspaceUsage } from "@/lib/runningLimit";
@@ -97,19 +100,16 @@ export { useRowMenu };
 
 /**
  * Organizations with a section, default first then by name, and which of them
- * are live; none while signed out, with no cloud-enabled organization, or
- * with the kill switch off.
+ * are live; none while signed out or with no cloud-enabled organization.
  */
 export function useCloudSections(): { orgs: OrganizationSummary[]; defaultOrg: string | null; live: ReadonlySet<string> } {
   const { status } = useAccount();
-  const { cloudSidebar } = usePrefs();
   return useMemo(() => {
-    if (!cloudSidebar) return { orgs: [], defaultOrg: null, live: new Set<string>() };
     const orgs = cloudOrganizations(status);
     const defaultOrg = defaultOrgId(status);
     const sorted = [...orgs].sort((a, b) => Number(b.id === defaultOrg) - Number(a.id === defaultOrg) || sectionName(a).localeCompare(sectionName(b)));
     return { orgs: sorted, defaultOrg, live: new Set(liveCloudOrgIds(status)) };
-  }, [status, cloudSidebar]);
+  }, [status]);
 }
 
 export function sectionName(org: OrganizationSummary): string {
@@ -126,7 +126,7 @@ export function useSectionCollapsed(key: string, byDefault = false): [boolean, (
 
 type AddDialog = { orgId: string; orgName: string; kind: "repository" | "blank" };
 
-export function CloudSections({ onOpenCloudPage, onOpenAccount }: { onOpenCloudPage?: () => void; onOpenAccount?: () => void }) {
+export function CloudSections({ onOpenAccount }: { onOpenAccount?: () => void }) {
   const { orgs, defaultOrg, live } = useCloudSections();
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [adding, setAdding] = useState<AddDialog | null>(null);
@@ -134,6 +134,7 @@ export function CloudSections({ onOpenCloudPage, onOpenAccount }: { onOpenCloudP
   if (!orgs.length) return null;
   return (
     <>
+      <PurgeNotices />
       {orgs.map((org, index) => (
         <OrgSection
           key={org.id}
@@ -144,7 +145,6 @@ export function CloudSections({ onOpenCloudPage, onOpenAccount }: { onOpenCloudP
           spaced={index === 0 || live.has(org.id) || live.has(orgs[index - 1].id)}
           onLifecycle={setDialog}
           onAdd={(kind) => setAdding({ orgId: org.id, orgName: sectionName(org), kind })}
-          onOpenCloudPage={onOpenCloudPage}
         />
       ))}
       {dialog && <WorkspaceLifecycleDialog request={dialog} onClose={() => setDialog(null)} />}
@@ -153,6 +153,25 @@ export function CloudSections({ onOpenCloudPage, onOpenAccount }: { onOpenCloudP
       )}
       {adding?.kind === "blank" && <NewBlankProjectDialog orgId={adding.orgId} orgName={adding.orgName} onClose={() => setAdding(null)} />}
     </>
+  );
+}
+
+/** What this Mac dropped of workspaces deleted elsewhere (unsent messages, unsaved edits), said once and dismissed by hand. */
+function PurgeNotices() {
+  const { notices } = useCloudCatalog();
+  if (!notices.length) return null;
+  return (
+    <div className="mt-3 flex min-w-0 flex-col gap-1 px-1">
+      {notices.map((notice) => (
+        <div key={notice.workspaceId} className="flex min-w-0 items-start gap-1.5 rounded-md bg-well px-2 py-1.5 text-[11px] text-muted-foreground" role="status" data-testid="cloud-tombstone-notice">
+          <Trash2 className="mt-0.5 size-3 shrink-0" aria-hidden />
+          <span className="min-w-0 flex-1">{purgeNoticeText(notice)}</span>
+          <Button size="icon-xs" variant="ghost" aria-label="Dismiss" onClick={() => dismissCloudNotice(notice)}>
+            <X />
+          </Button>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -169,7 +188,6 @@ function OrgSection({
   spaced,
   onLifecycle,
   onAdd,
-  onOpenCloudPage,
 }: {
   org: OrganizationSummary;
   isDefault: boolean;
@@ -178,7 +196,6 @@ function OrgSection({
   spaced: boolean;
   onLifecycle: (dialog: Dialog) => void;
   onAdd: (kind: AddDialog["kind"]) => void;
-  onOpenCloudPage?: () => void;
 }) {
   const catalog = useCloudCatalog();
   const { status } = useAccount();
@@ -293,9 +310,9 @@ function OrgSection({
                   <DropdownMenuItem onSelect={() => void refreshCloudWorkspaces(org.id)}>
                     <RefreshCw /> Refresh cloud workspaces
                   </DropdownMenuItem>
-                  {/* The full-window page works in the default organization. */}
-                  {isDefault && onOpenCloudPage && mayCreate !== null && (
-                    <DropdownMenuItem onSelect={onOpenCloudPage} disabled={!mayCreate} title={mayCreate ? undefined : NEW_WORKSPACE_ADMIN_REASON} data-testid="cloud-new-workspace">
+                  {/* The full form (several repositories, the provider) works in the default organization. */}
+                  {isDefault && mayCreate !== null && (
+                    <DropdownMenuItem onSelect={() => openNewCloudWorkspace()} disabled={!mayCreate} title={mayCreate ? undefined : NEW_WORKSPACE_ADMIN_REASON} data-testid="cloud-new-workspace">
                       <Plus /> New cloud workspace…
                       {!mayCreate && <span className="ml-auto pl-3 text-[10px] text-faint">admins only</span>}
                     </DropdownMenuItem>
@@ -374,6 +391,9 @@ function OrgTree({ org, orgId, mayCreate, onLifecycle }: { org: OrgCatalog | und
             </button>
           </div>
           <TreeGroup expanded={archivedOpen} className="pb-1 pl-2">
+            <p className="px-1.5 pb-1 text-[10px] leading-snug text-faint" data-testid="cloud-archived-note">
+              Stopped and kept until their deadline, then deleted automatically. Storage keeps billing at the provider until then.
+            </p>
             {placed.archived.map((node) => (
               <ArchivedWorkspaceRow key={node.key} node={node} onLifecycle={onLifecycle} />
             ))}
@@ -596,6 +616,9 @@ function workspaceCard(item: CloudWorkspaceListItem, activity: CloudActivity): s
   const lines = [`Cloud workspace ${workspace.name}`, `Runs on ${workspace.provider}`, `State: ${activity.label}${activity.lastKnown ? " (last known)" : ""}`, describeWorkspace(item)];
   const branch = workspace.launch?.workBranch;
   if (branch) lines.push(`Branch: ${branch}`);
+  // How far a delete is, or why it stopped.
+  const deleting = deletionLine(item);
+  if (deleting) lines.push(deleting);
   const repositories = (workspace.repositories ?? []).map((repository) => repository.fullName ?? repository.identity).filter(Boolean);
   if (repositories.length) lines.push(`Repositories: ${repositories.join(", ")}`);
   lines.push(`Access: ${workspace.accessMode === "organization" ? "organization" : "private"}`);
@@ -682,6 +705,11 @@ function WorkspaceGroupNode({ node, expanded: projectExpanded, onLifecycle }: { 
         </RowActions>
       </TreeRow>
       {error && <p className="ml-6 text-[10px] text-destructive">{error}</p>}
+      {deletionLine(node.item) && (
+        <p className={cn("ml-6 text-[10px]", deletion(node.item) === "failed" ? "whitespace-normal break-words text-destructive" : "text-faint")} data-testid="cloud-workspace-row-deletion">
+          {deletionLine(node.item)}
+        </p>
+      )}
       <TreeGroup expanded={expanded} className="pl-2">
         <WorkspaceSessions node={node} shown={shown} showLocation={false} />
       </TreeGroup>
@@ -1050,6 +1078,27 @@ function CloudSessionNode({ row, node, manage, location }: { row: CloudSessionRo
 
 // ---- archived workspaces --------------------------------------------------
 
+/**
+ * An archived workspace's second line: the archive in progress, why it did
+ * not finish (it stays here to retry), or its deletion deadline; and what
+ * the final save of its conversations did, when the archive reported it.
+ */
+export function archivedRowText(item: CloudWorkspaceListItem, now = Date.now()): { line: string; failed: boolean; saved: string | null } {
+  const busy = archiving(item);
+  const failed = item.workspace.state !== "archived" && !busy && !deletion(item);
+  const saved = !busy && item.latestOperation?.action === "archive" ? checkpointText(item.latestOperation.checkpoint) : null;
+  const deleting = deletionLine(item);
+  const line = deleting
+    ? deleting
+    : busy
+      ? archivingText(item)
+      : failed
+        ? `The archive did not finish: ${item.latestOperation ? operationFailureText(item.latestOperation) : lifecycleErrorMessage("cloud_workspace_unknown_error")}`
+        : archiveLine(item, now);
+  // A reason is read whole: it wraps instead of being cut at the sidebar's width.
+  return { line, failed: failed || deletion(item) === "failed", saved };
+}
+
 function ArchivedWorkspaceRow({ node, onLifecycle }: { node: CloudWorkspaceNode; onLifecycle: (dialog: Dialog) => void }) {
   const store = useSessionStore();
   const { item, key } = node;
@@ -1058,6 +1107,9 @@ function ArchivedWorkspaceRow({ node, onLifecycle }: { node: CloudWorkspaceNode;
   const menu = useRowMenu();
   const state = deriveCloudActivity(item);
   const selected = store.selectedCloudWorkspace === key;
+  const text = archivedRowText(item);
+  // Reading is for anyone the workspace is shared with; it connects without waking, and an archived machine is never started by it.
+  const readable = workspace.state === "archived" && !deletion(item) && workspace.you?.role !== "none";
   const run = async (work: () => Promise<void>) => {
     setError(null);
     try {
@@ -1068,7 +1120,7 @@ function ArchivedWorkspaceRow({ node, onLifecycle }: { node: CloudWorkspaceNode;
   };
   return (
     <div role="treeitem" aria-label={workspace.name} aria-selected={selected} className="min-w-0" data-testid="cloud-workspace-node" data-workspace={workspace.id}>
-      <TreeRow level="item" selected={selected} title={describeWorkspace(item)}>
+      <TreeRow level="item" selected={selected} title={[describeWorkspace(item), text.line, text.saved].filter(Boolean).join("\n")}>
         <span aria-hidden className={cn("ml-1.5 size-1.5 shrink-0 rounded-full", DOT[state.tone])} />
         <button
           type="button"
@@ -1082,7 +1134,14 @@ function ArchivedWorkspaceRow({ node, onLifecycle }: { node: CloudWorkspaceNode;
               {state.label}
             </span>
           </span>
-          <span className="truncate pl-4 text-[10px] text-faint">{archiveLine(item)}</span>
+          <span className={cn("pl-4 text-[10px] text-faint", text.failed ? "whitespace-normal break-words text-destructive" : "truncate")} data-testid="cloud-archive-deadline">
+            {text.line}
+          </span>
+          {text.saved && (
+            <span className="truncate pl-4 text-[10px] text-faint" data-testid="cloud-archive-saved">
+              {text.saved}
+            </span>
+          )}
         </button>
         <RowActions persistent className={menu.open ? "not-sr-only" : undefined}>
           <DropdownMenu {...menu.root}>
@@ -1094,6 +1153,11 @@ function ArchivedWorkspaceRow({ node, onLifecycle }: { node: CloudWorkspaceNode;
               </DropdownMenuTrigger>
             </WithTooltip>
             <DropdownMenuContent align="end" className="w-[17rem]">
+              {readable && (
+                <DropdownMenuItem onSelect={() => selectCloudWorkspace(key)} title="Read saved agent conversations; nothing is started" data-testid="cloud-read-conversations">
+                  <BookOpen /> Read conversations
+                </DropdownMenuItem>
+              )}
               <WorkspaceActionItems item={item} onLifecycle={onLifecycle} run={run} archived />
             </DropdownMenuContent>
           </DropdownMenu>

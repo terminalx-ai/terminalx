@@ -36,6 +36,21 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
     transcription_preferences: { model: "", inputDevice: null, muteWhileRecording: false },
     status_bar_settings: { visible: false },
   };
+  // `archived`: an archive that failed with a long reason, an archive whose
+  // final save timed out, and a workspace deleted elsewhere (its notice).
+  if (f.archived) {
+    const day = 86_400_000;
+    const archived = (id, name, state, operation) => ({ workspace: { ...ws(id, name).workspace, state, archivedAt: now - day, deleteAfter: now + 12.5 * day }, latestOperation: { id: `op-${id}`, workspaceId: id, type: "archive", action: "archive", stage: "done", cancelable: false, createdAt: now, updatedAt: now, ...operation } });
+    const rows = [
+      ...catalog.orgs[ORG].workspaces,
+      archived("a1", "quarterly-report-migration-archive", "attention-required", { state: "failed", errorCode: "cloud_provider_unavailable" }),
+      archived("a2", "old-experiment", "archived", { state: "succeeded", checkpoint: "timed-out" }),
+    ];
+    catalog.orgs[ORG].workspaces = [...rows, ws("gone", "deleted-on-another-mac")];
+    answers.cloud_workspaces = { workspaces: rows, tombstones: [{ id: "gone", orgId: ORG, deletedAt: now, expiresAt: now + 30 * day }], quota: { used: 2, limit: 3 } };
+    answers.cloud_agent_purge_workspace = { removed: true, unsentCommands: 2, cachedTabs: 1 };
+    answers.cloud_providers = { providers: [] };
+  }
   // `localSession`: one local session with a long transcript and a pending
   // permission request, as a PTY-first agent tab (claude) and as one that is not.
   if (f.localSession) {
