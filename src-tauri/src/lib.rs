@@ -48,6 +48,7 @@ mod organization_workspace_config;
 #[cfg(feature = "desktop")]
 pub mod computer;
 mod control;
+mod cloud_control;
 #[cfg(windows)]
 mod pipe_transport;
 #[cfg(feature = "desktop")]
@@ -453,6 +454,7 @@ pub fn run() {
             commands::mobile_terminal_drivers,
             commands::pty_kill,
             commands::terminal_perf_reply,
+            commands::cloud_control_reply,
             commands::list_dir,
             media::open_media_file,
             media::close_media_file,

@@ -127,6 +127,67 @@ terminalx issues list --project <project> [--provider github|linear] \
 GitHub uses the reader's authenticated `gh` CLI. Linear uses the key configured in TerminalX →
 Settings → Integrations. The default provider is GitHub.
 
+### Cloud workspaces
+
+The same verbs work on an organization's cloud workspaces. A cloud project, workspace or
+session is named by the opaque key the lists print (`cloud:…`); never build one by hand. The
+app must be signed in. Every command does exactly what the signed-in person may do in the
+window, with the same refusals: a viewer can read and cannot send, and only an organization
+owner or admin can start a session, stop or resume a workspace.
+
+```text
+terminalx cloud status --json
+terminalx projects list --cloud [--org <org>] --json
+terminalx sessions list --cloud [--project <cloud-project>] [--org <org>] --json
+terminalx read <cloud-session> [--tab <tab>] [--since <seq>] [--tail <count>] --json
+terminalx wait <cloud-session> [--tab <tab>] [--timeout <seconds>] --json
+terminalx send <cloud-session> <text> [--tab <tab>] [--idempotency-key <key>] --json
+terminalx sessions create --project <cloud-project> --prompt <text> [--agent <agent>] \
+  [--model <model>] [--effort <effort>] [--mode <mode>] [--on-main] \
+  [--wake] [--confirm-spend] [--idempotency-key <key>] --json
+terminalx cloud stop <cloud-workspace> --yes --json
+terminalx cloud resume <cloud-workspace> --json
+```
+
+`cloud status` reports `version`, whether cloud commands are `enabled`, the `capabilities` this
+app supports, and the organizations reachable from it. Check a capability before relying on a
+command; an app that does not know one answers `unsupported`.
+
+**The person decides whether the command line may touch the cloud.** These commands run with the
+signed-in person's account, and any agent in a local session can run them. They are all refused
+with `cloud_control_disabled` until the person turns on "Let agents in local sessions control
+cloud workspaces" in Settings (`cloud status` then says `enabled: false`). With it on, each
+command that starts billed compute or stops a workspace is still confirmed by the person in the
+app window first, and answers `declined` if they refuse. Do not try to work around either: ask
+the person.
+
+**Looking never starts compute.** `projects list`, `sessions list`, `read` and `wait` never
+resume a stopped workspace. Lists come from what the app already holds. `read` returns the
+transcript kept on this computer, caught up from the workspace's saved checkpoint. `wait`
+follows a running workspace and only polls a stopped one. Session titles and transcripts are
+end-to-end encrypted: a workspace this computer has never opened appears under
+`workspacesNotLoaded` until someone opens it once in the app.
+
+**Only these start or stop compute, and each says so:**
+
+- `send` to a session of a stopped workspace resumes it for that message (the result's `wake`
+  says what happened). The message is queued and delivered once; `state` is `queued` until the
+  runtime takes it. Pass `--idempotency-key` so that repeating the command after a timeout
+  returns the first answer instead of sending again (the key is remembered while the app runs);
+  without one, `read` the session before resending.
+- `cloud resume` and `cloud stop --yes` are the workspace menu's Resume and Stop.
+- `sessions create` runs in the project's running workspace. If its workspace is stopped, or
+  turns out to have stopped by itself, it answers `cloud_workspace_stopped` and wakes nothing
+  unless `--wake` is passed. If the project has no workspace
+  it answers `spend_confirmation_required` unless `--confirm-spend` is passed, which creates a
+  new machine and returns its `workspace` key and `operationId`; the first session appears in
+  `sessions list` once the machine has started it. Pass the same `--idempotency-key` when
+  retrying a create.
+
+`wait` returns `reason`: `permission` (the agent asks for a decision), `stop` (the turn ended),
+`stopped` (nothing is running) or `timeout`. Interrupting it leaves nothing running in the app. Answering a permission request, archiving and
+deleting a workspace are done in the app.
+
 ### This guide
 
 ```text
@@ -266,8 +327,24 @@ JSON failures have this shape:
 - `request_lapsed`: refresh `permissions list`; never reuse the old request id.
 - `timeout`: the socket did not answer in time. Check `status` before retrying a mutating
   command, because it may already have completed.
+- `forbidden`: the signed-in person may not do this in that cloud workspace or organization (a
+  viewer sending, a member starting a session, stopping or resuming). The message says who can.
+  Do not retry.
+- `cloud_workspace_stopped`, `spend_confirmation_required`: the command would start billed
+  compute. Repeat it with `--wake` or `--confirm-spend` only when that is intended.
+- `cloud_control_disabled`: the person has not allowed cloud commands from the command line. Tell
+  them the setting named in `recovery`; do not retry.
+- `declined`: the person refused the request in the app window. Do not retry.
+- `account_signed_out`: sign in to TerminalX in the app.
+- `cloud_unavailable`: the app's window did not answer. Check the session with `read` before
+  repeating a `send`.
+- `unsupported`: this app does not know the command; see `cloud status`.
+- Other `cloud_…` codes are the service's own answers (for example
+  `cloud_workspace_concurrency_exceeded`: the organization is at its running limit).
 - `internal`: report the message and stop rather than guessing at app state.
 
 All mutating commands act only through the running app. Version 1 exposes no arbitrary
 filesystem or git-write command; worktree deletion and browser profile deletion are the only
-destructive operations outside the browser page itself.
+destructive operations outside the browser page itself. Cloud commands use the app's signed-in
+account over this same local socket: there is no hosted endpoint, and the organization's
+cloud-provider key is never involved.

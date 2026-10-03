@@ -10,6 +10,7 @@ import { AgentMark } from "@/components/AgentMark";
 import { Markdown } from "@/components/chat/Markdown";
 import { cn } from "@/lib/cn";
 import { THEMES, hasLightMode, setMode, setTheme, useTheme, type Mode, type ThemeId } from "@/lib/theme";
+import { CLOUD_CONTROL_HAS_SETTING, CLOUD_CONTROL_POLICY, CLOUD_CONTROL_SETTING } from "@/lib/cloudControl";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { repoFile } from "@/lib/repo";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
@@ -145,6 +146,14 @@ function GeneralTab() {
     <div className="flex flex-col">
       <SettingRow label="Website links" description="Choose where HTTP(S) links open by default." control={<Segmented aria-label="Website links" value={prefs.linkBrowser} onChange={(v) => setPrefs({ linkBrowser: v })} options={[{ value: "terminalx", label: "TerminalX Browser" }, { value: "system", label: "System Browser" }]} />} />
       <SettingRow label="Link actions" description="Show both browser destinations in the link action menu." control={<Switch checked={prefs.linkActions} onCheckedChange={(v) => setPrefs({ linkActions: v })} />} />
+      {/* PRO-40: unless the app ships the in-window confirmation alone. */}
+      {CLOUD_CONTROL_HAS_SETTING && (
+        <SettingRow
+          label={CLOUD_CONTROL_SETTING}
+          description={`Off: the terminalx command line cannot see or change cloud workspaces. ${CLOUD_CONTROL_POLICY === "both" ? "On: any agent running in a local session can list them, read their conversations and send messages to running workspaces. Starting, stopping or creating a workspace still asks you in this window each time." : "On: any agent running in a local session can list them, read their conversations, send messages, and start, stop or create workspaces in your organizations, which can cost money."}`}
+          control={<Switch aria-label={CLOUD_CONTROL_SETTING} checked={prefs.cloudControlFromAgents} onCheckedChange={(v) => setPrefs({ cloudControlFromAgents: v })} />}
+        />
+      )}
       <SettingRow
         label="Command line tool"
         description={
