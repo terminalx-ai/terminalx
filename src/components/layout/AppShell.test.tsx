@@ -49,7 +49,7 @@ vi.mock("@/lib/sessions", () => ({
   selectSession: vi.fn(),
   useSessionStore: () => sessionStore,
 }));
-vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn() }));
+vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn(), useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
 vi.mock("@/lib/agentEvents", () => ({ applyEvent: vi.fn(), subscribeAgentEvents: vi.fn() }));
 vi.mock("@/lib/api", () => ({ agent: { send: vi.fn() } }));
 vi.mock("@/lib/models", () => ({ loadModels: vi.fn() }));
@@ -82,8 +82,8 @@ vi.mock("@/components/layout/RightPanel", () => ({
   RightPanel: ({ cwd, branch }: { cwd: string; branch?: string | null }) => <div data-testid="right-panel" data-cwd={cwd} data-branch={branch ?? ""} />,
 }));
 vi.mock("@/components/settings/SettingsPage", () => ({
-  SettingsPage: ({ onBack }: { onBack: () => void }) => (
-    <div data-testid="settings-page">
+  SettingsPage: ({ onBack, initialTab }: { onBack: () => void; initialTab?: unknown }) => (
+    <div data-testid="settings-page" data-initial-tab={typeof initialTab === "string" ? initialTab : "not-a-section"}>
       <button type="button" onClick={onBack}>Back to previous page</button>
     </div>
   ),
@@ -185,5 +185,12 @@ describe("settings page navigation", () => {
 
     expect(await screen.findByTestId("issues")).toBeTruthy();
     expect(screen.queryByTestId("settings-page")).toBeNull();
+  });
+
+  it("opens on the default section when the sidebar's button hands it the click's event", async () => {
+    render(<AppShell />);
+    // The mocked sidebar wires the button as `onClick={onOpenSettings}`, so the opener receives the event.
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+    expect((await screen.findByTestId("settings-page")).dataset.initialTab).toBe("general");
   });
 });

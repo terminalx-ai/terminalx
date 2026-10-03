@@ -14,21 +14,34 @@ import {
 } from "@/components/ui/menu";
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
-import { keycaps, useHotkey } from "@/lib/hotkeys";
+import { useShortcutKeycaps } from "@/lib/hotkeys";
+import { matchesShortcut } from "@/lib/shortcuts";
 import { EFFORT_LABEL, PERMISSION_MODES, modeLabel, refreshModels, upgradeHint, useModels } from "@/lib/models";
 import { chooseMode } from "@/lib/dialogs";
 import { files as filesApi, type FileHit, type ImageInput, type SlashCommand } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
-import { DictationStatus, MicButton, useDictationInto } from "./Dictation";
+import { DictationStatus, MicButton, useDictationInto, useDictationShortcuts } from "./Dictation";
 import { PickerMenu, type PickerItem } from "./PickerMenu";
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "./useImageAttachments";
 import { useComposerHistory } from "./useComposerHistory";
 import { tokenAtCaret } from "@/lib/pickers";
 
 const commandCache = new Map<string, SlashCommand[]>();
+
+/** Break the line at the caret, through the input event the draft is read from. */
+export function insertNewLine(el: HTMLTextAreaElement) {
+  const start = el.selectionStart ?? el.value.length;
+  const end = el.selectionEnd ?? start;
+  const next = el.value.slice(0, start) + "\n" + el.value.slice(end);
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(el, next);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.setSelectionRange(start + 1, start + 1);
+}
 // Matches the textarea's max-h-60: about ten lines before it scrolls.
 const MAX_HEIGHT = 240;
 const NO_HISTORY: string[] = [];
+/** The least of its label the permission picker shows: about a first word ("Bypass…"). With less room it shows none. */
+const PERMISSION_LABEL_MIN_CHARS = 9;
 
 /**
  * The composer inside a session. Enter sends, Shift+Enter breaks a line.
@@ -178,7 +191,8 @@ export function Composer({
   }, [cwd, tab.harness]);
 
   const dictation = useDictationInto(tab.id, draft, onDraftChange, ref);
-  useHotkey("mod+shift+d", dictation.toggle, { enabled: autoFocus });
+  useDictationShortcuts(dictation, !!autoFocus);
+  const keysOf = useShortcutKeycaps();
 
   const token = useMemo(() => tokenAtCaret(draft, caret), [draft, caret]);
   const tokenKey = token ? `${token.kind}:${token.start}` : null;
@@ -292,9 +306,16 @@ export function Composer({
     }
     // An open menu owns the arrows (the pickers above, the model and permission menus); dictation owns the draft.
     if (!pickerOpen && !modelMenu.open && !modeMenu.open && !dictation.dictating && recall.onKeyDown(e)) return;
-    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+    if (e.nativeEvent.isComposing) return;
+    if (matchesShortcut(e.nativeEvent, "composer.send")) {
       e.preventDefault();
       void send();
+      return;
+    }
+    // Enter that is not Send already breaks the line; any other key for New line has to do it itself.
+    if (matchesShortcut(e.nativeEvent, "composer.newLine") && e.key !== "Enter") {
+      e.preventDefault();
+      insertNewLine(e.currentTarget);
     }
   };
 
@@ -303,6 +324,7 @@ export function Composer({
   const modelName = model?.label ?? tab.model ?? "Model";
   const effortName = tab.effort && model?.efforts.length ? (EFFORT_LABEL[tab.effort] ?? tab.effort) : null;
   const modelTitle = `Model: ${modelName}${effortName ? ` · ${effortName}` : ""}`;
+  const permissionLabel = modeLabel(tab.permissionMode);
   const pct = contextUsed && contextMax ? Math.min(100, Math.round((contextUsed / contextMax) * 100)) : null;
 
   return (
@@ -430,14 +452,25 @@ export function Composer({
 
           <DropdownMenu {...modeMenu.root}>
             <DropdownMenuTrigger asChild {...modeMenu.trigger}>
-              <Button variant="ghost" size="sm" className="min-w-11 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? `Permission mode: ${modeLabel(tab.permissionMode)}`} aria-label={settingsLockedReason ? `Permission mode: ${settingsLockedReason}` : undefined}>
+              {/*
+                In a narrow composer the label truncates down to about its first word, never to a
+                single letter: with no room for that it wraps out of sight below the button's one
+                line, leaving the mode's dot and the chevron. The tooltip names the mode either way.
+              */}
+              <Button variant="ghost" size="sm" className="min-w-11 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? `Permission mode: ${permissionLabel}`} aria-label={settingsLockedReason ? `Permission mode: ${settingsLockedReason}` : undefined} data-testid="permission-mode">
                 <span
                   className={cn(
                     "size-2 shrink-0 rounded-full",
                     tab.permissionMode === "bypassPermissions" ? "bg-destructive" : tab.permissionMode === "plan" ? "bg-info" : "bg-add",
                   )}
                 />
-                <span className="min-w-0 truncate">{modeLabel(tab.permissionMode)}</span>
+                <span className="flex h-5 min-w-0 flex-wrap content-start overflow-hidden leading-5">
+                  {/* Holds the one visible line, so a label that does not fit starts below it. */}
+                  <span aria-hidden className="h-5 w-0 shrink-0" />
+                  <span className="grow basis-0 truncate" style={{ minWidth: `${Math.min(permissionLabel.length, PERMISSION_LABEL_MIN_CHARS) * 0.8}ch` }} data-testid="permission-mode-label">
+                    {permissionLabel}
+                  </span>
+                </span>
                 <ChevronDown className="size-3 text-faint" />
               </Button>
             </DropdownMenuTrigger>
@@ -475,13 +508,13 @@ export function Composer({
               </WithTooltip>
             )}
             {busy && canStop ? (
-              <WithTooltip label="Stop" keys={["Esc"]}>
+              <WithTooltip label="Stop" keys={keysOf("session.stop")}>
                 <Button size="icon-sm" variant="secondary" aria-label="Stop" onClick={onStop}>
                   <Square className="size-3 fill-current" />
                 </Button>
               </WithTooltip>
             ) : null}
-            <WithTooltip label={busy ? "Queue" : "Send"} keys={keycaps("enter")}>
+            <WithTooltip label={busy ? "Queue" : "Send"} keys={keysOf("composer.send")}>
               <Button
                 size="icon-sm"
                 variant={draft.trim() || attachments.length ? "accent" : "secondary"}

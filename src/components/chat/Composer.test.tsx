@@ -18,8 +18,9 @@ vi.mock("@/components/chat/Dictation", () => ({
   // Only what the composer hands it: whether dictating into this composer is off.
   MicButton: ({ disabled }: { disabled?: boolean }) => (disabled === undefined ? null : <button aria-label="Dictate" disabled={disabled} />),
   useDictationInto: () => ({ dictating: false, toggle: vi.fn() }),
+  useDictationShortcuts: vi.fn(),
 }));
-vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn() }));
+vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn(), useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
 vi.mock("@/lib/models", () => ({
   EFFORT_LABEL: {},
   PERMISSION_MODES: [{ id: "auto", label: "Auto", hint: "" }],
@@ -31,6 +32,8 @@ vi.mock("@/lib/models", () => ({
 vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
 
 const { Composer } = await import("./Composer");
+const { setPrefs } = await import("@/lib/prefs");
+const { sendShortcut } = await import("@/lib/shortcuts");
 const { resetComposerHistory, sentMessages } = await import("./useComposerHistory");
 const { buildTranscript } = await import("@/lib/transcript");
 const { RECOVERY_PROMPT } = await import("@/lib/recovery");
@@ -455,6 +458,61 @@ describe("composer history (PRO-85)", () => {
     press("Enter");
     await waitFor(() => expect(onSend).toHaveBeenCalledWith("a new message", []));
     await waitFor(() => expect(field().value).toBe(""));
+  });
+
+  describe("with the reader's own keys (Settings → Shortcuts)", () => {
+    afterEach(() => setPrefs({ shortcuts: {} }));
+
+    it("sends on the chosen key, and Return then only breaks the line", async () => {
+      // `mod` is Ctrl in jsdom, which is not a Mac.
+      setPrefs({ shortcuts: { "composer.send": ["mod+enter"] } });
+      const onSend = vi.fn();
+      render(<HistoryComposer onSend={onSend} />);
+      type("a new message");
+      // Not taken by the composer: the textarea breaks the line itself.
+      expect(press("Enter")).toBe(false);
+      expect(onSend).not.toHaveBeenCalled();
+      expect(press("Enter", { ctrlKey: true })).toBe(true);
+      await waitFor(() => expect(onSend).toHaveBeenCalledWith("a new message", []));
+    });
+
+    it("does not send at all when Send has no key", () => {
+      setPrefs({ shortcuts: { "composer.send": [] } });
+      const onSend = vi.fn();
+      render(<HistoryComposer onSend={onSend} />);
+      type("a new message");
+      expect(press("Enter")).toBe(false);
+      expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it("breaks the line on a New line key that is not Return", () => {
+      setPrefs({ shortcuts: { "composer.newLine": ["mod+j"] } });
+      render(<HistoryComposer onSend={vi.fn()} />);
+      type("one two", 3);
+      expect(!fireEvent.keyDown(field(), { key: "j", code: "KeyJ", ctrlKey: true })).toBe(true);
+      expect(field().value).toBe("one\n two");
+      expect(field().selectionStart).toBe(4);
+    });
+
+    it("recalls messages on the chosen keys, and the arrows only move the caret", () => {
+      setPrefs({ shortcuts: { "composer.historyPrevious": ["mod+up"], "composer.historyNext": ["mod+down"] } });
+      render(<HistoryComposer />);
+      expect(press("ArrowUp")).toBe(false);
+      expect(field().value).toBe("");
+      expect(press("ArrowUp", { ctrlKey: true })).toBe(true);
+      expect(field().value).toBe("third message");
+      expect(press("ArrowDown", { ctrlKey: true })).toBe(true);
+      expect(field().value).toBe("");
+    });
+
+    it("runs Send from the command palette whatever its key is", async () => {
+      setPrefs({ shortcuts: { "composer.send": [] } });
+      const onSend = vi.fn();
+      render(<HistoryComposer onSend={onSend} />);
+      type("a new message");
+      sendShortcut("composer.send", field());
+      await waitFor(() => expect(onSend).toHaveBeenCalledWith("a new message", []));
+    });
   });
 
   it("an open @ or / menu takes the arrows", async () => {
