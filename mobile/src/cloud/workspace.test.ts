@@ -585,6 +585,9 @@ describe("a cloud workspace on the phone", () => {
       h.runtimes[0].encrypted({ event: "collab.you", params: { you: { userId: "u-me", role: "none", canApprove: false } } });
       await vi.waitFor(() => expect(h.refresh.calls).toBe(1));
       expect(h.session.getSnapshot().role).toBe("none");
+      // What was shown is gone from memory, not only hidden.
+      await vi.waitFor(() => expect(h.session.getSnapshot().tabs).toEqual([]));
+      expect(h.session.getSnapshot().collab).toMatchObject({ participants: [], notes: {}, leases: {} });
       h.session.close();
     });
 

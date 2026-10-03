@@ -459,6 +459,15 @@ export class CloudWorkspaceSession {
       }
       // Not shared with this person: the runtime refuses everything, so nothing is asked.
       if (this.unshared()) {
+        // And nothing of it is held in memory either: no conversation, no tab titles, no notes, no one's presence.
+        for (const entry of this.viewing.values()) {
+          entry.stop?.();
+          entry.stop = null;
+        }
+        this.tabs.clear();
+        this.notes.clear();
+        this.leases.clear();
+        this.participants = [];
         this.error = null;
         this.publish();
         return;

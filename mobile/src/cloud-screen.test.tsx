@@ -462,6 +462,22 @@ describe("a shared cloud workspace on the phone", () => {
     expect(session.takeWheel).not.toHaveBeenCalled();
   });
 
+  it("shows nothing of the workspace when the runtime says there is no role while the list still says there is one", async () => {
+    // The list has not caught up (or cannot be read): access is "ok" there, the session is open, and the runtime says none.
+    const { session } = world({ role: "none", access: "ok", tabs: 2, collab: { available: true, participants: [alice], notes: {} } });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("This workspace has not been shared with you");
+    // No agent tab titles, no presence, no conversation, no composer, no way into sharing.
+    expect(text()).not.toContain("Fix login");
+    expect(text()).not.toContain("Second 1");
+    expect(text()).not.toContain("Also here");
+    expect(text()).not.toContain("Alice");
+    expect(text()).not.toContain("run the tests");
+    expect(container.querySelector('input[type="text"]')).toBeNull();
+    expect(() => button("Sharing")).toThrow();
+    expect(session.view).not.toHaveBeenCalled();
+  });
+
   it("says a workspace has not been shared with this person instead of an empty conversation", async () => {
     world({ role: "none", collab: { available: true } });
     await show(<CloudWorkspaceScreen />);

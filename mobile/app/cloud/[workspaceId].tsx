@@ -76,7 +76,10 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
   const nameOf = useNames(catalog);
   const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot);
   const [chosen, setChosen] = useState<string | null>(initialTabId);
-  const tab = snapshot.tabs.find((entry) => entry.tabId === chosen) ?? snapshot.tabs[0] ?? null;
+  // The runtime's word, which can be ahead of the list (and stays so if the list cannot be read): with no
+  // role nothing of the workspace is shown, not its agent tabs' titles and not who else is in it.
+  const unshared = snapshot.role === "none";
+  const tab = unshared ? null : (snapshot.tabs.find((entry) => entry.tabId === chosen) ?? snapshot.tabs[0] ?? null);
   const tabId = tab?.tabId ?? null;
   const live = snapshot.connection.state === "connected";
   const starting = listedState === "suspended" && snapshot.outbox.some((entry) => (entry.state === "queued" || entry.state === "leased") && (entry.wake === "queued" || entry.wake === "in-progress"));
@@ -96,12 +99,12 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
       <Text style={[styles.bannerText, { color: palette.ink }]}>{banner.text}</Text>
       {role ? <Text style={[styles.role, { color: palette.muted }]}>{role}</Text> : null}
       {canReconnect ? <Pressable accessibilityRole="button" accessibilityLabel="Reconnect" onPress={() => { session.reconnect(); void catalog.refresh(); }} style={[styles.reconnect, { backgroundColor: palette.raised }]}><Text style={[styles.role, { color: palette.ink }]}>Reconnect</Text></Pressable> : null}
-      {listedState !== null ? <Pressable accessibilityRole="button" accessibilityLabel="Sharing" onPress={() => router.push({ pathname: "/cloud/shares", params: { orgId, workspaceId } })} style={[styles.sharing, { backgroundColor: palette.raised }]}><Text style={[styles.role, { color: palette.ink }]}>Sharing</Text></Pressable> : null}
+      {listedState !== null && !unshared ? <Pressable accessibilityRole="button" accessibilityLabel="Sharing" onPress={() => router.push({ pathname: "/cloud/shares", params: { orgId, workspaceId } })} style={[styles.sharing, { backgroundColor: palette.raised }]}><Text style={[styles.role, { color: palette.ink }]}>Sharing</Text></Pressable> : null}
     </View>
-    {presence ? <Text accessibilityLabel={presence} style={[styles.presence, { color: palette.muted }]}>{presence}</Text> : null}
+    {presence && !unshared ? <Text accessibilityLabel={presence} style={[styles.presence, { color: palette.muted }]}>{presence}</Text> : null}
     {snapshot.error ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.warning }]}>{codeText(snapshot.error)}</Text> : null}
-    {snapshot.tabs.length > 1 ? <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabs} contentContainerStyle={styles.tabsContent}>{snapshot.tabs.map((entry, index) => <Pressable key={entry.tabId} accessibilityRole="tab" accessibilityState={{ selected: entry.tabId === tabId }} onPress={() => setChosen(entry.tabId)} style={[styles.tab, { backgroundColor: entry.tabId === tabId ? palette.selected : palette.raised }]}><Text numberOfLines={1} style={[styles.tabText, { color: palette.ink }]}>{entry.title ?? `Agent ${index + 1}`}</Text></Pressable>)}</ScrollView> : null}
-    {snapshot.role === "none" ? <EmptyState title={accessText("not-shared").title} detail={accessText("not-shared").detail} /> : tab ? <Conversation key={tab.tabId} catalog={catalog} session={session} scope={`${orgId}/${workspaceId}`} tabId={tab.tabId} live={live} listedState={listedState} /> : <EmptyState title={live ? "No agent tabs" : "Nothing saved yet"} detail={live ? "This workspace has no agent conversation." : "There is no saved conversation for this workspace to show while it is not running."} />}
+    {snapshot.tabs.length > 1 && !unshared ? <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabs} contentContainerStyle={styles.tabsContent}>{snapshot.tabs.map((entry, index) => <Pressable key={entry.tabId} accessibilityRole="tab" accessibilityState={{ selected: entry.tabId === tabId }} onPress={() => setChosen(entry.tabId)} style={[styles.tab, { backgroundColor: entry.tabId === tabId ? palette.selected : palette.raised }]}><Text numberOfLines={1} style={[styles.tabText, { color: palette.ink }]}>{entry.title ?? `Agent ${index + 1}`}</Text></Pressable>)}</ScrollView> : null}
+    {unshared ? <EmptyState title={accessText("not-shared").title} detail={accessText("not-shared").detail} /> : tab ? <Conversation key={tab.tabId} catalog={catalog} session={session} scope={`${orgId}/${workspaceId}`} tabId={tab.tabId} live={live} listedState={listedState} /> : <EmptyState title={live ? "No agent tabs" : "Nothing saved yet"} detail={live ? "This workspace has no agent conversation." : "There is no saved conversation for this workspace to show while it is not running."} />}
   </>;
 }
 
