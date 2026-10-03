@@ -2546,10 +2546,14 @@ pub async fn rename_workspace(app: AppHandle, project_path: String, path: String
 /// What deleting a workspace would cost: the git state of its tree plus how
 /// many sessions (and transcripts) would go with it.
 #[tauri::command]
-pub async fn workspace_disposition(project_path: String, path: String) -> CmdResult<crate::workspaces::WorkspaceDisposition> {
+pub async fn workspace_disposition(project_path: String, path: String, fetch: Option<bool>) -> CmdResult<crate::workspaces::WorkspaceDisposition> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut disposition = crate::workspaces::disposition(Path::new(&project_path), Path::new(&path));
-        if disposition.exists && !disposition.is_main {
+        // The fetch is for the dialog that is about to delete the workspace,
+        // which asks for it. Everything else that reads the disposition (the
+        // pull request panel does so every 30 seconds) stays off the network
+        // and gets no clean-and-merged verdict at all.
+        if fetch == Some(true) && disposition.exists && !disposition.is_main {
             disposition.landed = Some(crate::landed::check(Path::new(&project_path), Path::new(&path), crate::landed::Fetch::Fresh));
         }
         let sessions = sessions_in_workspace(Path::new(&path))?;

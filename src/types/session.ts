@@ -117,6 +117,8 @@ export interface Landed {
   merged: "ancestor" | "rebase" | "squash" | "noChanges" | null;
   unmergedCommits: number;
   pushed: boolean;
+  /** The default branch was fetched for this check. */
+  fresh: boolean;
   /** Why "merged" could not be established for certain; null when it was. */
   notVerified: string | null;
   /** Clean, merged and verified: one confirmation is enough. */
@@ -140,7 +142,7 @@ export interface WorkspaceDisposition {
   sessions: number;
   /** Their titles, so the confirmation can name what goes. */
   sessionTitles: string[];
-  /** Whether the work is clean and merged into the default branch; absent for the main checkout. */
+  /** Whether the work is clean and merged into the default branch. Only present when the check was asked for with a fetch. */
   landed?: Landed | null;
 }
 

@@ -283,7 +283,13 @@ export const api = {
     invoke<string>("preview_workspace_name", { projectPath, requested: requested ?? null }),
   renameWorkspace: (projectPath: string, path: string, name: string) =>
     invoke<WorkspaceRename>("rename_workspace", { projectPath, path, name }),
-  workspaceDisposition: (projectPath: string, path: string) => invoke<WorkspaceDisposition>("workspace_disposition", { projectPath, path }),
+  /**
+   * What a workspace holds. With `fetch`, the default branch is fetched and
+   * the clean-and-merged check is made too (`landed`); that is for the
+   * dialog about to delete it. Without it, nothing touches the network.
+   */
+  workspaceDisposition: (projectPath: string, path: string, options: { fetch?: boolean } = {}) =>
+    invoke<WorkspaceDisposition>("workspace_disposition", { projectPath, path, fetch: options.fetch ?? false }),
   deleteWorkspace: (projectPath: string, path: string, deleteBranch: boolean) =>
     invoke<WorkspaceDeleteReport>("delete_workspace", { projectPath, path, deleteBranch }),
 
