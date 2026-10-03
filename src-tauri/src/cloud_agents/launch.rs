@@ -41,8 +41,12 @@ const GITHUB: &str = "https://github.com";
 const GITHUB_PROVIDER: &str = "github";
 /// Where a clone lands until it is complete, next to its final directory.
 const STAGING_PREFIX: &str = ".terminalx-clone-";
+/// All of a launch's clones together get this long. The clone is a full one
+/// (history and every branch, as a local checkout has), so it is capped by
+/// time, not by depth: what has not finished by then fails the launch.
+pub const CLONE_BUDGET: Duration = Duration::from_secs(30 * 60);
 /// A transfer slower than this many bytes a second for this many seconds is
-/// given up, so a stalled clone fails the launch instead of hanging it.
+/// given up, so a stalled clone fails the launch long before the budget.
 const LOW_SPEED_LIMIT: &str = "http.lowSpeedLimit=1000";
 const LOW_SPEED_TIME: &str = "http.lowSpeedTime=60";
 
@@ -224,9 +228,9 @@ pub enum StartError {
 
 /// Prepares one repository; the real one runs git.
 pub trait Checkout: Send + Sync {
-    /// Clone a repository marked `clone` whose path is not a checkout yet.
-    /// The default does nothing.
-    fn clone_missing(&self, _repository: &Repository) -> Result<()> {
+    /// Clone a repository marked `clone` whose path is not a checkout yet,
+    /// giving up after `within`. The default does nothing.
+    fn clone_missing(&self, _repository: &Repository, _within: Duration) -> Result<()> {
         Ok(())
     }
     fn prepare(&self, repository: &Repository, work_branch: &str) -> Result<Branch>;
@@ -348,6 +352,10 @@ impl Launcher {
     }
 
     fn launch(&self, claim: &Claim) -> Result<Outcome, CallError> {
+        // Counted as work until it returns: a clone can outlast the idle
+        // window with nobody attached, and a suspend in the middle would
+        // leave the launch `outcome-unknown` with nothing cloned.
+        let _launching = crate::cloud_activity::launching();
         if let Err(error) = validate(claim, &self.root) {
             log::warn!("launch intent {}: {error:#}", claim.launch_id);
             return Ok(self.finish(claim, Outcome::failed("payload-invalid", Vec::new())));
@@ -364,8 +372,10 @@ impl Launcher {
             }
         }
         let mut branches = Vec::new();
+        let clone_deadline = std::time::Instant::now() + CLONE_BUDGET;
         for repository in claim.repositories.iter().filter(|repository| repository.clone.is_some()) {
-            if let Err(error) = self.checkout.clone_missing(repository) {
+            let within = clone_deadline.saturating_duration_since(std::time::Instant::now());
+            if let Err(error) = self.checkout.clone_missing(repository, within) {
                 log::warn!("clone {}/{}: {error:#}", repository.owner, repository.name);
                 return Ok(self.finish(claim, Outcome::failed("repository-clone-failed", branches)));
             }
@@ -533,7 +543,7 @@ fn is_empty_dir(path: &Path) -> bool {
 }
 
 impl Checkout for GitCheckout {
-    fn clone_missing(&self, repository: &Repository) -> Result<()> {
+    fn clone_missing(&self, repository: &Repository, within: Duration) -> Result<()> {
         let path = Path::new(&repository.path);
         let url = self.clone_url(repository);
         if path.join(".git").exists() {
@@ -563,7 +573,7 @@ impl Checkout for GitCheckout {
             args.extend(["--branch", base]);
         }
         args.extend(["--", &url, &staging_arg]);
-        if let Err(error) = crate::git::run(parent, &args) {
+        if let Err(error) = crate::git::run_within(parent, &args, within) {
             let _ = std::fs::remove_dir_all(&staging);
             return Err(error);
         }

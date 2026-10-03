@@ -280,8 +280,13 @@ project root. The runtime then:
 - keeps a checkout that is already there (an earlier attempt of the same
   workspace) when its `origin` is that repository, and refuses anything else
   at the path without deleting it;
-- gives up a transfer that stalls for a minute, so the launch fails instead
-  of hanging;
+- makes a full clone (all history and branches, as a local checkout has),
+  capped by time instead of depth: a transfer that stalls for a minute is
+  given up, and all of a launch's clones together get 30 minutes
+  (`CLONE_BUDGET`). At the deadline Git's whole process group is killed;
+- counts as work while it runs (`cloud_activity::launching`): the activity
+  report carries it as a running turn, so the server's idle suspend does not
+  stop a workspace whose clone is still going with nobody attached;
 - reports `repository-clone-failed` when a clone cannot be made. The agent is
   not started and the prompt is not sent.
 

@@ -551,7 +551,7 @@ fn a_retry_keeps_the_clone_it_already_has_and_clears_its_own_leftover() {
     let checkout = GitCheckout::from_remote(remote.to_str().unwrap());
     // A clone that died halfway left its staging directory behind.
     std::fs::create_dir_all(root.join(".terminalx-clone-app").join("junk")).unwrap();
-    checkout.clone_missing(&app).unwrap();
+    checkout.clone_missing(&app, CLONE_BUDGET).unwrap();
     assert!(!root.join(".terminalx-clone-app").exists());
     checkout.prepare(&app, WORK_BRANCH).unwrap();
     std::fs::write(Path::new(&app.path).join("work.txt"), "work\n").unwrap();
@@ -560,13 +560,13 @@ fn a_retry_keeps_the_clone_it_already_has_and_clears_its_own_leftover() {
     let head = git(Path::new(&app.path), &["rev-parse", "HEAD"]);
 
     // The next attempt neither clones again nor resets the branch.
-    checkout.clone_missing(&app).unwrap();
+    checkout.clone_missing(&app, CLONE_BUDGET).unwrap();
     assert_eq!(checkout.prepare(&app, WORK_BRANCH).unwrap().head, head);
     assert!(Path::new(&app.path).join("work.txt").exists());
 
     // A checkout of something else at that path is refused, not replaced.
     let other = Repository { name: "other".into(), ..app.clone() };
-    assert!(checkout.clone_missing(&other).unwrap_err().to_string().contains("another repository"));
+    assert!(checkout.clone_missing(&other, CLONE_BUDGET).unwrap_err().to_string().contains("another repository"));
     assert!(Path::new(&app.path).join("work.txt").exists());
 }
 
@@ -598,6 +598,48 @@ fn a_clone_that_cannot_be_made_fails_the_launch_and_deletes_nothing() {
     std::fs::write(root.join("app").join("notes.txt"), "mine\n").unwrap();
     assert_eq!(failed("b", to_clone(&root, "app", None)), "repository-clone-failed");
     assert_eq!(std::fs::read_to_string(root.join("app").join("notes.txt")).unwrap(), "mine\n");
+}
+
+#[test]
+fn a_clone_that_runs_out_of_time_is_stopped_and_leaves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = remotes(dir.path(), &["app"]);
+    let root = dir.path().join("workspace");
+    let app = to_clone(&root, "app", None);
+    let error = GitCheckout::from_remote(remote.to_str().unwrap()).clone_missing(&app, Duration::ZERO).unwrap_err();
+    assert!(error.to_string().contains("timed out"), "{error:#}");
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0, "no staging directory and no half clone");
+    // With time, the same clone is made.
+    GitCheckout::from_remote(remote.to_str().unwrap()).clone_missing(&app, CLONE_BUDGET).unwrap();
+    assert!(Path::new(&app.path).join("README.md").exists());
+}
+
+#[test]
+fn a_launch_counts_as_work_while_it_runs() {
+    struct Watching(Mutex<Vec<bool>>);
+    impl Checkout for Watching {
+        fn clone_missing(&self, _repository: &Repository, within: Duration) -> Result<()> {
+            // Seen from inside the launch: the activity reporter would report a running turn.
+            self.0.lock().unwrap().push(crate::cloud_activity::launches() >= 1 && within <= CLONE_BUDGET && within > Duration::ZERO);
+            Ok(())
+        }
+        fn prepare(&self, repository: &Repository, work_branch: &str) -> Result<Branch> {
+            Ok(Branch { path: repository.path.clone(), branch: work_branch.into(), head: "0".repeat(40) })
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("workspace");
+    let checkout = Arc::new(Watching(Mutex::new(Vec::new())));
+    let launcher = Launcher {
+        api: FakeApi::new(Some(claim(vec![to_clone(&root, "app", None)]))),
+        starter: Arc::new(FakeStarter::default()),
+        checkout: checkout.clone(),
+        store: Store::open(dir.path()),
+        incarnation: "incarnation-aaaaaaaaaaaa".into(),
+        root,
+    };
+    assert_eq!(launcher.pass().unwrap(), Pass::Settled("started".into()));
+    assert_eq!(*checkout.0.lock().unwrap(), [true]);
 }
 
 #[test]
