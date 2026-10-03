@@ -609,7 +609,7 @@ pub struct CloudWorkspaceOperation {
     /// The server's own detail for a failed operation, beside the error
     /// code (`box_deleted_sandbox_present`). Absent from an older server;
     /// only a short token passes.
-    #[serde(default, deserialize_with = "safe_provider_error_code")]
+    #[serde(default, deserialize_with = "safe_detail_code", skip_serializing_if = "Option::is_none")]
     pub detail_code: Option<String>,
     pub progress: Option<OperationProgress>,
     pub events: Option<Vec<OperationEvent>>,
@@ -2038,6 +2038,24 @@ where
     })
 }
 
+/// A detail code as the server stores it: `^[a-z0-9][a-z0-9_-]{0,79}$`.
+fn safe_detail_code<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::String(code))
+            if (1..=80).contains(&code.len())
+                && !matches!(code.as_bytes()[0], b'_' | b'-')
+                && code.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')) =>
+        {
+            Some(code)
+        }
+        _ => None,
+    })
+}
+
 fn safe_provider_operation_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -2411,6 +2429,9 @@ mod tests {
             (Some("box_deleted_sandbox_present".into()), Some("op_01HZX-9f2c".into()))
         );
         assert_eq!(parse(json!("Boat said: sandbox still there"), json!("an id with spaces")), (None, None));
+        assert_eq!(parse(json!("a".repeat(80)), json!("bdop_01HZX")).0, Some("a".repeat(80)));
+        assert_eq!(parse(json!("a".repeat(81)), json!("bdop_01HZX")), (None, Some("bdop_01HZX".into())));
+        assert_eq!(parse(json!("-leading"), json!("")), (None, None));
         assert_eq!(parse(Value::Null, json!({ "raw": "body" })), (None, None));
         // An older server sends neither, and nothing is invented for it.
         let old: CloudWorkspaceSnapshot = serde_json::from_str(&snapshot_body(Some("cloud_provider_permission_denied"))).unwrap();
