@@ -8,7 +8,6 @@ import { blankIdentity, cloudOrganizations, getCloudCatalog, liveCloudOrgIds, re
 import { cloudConnectionInfo, subscribeCloudConnections } from "@/lib/cloudConnections";
 import { isArchived } from "@/lib/cloudLifecycle";
 import { buildCloudSessions, liveCloudSessionList, subscribeCloudSessionLists } from "@/lib/cloudSessions";
-import { getPrefs, subscribePrefs } from "@/lib/prefs";
 import { selectCloudSession } from "@/lib/sessions";
 import { selectSessionTab } from "@/lib/terminal";
 import { cloudProjectKey, cloudWorkspaceKey } from "@/types/target";
@@ -207,9 +206,8 @@ function projectWorkspace(item: CloudWorkspaceListItem, org: { id: string; name:
 
 // ---- the store -------------------------------------------------------------
 
-/** The organizations whose sessions count: the live ones, unless the cloud sidebar is switched off. */
-export function dashboardOrgs(status: AccountStatus, cloudSidebar: boolean): { id: string; name: string }[] {
-  if (!cloudSidebar) return [];
+/** The organizations whose sessions count: the live ones. */
+export function dashboardOrgs(status: AccountStatus): { id: string; name: string }[] {
   const live = new Set(liveCloudOrgIds(status));
   return cloudOrganizations(status)
     .filter((org) => live.has(org.id))
@@ -226,7 +224,7 @@ let scheduled = false;
 
 function recompute(): CloudDashboardSession[] {
   return projectCloudSessions({
-    orgs: dashboardOrgs(getAccount().status, getPrefs().cloudSidebar),
+    orgs: dashboardOrgs(getAccount().status),
     catalog: getCloudCatalog(),
     liveSessions: liveCloudSessionList,
     agentTabs: (organizationId, workspaceId) => getCloudAgents({ organizationId, workspaceId }).tabs,
@@ -237,7 +235,7 @@ function recompute(): CloudDashboardSession[] {
 /** This desktop's tab cache for each workspace, once: a disk read (and the checkpoint list), never a connection or a wake. */
 function loadAgentCaches() {
   const catalog = getCloudCatalog();
-  for (const org of dashboardOrgs(getAccount().status, getPrefs().cloudSidebar)) {
+  for (const org of dashboardOrgs(getAccount().status)) {
     for (const item of catalog.orgs[org.id]?.workspaces ?? []) {
       const key = cloudWorkspaceKey(org.id, item.workspace.id);
       if (isArchived(item.workspace) || loaded.has(key)) continue;
@@ -272,7 +270,7 @@ function invalidate() {
 
 function start() {
   if (unsubscribers.length) return;
-  unsubscribers = [subscribeAccount(invalidate), subscribePrefs(invalidate), subscribeCloudCatalog(invalidate), subscribeCloudSessionLists(invalidate), subscribeAllCloudAgents(invalidate), subscribeCloudConnections(invalidate)];
+  unsubscribers = [subscribeAccount(invalidate), subscribeCloudCatalog(invalidate), subscribeCloudSessionLists(invalidate), subscribeAllCloudAgents(invalidate), subscribeCloudConnections(invalidate)];
   invalidate();
 }
 

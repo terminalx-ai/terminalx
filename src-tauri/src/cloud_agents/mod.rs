@@ -764,18 +764,25 @@ impl CloudAgents {
     /// After a runtime restart: turns that were running died with the
     /// previous process. Say so in their transcripts instead of letting
     /// them look like they are still going.
+    ///
+    /// A workspace restored from a saved state can come back with the same
+    /// turn marked running more than once; the transcript says it once.
     pub fn mark_interrupted_turns(&self, tabs: &[(String, String)]) {
         for (session_id, tab_id) in tabs {
-            self.ops.note(
-                session_id,
-                tab_id,
-                "The workspace runtime restarted and the agent process running this turn ended. \
-                 Its saved conversation resumes when you send the next message.",
-            );
+            let already_said = self.ops.events(session_id, tab_id).ok().is_some_and(|events| {
+                events.last().is_some_and(|event| event["payload"]["type"] == "status" && event["payload"]["text"] == INTERRUPTED_TURN_NOTICE)
+            });
+            if already_said {
+                continue;
+            }
+            self.ops.note(session_id, tab_id, INTERRUPTED_TURN_NOTICE);
             self.changed(Some(tab_id), true);
         }
     }
 }
+
+const INTERRUPTED_TURN_NOTICE: &str = "The workspace runtime restarted and the agent process running this turn ended. \
+     Its saved conversation resumes when you send the next message.";
 
 /// Tabs of `root` that were mid-turn when the index was last written; call
 /// before `idle_orphaned_tabs` resets them.

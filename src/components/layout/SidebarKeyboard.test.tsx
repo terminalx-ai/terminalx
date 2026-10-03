@@ -100,7 +100,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  prefs.setPrefs({ cloudSidebar: true, cloudProjects: {}, cloudBlankProjects: {}, cloudPinned: {}, cloudCollapsed: {}, sidebarSections: {} });
+  prefs.setPrefs({ cloudProjects: {}, cloudBlankProjects: {}, cloudPinned: {}, cloudCollapsed: {}, sidebarSections: {} });
   await act(async () => {
     await catalog.ingestCloudList({ workspaces: [cloudItem], quota: { used: 1, limit: 2 } }, ORG);
     await catalog.ingestCloudList({ workspaces: [], quota: { used: 0, limit: 2 } }, "org-b");

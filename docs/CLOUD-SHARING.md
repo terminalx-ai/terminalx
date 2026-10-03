@@ -607,7 +607,7 @@ the "live two-user test" blocks of `SessionView.cloud.test.tsx`,
 `src/components/layout/cloud/CloudSections.test.tsx`,
 `packages/portable/src/workspaceCollab.test.ts`,
 `src/components/cloud/CloudShareDialog.test.tsx`, the PRO-30 blocks of
-`CloudAgents.test.tsx` and `CloudSessionPage.test.tsx`, and the
+`CloudAgents.test.tsx` and `CloudWorkspaceView.test.tsx`, and the
 `cloud_workspaces::tests::share*` Rust tests. `src/lib/cloudSessions.access.test.ts`
 covers what is forgotten when access ends and read again when it returns.
 `pnpm test:webkit-layout` (after `pnpm build`) measures in WebKit what jsdom
