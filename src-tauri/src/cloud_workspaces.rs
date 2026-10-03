@@ -17,9 +17,10 @@ const CONTRACT: &str = "providers-v1";
 /// Archive, tombstones and cleanup reports (terminalx-saas contract §10.6).
 /// Without it an archived workspace reads as suspended.
 const LIFECYCLE: &str = "archive-v1";
-/// The local Docker provider (terminalx-saas `cloud:e2e:local --serve`) is
-/// offered only by debug builds.
-const SUPPORTED_PROVIDERS: &str = if cfg!(debug_assertions) { "machine0,box,local-docker" } else { "machine0,box" };
+/// The providers this client can show and drive; the server leaves every
+/// other one out of its answers. The local Docker provider (terminalx-saas
+/// `cloud:e2e:local --serve`) is offered only by debug builds.
+const SUPPORTED_PROVIDERS: &str = if cfg!(debug_assertions) { "machine0,box,hetzner,local-docker" } else { "machine0,box,hetzner" };
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const RESPONSE_LIMIT_BYTES: u64 = 512 * 1024;
 /// The catalog feed carries every member Organization's list in one answer.
@@ -33,6 +34,7 @@ const DIAGNOSTICS_RESPONSE_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
 pub enum CloudWorkspaceProviderId {
     Machine0,
     Box,
+    Hetzner,
     #[serde(rename = "local-docker")]
     LocalDocker,
 }
@@ -42,6 +44,7 @@ impl CloudWorkspaceProviderId {
         match self {
             Self::Machine0 => "machine0",
             Self::Box => "box",
+            Self::Hetzner => "hetzner",
             Self::LocalDocker => "local-docker",
         }
     }
@@ -2760,6 +2763,20 @@ mod tests {
     }
 
     #[test]
+    fn hetzner_is_a_provider_this_client_names_and_reads() {
+        assert!(SUPPORTED_PROVIDERS.split(',').any(|provider| provider == "hetzner"));
+        let provider: CloudWorkspaceProviderId = serde_json::from_str(r#""hetzner""#).unwrap();
+        assert_eq!(provider, CloudWorkspaceProviderId::Hetzner);
+        assert_eq!(provider.as_str(), "hetzner");
+        assert_eq!(serde_json::to_string(&provider).unwrap(), r#""hetzner""#);
+        // Every provider the client declares is one it can also read back.
+        for name in SUPPORTED_PROVIDERS.split(',') {
+            let parsed: CloudWorkspaceProviderId = serde_json::from_value(json!(name)).unwrap();
+            assert_eq!(parsed.as_str(), name);
+        }
+    }
+
+    #[test]
     fn sends_provider_contract_and_encodes_native_organization() {
         let body = r#"{"providers":[]}"#;
         let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
@@ -2781,7 +2798,7 @@ mod tests {
         let lower = request.to_ascii_lowercase();
         assert!(lower.contains("authorization: bearer native-secret-token"));
         assert!(lower.contains("x-terminalx-cloud-workspace-contract: providers-v1"));
-        assert!(lower.contains("x-terminalx-cloud-workspace-providers: machine0,box"));
+        assert!(lower.contains("x-terminalx-cloud-workspace-providers: machine0,box,hetzner"));
     }
 
     #[test]

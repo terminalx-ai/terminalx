@@ -399,7 +399,7 @@ export interface CloudCatalogFeed {
 }
 
 /** `local-docker` is offered by debug builds only (terminalx-saas `cloud:e2e:local --serve`). */
-export type CloudWorkspaceProviderId = "machine0" | "box" | "local-docker";
+export type CloudWorkspaceProviderId = "machine0" | "box" | "hetzner" | "local-docker";
 export type CloudWorkspaceReleaseDisposition = "destroyed" | "archived" | "terminalx-only";
 export type CloudWorkspaceNetworkPolicy = "relay-only" | "provider-public-network";
 
