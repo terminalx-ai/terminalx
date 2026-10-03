@@ -68,6 +68,8 @@ export function AppShell() {
   const store = useSessionStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(GENERAL_SETTINGS_TAB);
+  // Every request for Settings, so asking again with it open still lands on the section asked for.
+  const [settingsRequest, setSettingsRequest] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [cloudSessionOpen, setCloudSessionOpen] = useState(false);
 
@@ -102,14 +104,17 @@ export function AppShell() {
   const openSettings = useCallback((tab?: unknown) => {
     setSettingsTab(typeof tab === "string" ? (tab as SettingsTab) : GENERAL_SETTINGS_TAB);
     setSettingsOpen(true);
+    setSettingsRequest((count) => count + 1);
   }, []);
   const openAccountSettings = useCallback(() => {
     setSettingsTab("account");
     setSettingsOpen(true);
+    setSettingsRequest((count) => count + 1);
   }, []);
   const openAgentSettings = useCallback(() => {
     setSettingsTab("agents");
     setSettingsOpen(true);
+    setSettingsRequest((count) => count + 1);
   }, []);
   const newSession = useCallback(() => selectSession(null), []);
   const showIssues = useCallback(() => openIssues(), []);
@@ -149,7 +154,7 @@ export function AppShell() {
       <div className="flex min-h-0 flex-1">
         {settingsOpen ? (
           <Suspense fallback={viewFallback}>
-            <SettingsPage initialTab={settingsTab} onBack={() => setSettingsOpen(false)} />
+            <SettingsPage initialTab={settingsTab} openRequest={settingsRequest} onBack={() => setSettingsOpen(false)} />
           </Suspense>
         ) : cloudSessionOpen ? (
           <Suspense fallback={viewFallback}>
