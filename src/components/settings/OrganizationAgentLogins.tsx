@@ -44,6 +44,8 @@ export function agentLoginMessage(error: unknown): string {
       return "The Claude Code sign-in on this Mac has expired or is about to. Run claude once so it renews, then try again.";
     case "cloud_agent_local_login_cancelled":
       return "Canceled in the confirmation. Nothing was sent.";
+    case "cloud_agent_login_replace_unconfirmed":
+      return "A login is already stored for this agent. Choose to replace it, then try again. Nothing was changed.";
     case "cloud_agent_local_login_denied":
       return "This Mac's login was not read: access to it was not allowed. Nothing was sent.";
     case "cloud_provider_entry_cancelled":
@@ -61,13 +63,37 @@ export function agentLoginMessage(error: unknown): string {
   }
 }
 
-function statusLine(login: AgentLogin | undefined): string {
-  if (!login || login.state === "disconnected") return "Not connected";
-  const how = login.authKind === "api-key" ? "API key" : "subscription login";
-  const who = login.displayIdentity ? ` · ${login.displayIdentity}` : "";
-  if (login.state === "revoked") return `Revoked (${how}${who}): workspaces no longer receive it. Replace it to use this agent again.`;
+/**
+ * A sign-in lent from a Mac says when it stops working in its name
+ * ("ada@example.com · lent until 2026-10-03T21:40:00Z"), since the service
+ * has no field for it. Null for any other login.
+ */
+export function lentUntil(login: Pick<AgentLogin, "displayIdentity"> | undefined): { who: string; at: number } | null {
+  const match = /^(.*) · lent until (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)$/.exec(login?.displayIdentity ?? "");
+  const at = match ? Date.parse(match[2]) : NaN;
+  return match && Number.isFinite(at) ? { who: match[1], at } : null;
+}
+
+function remaining(ms: number): string {
+  const minutes = Math.max(1, Math.round(ms / 60_000));
+  if (minutes < 90) return `${minutes} min`;
+  return `${Math.round(minutes / 60)} h`;
+}
+
+/** What the row says about a login, and whether it needs attention. */
+export function agentLoginStatus(login: AgentLogin | undefined, now = Date.now()): { text: string; warn: boolean } {
+  if (!login || login.state === "disconnected") return { text: "Not connected", warn: false };
+  const lent = lentUntil(login);
+  const how = login.authKind === "api-key" ? "API key" : lent ? "sign-in lent from a Mac" : "subscription login";
+  const who = lent ? ` · ${lent.who}` : login.displayIdentity ? ` · ${login.displayIdentity}` : "";
+  if (login.state === "revoked") return { text: `Revoked (${how}${who}): workspaces no longer receive it. Replace it to use this agent again.`, warn: true };
+  // The service still calls an expired lend connected; the time in its name says otherwise.
+  if (lent && lent.at <= now) {
+    return { text: `Expired ${new Date(lent.at).toLocaleString()} (${how}${who}): agents can no longer sign in with it. Connect a login again.`, warn: true };
+  }
   const scope = login.sharedUse === "managers" ? " · only workspaces created by owners and admins" : "";
-  return `Connected · ${how}${who}${scope} · updated ${new Date(login.updatedAt).toLocaleDateString()}`;
+  if (lent) return { text: `Connected · ${how}${who}${scope} · expires in ${remaining(lent.at - now)} (${new Date(lent.at).toLocaleString()})`, warn: lent.at - now < 60 * 60_000 };
+  return { text: `Connected · ${how}${who}${scope} · updated ${new Date(login.updatedAt).toLocaleDateString()}`, warn: false };
 }
 
 export function OrganizationAgentLogins({ contextRevision, organizationName }: { contextRevision: string; organizationName?: string | null }) {
@@ -81,6 +107,13 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
   const [pending, setPending] = useState<Pending | null>(null);
   const [sharing, setSharing] = useState(false);
   const [machines, setMachines] = useState(false);
+  const [replace, setReplace] = useState(false);
+  // An expiry shown as "in 3 h" is re-read every minute, so it turns to Expired without a refresh.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
   const epoch = useRef(0);
 
   const load = useCallback(async () => {
@@ -114,6 +147,7 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
     setPending(next);
     setSharing(false);
     setMachines(false);
+    setReplace(false);
     setError(null);
     setNotice(null);
   };
@@ -135,6 +169,7 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
       setBusy(false);
       setSharing(false);
       setMachines(false);
+      setReplace(false);
     }
   };
 
@@ -172,6 +207,8 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
             {AGENTS.map((agent) => {
               const login = logins.find((candidate) => candidate.provider === agent.id);
               const stored = !!login && login.state !== "disconnected";
+              const status = agentLoginStatus(login, now);
+              const storedKind = login?.authKind === "api-key" ? "API key" : "login";
               const open = pending?.agent === agent.id ? pending : null;
               return (
                 <li key={agent.id} className="rounded-md bg-well p-2" data-testid="agent-login" data-agent={agent.id}>
@@ -179,8 +216,8 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
                   <div className="flex flex-col gap-1.5">
                     <div className="min-w-0">
                       <div className="font-medium">{agent.name}</div>
-                      <div className={login?.state === "revoked" ? "text-warning" : "text-muted-foreground"} data-testid="agent-login-status">
-                        {statusLine(login)}
+                      <div className={status.warn ? "text-warning" : "text-muted-foreground"} data-testid="agent-login-status">
+                        {status.text}
                       </div>
                     </div>
                     <div className="flex flex-wrap gap-1.5">
@@ -189,7 +226,7 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
                       </Button>
                       {agent.local && (
                         <Button size="xs" variant="outline" disabled={busy} onClick={() => choose({ agent: agent.id, source: "local-login" })}>
-                          Use this Mac's {agent.local} login
+                          {stored ? `Replace with this Mac's ${agent.local} sign-in (temporary)` : `Lend this Mac's ${agent.local} sign-in (temporary)`}
                         </Button>
                       )}
                       {stored && (
@@ -207,6 +244,17 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
                           ? `TerminalX will read the ${agent.name} sign-in on this Mac and lend its short-lived access token to ${organization}. The refresh token stays on this Mac, so what is uploaded cannot be renewed: it stops working when it expires, usually within hours, and has to be lent again. Before anything is sent, a confirmation from the app names the organization, the account and the expiry. It is your own subscription: usage in these workspaces counts against it.`
                           : `A secure dialog will ask for the ${agent.name} API key for ${organization}. It is sent to the account service, which checks it with the provider and stores it encrypted.`}
                       </p>
+                      {stored && (
+                        <label className="flex items-start gap-2 rounded-md border border-destructive/25 p-2" data-testid="agent-login-replace">
+                          <input type="checkbox" checked={replace} disabled={busy} onChange={(event) => setReplace(event.target.checked)} />
+                          <span>
+                            <strong>Replace the {storedKind} now stored for {agent.name}.</strong> The organization has one login per agent, so this removes
+                            it.
+                            {open.source === "local-login" &&
+                              ` When the lent sign-in expires, ${agent.name} agents in every workspace of ${organization} stop until a login is connected again.`}
+                          </span>
+                        </label>
+                      )}
                       <label className="flex items-start gap-2">
                         <input type="checkbox" checked={sharing} disabled={busy} onChange={(event) => setSharing(event.target.checked)} />
                         <span>
@@ -226,7 +274,7 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
                       <div className="flex gap-1.5">
                         <Button
                           size="xs"
-                          disabled={busy || !sharing || !machines}
+                          disabled={busy || !sharing || !machines || (stored && !replace)}
                           onClick={() =>
                             void run(
                               () =>
@@ -234,6 +282,7 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
                                   contextRevision,
                                   organizationSharing: sharing,
                                   machineInstallation: machines,
+                                  replaceExisting: stored && replace,
                                 }),
                               `${agent.name} is connected for this organization's cloud workspaces.`,
                             )

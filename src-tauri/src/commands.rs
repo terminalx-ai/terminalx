@@ -564,11 +564,18 @@ pub async fn cloud_agent_login_connect(
     static GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _guard = GUARD.try_lock().map_err(|_| CloudWorkspaceClientError::local("cloud_provider_operation_in_progress", true))?;
     let service = state.cloud_workspaces.clone();
-    let authorization = tauri::async_runtime::spawn_blocking(move || service.authorize_agent_login(&consent))
+    let authorization = tauri::async_runtime::spawn_blocking(move || service.authorize_agent_login(provider, &consent))
         .await
         .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Read))??;
     // The organization by name when it is the active one; its id otherwise, as the provider dialog shows it.
-    let organization = state.account.active_organization_name(authorization.organization_id()).unwrap_or_else(|| authorization.organization_id().to_owned());
+    // It is put into a native dialog: text from the account service, cleaned like any other.
+    let organization = state
+        .account
+        .active_organization_name(authorization.organization_id())
+        .map(|name| dialog_text(&name))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| authorization.organization_id().to_owned());
+    let replaces = authorization.replaces();
     let unavailable = || CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false);
     let (kind, secret, identity) = match source {
         AgentLoginSource::ApiKey => {
@@ -596,7 +603,7 @@ pub async fn cloud_agent_login_connect(
             // account, and nothing is uploaded unless its own button is pressed. Every time.
             let expires = local_time(login.expires_at_ms);
             let account = login.account.clone().unwrap_or_else(|| "the Claude Code account signed in on this Mac (its name is not recorded here)".into());
-            let text = local_login_confirmation(&organization, &account, &expires);
+            let text = local_login_confirmation(&organization, &account, &expires, replaces);
             let (sender, receiver) = std::sync::mpsc::sync_channel(1);
             app.run_on_main_thread(move || {
                 let _ = sender.send(native_confirm("Lend this Mac's Claude Code sign-in?", &text, "Upload access token"));
@@ -608,7 +615,12 @@ pub async fn cloud_agent_login_connect(
                 Some(false) => return Err(CloudWorkspaceClientError::local("cloud_agent_local_login_cancelled", false)),
                 None => return Err(unavailable()),
             }
-            let identity = format!("{} · this Mac's sign-in, temporary until {}", login.account.as_deref().unwrap_or("Claude Code"), expires);
+            // The dialog has no time limit: what was valid when it opened may not be now.
+            if !crate::agent_local_login::still_worth_lending(login.expires_at_ms) {
+                return Err(CloudWorkspaceClientError::local(crate::agent_local_login::LocalLoginError::Expired.code(), false));
+            }
+            // The expiry travels as a time (UTC), so whoever looks at the list sees it in their own zone.
+            let identity = lent_identity(login.account.as_deref(), login.expires_at_ms);
             (AgentLoginKind::LoginDocument, login.secret, Some(identity))
         }
     };
@@ -616,6 +628,28 @@ pub async fn cloud_agent_login_connect(
     tauri::async_runtime::spawn_blocking(move || service.save_agent_login(authorization, provider, kind, secret, identity.as_deref()))
         .await
         .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Mutation))?
+}
+
+/// Text for a native dialog: no control or direction-changing characters, bounded.
+fn dialog_text(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| !c.is_control() && !matches!(*c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'))
+        .take(120)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// What the stored login is called: whose sign-in it is, and when it stops
+/// working as a UTC time the list can read back ("… · lent until
+/// 2026-10-03T21:40:00Z").
+fn lent_identity(account: Option<&str>, expires_at_ms: i64) -> String {
+    use chrono::TimeZone;
+    let until = match chrono::Utc.timestamp_millis_opt(expires_at_ms) {
+        chrono::LocalResult::Single(at) => at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        _ => "an unknown time".into(),
+    };
+    format!("{} · lent until {until}", account.unwrap_or("Claude Code on a Mac"))
 }
 
 /// When a lent sign-in stops working, in this computer's own time.
@@ -630,14 +664,24 @@ fn local_time(at_ms: i64) -> String {
 /// What the native confirmation says before a local sign-in is uploaded:
 /// which organization gets it, whose it is, what exactly leaves this Mac,
 /// who can use it, and when and how it ends.
-fn local_login_confirmation(organization: &str, account: &str, expires: &str) -> String {
+fn local_login_confirmation(organization: &str, account: &str, expires: &str, replaces: Option<crate::cloud_workspaces::AgentLoginKind>) -> String {
+    use crate::cloud_workspaces::AgentLoginKind;
+    let replacing = match replaces {
+        Some(AgentLoginKind::ApiKey) => format!(
+            "THIS REPLACES the API key now stored for Claude Code in {organization}. The key is removed; when the lent sign-in expires, Claude Code agents in every workspace of the organization stop until a login is connected again.\n\n"
+        ),
+        Some(AgentLoginKind::LoginDocument) => format!(
+            "THIS REPLACES the login now stored for Claude Code in {organization}. When the lent sign-in expires, Claude Code agents in every workspace of the organization stop until a login is connected again.\n\n"
+        ),
+        None => String::new(),
+    };
     format!(
-        "Organization: {organization}\nAccount: {account}\n\n\
+        "Organization: {organization}\nAccount (as Claude Code on this Mac records it): {account}\n\n{replacing}\
          TerminalX will upload this sign-in's short-lived access token to the account service, for agents in the cloud workspaces of {organization}. \
          The refresh token stays on this Mac, so this Mac's sign-in keeps working and the uploaded token cannot be renewed: it stops working on {expires}.\n\n\
          Until then, agents in every member's workspaces of this organization may run on your Claude subscription, \
          and anyone who can drive one of those workspaces can read the token off its machine.\n\n\
-         To end it sooner, disconnect it in Settings (the service refuses while a workspace still uses the login) or sign out of Claude Code."
+         To end it sooner, disconnect it in Settings (the service refuses while a workspace still uses the login)."
     )
 }
 
@@ -646,7 +690,7 @@ fn local_login_confirmation(organization: &str, account: &str, expires: &str) ->
 #[cfg(target_os = "macos")]
 fn native_confirm(title: &str, text: &str, confirm: &str) -> Option<bool> {
     use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSAlertStyle};
+    use objc2_app_kit::{NSAlert, NSAlertSecondButtonReturn, NSAlertStyle};
     use objc2_foundation::NSString;
     let mtm = MainThreadMarker::new()?;
     let alert = NSAlert::new(mtm);
@@ -656,7 +700,9 @@ fn native_confirm(title: &str, text: &str, confirm: &str) -> Option<bool> {
     // Cancel first: Return and the default button never upload anything.
     alert.addButtonWithTitle(&NSString::from_str("Cancel"));
     alert.addButtonWithTitle(&NSString::from_str(confirm));
-    Some(alert.runModal() != NSAlertFirstButtonReturn)
+    // Only the confirm button is a yes. Cancel, and any way a modal can end
+    // without a button (abort, stop), is a no.
+    Some(alert.runModal() == NSAlertSecondButtonReturn)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2222,8 +2268,18 @@ mod command_tests {
     // PRO-79: the app's own confirmation before a local sign-in is uploaded.
     #[test]
     fn the_local_sign_in_confirmation_names_the_organization_the_account_and_the_expiry() {
-        let text = super::local_login_confirmation("Acme Robotics", "ada@example.com", "3 Oct 2026, 21:40");
-        assert!(text.starts_with("Organization: Acme Robotics\nAccount: ada@example.com\n"));
+        use crate::cloud_workspaces::AgentLoginKind;
+        let text = super::local_login_confirmation("Acme Robotics", "ada@example.com", "3 Oct 2026, 21:40", None);
+        assert!(text.starts_with("Organization: Acme Robotics\nAccount (as Claude Code on this Mac records it): ada@example.com\n"));
+        assert!(!text.contains("REPLACES") && !text.contains("sign out of Claude Code"));
+        // Review of #293: replacing a stored login is said, in the dialog too.
+        let replacing = super::local_login_confirmation("Acme Robotics", "ada@example.com", "3 Oct 2026, 21:40", Some(AgentLoginKind::ApiKey));
+        assert!(replacing.contains("THIS REPLACES the API key now stored for Claude Code in Acme Robotics"));
+        assert!(replacing.contains("agents in every workspace of the organization stop"));
+        assert!(super::local_login_confirmation("Acme", "a@b.c", "x", Some(AgentLoginKind::LoginDocument)).contains("THIS REPLACES the login now stored"));
+        // The expiry is stored as a UTC time, and dialog text is cleaned.
+        assert_eq!(super::lent_identity(Some("ada@example.com"), 1_790_000_000_000), "ada@example.com · lent until 2026-09-21T14:13:20Z");
+        assert_eq!(super::dialog_text(" Acme\u{202E}\n Robotics "), "Acme Robotics");
         assert!(text.contains("stops working on 3 Oct 2026, 21:40"));
         assert!(text.contains("The refresh token stays on this Mac"));
         assert!(text.contains("every member's workspaces"));

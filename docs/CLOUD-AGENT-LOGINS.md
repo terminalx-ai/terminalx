@@ -52,8 +52,18 @@ the provider rotates it the first refresh on either side signs the other out.
 
 So the lent sign-in is **temporary**. It stops working at the access token's
 own expiry (hours), the service cannot renew it, and it has to be lent again.
-The stored login's name says so ("… · this Mac's sign-in, temporary until
-…"), which is also how other admins see whose subscription it is.
+The stored login's name carries whose sign-in it is and its expiry as a UTC
+time ("ada@example.com · lent until 2026-10-03T21:40:00Z"), because the
+service has no field for an expiry. The list reads that back: it shows
+"expires in 3 h" in the viewer's own time zone, and **Expired** once the time
+has passed, even though the service still calls the login connected.
+
+The service holds one login per organization and agent, so lending a sign-in
+**replaces** whatever is stored, an API key included. When one is stored the
+button reads "Replace…", the page asks for that choice explicitly, the app
+refuses without it (`cloud_agent_login_replace_unconfirmed`), and the native
+confirmation says what is replaced and that agents in every workspace stop
+when the lent sign-in expires.
 
 The steps, in order:
 
@@ -65,7 +75,9 @@ The steps, in order:
 4. **A native confirmation** (`native_confirm`, an `NSAlert` drawn by the
    app, not the page) names the organization, the account and the expiry, and
    says what leaves the Mac, who can use it and how it ends. Cancel is the
-   default button. This is the confirmation that counts: the page's
+   default button, and only the confirm button counts as yes (a modal that
+   ends any other way uploads nothing). The expiry is checked again after
+   the dialog closes. This is the confirmation that counts: the page's
    checkboxes are values the webview reports, and the Keychain prompt is not
    a control, because the app already reads that item for the usage display.
 5. Only then is the access token uploaded.

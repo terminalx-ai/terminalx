@@ -452,6 +452,8 @@ export interface AgentLoginConsent {
   contextRevision: string;
   organizationSharing: boolean;
   machineInstallation: boolean;
+  /** The login now stored for the agent may be replaced; required when there is one. */
+  replaceExisting: boolean;
 }
 
 export interface CloudProviderSummaryResponse {

@@ -97,6 +97,11 @@ pub fn claude_from_raw(raw: &str, now_ms: i64) -> Result<(Zeroizing<String>, i64
     Ok((Zeroizing::new(json!({ "claudeAiOauth": kept }).to_string()), expires_at))
 }
 
+/// Whether a sign-in read a while ago still has enough time left to lend.
+pub fn still_worth_lending(expires_at_ms: i64) -> bool {
+    expires_at_ms >= now_ms() + MIN_REMAINING_MS
+}
+
 /// The address of the account Claude Code is signed in to, from its
 /// `.claude.json`. Display only: it names the account in the confirmation
 /// and on the stored login.

@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, type AgentLogin } from "@/lib/api";
-import { OrganizationAgentLogins } from "./OrganizationAgentLogins";
+import { agentLoginStatus, lentUntil, OrganizationAgentLogins } from "./OrganizationAgentLogins";
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -37,7 +37,8 @@ describe("agent logins in Settings (PRO-79)", () => {
     // Only Claude Code's sign-in can be lent from this Mac (Codex's cannot be used without its refresh token).
     expect(within(row("cursor")).queryByRole("button", { name: /this Mac/ })).toBeNull();
     expect(within(row("codex")).queryByRole("button", { name: /this Mac/ })).toBeNull();
-    expect(within(row("claude")).getByRole("button", { name: "Use this Mac's Claude Code login" })).toBeTruthy();
+    // A stored login is replaced, and the button says so.
+    expect(within(row("claude")).getByRole("button", { name: "Replace with this Mac's Claude Code sign-in (temporary)" })).toBeTruthy();
     expect(within(row("cursor")).queryByRole("button", { name: "Disconnect" })).toBeNull();
     expect(within(row("claude")).getByRole("button", { name: "Disconnect" })).toBeTruthy();
     cleanup();
@@ -55,8 +56,10 @@ describe("agent logins in Settings (PRO-79)", () => {
       return stored[0]!;
     });
     await show();
-    fireEvent.click(within(row("claude")).getByRole("button", { name: "Use this Mac's Claude Code login" }));
+    fireEvent.click(within(row("claude")).getByRole("button", { name: "Lend this Mac's Claude Code sign-in (temporary)" }));
     const panel = within(row("claude")).getByTestId("agent-login-consent");
+    // Nothing is stored yet: there is nothing to replace and no such choice.
+    expect(within(panel).queryByTestId("agent-login-replace")).toBeNull();
     // What is shared, who can use it, how to revoke it.
     expect(panel.textContent).toContain("lend its short-lived access token to Acme Robotics");
     expect(panel.textContent).toContain("The refresh token stays on this Mac");
@@ -75,7 +78,7 @@ describe("agent logins in Settings (PRO-79)", () => {
     fireEvent.click(go);
     await waitFor(() => expect(screen.getByTestId("agent-logins-notice").textContent).toContain("Claude Code is connected"));
     // The page names the source and the consent; the login is read by the app, not passed through here.
-    expect(api.cloudAgentLoginConnect).toHaveBeenCalledWith("claude", "local-login", { contextRevision: "org-revision", organizationSharing: true, machineInstallation: true });
+    expect(api.cloudAgentLoginConnect).toHaveBeenCalledWith("claude", "local-login", { contextRevision: "org-revision", organizationSharing: true, machineInstallation: true, replaceExisting: false });
     expect(within(row("claude")).getByTestId("agent-login-status").textContent).toMatch(/^Connected/);
     expect(document.querySelector('input[type="text"], input[type="password"], textarea')).toBeNull();
   });
@@ -96,7 +99,7 @@ describe("agent logins in Settings (PRO-79)", () => {
     await show();
     const failWith = async (code: string, text: RegExp) => {
       vi.mocked(api.cloudAgentLoginConnect).mockRejectedValueOnce({ code });
-      fireEvent.click(within(row("claude")).getByRole("button", { name: "Use this Mac's Claude Code login" }));
+      fireEvent.click(within(row("claude")).getByRole("button", { name: "Lend this Mac's Claude Code sign-in (temporary)" }));
       consent(within(row("claude")).getByTestId("agent-login-consent"));
       fireEvent.click(within(row("claude")).getByRole("button", { name: "Read this Mac's sign-in and confirm" }));
       await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(text));
@@ -127,14 +130,56 @@ describe("agent logins in Settings (PRO-79)", () => {
   });
 
   it("says why a disconnect was refused while a workspace still uses the login, and keeps it listed", async () => {
-    stored = [login({ displayIdentity: "ada@example.com · this Mac's sign-in, temporary until 3 Oct 2026, 21:40" })];
+    stored = [login({ displayIdentity: "ada@example.com" })];
     vi.mocked(api.cloudAgentLoginRemove).mockRejectedValue({ code: "cloud_workspace_credential_in_use" });
     await show();
-    // Other admins see whose sign-in it is and that it is temporary.
-    expect(within(row("claude")).getByTestId("agent-login-status").textContent).toContain("ada@example.com · this Mac's sign-in, temporary until 3 Oct 2026, 21:40");
     fireEvent.click(within(row("claude")).getByRole("button", { name: "Disconnect" }));
     fireEvent.click(within(row("claude")).getByRole("button", { name: "Disconnect Claude Code" }));
     expect((await screen.findByRole("alert")).textContent).toMatch(/still uses it\. Delete or archive those workspaces first, or revoke the login in the web console/);
     expect(within(row("claude")).getByTestId("agent-login-status").textContent).toMatch(/^Connected/);
+  });
+
+  // Review of #293: lending a sign-in silently replaced a working API key.
+  it("replaces a stored login only by an explicit choice that says what stops working", async () => {
+    stored = [login({ authKind: "api-key" })];
+    vi.mocked(api.cloudAgentLoginConnect).mockResolvedValue(login({}));
+    await show();
+    fireEvent.click(within(row("claude")).getByRole("button", { name: "Replace with this Mac's Claude Code sign-in (temporary)" }));
+    const panel = within(row("claude")).getByTestId("agent-login-consent");
+    const choice = within(panel).getByTestId("agent-login-replace");
+    expect(choice.textContent).toContain("Replace the API key now stored for Claude Code.");
+    expect(choice.textContent).toContain("When the lent sign-in expires, Claude Code agents in every workspace of Acme Robotics stop until a login is connected again.");
+    const go = within(panel).getByRole("button", { name: "Read this Mac's sign-in and confirm" });
+    // Both consents without the replace choice: still not enough.
+    const boxes = within(panel).getAllByRole("checkbox");
+    expect(boxes).toHaveLength(3);
+    fireEvent.click(boxes[1]!);
+    fireEvent.click(boxes[2]!);
+    expect(go.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(boxes[0]!);
+    fireEvent.click(go);
+    await waitFor(() => expect(api.cloudAgentLoginConnect).toHaveBeenCalledWith("claude", "local-login", expect.objectContaining({ replaceExisting: true })));
+  });
+
+  // Review of #293: the row said Connected after the lent sign-in had expired.
+  it("shows a lent sign-in's expiry as a time, and Expired once it has passed", () => {
+    const lent = login({ displayIdentity: "ada@example.com · lent until 2026-10-03T21:40:00Z" });
+    const at = Date.parse("2026-10-03T21:40:00Z");
+    expect(lentUntil(lent)).toEqual({ who: "ada@example.com", at });
+    expect(lentUntil(login({ displayIdentity: "ada@example.com" }))).toBeNull();
+    expect(lentUntil(login({ displayIdentity: "x · lent until yesterday" }))).toBeNull();
+
+    const before = agentLoginStatus(lent, at - 3 * 60 * 60_000);
+    expect(before.text).toMatch(/^Connected · sign-in lent from a Mac · ada@example\.com · expires in 3 h \(/);
+    expect(before.warn).toBe(false);
+    const soon = agentLoginStatus(lent, at - 20 * 60_000);
+    expect(soon.text).toContain("expires in 20 min");
+    expect(soon.warn).toBe(true);
+    const after = agentLoginStatus(lent, at + 60_000);
+    expect(after.text).toMatch(/^Expired .*agents can no longer sign in with it\. Connect a login again\.$/);
+    expect(after.text).not.toContain("Connected");
+    expect(after.warn).toBe(true);
+    // The time is rendered in the viewer's own zone, not the uploader's.
+    expect(after.text).toContain(new Date(at).toLocaleString());
   });
 });

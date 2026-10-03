@@ -280,15 +280,24 @@ pub struct AgentLoginConsent {
     pub organization_sharing: bool,
     /// Short-lived access made from it is installed on the workspace machines.
     pub machine_installation: bool,
+    /// The login now stored for this agent may be replaced. Required when there is one.
+    #[serde(default)]
+    pub replace_existing: bool,
 }
 
 pub(crate) struct AgentLoginAuthorization {
     context: AccountContext,
+    /// The kind of login stored for the agent now, which saving replaces.
+    replaces: Option<AgentLoginKind>,
 }
 
 impl AgentLoginAuthorization {
     pub(crate) fn organization_id(&self) -> &str {
         &self.context.organization_id
+    }
+
+    pub(crate) fn replaces(&self) -> Option<AgentLoginKind> {
+        self.replaces
     }
 }
 
@@ -1321,6 +1330,8 @@ impl Client {
 enum RequestBody {
     Json(Value),
     Secret(zeroize::Zeroizing<String>),
+}
+
 impl Client {
     /// `GET /v1/desktop/cloud-catalog` (saas contract §23). `None` is the
     /// server's 304: nothing changed since `cursor`.
@@ -1624,7 +1635,12 @@ impl CloudWorkspaceService {
     /// for the organization that is active now, and the service accepts them
     /// as an owner or admin (the list is refused to anyone else). Nothing is
     /// prompted for, read or sent before this passes.
-    pub(crate) fn authorize_agent_login(&self, consent: &AgentLoginConsent) -> Result<AgentLoginAuthorization, CloudWorkspaceClientError> {
+    ///
+    /// The service holds one login per organization and agent, so storing one
+    /// replaces whatever is there. When a login is stored for `provider`,
+    /// the person must have chosen to replace it (`replace_existing`); what
+    /// would be replaced is returned so the native dialog can name it.
+    pub(crate) fn authorize_agent_login(&self, provider: AgentLoginProvider, consent: &AgentLoginConsent) -> Result<AgentLoginAuthorization, CloudWorkspaceClientError> {
         if !consent.organization_sharing || !consent.machine_installation {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
@@ -1632,11 +1648,19 @@ impl CloudWorkspaceService {
         if consent.context_revision != AccountManager::context_revision(&context) {
             return Err(context_changed_error(RequestRisk::Read));
         }
-        Self::read_agent_logins(&self.client, &context)?;
+        let stored = Self::read_agent_logins(&self.client, &context)?;
         if !self.account.is_current(&context) {
             return Err(context_changed_error(RequestRisk::Read));
         }
-        Ok(AgentLoginAuthorization { context })
+        let replaces = stored
+            .credentials
+            .into_iter()
+            .find(|login| login.provider == provider.as_str() && login.state.as_deref() != Some("disconnected"))
+            .map(|login| if login.auth_kind == "api-key" { AgentLoginKind::ApiKey } else { AgentLoginKind::LoginDocument });
+        if replaces.is_some() && !consent.replace_existing {
+            return Err(CloudWorkspaceClientError::local("cloud_agent_login_replace_unconfirmed", false));
+        }
+        Ok(AgentLoginAuthorization { context, replaces })
     }
 
     /// Store a login for an agent. `secret` is sent once, to the service
@@ -1679,8 +1703,9 @@ impl CloudWorkspaceService {
         Ok(login)
     }
 
-    /// Disconnect an agent's login: the service stops handing it to
-    /// workspaces at once.
+    /// Disconnect an agent's login. The service refuses while a workspace
+    /// still uses it, and access already handed to a machine lasts until its
+    /// own expiry.
     pub fn remove_agent_login(&self, provider: AgentLoginProvider, context_revision: String) -> Result<(), CloudWorkspaceClientError> {
         let context = self.context()?;
         if context_revision != AccountManager::context_revision(&context) || !self.account.is_current(&context) {
@@ -3077,7 +3102,26 @@ mod tests {
     // ---- agent logins (PRO-79)
 
     fn consent(revision: &str, sharing: bool, machines: bool) -> AgentLoginConsent {
-        AgentLoginConsent { context_revision: revision.into(), organization_sharing: sharing, machine_installation: machines }
+        AgentLoginConsent { context_revision: revision.into(), organization_sharing: sharing, machine_installation: machines, replace_existing: false }
+    }
+
+    // Review of #293: lending a sign-in silently replaced a working API key.
+    #[test]
+    fn a_stored_login_is_replaced_only_by_an_explicit_choice_and_the_dialog_is_told_what_it_replaces() {
+        let stored = r#"{"credentials":[{"id":"c1","provider":"claude","authKind":"api-key","fingerprint":"sha256:ab","version":1,"updatedAt":5,"state":"connected"},{"id":"c2","provider":"codex","authKind":"api-key","fingerprint":"sha256:cd","version":1,"updatedAt":5,"state":"disconnected"}]}"#;
+        let revision = AccountManager::context_revision(&context());
+        let ask = |provider, replace| {
+            let (base, _, request) = serve_once(response("200 OK", stored, ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            let result = service.authorize_agent_login(provider, &AgentLoginConsent { replace_existing: replace, ..consent(&revision, true, true) });
+            request.join().unwrap();
+            result
+        };
+        assert_eq!(ask(AgentLoginProvider::Claude, false).err().unwrap().code, "cloud_agent_login_replace_unconfirmed");
+        assert_eq!(ask(AgentLoginProvider::Claude, true).unwrap().replaces(), Some(AgentLoginKind::ApiKey));
+        // Nothing stored, or only a disconnected one: nothing to replace, no extra choice needed.
+        assert_eq!(ask(AgentLoginProvider::Cursor, false).unwrap().replaces(), None);
+        assert_eq!(ask(AgentLoginProvider::Codex, false).unwrap().replaces(), None);
     }
 
     #[test]
@@ -3106,12 +3150,12 @@ mod tests {
         let (_, service) = test_service(&base);
         let revision = AccountManager::context_revision(&context());
         for (sharing, machines) in [(false, true), (true, false), (false, false)] {
-            assert_eq!(service.authorize_agent_login(&consent(&revision, sharing, machines)).err().unwrap().code, "cloud_workspace_request_invalid");
+            assert_eq!(service.authorize_agent_login(AgentLoginProvider::Claude, &consent(&revision, sharing, machines)).err().unwrap().code, "cloud_workspace_request_invalid");
         }
         // For another organization than the active one: still no request.
-        assert_eq!(service.authorize_agent_login(&consent("old-context", true, true)).err().unwrap().code, "account_context_changed");
+        assert_eq!(service.authorize_agent_login(AgentLoginProvider::Claude, &consent("old-context", true, true)).err().unwrap().code, "account_context_changed");
         // Consented, for this organization: the one read that the service answers only for owners and admins.
-        assert!(service.authorize_agent_login(&consent(&revision, true, true)).is_ok());
+        assert!(service.authorize_agent_login(AgentLoginProvider::Claude, &consent(&revision, true, true)).is_ok());
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/cloud-workspace-credentials HTTP/1.1"));
         assert!(!captured.extra_request);
@@ -3119,7 +3163,7 @@ mod tests {
         // A member: the service refuses the read, and the refusal is what comes back.
         let (base, _, request) = serve_once(response("403 Forbidden", r#"{"error":"organization_admin_required"}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        assert_eq!(service.authorize_agent_login(&consent(&revision, true, true)).err().unwrap().code, "organization_admin_required");
+        assert_eq!(service.authorize_agent_login(AgentLoginProvider::Claude, &consent(&revision, true, true)).err().unwrap().code, "organization_admin_required");
         assert!(!request.join().unwrap().extra_request);
     }
 
@@ -3130,7 +3174,7 @@ mod tests {
         let (_, service) = test_service(&base);
         let login = service
             .save_agent_login(
-                AgentLoginAuthorization { context: context() },
+                AgentLoginAuthorization { context: context(), replaces: None },
                 AgentLoginProvider::Claude,
                 AgentLoginKind::LoginDocument,
                 zeroize::Zeroizing::new(r#"{"claudeAiOauth":{"accessToken":"at-1"}}"#.to_string()),
@@ -3157,9 +3201,9 @@ mod tests {
         // An empty login is refused here, and an answer about another agent is not accepted.
         let (base, _, _request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let empty = service.save_agent_login(AgentLoginAuthorization { context: context() }, AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("  ".to_string()), None);
+        let empty = service.save_agent_login(AgentLoginAuthorization { context: context(), replaces: None }, AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("  ".to_string()), None);
         assert_eq!(empty.err().unwrap().code, "cloud_workspace_request_invalid");
-        let other = service.save_agent_login(AgentLoginAuthorization { context: context() }, AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("sk-1".to_string()), None);
+        let other = service.save_agent_login(AgentLoginAuthorization { context: context(), replaces: None }, AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("sk-1".to_string()), None);
         assert!(other.is_err());
     }
 
@@ -3176,7 +3220,7 @@ mod tests {
         let (_, service) = test_service(&base);
         // Asked for another organization than the active one: nothing is sent.
         assert_eq!(service.remove_agent_login(AgentLoginProvider::Cursor, "old-context".into()).err().unwrap().code, "account_context_changed");
-        let refused = service.save_agent_login(AgentLoginAuthorization { context: context() }, AgentLoginProvider::Cursor, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("key-1".to_string()), None);
+        let refused = service.save_agent_login(AgentLoginAuthorization { context: context(), replaces: None }, AgentLoginProvider::Cursor, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("key-1".to_string()), None);
         assert_eq!(refused.err().unwrap().code, "cloud_workspace_credential_invalid");
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("PUT ") && !captured.extra_request);
