@@ -81,10 +81,17 @@ export const RECONNECTING_LABEL = "Reconnecting…";
 /** A stop is running: the machine is on its way down, whoever asked. */
 export const STOPPING_LABEL = "Stopping…";
 /** The workspace's machine coming up: being provisioned, or resumed from a stop. */
-export const STARTING_LABEL = "Starting";
+export const STARTING_LABEL = "Starting…";
+/** This desktop woke a stopped workspace, and its machine is coming back. */
+export const RESUMING_LABEL = "Resuming…";
+/**
+ * Every label the chip shows while something is still happening. Each ends in
+ * an ellipsis; a state that has settled ("Live", "Stopped") never does.
+ */
+export const IN_PROGRESS_LABELS = [CONNECTING_LABEL, RECONNECTING_LABEL, STOPPING_LABEL, STARTING_LABEL, RESUMING_LABEL] as const;
 
-/** While waking, the chip only moves forward: Resuming, then Connecting, then Live. */
-export const WAKE_STEPS = ["Resuming", CONNECTING_LABEL] as const;
+/** While waking, the chip only moves forward: Resuming…, then Connecting…, then Live. */
+export const WAKE_STEPS = [RESUMING_LABEL, CONNECTING_LABEL] as const;
 
 /**
  * The connection chip: a short label, and whether it is live, on its way, or
@@ -92,7 +99,7 @@ export const WAKE_STEPS = ["Resuming", CONNECTING_LABEL] as const;
  * connection still reads connected, unless this desktop woke it. `woke` is
  * set once an interactive action asked for compute (CS-7's single wake).
  *
- * "Starting" is the machine's: a workspace that is being provisioned or
+ * "Starting…" is the machine's: a workspace that is being provisioned or
  * resumed (`starting`, from the workspace list). A workspace that is running
  * and that this window is only attaching to (a member opening a session
  * someone else has live) reads "Connecting…", also while the relay waits for
@@ -100,7 +107,7 @@ export const WAKE_STEPS = ["Resuming", CONNECTING_LABEL] as const;
  *
  * "Live" is the transport's word alone: `state` is the connection's own
  * state, never the workspace list's. While a stop runs (`stopping`, from the
- * list's operation) it reads "Stopping…", then "Stopped": never "Starting"
+ * list's operation) it reads "Stopping…", then "Stopped": never "Starting…"
  * or "Live" for a machine on its way down. A window attaching again after
  * its workspace came back (`reattaching`) reads "Reconnecting…" until the
  * transport is really up.
