@@ -105,6 +105,8 @@ export interface WorkspacePr {
 
 export interface WorkspaceDisposition {
   exists: boolean;
+  /** False when the directory could not be checked: the counts are then 0 and mean "unknown". */
+  checked: boolean;
   isMain: boolean;
   branch: string | null;
   uncommitted: number;
@@ -180,9 +182,16 @@ export interface CommitInfo {
 
 export interface WorktreeDisposition {
   exists: boolean;
+  /** False when the directory could not be checked: the counts are then 0 and mean "unknown". */
+  checked: boolean;
   uncommitted: number;
   unpushed: number;
   branch: string | null;
+}
+
+export interface DeleteSessionReport {
+  /** The worktree's branch, when it was kept because it holds commits nothing else has. */
+  keptBranch: string | null;
 }
 
 export function sessionStatus(s: SessionEntry): TabStatus {

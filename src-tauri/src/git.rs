@@ -455,27 +455,93 @@ fn ensure_worktree_dir_ignored(project: &Path) {
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeDisposition {
     pub exists: bool,
+    /// Whether the counts below could be read. A directory that is no longer
+    /// a working tree of its own (its `.git` file is gone or broken) cannot
+    /// be checked: git would answer for the project around it and report
+    /// nothing. The counts are then 0 and mean "unknown", not "clean".
+    #[serde(default)]
+    pub checked: bool,
     pub uncommitted: u32,
     /// Commits no other ref holds. Over-warning is the safe direction.
     pub unpushed: u32,
     pub branch: Option<String>,
 }
 
+/// Whether `path` is the top of a working tree of its own. Without this a
+/// git command run there silently answers for the enclosing repository.
+pub fn is_own_worktree(path: &Path) -> bool {
+    let Ok(top) = run(path, &["rev-parse", "--show-toplevel"]) else { return false };
+    match (std::fs::canonicalize(top.trim()), std::fs::canonicalize(path)) {
+        (Ok(top), Ok(path)) => top == path,
+        _ => false,
+    }
+}
+
 pub fn worktree_disposition(project: &Path, name: &str) -> WorktreeDisposition {
     let path = worktree_path(project, name);
-    if !path.exists() {
+    if std::fs::symlink_metadata(&path).is_err() {
         return WorktreeDisposition::default();
     }
     let branch = worktree_branch(name);
-    let uncommitted = run(&path, &["status", "--porcelain", "--"]).map(|s| s.lines().count() as u32).unwrap_or(0);
+    let unchecked = WorktreeDisposition { exists: true, checked: false, uncommitted: 0, unpushed: 0, branch: Some(branch.clone()) };
+    if !is_own_worktree(&path) {
+        return unchecked;
+    }
+    let uncommitted = run(&path, &["status", "--porcelain", "--"]).map(|s| s.lines().count() as u32);
     let unpushed = run(
         &path,
         &["rev-list", "--count", "HEAD", "--not", &format!("--exclude={branch}"), "--branches", "--remotes", "--tags"],
     )
     .ok()
-    .and_then(|s| s.trim().parse().ok())
-    .unwrap_or(0);
-    WorktreeDisposition { exists: true, uncommitted, unpushed, branch: Some(branch) }
+    .and_then(|s| s.trim().parse::<u32>().ok());
+    match (uncommitted, unpushed) {
+        (Ok(uncommitted), Some(unpushed)) => WorktreeDisposition { exists: true, checked: true, uncommitted, unpushed, branch: Some(branch) },
+        _ => unchecked,
+    }
+}
+
+/// Bytes a file or directory tree takes on disk. Symlinks are counted as
+/// links and never followed.
+pub fn size_on_disk(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::symlink_metadata(path) else { return 0 };
+    #[cfg(unix)]
+    let own = {
+        use std::os::unix::fs::MetadataExt;
+        meta.blocks() * 512
+    };
+    #[cfg(not(unix))]
+    let own = meta.len();
+    if !meta.is_dir() {
+        return own;
+    }
+    let children: u64 = std::fs::read_dir(path).into_iter().flatten().flatten().map(|entry| size_on_disk(&entry.path())).sum();
+    own + children
+}
+
+pub fn format_size(bytes: u64) -> String {
+    match bytes {
+        b if b >= 1_000_000_000 => format!("{:.1} GB", b as f64 / 1e9),
+        b if b >= 1_000_000 => format!("{} MB", b / 1_000_000),
+        b if b >= 1_000 => format!("{} KB", b / 1_000),
+        b => format!("{b} B"),
+    }
+}
+
+/// Whether deleting a worktree's directory directly, when git cannot remove
+/// it, is allowed. Only a caller that showed the person what would be lost
+/// and got a confirmation may allow it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectDelete {
+    Allowed,
+    Never,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeRemoval {
+    /// The worktree's branch, when it was kept because it holds commits no
+    /// other branch, remote or tag has.
+    pub kept_branch: Option<String>,
 }
 
 /// Where the managed worktree `name` lives. The guard keys on shape: a direct
@@ -498,8 +564,10 @@ pub fn managed_worktree_path(project: &Path, name: &str) -> Result<PathBuf> {
 /// directory goes for good; nothing is moved to the Trash.
 ///
 /// The guard is checked on what is really on disk: `path` must be a real
-/// directory, not a symlink, and once both are resolved it must still be a
-/// direct child of the project's worktree root.
+/// directory, not a symlink; once both are resolved it must still be a
+/// direct child of the project's worktree root; and it must be this
+/// project's (see [`belongs_to_project`]), because the worktree folder is a
+/// setting and two projects, or a clone someone put there, can share it.
 pub fn remove_managed_worktree_dir(project: &Path, path: &Path) -> Result<()> {
     let meta = std::fs::symlink_metadata(path).with_context(|| format!("{} cannot be read", path.display()))?;
     if meta.file_type().is_symlink() {
@@ -513,19 +581,85 @@ pub fn remove_managed_worktree_dir(project: &Path, path: &Path) -> Result<()> {
     if resolved.parent() != Some(root.as_path()) {
         bail!("refusing to remove: {} is not directly under the worktree directory", path.display());
     }
-    let project = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
-    if resolved == project || project.starts_with(&resolved) {
+    let project_dir = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    if resolved == project_dir || project_dir.starts_with(&resolved) {
         bail!("refusing to remove: {} holds the project itself", path.display());
     }
+    belongs_to_project(project, &resolved)?;
     std::fs::remove_dir_all(&resolved).with_context(|| format!("delete {}", resolved.display()))
 }
 
-/// Remove a worktree and its branch. When `git worktree remove --force`
-/// fails the directory is deleted directly, behind the same guard, and the
-/// stale record pruned. An error names the directory and both reasons, and
-/// leaves the branch alone so the removal can be tried again.
-pub fn remove_worktree(project: &Path, name: &str) -> Result<()> {
+/// Whether a directory in the worktree folder is this project's to delete
+/// directly: its `.git` is absent (what is left of a removal that failed
+/// part-way), or is a file pointing into this project's `.git/worktrees/`.
+/// A `.git` directory is a repository of its own; a link pointing anywhere
+/// else is another project's worktree. Both are refused.
+fn belongs_to_project(project: &Path, dir: &Path) -> Result<()> {
+    let dot_git = dir.join(".git");
+    let meta = match std::fs::symlink_metadata(&dot_git) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => bail!("refusing to remove: {} cannot be read: {e}", dot_git.display()),
+        Ok(meta) => meta,
+    };
+    if !meta.is_file() {
+        bail!("refusing to remove: {} is a repository of its own, not a worktree of this project", dir.display());
+    }
+    let text = std::fs::read_to_string(&dot_git).with_context(|| format!("read {}", dot_git.display()))?;
+    let Some(link) = text.lines().next().and_then(|line| line.strip_prefix("gitdir:")).map(str::trim).filter(|link| !link.is_empty()) else {
+        bail!("refusing to remove: {} does not say which repository it belongs to", dot_git.display());
+    };
+    let link = if Path::new(link).is_absolute() { PathBuf::from(link) } else { dir.join(link) };
+    let common = run(project, &["rev-parse", "--git-common-dir"]).context("the project's git directory cannot be found")?;
+    let common = common.trim();
+    let common = if Path::new(common).is_absolute() { PathBuf::from(common) } else { project.join(common) };
+    let ours = common.join("worktrees");
+    // The record may already be gone (git drops it before it fails on the
+    // directory), so fall back to comparing the paths as written.
+    let resolve = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let owner = link.parent().map(resolve);
+    let matches = owner.as_deref().is_some_and(|owner| owner == resolve(&ours) || owner == std::fs::canonicalize(&common).unwrap_or(common.clone()).join("worktrees"));
+    if !matches {
+        bail!("refusing to remove: {} is a worktree of another repository", dir.display());
+    }
+    Ok(())
+}
+
+/// Commits on `branch` that no other branch, remote or tag holds. `None`
+/// when git cannot say.
+pub fn unique_commits(project: &Path, branch: &str) -> Option<u32> {
+    run(project, &["rev-list", "--count", branch, "--not", &format!("--exclude={branch}"), "--branches", "--remotes", "--tags"])
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+}
+
+/// What a removal that failed left behind, in words for the person.
+fn leftover_state(path: &Path) -> String {
+    if std::fs::symlink_metadata(path).is_err() {
+        return "The directory is gone.".into();
+    }
+    let size = format_size(size_on_disk(path));
+    if is_own_worktree(path) {
+        format!("It is still a checkout ({size} on disk), though some of its files may already have been removed.")
+    } else {
+        format!("It was partly removed: {size} remain on disk and it is no longer a usable checkout.")
+    }
+}
+
+/// Remove a worktree and its branch.
+///
+/// When `git worktree remove --force` fails and `direct` allows it, the
+/// directory is deleted directly, behind the guard above, and the stale
+/// record pruned. An error names the directory, both reasons and what state
+/// the directory was left in, and leaves the branch alone so the removal can
+/// be tried again.
+///
+/// The branch goes with a worktree git removed itself. On any other path the
+/// directory could not be checked for unpushed commits (git answers for the
+/// enclosing project there), so the branch is deleted only when nothing else
+/// would be lost with it, and is otherwise kept and named in the result.
+pub fn remove_worktree(project: &Path, name: &str, direct: DirectDelete) -> Result<WorktreeRemoval> {
     let path = managed_worktree_path(project, name)?;
+    let mut removed_by_git = false;
     // `symlink_metadata` so a dangling link still counts as something there.
     if let Ok(meta) = std::fs::symlink_metadata(&path) {
         if meta.file_type().is_symlink() {
@@ -533,16 +667,28 @@ pub fn remove_worktree(project: &Path, name: &str) -> Result<()> {
         }
         let target = arg(&path)?;
         let _ = run(project, &["worktree", "unlock", target]);
-        if let Err(git_error) = run(project, &["worktree", "remove", "--force", target]) {
-            if let Err(direct_error) = remove_managed_worktree_dir(project, &path) {
-                bail!("Could not remove the worktree at {}: {direct_error:#} ({git_error:#})", path.display());
+        match run(project, &["worktree", "remove", "--force", target]) {
+            Ok(_) => removed_by_git = true,
+            Err(git_error) if direct == DirectDelete::Never => {
+                bail!("Could not remove the worktree at {}: {git_error:#}. {}", path.display(), leftover_state(&path));
+            }
+            Err(git_error) => {
+                if let Err(direct_error) = remove_managed_worktree_dir(project, &path) {
+                    bail!("Could not remove the worktree at {}: {direct_error:#} ({git_error:#}). {}", path.display(), leftover_state(&path));
+                }
             }
         }
     }
     let _ = run(project, &["worktree", "prune"]);
     let branch = worktree_branch(name);
+    if !run_ok(project, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]) {
+        return Ok(WorktreeRemoval::default());
+    }
+    if !removed_by_git && unique_commits(project, &branch) != Some(0) {
+        return Ok(WorktreeRemoval { kept_branch: Some(branch) });
+    }
     let _ = run(project, &["branch", "-D", &branch]);
-    Ok(())
+    Ok(WorktreeRemoval::default())
 }
 
 pub fn list_worktrees(project: &Path) -> Result<Vec<(String, Option<String>)>> {
@@ -750,9 +896,9 @@ mod tests {
         std::fs::write(Path::new(&wt.path).join("c.txt"), "x").unwrap();
         let d = worktree_disposition(p, "quiet-amber-fox");
         assert!(d.exists && d.uncommitted == 1 && d.unpushed == 0);
-        assert!(remove_worktree(p, "").is_err());
-        assert!(remove_worktree(p, "../x").is_err());
-        remove_worktree(p, "quiet-amber-fox").unwrap();
+        assert!(remove_worktree(p, "", DirectDelete::Allowed).is_err());
+        assert!(remove_worktree(p, "../x", DirectDelete::Allowed).is_err());
+        remove_worktree(p, "quiet-amber-fox", DirectDelete::Allowed).unwrap();
         assert!(!Path::new(&wt.path).exists());
         assert!(!worktree_branch_names(p).contains(&"quiet-amber-fox".to_string()));
     }
@@ -766,7 +912,7 @@ mod tests {
         std::fs::create_dir_all(p.join(".raccoon/outside")).unwrap();
         for name in ["", ".", "..", "../outside", "../../a.txt", "a/b", "/tmp", "a\\b", "quiet-amber-fox/..", "x\0y"] {
             assert!(managed_worktree_path(p, name).is_err(), "{name:?} names a worktree");
-            assert!(remove_worktree(p, name).is_err(), "{name:?} was removed");
+            assert!(remove_worktree(p, name, DirectDelete::Allowed).is_err(), "{name:?} was removed");
         }
         assert!(p.join("a.txt").exists());
         assert!(p.join(".git").exists());
@@ -783,7 +929,7 @@ mod tests {
         // Without its `.git` file git no longer accepts the directory as a worktree.
         std::fs::remove_file(Path::new(&wt.path).join(".git")).unwrap();
         assert!(run(p, &["worktree", "remove", "--force", &wt.path]).is_err());
-        remove_worktree(p, "quiet-amber-fox").unwrap();
+        remove_worktree(p, "quiet-amber-fox", DirectDelete::Allowed).unwrap();
         assert!(!Path::new(&wt.path).exists());
         assert!(!run(p, &["worktree", "list", "--porcelain"]).unwrap().contains("quiet-amber-fox"), "the record is pruned");
         assert!(!worktree_branch_names(p).contains(&"quiet-amber-fox".to_string()));
@@ -791,7 +937,7 @@ mod tests {
         // A directory git never knew about goes the same way.
         let stray = worktree_path(p, "stray");
         std::fs::create_dir_all(stray.join("node_modules")).unwrap();
-        remove_worktree(p, "stray").unwrap();
+        remove_worktree(p, "stray", DirectDelete::Allowed).unwrap();
         assert!(!stray.exists());
         assert!(p.join("a.txt").exists());
     }
@@ -808,7 +954,7 @@ mod tests {
         let link = worktree_path(p, "link");
         std::os::unix::fs::symlink(outside.path(), &link).unwrap();
 
-        assert!(remove_worktree(p, "link").is_err());
+        assert!(remove_worktree(p, "link", DirectDelete::Allowed).is_err());
         assert!(remove_managed_worktree_dir(p, &link).is_err());
         assert!(outside.path().join("keep.txt").exists());
         assert!(link.symlink_metadata().is_ok(), "the link itself is left alone");
@@ -816,7 +962,7 @@ mod tests {
         // A link to the project must not take the project with it either.
         let to_project = worktree_path(p, "project");
         std::os::unix::fs::symlink(p, &to_project).unwrap();
-        assert!(remove_worktree(p, "project").is_err());
+        assert!(remove_worktree(p, "project", DirectDelete::Allowed).is_err());
         assert!(p.join("a.txt").exists());
     }
 
@@ -849,14 +995,195 @@ mod tests {
         let p = dir.path();
         let wt = create_worktree(p, "quiet-amber-fox", None).unwrap();
         std::fs::set_permissions(&wt.path, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let error = remove_worktree(p, "quiet-amber-fox").map_err(|e| format!("{e:#}"));
+        let error = remove_worktree(p, "quiet-amber-fox", DirectDelete::Allowed).map_err(|e| format!("{e:#}"));
         std::fs::set_permissions(&wt.path, std::fs::Permissions::from_mode(0o755)).unwrap();
         let error = error.unwrap_err();
         assert!(error.contains(&wt.path), "{error}");
         assert!(Path::new(&wt.path).join("a.txt").exists());
         assert!(worktree_branch_names(p).contains(&"quiet-amber-fox".to_string()));
-        remove_worktree(p, "quiet-amber-fox").unwrap();
+        remove_worktree(p, "quiet-amber-fox", DirectDelete::Allowed).unwrap();
         assert!(!Path::new(&wt.path).exists());
+    }
+
+    /// A worktree holding one commit nothing else has and one dirty file.
+    fn worktree_with_unsaved_work(p: &Path, name: &str) -> (PathBuf, String) {
+        let wt = PathBuf::from(create_worktree(p, name, None).unwrap().path);
+        std::fs::write(wt.join("work.txt"), "work\n").unwrap();
+        run(&wt, &["add", "."]).unwrap();
+        run(&wt, &["commit", "-q", "-m", "unpushed"]).unwrap();
+        let commit = run(&wt, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        std::fs::write(wt.join("dirty.txt"), "dirty\n").unwrap();
+        (wt, commit)
+    }
+
+    #[test]
+    fn a_broken_worktree_reads_as_unchecked_and_its_unpushed_commits_survive() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        let (wt, commit) = worktree_with_unsaved_work(p, "quiet-amber-fox");
+        let intact = worktree_disposition(p, "quiet-amber-fox");
+        assert!(intact.checked && intact.uncommitted == 1 && intact.unpushed == 1);
+
+        // Without its `.git` file git answers for the enclosing project, where
+        // the worktree folder is ignored: that must not read as "clean".
+        std::fs::remove_file(wt.join(".git")).unwrap();
+        assert!(!is_own_worktree(&wt));
+        let broken = worktree_disposition(p, "quiet-amber-fox");
+        assert!(broken.exists && !broken.checked, "{broken:?}");
+
+        // A caller that showed nothing may not delete it directly at all.
+        assert!(remove_worktree(p, "quiet-amber-fox", DirectDelete::Never).is_err());
+        assert!(wt.join("dirty.txt").exists());
+
+        // After an explicit confirmation the directory goes, but the branch
+        // holding the only copy of the commit is kept and named.
+        let removal = remove_worktree(p, "quiet-amber-fox", DirectDelete::Allowed).unwrap();
+        assert_eq!(removal.kept_branch.as_deref(), Some("raccoon/quiet-amber-fox"));
+        assert!(!wt.exists());
+        assert_eq!(run(p, &["rev-parse", "raccoon/quiet-amber-fox"]).unwrap().trim(), commit);
+    }
+
+    #[test]
+    fn a_branch_with_nothing_of_its_own_goes_after_a_direct_delete() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        let wt = create_worktree(p, "quiet-amber-fox", None).unwrap();
+        std::fs::remove_file(Path::new(&wt.path).join(".git")).unwrap();
+        assert_eq!(remove_worktree(p, "quiet-amber-fox", DirectDelete::Allowed).unwrap(), WorktreeRemoval::default());
+        assert!(!worktree_branch_names(p).contains(&"quiet-amber-fox".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_removal_that_stops_part_way_says_what_is_left() {
+        use std::os::unix::fs::PermissionsExt;
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        let (wt, commit) = worktree_with_unsaved_work(p, "quiet-amber-fox");
+        let locked = wt.join("zz-locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("held.bin"), vec![1u8; 64 * 1024]).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let error = remove_worktree(p, "quiet-amber-fox", DirectDelete::Allowed).map_err(|e| format!("{e:#}"));
+        let usable = is_own_worktree(&wt);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = error.unwrap_err();
+
+        assert!(error.contains(wt.to_str().unwrap()), "{error}");
+        assert!(locked.join("held.bin").exists());
+        if usable {
+            assert!(error.contains("still a checkout"), "{error}");
+        } else {
+            assert!(error.contains("partly removed") && error.contains("no longer a usable checkout"), "{error}");
+        }
+        assert!(error.contains("KB") || error.contains("MB"), "the size that remains is given: {error}");
+        // Whatever state the directory is in, the unpushed commit is not lost.
+        assert_eq!(run(p, &["rev-parse", "raccoon/quiet-amber-fox"]).unwrap().trim(), commit);
+
+        // Retrying finishes the job and still keeps the branch.
+        let removal = remove_worktree(p, "quiet-amber-fox", DirectDelete::Allowed).unwrap();
+        assert!(!wt.exists());
+        assert_eq!(removal.kept_branch.as_deref(), Some("raccoon/quiet-amber-fox"));
+    }
+
+    #[test]
+    fn another_projects_directory_in_a_shared_worktree_folder_is_refused() {
+        let _home = crate::store::temp_home();
+        // A worktree folder outside any project, as an absolute setting allows.
+        let shared = tempfile::tempdir().unwrap();
+        let shared_root = std::fs::canonicalize(shared.path()).unwrap();
+        let settings = crate::store::settings::Settings { worktree_dir: shared_root.to_string_lossy().into_owned(), ..Default::default() };
+        crate::store::settings::save(&settings).unwrap();
+        let ours = repo();
+        let theirs = repo();
+        assert_eq!(worktree_root(ours.path()), shared_root);
+
+        // The other project's worktree, under the name of a session we are deleting.
+        let foreign = PathBuf::from(create_worktree(theirs.path(), "fix-login", None).unwrap().path);
+        std::fs::write(foreign.join("theirs.txt"), "theirs").unwrap();
+        let error = format!("{:#}", remove_worktree(ours.path(), "fix-login", DirectDelete::Allowed).unwrap_err());
+        assert!(error.contains("another repository"), "{error}");
+        assert!(foreign.join("theirs.txt").exists());
+        assert!(remove_managed_worktree_dir(ours.path(), &foreign).is_err());
+
+        // A clone someone put in the worktree folder is a repository of its own.
+        let clone = shared_root.join("a-clone");
+        std::fs::create_dir_all(&clone).unwrap();
+        run(&clone, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(clone.join("precious.txt"), "x").unwrap();
+        let error = format!("{:#}", remove_worktree(ours.path(), "a-clone", DirectDelete::Allowed).unwrap_err());
+        assert!(error.contains("repository of its own"), "{error}");
+        assert!(clone.join("precious.txt").exists());
+
+        // Our own worktree there, broken, is still ours to delete.
+        let own = PathBuf::from(create_worktree(ours.path(), "quiet-amber-fox", None).unwrap().path);
+        let record = std::fs::read_to_string(own.join(".git")).unwrap();
+        assert!(record.starts_with("gitdir:"));
+        std::fs::write(own.join(".git"), format!("{}\n", record.trim().replace("quiet-amber-fox", "pruned-record"))).unwrap();
+        remove_worktree(ours.path(), "quiet-amber-fox", DirectDelete::Allowed).unwrap();
+        assert!(!own.exists());
+        assert!(foreign.join("theirs.txt").exists());
+    }
+
+    #[test]
+    fn a_dot_git_that_names_no_repository_is_refused() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        let wt = PathBuf::from(create_worktree(p, "quiet-amber-fox", None).unwrap().path);
+        for content in ["", "garbage\n", "gitdir:\n", "gitdir: /somewhere/else/.git/worktrees/quiet-amber-fox\n", "gitdir: ../../..\n"] {
+            std::fs::write(wt.join(".git"), content).unwrap();
+            assert!(remove_worktree(p, "quiet-amber-fox", DirectDelete::Allowed).is_err(), "{content:?}");
+            assert!(wt.join("a.txt").exists(), "{content:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_inside_a_worktree_is_removed_as_a_link() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        let wt = PathBuf::from(create_worktree(p, "quiet-amber-fox", None).unwrap().path);
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("keep.txt"), "keep").unwrap();
+        std::os::unix::fs::symlink(outside.path(), wt.join("linked-dir")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("keep.txt"), wt.join("linked-file")).unwrap();
+        std::os::unix::fs::symlink(p, wt.join("linked-project")).unwrap();
+        // Through git, and through the direct delete.
+        for broken in [false, true] {
+            if broken {
+                let again = PathBuf::from(create_worktree(p, "quiet-amber-fox", None).unwrap().path);
+                std::os::unix::fs::symlink(outside.path(), again.join("linked-dir")).unwrap();
+                std::os::unix::fs::symlink(p, again.join("linked-project")).unwrap();
+                std::fs::remove_file(again.join(".git")).unwrap();
+            }
+            remove_worktree(p, "quiet-amber-fox", DirectDelete::Allowed).unwrap();
+            assert!(!wt.exists());
+            assert!(outside.path().join("keep.txt").exists());
+            assert!(p.join("a.txt").exists());
+        }
+    }
+
+    #[test]
+    fn a_name_in_another_case_never_reaches_outside_the_worktree_folder() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        let wt = PathBuf::from(create_worktree(p, "quiet-amber-fox", None).unwrap().path);
+        std::fs::create_dir_all(p.join(".RACCOON-other")).unwrap();
+        // On a case-insensitive disk this is the same directory; on a
+        // case-sensitive one it is nothing. Either way only that entry of the
+        // worktree folder can be affected.
+        let _ = remove_worktree(p, "QUIET-AMBER-FOX", DirectDelete::Allowed);
+        assert!(!wt.exists() || wt.join("a.txt").exists());
+        assert!(p.join("a.txt").exists());
+        assert!(p.join(".git").is_dir());
+        assert!(p.join(".RACCOON-other").exists());
     }
 
     #[test]

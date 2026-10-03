@@ -1772,11 +1772,16 @@ impl WorkspaceRpc {
                     }
                 }
             }
-            // Its shells go before the worktree does, so nothing holds the directory.
-            self.close_session_ptys(&HashSet::from([doomed.id.clone()]));
+            // Its shells go before the worktree does, and are waited for, so
+            // nothing holds the directory.
+            self.close_session_ptys_waiting(&HashSet::from([doomed.id.clone()]), Some(std::time::Duration::from_secs(5)));
         };
-        let removed = crate::session_ops::delete_session_blocking(&*self.sink, &session.id, remove_worktree, &stop)
+        // A remote caller was shown nothing of what the worktree holds, so a
+        // directory git cannot remove is reported, never deleted directly.
+        let deleted = crate::session_ops::delete_session_blocking(&*self.sink, &session.id, remove_worktree, crate::git::DirectDelete::Never, &stop)
             .map_err(RpcError::internal)?;
+        let kept_branch = deleted.kept_branch;
+        let removed = deleted.sessions;
         let removed_ids: HashSet<String> = removed.iter().map(|session| session.id.clone()).collect();
         if let Some(agents) = self.agents.get() {
             for tab in removed.iter().flat_map(|session| &session.tabs) {
@@ -1788,11 +1793,17 @@ impl WorkspaceRpc {
         self.close_session_ptys(&removed_ids);
         let mut deleted: Vec<String> = removed_ids.into_iter().collect();
         deleted.sort();
-        Ok(json!({ "sessionId": session.id, "deleted": deleted }))
+        Ok(json!({ "sessionId": session.id, "deleted": deleted, "keptBranch": kept_branch }))
     }
 
     /// Close the terminals opened for sessions that are gone.
     fn close_session_ptys(&self, sessions: &HashSet<String>) {
+        self.close_session_ptys_waiting(sessions, None);
+    }
+
+    /// Close the sessions' terminals; with `wait`, also wait that long for
+    /// their processes to exit.
+    fn close_session_ptys_waiting(&self, sessions: &HashSet<String>, wait: Option<std::time::Duration>) {
         let (killed, ended) = {
             let mut ptys = self.ptys.lock().unwrap();
             let doomed: Vec<(String, bool)> = ptys
@@ -1811,8 +1822,13 @@ impl WorkspaceRpc {
             }
             (doomed.into_iter().map(|(id, _)| id).collect::<Vec<_>>(), ended)
         };
-        for id in killed {
-            self.terminals.kill(&id);
+        match wait {
+            Some(timeout) => self.terminals.kill_all_and_wait(&killed, timeout),
+            None => {
+                for id in killed {
+                    self.terminals.kill(&id);
+                }
+            }
         }
         self.forget_subscriptions(ended);
     }

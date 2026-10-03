@@ -435,9 +435,10 @@ export async function renameSession(id: string, title: string) {
 }
 
 export async function deleteSession(id: string, removeWorktree: boolean) {
-  await api.deleteSession(id, removeWorktree);
+  const report = await api.deleteSession(id, removeWorktree);
   // Siblings taken along with a removed worktree arrive as session_deleted events.
   removeSessions([id]);
+  return report;
 }
 
 export async function settleSession(id: string, action: "delete" | "relocate") {

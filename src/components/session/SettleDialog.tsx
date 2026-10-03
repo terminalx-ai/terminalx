@@ -49,7 +49,9 @@ export function SettleDialog() {
     }
   };
 
-  const risky = !!disp && (disp.unpushed > 0 || disp.uncommitted > 0);
+  // A tree that could not be checked is treated as holding work.
+  const unchecked = !!disp && disp.exists && !disp.checked;
+  const risky = !!disp && (unchecked || disp.unpushed > 0 || disp.uncommitted > 0);
 
   return (
     <Dialog open={!!settleFor} onOpenChange={(o) => !o && closeSettle()}>
@@ -81,6 +83,7 @@ export function SettleDialog() {
             <div className="flex items-start gap-2 text-foreground">
               <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" />
               <div>
+                {unchecked && <div>This folder is no longer a working git checkout, so it cannot be checked for uncommitted or unpushed work.</div>}
                 {disp.unpushed > 0 && (
                   <div>
                     {disp.unpushed} commit{disp.unpushed === 1 ? "" : "s"} on this branch {disp.unpushed === 1 ? "has" : "have"} not been pushed anywhere.
@@ -91,7 +94,9 @@ export function SettleDialog() {
                     {disp.uncommitted} file{disp.uncommitted === 1 ? "" : "s"} {disp.uncommitted === 1 ? "has" : "have"} uncommitted changes.
                   </div>
                 )}
-                <div className="mt-1 text-muted-foreground">Deleting the worktree loses them. Push or commit first, or move the session instead.</div>
+                <div className="mt-1 text-muted-foreground">
+                  {unchecked ? "Deleting it loses any files in it that are not saved elsewhere. Its branch is kept if it holds commits nothing else has." : "Deleting the worktree loses them. Push or commit first, or move the session instead."}
+                </div>
               </div>
             </div>
           )}

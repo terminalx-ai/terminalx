@@ -960,15 +960,26 @@ pub fn set_active_tab(session_id: String, tab_id: String) -> CmdResult<()> {
     .map_err(err)
 }
 
-/// Delete a session, its logs, attachments and (best effort) its worktree.
-/// Removing the worktree takes every session that ran in it along, since a
-/// checkout that no longer exists has nothing left for them to run in.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteSessionReport {
+    /// The worktree's branch, when it was kept because it holds commits
+    /// nothing else has.
+    pub kept_branch: Option<String>,
+}
+
+/// Delete a session, its logs, attachments and its worktree. Removing the
+/// worktree takes every session that ran in it along, since a checkout that
+/// no longer exists has nothing left for them to run in. A worktree that
+/// cannot be removed fails the delete and keeps the sessions.
 #[tauri::command]
-pub async fn delete_session(app: AppHandle, session_id: String, remove_worktree: bool) -> CmdResult<()> {
+pub async fn delete_session(app: AppHandle, session_id: String, remove_worktree: bool) -> CmdResult<DeleteSessionReport> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
         let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));
-        crate::session_ops::delete_session_blocking(&app, &session_id, remove_worktree, &stop).map(|_| ())
+        // The sidebar showed what the worktree holds and got a confirmation.
+        crate::session_ops::delete_session_blocking(&app, &session_id, remove_worktree, git::DirectDelete::Allowed, &stop)
+            .map(|deleted| DeleteSessionReport { kept_branch: deleted.kept_branch })
     })
     .await
     .map_err(err)?
@@ -1033,7 +1044,10 @@ pub async fn remove_session_worktree(app: AppHandle, session_id: String) -> CmdR
         let name = s.worktree_name.clone().ok_or("session has no worktree")?;
         let attached = sessions_in_workspace(Path::new(&s.cwd))?;
         stop_sessions_and_wait(&state, &attached);
-        git::remove_worktree(Path::new(&s.project_path), &name).map_err(err)?;
+        let removal = git::remove_worktree(Path::new(&s.project_path), &name, git::DirectDelete::Allowed).map_err(err)?;
+        if let Some(branch) = removal.kept_branch {
+            log::warn!("kept branch {branch}: it holds commits nothing else has");
+        }
         let moved = mark_workspace_sessions_removed(&s.project_path, &attached)?;
         notify_workspace_settled(&app, &s.project_path, &moved);
         moved
@@ -1058,7 +1072,10 @@ pub async fn settle_session(app: AppHandle, session_id: String, action: String) 
             "delete" => {
                 let attached = sessions_in_workspace(Path::new(&s.cwd))?;
                 stop_sessions_and_wait(&state, &attached);
-                git::remove_worktree(Path::new(&s.project_path), &name).map_err(err)?;
+                let removal = git::remove_worktree(Path::new(&s.project_path), &name, git::DirectDelete::Allowed).map_err(err)?;
+                if let Some(branch) = removal.kept_branch {
+                    log::warn!("kept branch {branch}: it holds commits nothing else has");
+                }
                 let moved = mark_workspace_sessions_removed(&s.project_path, &attached)?;
                 notify_workspace_settled(&app, &s.project_path, &moved);
                 moved
@@ -2184,6 +2201,7 @@ mod command_tests {
             project.to_str().unwrap(),
             worktree.to_str().unwrap(),
             true,
+            crate::git::DirectDelete::Allowed,
         )
         .unwrap();
 
@@ -2220,6 +2238,7 @@ mod command_tests {
             project.to_str().unwrap(),
             worktree.to_str().unwrap(),
             true,
+            crate::git::DirectDelete::Allowed,
         )
         .unwrap();
 
@@ -2453,8 +2472,10 @@ pub async fn delete_workspace(app: AppHandle, project_path: String, path: String
         let state = app.state::<crate::AppState>();
         let affected = sessions_in_workspace(Path::new(&path))?;
         stop_sessions_and_wait(&state, &affected);
-        state.browser.forget_workspace(&crate::browser::control::canonical(&path));
-        let removed = delete_workspace_entries(&project_path, &path, delete_branch)?;
+        let browser_key = crate::browser::control::canonical(&path);
+        let removed = delete_workspace_entries(&project_path, &path, delete_branch, git::DirectDelete::Allowed)?;
+        // Only once the workspace is really gone: a delete that fails keeps it.
+        state.browser.forget_workspace(&browser_key);
         notify_workspace_deleted(&app, &project_path, &removed);
         Ok(removed)
     })

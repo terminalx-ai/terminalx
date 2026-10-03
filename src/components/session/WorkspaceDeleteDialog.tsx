@@ -41,7 +41,9 @@ export function WorkspaceDeleteDialog() {
   if (!workspaceDelete) return null;
   const pr = disp?.pr ?? null;
   const merged = pr?.state === "MERGED";
-  const clean = !!disp && disp.uncommitted === 0 && disp.unpushed === 0;
+  // A directory that could not be checked is never called clean.
+  const unchecked = !!disp && disp.exists && !disp.checked;
+  const clean = !!disp && !unchecked && disp.uncommitted === 0 && disp.unpushed === 0;
   const safe = !!disp && clean && (merged || (disp.prChecked && !pr && (disp.aheadOfBase ?? 0) === 0));
   const risky = !!disp && !safe;
 
@@ -84,8 +86,14 @@ export function WorkspaceDeleteDialog() {
           {disp && (
             <>
               <SessionsRow count={disp.sessions} />
-              <Row ok={disp.uncommitted === 0} text={disp.uncommitted === 0 ? "No uncommitted changes." : `${disp.uncommitted} file${disp.uncommitted === 1 ? "" : "s"} with uncommitted changes.`} />
-              <Row ok={disp.unpushed === 0} text={disp.unpushed === 0 ? "Every commit is pushed." : `${disp.unpushed} commit${disp.unpushed === 1 ? "" : "s"} not pushed anywhere.`} />
+              {unchecked ? (
+                <Row ok={false} text="This folder is no longer a working git checkout, so it cannot be checked for uncommitted or unpushed work." />
+              ) : (
+                <>
+                  <Row ok={disp.uncommitted === 0} text={disp.uncommitted === 0 ? "No uncommitted changes." : `${disp.uncommitted} file${disp.uncommitted === 1 ? "" : "s"} with uncommitted changes.`} />
+                  <Row ok={disp.unpushed === 0} text={disp.unpushed === 0 ? "Every commit is pushed." : `${disp.unpushed} commit${disp.unpushed === 1 ? "" : "s"} not pushed anywhere.`} />
+                </>
+              )}
               {pr ? (
                 <div className="flex items-start gap-2">
                   {merged ? <GitMerge className="mt-0.5 size-3.5 shrink-0 text-merged" /> : <GitPullRequest className={`mt-0.5 size-3.5 shrink-0 ${pr.state === "OPEN" ? "text-warning" : "text-faint"}`} />}

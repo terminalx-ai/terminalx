@@ -20,6 +20,7 @@ import type {
   TabEntry,
   WorkStatus,
   WorktreeDisposition,
+  DeleteSessionReport,
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
@@ -286,7 +287,7 @@ export const api = {
   setSessionPinned: (sessionId: string, pinned: boolean) => invoke<void>("set_session_pinned", { sessionId, pinned }),
   setActiveTab: (sessionId: string, tabId: string) => invoke<void>("set_active_tab", { sessionId, tabId }),
   deleteSession: (sessionId: string, removeWorktree: boolean) =>
-    invoke<void>("delete_session", { sessionId, removeWorktree }),
+    invoke<DeleteSessionReport>("delete_session", { sessionId, removeWorktree }),
   worktreeDisposition: (sessionId: string) => invoke<WorktreeDisposition>("worktree_disposition", { sessionId }),
   removeSessionWorktree: (sessionId: string) => invoke<SessionEntry>("remove_session_worktree", { sessionId }),
   settleSession: (sessionId: string, action: "delete" | "relocate") => invoke<SessionEntry>("settle_session", { sessionId, action }),
