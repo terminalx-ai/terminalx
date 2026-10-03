@@ -33,7 +33,9 @@ vi.mock("@/lib/automations", () => ({
   updateAutomation,
   useAutomationStore: () => automationStore,
 }));
-vi.mock("@/lib/models", () => ({
+vi.mock("@/lib/models", async (original) => ({
+  // The pure helpers stay real; only the list and its loading are stubbed.
+  ...(await original<typeof import("@/lib/models")>()),
   BYPASS_MODE: "bypassPermissions",
   DEFAULT_AUTOMATION_MODE: "bypassPermissions",
   EFFORT_LABEL: {},

@@ -63,6 +63,12 @@ export interface Prefs {
    * is off until the person turns it on.
    */
   cloudControlFromAgents: boolean;
+  /**
+   * The sidebar's session filter per person, by account email (`local` while
+   * signed out). Only a filter that is on is kept; someone not listed sees
+   * every session. One person's choice never carries over to another.
+   */
+  sidebarFilters: Record<string, "unread" | "needs">;
 }
 
 const DEFAULTS: Prefs = {
@@ -94,6 +100,7 @@ const DEFAULTS: Prefs = {
   cloudCollapsed: {},
   shortcuts: {},
   cloudControlFromAgents: false,
+  sidebarFilters: {},
 };
 
 const KEY = "raccoon.prefs";

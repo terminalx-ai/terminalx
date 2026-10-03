@@ -19,7 +19,7 @@ import {
 import { LIFECYCLE_ADMIN_REASON, NEW_SESSION_ADMIN_REASON, NOT_SHARED_REASON, effectiveYou, getCollab, listedYou, tabGate, workspaceAuthority } from "@/lib/cloudCollab";
 import { cloudConnectionInfo, connectedCloudClient, retainCloudConnection, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
 import { getCloudDashboard, type CloudDashboardSession } from "@/lib/cloudDashboard";
-import { archiving, deletion, isArchived, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
+import { archiving, deletion, isArchived, lifecycleErrorMessage, stopping } from "@/lib/cloudLifecycle";
 import { confirmCloudCreate, planCloudStart, prepareCloudCreate, startInWorkspace, type CloudSessionRequest } from "@/lib/cloudNewSession";
 import { personName } from "@/lib/cloudPeople";
 import { deriveCloudActivity } from "@/lib/cloudRowState";
@@ -63,28 +63,33 @@ export const CLOUD_CONTROL_VERSION = 1;
  * (`--yes`, `--wake`, `--confirm-spend`) are passed by that same caller, so
  * they are no check on it.
  *
- * Two answers to that are built, and this one constant chooses which ships
- * (the owner's decision, PRO-40):
+ * Two answers to that are built, and they compose. This one constant
+ * chooses what ships (the owner's decision, PRO-40):
  *
- * - `"setting"`: every cloud command is refused until the person turns on
- *   "Let agents in local sessions control cloud workspaces" in Settings
- *   (off by default). Once on, the commands run as asked.
- * - `"confirm"`: the commands are available, and each one that would start
- *   billed compute or stop a workspace first asks the person in the window.
+ * - `"both"` (the default, and the coordinator's recommendation): every
+ *   cloud command is refused until the person turns on "Let agents in local
+ *   sessions control cloud workspaces" in Settings (off by default), AND
+ *   with it on, each command that would start billed compute or stop a
+ *   workspace still asks the person in the window first.
+ * - `"setting"`: the setting alone. Once on, the commands run as asked.
+ * - `"confirm"`: the question in the window alone, with no setting.
  */
-export type CloudControlPolicy = "setting" | "confirm";
-export const CLOUD_CONTROL_POLICY: CloudControlPolicy = "setting";
+export type CloudControlPolicy = "both" | "setting" | "confirm";
+export const CLOUD_CONTROL_POLICY: CloudControlPolicy = "both";
 let policy: CloudControlPolicy = CLOUD_CONTROL_POLICY;
-/** For tests: run under the other option. */
+/** For tests: run under another option. */
 export function setCloudControlPolicy(next: CloudControlPolicy = CLOUD_CONTROL_POLICY) {
   policy = next;
 }
 
+/** Whether the shipped policy has the Settings switch. */
+export const CLOUD_CONTROL_HAS_SETTING = (CLOUD_CONTROL_POLICY as CloudControlPolicy) !== "confirm";
+
 export const CLOUD_CONTROL_SETTING = "Let agents in local sessions control cloud workspaces";
 
-/** Under the setting: nothing of the cloud is reachable from the command line until the person allows it. */
+/** With the setting: nothing of the cloud is reachable from the command line until the person allows it. */
 function allowed(): boolean {
-  return policy !== "setting" || getPrefs().cloudControlFromAgents === true;
+  return policy === "confirm" || getPrefs().cloudControlFromAgents === true;
 }
 
 function assertAllowed() {
@@ -94,12 +99,14 @@ function assertAllowed() {
 }
 
 /**
- * Under "confirm": ask the person, in the window, before something that
- * starts billed compute or stops a workspace. The question says it came from
- * the command line. Under "setting" the person already allowed it.
+ * Ask the person, in the window, before something that starts billed
+ * compute or stops a workspace. The question says it came from the command
+ * line. Having turned the setting on is not an answer to it: the setting
+ * lets agents ask, the person still decides each time. Only under
+ * `"setting"` alone is nothing asked.
  */
 async function confirmInWindow(what: string, okLabel: string): Promise<void> {
-  if (policy !== "confirm") return;
+  if (policy === "setting") return;
   const yes = await ask(`A terminalx command (run by you or by an agent in a local session) asks to ${what}`, { title: "Cloud workspace request", kind: "warning", okLabel, cancelLabel: "Refuse" }).catch(() => false);
   if (!yes) throw new CloudControlError("declined", "The request was refused in the TerminalX window.");
 }
@@ -475,10 +482,12 @@ async function sessionsCreate(params: Params) {
   if (plan.kind === "reuse" || plan.kind === "wake") {
     const { workspace } = plan.node.item;
     // Waiting on a machine that is already starting costs nothing more; resuming a stopped one is said out loud.
-    if (plan.kind === "wake" && workspace.state === "suspended" && params.wake !== true) {
+    // One that is on its way down counts as stopped: connecting to it now would bring it back up.
+    const down = workspace.state === "suspended" || stopping(plan.node.item);
+    if (plan.kind === "wake" && down && params.wake !== true) {
       throw new CloudControlError("cloud_workspace_stopped", `The project's workspace ${workspace.name} is stopped. A new session there resumes it, which starts billing its compute.`, "Pass --wake to resume it for this session, or resume it first with terminalx cloud resume.");
     }
-    const resumes = plan.kind === "wake" && workspace.state === "suspended";
+    const resumes = plan.kind === "wake" && down;
     if (resumes) await confirmInWindow(`start a session in the stopped cloud workspace ${workspace.name}. That resumes it, which starts billing its compute.`, "Resume and start");
     let woke = resumes;
     let key: string;

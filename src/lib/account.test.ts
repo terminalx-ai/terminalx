@@ -137,7 +137,8 @@ describe("a role changed elsewhere (an owner demotes this admin)", () => {
 
     // The account service cannot be reached; the list (read every 30 s) says this person no longer manages.
     native("admin", new Error("offline"));
-    account.noteListedOrgRole("org-a", false, Date.now() + 1);
+    const { roleAskStamp } = await import("./accountRoles");
+    account.noteListedOrgRole("org-a", false, roleAskStamp());
     expect(role(account)).toBe("member");
     expect(roleCalls()).toEqual([{ force: true }]);
     await settle();
@@ -147,11 +148,47 @@ describe("a role changed elsewhere (an owner demotes this admin)", () => {
 
     // Once the account service answers, its word is the one shown: promoted to owner meanwhile.
     native("admin", { role: "owner" });
+    const listAskedBefore = roleAskStamp();
     await account.refreshAccountRoles(true);
     expect(role(account)).toBe("owner");
     // A list asked for before that answer says nothing new.
-    account.noteListedOrgRole("org-a", false, 1);
+    account.noteListedOrgRole("org-a", false, listAskedBefore);
     expect(role(account)).toBe("owner");
+  });
+
+  it("keeps a roles read and a workspace list asked for in the same millisecond in the order they were asked", async () => {
+    vi.resetModules();
+    // Every read of the clock in this test answers the same millisecond.
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    try {
+      native("admin", { role: "admin" });
+      const account = await import("./account");
+      const { roleAskStamp } = await import("./accountRoles");
+      await account.bootAccount();
+      await vi.waitFor(() => expect(roleCalls()).toHaveLength(1));
+      await settle();
+
+      // A list asked for after the roles answered, in that millisecond, is the newer word: this admin was demoted.
+      native("admin", new Error("offline"));
+      account.noteListedOrgRole("org-a", false, roleAskStamp());
+      expect(role(account)).toBe("member");
+      expect(roleCalls()).toEqual([{ force: true }]);
+      await settle();
+
+      // A roles read asked for after that list, in that millisecond still, is newer than the list.
+      native("admin", { role: "owner" });
+      await account.refreshAccountRoles(true);
+      expect(role(account)).toBe("owner");
+
+      // And a list asked for before a roles read, whose answer arrives after the roles', says nothing new.
+      const listAsked = roleAskStamp();
+      await account.refreshAccountRoles(true);
+      account.noteListedOrgRole("org-a", false, listAsked);
+      expect(role(account)).toBe("owner");
+      expect(Date.now()).toBe(1_700_000_000_000);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("takes a promotion from the list too, and nothing from a list that does not say", async () => {
@@ -162,15 +199,16 @@ describe("a role changed elsewhere (an owner demotes this admin)", () => {
     await vi.waitFor(() => expect(roleCalls()).toHaveLength(1));
     await settle();
     native("member", { role: "member", fresh: false });
-    account.noteListedOrgRole("org-a", null, Date.now() + 1);
-    account.noteListedOrgRole("org-a", false, Date.now() + 1);
+    const { roleAskStamp } = await import("./accountRoles");
+    account.noteListedOrgRole("org-a", null, roleAskStamp());
+    account.noteListedOrgRole("org-a", false, roleAskStamp());
     expect(roleCalls()).toEqual([]);
-    account.noteListedOrgRole("org-a", true, Date.now() + 1);
+    account.noteListedOrgRole("org-a", true, roleAskStamp());
     expect(role(account)).toBe("admin");
     expect(roleCalls()).toEqual([{ force: true }]);
     await settle();
     // The list agrees with the account again: nothing is overridden.
-    account.noteListedOrgRole("org-a", false, Date.now() + 2);
+    account.noteListedOrgRole("org-a", false, roleAskStamp());
     expect(role(account)).toBe("member");
   });
 });
@@ -291,5 +329,32 @@ describe("leftovers of an organization left or another user (PRO-71 follow-ups)"
     expect(localStorage.getItem("terminalx.cloudCreate.pending.org-a")).toBeNull();
     expect(prefs.getPrefs().cloudPinned).toEqual({ "org-c": ["y"] });
     expect(account.getAccount().status.identity?.email).toBe("b@example.com");
+  });
+
+  it("forgets organization setup records on sign-out and when another user signs in; a left organization loses only its own (PRO-16)", async () => {
+    const account = await import("./account");
+    const setups = await import("./organizationSetup");
+    const record = (requestId: string, organizationId: string) => ({ ...setups.newSetup("Team", requestId, 1), organizationId, step: "compute" as const });
+    announce(who("a@example.com", ["org-a", "org-b"]));
+    setups.saveSetup("a@example.com", record("r-a", "org-a"));
+    setups.saveSetup("a@example.com", record("r-b", "org-b"));
+    localStorage.setItem("terminalx.organization-setup.v1.a@example.com.name", "Draft");
+
+    // Leaving one organization takes only its record.
+    announce(who("a@example.com", ["org-a"]));
+    expect(setups.loadSetups("a@example.com").map((r) => r.organizationId)).toEqual(["org-a"]);
+
+    // Another user signs in without a sign-out in between: the first user's records go, theirs stay.
+    setups.saveSetup("b@example.com", record("r-c", "org-c"));
+    announce(who("b@example.com", ["org-c"]));
+    expect(setups.loadSetups("a@example.com")).toEqual([]);
+    expect(localStorage.getItem("terminalx.organization-setup.v1.a@example.com.name")).toBeNull();
+    expect(setups.loadSetups("b@example.com")).toHaveLength(1);
+
+    // Signing out forgets them.
+    announce({ state: "signed-out", identity: null, expiresAt: null, lastError: null });
+    expect(setups.loadSetups("b@example.com")).toEqual([]);
+    expect(Object.keys(localStorage).filter((key) => key.startsWith("terminalx.organization-setup"))).toEqual([]);
+    expect(account.getAccount().status.state).toBe("signed-out");
   });
 });

@@ -26,7 +26,7 @@
   };
   const tab = { id: TAB, harness: "claude", title: "Echo:hello from Alice", model: "", permissionMode: "default", status: "idle", created: at, modified: at };
   const session = { id: SESSION, projectPath: "/w", cwd: "/w", title, branch: f.branch ?? null, created: at, modified: at, archived: false, pinned: !!f.pinned, tabs: [tab], activeTab: TAB };
-  const capabilities = ["pty/1", ...(f.sessionTerminals === false ? [] : ["pty/2"]), "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "collab/1"];
+  const capabilities = ["pty/1", ...(f.sessionTerminals === false ? [] : ["pty/2"]), "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "collab/1", ...(f.agentTerminal ? ["agent-pty/1"] : [])];
   const catalog = { version: 1, createMemory: {}, orgs: { [ORG]: { workspaces: [workspace], repositories: [], quota: { used: 1, limit: 3 }, fetchedAt: now, sessions: { [WS]: { sessions: [session], capabilities, at: now } } } } };
   const org = { id: ORG, name: "Local E2E", role: role === "manager" ? "owner" : "member", isPersonal: false, cloud: { enabled: true, flags: {} } };
 

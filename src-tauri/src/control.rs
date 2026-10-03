@@ -658,24 +658,35 @@ impl ControlService {
         }
         let affected = crate::session_ops::sessions_in_workspace(Path::new(&worktree.path))
             .map_err(ControlError::internal)?;
+        // Agents, then the sessions' shells, each waited for, so nothing
+        // still holds the directory.
+        let mut shells = Vec::new();
         for session in &affected {
             for tab in &session.tabs {
                 let _ = self.manager.stop(&session.id, &tab.id);
             }
+            shells.extend(self.manager.terminals().session_pane_ids(&session.id, &[]));
         }
+        self.manager.terminals().kill_all_and_wait(&shells, std::time::Duration::from_secs(5));
         #[cfg(feature = "desktop")]
-        if let Some(desktop) = &self.desktop {
-            desktop.browser.forget_workspace(&crate::browser::control::canonical(&worktree.path));
-        }
-        let entries = crate::session_ops::delete_workspace_entries(
+        let browser_key = crate::browser::control::canonical(&worktree.path);
+        // The CLI showed nothing of what the directory holds, so a worktree
+        // git cannot remove is reported rather than deleted directly.
+        let (entries, removal) = crate::session_ops::delete_workspace_entries(
             &project.path,
             &worktree.path,
             false,
+            crate::git::DirectDelete::Never,
         )
         .map_err(ControlError::internal)?;
+        // Only once the workspace is really gone: a delete that fails keeps it.
+        #[cfg(feature = "desktop")]
+        if let Some(desktop) = &self.desktop {
+            desktop.browser.forget_workspace(&browser_key);
+        }
         crate::session_ops::notify_workspace_deleted(&*self.sink, &project.path, &entries);
         let removed: Vec<_> = entries.into_iter().map(|entry| entry.id).collect();
-        Ok(json!({"deleted": worktree.path, "project": project.path, "removedSessions": removed}))
+        Ok(json!({"deleted": worktree.path, "project": project.path, "removedSessions": removed, "keptBranch": removal.kept_branch}))
     }
 
     fn issues_list(&self, params: Value) -> Result<Value, ControlError> {

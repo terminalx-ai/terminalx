@@ -1,12 +1,13 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, closeWorkspaceConnections, closeWorkspaceConnectionsIn, errorMessage, type AccountStatus } from "@/lib/api";
-import { registerAccountRoles } from "@/lib/accountRoles";
+import { registerAccountRoles, roleAskStamp } from "@/lib/accountRoles";
 import { isMultiOrg, keptCloudOrgs, mayStartCloudSessions } from "@/lib/multiOrg";
 import { dropCloudAgentsIn } from "@/lib/cloudAgents";
 import { closeCloudConnectionsIn, resetCloudConnections } from "@/lib/cloudConnections";
 import { dropCloudTerminalsIn, resetCloudTerminals } from "@/lib/cloudTerminals";
 import { forgetPendingCreates, setPendingCreateUser } from "@/lib/cloudCreate";
+import { forgetOtherSetups, forgetSetups } from "@/lib/organizationSetup";
 import { dropCollabIn, resetCollab } from "@/lib/cloudCollab";
 import { resetPeople } from "@/lib/cloudPeople";
 import { dropEditors } from "@/lib/editors";
@@ -61,7 +62,10 @@ function applyStatus(status: AccountStatus) {
     // its connections and what they cached.
     for (const orgId of change.left) dropCloudOrg(orgId);
   }
-  for (const orgId of leftMemberships(state.status, status)) forgetCloudOrg(orgId);
+  for (const orgId of leftMemberships(state.status, status)) forgetCloudOrg(orgId, status.state === "signed-in" ? (status.identity?.email ?? null) : null);
+  // Signing out here (not a launch that finds nobody signed in) forgets the
+  // setup records: they name organizations and hold a prepared prompt.
+  if (state.status.state === "signed-in" && status.state === "signed-out") forgetOtherSetups(null);
   followUser(status);
   set({ status, ready: true });
   scheduleRefresh(status);
@@ -94,8 +98,9 @@ function pruneCloudPrefs(keep: (orgId: string) => boolean) {
 }
 
 /** What is left of an organization the user left: its pending creates (with their prompts) and its sidebar prefs. */
-function forgetCloudOrg(orgId: string) {
+function forgetCloudOrg(orgId: string, user: string | null) {
   forgetPendingCreates((_user, organizationId) => organizationId === orgId);
+  if (user) forgetSetups(user, (organizationId) => organizationId === orgId);
   pruneCloudPrefs((id) => id !== orgId);
 }
 
@@ -127,8 +132,10 @@ function followUser(status: AccountStatus) {
     /* storage unavailable */
   }
   if (last === user) return;
-  // Pending creates of anyone else (and unscoped ones from before) go.
+  // Pending creates of anyone else (and unscoped ones from before) go, and
+  // so do their organization setup records.
   forgetPendingCreates((owner) => last !== null && owner !== user);
+  if (last !== null) forgetOtherSetups(user);
   if (last !== null && status.organizations) {
     const members = new Set(status.organizations.map((org) => org.id));
     pruneCloudPrefs((orgId) => members.has(orgId));
@@ -228,18 +235,18 @@ function refreshOnFocus() {
 
 // ---- Organizations and roles ------------------------------------------------
 
-/** When the roles the server last answered with were asked for. */
+/** The `roleAskStamp()` of the roles read the server last answered: its place among the reads and the lists asked for. */
 let rolesAskedAt = 0;
 let rolesFlight: Promise<void> | null = null;
 let rolesFlightFresh = false;
 
-export function refreshAccountRoles(force = false, now: () => number = Date.now): Promise<void> {
+export function refreshAccountRoles(force = false): Promise<void> {
   if (rolesFlight) {
     // A forced read that found a throttled one running asks again after it.
     const running = rolesFlight;
-    return force ? running.then(() => (rolesFlightFresh ? undefined : refreshAccountRoles(true, now))) : running;
+    return force ? running.then(() => (rolesFlightFresh ? undefined : refreshAccountRoles(true))) : running;
   }
-  const askedAt = now();
+  const askedAt = roleAskStamp();
   const flight: Promise<void> = api
     .accountRefreshRoles(force)
     .then((result) => {
@@ -247,8 +254,8 @@ export function refreshAccountRoles(force = false, now: () => number = Date.now)
       if (!result?.status) return;
       if (rolesFlightFresh) {
         rolesAskedAt = askedAt;
-        // The server's answer is newer than what any earlier list implied.
-        for (const [orgId, hint] of roleHints) if (hint.at <= askedAt) roleHints.delete(orgId);
+        // The server's answer is newer than what any list asked for before it implied.
+        for (const [orgId, hint] of roleHints) if (hint.at < askedAt) roleHints.delete(orgId);
       }
       applyStatus(result.status);
     })
@@ -272,7 +279,7 @@ function withRoleHints(status: AccountStatus): AccountStatus {
   let changed = false;
   const organizations = status.organizations.map((org) => {
     const hint = roleHints.get(org.id);
-    if (!hint || hint.at <= rolesAskedAt) return org;
+    if (!hint || hint.at < rolesAskedAt) return org;
     const manages = org.role === "owner" || org.role === "admin";
     if (manages === hint.manages) return org;
     changed = true;
@@ -284,11 +291,12 @@ function withRoleHints(status: AccountStatus): AccountStatus {
 
 /**
  * What a workspace list says about this person's role (see `accountRoles`).
- * `askedAt` is when the list was asked for: a list older than the roles' own
- * answer says nothing new.
+ * `askedAt` is the `roleAskStamp()` taken when the list was asked for: a list
+ * asked for before the roles last answered were says nothing new. Stamps are
+ * never equal, so two asked in the same millisecond are still in order.
  */
 export function noteListedOrgRole(orgId: string, manages: boolean | null, askedAt: number) {
-  if (manages === null || askedAt <= rolesAskedAt) return;
+  if (manages === null || askedAt < rolesAskedAt) return;
   const known = mayStartCloudSessions(reported, orgId);
   if (known === null) return;
   if (known === manages) {

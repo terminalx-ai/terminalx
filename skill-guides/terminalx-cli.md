@@ -154,12 +154,12 @@ app supports, and the organizations reachable from it. Check a capability before
 command; an app that does not know one answers `unsupported`.
 
 **The person decides whether the command line may touch the cloud.** These commands run with the
-signed-in person's account, and any agent in a local session can run them. Depending on the app,
-either they are all refused with `cloud_control_disabled` until the person turns on "Let agents
-in local sessions control cloud workspaces" in Settings (`cloud status` then says
-`enabled: false`), or each command that starts billed compute or stops a workspace is first
-confirmed by the person in the app window, and answers `declined` if they refuse. Do not try to
-work around either: ask the person.
+signed-in person's account, and any agent in a local session can run them. They are all refused
+with `cloud_control_disabled` until the person turns on "Let agents in local sessions control
+cloud workspaces" in Settings (`cloud status` then says `enabled: false`). With it on, each
+command that starts billed compute or stops a workspace is still confirmed by the person in the
+app window first, and answers `declined` if they refuse. Do not try to work around either: ask
+the person.
 
 **Looking never starts compute.** `projects list`, `sessions list`, `read` and `wait` never
 resume a stopped workspace. Lists come from what the app already holds. `read` returns the

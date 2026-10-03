@@ -22,7 +22,7 @@ export type WorkItem =
   | { kind: "tool_group"; name: string; calls: ToolCall[]; key: string }
   | { kind: "text"; text: string; key: string; seq: number }
   | { kind: "reasoning"; text: string; key: string; seq: number }
-  | { kind: "queued"; text: string; key: string; seq: number; images?: { url: string }[] }
+  | { kind: "queued"; text: string; key: string; seq: number; ts?: string; images?: { url: string }[] }
   | { kind: "status"; text: string; key: string; seq: number }
   | { kind: "error"; text: string; key: string; seq: number }
   | { kind: "compaction"; preTokens?: number; postTokens?: number; key: string; seq: number }
@@ -62,6 +62,8 @@ export interface Transcript {
   tasks: BackgroundTask[];
   contextUsed?: number;
   contextMax?: number;
+  /** The full id of the model the agent last said it ran; what an alias came to. */
+  model?: string;
   compacting: boolean;
   retry?: { attempt: number; maxRetries: number; reason?: string };
   modelRequestOpen: boolean;
@@ -90,6 +92,25 @@ function visibleUserText(text: string): string {
   return text;
 }
 
+/**
+ * Take a queued message out of the turn it was a note in. The agent held it
+ * until that turn was over and then took it as its next prompt; a
+ * `turn_started` naming its seq says so (the message itself is published
+ * once, when it is sent). One the agent took mid-turn has no such event and
+ * stays where it is.
+ */
+function takeQueued(turns: Turn[], seq: number): Turn["prompt"] {
+  for (let index = turns.length - 1; index >= 0; index--) {
+    const work = turns[index].work;
+    const at = work.findIndex((item) => item.kind === "queued" && item.seq === seq);
+    if (at < 0) continue;
+    const [held] = work.splice(at, 1);
+    if (held.kind !== "queued") return undefined;
+    return { text: held.text, images: held.images, ts: held.ts ?? turns[index].completed?.ts ?? "", seq: held.seq };
+  }
+  return undefined;
+}
+
 export function buildTranscript(events: AgentEvent[], live: boolean): Transcript {
   const turns: Turn[] = [];
   const asks = new Map<string, PendingAsk>();
@@ -97,6 +118,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
   let tasks: BackgroundTask[] = [];
   let contextUsed: number | undefined;
   let contextMax: number | undefined;
+  let model: string | undefined;
   let compacting = false;
   let retry: Transcript["retry"];
   let modelRequestOpen = false;
@@ -121,7 +143,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
       case "user_message": {
         const text = visibleUserText(payload.text);
         if (payload.queued && current && !current.completed) {
-          current.work.push({ kind: "queued", text, key: `q${event.seq}`, seq: event.seq, images: payload.images });
+          current.work.push({ kind: "queued", text, key: `q${event.seq}`, seq: event.seq, ts: event.ts, images: payload.images });
           break;
         }
         for (const call of calls.values()) if (!call.result) call.abandoned = true;
@@ -139,8 +161,21 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
         workingSince = Date.parse(event.ts);
         break;
       }
-      case "turn_started":
+      case "turn_started": {
+        if (payload.promptSeq == null) break;
+        const prompt = takeQueued(turns, payload.promptSeq);
+        if (!prompt) break;
+        if (current && !current.completed && !current.prompt) {
+          current.prompt = prompt;
+        } else {
+          for (const call of calls.values()) if (!call.result) call.abandoned = true;
+          current = { key: `t${event.seq}`, seq: event.seq, prompt, work: [], toolCount: 0, editedFiles: 0, live: false };
+          turns.push(current);
+        }
+        modelRequestOpen = false;
+        workingSince = Date.parse(event.ts);
         break;
+      }
       case "assistant_text": {
         const turn = ensureTurn(event);
         if (payload.text.trim()) turn.work.push({ kind: "text", text: payload.text, key: `a${event.seq}`, seq: event.seq });
@@ -251,6 +286,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
       case "usage_update":
         if (payload.contextUsed != null) contextUsed = payload.contextUsed;
         if (payload.contextMax != null) contextMax = payload.contextMax;
+        if (payload.model) model = payload.model;
         break;
       case "context_compaction_started":
         compacting = true;
@@ -324,6 +360,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
     tasks,
     contextUsed,
     contextMax,
+    model,
     compacting,
     retry,
     modelRequestOpen,
