@@ -98,7 +98,8 @@ What a run does:
   soak go through the app's views.
 - **Soak.** Through the app's own stores and views: open 4 sessions, each with
   a terminal that fills its 10,000-line scrollback; open and close 50 terminal
-  tabs; switch sessions 200 times; delete the sessions. The same terminals are
+  tabs; open and close 20 agent tabs (against a stand-in CLI); switch
+  sessions 200 times; delete the sessions. The same terminals are
   open after the first three steps, so memory should be flat across them. The
   terminals the tab step closes are tracked the same way as in the churn.
 
@@ -321,5 +322,25 @@ one prints an agent-style stream for 10 s):
 | Replay buffers left at the end of the run | 48–51 | 0 |
 
 Memory is as in the entry above (344 MB baseline, 320 MB after the soak).
+
+### A closed agent tab's terminal is dropped
+
+Closing an agent tab stopped its CLI but left its pane and its xterm in the
+window, with the whole scrollback, until its session was deleted. The window
+now drops both when a tab is closed, and when the backend reports a session
+with fewer tabs.
+
+The soak has a step for it: 20 agent tabs opened and closed through the
+app's own tab functions. They run `scripts/remote-runtime/fake-claude`, which
+`bench-app.sh` puts first on the app's path together with a `HOME` of its
+own, so no real agent runs and nothing is written under the real home.
+
+| After 20 agent tabs were opened and closed | Before | After |
+| --- | --- | --- |
+| xterm instances (8 belong to the open sessions) | 28 | 8 |
+| Panes | 28 | 8 |
+| Of the 20 closed terminals, collected by the end of the run | 0 | 20 |
+
+An archived session still keeps its terminals.
 
 Still open from the baseline: findings 5, 6 and 8.
