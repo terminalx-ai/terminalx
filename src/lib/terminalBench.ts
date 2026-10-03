@@ -1,11 +1,11 @@
 import { listen } from "@tauri-apps/api/event";
 import { api, pty } from "@/lib/api";
-import { createInstance } from "@/components/terminal/TerminalView";
+import { createInstance, createTerminal } from "@/components/terminal/TerminalView";
 import { addProject, addTab, deleteSession, getSessionStore, removeTab, selectSession, upsertSession } from "@/lib/sessions";
 import { enterTerminalView } from "@/lib/tabViews";
 import { rendererOf } from "@/lib/terminalCounters";
 import { fitTerminal } from "@/lib/terminalFit";
-import { showWebgl } from "@/lib/terminalWebgl";
+import { dropWebgl, showWebgl } from "@/lib/terminalWebgl";
 import {
   adoptPane,
   agentPaneId,
@@ -47,6 +47,7 @@ export type BenchRequest =
   | { scenario: "ui"; action: "select"; sessionId: string }
   | { scenario: "ui"; action: "terminalView"; sessionId: string; tabId: string }
   | { scenario: "ui"; action: "screen" | "reload" }
+  | { scenario: "engine"; cwd: string; name: string; command: string }
   | { scenario: "covered"; projectPath: string; stream: string; seconds: number }
   | ({ scenario: "soak"; projectPath: string; fill: string } & ({ step: "open"; sessions: number } | { step: "tabs" | "switches"; count: number } | { step: "agents"; count: number; harness: string } | { step: "cleanup" }));
 
@@ -453,6 +454,154 @@ async function soak(request: Soak) {
   return { scenario: request.scenario, step: request.step, stepClosed: step, page: page(), mainThread: stop(), counters: terminalCounters(), closed: { ...soakClosed }, leftAfterDelete: left };
 }
 
+/** Everything a command prints, as the PTY delivers it. */
+async function collect(cwd: string, command: string): Promise<Uint8Array> {
+  const id = `perf:collect:${Date.now().toString(36)}${++runs}`;
+  const chunks: Uint8Array[] = [];
+  let last = performance.now();
+  let exited = false;
+  const unlisten = await listen<{ id: string }>("pty_exit", (event) => {
+    if (event.payload.id === id) exited = true;
+  });
+  let total = 0;
+  await pty.attach(id, (bytes) => {
+    chunks.push(bytes.slice());
+    last = performance.now();
+    total += bytes.length;
+    void pty.ack(id, total);
+  });
+  await pty.spawn(id, cwd, 190, 24, command);
+  while (!exited || performance.now() - last < 300) await sleep(50);
+  unlisten();
+  await pty.kill(id);
+  await pty.detach(id);
+  const all = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
+  let at = 0;
+  for (const chunk of chunks) {
+    all.set(chunk, at);
+    at += chunk.length;
+  }
+  return all;
+}
+
+/**
+ * SPIKE (phase 3): xterm.js against libghostty-vt on the same bytes, in this
+ * web view, with no PTY or IPC in the timing. Each engine parses the workload
+ * off screen, then again on screen while drawing.
+ */
+async function engine(request: Extract<BenchRequest, { scenario: "engine" }>) {
+  const CHUNK = 32 * 1024;
+  const COLS = 190;
+  const ROWS = 24;
+  const bytes = await collect(request.cwd, request.command);
+  const megabytes = bytes.length / 1024 / 1024;
+  const chunks: Uint8Array[] = [];
+  for (let at = 0; at < bytes.length; at += CHUNK) chunks.push(bytes.subarray(at, at + CHUNK));
+  const overlay = document.createElement("div");
+  overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:var(--surface-page);padding:4px 8px";
+  document.body.appendChild(overlay);
+  const rate = (ms: number) => round(megabytes / (ms / 1000));
+  const results: Record<string, unknown> = { scenario: request.scenario, name: request.name, megabytes: round(megabytes), page: page() };
+  try {
+    // xterm.js: it parses in slices of its own and says when the last write is done.
+    for (const onScreen of [false, true]) {
+      const inst = createTerminal(mode());
+      inst.term.resize(COLS, ROWS);
+      if (onScreen) {
+        overlay.appendChild(inst.el);
+        showWebgl(inst.term);
+        await frame();
+      }
+      const stop = watchMainThread();
+      const started = performance.now();
+      // Fed as the app feeds it: never more than about a megabyte ahead of the parser.
+      let pending = 0;
+      let wake: (() => void) | null = null;
+      for (const chunk of chunks) {
+        pending += chunk.length;
+        inst.term.write(chunk, () => {
+          pending -= chunk.length;
+          if (pending < 512 * 1024) wake?.();
+        });
+        if (pending > 1024 * 1024) await new Promise<void>((resolve) => (wake = resolve));
+      }
+      while (pending > 0) await new Promise<void>((resolve) => (wake = resolve));
+      const ms = performance.now() - started;
+      await frame();
+      const mainThread = stop();
+      results[onScreen ? "xtermOnScreen" : "xtermParse"] = { ms: round(ms), megabytesPerSecond: rate(ms), lines: inst.term.buffer.active.length, renderer: rendererOf(inst.term), mainThread };
+      dropWebgl(inst.term);
+      inst.term.dispose();
+      inst.el.remove();
+      await sleep(500);
+    }
+
+    const { GhosttyVt } = await import("@/lib/spike/ghosttyVt");
+    const { GhosttyCanvas } = await import("@/lib/spike/ghosttyCanvas");
+    const wasm = await (await fetch((await import("../../spike/terminal-ghostty/ghostty-vt.wasm?url")).default)).arrayBuffer();
+    const loadStarted = performance.now();
+    const vt = await GhosttyVt.load(wasm);
+    results.ghosttyLoadMs = round(performance.now() - loadStarted);
+    // About 10,000 lines at this width, as xterm is configured: libghostty-vt counts scrollback in bytes.
+    const SCROLLBACK = 24 * 1024 * 1024;
+    const style = getComputedStyle(document.documentElement);
+    const fontFamily = style.getPropertyValue("--font-mono").trim() || "ui-monospace, monospace";
+    for (const onScreen of [false, true]) {
+      const before = vt.memory.buffer.byteLength;
+      const terminal = vt.newTerminal(COLS, ROWS, SCROLLBACK);
+      const surface = onScreen ? new GhosttyCanvas(terminal, COLS, ROWS, { foreground: mode() === "dark" ? "#e6e6e6" : "#222222", background: mode() === "dark" ? "#1c1c1f" : "#f7f7f5" }, fontFamily) : null;
+      if (surface) overlay.appendChild(surface.canvas);
+      await frame();
+      const stop = watchMainThread();
+      const started = performance.now();
+      let parseMs = 0;
+      let drawMs = 0;
+      let longestDrawMs = 0;
+      let draws = 0;
+      let next = 0;
+      while (next < chunks.length) {
+        // As xterm does: parse for about 12 ms, then let the page breathe.
+        const slice = performance.now();
+        while (next < chunks.length && performance.now() - slice < 12) terminal.write(chunks[next++]);
+        parseMs += performance.now() - slice;
+        if (surface) {
+          const drawing = performance.now();
+          surface.draw();
+          const took = performance.now() - drawing;
+          drawMs += took;
+          longestDrawMs = Math.max(longestDrawMs, took);
+          draws++;
+          await frame();
+        } else {
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        }
+      }
+      const ms = performance.now() - started;
+      const mainThread = stop();
+      results[onScreen ? "ghosttyOnScreen" : "ghosttyParse"] = {
+        ms: round(ms),
+        megabytesPerSecond: rate(ms),
+        parseMs: round(parseMs),
+        parseMegabytesPerSecond: rate(parseMs),
+        drawMs: round(drawMs),
+        draws,
+        meanDrawMs: draws ? round(drawMs / draws) : null,
+        longestDrawMs: round(longestDrawMs),
+        lines: terminal.totalRows,
+        wasmGrowthBytes: vt.memory.buffer.byteLength - before,
+        wasmBytes: vt.memory.buffer.byteLength,
+        mainThread,
+      };
+      surface?.canvas.remove();
+      terminal.dispose();
+      await sleep(500);
+    }
+    return results;
+  } finally {
+    overlay.remove();
+  }
+}
+
 /**
  * One program's output into a terminal, with nothing that needs the page to
  * be visible: no frames, no timers. For measuring what a hidden window does
@@ -643,6 +792,8 @@ export async function runTerminalBench(request: BenchRequest): Promise<unknown> 
         return await ui(request);
       case "background":
         return await background(request);
+      case "engine":
+        return await engine(request);
       default:
         throw new Error(`unknown scenario ${(request as { scenario: string }).scenario}`);
     }

@@ -467,3 +467,92 @@ after the soak 1.04 times the baseline in this run).
 Still open from the baseline: finding 8 (the status bar cannot see the web
 view's memory on macOS). Not done: an archived session keeps its terminals,
 and there is no cap on how many idle xterm instances are kept.
+
+## Phase 3: would another engine be better?
+
+A spike, on the branch `spike/terminal-ghostty-232`. Nothing from it is
+merged; it is here to inform a decision.
+
+### What was compared
+
+The same bytes (collected from the PTY, so with no IPC in the timing) through:
+
+1. **xterm.js 6 with its WebGL renderer**, as the app uses it.
+2. **libghostty-vt compiled to WebAssembly, with a 2D-canvas renderer**, the
+   approach Zuse takes. The binding and the renderer were written for the
+   spike, about 330 lines, enough to parse and to draw dirty rows. They are
+   not a terminal: no input encoding, selection, links, IME or reflow.
+3. **`alacritty_terminal` in Rust**, natively, parse only: what a backend-side
+   VT that sends damage frames to the window would spend.
+
+Same machine, the `--debug` bundle (the web side is the production bundle;
+WebAssembly speed does not depend on the Rust profile), 190 × 24 cells,
+about 10,000 lines of scrollback in each engine.
+
+### Numbers
+
+| Workload | Engine | Where it runs | Parse, off screen (MB/s) | On screen, drawing (MB/s) | Long tasks | Frames/s |
+| --- | --- | --- | --- | --- | --- | --- |
+| `cat` of the 50 MB log | xterm.js + WebGL | web view, main thread | 87 | 84 | 0 | 59.5 |
+| | libghostty-vt (WASM) + 2D canvas | web view, main thread | 81 | 58 | 0 | 58.9 |
+| | `alacritty_terminal` | backend, own thread | 201 | not built | | |
+| Agent-style redraws, 7 MB | xterm.js + WebGL | web view, main thread | 87 | 103 | 0 | 37.5 |
+| | libghostty-vt (WASM) + 2D canvas | web view, main thread | 45 | 31 | 0 | 55.3 |
+| | `alacritty_terminal` | backend, own thread | 190 | not built | | |
+
+- The libghostty-vt on-screen figures are held down by the spike's own loop,
+  which parses for 12 ms and then waits for a frame; its parser ran at 81 and
+  45 MB/s in those runs too. Drawing the changed rows took 1.1–1.3 ms per
+  frame on average and 5 ms at most.
+- libghostty-vt loads in 4–7 ms. With about 10,000 lines at 190 columns its
+  WebAssembly memory was 31 MB; xterm.js holds about 23 MB for the same.
+  WebAssembly memory never shrinks: what a closed terminal used can be reused
+  by the next one but is not returned to the system.
+- With `alacritty_terminal`, every 32 KB batch of a flood damages the whole
+  screen. A damage frame is then at most the visible cells: about 55 KB for
+  190 × 24, 3.3 MB/s at 60 frames a second however fast the program prints.
+  The raw channel of phase 2 carries 90 MB/s.
+
+### What it means
+
+- **Neither alternative parses faster than xterm.js 6 inside the web view.**
+  libghostty-vt is level on plain text and half as fast on escape-heavy
+  redraws, which is what agent CLIs send. (The artifact is a `ReleaseSmall`
+  build; a `ReleaseFast` one would be quicker, and was not built here.)
+- **Speed is no longer the reason to switch.** After phase 2 the app meets
+  every criterion of the issue on xterm.js. The problems were in how the app
+  used the terminal (a leaked timer, no flow control, covered terminals
+  drawing), not in xterm.js being slow.
+- **What a libghostty-vt terminal would buy:** no WebGL context limit (2D
+  canvas), Ghostty's emulation (synchronized output, the Kitty keyboard
+  protocol) and one terminal core shared with a mobile app, as Zuse has.
+- **What it would cost:** the whole terminal around the parser. Zuse's is
+  about 2,600 lines for the emulator binding, the surface and the key map,
+  and Zuse is **AGPL-3.0-only**, so none of it can be copied into this
+  MIT repository; it would have to be written here. Then selection, search,
+  links, IME, accessibility and the fit logic, which xterm.js and its addons
+  provide today. The content security policy must allow `wasm-unsafe-eval`.
+- **A backend-side VT is the stronger architecture if a change is wanted.**
+  Parsing at 200 MB/s on its own thread takes the web view's main thread out
+  of the output path altogether, gives the desktop window, the mobile reader
+  and the remote runtime one source of truth for the screen, and restores a
+  terminal exactly after a window reload, which the 512 KiB raw scrollback
+  cannot (modes are lost). It is also the larger piece of work: a renderer in
+  the window, a protocol for scrollback, selection and search, and input
+  encoding in Rust.
+
+### Recommendation
+
+Stay on xterm.js now. Merge phase 2, and move to xterm.js 7 when it is
+released for the synchronized-output viewport fix.
+
+Reconsider when one of these is true, and then prefer a backend-side VT over
+WebAssembly in the window:
+
+- the mobile app is to show live terminals with the same fidelity as the
+  desktop, so a shared core has a second user;
+- terminals must survive a window reload, or idle ones must be dropped and
+  rebuilt exactly (the open item from phase 2);
+- xterm.js 7 does not fix the redraw problems agent CLIs show.
+
+This is the owner's decision; nothing here is merged.
