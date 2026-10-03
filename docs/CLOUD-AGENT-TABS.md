@@ -236,6 +236,20 @@ instead of from this computer.
   what is offered, not what is allowed. A refusal shows the runtime's own
   sentence on the outbox entry above the composer (docs/CLOUD-SHARING.md).
 
+- **`@` mentions** (`session.files { sessionId, query, limit }`,
+  `composer/2`, read-only): the files of the session's directory whose path
+  matches, best first, from the same index and ranking a local tab uses
+  (`files::search`): paths relative to the session's directory, ignored
+  files left out, and the shallowest files for a bare `@`. Names only.
+  Anyone who may see the session may ask; the composer offers the list (and
+  its "Mention a file" button) to people who can send, while the runtime is
+  connected. A stopped workspace is not woken to list files: there is then
+  no list, and a path can still be typed.
+
+  Every path the list offers is inside the project, so a mention picked
+  from it is one the runtime accepts from a plain driver too (PRO-88 refuses
+  only mentions of files outside the project).
+
 Mobile is out of scope for PRO-22. It can reuse the same keys, outbox and
 checkpoint formats.
 
