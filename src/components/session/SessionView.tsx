@@ -27,7 +27,7 @@ import { useTabLog } from "@/lib/agentEvents";
 import type { TabEntry } from "@/types/session";
 import { WorkspaceNameEditor } from "./WorkspaceNameEditor";
 import { workspaceName } from "@/lib/dashboard";
-import { localSessionBackend } from "@/lib/sessionBackend";
+import { localSessionBackend, terminalViewOf } from "@/lib/sessionBackend";
 import type { CloudSessionModel } from "@/lib/cloudSession";
 import { cloudAgentLabel } from "@/lib/cloudRowState";
 import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
@@ -287,15 +287,18 @@ export function SessionView({
   const activeTab = selected?.kind === "agent" ? session.tabs.find((tab) => tab.id === selected.id) : undefined;
   const activeShell = selected?.kind === "terminal" ? shellPanes.find((pane) => pane.id === selected.id) : undefined;
   const tabViews = useTabViews();
-  const activeInTerminal = !!activeTab && tabViews.views[activeTab.id] === "terminal";
+  // The chat or terminal switch: every local tab has it; a cloud tab while its runtime serves the agent's terminal (PRO-86).
+  const terminalOffer = activeTab && !cloud?.locked ? terminalViewOf(backend, activeTab) : null;
+  const activeInTerminal = !!activeTab && !!terminalOffer?.available && tabViews.views[activeTab.id] === "terminal";
   const switching = !!activeTab && !!tabViews.switching[activeTab.id];
   const workspaceLabel = session.worktreeRemoved ? workspaceName(session) : session.branch;
   const workspaceTitle = session.removedWorkspace?.path ?? session.cwd;
   const [continuationSource, setContinuationSource] = useState<TabEntry | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
   const workspace = managedWorkspaceFor(session);
+  // One action for local and cloud tabs, so a remapped shortcut switches either.
   useShortcut("session.toggleTerminalView", () => {
-    if (activeTab && local) void toggleTabView(session, activeTab);
+    if (activeTab && terminalOffer?.available) void toggleTabView(session, activeTab, { remote: !local });
   });
   const ed = useEditors();
   const hasEditors = ed.editors.some((e) => e.sessionId === session.id);
@@ -416,7 +419,7 @@ export function SessionView({
                 </Button>
               </WithTooltip>
             )}
-            {activeTab && local && (
+            {activeTab && terminalOffer?.available && (
               <WithTooltip label={activeInTerminal ? "Back to chat" : "Show terminal view"} shortcut="session.toggleTerminalView">
                 <Button
                   variant="ghost"
@@ -424,10 +427,27 @@ export function SessionView({
                   aria-label={activeInTerminal ? "Back to chat" : "Show terminal view"}
                   aria-pressed={activeInTerminal}
                   disabled={switching}
-                  onClick={() => void toggleTabView(session, activeTab)}
+                  onClick={() => void toggleTabView(session, activeTab, { remote: !local })}
                   className={cn(activeInTerminal && "bg-veil-strong text-foreground")}
                 >
                   {activeInTerminal ? <MessageSquare /> : <Terminal />}
+                </Button>
+              </WithTooltip>
+            )}
+            {activeTab && terminalOffer && !terminalOffer.available && (
+              // Not offered here (an older runtime, or an agent with no terminal): the switch stays in its place, off, and says why.
+              <WithTooltip label={terminalOffer.reason ?? undefined}>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="Terminal view is not available"
+                  aria-disabled
+                  title={terminalOffer.reason ?? undefined}
+                  data-testid="terminal-view-unavailable"
+                  className="cursor-not-allowed opacity-40 hover:bg-transparent"
+                  onClick={(event) => event.preventDefault()}
+                >
+                  <Terminal />
                 </Button>
               </WithTooltip>
             )}

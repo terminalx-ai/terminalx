@@ -5,6 +5,7 @@ const pty = vi.hoisted(() => ({
   kill: vi.fn().mockResolvedValue(undefined),
   write: vi.fn().mockResolvedValue(undefined),
   resize: vi.fn().mockResolvedValue(undefined),
+  detachAll: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/lib/api", () => ({ pty }));
@@ -76,76 +77,31 @@ describe("session shell tabs", () => {
 });
 
 describe("terminal counters", () => {
-  it("counts output, the replay buffers it waits in, and live instances by renderer", async () => {
-    const handlers = new Map<string, (event: { payload: unknown }) => void>();
-    listen.mockImplementation(async (event: string, handler: (event: { payload: unknown }) => void) => {
-      handlers.set(event, handler);
-      return () => {};
-    });
+  it("counts live instances by renderer and where they are, and stops an instance's output when it is disposed", async () => {
     const terminal = await loadTerminalStore();
     const { setRenderer } = await import("./terminalCounters");
-    await terminal.subscribeTerminals();
-
-    // No view has asked for this pane yet: its output waits in a replay buffer.
-    handlers.get("pty_data")!({ payload: { id: "p1", data: btoa("hello") } });
-    expect(terminal.terminalCounters()).toMatchObject({ instances: 0, replayBuffers: 1, replayBytes: 5, data: { local: { events: 1, bytes: 5 }, cloud: { events: 0, bytes: 0 } } });
+    expect(terminal.terminalCounters()).toMatchObject({ instances: 0, panes: 0 });
 
     const term = { write: vi.fn(), dispose: vi.fn(), buffer: { normal: { length: 40 }, alternate: { length: 24 } } };
     const el = document.createElement("div");
-    terminal.getInstance("p1", () => ({ el, term, fit: {} }) as never);
-    expect(term.write).toHaveBeenCalledTimes(1);
-    expect(terminal.terminalCounters()).toMatchObject({ instances: 1, attached: 0, webgl: 0, dom: 1, bufferLines: 64, replayBuffers: 0, replayBytes: 0 });
+    const release = vi.fn();
+    terminal.getInstance("p1", () => ({ el, term, fit: {}, release }) as never);
+    expect(terminal.terminalCounters()).toMatchObject({ instances: 1, attached: 0, webgl: 0, dom: 1, bufferLines: 64 });
 
     setRenderer(term as never, "webgl");
     document.body.appendChild(el);
-    handlers.get("pty_data")!({ payload: { id: "p1", data: btoa("more") } });
-    expect(terminal.terminalCounters()).toMatchObject({ instances: 1, attached: 1, webgl: 1, dom: 0, data: { local: { events: 2, bytes: 9 } } });
+    expect(terminal.terminalCounters()).toMatchObject({ instances: 1, attached: 1, webgl: 1, dom: 0 });
 
     terminal.disposeInstance("p1");
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(term.dispose).toHaveBeenCalledTimes(1);
     expect(terminal.terminalCounters()).toMatchObject({ instances: 0, webgl: 0, dom: 0 });
   });
 });
 
 describe("terminals that are gone", () => {
-  async function loadWithEvents() {
-    const handlers = new Map<string, (event: { payload: unknown }) => void>();
-    listen.mockImplementation(async (event: string, handler: (event: { payload: unknown }) => void) => {
-      handlers.set(event, handler);
-      return () => {};
-    });
-    const terminal = await loadTerminalStore();
-    await terminal.subscribeTerminals();
-    const output = (id: string, text: string) => handlers.get("pty_data")!({ payload: { id, data: btoa(text) } });
-    return { terminal, output };
-  }
-
-  it("drops output that arrives after a pane was closed, and keeps it again once the id is reopened", async () => {
-    vi.useFakeTimers();
-    try {
-      const { terminal, output } = await loadWithEvents();
-      const pane = await terminal.openTerminal("s1", "/repo", 100, 24, { id: "tab:t1", hidden: true });
-      await terminal.closeTerminal(pane.id);
-      // The killed process's last bytes: nobody will ever read them.
-      output("tab:t1", "bye");
-      expect(terminal.terminalCounters()).toMatchObject({ replayBuffers: 0, replayBytes: 0 });
-
-      // The same tab's terminal view is entered again: output before its view mounts is kept.
-      await terminal.openTerminal("s1", "/repo", 100, 24, { id: "tab:t1", hidden: true });
-      output("tab:t1", "hello");
-      expect(terminal.terminalCounters()).toMatchObject({ replayBuffers: 1, replayBytes: 5 });
-
-      // And a pane the backend opens later under a closed id is not ignored for good.
-      await terminal.closeTerminal("tab:t1");
-      vi.advanceTimersByTime(5_000);
-      output("tab:t1", "again");
-      expect(terminal.terminalCounters()).toMatchObject({ replayBuffers: 1, replayBytes: 5 });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
   it("closes every terminal of a deleted session, and only those", async () => {
-    const { terminal } = await loadWithEvents();
+    const terminal = await loadTerminalStore();
     const shell = await terminal.openTerminal("s1", "/repo");
     await terminal.adoptPane({ id: "tab:agent-1", sessionId: "s1", title: "Agent", hidden: true, owned: true });
     const dispose = vi.fn();
@@ -167,7 +123,7 @@ describe("terminals that are gone", () => {
   });
 
   it("closes a session's shells and leaves its agent pane when its checkout is removed", async () => {
-    const { terminal } = await loadWithEvents();
+    const terminal = await loadTerminalStore();
     await terminal.openTerminal("s1", "/repo");
     await terminal.openTerminal("s1", "/repo");
     await terminal.adoptPane({ id: "tab:agent-1", sessionId: "s1", title: "Agent", hidden: true, owned: true });
