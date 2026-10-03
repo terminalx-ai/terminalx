@@ -102,6 +102,18 @@ runtime reports what is left and the desktop says so.
   lost"), and **almost full** below both 5% and 2 GB, or below 1% of inodes.
   It clears by itself once space is freed.
 
+### Low memory during a turn
+
+While an agent turn runs in the session being shown (a tab working or
+waiting for an answer), the same reading is taken every 10 s instead of 60 s.
+Memory is low when `MemAvailable` is under both 10% of RAM and 512 MiB, the
+rule the server's worker uses before a relaunch (saas contract 9.5). Three low
+readings in a row show "The workspace's machine is almost out of memory (… free
+of …). The agent, or a program it runs, may be stopped by the machine." One
+reading with room breaks the run and clears the warning; so do the end of the
+turn and the loss of the connection. Low memory with nothing running is not
+warned about.
+
 Not done: the server is not told, so the workspace list and an admin's
 diagnostics do not show a full disk to someone who is not connected to it,
 and a stopped workspace's disk is not known.
@@ -118,7 +130,8 @@ and a stopped workspace's disk is not known.
 - `src/lib/cloudResources.test.tsx`, `src-tauri/src/cloud_resources.rs`,
   `src-tauri/src/remote/server_tests.rs`: the disk levels and their wording;
   only a connected workspace is asked; the notice follows the disk and goes
-  with the connection; a runtime that does not report is asked once.
+  with the connection; a runtime that does not report is asked once; the
+  low-memory rule, three in a row, only during a turn.
 - `src/lib/cloudLifecycle.test.ts`: purging a deleted workspace and only it;
   an already-purged tombstone; a failed native purge retried.
 - `src-tauri/src/cloud_workspaces.rs`: the header, force, the archive
