@@ -821,6 +821,10 @@ pub struct DispositionRuntime {
 pub struct DispositionCapabilities {
     pub permanent_delete: bool,
     pub release_disposition: String,
+    /// Whether a resume after a stop brings the same processes back (a warm
+    /// reconnect) or is a cold boot. Absent from an older server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserves_processes_on_resume: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3792,6 +3796,15 @@ mod tests {
         assert_eq!(disposition.runtime.active_turns, 1);
         assert_eq!(disposition.blockers, ["active-turns", "pending-approvals"]);
         assert!(disposition.runtime_facts.available);
+        // An older server does not say what a resume brings back.
+        assert_eq!(disposition.provider_capabilities.preserves_processes_on_resume, None);
+
+        let mut cold = facts.clone();
+        cold["providerCapabilities"]["preservesProcessesOnResume"] = json!(false);
+        let (base, _, request) = serve_once(response("200 OK", &cold.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.disposition(None, "workspace-1").unwrap().provider_capabilities.preserves_processes_on_resume, Some(false));
+        request.join().unwrap();
 
         let (base, _, request) = serve_once(response("200 OK", &facts.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
