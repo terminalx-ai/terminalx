@@ -1,5 +1,40 @@
 # TerminalX changelog
 
+## 0.2.7
+
+Terminals are released when their tabs and sessions go away, a slow Keychain
+call can no longer freeze the app, and small cloud UI findings are fixed.
+
+### Terminals
+
+- Closing an agent tab drops its terminal pane and scrollback instead of
+  holding them until the session is deleted. A tab removed from the CLI or
+  another client is released the same way. (#247)
+- Deleting a session or workspace closes its shells in the window and the
+  backend, and output that arrives after a pane is closed is dropped instead
+  of starting a buffer nothing reads. Removing a session's worktree closes
+  its shells. (#245)
+- `terminalx status --json` reports terminal counters for the backend and the
+  window, and a benchmark that runs in the real window measures throughput,
+  typing echo and memory; see docs/TERMINAL-PERFORMANCE.md. No behaviour
+  change for users. (#243)
+
+### Accounts
+
+- A slow or deadlocked Keychain call can no longer freeze the window. Every
+  Keychain call goes through one gate, the account lock is never held across
+  a Keychain or network call, workspace keys are read once per run and
+  written only when they change, and cloud frames are queued off the main
+  thread. (#246)
+
+### Cloud UI
+
+- Settings opens on General from the sidebar button instead of a blank page.
+  Pending header chips such as "Resuming…" and "Starting…" carry an ellipsis.
+  The mode picker hides its label rather than truncating it to a letter, the
+  "Local" heading appears only over local projects, and a cloud session view
+  stays on its tab when someone else adds a new one. (#251)
+
 ## 0.2.6
 
 Cloud sessions stay connected after a workspace stops and restarts, and
