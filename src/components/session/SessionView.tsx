@@ -128,6 +128,11 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
  * 3. Only then the title truncates.
  * 4. In a header too narrow for all of that (`HEADER_TIGHT`), the project and
  *    the branch chip are left out: the sidebar row shows both.
+ * 5. In that same narrow header the terminal-view switch (PRO-86) must not
+ *    cost the title its first 12 characters. A switch that is only a disabled
+ *    placeholder ("not available here") is left out. A switch that works
+ *    stays, and the location chip is left out instead: the sidebar row says
+ *    where the session runs and has the same workspace menu.
  *
  * The connection and role chips never shrink. The shrink factors do the
  * ordering: a larger one takes (nearly) all the squeeze until it is at its
@@ -149,7 +154,7 @@ function tabLabelOf(cloud: CloudSessionModel, tabId: string): string | null {
 }
 
 /** Where a cloud session runs, and whether this window is attached to it. The location chip holds the workspace's lifecycle actions. */
-function CloudLocation({ cloud }: { cloud: CloudSessionModel }) {
+function CloudLocation({ cloud, yields = false }: { cloud: CloudSessionModel; /** Left out of a tight header (see the order above). */ yields?: boolean }) {
   const { location, connection } = cloud;
   const catalog = useCloudCatalog();
   const item = findCloudWorkspace(catalog, cloud.orgId, cloud.workspaceId);
@@ -159,7 +164,7 @@ function CloudLocation({ cloud }: { cloud: CloudSessionModel }) {
   const { status } = useAccount();
   const [error, run] = useLifecycleRun();
   const title = `Runs in the cloud workspace ${cloud.workspaceName} (${location.provider}, ${location.org}), not on this computer.`;
-  const chipClass = cn("ml-1 flex max-w-[30%] items-center overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground", HEADER_CHIP_YIELDS);
+  const chipClass = cn("ml-1 flex max-w-[30%] items-center overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground", HEADER_CHIP_YIELDS, yields && HEADER_TIGHT);
   const chip = (
     <>
       <Cloud className={HEADER_CHIP_ICON} />
@@ -401,7 +406,7 @@ export function SessionView({
                 {session.worktreeRemoved && <span className="text-faint">· workspace removed</span>}
               </span>
             )}
-            {cloud && <CloudLocation cloud={cloud} />}
+            {cloud && <CloudLocation cloud={cloud} yields={!!terminalOffer?.available} />}
             {renameError && (
               <span role="alert" className="ml-1 max-w-64 truncate text-[11px] text-destructive" title={renameError}>
                 {renameError}
@@ -444,7 +449,7 @@ export function SessionView({
                   aria-disabled
                   title={terminalOffer.reason ?? undefined}
                   data-testid="terminal-view-unavailable"
-                  className="cursor-not-allowed opacity-40 hover:bg-transparent"
+                  className={cn("cursor-not-allowed opacity-40 hover:bg-transparent", cloud && HEADER_TIGHT)}
                   onClick={(event) => event.preventDefault()}
                 >
                   <Terminal />

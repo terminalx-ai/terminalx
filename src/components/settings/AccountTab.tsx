@@ -53,7 +53,7 @@ export function AccountTab() {
         <p className="text-xs leading-relaxed text-muted-foreground">
           Your TerminalX account is optional. The session refreshes automatically and its credentials are stored in macOS Keychain.
         </p>
-        <OrganizationOnboarding key={identity.email} organizationName={identity.organization} accountEmail={identity.email} contextRevision={status.context?.revision ?? ""} organizations={status.organizations ?? []} multiOrg={isMultiOrg(status)} />
+        <OrganizationOnboarding key={identity.email} organizationName={identity.organization} organizationId={identity.organizationId ?? null} accountEmail={identity.email} contextRevision={status.context?.revision ?? ""} organizations={status.organizations ?? []} multiOrg={isMultiOrg(status)} />
         {identity.organization && <OrganizationMembers accountEmail={identity.email} contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationCompute contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationAgentLogins contextRevision={status.context?.revision ?? ""} organizationName={identity.organization} />}
