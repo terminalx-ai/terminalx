@@ -26,13 +26,14 @@ pnpm tauri:dev
 ```
 
 That is `tauri dev --config src-tauri/tauri.dev.conf.json`. The extra config is
-a merge patch over `tauri.conf.json` — it changes three things and nothing else:
+a merge patch over `tauri.conf.json`. Its app identity overrides include:
 
 | Key | Dev value | What it moves |
 | --- | --- | --- |
 | `productName` | `TerminalX Dev` | The Dock label, the app menu, ⌘-Tab |
 | `identifier` | `com.terminalx.next.dev` | macOS permission grants and per-app state |
 | `bundle.icon` | `icons-dev/*` | The Dock icon: the app icon with an orange circular "D" badge |
+| `plugins.deep-link.desktop.schemes` | `["terminalx-dev"]` | Launch and sign-in links belong to Dev alone |
 
 So a dev build and an installed release can sit in the Dock together and stay
 apart at a glance.
@@ -40,9 +41,21 @@ apart at a glance.
 The release identity is `TerminalX` / `com.terminalx.next`, and it registers
 `terminalx://`. The bundle identifier deliberately keeps its `.next` suffix
 because the predecessor owns `com.terminalx`; macOS cannot install two apps
-with the same identifier. The deep-link handler continues to recognize
-`terminalx-next://` URLs for compatibility, but the bundle no longer registers
-that scheme.
+with the same identifier. The release handler continues to recognize
+`terminalx-next://` URLs for old installs, but the bundle no longer registers
+that scheme. Dev registers and accepts only `terminalx-dev://`. Callback URIs
+are selected from the Tauri bundle identity, including when a Dev bundle is
+built with Cargo's release profile.
+
+The server must accept `terminalx-dev://auth/callback` before this app change
+ships. Deploy the coordinated console/API change in `dudhatparesh/terminalx-saas`
+first. Dev authorize requests include `app=dev`; `legacy=1` is reserved for
+callers that need a Legacy hand-off. Both flags affect button visibility only.
+No flag means only **Open TerminalX**. The main button always uses `terminalx://`.
+
+Previously installed Dev bundles may have left a `terminalx://` registration
+in macOS Launch Services. Test with updated Dev and release bundles; stale
+registrations from old Dev bundles or other local copies may need clearing.
 
 The separate identifier is what keeps the two from stepping on each other in
 macOS itself. TCC keys microphone and speech-recognition consent by bundle
