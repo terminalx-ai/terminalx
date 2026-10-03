@@ -367,7 +367,12 @@ describe("cloud agent tabs", () => {
     expect(signInMessage(info({ provider: "codex", state: "not-connected" }), null)).toContain("Ask an owner or admin");
     expect(signInMessage(info({ provider: "codex", state: "unavailable", reason: "token-expired" }), true)).toContain("login has expired");
     expect(signInMessage(info({ provider: "codex", state: "unavailable", reason: "shared-use-policy" }), false)).toContain("An owner or admin can allow it for the whole organization.");
-    expect(signInMessage(info({ provider: "codex", state: "revoked" }), true)).toContain("Codex login is revoked");
+    expect(signInMessage(info({ provider: "codex", state: "revoked" }), true)).toContain("Codex login was revoked");
+    expect(signInMessage(info({ provider: "codex", state: "disconnected" }), true)).toContain("Codex login was disconnected");
+    // A state word this app does not know is not printed.
+    const unknown = signInMessage(info({ provider: "codex", state: "quarantined_v2" }), true)!;
+    expect(unknown).toContain("Codex login is not available");
+    expect(unknown).not.toContain("quarantined");
   });
 
   it("wakes a sleeping workspace only after an interactive command, and reports the wake", async () => {
