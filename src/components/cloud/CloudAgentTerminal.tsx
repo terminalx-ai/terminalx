@@ -19,6 +19,7 @@ import {
 } from "@/lib/cloudTerminals";
 import type { AgentTerminalTarget } from "@/lib/sessionBackend";
 import { getInstance } from "@/lib/terminal";
+import { terminalSize } from "@/lib/terminalFit";
 
 /**
  * The terminal view of a cloud agent tab (PRO-86): the terminal the tab's own
@@ -92,7 +93,10 @@ export function CloudAgentTerminal({
       setBusy(true);
       setError(null);
       try {
-        const size = getInstance(id, create).fit.proposeDimensions();
+        // The size this view fits itself to (`TerminalView`), so taking control is one resize of the agent's screen, not two.
+        const instance = getInstance(id, create);
+        const box = instance.el.parentElement;
+        const size = (box && terminalSize(instance.term, box)) ?? instance.fit.proposeDimensions();
         await takeControl(workspace, client, id, size && size.cols > 0 && size.rows > 0 ? { cols: size.cols, rows: size.rows } : null, { start });
         return true;
       } catch (e) {

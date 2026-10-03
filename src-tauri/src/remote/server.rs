@@ -259,6 +259,9 @@ pub struct WorkspaceRpc {
     terminals: Arc<Terminals>,
     sessions: Option<SessionManager>,
     ptys: Mutex<HashMap<String, PtyState>>,
+    /// Agent tabs that were removed. Tab ids are never reused, and the last
+    /// output of a CLI that was just stopped must not bring its terminal back.
+    removed_agent_tabs: Mutex<HashSet<String>>,
     session_subs: Mutex<HashMap<String, SessionSubscription>>,
     subscriptions: Mutex<HashMap<String, Subscription>>,
     idempotency: Mutex<IdempotencyCache>,
@@ -305,6 +308,7 @@ impl WorkspaceRpc {
             terminals,
             sessions,
             ptys: Mutex::new(HashMap::new()),
+            removed_agent_tabs: Mutex::new(HashSet::new()),
             session_subs: Mutex::new(HashMap::new()),
             subscriptions: Mutex::new(HashMap::new()),
             idempotency: Mutex::new(IdempotencyCache::default()),
@@ -1029,6 +1033,9 @@ impl WorkspaceRpc {
     fn agent_entry<'a>(&self, ptys: &'a mut HashMap<String, PtyState>, pty_id: &str) -> Result<&'a mut PtyState, RpcError> {
         if !ptys.contains_key(pty_id) {
             let tab_id = pty_id.strip_prefix(AGENT_PTY_PREFIX).ok_or_else(|| RpcError::not_found("no such terminal"))?;
+            if self.removed_agent_tabs.lock().unwrap().contains(tab_id) {
+                return Err(RpcError::not_found("the terminal closed with its tab"));
+            }
             let (input, queue) = std::sync::mpsc::channel::<Vec<u8>>();
             let input_pending = Arc::new(AtomicUsize::new(0));
             let terminals = self.terminals.clone();
@@ -1143,9 +1150,11 @@ impl WorkspaceRpc {
 
     /// The terminals of tabs that are gone go with them.
     fn close_agent_ptys<'a>(&self, tab_ids: impl Iterator<Item = &'a String>) {
+        let tab_ids: Vec<&String> = tab_ids.collect();
+        self.removed_agent_tabs.lock().unwrap().extend(tab_ids.iter().map(|tab_id| tab_id.to_string()));
         let ended: Vec<String> = {
             let mut ptys = self.ptys.lock().unwrap();
-            tab_ids.flat_map(|tab_id| Self::remove_pty(&mut ptys, &format!("{AGENT_PTY_PREFIX}{tab_id}"))).collect()
+            tab_ids.into_iter().flat_map(|tab_id| Self::remove_pty(&mut ptys, &format!("{AGENT_PTY_PREFIX}{tab_id}"))).collect()
         };
         self.forget_subscriptions(ended);
     }
@@ -1612,7 +1621,8 @@ impl WorkspaceRpc {
                 // later is replayed the screen it drew.
                 match self.agent_entry(&mut ptys, &data.id) {
                     Ok(pty) => pty,
-                    Err(error) => return log::warn!("an agent terminal's output is not kept: {}", error.message),
+                    // Its tab is gone (the last bytes of a CLI that was just stopped).
+                    Err(_) => return,
                 }
             } else {
                 let Some(pty) = ptys.get_mut(&data.id) else { return };
