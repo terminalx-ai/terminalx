@@ -287,8 +287,26 @@ project root. The runtime then:
 - counts as work while it runs (`cloud_activity::launching`): the activity
   report carries it as a running turn, so the server's idle suspend does not
   stop a workspace whose clone is still going with nobody attached;
-- reports `repository-clone-failed` when a clone cannot be made. The agent is
-  not started and the prompt is not sent.
+- stops when the create is canceled: while Git runs, the launcher asks the
+  server every 10 s whether the intent is still claimed, and on a cancel
+  kills Git's process group and removes the staging directory. An API it
+  cannot reach is not a cancel;
+- reports why a clone could not be made, each with its own text in the
+  desktop (`FAILURES` in `src/lib/cloudCreate.ts`). The agent is not started
+  and the prompt is not sent:
+
+  | Category | When |
+  | --- | --- |
+  | `repository-access-denied` | GitHub or the credential helper refused (no access, repository not found, sign-in failed) |
+  | `repository-branch-not-found` | the base branch is not in the repository |
+  | `repository-clone-timed-out` | the transfer stalled, or the 30 minutes ran out |
+  | `repository-path-occupied` | files, or another repository's checkout, are already at the path; nothing is deleted |
+  | `repository-empty` | the repository has no commits |
+  | `workspace-disk-full` | the disk or quota ran out while cloning |
+  | `repository-clone-failed` | anything else (network, a broken transfer) |
+
+  A desktop from before these categories shows the category itself in
+  "The agent did not start (…)".
 
 **The GitHub token.** `launch.rs` never holds one. Git asks the credential
 helper `cloud_github` installs at boot (PRO-14), which gets a short-lived

@@ -49,6 +49,58 @@ pub const CLONE_BUDGET: Duration = Duration::from_secs(30 * 60);
 /// given up, so a stalled clone fails the launch long before the budget.
 const LOW_SPEED_LIMIT: &str = "http.lowSpeedLimit=1000";
 const LOW_SPEED_TIME: &str = "http.lowSpeedTime=60";
+/// How often a running clone asks the server whether its create was canceled.
+pub const CANCEL_POLL: Duration = Duration::from_secs(10);
+
+/// Why a clone was not made. Each failure has its own category, so the
+/// person is told what actually went wrong (§19.5).
+#[derive(Debug)]
+pub enum CloneError {
+    /// The create was canceled while Git ran; Git was killed.
+    Canceled,
+    Failed { category: &'static str, detail: String },
+}
+
+impl CloneError {
+    fn failed(category: &'static str, detail: impl Into<String>) -> Self {
+        Self::Failed { category, detail: detail.into() }
+    }
+
+    fn io(error: std::io::Error) -> Self {
+        Self::failed(if is_disk_full(&error) { DISK_FULL } else { CLONE_FAILED }, error.to_string())
+    }
+}
+
+const CLONE_FAILED: &str = "repository-clone-failed";
+const ACCESS_DENIED: &str = "repository-access-denied";
+const BRANCH_NOT_FOUND: &str = "repository-branch-not-found";
+const CLONE_TIMED_OUT: &str = "repository-clone-timed-out";
+const PATH_OCCUPIED: &str = "repository-path-occupied";
+const REPOSITORY_EMPTY: &str = "repository-empty";
+const DISK_FULL: &str = "workspace-disk-full";
+
+fn is_disk_full(error: &std::io::Error) -> bool {
+    // ENOSPC and EDQUOT.
+    matches!(error.raw_os_error(), Some(28) | Some(122)) || error.kind() == std::io::ErrorKind::StorageFull
+}
+
+/// The category for what Git wrote when a clone failed (it runs with
+/// `LC_ALL=C`). The disk is checked first: a full disk also breaks the
+/// transfer, and that is the reason worth telling.
+pub fn clone_failure_category(stderr: &str) -> &'static str {
+    let has = |needles: &[&str]| needles.iter().any(|needle| stderr.contains(needle));
+    if has(&["No space left on device", "Disk quota exceeded"]) {
+        DISK_FULL
+    } else if stderr.contains("Remote branch") && stderr.contains("not found") {
+        BRANCH_NOT_FOUND
+    } else if has(&["Operation too slow", "Operation timed out", "Connection timed out"]) {
+        CLONE_TIMED_OUT
+    } else if has(&["Authentication failed", "could not read Username", "could not read Password", "Repository not found", "returned error: 401", "returned error: 403", "returned error: 404", "terminal prompts disabled"]) {
+        ACCESS_DENIED
+    } else {
+        CLONE_FAILED
+    }
+}
 
 /// `[a-z0-9-]{1,32}`, the agent ids a launch may name.
 pub fn valid_agent(agent: &str) -> bool {
@@ -229,8 +281,9 @@ pub enum StartError {
 /// Prepares one repository; the real one runs git.
 pub trait Checkout: Send + Sync {
     /// Clone a repository marked `clone` whose path is not a checkout yet,
-    /// giving up after `within`. The default does nothing.
-    fn clone_missing(&self, _repository: &Repository, _within: Duration) -> Result<()> {
+    /// giving up after `within` or as soon as `canceled` says so. The
+    /// default does nothing.
+    fn clone_missing(&self, _repository: &Repository, _within: Duration, _canceled: &dyn Fn() -> bool) -> std::result::Result<(), CloneError> {
         Ok(())
     }
     fn prepare(&self, repository: &Repository, work_branch: &str) -> Result<Branch>;
@@ -291,6 +344,8 @@ pub struct Launcher {
     pub incarnation: String,
     /// Where an intent without repositories starts its agent.
     pub root: PathBuf,
+    /// How often a running clone asks whether its create was canceled.
+    pub cancel_poll: Duration,
 }
 
 /// What one pass did, for the loop and tests.
@@ -373,11 +428,37 @@ impl Launcher {
         }
         let mut branches = Vec::new();
         let clone_deadline = std::time::Instant::now() + CLONE_BUDGET;
+        // A create canceled while Git runs: asked every `CANCEL_POLL`, so Git
+        // is killed instead of running on for a workspace nobody wants. An
+        // unreachable API is not a cancel.
+        let settled: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+        let asked = std::sync::Mutex::new(std::time::Instant::now());
+        let canceled = || {
+            let mut asked = asked.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if asked.elapsed() < self.cancel_poll {
+                return false;
+            }
+            *asked = std::time::Instant::now();
+            match self.api.phase(&claim.launch_id, "syncing-repository") {
+                Ok(Some(state)) => {
+                    *settled.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(state);
+                    true
+                }
+                _ => false,
+            }
+        };
         for repository in claim.repositories.iter().filter(|repository| repository.clone.is_some()) {
             let within = clone_deadline.saturating_duration_since(std::time::Instant::now());
-            if let Err(error) = self.checkout.clone_missing(repository, within) {
-                log::warn!("clone {}/{}: {error:#}", repository.owner, repository.name);
-                return Ok(self.finish(claim, Outcome::failed("repository-clone-failed", branches)));
+            match self.checkout.clone_missing(repository, within, &canceled) {
+                Ok(()) => {}
+                Err(CloneError::Canceled) => {
+                    let state = settled.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+                    return Err(CallError::Settled(state.unwrap_or_else(|| "canceled".into())));
+                }
+                Err(CloneError::Failed { category, detail }) => {
+                    log::warn!("clone {}/{}: {category}: {detail}", repository.owner, repository.name);
+                    return Ok(self.finish(claim, Outcome::failed(category, branches)));
+                }
             }
         }
         for repository in &claim.repositories {
@@ -543,29 +624,30 @@ fn is_empty_dir(path: &Path) -> bool {
 }
 
 impl Checkout for GitCheckout {
-    fn clone_missing(&self, repository: &Repository, within: Duration) -> Result<()> {
+    fn clone_missing(&self, repository: &Repository, within: Duration, canceled: &dyn Fn() -> bool) -> std::result::Result<(), CloneError> {
         let path = Path::new(&repository.path);
         let url = self.clone_url(repository);
         if path.join(".git").exists() {
             // This workspace's clone from an earlier attempt: kept as it is.
-            let origin = crate::git::run(path, &["remote", "get-url", "origin"])?;
+            let origin = crate::git::run(path, &["remote", "get-url", "origin"]).unwrap_or_default();
             if origin.trim() != url {
-                bail!("{} is a checkout of another repository", repository.path);
+                return Err(CloneError::failed(PATH_OCCUPIED, format!("{} is a checkout of another repository", repository.path)));
             }
             return Ok(());
         }
         if path.exists() && !is_empty_dir(path) {
             // Never deleted: it may be someone's work.
-            bail!("{} exists and is not a checkout", repository.path);
+            return Err(CloneError::failed(PATH_OCCUPIED, format!("{} exists and is not a checkout", repository.path)));
         }
-        let parent = path.parent().ok_or_else(|| anyhow!("no parent directory"))?;
-        let name = path.file_name().ok_or_else(|| anyhow!("no directory name"))?;
-        std::fs::create_dir_all(parent)?;
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return Err(CloneError::failed(CLONE_FAILED, "no directory to clone into"));
+        };
+        std::fs::create_dir_all(parent).map_err(CloneError::io)?;
         // Cloned next to its place and moved in whole, so a clone that died
         // halfway is never mistaken for a checkout. A leftover is our own.
         let staging = parent.join(format!("{STAGING_PREFIX}{}", name.to_string_lossy()));
         if staging.exists() {
-            std::fs::remove_dir_all(&staging)?;
+            std::fs::remove_dir_all(&staging).map_err(CloneError::io)?;
         }
         let staging_arg = staging.to_string_lossy().into_owned();
         let mut args = vec!["-c", LOW_SPEED_LIMIT, "-c", LOW_SPEED_TIME, "clone", "--quiet"];
@@ -573,15 +655,23 @@ impl Checkout for GitCheckout {
             args.extend(["--branch", base]);
         }
         args.extend(["--", &url, &staging_arg]);
-        if let Err(error) = crate::git::run_within(parent, &args, within) {
+        use crate::git::RunError;
+        let cloned = match crate::git::run_within(parent, &args, within, canceled) {
+            Ok(()) if crate::git::head_commit(&staging).is_none() => Err(CloneError::failed(REPOSITORY_EMPTY, "the repository has no commits")),
+            Ok(()) => Ok(()),
+            Err(RunError::Stopped) => Err(CloneError::Canceled),
+            Err(RunError::TimedOut) => Err(CloneError::failed(CLONE_TIMED_OUT, format!("not finished after {} s", within.as_secs()))),
+            Err(RunError::Failed(stderr)) => Err(CloneError::failed(clone_failure_category(&stderr), stderr)),
+            Err(RunError::Spawn(error)) => Err(CloneError::io(error)),
+        };
+        if let Err(error) = cloned {
             let _ = std::fs::remove_dir_all(&staging);
             return Err(error);
         }
         if path.exists() {
-            std::fs::remove_dir(path)?;
+            std::fs::remove_dir(path).map_err(CloneError::io)?;
         }
-        std::fs::rename(&staging, path)?;
-        Ok(())
+        std::fs::rename(&staging, path).map_err(CloneError::io)
     }
 
     fn prepare(&self, repository: &Repository, work_branch: &str) -> Result<Branch> {

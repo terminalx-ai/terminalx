@@ -187,6 +187,17 @@ describe("phases", () => {
     expect(failureMessage(snapshot({ workspace: { launch: launch("failed", { category: "agent-unavailable" }) } }))).toMatch(/not installed/);
     expect(failureMessage(snapshot({ workspace: { launch: launch("failed", { category: "runtime-interrupted" }) } }))).toMatch(/may not have been sent/);
     expect(failureMessage(snapshot({ workspace: { launch: launch("failed", { category: "repository-clone-failed" }) } }))).toMatch(/could not be cloned/);
+    // Each clone failure says what failed; only a refusal by GitHub points at GitHub access.
+    const cloneText = (category: string) => failureMessage(snapshot({ workspace: { launch: launch("failed", { category }) } }));
+    expect(cloneText("repository-access-denied")).toMatch(/GitHub access/);
+    expect(cloneText("repository-branch-not-found")).toMatch(/base branch does not exist/);
+    expect(cloneText("repository-clone-timed-out")).toMatch(/took too long or stalled/);
+    expect(cloneText("repository-path-occupied")).toMatch(/already in the workspace/);
+    expect(cloneText("repository-empty")).toMatch(/no commits/);
+    expect(cloneText("workspace-disk-full")).toMatch(/disk space/);
+    for (const category of ["repository-clone-failed", "repository-branch-not-found", "repository-clone-timed-out", "repository-path-occupied", "repository-empty", "workspace-disk-full"]) {
+      expect(cloneText(category)).not.toMatch(/GitHub access/);
+    }
     expect(failureMessage(snapshot({ operation: { state: "failed", errorCode: "provider_retry_exhausted" } }))).toMatch(/provider_retry_exhausted/);
     const running = snapshot({ workspace: { launch: launch("running", { timings: { ...launch("running").timings, runningAt: 7400 } }) } });
     expect(launchLatency(running)).toBe(6400);
