@@ -18,7 +18,7 @@ import {
 } from "@/lib/cloudAgents";
 import type { CloudAgentScope, OutboxEntry } from "@/lib/cloudAgentApi";
 import { APPROVE_BLOCKED_REASON, canApprove, mayConfigure, roleBlockReason } from "@/lib/cloudCollab";
-import { cloudComposerCommands, cloudComposerFiles, type ComposerCommands, type ComposerFiles } from "@/lib/cloudComposer";
+import { CLOUD_IMAGES_NEED_RUNNING, CloudImageError, cloudComposerCommands, cloudComposerFiles, cloudImagesBlocked, type ComposerCommands, type ComposerFiles } from "@/lib/cloudComposer";
 import { isPtyFirst } from "@/lib/tabViews";
 import type { TerminalInstance } from "@/lib/terminal";
 import type { AgentEvent } from "@/types/events";
@@ -199,8 +199,6 @@ export function localSessionBackend(sessionId: string): SessionBackend {
 
 // ---- cloud
 
-export const CLOUD_IMAGES_UNSUPPORTED = "Images cannot be sent to cloud agent tabs yet.";
-
 /**
  * Why a cloud session is view-only, or null when this person may drive it.
  * On a shared workspace (PRO-30) the collaboration role decides: a driver's
@@ -341,7 +339,7 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     kind: "cloud",
     key: ctx.key,
     generation: live ? `${live.runtimeGeneration}:${live.runtimeEpoch ?? ""}:${ctx.connects ?? 0}` : `offline:${ctx.client ? "client" : "none"}`,
-    caps: { local: false, write, steer: true, images: false, recovery: false },
+    caps: { local: false, write, steer: true, images: !!client?.hasCapability("composer/3"), recovery: false },
     readOnlyReason,
     approveBlockedReason,
     collab: { key: ctx.workspaceKey, you, client: ctx.collabClient ?? null },
@@ -365,10 +363,17 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
       };
     },
     send: async (tabId, text, images) => {
-      if (images.length) throw new Error(CLOUD_IMAGES_UNSUPPORTED);
+      guard();
+      // Images are uploaded straight to the runtime (PRO-22): a stopped workspace is started
+      // for them, by the same single wake a message asks for, and the message stays in the composer.
+      const blocked = images.length ? cloudImagesBlocked(client) : null;
+      if (blocked) {
+        if (blocked === CLOUD_IMAGES_NEED_RUNNING) followWake();
+        throw new CloudImageError(blocked);
+      }
       // Settings chosen while this person could approve are not sent once they cannot: the runtime would ignore them.
       if (!mayConfigure(you)) discardPendingConfig(scope, tabId);
-      await interactive(() => sendToCloudAgent(scope, tabId, text, client));
+      await interactive(() => sendToCloudAgent(scope, tabId, text, client, images));
       return { events: [], queued: true };
     },
     steer: (tabId, text) => interactive(() => steerCloudAgent(scope, tabId, text, client)),

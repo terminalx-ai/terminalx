@@ -28,11 +28,13 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * - `composer/1` (PRO-22): `session.commands`, the slash commands an agent
  *   tab's composer offers this person;
  * - `composer/2`: `session.files`, the session's files by name, for the
- *   composer's `@` list.
+ *   composer's `@` list;
+ * - `composer/3`: `session.attach`, an image uploaded in parts for the
+ *   message that then names it.
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 
 /**
@@ -46,6 +48,7 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "runtime.agents": "agents/1",
   "session.commands": "composer/1",
   "session.files": "composer/2",
+  "session.attach": "composer/3",
   // `collab/1` (PRO-30, docs/CLOUD-SHARING.md) also grants presence, notes
   // and tab leases, which are not named after it.
   "presence.update": "collab/1",

@@ -48,10 +48,17 @@ export function useImageAttachments({
   textareaRef,
   draft,
   onDraftChange,
+  mentionFiles = true,
 }: {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   draft: string;
   onDraftChange: (v: string) => void;
+  /**
+   * False when the agent does not run on this computer (a cloud tab): a
+   * dropped file that is not an image is then left alone, since its path
+   * here names nothing there.
+   */
+  mentionFiles?: boolean;
 }): ImageAttachments {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [dragging, setDragging] = useState(false);
@@ -86,7 +93,7 @@ export function useImageAttachments({
             ...current,
             { id: crypto.randomUUID(), name: img.name, mediaType: img.mediaType, data: img.data, previewUrl: `data:${img.mediaType};base64,${img.data}` },
           ]);
-        } else {
+        } else if (mentionFiles) {
           mentions.push(`@${path}`);
         }
       }
@@ -97,7 +104,7 @@ export function useImageAttachments({
       }
       textareaRef.current?.focus();
     },
-    [textareaRef],
+    [textareaRef, mentionFiles],
   );
 
   const chooseFiles = useCallback(async () => {
@@ -190,11 +197,11 @@ export function useImageAttachments({
 }
 
 /** The overlay that names what a drop does, shown while a file hovers the frame. */
-export function DropHint({ dragging }: { dragging: boolean }) {
+export function DropHint({ dragging, mentionFiles = true }: { dragging: boolean; mentionFiles?: boolean }) {
   if (!dragging) return null;
   return (
     <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-2xl bg-composer/80 text-sm text-muted-foreground">
-      Drop images to attach, other files to mention
+      {mentionFiles ? "Drop images to attach, other files to mention" : "Drop images to attach"}
     </div>
   );
 }

@@ -9,6 +9,7 @@
 //! receipt; the live workspace RPC reads tabs and changes their settings.
 
 pub mod api;
+pub mod attachments;
 pub mod checkpoints;
 pub mod crypto;
 pub mod keys;
@@ -106,6 +107,14 @@ pub trait AgentOps: Send + Sync {
     fn tabs(&self) -> Vec<AgentTabInfo>;
     fn busy(&self, session_id: &str, tab_id: &str) -> bool;
     fn send(&self, session_id: &str, tab_id: &str, text: &str) -> Result<()>;
+    /// A message with images (PRO-22), handed to the agent as a local
+    /// tab's are. An agent host that cannot take images says so.
+    fn send_with_images(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>) -> Result<()> {
+        if images.is_empty() {
+            return self.send(session_id, tab_id, text);
+        }
+        anyhow::bail!("this runtime cannot send images to an agent")
+    }
     fn stop(&self, session_id: &str, tab_id: &str) -> Result<()>;
     fn respond(&self, session_id: &str, tab_id: &str, request_id: &str, option_id: &str) -> Result<(), DecisionError>;
     fn answer(&self, session_id: &str, tab_id: &str, request_id: &str, answers: HashMap<String, String>) -> Result<(), DecisionError>;
@@ -264,6 +273,10 @@ impl AgentOps for ManagerOps {
         self.manager.send(session_id, tab_id, text.to_string(), Vec::new()).map(|_| ())
     }
 
+    fn send_with_images(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>) -> Result<()> {
+        self.manager.send(session_id, tab_id, text.to_string(), images).map(|_| ())
+    }
+
     fn stop(&self, session_id: &str, tab_id: &str) -> Result<()> {
         match self.manager.stop(session_id, tab_id) {
             // A stop racing another stop is the same stop.
@@ -345,6 +358,8 @@ pub struct CloudAgents {
     pub keys: keys::Keys,
     pub receipts: receipts::Receipts,
     pub follow_ups: receipts::FollowUps,
+    /// Images uploaded for a message that has not been typed yet.
+    pub attachments: attachments::Attachments,
     /// Present when the runtime has an API to lease from and upload to.
     pub identity: Option<Identity>,
     pub api: Option<Arc<dyn api::MailboxApi>>,
@@ -399,6 +414,7 @@ impl CloudAgents {
             keys: keys::Keys::open(dir, now).context("open the workspace content keys")?,
             receipts: receipts::Receipts::open(dir).context("open the receipt store")?,
             follow_ups: receipts::FollowUps::open(dir).context("open the follow-up queue")?,
+            attachments: attachments::Attachments::open(dir).context("open the attachment store")?,
             identity,
             api,
             checkpoints: checkpoints::Checkpoints::open(dir, generation)?,
@@ -542,6 +558,7 @@ impl CloudAgents {
         for (tab_id, follow_up) in dropped {
             let why = self.follow_up_refusal(&tab_id, &follow_up).unwrap_or("Dropped a queued message its sender may no longer send.");
             self.ops.note(&follow_up.session_id, &tab_id, why);
+            self.attachments.remove(&follow_up.images);
             self.changed(Some(&tab_id), true);
         }
         true
@@ -644,6 +661,19 @@ impl CloudAgents {
         Ok(key_id)
     }
 
+    /// One part of an image `owner` attaches to a message they are about to
+    /// send (`session.attach`). Uploads nobody sent within a day are dropped
+    /// first, except those a queued message still waits for.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attach_part(&self, owner: &str, id: &str, offset: u64, bytes: &[u8], media_type: &str, name: Option<&str>, last: bool) -> Result<u64, attachments::AttachError> {
+        let now = now_ms();
+        if offset == 0 {
+            let waiting: Vec<String> = self.follow_ups.tabs().iter().flat_map(|tab_id| self.follow_ups.list(tab_id)).flat_map(|follow_up| follow_up.images).collect();
+            self.attachments.prune(now, &waiting);
+        }
+        self.attachments.write_part(owner, id, offset, bytes, media_type, name, last, now)
+    }
+
     /// A tab's turn may have ended: send its next follow-up if so.
     pub fn nudge_follow_ups(&self, tab_id: &str) {
         let mut pending = self.dispatch.lock().unwrap();
@@ -681,10 +711,18 @@ impl CloudAgents {
             // the follow-up rather than sending it twice.
             match self.follow_ups.pop(&tab_id) {
                 Ok(Some(follow_up)) => {
-                    if let Err(error) = self.ops.send(&follow_up.session_id, &tab_id, &follow_up.text) {
-                        log::warn!("send follow-up {}: {error:#}", follow_up.client_command_id);
-                        self.ops.note(&follow_up.session_id, &tab_id, &format!("A queued message could not be sent: {error:#}"));
+                    // Its images were checked when it was queued; if they are
+                    // gone since, it is not sent without them.
+                    match self.attachments.load(&follow_up.actor_id, &follow_up.images) {
+                        Ok(images) => {
+                            if let Err(error) = self.ops.send_with_images(&follow_up.session_id, &tab_id, &follow_up.text, images) {
+                                log::warn!("send follow-up {}: {error:#}", follow_up.client_command_id);
+                                self.ops.note(&follow_up.session_id, &tab_id, &format!("A queued message could not be sent: {error:#}"));
+                            }
+                        }
+                        Err(_) => self.ops.note(&follow_up.session_id, &tab_id, "A queued message was not sent: its images are no longer on the workspace. Send it again."),
                     }
+                    self.attachments.remove(&follow_up.images);
                     sent += 1;
                     self.changed(Some(&tab_id), true);
                 }

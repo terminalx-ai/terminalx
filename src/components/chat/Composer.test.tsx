@@ -1,5 +1,5 @@
 import "@testing-library/dom";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TabEntry } from "@/types/session";
@@ -192,6 +192,36 @@ describe("composer attachments", () => {
     fireEvent.drop(dropTarget, { dataTransfer: { files: [image], types: ["Files"] } });
 
     expect(await screen.findByAltText("drop.webp")).toBeTruthy();
+  });
+
+  it("a file dropped from this computer is mentioned to a local agent, and left alone for a cloud one", async () => {
+    invoke.mockImplementation(async (command: string) => (command === "read_image_file" ? null : []));
+    let drop: (event: { payload: { type: string; paths: string[] } }) => Promise<void> = async () => undefined;
+    let listening = 0;
+    dragDropListener.mockImplementation(async (listener: typeof drop) => {
+      drop = listener;
+      listening += 1;
+      return vi.fn();
+    });
+    function Dropped({ remote }: { remote: boolean }) {
+      const [draft, setDraft] = useState("");
+      return <Composer tab={tab} remote={remote} busy={false} draft={draft} onDraftChange={setDraft} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    }
+    const view = render(<Dropped remote={false} />);
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await waitFor(() => expect(listening).toBeGreaterThan(0));
+    await act(async () => drop({ payload: { type: "drop", paths: ["/Users/me/notes.txt"] } }));
+    expect(box.value).toBe("@/Users/me/notes.txt ");
+    view.unmount();
+    listening = 0;
+
+    render(<Dropped remote />);
+    const cloudBox = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await waitFor(() => expect(listening).toBeGreaterThan(0));
+    await act(async () => drop({ payload: { type: "over", paths: [] } }));
+    expect(screen.getByText("Drop images to attach")).toBeTruthy();
+    await act(async () => drop({ payload: { type: "drop", paths: ["/Users/me/notes.txt"] } }));
+    expect(cloudBox.value).toBe("");
   });
 
   it("keeps an attachment when sending fails", async () => {
