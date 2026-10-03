@@ -212,6 +212,7 @@ describe("composer attachments", () => {
     await waitFor(() => expect(listening).toBeGreaterThan(0));
     await act(async () => drop({ payload: { type: "drop", paths: ["/Users/me/notes.txt"] } }));
     expect(box.value).toBe("@/Users/me/notes.txt ");
+    expect(screen.queryByTestId("attach-notice")).toBeNull();
     view.unmount();
     listening = 0;
 
@@ -222,6 +223,31 @@ describe("composer attachments", () => {
     expect(screen.getByText("Drop images to attach")).toBeTruthy();
     await act(async () => drop({ payload: { type: "drop", paths: ["/Users/me/notes.txt"] } }));
     expect(cloudBox.value).toBe("");
+    // It says why, instead of ignoring the file without a word (an over-5 MB image reads the same way).
+    expect(screen.getByTestId("attach-notice").textContent).toBe("notes.txt was not attached: only images (PNG, JPEG, GIF, WebP) up to 5 MB can be sent to a cloud agent.");
+    // The next image attached clears it.
+    invoke.mockImplementation(async (command: string) => (command === "read_image_file" ? { mediaType: "image/png", data: "YWJj", name: "shot.png" } : []));
+    await act(async () => drop({ payload: { type: "drop", paths: ["/Users/me/shot.png"] } }));
+    expect(screen.queryByTestId("attach-notice")).toBeNull();
+    expect(await screen.findByAltText("shot.png")).toBeTruthy();
+  });
+
+  it("hands over the very same image when a failed send is tried again", async () => {
+    const sent: unknown[] = [];
+    const onSend = vi.fn(async (_text: string, images: unknown[]) => {
+      sent.push(images[0]);
+      if (sent.length === 1) throw new Error("offline");
+    });
+    const { container } = render(<TestComposer onSend={onSend} />);
+    const image = new File([new Uint8Array([1, 2, 3])], "retry.png", { type: "image/png" });
+    fireEvent.drop(container.querySelector("textarea")!.parentElement!, { dataTransfer: { files: [image], types: ["Files"] } });
+    await screen.findByAltText("retry.png");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(2));
+    expect(sent[1]).toBe(sent[0]);
   });
 
   it("keeps an attachment when sending fails", async () => {

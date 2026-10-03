@@ -31,6 +31,8 @@ export interface ImageAttachments {
   clear: () => void;
   /** The queue in the shape `agent.send` takes. */
   images: ImageInput[];
+  /** Why the last file offered was not attached (a cloud tab only), until the queue changes again. */
+  notice: string | null;
   /** Spread onto the composer frame so it accepts pasted and dropped files. */
   dropZoneProps: Pick<HTMLAttributes<HTMLElement>, "onPaste" | "onDragEnter" | "onDragOver" | "onDragLeave" | "onDrop">;
 }
@@ -62,6 +64,12 @@ export function useImageAttachments({
 }): ImageAttachments {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [dragging, setDragging] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  // A local tab mentions what is not an image; a cloud tab can only say why it was left out.
+  const refuse = useCallback(
+    (names: string[]) => setNotice(mentionFiles || !names.length ? null : notAttached(names)),
+    [mentionFiles],
+  );
   const fileRef = useRef<HTMLInputElement>(null);
   // The drop target is registered once, so it reads the draft through a ref
   // rather than taking it as a dependency — otherwise every keystroke tore
@@ -71,8 +79,12 @@ export function useImageAttachments({
 
   const addFiles = useCallback(async (list: File[]) => {
     const out: Attachment[] = [];
+    const skipped: string[] = [];
     for (const f of list) {
-      if (!f.type.startsWith("image/") || f.size > MAX_IMAGE_BYTES) continue;
+      if (!f.type.startsWith("image/") || f.size > MAX_IMAGE_BYTES) {
+        skipped.push(f.name);
+        continue;
+      }
       const data = await new Promise<string>((res) => {
         const r = new FileReader();
         r.onload = () => res(String(r.result).split(",")[1] ?? "");
@@ -81,11 +93,13 @@ export function useImageAttachments({
       out.push({ id: crypto.randomUUID(), name: f.name, mediaType: f.type, data, previewUrl: URL.createObjectURL(f) });
     }
     if (out.length) setAttachments((a) => [...a, ...out]);
-  }, []);
+    refuse(skipped);
+  }, [refuse]);
 
   const addPaths = useCallback(
     async (paths: string[]) => {
       const mentions: string[] = [];
+      const skipped: string[] = [];
       for (const path of paths) {
         const img = await filesApi.readImage(path).catch(() => null);
         if (img) {
@@ -95,6 +109,8 @@ export function useImageAttachments({
           ]);
         } else if (mentionFiles) {
           mentions.push(`@${path}`);
+        } else {
+          skipped.push(path.split(/[\\/]/).pop() || path);
         }
       }
       if (mentions.length) {
@@ -102,9 +118,10 @@ export function useImageAttachments({
         const sep = current && !/\s$/.test(current) ? " " : "";
         change(current + sep + mentions.join(" ") + " ");
       }
+      refuse(skipped);
       textareaRef.current?.focus();
     },
-    [textareaRef, mentionFiles],
+    [textareaRef, mentionFiles, refuse],
   );
 
   const chooseFiles = useCallback(async () => {
@@ -127,6 +144,7 @@ export function useImageAttachments({
   }, []);
 
   const clear = useCallback(() => {
+    setNotice(null);
     setAttachments((list) => {
       for (const item of list) {
         if (item.previewUrl.startsWith("blob:")) URL.revokeObjectURL(item.previewUrl);
@@ -151,7 +169,15 @@ export function useImageAttachments({
     [addPaths, textareaRef],
   );
 
-  const images = useMemo(() => attachments.map((a) => ({ mediaType: a.mediaType, data: a.data, name: a.name })), [attachments]);
+  // One object per attachment for as long as it is queued: a send tried again hands over the very
+  // same images, which is how a cloud tab knows not to upload them as new ones.
+  const inputs = useRef(new Map<string, ImageInput>());
+  const images = useMemo(() => {
+    const kept = new Map<string, ImageInput>();
+    for (const a of attachments) kept.set(a.id, inputs.current.get(a.id) ?? { mediaType: a.mediaType, data: a.data, name: a.name });
+    inputs.current = kept;
+    return [...kept.values()];
+  }, [attachments]);
 
   const dropZoneProps = useMemo<ImageAttachments["dropZoneProps"]>(
     () => ({
@@ -191,9 +217,15 @@ export function useImageAttachments({
   // One stable object per change, so a composer's send callback can list it
   // as a dependency without being rebuilt on every render.
   return useMemo(
-    () => ({ attachments, dragging, fileRef, addFiles, chooseFiles, remove, clear, images, dropZoneProps }),
-    [attachments, dragging, addFiles, chooseFiles, remove, clear, images, dropZoneProps],
+    () => ({ attachments, dragging, fileRef, addFiles, chooseFiles, remove, clear, images, notice, dropZoneProps }),
+    [attachments, dragging, addFiles, chooseFiles, remove, clear, images, notice, dropZoneProps],
   );
+}
+
+/** Said when a cloud tab's composer leaves a file out: it takes images only, and nothing is mentioned by its path here. */
+export function notAttached(names: string[]): string {
+  const what = names.length === 1 ? `${names[0]} was` : `${names.length} files were`;
+  return `${what} not attached: only images (PNG, JPEG, GIF, WebP) up to 5 MB can be sent to a cloud agent.`;
 }
 
 /** The overlay that names what a drop does, shown while a file hovers the frame. */

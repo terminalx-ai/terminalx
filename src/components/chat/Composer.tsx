@@ -415,6 +415,11 @@ export function Composer({
           </div>
         )}
         <AttachmentThumbs attach={attach} />
+        {attach.notice && (
+          <div className="mb-1 px-1.5 text-xs text-warning" role="status" data-testid="attach-notice">
+            {attach.notice}
+          </div>
+        )}
         <textarea
           ref={ref}
           data-composer

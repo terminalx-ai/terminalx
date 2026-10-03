@@ -51,6 +51,10 @@ use std::path::{Component, Path};
 pub const SLASH_CATEGORY: &str = "slash-command-forbidden";
 pub const SHELL_CATEGORY: &str = "shell-command-forbidden";
 pub const MENTION_CATEGORY: &str = "file-mention-forbidden";
+/// A command that would have waited behind a running turn in a queue nobody
+/// re-checks: refused for everyone, to be sent again when the turn ends.
+pub const NOT_QUEUED_CATEGORY: &str = "command-not-queued";
+pub const NOT_QUEUED_MESSAGE: &str = "A turn is running: send this command when it has ended. A command is not queued behind a running turn.";
 
 /// Commands that change nothing about what the agent may do: they start a
 /// new conversation, shorten the current one, or show help. Per CLI, since a
@@ -159,9 +163,13 @@ pub fn is_command(text: &str) -> bool {
     first.is_some_and(|line| line.starts_with(['/', '!']))
 }
 
-/// Whitespace and what a terminal or a CLI's own trimming would skip.
+/// Whitespace and what a terminal or a CLI's own trimming would skip: the
+/// soft hyphen, zero-width and joiner characters, the bidirectional controls
+/// and the invisible mathematical operators.
 fn invisible(c: char) -> bool {
-    c.is_whitespace() || c.is_control() || matches!(c, '\u{feff}' | '\u{200b}'..='\u{200f}' | '\u{2060}')
+    c.is_whitespace()
+        || c.is_control()
+        || matches!(c, '\u{ad}' | '\u{61c}' | '\u{feff}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}')
 }
 
 /// An `@` mention of a file outside the project, as written. A mention
@@ -200,6 +208,13 @@ fn outside_mention<'a>(line: &'a str, project: Option<&Path>) -> Option<&'a str>
 /// one that climbs above it.
 fn leaves_project(path: &str, project: Option<&Path>) -> bool {
     let path = path.replace('\\', "/");
+    // `@server:file:///etc/hosts` names a resource by URI (an MCP server's):
+    // what follows the scheme is judged as the absolute path it is, so only
+    // a file of the project passes and any other resource is "outside".
+    let path = match path.split_once("://") {
+        Some((_, rest)) => format!("/{rest}"),
+        None => path,
+    };
     if path.starts_with('~') {
         return true;
     }
@@ -368,6 +383,15 @@ mod tests {
             ("see @/workspace/api/../web/.env", "@/workspace/api/../web/.env"),
             ("see @/workspace", "@/workspace"),
             ("see @/", "@/"),
+            // A resource named by URI is a file wherever the URI says.
+            ("read @filesystem:file:///etc/hosts", "@filesystem:file:///etc/hosts"),
+            ("read @file:///workspace/api/../web/.env", "@file:///workspace/api/../web/.env"),
+            ("read @docs:https://internal.example/secret", "@docs:https://internal.example/secret"),
+            ("read @\"fs:file:///var/lib/a file\"", "@\"fs:file:///var/lib/a file\""),
+            // More characters nobody sees.
+            ("read\u{ad}@/etc/hosts", "@/etc/hosts"),
+            ("read\u{202e}@/etc/hosts", "@/etc/hosts"),
+            ("read\u{2063}@~/x", "@~/x"),
         ] {
             let refusal = checked(text, "claude").expect_err(text);
             assert_eq!((refusal.kind, refusal.command.as_str(), refusal.category()), (Kind::Mention, mention, MENTION_CATEGORY), "{text:?}");
@@ -388,6 +412,8 @@ mod tests {
             "see @src/../Cargo.toml and @./src/lib.rs",
             "see @\"docs/a file.md\" and @'notes/x y.md'",
             "see @\"x y/../README.md\"",
+            "see @filesystem:file:///workspace/api/src/main.rs",
+            "see @server:issue/123 and @alice:bob",
         ] {
             assert_eq!(checked(text, "claude"), Ok(()), "{text:?}");
         }
@@ -399,7 +425,19 @@ mod tests {
 
     #[test]
     fn whitespace_and_invisible_characters_do_not_hide_a_command() {
-        for text in ["  /model opus", "\t/model", "\n\n/model opus", "\u{feff}/model", "\u{200b} /model", "\r\n /model"] {
+        for text in [
+            "  /model opus",
+            "\t/model",
+            "\n\n/model opus",
+            "\u{feff}/model",
+            "\u{200b} /model",
+            "\r\n /model",
+            "\u{ad}/model",
+            "\u{202e}/model",
+            "\u{2066}\u{2069}/model",
+            "\u{2061}\u{2064}/model",
+            "\u{61c}/model",
+        ] {
             assert_eq!(slash(text), "/model", "{text:?}");
             assert!(is_command(text), "{text:?}");
         }

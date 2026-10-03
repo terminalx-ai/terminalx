@@ -2267,8 +2267,7 @@ impl WorkspaceRpc {
         // right before the running turn ends (the mailbox's follow-up queue
         // is re-checked). Prose queues as before, mentions included.
         if slash::is_command(text) && (busy || self.sessions.as_ref().is_some_and(|sessions| sessions.turn_open(&session.id, &tab.id))) {
-            return Err(RpcError::new("conflict", "A turn is running: send this command when it has ended. A command is not queued behind a running turn.")
-                .with_data(json!({ "reason": "command-not-queued" })));
+            return Err(RpcError::new("conflict", slash::NOT_QUEUED_MESSAGE).with_data(json!({ "reason": slash::NOT_QUEUED_CATEGORY })));
         }
         let now = crate::cloud_agents::now_ms();
         match peer.user_id.as_deref() {
@@ -2419,7 +2418,7 @@ impl WorkspaceRpc {
             Ok(size) => Ok(json!({ "attachmentId": id, "size": size, "complete": last })),
             Err(AttachError::Invalid(why)) => Err(RpcError::invalid(why)),
             Err(AttachError::TooLarge) => Err(RpcError::invalid("the image is larger than 5 MB").with_data(json!({ "reason": "image-too-large" }))),
-            Err(AttachError::Full) => Err(RpcError::new("conflict", "too many images wait to be sent in this workspace; send or remove some first").with_data(json!({ "reason": "attachments-full" }))),
+            Err(AttachError::Full) => Err(RpcError::new("conflict", "too many images are waiting to be sent in this workspace; try again later").with_data(json!({ "reason": "attachments-full" }))),
             Err(AttachError::Failed(error)) => Err(RpcError::internal(error)),
         }
     }

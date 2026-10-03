@@ -78,6 +78,11 @@ pub struct AgentTabInfo {
     pub follow_ups: Vec<FollowUpView>,
     /// Who is driving the tab (contract §21.5), if anyone.
     pub lease: Option<crate::remote::collab::TabLease>,
+    /// Set when the tab's agent has no way to sign in (PRO-78): the
+    /// organization has no usable login for it and the workspace
+    /// configuration sets no key. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<crate::cloud_grants::SignInRequired>,
     pub last_seq: u64,
     pub created: String,
     pub modified: String,
@@ -243,6 +248,7 @@ impl AgentOps for ManagerOps {
                         .collect(),
                     follow_ups: Vec::new(),
                     lease: None,
+                    sign_in: crate::cloud_grants::sign_in_required_for_launch(&tab.harness, &format!("{}/{}", entry.id, tab.id)),
                     last_seq,
                     created: tab.created.clone(),
                     modified: tab.modified.clone(),
@@ -666,12 +672,18 @@ impl CloudAgents {
     /// first, except those a queued message still waits for.
     #[allow(clippy::too_many_arguments)]
     pub fn attach_part(&self, owner: &str, id: &str, offset: u64, bytes: &[u8], media_type: &str, name: Option<&str>, last: bool) -> Result<u64, attachments::AttachError> {
-        let now = now_ms();
         if offset == 0 {
-            let waiting: Vec<String> = self.follow_ups.tabs().iter().flat_map(|tab_id| self.follow_ups.list(tab_id)).flat_map(|follow_up| follow_up.images).collect();
-            self.attachments.prune(now, &waiting);
+            self.prune_attachments();
         }
-        self.attachments.write_part(owner, id, offset, bytes, media_type, name, last, now)
+        self.attachments.write_part(owner, id, offset, bytes, media_type, name, last, now_ms())
+    }
+
+    /// Drop uploads nobody sent within a day, except those a queued message
+    /// still waits for. Also run on a timer (`start`), so uploads left by
+    /// messages that never arrived do not fill the store for good.
+    pub fn prune_attachments(&self) {
+        let waiting: Vec<String> = self.follow_ups.tabs().iter().flat_map(|tab_id| self.follow_ups.list(tab_id)).flat_map(|follow_up| follow_up.images).collect();
+        self.attachments.prune(now_ms(), &waiting);
     }
 
     /// A tab's turn may have ended: send its next follow-up if so.
@@ -787,9 +799,17 @@ impl CloudAgents {
             self.nudge_follow_ups(&tab_id);
         }
         let agents = self.clone();
-        let _ = std::thread::Builder::new().name("cloud-follow-ups".into()).spawn(move || loop {
-            agents.dispatch_signal.wait(Duration::from_secs(5));
-            agents.dispatch_follow_ups();
+        let _ = std::thread::Builder::new().name("cloud-follow-ups".into()).spawn(move || {
+            // Old uploads go at start and then about hourly, whether or not anyone uploads again.
+            let mut pruned: Option<std::time::Instant> = None;
+            loop {
+                if pruned.is_none_or(|at| at.elapsed() >= ATTACHMENT_PRUNE_EVERY) {
+                    agents.prune_attachments();
+                    pruned = Some(std::time::Instant::now());
+                }
+                agents.dispatch_signal.wait(Duration::from_secs(5));
+                agents.dispatch_follow_ups();
+            }
         });
         if self.api.is_some() {
             let agents = self.clone();
@@ -818,6 +838,8 @@ impl CloudAgents {
         }
     }
 }
+
+const ATTACHMENT_PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
 
 const INTERRUPTED_TURN_NOTICE: &str = "The workspace runtime restarted and the agent process running this turn ended. \
      Its saved conversation resumes when you send the next message.";

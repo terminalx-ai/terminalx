@@ -128,6 +128,8 @@ export const CLOUD_IMAGES_OLD_RUNTIME = "Images need a newer workspace runtime. 
  * asks for) and keeps the message in the composer.
  */
 export const CLOUD_IMAGES_NEED_RUNNING = "Starting the workspace: images are uploaded straight to it. Send again once it is running.";
+/** Not connected for another reason (reconnecting, offline): nothing is started, and the message stays in the composer. */
+export const CLOUD_IMAGES_NEED_CONNECTION = "Not connected to the workspace: images are uploaded straight to it. Send again once it is connected.";
 /** As many as the runtime takes with one message. */
 export const CLOUD_MAX_IMAGES = 8;
 export const CLOUD_TOO_MANY_IMAGES = `A message to a cloud agent carries at most ${CLOUD_MAX_IMAGES} images.`;
@@ -150,7 +152,10 @@ export async function uploadCloudImages(client: WorkspaceRpcClient, where: { ses
   if (images.length > CLOUD_MAX_IMAGES) throw new CloudImageError(CLOUD_TOO_MANY_IMAGES);
   const refs: CloudImageRef[] = [];
   for (const image of images) {
-    const id = `att-${crypto.randomUUID().replace(/-/g, "")}`;
+    // One id per attachment the composer holds: a send tried again uploads under the same id,
+    // which the runtime takes as the same upload, instead of leaving one behind per attempt.
+    const id = attachmentId(image);
+    if (refs.some((ref) => ref.id === id)) continue;
     const parts = Math.max(1, Math.ceil(image.data.length / PART_CHARS));
     for (let part = 0; part < parts; part++) {
       const request = {
@@ -175,9 +180,24 @@ export async function uploadCloudImages(client: WorkspaceRpcClient, where: { ses
   return refs;
 }
 
-/** Why images cannot go to this runtime now, or null when they can. */
-export function cloudImagesBlocked(client: WorkspaceRpcClient | null): string | null {
-  if (!client || client.connection.state !== "connected") return CLOUD_IMAGES_NEED_RUNNING;
+/** The upload id of each image a composer has handed over, for as long as the composer keeps that image. */
+const attachmentIds = new WeakMap<ImageInput, string>();
+
+function attachmentId(image: ImageInput): string {
+  const known = attachmentIds.get(image);
+  if (known) return known;
+  const id = `att-${crypto.randomUUID().replace(/-/g, "")}`;
+  attachmentIds.set(image, id);
+  return id;
+}
+
+/**
+ * Why images cannot go to this runtime now, or null when they can. `asleep`:
+ * the workspace is stopped, so sending starts it; any other disconnected
+ * state (reconnecting, offline) only waits for the connection.
+ */
+export function cloudImagesBlocked(client: WorkspaceRpcClient | null, asleep: boolean): string | null {
+  if (!client || client.connection.state !== "connected") return asleep ? CLOUD_IMAGES_NEED_RUNNING : CLOUD_IMAGES_NEED_CONNECTION;
   return client.hasCapability("composer/3") ? null : CLOUD_IMAGES_OLD_RUNTIME;
 }
 

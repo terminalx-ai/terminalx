@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceRpcError, type WorkspaceRpcClient, type WorkspaceYou } from "@terminalx/portable/workspace";
 import {
+  CLOUD_IMAGES_NEED_CONNECTION,
   CLOUD_IMAGES_NEED_RUNNING,
   CLOUD_IMAGES_OLD_RUNTIME,
   CLOUD_TOO_MANY_IMAGES,
@@ -133,6 +134,19 @@ describe("a cloud tab's images", () => {
     expect(mutate.mock.calls.every(([, params]) => (params.data as string).length % 4 === 0)).toBe(true);
   });
 
+  it("upload one attachment under one id, so a send tried again leaves no second upload behind", async () => {
+    const { mutate, client } = uploader();
+    const image = { mediaType: "image/png", data: "YWJj", name: "shot.png" };
+    const first = await uploadCloudImages(client, where, [image, image]);
+    const again = await uploadCloudImages(client, where, [image]);
+    expect(first).toEqual([{ id: expect.stringMatching(/^att-[0-9a-f]{32}$/), mediaType: "image/png", name: "shot.png" }]);
+    expect(again).toEqual(first);
+    expect(mutate.mock.calls.map(([, params]) => params.attachmentId)).toEqual([first[0]!.id, first[0]!.id]);
+    // The same picture attached anew is another attachment.
+    const [other] = await uploadCloudImages(client, where, [{ ...image }]);
+    expect(other!.id).not.toBe(first[0]!.id);
+  });
+
   it("say in words why one was refused, and never send more than a message carries", async () => {
     const refused = uploader(new WorkspaceRpcError("invalid_params", "the image is larger than 5 MB", "session.attach"));
     const failure = await uploadCloudImages(refused.client, where, [{ mediaType: "image/png", data: "YWJj", name: "huge.png" }]).catch((error: unknown) => error);
@@ -149,9 +163,12 @@ describe("a cloud tab's images", () => {
   });
 
   it("need a connected runtime that takes them", () => {
-    expect(cloudImagesBlocked(null)).toBe(CLOUD_IMAGES_NEED_RUNNING);
-    expect(cloudImagesBlocked({ connection: { state: "suspended" }, hasCapability: () => false } as unknown as WorkspaceRpcClient)).toBe(CLOUD_IMAGES_NEED_RUNNING);
-    expect(cloudImagesBlocked(runtime({}, ["composer/1", "composer/2"]).client)).toBe(CLOUD_IMAGES_OLD_RUNTIME);
-    expect(cloudImagesBlocked(runtime({}, ["composer/3"]).client)).toBeNull();
+    expect(cloudImagesBlocked(null, true)).toBe(CLOUD_IMAGES_NEED_RUNNING);
+    expect(cloudImagesBlocked({ connection: { state: "suspended" }, hasCapability: () => false } as unknown as WorkspaceRpcClient, true)).toBe(CLOUD_IMAGES_NEED_RUNNING);
+    // Reconnecting or offline is not "starting": nothing is started for it.
+    expect(cloudImagesBlocked({ connection: { state: "reconnecting" }, hasCapability: () => false } as unknown as WorkspaceRpcClient, false)).toBe(CLOUD_IMAGES_NEED_CONNECTION);
+    expect(cloudImagesBlocked(null, false)).toBe(CLOUD_IMAGES_NEED_CONNECTION);
+    expect(cloudImagesBlocked(runtime({}, ["composer/1", "composer/2"]).client, false)).toBe(CLOUD_IMAGES_OLD_RUNTIME);
+    expect(cloudImagesBlocked(runtime({}, ["composer/3"]).client, false)).toBeNull();
   });
 });

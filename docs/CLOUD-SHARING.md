@@ -225,7 +225,10 @@ role changed).
     absolute path that is not under the session's working directory, or a
     relative one that climbs above it, with `.` and `..` resolved as text. A
     quoted mention (`@"a b/c"`) is read to its closing quote. A mention
-    starts a word, also after an invisible character. `@src/main.rs`, the
+    starts a word, also after an invisible character (zero-width and
+    bidirectional controls, the soft hyphen and the like). A resource named
+    by URI (`@server:file:///etc/hosts`, an MCP server's) is judged by the
+    path after its scheme, so only a file of the project passes. `@src/main.rs`, the
     project's own files by absolute path, and `name@example.com` pass.
   - **The project's own commands** (`.claude/commands`, `.claude/skills`)
     are not allowed. A plain driver can have the agent write one (in
@@ -250,10 +253,13 @@ role changed).
   `command` (as typed, shortened) and `message`. `session.send` answers
   `forbidden` with `data.reason` of the same name. A queued follow-up that
   became refusable (its sender lost `canApprove` while it waited) is dropped
-  with a note in the transcript. On the live `session.send`, a slash or `!`
-  command is never queued behind a running turn, whoever sends it
-  (`conflict`, `data.reason: "command-not-queued"`), because nothing
-  re-checks the session's own queue; prose queues as before. The desktop
+  with a note in the transcript. A slash or `!` command is never left in the
+  session's own queue behind a running turn, whoever sends it, because
+  nothing re-checks that queue: a mailbox `steer` of one while a turn runs
+  is `rejected` with category `command-not-queued`, and the live
+  `session.send` answers `conflict` with `data.reason` of the same name.
+  Prose steers and queues as before; a mailbox `send` of a command waits in
+  the follow-up queue, which is re-checked. The desktop
   shows the runtime's sentence for these refusals, on the outbox entry or as
   the send's error.
 - **Permission decisions** are not lease-bound; they need `canApprove`.

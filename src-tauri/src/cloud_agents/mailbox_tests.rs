@@ -43,6 +43,7 @@ impl AgentOps for FakeOps {
             pending_permissions: Vec::new(),
             follow_ups: Vec::new(),
             lease: None,
+            sign_in: None,
             last_seq: 0,
             created: String::new(),
             modified: String::new(),
@@ -707,6 +708,8 @@ fn a_plain_drivers_slash_command_is_refused_with_the_reason_and_an_approvers_goe
     *h.ops.busy.lock().unwrap() = false;
     assert!(collab.release("tab-1", "alice", false));
     for (n, text) in ["/model opus", "!ls -la", "@/etc/hosts what is in it"].iter().enumerate() {
+        // Each lands on an idle tab: a command is not steered into a running turn.
+        *h.ops.busy.lock().unwrap() = false;
         let bob = as_actor(lease(&h.agents, &format!("bob-{n}"), "steer", json!({ "v": 1, "text": text })), "bob", "driver", true);
         assert_eq!(handle(&h.agents, &bob).outcome, "applied", "{text:?}");
     }
@@ -779,6 +782,52 @@ fn a_queued_slash_command_is_dropped_when_its_sender_can_no_longer_approve() {
     h.agents.dispatch_follow_ups();
     assert_eq!(*h.ops.sent.lock().unwrap(), vec!["and then run the tests"], "neither command was typed");
     assert_eq!(h.ops.notes.lock().unwrap().iter().filter(|note| note.contains("queued command") && note.contains("no longer approve")).count(), 2);
+}
+
+/// #273 follow-up: a steer is typed into the running turn, where the
+/// session's own queue holds it until the turn ends, and nothing re-checks
+/// that queue. A slash or `!` command is therefore never steered into a
+/// running turn, whoever sends it; it would still run after its sender lost
+/// the right to send it.
+#[test]
+fn a_command_is_never_steered_into_a_running_turn() {
+    let h = harness();
+    shared(
+        &h,
+        json!([
+            { "userId": "alice", "role": "driver", "canApprove": false },
+            { "userId": "bob", "role": "driver", "canApprove": true },
+            { "userId": "boss", "role": "manager" },
+        ]),
+    );
+    let steer = |id: &str, user: &str, approves: bool, text: &str| {
+        let command = as_actor(lease(&h.agents, id, "steer", json!({ "v": 1, "text": text })), user, "driver", approves);
+        let receipt = handle(&h.agents, &command);
+        let body = open_receipt(&h.agents, &command, &receipt);
+        (receipt.outcome, receipt.category, body)
+    };
+    *h.ops.busy.lock().unwrap() = true;
+    for (n, text) in ["/model opus", "!ls", "  /compact", "\n!rm -rf build"].iter().enumerate() {
+        let (outcome, category, body) = steer(&format!("busy-{n}"), "bob", true, text);
+        assert_eq!((outcome.as_str(), category.as_deref()), ("rejected", Some("command-not-queued")), "{text:?}");
+        assert!(body["message"].as_str().unwrap().starts_with("A turn is running"), "{body}");
+    }
+    // A command a plain driver may send is still a command.
+    assert_eq!(steer("busy-plain", "alice", false, "/clear").1.as_deref(), Some("command-not-queued"));
+    // What they may not send at all is refused for that, as before.
+    assert_eq!(steer("busy-plain-2", "alice", false, "/model").1.as_deref(), Some("slash-command-forbidden"));
+    assert!(h.ops.sent.lock().unwrap().is_empty(), "nothing reached the running turn");
+    // Prose steers as it always did, a mention and a later `/` line included.
+    assert_eq!(steer("busy-prose", "bob", true, "use tabs, and read @/etc/hosts\n/model is not a command here").0, "applied");
+    // On an idle tab a command is typed at once: there is no queue to wait in.
+    *h.ops.busy.lock().unwrap() = false;
+    assert_eq!(steer("idle", "bob", true, "/model opus").0, "applied");
+    assert_eq!(h.ops.sent.lock().unwrap().len(), 2);
+    // A `send` of a command while busy waits in the follow-up queue, which is
+    // re-checked before it is typed (see the test above).
+    let queued = handle(&h.agents, &as_actor(lease(&h.agents, "send-1", "send", json!({ "v": 1, "text": "/model sonnet" })), "bob", "driver", true));
+    assert_eq!(queued.outcome, "applied");
+    assert_eq!(h.agents.follow_ups.list("tab-1").len(), 1);
 }
 
 /// PRO-22: the sender uploads an image first; the message names it.
@@ -874,4 +923,25 @@ fn a_queued_message_whose_images_are_gone_is_not_sent_without_them() {
     assert!(h.ops.sent.lock().unwrap().is_empty());
     assert!(h.ops.notes.lock().unwrap().iter().any(|note| note.contains("its images are no longer on the workspace")));
     assert!(h.agents.tab("tab-1").unwrap().follow_ups.is_empty());
+}
+
+/// Review of #309: a refused message must not leave its uploads behind, or
+/// retries fill the store until nobody can attach.
+#[test]
+fn a_refused_message_gives_up_its_senders_uploads_and_nobody_elses() {
+    let h = harness();
+    shared(&h, json!([{ "userId": "alice", "role": "driver", "canApprove": false }, { "userId": "bob", "role": "driver", "canApprove": false }]));
+    upload(&h.agents, "alice", "attach-0001", b"abc");
+    upload(&h.agents, "bob", "attach-0002", b"def");
+    // A PRO-88 refusal of alice's message, which names her upload and bob's.
+    let body = json!({ "v": 1, "text": "/model opus", "images": [{ "id": "attach-0001" }, { "id": "attach-0002" }] });
+    let receipt = handle(&h.agents, &as_actor(lease(&h.agents, "c1", "send", body), "alice", "driver", false));
+    assert_eq!((receipt.outcome.as_str(), receipt.category.as_deref()), ("rejected", Some("slash-command-forbidden")));
+    assert!(h.agents.attachments.load("alice", &["attach-0001".into()]).is_err(), "her upload goes with her refused message");
+    assert!(h.agents.attachments.load("bob", &["attach-0002".into()]).is_ok(), "his stays");
+    // The same attachment sent again under the same id is a fresh upload and goes through.
+    upload(&h.agents, "alice", "attach-0001", b"abc");
+    let again = json!({ "v": 1, "text": "what is this?", "images": [{ "id": "attach-0001" }] });
+    assert_eq!(handle(&h.agents, &as_actor(lease(&h.agents, "c2", "send", again), "alice", "driver", false)).outcome, "applied");
+    assert_eq!(h.ops.images.lock().unwrap().len(), 1);
 }

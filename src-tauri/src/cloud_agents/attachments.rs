@@ -186,6 +186,16 @@ impl Attachments {
         }
     }
 
+    /// As `remove`, for the uploads among `ids` that are `owner`'s.
+    pub fn remove_owned(&self, owner: &str, ids: &[String]) {
+        let _guard = self.lock.lock().unwrap();
+        for id in ids.iter().filter(|id| valid_id(id)) {
+            if self.meta(id).is_some_and(|meta| meta.owner == owner) {
+                self.remove_locked(id);
+            }
+        }
+    }
+
     fn remove_locked(&self, id: &str) {
         let _ = fs::remove_file(self.data(id));
         let _ = fs::remove_file(self.meta_path(id));
@@ -338,6 +348,16 @@ mod tests {
         assert!(store.load("alice", std::slice::from_ref(&waiting)).is_ok(), "a queued message still waits for it");
         assert_eq!(store.ids().len(), 1);
         assert_eq!(store.write_part("alice", "attach-overflow", 0, b"abc", "image/png", None, true, 3), Ok(3));
+    }
+
+    #[test]
+    fn only_an_uploads_owner_removes_it_by_name() {
+        let (_dir, store) = store();
+        store.write_part("alice", ID, 0, b"abc", "image/png", None, true, 1).unwrap();
+        store.remove_owned("bob", &[ID.into()]);
+        assert!(store.load("alice", &[ID.into()]).is_ok());
+        store.remove_owned("alice", &[ID.into(), "../x".into()]);
+        assert!(store.load("alice", &[ID.into()]).is_err());
     }
 
     #[test]

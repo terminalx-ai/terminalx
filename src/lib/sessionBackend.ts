@@ -366,7 +366,7 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
       guard();
       // Images are uploaded straight to the runtime (PRO-22): a stopped workspace is started
       // for them, by the same single wake a message asks for, and the message stays in the composer.
-      const blocked = images.length ? cloudImagesBlocked(client) : null;
+      const blocked = images.length ? cloudImagesBlocked(client, cloudAsleep(ctx.state, ctx.workspaceState)) : null;
       if (blocked) {
         if (blocked === CLOUD_IMAGES_NEED_RUNNING) followWake();
         throw new CloudImageError(blocked);

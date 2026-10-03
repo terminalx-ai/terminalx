@@ -137,9 +137,24 @@ with the same token; `stale-lease` is final; `stale-generation` leases again.
   "process",       // running | exited | not-started
   "pendingPermissions": [{ "requestId", "toolName", "input", "options" }],
   "followUps": [{ "clientCommandId", "text" }],
+  "signIn": { "provider", "state", "reason" },  // only when the agent cannot sign in
   "lastSeq": 0,    // newest committed event seq
   "created", "modified" }
 ```
+
+`signIn` (PRO-78) is present only when the tab's agent has no way to sign in:
+the server's last grant answer listed no usable login for its provider
+(`claude`, `codex`, `cursor`), the workspace configuration sets no key for it,
+and the session did not start with a credential. `state` is `not-connected`
+when the organization has no login for the provider, else the server's state
+for the one it has (`revoked`, `disconnected`, `unavailable`, with a `reason`
+such as `token-expired` or `shared-use-policy`). It is never set on a guess:
+not before the first grant sync, not after a failed one, and never for an
+agent the runtime cannot rule out a hand sign-in for (Cursor). Such a tab does not
+count as an active turn in the activity report, so it does not hold off the
+idle suspend, and the desktop shows it as "Needs sign-in", not "Working". A
+first prompt for such an agent fails with the launch category
+`agent-sign-in-required` instead of being typed into a sign-in screen.
 
 Subscribers of `session.subscribe` also get `session.status` notifications:
 `{ subscriptionId, sessionId, tabId, status }` (the process state comes with
@@ -283,18 +298,29 @@ instead of from this computer.
   desktop shows the receipt's sentence. A message queued behind a running
   turn keeps its uploads until it is typed; if they are gone by then it is
   not sent without them and the transcript says so. A stop, or a sender who
-  lost access, drops the queued message and its uploads. An upload nobody
-  sent within a day is removed; at most 64 wait at once.
+  lost access, drops the queued message and its uploads. A message the
+  runtime refuses (a PRO-88 refusal, a held lease, an invalid payload) gives
+  up its sender's uploads at once. An upload nobody sent within a day is
+  removed, at start and about hourly; at most 64 wait at once. The desktop
+  uploads one attachment under one id for as long as the composer holds it,
+  so a send tried again replaces nothing and leaves nothing behind.
 
   Uploading needs the runtime: sending images to a stopped workspace starts
   it (the one wake a message asks for), says so, and keeps the message and
-  its attachments in the composer to send once it is running. A runtime
+  its attachments in the composer to send once it is running. While it is
+  only not connected (reconnecting, offline) nothing is started and the
+  composer says to send again once connected. In a cloud tab a file that is
+  not an image, or an image over 5 MB, is not attached and the composer says
+  why. A runtime
   from before `composer/3` says it needs an update; the message is never
   sent without its images.
 
   In the transcript, an image sent to a cloud tab shows by name: its file
   is on the workspace, not on this computer, so there is no thumbnail.
   "Send again" on a message whose outcome is unknown resends its text only.
+  Nothing strips an image's metadata (EXIF, location). Once sent, the image
+  is archived on the workspace under `<store root>/attachments/<sessionId>/`,
+  as a local tab's is on this computer, until the session is deleted.
 
 Mobile is out of scope for PRO-22. It can reuse the same keys, outbox and
 checkpoint formats.
