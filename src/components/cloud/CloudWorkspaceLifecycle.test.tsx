@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, type CloudWorkspaceDisposition, type CloudWorkspaceListItem } from "@/lib/api";
 import type { RuntimeCheck } from "@/lib/cloudLifecycle";
-import { actionsFor, CloudWorkspaceLifecycleDialog, DeletionProgress } from "./CloudWorkspaceLifecycle";
+import { actionsFor, CloudWorkspaceLifecycleDialog, deletionLine, DeletionProgress } from "./CloudWorkspaceLifecycle";
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -394,6 +394,15 @@ describe("DeletionProgress", () => {
       // Any other stopped delete can be deleted again.
       const refused = item("attention-required", { provider: "box" }, operation({ action: "delete", state: "failed", errorCode: "cloud_provider_permission_denied" }));
       expect(actionsFor(refused)).toContain("delete");
+    });
+
+    it("words the list row's line the same way", () => {
+      const line = (fields: Record<string, unknown>, provider: "box" | "machine0" = "box") => deletionLine(item("attention-required", { provider }, operation({ action: "delete", state: "failed", ...fields })));
+      expect(line({ errorCode: "cloud_provider_state_conflict", detailCode: "box_deleted_sandbox_present" })).toBe(
+        "The delete stopped: Boat accepted the deletion but still reports the sandbox. Contact Boat support with the deletion operation id.",
+      );
+      expect(line({ errorCode: "cloud_provider_permission_denied" })).toMatch(/sandbox\.read and sandbox\.delete.*then press Retry delete\.$/);
+      expect(line({ errorCode: "cloud_provider_state_conflict" })).not.toMatch(/cloud_provider_state_conflict|The action failed/);
     });
 
     it("never shows the raw state-conflict code, with or without a detail code", () => {

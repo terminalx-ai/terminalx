@@ -425,7 +425,8 @@ export function deletionLine(item: CloudWorkspaceListItem): string | null {
   const state = deletion(item);
   const operation = item.latestOperation;
   if (!state || !operation) return null;
-  if (state !== "running") return `The delete stopped: ${operationFailureText(operation)}`;
+  // The same sentence as the stopped delete's own view gives (PRO-52).
+  if (state !== "running") return `The delete stopped: ${deleteFailure(operation, item.workspace.provider).text}`;
   const items = operation.cleanup?.items ?? [];
   return items.length ? `Deleting: ${items.length - remaining(operation.cleanup!).length} of ${items.length} removed.` : "Deleting…";
 }
