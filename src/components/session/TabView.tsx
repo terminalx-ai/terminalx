@@ -4,7 +4,7 @@ import { applyEvent, useTabLog } from "@/lib/agentEvents";
 import { buildTranscript, type Transcript } from "@/lib/transcript";
 import { getDraft, setDraft, useDraft } from "@/lib/drafts";
 import { useSessionStore } from "@/lib/sessions";
-import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
+import { hasEscapeOverlay, useShortcut } from "@/lib/hotkeys";
 import { changeRange, useChanges } from "@/lib/changes";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { CLOUD_IMAGES_UNSUPPORTED, localSessionBackend, terminalViewOf, type SessionBackend } from "@/lib/sessionBackend";
@@ -198,8 +198,8 @@ export function TabView({
   };
 
   // Editors, dialogs and pickers own Escape before the agent-stop shortcut.
-  // In a cloud tab's terminal view Escape belongs to the agent's own screen, as every other key does.
-  useHotkey("escape", () => (live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane") ? (stop(), true) : false), {
+  // In a cloud tab's terminal view the stop key (Escape, unless remapped) belongs to the agent's own screen, as every other key does.
+  useShortcut("session.stop", () => (live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane") ? (stop(), true) : false), {
     enabled: active && !continuationOpen && !(remoteTerminal && terminalMode),
   });
 

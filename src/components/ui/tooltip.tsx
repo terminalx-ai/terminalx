@@ -1,6 +1,7 @@
 import * as React from "react";
 import { Tooltip as TooltipPrimitive } from "radix-ui";
 import { cn } from "@/lib/cn";
+import { keycaps, useKeymap, type ShortcutId } from "@/lib/shortcuts";
 
 export const TooltipProvider = TooltipPrimitive.Provider;
 export const Tooltip = TooltipPrimitive.Root;
@@ -53,15 +54,20 @@ export function KbdGroup({ keys }: { keys: string[] }) {
 /** Wrap any element with a tooltip carrying a label and optional shortcut. */
 export function WithTooltip({
   label,
-  keys,
+  keys: fixedKeys,
+  shortcut,
   side = "bottom",
   children,
 }: {
   label?: string;
   keys?: string[];
+  /** The action whose current keys to show, kept up to date when the reader changes them. */
+  shortcut?: ShortcutId;
   side?: "top" | "bottom" | "left" | "right";
   children: React.ReactElement;
 }) {
+  if (shortcut) return <ShortcutTooltip label={label} shortcut={shortcut} side={side} children={children} />;
+  const keys = fixedKeys;
   if (!label && !keys?.length) return children;
   return (
     <Tooltip delayDuration={400}>
@@ -71,5 +77,15 @@ export function WithTooltip({
         {keys?.length ? <KbdGroup keys={keys} /> : null}
       </TooltipContent>
     </Tooltip>
+  );
+}
+
+/** A tooltip whose keys are the action's current ones; only these follow the keymap. */
+function ShortcutTooltip({ label, shortcut, side, children }: { label?: string; shortcut: ShortcutId; side: "top" | "bottom" | "left" | "right"; children: React.ReactElement }) {
+  const first = useKeymap()[shortcut][0];
+  return (
+    <WithTooltip label={label} keys={first ? keycaps(first) : []} side={side}>
+      {children}
+    </WithTooltip>
   );
 }

@@ -3,7 +3,7 @@ import { FileText, Search } from "lucide-react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import type { FileHit } from "@/lib/api";
 import { openFile } from "@/lib/editors";
-import { useHotkey } from "@/lib/hotkeys";
+import { useShortcut } from "@/lib/hotkeys";
 import { cn } from "@/lib/cn";
 import { dirName } from "@/lib/paths";
 import { localFileSource, type FileSource } from "@/lib/workspaceFiles";
@@ -21,7 +21,7 @@ export function QuickOpen({ sessionId, root, source }: { sessionId: string; root
   const [sel, setSel] = useState(0);
   const input = useRef<HTMLInputElement>(null);
 
-  useHotkey("mod+p", () => setOpen(true));
+  useShortcut("files.quickOpen", () => setOpen(true));
 
   useEffect(() => {
     if (!open) return;

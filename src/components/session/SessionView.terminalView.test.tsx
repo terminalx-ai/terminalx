@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
   guard: null as unknown as ReturnType<typeof import("@/test/guardedApi").guardedApi>,
   workspaceConnection: vi.fn(),
   catalog: { owner: "me", revision: "r", loaded: true, orgs: {} as Record<string, unknown>, createMemory: {}, notices: [] },
-  prefs: { panelOpen: false, panelWidth: 360, sidebarOpen: true, lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", useWorktree: true },
+  prefs: { panelOpen: false, panelWidth: 360, sidebarOpen: true, lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", useWorktree: true, shortcuts: {} as Record<string, string[]> },
   createTerminal: (): unknown => undefined,
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (command: string, args?: Record<string, unknown>) => mocks.guard.invoke(command, args) }));
@@ -63,7 +63,7 @@ import { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { SessionView } from "./SessionView";
 import { useCloudSession } from "@/lib/cloudSession";
 import { resetCloudAgents } from "@/lib/cloudAgents";
-import { agentTerminalId, cloudTerminalFactory, ensureAgentTerminal, resetCloudTerminals, typeIntoCloudTerminal } from "@/lib/cloudTerminals";
+import { agentTerminalId, agentTerminalOf, cloudTerminalFactory, ensureAgentTerminal, resetCloudTerminals, typeIntoCloudTerminal } from "@/lib/cloudTerminals";
 import { getInstance } from "@/lib/terminal";
 import { resetCloudConnections } from "@/lib/cloudConnections";
 import { TERMINAL_APPROVAL_REASON, VIEWER_REASON, resetCollab } from "@/lib/cloudCollab";
@@ -157,6 +157,7 @@ beforeEach(() => {
   mocks.workspaceConnection.mockImplementation(async () => ({ target: { kind: "cloud", organizationId: ORG, workspaceId: WS }, client, activate, close: vi.fn() }));
   setCatalog(workspaceItem("ready"));
   selectSessionTab(KEY, { kind: "agent", id: "t-1" });
+  mocks.prefs.shortcuts = {};
 });
 
 afterEach(() => {
@@ -261,6 +262,41 @@ describe("the chat / terminal switch on a cloud agent tab (PRO-86)", () => {
     await waitFor(() => expect(runtime.params("pty.attach")).toHaveLength(2));
     expect(runtime.params("pty.attach")[1]).toMatchObject({ sinceOffset: runtime.agent.screen.length });
     expect(guard.violations).toEqual([]);
+  });
+
+  it("follows a remapped shortcut, like a local tab (the one action in the shortcut registry)", async () => {
+    mocks.prefs.shortcuts = { "session.toggleTerminalView": ["mod+shift+y"] };
+    await open();
+    // The old keys no longer switch anything; the new ones do, both ways.
+    fireEvent.keyDown(window, { key: "T", code: "KeyT", ctrlKey: true, shiftKey: true });
+    await settle();
+    expect(screen.queryByTestId("cloud-agent-terminal")).toBeNull();
+    fireEvent.keyDown(window, { key: "Y", code: "KeyY", ctrlKey: true, shiftKey: true });
+    expect(await screen.findByTestId("cloud-agent-terminal")).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Y", code: "KeyY", ctrlKey: true, shiftKey: true });
+    await waitFor(() => expect(screen.queryByTestId("cloud-agent-terminal")).toBeNull());
+    expect(screen.getByTestId("composer")).toBeTruthy();
+  });
+
+  it("leaves Escape to the agent in the terminal view, and stops the turn with it from the chat", async () => {
+    runtime.tabs = [agentTab({ status: "in_progress" })];
+    await open();
+    showTerminal();
+    await screen.findByTestId("cloud-agent-terminal");
+    // The app does not take the key: it is not prevented, and no stop is queued.
+    expect(fireEvent.keyDown(window, { key: "Escape", code: "Escape" })).toBe(true);
+    await settle();
+    expect(enqueued).toEqual([]);
+    // Typed in the terminal it is a byte for the agent's own screen.
+    await waitFor(() => expect(agentTerminalOf(WORKSPACE, "t-1")?.control).toBe("you"));
+    act(() => xterm.type("\x1b"));
+    await waitFor(() => expect(runtime.typed).toEqual(["\x1b"]));
+    expect(enqueued).toEqual([]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to chat" }));
+    await screen.findByTestId("composer");
+    expect(fireEvent.keyDown(window, { key: "Escape", code: "Escape" })).toBe(false);
+    await waitFor(() => expect(enqueued).toEqual(["stop"]));
   });
 
   it("remembers the view per tab", async () => {

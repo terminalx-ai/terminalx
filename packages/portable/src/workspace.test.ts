@@ -167,7 +167,7 @@ class FakeRuntime implements WorkspaceTransport {
         return ok(result);
       }
       case "runtime.agents":
-        return ok({ agents: [{ id: "claude", name: "Claude Code", caps: { effort: true }, models: [{ id: "opus", label: "Opus 5", efforts: ["high"], defaultEffort: "high", acceptsImages: true, isDefault: true, upgrade: null, description: null }], modes: ["plan", "bypassPermissions"], defaultMode: "bypassPermissions" }] });
+        return ok({ agents: [{ id: "claude", name: "Claude Code", caps: { effort: true }, models: [{ id: "opus", label: "Opus 5.5", efforts: ["high"], defaultEffort: "high", acceptsImages: true, isDefault: true, upgrade: null, description: null }], modes: ["plan", "bypassPermissions"], defaultMode: "bypassPermissions" }] });
       case "pty.list":
         return ok({ epoch: this.epoch, terminals: [{ ptyId: "p1", epoch: this.epoch, sessionId: "s1" }, { ptyId: "p2", epoch: this.epoch }] });
       default:
