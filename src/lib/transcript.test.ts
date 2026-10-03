@@ -76,6 +76,81 @@ describe("buildTranscript", () => {
     expect(t.pendingAsks).toHaveLength(0);
   });
 
+  // #250: a prompt typed into the agent's own terminal never passes through
+  // the composer, so its event has the text and nothing else — no baseline,
+  // no cwd, no images, not even `queued`, which older logs omit.
+  it("draws a prompt that carries none of the composer's fields", () => {
+    const typed = { type: "user_message", text: "typed in the terminal" } as Payload;
+    const t = buildTranscript(
+      [
+        ev({ type: "user_message", text: "from the composer", queued: false, baseline: "abc", cwd: "/w" }),
+        ev({ type: "assistant_text", text: "first" }),
+        ev({ type: "turn_completed", status: "ok", authFailed: false }),
+        ev(typed),
+        ev({ type: "assistant_text", text: "second" }),
+        ev({ type: "turn_completed", status: "ok", authFailed: false }),
+      ],
+      false,
+    );
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["from the composer", "typed in the terminal"]);
+    expect(t.turns[1].work.map((w) => w.kind === "text" && w.text)).toEqual(["second"]);
+  });
+
+  it("starts a turn at a prompt typed while another was running, as it does for a composer's", () => {
+    const t = buildTranscript(
+      [
+        ev({ type: "user_message", text: "go", queued: false }),
+        toolStart("a", "Bash"),
+        ev({ type: "user_message", text: "and also this", queued: false }),
+        toolDone("a"),
+        ev({ type: "assistant_text", text: "both done" }),
+        ev({ type: "turn_completed", status: "ok", authFailed: false }),
+      ],
+      false,
+    );
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["go", "and also this"]);
+    expect(t.turns[1].completed?.status).toBe("ok");
+  });
+
+  it("makes a queued message the prompt of the turn it starts once the turn before it is over", () => {
+    const events = [
+      ev({ type: "user_message", text: "go", queued: false }),
+      toolStart("a", "Bash"),
+      toolDone("a"),
+      ev({ type: "user_message", text: "then this", queued: true }),
+      ev({ type: "assistant_text", text: "done" }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+    ];
+    // Still waiting: it is a note in the turn it is queued behind.
+    let t = buildTranscript(events, true);
+    expect(t.turns).toHaveLength(1);
+    expect(t.turns[0].work.some((w) => w.kind === "queued")).toBe(true);
+
+    // The agent took it as its next prompt; no second `user_message` says so.
+    events.push(ev({ type: "assistant_text", text: "on it" }));
+    t = buildTranscript(events, true);
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["go", "then this"]);
+    expect(t.turns[0].work.some((w) => w.kind === "queued")).toBe(false);
+    expect(t.turns[1].work.map((w) => w.kind)).toEqual(["text"]);
+  });
+
+  it("leaves a queued message the agent took mid-turn in the turn it was taken in", () => {
+    const t = buildTranscript(
+      [
+        ev({ type: "user_message", text: "go", queued: false }),
+        ev({ type: "user_message", text: "steer", queued: true }),
+        toolStart("a", "Bash"),
+        toolDone("a"),
+        ev({ type: "turn_completed", status: "ok", authFailed: false }),
+        ev({ type: "assistant_text", text: "a stray reply" }),
+      ],
+      false,
+    );
+    expect(t.turns).toHaveLength(2);
+    expect(t.turns[0].work.some((w) => w.kind === "queued")).toBe(true);
+    expect(t.turns[1].prompt).toBeUndefined();
+  });
+
   it("reads context occupancy off the latest reading", () => {
     const events = [
       ev({ type: "user_message", text: "go", queued: false }),

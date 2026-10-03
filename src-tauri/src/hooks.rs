@@ -86,6 +86,30 @@ pub struct Origin {
     /// Claude: `~/.claude/projects/<encoded cwd>`. Codex: the managed
     /// `$TERMINALX_HOME/codex/sessions`.
     pub transcript_root: PathBuf,
+    /// Claude only: this conversation's own file, wherever the CLI keeps it.
+    pub conversation: Option<ConversationFile>,
+}
+
+/// One conversation's transcript, named without saying which folder it is
+/// in. Claude Code files a transcript under the directory the conversation
+/// was started in and keeps writing there when it is resumed from another:
+/// after a workspace is renamed, the file is not under the folder derived
+/// from where the checkout is now (#250).
+#[derive(Debug, Clone)]
+pub struct ConversationFile {
+    /// `~/.claude/projects`: the file is in a folder directly inside it.
+    pub projects: PathBuf,
+    /// `<conversation id>.jsonl`.
+    pub name: String,
+}
+
+impl ConversationFile {
+    fn is(&self, named: &Path) -> bool {
+        let Some(folder) = named.parent() else { return false };
+        let Some(above) = folder.parent() else { return false };
+        let same = |a: &Path, b: &Path| a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b);
+        named.file_name().and_then(|n| n.to_str()) == Some(self.name.as_str()) && under_root(&self.projects, named) && same(above, &self.projects)
+    }
 }
 
 impl Origin {
@@ -98,9 +122,13 @@ impl Origin {
     /// have opened. Anything else is read as if the frame had named no file
     /// at all: the tail stays where it is rather than following a frame to
     /// some other reader's private notes.
+    ///
+    /// For Claude that is any file in the folder derived from the checkout,
+    /// or the tab's own conversation in whichever folder the CLI filed it —
+    /// by name, so it is still only ever this tab's transcript.
     pub fn transcript<'f>(&self, frame: &'f HookFrame) -> Option<&'f Path> {
         let named = Path::new(frame.payload["transcript_path"].as_str()?);
-        under_root(&self.transcript_root, named).then_some(named)
+        (under_root(&self.transcript_root, named) || self.conversation.as_ref().is_some_and(|own| own.is(named))).then_some(named)
     }
 }
 
@@ -1215,7 +1243,7 @@ mod tests {
 
     #[test]
     fn only_the_token_this_launch_was_given_is_this_tab_s() {
-        let origin = Origin { token: mint_token(), transcript_root: PathBuf::from("/nowhere") };
+        let origin = Origin { token: mint_token(), transcript_root: PathBuf::from("/nowhere"), conversation: None };
         assert!(origin.accepts(&frame(&origin.token, "")));
         assert!(!origin.accepts(&frame(&mint_token(), "")), "another tab's token is not this tab's");
         assert!(!origin.accepts(&frame("", "")), "a frame from a build with no token is refused");
@@ -1226,7 +1254,7 @@ mod tests {
         assert!(!origin.accepts(&frame(&nearly, "")));
 
         // A tab that never got a token accepts nothing, empty frames included.
-        let unset = Origin { token: String::new(), transcript_root: PathBuf::from("/nowhere") };
+        let unset = Origin { token: String::new(), transcript_root: PathBuf::from("/nowhere"), conversation: None };
         assert!(!unset.accepts(&frame("", "")));
     }
 
@@ -1235,7 +1263,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let root = home.path().join(".claude/projects/-Users-me-work");
         std::fs::create_dir_all(&root).unwrap();
-        let origin = Origin { token: mint_token(), transcript_root: root.clone() };
+        let origin = Origin { token: mint_token(), transcript_root: root.clone(), conversation: None };
 
         // The file the CLI opened, which it has yet to create.
         let mine = root.join("2f1c.jsonl");
@@ -1257,6 +1285,39 @@ mod tests {
         assert_eq!(origin.transcript(&HookFrame { payload: json!({}), ..frame("", "") }), None);
     }
 
+    /// #250: a workspace was renamed, the tab resumed its conversation from
+    /// the new folder, and the CLI went on writing the transcript where the
+    /// conversation began. Every hook named that file and every one was
+    /// refused, so the chat heard nothing the transcript said.
+    #[test]
+    fn a_frame_may_name_this_tab_s_own_conversation_in_another_checkout_s_folder() {
+        let home = tempfile::tempdir().unwrap();
+        let projects = home.path().join(".claude/projects");
+        let (now, began) = (projects.join("-Users-me-work-renamed"), projects.join("-Users-me-work-original"));
+        std::fs::create_dir_all(&now).unwrap();
+        std::fs::create_dir_all(&began).unwrap();
+        let own = ConversationFile { projects: projects.clone(), name: "2f1c.jsonl".into() };
+        let origin = Origin { token: mint_token(), transcript_root: now.clone(), conversation: Some(own) };
+
+        let mine = began.join("2f1c.jsonl");
+        assert_eq!(origin.transcript(&frame("", mine.to_str().unwrap())), Some(mine.as_path()));
+        // Still only this conversation: not its neighbours in that folder,
+        // not a file of the same name deeper down or outside the projects
+        // folder, and not a traversal back in.
+        for outside in [
+            began.join("another.jsonl"),
+            began.join("nested/2f1c.jsonl"),
+            projects.join("2f1c.jsonl"),
+            home.path().join("notes/2f1c.jsonl"),
+            projects.join("-Users-me-work-original/../../../notes/2f1c.jsonl"),
+        ] {
+            assert_eq!(origin.transcript(&frame("", outside.to_str().unwrap())), None, "{}", outside.display());
+        }
+        // A tab with no conversation of its own (Codex) keeps to its root.
+        let rooted = Origin { conversation: None, ..origin.clone() };
+        assert_eq!(rooted.transcript(&frame("", mine.to_str().unwrap())), None);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_symlinked_root_still_holds_its_own_transcripts() {
@@ -1268,7 +1329,7 @@ mod tests {
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(dir.path().join("real"), &link).unwrap();
 
-        let origin = Origin { token: mint_token(), transcript_root: link.join("sessions") };
+        let origin = Origin { token: mint_token(), transcript_root: link.join("sessions"), conversation: None };
         let named = real.join("2026/09/rollout.jsonl");
         assert_eq!(origin.transcript(&frame("", named.to_str().unwrap())), Some(named.as_path()));
         let elsewhere = dir.path().join("real/elsewhere.jsonl");

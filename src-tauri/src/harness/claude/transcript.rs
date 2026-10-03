@@ -11,8 +11,14 @@
 //! message at a time and there are no deltas to preview.
 //!
 //! The CLI's bookkeeping records (`queue-operation`, `last-prompt`, `mode`,
-//! `attachment`, …) carry nothing the transcript view would draw and are
-//! skipped, as are sidechain (subagent) and meta records.
+//! most `attachment`s, …) carry nothing the transcript view would draw and
+//! are skipped, as are sidechain (subagent) and meta records.
+//!
+//! A prompt reaches the file in one of two shapes, and both are the reader
+//! speaking (#250): a `user` record when the CLI was idle, and a
+//! `queued_command` attachment when it was typed while a turn was running —
+//! the CLI hands that one to the model with the next tool result and never
+//! writes a `user` record for it.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -22,17 +28,49 @@ use serde_json::Value;
 use crate::events::{Payload, ToolResult, ToolType, TurnStatus, Usage};
 use crate::harness::tui::TurnMark;
 
-/// Where the CLI keeps the transcript for a session run in `cwd`. Every
-/// character outside `[A-Za-z0-9-]` becomes `-`, which is why a dot-folder
-/// yields a double dash.
-pub fn cli_transcript_path(cwd: &str, session_id: &str) -> Option<PathBuf> {
-    Some(transcript_under(&dirs::home_dir()?, cwd, session_id))
+/// Where a session's transcript actually is.
+///
+/// The folder is named for the directory the conversation was *started* in,
+/// and the CLI goes on appending to that file when the conversation is
+/// resumed from somewhere else: a workspace that was renamed, a path reached
+/// through a symlink. So a file that exists under the session's id wins over
+/// the path derived from where the checkout is now (#250). With no file
+/// anywhere — a conversation that has yet to be written — it is the derived
+/// path.
+pub fn locate(cwd: &str, session_id: &str) -> Option<PathBuf> {
+    Some(locate_under(&dirs::home_dir()?, cwd, session_id))
+}
+
+/// [`locate`] without the home lookup.
+pub fn locate_under(home: &Path, cwd: &str, session_id: &str) -> PathBuf {
+    let derived = transcript_under(home, cwd, session_id);
+    // An id is a file name here, never a path.
+    if derived.exists() || session_id.is_empty() || session_id.contains(['/', '\\']) || session_id.starts_with('.') {
+        return derived;
+    }
+    let name = format!("{session_id}.jsonl");
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    std::fs::read_dir(projects_under(home))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|folder| folder.path().join(&name))
+        .filter(|candidate| candidate.is_file())
+        // The same conversation in two folders is one the CLI moved on from;
+        // the copy it is still writing is the newer.
+        .max_by_key(|candidate| modified(candidate))
+        .unwrap_or(derived)
+}
+
+/// The folder that holds every checkout's transcripts.
+pub fn projects_under(home: &Path) -> PathBuf {
+    home.join(".claude").join("projects")
 }
 
 /// Every record uuid in a session's transcript. A fork copies those records
 /// into its own file, so this is what the copy will look like.
 pub fn record_uuids(cwd: &str, session_id: &str) -> Option<HashSet<String>> {
-    let path = cli_transcript_path(cwd, session_id)?;
+    let path = locate(cwd, session_id)?;
     let text = std::fs::read_to_string(path).ok()?;
     Some(uuids_in(&text))
 }
@@ -44,10 +82,12 @@ fn uuids_in(text: &str) -> HashSet<String> {
         .collect()
 }
 
-/// Path check without the home lookup, for tests and callers that have one.
+/// Where the CLI files the transcript of a session started in `cwd`. Every
+/// character outside `[A-Za-z0-9-]` becomes `-`, which is why a dot-folder
+/// yields a double dash.
 pub fn transcript_under(home: &Path, cwd: &str, session_id: &str) -> PathBuf {
     let encoded: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
-    home.join(".claude").join("projects").join(encoded).join(format!("{session_id}.jsonl"))
+    projects_under(home).join(encoded).join(format!("{session_id}.jsonl"))
 }
 
 fn text_of(content: &Value) -> String {
@@ -66,6 +106,39 @@ fn text_of(content: &Value) -> String {
 /// user]`; it is a turn boundary, not something the reader said.
 fn interruption(text: &str) -> bool {
     text.starts_with("[Request interrupted by user")
+}
+
+/// What a local slash command prints (`/model`'s "Set model to …") and the
+/// caveat the CLI writes ahead of it. They are `user` records only because
+/// that is where the CLI keeps what the model should see next; nobody typed
+/// them.
+fn command_output(text: &str) -> bool {
+    let text = text.trim_start();
+    ["<local-command-stdout>", "<local-command-stderr>", "<local-command-caveat>"].iter().any(|tag| text.starts_with(tag))
+}
+
+fn tagged<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+    let from = text.find(&open)? + open.len();
+    let to = from + text[from..].find(&close)?;
+    Some(text[from..to].trim())
+}
+
+/// A slash command as the reader typed it. The CLI records `/model opus` as
+/// `<command-name>/model</command-name> … <command-args>opus</command-args>`;
+/// the chat shows what was typed, which is also what the composer published
+/// if the command was sent from there.
+fn slash_command(text: &str) -> Option<String> {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with("<command-name>") && !trimmed.starts_with("<command-message>") {
+        return None;
+    }
+    let name = tagged(trimmed, "command-name").filter(|n| !n.is_empty())?;
+    let slash = if name.starts_with('/') { "" } else { "/" };
+    Some(match tagged(trimmed, "command-args").filter(|a| !a.is_empty()) {
+        Some(args) => format!("{slash}{name} {args}"),
+        None => format!("{slash}{name}"),
+    })
 }
 
 /// Occupancy after one message: the four token counts of that message summed.
@@ -107,6 +180,11 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
                 Payload::TurnCompleted { .. } => Some(TurnMark::Ended),
                 _ => None,
             };
+        }
+        "attachment" => {
+            let before = out.len();
+            decode_queued_prompt(&v, out);
+            return (out.len() > before).then_some(TurnMark::Opened);
         }
         "assistant" if v["isApiErrorMessage"].as_bool() == Some(true) => {
             out.push(Payload::Error { message: text_of(&v["message"]["content"]), fatal: false });
@@ -156,7 +234,36 @@ fn decode_user(v: &Value, out: &mut Vec<Payload>) {
         out.push(Payload::TurnCompleted { status: TurnStatus::Aborted, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false });
         return;
     }
-    out.push(Payload::UserMessage { text: prompt, images: Vec::new(), baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
+    if command_output(&prompt) {
+        return;
+    }
+    let text = slash_command(&prompt).unwrap_or(prompt);
+    out.push(Payload::UserMessage { text, images: Vec::new(), baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
+}
+
+/// A prompt typed while a turn was running. The CLI queues it, hands it to
+/// the model alongside the next tool result, and records it as a
+/// `queued_command` attachment instead of a `user` record — so this is the
+/// only place a prompt typed into the terminal mid-turn is ever written.
+///
+/// The same attachment carries things nobody typed: a background task
+/// reporting in (`commandMode: "task-notification"`) and a message from
+/// another agent (`origin.kind: "peer"`, marked meta). Those stay out.
+fn decode_queued_prompt(v: &Value, out: &mut Vec<Payload>) {
+    let a = &v["attachment"];
+    if a["type"] != "queued_command" || a["commandMode"] != "prompt" || a["isMeta"].as_bool().unwrap_or(false) {
+        return;
+    }
+    // Older CLIs wrote no origin at all on a typed prompt.
+    if !matches!(a["origin"]["kind"].as_str(), None | Some("human")) {
+        return;
+    }
+    let prompt = text_of(&a["prompt"]);
+    if prompt.trim().is_empty() || command_output(&prompt) {
+        return;
+    }
+    let text = slash_command(&prompt).unwrap_or(prompt);
+    out.push(Payload::UserMessage { text, images: Vec::new(), baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
 }
 
 fn decode_assistant(v: &Value, out: &mut Vec<Payload>) {
@@ -320,6 +427,115 @@ mod tests {
 
         let fresh = "{\"type\":\"user\",\"uuid\":\"u9\",\"message\":{\"content\":\"after the fork\"}}\n";
         assert!(matches!(&s.push(fresh.as_bytes())[0], Payload::UserMessage { text, .. } if text == "after the fork"));
+    }
+
+    /// The records below are the shapes Claude Code 2.1.283–2.1.287 wrote in
+    /// real interactive sessions, cut down to the keys the decoder reads and
+    /// with the text replaced.
+    fn queued(prompt: &str, mode: &str, attachment_extra: &str) -> String {
+        format!(
+            r#"{{"parentUuid":"a1","isSidechain":false,"attachment":{{"type":"queued_command","prompt":"{prompt}","source_uuid":"q1","commandMode":"{mode}"{attachment_extra}}},"type":"attachment","uuid":"q-{mode}","userType":"external","cwd":"/tmp/x","sessionId":"s","version":"2.1.287"}}"#
+        )
+    }
+
+    /// #250. A prompt typed into the terminal while a turn is running is
+    /// never written as a `user` record: the CLI queues it and records a
+    /// `queued_command` attachment when it hands it to the model. Decoding
+    /// only `user` records left it out of the chat altogether.
+    #[test]
+    fn a_prompt_typed_while_a_turn_was_running_is_a_prompt() {
+        let typed = queued("also check the tests", "prompt", r#","origin":{"kind":"human"},"humanTurn":true"#);
+        let mut out = Vec::new();
+        let mark = decode_marked(&typed, &HashSet::new(), &mut out);
+        assert!(matches!(out.as_slice(), [Payload::UserMessage { text, queued: false, baseline: None, cwd: Some(cwd), .. }] if text == "also check the tests" && cwd == "/tmp/x"));
+        assert_eq!(mark, Some(TurnMark::Opened));
+
+        // An older CLI wrote no origin on what the reader typed.
+        let mut out = Vec::new();
+        decode_line(&queued("no origin", "prompt", ""), &HashSet::new(), &mut out);
+        assert!(matches!(out.as_slice(), [Payload::UserMessage { text, .. }] if text == "no origin"));
+
+        // A fork's copy of it is history like any other record.
+        let mut out = Vec::new();
+        decode_line(&typed, &HashSet::from(["q-prompt".to_string()]), &mut out);
+        assert!(out.is_empty());
+    }
+
+    /// The same attachment carries what nobody typed: a background task
+    /// reporting in, and another agent's message. Neither is the reader's.
+    #[test]
+    fn what_was_queued_by_something_other_than_the_reader_is_not_a_prompt() {
+        for record in [
+            queued("<task-notification>done</task-notification>", "task-notification", r#","origin":{"kind":"task-notification"}"#),
+            queued("<task-notification>done</task-notification>", "task-notification", ""),
+            queued("from another agent", "prompt", r#","origin":{"kind":"peer"},"isMeta":true"#),
+            queued("from another agent", "prompt", r#","origin":{"kind":"peer"}"#),
+            queued("   ", "prompt", r#","origin":{"kind":"human"}"#),
+            r#"{"type":"attachment","uuid":"h1","attachment":{"type":"hook_success","content":"ok"}}"#.to_string(),
+        ] {
+            let mut out = Vec::new();
+            assert_eq!(decode_marked(&record, &HashSet::new(), &mut out), None, "{record}");
+            assert!(out.is_empty(), "{record}");
+        }
+    }
+
+    /// A slash command reads as it was typed, which is what the composer
+    /// shows for one sent from there; what the command printed is not a
+    /// message from anybody.
+    #[test]
+    fn a_slash_command_reads_as_typed_and_its_output_is_not_a_prompt() {
+        let user = |content: &str| format!(r#"{{"parentUuid":"a1","isSidechain":false,"type":"user","uuid":"c1","userType":"external","cwd":"/tmp/x","sessionId":"s","message":{{"role":"user","content":"{content}"}}}}"#);
+        let decode = |line: String| {
+            let mut out = Vec::new();
+            decode_line(&line, &HashSet::new(), &mut out);
+            out
+        };
+        let typed = |line: String| match decode(line).as_slice() {
+            [Payload::UserMessage { text, .. }] => text.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(typed(user(r"<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args></command-args>")), "/model");
+        assert_eq!(typed(user(r"<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>opus</command-args>")), "/model opus");
+        assert_eq!(typed(user(r"<command-message>review is running…</command-message>\n<command-name>review</command-name>\n<command-args>the last commit</command-args>")), "/review the last commit");
+        // Prose that merely mentions a tag is prose.
+        assert_eq!(typed(user("what does <command-name> mean?")), "what does <command-name> mean?");
+
+        assert!(decode(user(r"<local-command-stdout>Set model to opus</local-command-stdout>")).is_empty());
+        assert!(decode(user(r"<local-command-stderr>no such model</local-command-stderr>")).is_empty());
+        assert!(decode(user(r"<local-command-caveat>Caveat: the messages below were generated by the user while running local commands.</local-command-caveat>")).is_empty());
+    }
+
+    /// #250. The CLI files a transcript under the folder the conversation
+    /// began in and keeps writing there when it is resumed from another. A
+    /// renamed workspace derives a folder the CLI never wrote to, the tab
+    /// followed a file that did not exist, and nothing the transcript said —
+    /// the reader's own prompts included — reached the chat.
+    #[test]
+    fn a_resumed_conversation_is_followed_where_the_cli_keeps_it() {
+        let home = tempfile::tempdir().unwrap();
+        let (began, now) = ("/Users/dev/repo/.raccoon/worktrees/eager-moss-panda", "/Users/dev/repo/.raccoon/worktrees/cloud-vm");
+
+        // Nothing written yet: a new conversation goes where the CLI will put it.
+        let derived = transcript_under(home.path(), now, "abc");
+        assert_eq!(locate_under(home.path(), now, "abc"), derived);
+
+        let kept = transcript_under(home.path(), began, "abc");
+        std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        std::fs::write(&kept, "{}\n").unwrap();
+        std::fs::write(kept.with_file_name("other.jsonl"), "{}\n").unwrap();
+        assert_eq!(locate_under(home.path(), now, "abc"), kept, "the file that exists, not the one the folder's name derives");
+        assert_eq!(locate_under(home.path(), began, "abc"), kept);
+        assert_eq!(locate_under(home.path(), now, "missing"), transcript_under(home.path(), now, "missing"));
+
+        // Once the CLI does write under the new folder, that is the one.
+        std::fs::create_dir_all(derived.parent().unwrap()).unwrap();
+        std::fs::write(&derived, "{}\n").unwrap();
+        assert_eq!(locate_under(home.path(), now, "abc"), derived);
+
+        // An id is a file name; it is never used to walk somewhere else.
+        for id in ["../other", "a/b", "", ".."] {
+            assert_eq!(locate_under(home.path(), now, id), transcript_under(home.path(), now, id));
+        }
     }
 
     #[test]

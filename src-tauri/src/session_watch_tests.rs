@@ -55,6 +55,12 @@ impl Rig {
     /// A tab with no pane process behind it: what its pane draws, and when,
     /// is the test's to say.
     fn new() -> Self {
+        Self::of(CliKind::Claude, "")
+    }
+
+    /// A tab on either CLI, opened on a transcript that already holds
+    /// `history`: a conversation the tab is resuming.
+    fn of(kind: CliKind, history: &str) -> Self {
         let home = store::temp_home();
         let dir = tempfile::tempdir().unwrap();
         let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(256));
@@ -72,26 +78,32 @@ impl Rig {
         );
         let pane = format!("{SESSION}-{TAB}");
         let transcript = dir.path().join("transcript.jsonl");
-        std::fs::write(&transcript, "").unwrap();
-        let tail = Arc::new(tui::Tail::opening(transcript.clone(), claude::transcript::decode_line, Default::default()).marking(claude::transcript::decode_marked));
+        std::fs::write(&transcript, history).unwrap();
+        let tail = Arc::new(match kind {
+            CliKind::Claude => tui::Tail::opening(transcript.clone(), claude::transcript::decode_line, Default::default()).marking(claude::transcript::decode_marked),
+            CliKind::Codex => tui::Tail::opening(transcript.clone(), codex::rollout::decode_line, Default::default()).marking(codex::rollout::decode_marked),
+        });
         let token = crate::hooks::mint_token();
         let now = Instant::now();
         let rt = Arc::new(Mutex::new(TabRuntime {
             session_id: SESSION.into(),
             tab_id: TAB.into(),
-            harness: "claude".into(),
+            harness: match kind {
+                CliKind::Claude => "claude".into(),
+                CliKind::Codex => "codex".into(),
+            },
             seq: 0,
             status: TabStatus::Idle,
             child: None,
             child_pid: None,
             engine: Engine::Cli(CliTab {
                 usage_account: None,
-                harness: CliKind::Claude,
+                harness: kind,
                 mode: "default".into(),
                 pane_id: pane.clone(),
                 generation: 0,
                 restart_when_idle: false,
-                ready: Arc::new(tui::Ready::new(true)),
+                ready: Arc::new(tui::Ready::new(kind == CliKind::Claude)),
                 tail: tail.clone(),
                 echoed: Default::default(),
                 decisions: HashMap::new(),
@@ -100,7 +112,7 @@ impl Rig {
                 transcript_end_owed: false,
                 answered: HashMap::new(),
                 command: "claude".into(),
-                origin: Origin { token: token.clone(), transcript_root: dir.path().to_path_buf() },
+                origin: Origin { token: token.clone(), transcript_root: dir.path().to_path_buf(), conversation: None },
             }),
             pending: HashMap::new(),
             queued: Vec::new(),
@@ -511,6 +523,11 @@ fn what_a_real_pane_draws_is_what_holds_the_warning_back() {
     rig.manager.watch_tabs(PATIENCE, now, |_| None);
     assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
 }
+
+/// What a prompt typed into the terminal, and one sent from the composer,
+/// each leave in the chat (#250). The same rig, on either CLI.
+#[path = "session_prompt_tests.rs"]
+mod prompts;
 
 impl Drop for Rig {
     fn drop(&mut self) {

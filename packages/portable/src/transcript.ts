@@ -19,7 +19,7 @@ export type WorkItem =
   | { kind: "tool_group"; name: string; calls: ToolCall[]; key: string }
   | { kind: "text"; text: string; key: string; seq: number }
   | { kind: "reasoning"; text: string; key: string; seq: number }
-  | { kind: "queued"; text: string; key: string; seq: number; images?: { url: string }[] }
+  | { kind: "queued"; text: string; key: string; seq: number; ts?: string; images?: { url: string }[] }
   | { kind: "status"; text: string; key: string; seq: number }
   | { kind: "error"; text: string; key: string; seq: number }
   | { kind: "compaction"; preTokens?: number; postTokens?: number; key: string; seq: number }
@@ -87,6 +87,29 @@ function visibleUserText(text: string): string {
   return text;
 }
 
+const WORK_STARTS = new Set(["assistant_text", "reasoning", "tool_call_started", "subagent_started"]);
+
+/**
+ * A message queued behind a turn that the agent only took once that turn was
+ * over: it is the prompt of the turn that follows, not a note left in the one
+ * before. The agent's own record of taking it is not a second event (one
+ * message is one `user_message`), so the turn it starts arrives with no
+ * prompt of its own. A queued message with a tool call after it was taken
+ * during that turn and stays where it is.
+ */
+function takeHeldPrompt(previous: Turn | undefined): Turn["prompt"] {
+  if (!previous?.completed) return undefined;
+  let lastTool = -1;
+  previous.work.forEach((item, index) => {
+    if (item.kind === "tool" || item.kind === "tool_group" || item.kind === "subagent") lastTool = index;
+  });
+  const at = previous.work.findIndex((item, index) => index > lastTool && item.kind === "queued");
+  if (at < 0) return undefined;
+  const [held] = previous.work.splice(at, 1);
+  if (held.kind !== "queued") return undefined;
+  return { text: held.text, images: held.images, ts: held.ts ?? previous.completed.ts, seq: held.seq };
+}
+
 export function buildTranscript(events: AgentEvent[], live: boolean): Transcript {
   const turns: Turn[] = [];
   const asks = new Map<string, PendingAsk>();
@@ -107,6 +130,13 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
   const ensureTurn = (event: AgentEvent) => {
     if (!current) {
       current = { key: `t${event.seq}`, seq: event.seq, work: [], toolCount: 0, editedFiles: 0, live: false };
+      if (WORK_STARTS.has(event.payload.type)) {
+        const prompt = takeHeldPrompt(turns[turns.length - 1]);
+        if (prompt) {
+          current.prompt = prompt;
+          workingSince = Date.parse(event.ts);
+        }
+      }
       turns.push(current);
     }
     return current;
@@ -118,7 +148,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
       case "user_message": {
         const text = visibleUserText(payload.text);
         if (payload.queued && current && !current.completed) {
-          current.work.push({ kind: "queued", text, key: `q${event.seq}`, seq: event.seq, images: payload.images });
+          current.work.push({ kind: "queued", text, key: `q${event.seq}`, seq: event.seq, ts: event.ts, images: payload.images });
           break;
         }
         for (const call of calls.values()) if (!call.result) call.abandoned = true;
