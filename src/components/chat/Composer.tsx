@@ -25,7 +25,7 @@ import { PickerMenu, type PickerItem } from "./PickerMenu";
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "./useImageAttachments";
 import { useComposerHistory } from "./useComposerHistory";
 import { tokenAtCaret } from "@/lib/pickers";
-import type { ComposerCommandList, ComposerCommands } from "@/lib/cloudComposer";
+import type { ComposerCommandList, ComposerCommands, ComposerFiles } from "@/lib/cloudComposer";
 
 const commandCache = new Map<string, ComposerCommandList>();
 const NO_COMMANDS: ComposerCommandList = { commands: [], note: null };
@@ -72,6 +72,7 @@ export function Composer({
   tab,
   cwd,
   commands: givenCommands,
+  files: givenFiles,
   busy,
   draft,
   onDraftChange,
@@ -98,6 +99,8 @@ export function Composer({
   cwd?: string;
   /** Where the `/` list comes from when the tab does not run in `cwd` on this computer (a cloud tab: its runtime). */
   commands?: ComposerCommands | null;
+  /** Where the `@` list comes from for such a tab. Without it and without `cwd` there is no file list. */
+  files?: ComposerFiles | null;
   busy: boolean;
   draft: string;
   onDraftChange: (v: string) => void;
@@ -140,6 +143,10 @@ export function Composer({
   const commandSource = useMemo(() => givenCommands ?? (cwd ? localCommands(cwd, tab.harness) : null), [givenCommands?.key, cwd, tab.harness]);
   const [commandList, setCommandList] = useState<ComposerCommandList>(() => commandSource?.known() ?? NO_COMMANDS);
   const commands: SlashCommand[] = commandList.commands;
+  const fileSource = useMemo<ComposerFiles | null>(
+    () => givenFiles ?? (cwd ? { key: cwd, search: (query, limit) => filesApi.search(cwd, query, limit) } : null),
+    [givenFiles?.key, cwd],
+  );
   const [fileHits, setFileHits] = useState<FileHit[]>([]);
   const [highlighted, setHighlighted] = useState(0);
   const [dismissedToken, setDismissedToken] = useState<string | null>(null);
@@ -242,15 +249,15 @@ export function Composer({
       setDismissedToken(recalled ? `${recalled.kind}:${recalled.start}` : null);
     },
   });
-  const pickerOpen = !!token && dismissedToken !== tokenKey && (token.kind === "mention" ? !!cwd : commands.length > 0 || !!commandList.note);
+  const pickerOpen = !!token && dismissedToken !== tokenKey && (token.kind === "mention" ? !!fileSource : commands.length > 0 || !!commandList.note);
 
   // File hits follow the query, lightly debounced.
   useEffect(() => {
-    if (!token || token.kind !== "mention" || !cwd) return;
+    if (!token || token.kind !== "mention" || !fileSource) return;
     let cancelled = false;
     const id = window.setTimeout(() => {
-      filesApi
-        .search(cwd, token.query, 30)
+      fileSource
+        .search(token.query, 30)
         .then((h) => !cancelled && setFileHits(h))
         .catch(() => {});
     }, 60);
@@ -258,7 +265,7 @@ export function Composer({
       cancelled = true;
       window.clearTimeout(id);
     };
-  }, [token?.kind, token?.query, cwd]);
+  }, [token?.kind, token?.query, fileSource]);
 
   const items: PickerItem[] = useMemo(() => {
     if (!token) return [];
@@ -423,7 +430,7 @@ export function Composer({
           {/* Nothing can be sent: attaching and dictating into it are off too. */}
           <AttachButton attach={attach} disabled={disabled} />
           <MicButton dictation={dictation} disabled={disabled} />
-          {cwd && (
+          {fileSource && (
             <WithTooltip label="Mention a file">
               <Button
                 variant="ghost"

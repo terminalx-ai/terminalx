@@ -277,6 +277,7 @@ export function TabView({
           tab={tab}
           cwd={local ? session.cwd : undefined}
           commands={backend.commands?.(tab)}
+          files={backend.files?.()}
           busy={live}
           draft={draft}
           onDraftChange={(v) => {

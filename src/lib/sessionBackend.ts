@@ -18,7 +18,7 @@ import {
 } from "@/lib/cloudAgents";
 import type { CloudAgentScope, OutboxEntry } from "@/lib/cloudAgentApi";
 import { APPROVE_BLOCKED_REASON, canApprove, mayConfigure, roleBlockReason } from "@/lib/cloudCollab";
-import { cloudComposerCommands, type ComposerCommands } from "@/lib/cloudComposer";
+import { cloudComposerCommands, cloudComposerFiles, type ComposerCommands, type ComposerFiles } from "@/lib/cloudComposer";
 import { isPtyFirst } from "@/lib/tabViews";
 import type { TerminalInstance } from "@/lib/terminal";
 import type { AgentEvent } from "@/types/events";
@@ -35,7 +35,7 @@ import type { TabEntry, TabStatus } from "@/types/session";
  *   runtime is online), its terminals, and the workspace's Git and files.
  */
 export interface SessionBackendCaps {
-  /** Its tabs and paths are on this computer: terminal view, browser tabs, continuation, worktree rename and @-mentions. */
+  /** Its tabs and paths are on this computer: terminal view, browser tabs, continuation and worktree rename. */
   local: boolean;
   /** Send, steer, stop, answer, configure, add tabs and open terminals. False for a view-only attachment. */
   write: boolean;
@@ -139,6 +139,13 @@ export interface SessionBackend {
    * a runtime from before `composer/1`). A local tab's composer asks its CLI.
    */
   commands?(tab: Pick<TabEntry, "id" | "harness">): ComposerCommands | null;
+  /**
+   * Cloud only (PRO-22): the session's files for the composer's `@` list,
+   * searched by the runtime. Null while it is not connected (a stopped
+   * workspace is not woken to list files), for a view-only reader, and on a
+   * runtime from before `composer/2`.
+   */
+  files?(): ComposerFiles | null;
   /** Cloud only: commands on their way for a tab, the runtime's queued follow-ups, and resending an unconfirmed one. */
   outbox?: {
     entries(tabId: string): OutboxEntry[];
@@ -407,6 +414,7 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     },
     commands: (tab) =>
       write ? cloudComposerCommands({ workspaceKey: ctx.workspaceKey, sessionId: ctx.sessionId, tabId: tab.id, harness: tab.harness, client, you }) : null,
+    files: () => (write ? cloudComposerFiles({ workspaceKey: ctx.workspaceKey, sessionId: ctx.sessionId, client }) : null),
     agentTerminal: terminalBase && {
       workspaceKey: ctx.workspaceKey,
       client: client?.hasCapability("agent-pty/1") ? client : null,

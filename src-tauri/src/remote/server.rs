@@ -40,6 +40,11 @@ pub const MAX_PTYS: usize = 16;
 const MAX_EXITED_PTYS: usize = 8;
 const PTY_RING_BYTES: usize = 1024 * 1024;
 const PTY_PREFIX: &str = "remote-pty-";
+/// `session.files`: how long a query may be, and how many hits it answers.
+const MAX_FILE_QUERY_BYTES: usize = 400;
+const DEFAULT_FILE_HITS: usize = 30;
+const MAX_FILE_HITS: usize = 50;
+
 /// An agent tab's own terminal (`agent-pty/1`, PRO-86) is the pane its CLI
 /// runs in, `tab:<tabId>` ([`SessionManager::pane_id`]).
 const AGENT_PTY_PREFIX: &str = "tab:";
@@ -852,6 +857,7 @@ impl WorkspaceRpc {
             "session.subscribe" => self.session_subscribe(peer, params),
             "session.tabs" => self.session_tabs(peer),
             "session.commands" => self.session_commands(peer, params),
+            "session.files" => self.session_files(peer, params),
             "session.configure" => self.session_configure(peer, params),
             "session.markRead" => self.session_mark_read(peer, params),
             "session.update" => self.session_update(peer, params),
@@ -2362,6 +2368,23 @@ impl WorkspaceRpc {
             Vec::new()
         };
         Ok(json!({ "commands": commands, "restricted": restricted }))
+    }
+
+    /// The files of a session's directory whose path matches `query`, best
+    /// first, for the composer's `@` list (`composer/2`, PRO-22): the same
+    /// index and ranking as a local tab's (`files::search`), so paths are
+    /// relative to the session's directory, ignored files are left out and
+    /// an empty query lists the shallowest files. Names only, never
+    /// contents; anyone who may see the session may ask.
+    fn session_files(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
+        let query = params.get("query").and_then(Value::as_str).unwrap_or("");
+        if query.len() > MAX_FILE_QUERY_BYTES {
+            return Err(RpcError::invalid("the query is too long"));
+        }
+        let limit = params.get("limit").and_then(Value::as_u64).map_or(DEFAULT_FILE_HITS, |limit| limit as usize).clamp(1, MAX_FILE_HITS);
+        let files = crate::files::search(Path::new(&session.cwd), query, limit).map_err(RpcError::internal)?;
+        Ok(json!({ "files": files }))
     }
 
     /// What the CLI of `harness` lists in `cwd`, as `list_slash_commands`

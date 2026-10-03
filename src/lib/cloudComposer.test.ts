@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
-import { COMMANDS_RESTRICTED_NOTE, cloudComposerCommands, resetCloudComposer } from "./cloudComposer";
+import { COMMANDS_RESTRICTED_NOTE, cloudComposerCommands, cloudComposerFiles, resetCloudComposer } from "./cloudComposer";
 
 const approver: WorkspaceYou = { userId: "u-me", role: "driver", canApprove: true, listed: true } as WorkspaceYou;
 const plain: WorkspaceYou = { ...approver, canApprove: false };
@@ -64,5 +64,28 @@ describe("a cloud tab's slash commands", () => {
     await expect(source.load()).rejects.toThrow("timeout");
     call.mockResolvedValueOnce({ commands: [], restricted: false });
     expect(await source.load()).toEqual({ commands: [], note: null });
+  });
+});
+
+describe("a cloud tab's file mentions", () => {
+  const where = { workspaceKey: "cloud:o:w", sessionId: "s-1" };
+
+  it("search the session's directory on the runtime", async () => {
+    const { call, client } = runtime({ files: [{ path: "src/auth/login.rs", name: "login.rs", score: 140 }, { path: "docs/login.md" }, { name: "pathless" }, null] }, ["composer/1", "composer/2"]);
+    const files = cloudComposerFiles({ ...where, client })!;
+    expect(await files.search("login", 30)).toEqual([
+      { path: "src/auth/login.rs", name: "login.rs", score: 140 },
+      { path: "docs/login.md", name: "login.md", score: 0 },
+    ]);
+    expect(call).toHaveBeenCalledWith("session.files", { sessionId: "s-1", query: "login", limit: 30 });
+  });
+
+  it("are not offered while the runtime is not connected, or on a runtime from before composer/2", () => {
+    expect(cloudComposerFiles({ ...where, client: null })).toBeNull();
+    const old = runtime({}, ["composer/1"]);
+    expect(cloudComposerFiles({ ...where, client: old.client })).toBeNull();
+    const asleep = { connection: { state: "suspended" }, hasCapability: () => false, call: vi.fn() } as unknown as WorkspaceRpcClient;
+    expect(cloudComposerFiles({ ...where, client: asleep })).toBeNull();
+    expect(old.call).not.toHaveBeenCalled();
   });
 });

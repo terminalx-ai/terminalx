@@ -688,7 +688,7 @@ fn members(list: Value) -> Option<collab::Members> {
     Some(serde_json::from_value(json!({ "v": 1, "members": list })).unwrap())
 }
 
-const ALL: [&str; 7] = ["pty/1", "fs/1", "session/1", "keys/1", "collab/1", "git/1", "composer/1"];
+const ALL: [&str; 8] = ["pty/1", "fs/1", "session/1", "keys/1", "collab/1", "git/1", "composer/1", "composer/2"];
 
 async fn person(rpc: &Arc<WorkspaceRpc>, device: &str, authority: Authority, user: &str) -> (Arc<Peer>, Notifications, Value) {
     let (peer, events) = Peer::for_user(device.into(), authority, Some(user.into()));
@@ -1152,6 +1152,43 @@ async fn the_composer_is_offered_only_the_commands_its_reader_may_send() {
     ])));
     let listed = call(&f.rpc, &erin, "session.commands", params).await.unwrap();
     assert_eq!((listed["restricted"].clone(), names(&listed).contains(&"deploy".to_string())), (json!(true), false));
+}
+
+/// PRO-22: `session.files` finds the session's files by name for the
+/// composer's `@` list, for whoever may see the session.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_composer_finds_the_sessions_files_by_name() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    std::fs::create_dir_all(f.root.join("src/auth")).unwrap();
+    std::fs::write(f.root.join("src/auth/login.rs"), "secret contents").unwrap();
+    std::fs::write(f.root.join("src/main.rs"), "").unwrap();
+    std::fs::write(f.root.join("README.md"), "").unwrap();
+    let session = seed_session(&f.root, "Fix login", None);
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager" },
+        { "userId": "alice", "role": "driver", "canApprove": false },
+        { "userId": "nora", "role": "none" },
+    ])));
+    let (admin, _admin_events, _) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    let (alice, _alice_events, _) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (nora, _nora_events, _) = person(&f.rpc, "d-nora", Authority::Participate, "nora").await;
+    let paths = |found: &Value| found["files"].as_array().unwrap().iter().map(|hit| hit["path"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    for peer in [&admin, &alice] {
+        let found = call(&f.rpc, peer, "session.files", json!({ "sessionId": session.id, "query": "login" })).await.unwrap();
+        assert_eq!(paths(&found), ["src/auth/login.rs"]);
+        assert_eq!(found["files"][0]["name"], "login.rs");
+        assert!(!found.to_string().contains("secret contents"), "names only");
+    }
+    // A bare `@`: the shallowest files first, and no more than asked for.
+    let found = call(&f.rpc, &alice, "session.files", json!({ "sessionId": session.id, "query": "", "limit": 2 })).await.unwrap();
+    assert_eq!(paths(&found), ["README.md", "src/main.rs"]);
+    // What a plain driver is offered is a file of the project: mentioning it is not refused.
+    let send = json!({ "sessionId": session.id, "tabId": session.tabs[0].id, "text": "read @src/auth/login.rs", "clientRequestId": "request-mention-1" });
+    assert_eq!(code(call(&f.rpc, &alice, "session.send", send).await), "unavailable");
+    assert_eq!(code(call(&f.rpc, &alice, "session.files", json!({ "sessionId": session.id, "query": "x".repeat(401) })).await), "invalid_params");
+    // Someone the workspace is not shared with is refused: no file names.
+    assert_eq!(code(call(&f.rpc, &nora, "session.files", json!({ "sessionId": session.id, "query": "login" })).await), "forbidden");
 }
 
 /// One tab whose turn is running.
