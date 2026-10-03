@@ -199,6 +199,9 @@ role changed).
   | `/mod` typed | completed to `/model` | completed to `/model` |
   | `/help`, `/reset` | known | "Unrecognized command", left in the composer |
   | `@/etc/hosts …` | reads the file, no permission request | sent as written (nothing shown as attached) |
+  | `@"x y/../../outside.txt"` (double quotes, a space) | reads the file outside the project | not run |
+  | `@'x y/../../outside.txt'` (single quotes) | prose | not run |
+  | `！ls`, `／model` (full-width) | prose | prose |
   | `#…` | prose (no memory shortcut) | not run |
 
   So for a plain driver the runtime decides (`cloud_agents/slash.rs`),
@@ -207,40 +210,52 @@ role changed).
   when it is leased, by the sender's access then), a queued follow-up right
   before it is typed, and the live `session.send`. From a manager or someone
   with `canApprove` everything passes. From a plain driver:
-  - **`!`**: a line that starts with `!` is refused
+  - **`!`**: a message whose first line starts with `!` is refused
     (`shell-command-forbidden`).
-  - **`@`**: a mention of a file outside the project (`@/…`, `@~…`, or a
-    path with `..`) is refused (`file-mention-forbidden`). `@src/main.rs`
-    and `name@example.com` pass.
-  - **`/`**: only the tab's CLI's harmless commands pass, typed exactly:
-    Claude Code `/clear` (also `/reset`, `/new`), `/compact`, `/help`; Codex
-    `/clear`, `/new`, `/compact`; any other agent, none. Everything else
-    that starts with `/` is refused (`slash-command-forbidden`), not only
-    the commands known to be sensitive, so no list of the CLIs' commands has
-    to be kept complete. An allowed command with a control character, an
-    `@` or a `\` is refused too: typed as keys they are a key, a picker and
-    a line continuation.
+  - **`/`**: on the first line, only the tab's CLI's harmless commands pass,
+    typed exactly: Claude Code `/clear` (also `/reset`, `/new`), `/compact`,
+    `/help`; Codex `/clear`, `/new`, `/compact`; any other agent, none.
+    Everything else that starts with `/` is refused
+    (`slash-command-forbidden`), not only the commands known to be
+    sensitive, so no list of the CLIs' commands has to be kept complete. An
+    allowed command with a control character, an `@` or a `\` is refused
+    too: typed as keys they are a key, a picker and a line continuation.
+  - **`@`**: anywhere in the message, a mention of a file outside the
+    project is refused (`file-mention-forbidden`): a path under `~`, an
+    absolute path that is not under the session's working directory, or a
+    relative one that climbs above it, with `.` and `..` resolved as text. A
+    quoted mention (`@"a b/c"`) is read to its closing quote. A mention
+    starts a word, also after an invisible character. `@src/main.rs`, the
+    project's own files by absolute path, and `name@example.com` pass.
   - **The project's own commands** (`.claude/commands`, `.claude/skills`)
     are not allowed. A plain driver can have the agent write one (in
     `acceptEdits`, without a request), and its front matter can name tools
     that run without asking (`allowed-tools`) or change the model.
 
-  The check reads the message as a CLI could: leading whitespace and
-  invisible characters are skipped; every line is looked at, since a CLI
-  that does not take the message as one paste starts a new input on each
-  line (a later line that starts with `/` is refused only when it reads as
-  `/name`, so a path in pasted output passes). A plain driver who wants to
-  start a message with a path or a `!` starts it with a word.
+  "First line" is the first line that is not blank, after whitespace and
+  invisible characters are skipped (Codex trims before it looks). Later
+  lines are prose to both CLIs, so a Markdown image (`![shot](a.png)`), a
+  path on its own line or a quoted command there does not stop a message.
+  The full-width `！` and `／` are prose to both CLIs and are not refused.
+
+  **What the check cannot see.** It reads text. A symbolic link inside the
+  project that points out of it makes `@link/secret` a path inside the
+  project here and a file outside it to the CLI; so does any other way the
+  file system differs from the text (a mount, a hard link). A plain driver
+  cannot create a link without the agent, and in a mode that asks the agent
+  needs approval to run `ln`.
+
   A refused mailbox command settles `rejected` with its category, never
   reaches the agent and does not claim the tab; its receipt carries
   `command` (as typed, shortened) and `message`. `session.send` answers
   `forbidden` with `data.reason` of the same name. A queued follow-up that
   became refusable (its sender lost `canApprove` while it waited) is dropped
-  with a note in the transcript. On the live `session.send`, a command is
-  never queued behind a running turn at all (`conflict`,
-  `data.reason: "command-not-queued"`), because nothing re-checks the
-  session's own queue. The desktop shows the refusal on the outbox entry,
-  in the runtime's words.
+  with a note in the transcript. On the live `session.send`, a slash or `!`
+  command is never queued behind a running turn, whoever sends it
+  (`conflict`, `data.reason: "command-not-queued"`), because nothing
+  re-checks the session's own queue; prose queues as before. The desktop
+  shows the runtime's sentence for these refusals, on the outbox entry or as
+  the send's error.
 - **Permission decisions** are not lease-bound; they need `canApprove`.
 
 ### Revocation

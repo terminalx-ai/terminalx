@@ -159,7 +159,7 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
     // (PRO-88). Refused before the applying mark: nothing reached the agent.
     if matches!(lease.kind.as_str(), "send" | "steer") {
         let text = plaintext.get("text").and_then(Value::as_str).unwrap_or("");
-        if let Some(refusal) = agents.slash_refusal(access, &tab.harness, text) {
+        if let Some(refusal) = agents.slash_refusal(access, &tab.session_id, &tab.harness, text) {
             return finish(agents, lease, "rejected", Some(refusal.category()), json!({ "command": refusal.command, "message": refusal.message() }));
         }
     }

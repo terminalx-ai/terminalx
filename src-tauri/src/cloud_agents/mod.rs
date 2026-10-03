@@ -117,6 +117,11 @@ pub trait AgentOps: Send + Sync {
     fn session(&self, _session_id: &str) -> Option<SessionSummary> {
         None
     }
+    /// Where the session's agents run: what "inside the project" means for
+    /// a file a message mentions.
+    fn cwd(&self, _session_id: &str) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// What a checkpoint says about a tab's session. It travels only inside the
@@ -241,6 +246,10 @@ impl AgentOps for ManagerOps {
     fn session(&self, session_id: &str) -> Option<SessionSummary> {
         let entry = index::get(session_id).ok().filter(|entry| entry.project_path == self.root)?;
         Some(SessionSummary { title: entry.title, branch: entry.branch })
+    }
+
+    fn cwd(&self, session_id: &str) -> Option<PathBuf> {
+        index::get(session_id).ok().map(|entry| PathBuf::from(entry.cwd))
     }
 
     fn busy(&self, session_id: &str, tab_id: &str) -> bool {
@@ -486,11 +495,11 @@ impl CloudAgents {
     /// What `text` would make the agent's CLI do by itself (a slash command,
     /// a `!` shell command, a file from outside the project) that this
     /// person may not ask for (PRO-88). `harness` is the tab's agent.
-    pub fn slash_refusal(&self, access: Access, harness: &str, text: &str) -> Option<slash::Refusal> {
+    pub fn slash_refusal(&self, access: Access, session_id: &str, harness: &str, text: &str) -> Option<slash::Refusal> {
         if access.can_configure() {
             return None;
         }
-        slash::check(text, harness).err()
+        slash::check(text, harness, self.ops.cwd(session_id).as_deref()).err()
     }
 
     /// Why a queued follow-up may not be typed any more, as the note its
@@ -511,7 +520,7 @@ impl CloudAgents {
         // A tab that is gone has no CLI to name: nothing but prose passes.
         // (`ops.tabs`, not `self.tab`: this runs while the queue is locked.)
         let harness = self.ops.tabs().into_iter().find(|tab| tab.tab_id == tab_id).map(|tab| tab.harness).unwrap_or_default();
-        self.slash_refusal(access, &harness, &follow_up.text)
+        self.slash_refusal(access, &follow_up.session_id, &harness, &follow_up.text)
             .map(|_| "Dropped a queued command from a person who can no longer approve permissions.")
     }
 

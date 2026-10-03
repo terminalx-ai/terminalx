@@ -2208,18 +2208,18 @@ impl WorkspaceRpc {
         let busy = agents_busy(&self.agents, &session.id, &tab.id);
         // And the same rule for what the CLI runs by itself (PRO-88): a
         // slash command, a `!` shell command, an `@/path` mention.
-        if let Err(refusal) = slash::check(text, &tab.harness) {
-            if !self.access(peer).can_configure() {
+        if !self.access(peer).can_configure() {
+            if let Err(refusal) = slash::check(text, &tab.harness, Some(Path::new(&session.cwd))) {
                 return Err(RpcError::forbidden(refusal.message()).with_data(json!({ "reason": refusal.category(), "command": refusal.command })));
             }
-            // From someone who may send it, it still never waits in the
-            // session's own queue: nothing re-checks that queue if they lose
-            // the right before the running turn ends (the mailbox's
-            // follow-up queue is re-checked).
-            if busy || self.sessions.as_ref().is_some_and(|sessions| sessions.turn_open(&session.id, &tab.id)) {
-                return Err(RpcError::new("conflict", "a turn is running: send this command when it has ended (a command is not queued)")
-                    .with_data(json!({ "reason": "command-not-queued" })));
-            }
+        }
+        // A slash or `!` command never waits in the session's own queue,
+        // whoever sends it: nothing re-checks that queue if they lose the
+        // right before the running turn ends (the mailbox's follow-up queue
+        // is re-checked). Prose queues as before, mentions included.
+        if slash::is_command(text) && (busy || self.sessions.as_ref().is_some_and(|sessions| sessions.turn_open(&session.id, &tab.id))) {
+            return Err(RpcError::new("conflict", "A turn is running: send this command when it has ended. A command is not queued behind a running turn.")
+                .with_data(json!({ "reason": "command-not-queued" })));
         }
         let now = crate::cloud_agents::now_ms();
         match peer.user_id.as_deref() {
