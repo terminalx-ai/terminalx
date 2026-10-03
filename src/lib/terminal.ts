@@ -107,6 +107,11 @@ function decode(b64: string): Uint8Array {
   return out;
 }
 
+/** The live instance of a pane, if it has one. Never makes one: a view that is on its way out must not bring a closed terminal back. */
+export function peekInstance(id: string): TerminalInstance | undefined {
+  return instances.get(id);
+}
+
 export function getInstance(id: string, create: () => TerminalInstance): TerminalInstance {
   let inst = instances.get(id);
   if (!inst) {
@@ -309,6 +314,24 @@ export function dropSessionTerminals(sessionIds: readonly string[]) {
     void pty.kill(pane.id).catch(() => {});
     forgetPane(pane.id);
   }
+}
+
+/** The pane an agent tab's CLI runs in. */
+export function agentPaneId(tabId: string): string {
+  return `tab:${tabId}`;
+}
+
+/**
+ * The agent tabs are gone (closed here, or removed by the backend): let go of
+ * their panes and xterms. The backend stops the CLI when it removes a tab, but
+ * nothing told this window, so every closed tab kept its terminal and its
+ * scrollback until its session was deleted.
+ */
+export function dropTabTerminals(tabIds: readonly string[]) {
+  const gone = new Set(tabIds.map(agentPaneId));
+  if (state.panes.some((pane) => gone.has(pane.id))) set({ panes: state.panes.filter((pane) => !gone.has(pane.id)) });
+  // Also for a pane this window never adopted: its output may be waiting in a replay buffer.
+  for (const id of gone) forgetPane(id);
 }
 
 /** Close a session's shells and leave its agent panes: its checkout was removed, so a shell there has nowhere to be. */
