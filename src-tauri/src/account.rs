@@ -19,6 +19,7 @@ use url::Url;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::desktop_links::DesktopLinks;
 use crate::keychain::{Keychain, SecretStore};
 
 pub const STATUS_EVENT: &str = "account_status";
@@ -67,7 +68,6 @@ const ORGANIZATIONS_PATH: &str = "/v1/desktop/orgs";
 const ACTIVE_ORGANIZATION_PATH: &str = "/v1/desktop/auth/org";
 const CLIENT_ID: &str = "terminalx-desktop";
 const SCOPE: &str = "openid profile email offline_access";
-const REDIRECT_URI: &str = "terminalx://auth/callback";
 const LOCAL_PROFILE_ID: &str = "local-default";
 const KEYCHAIN_ACCOUNT: &str = "desktop-session";
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -742,7 +742,8 @@ impl AccountManager {
             state: random_url_token(),
             started_at: Instant::now(),
         };
-        let authorize_url = authorize_url(&pending)?;
+        let links = DesktopLinks::for_identifier(&app.config().identifier);
+        let authorize_url = authorize_url(&pending, links)?;
         let generation = {
             let mut inner = self.inner.lock().unwrap();
             inner.generation = inner.generation.wrapping_add(1);
@@ -844,7 +845,8 @@ impl AccountManager {
     }
 
     pub fn handle_deep_link(self: &Arc<Self>, app: &AppHandle, url: &Url) -> bool {
-        if !is_auth_callback(url) {
+        let links = DesktopLinks::for_identifier(&app.config().identifier);
+        if !links.is_auth_callback(url) {
             return false;
         }
         let action = self.claim_callback(url);
@@ -855,7 +857,7 @@ impl AccountManager {
                 let manager = self.clone();
                 let app = app.clone();
                 tauri::async_runtime::spawn_blocking(move || {
-                    let outcome = exchange_code(&pending, &code);
+                    let outcome = exchange_code(&pending, &code, links);
                     manager.finish_exchange(&app, pending.generation, outcome);
                 });
             }
@@ -1173,18 +1175,6 @@ pub fn focus_main_window(app: &AppHandle) {
     }
 }
 
-pub fn is_launch_link(url: &Url) -> bool {
-    matches!(url.scheme(), "terminalx" | "terminalx-next")
-        && url.host_str() == Some("launch")
-        && matches!(url.path(), "" | "/")
-}
-
-fn is_auth_callback(url: &Url) -> bool {
-    matches!(url.scheme(), "terminalx" | "terminalx-next")
-        && url.host_str() == Some("auth")
-        && url.path() == "/callback"
-}
-
 fn snapshot(inner: &Inner) -> AccountStatus {
     let (state, identity, expires_at) = if let Some(session) = inner.session.as_ref() {
         (
@@ -1248,18 +1238,21 @@ fn code_challenge(verifier: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
-fn authorize_url(pending: &PendingAuth) -> Result<Url> {
+fn authorize_url(pending: &PendingAuth, links: DesktopLinks) -> Result<Url> {
     let mut url = Url::parse(&format!("{}{AUTHORIZE_PATH}", api_base_url()))?;
     url.query_pairs_mut()
         .append_pair("client_id", CLIENT_ID)
         .append_pair("response_type", "code")
-        .append_pair("redirect_uri", REDIRECT_URI)
+        .append_pair("redirect_uri", links.redirect_uri())
         .append_pair("scope", SCOPE)
         .append_pair("nonce", &pending.nonce)
         .append_pair("state", &pending.state)
         .append_pair("code_challenge", &code_challenge(&pending.code_verifier))
         .append_pair("code_challenge_method", "S256")
         .append_pair("local_profile_id", LOCAL_PROFILE_ID);
+    if links == DesktopLinks::Dev {
+        url.query_pairs_mut().append_pair("app", "dev");
+    }
     Ok(url)
 }
 
@@ -1267,14 +1260,14 @@ fn endpoint(path: &str) -> String {
     format!("{}{path}", api_base_url())
 }
 
-fn exchange_code(pending: &PendingAuth, code: &str) -> Result<DesktopSession, CloudError> {
+fn exchange_code(pending: &PendingAuth, code: &str, links: DesktopLinks) -> Result<DesktopSession, CloudError> {
     post_json(
         SESSION_PATH,
         json!({
             "code": code,
             "codeVerifier": pending.code_verifier,
             "nonce": pending.nonce,
-            "redirectUri": REDIRECT_URI,
+            "redirectUri": links.redirect_uri(),
             "state": pending.state,
             "localProfileId": LOCAL_PROFILE_ID,
         }),
@@ -1459,7 +1452,7 @@ mod tests {
     #[test]
     fn authorize_url_matches_the_deployed_desktop_contract() {
         let pending = pending();
-        let url = authorize_url(&pending).unwrap();
+        let url = authorize_url(&pending, DesktopLinks::Release).unwrap();
         let params: BTreeMap<_, _> = url
             .query_pairs()
             .map(|(key, value)| (key.into_owned(), value.into_owned()))
@@ -1493,17 +1486,28 @@ mod tests {
     }
 
     #[test]
+    fn authorize_url_selects_the_build_redirect_and_only_requests_dev_for_dev() {
+        for links in [DesktopLinks::Release, DesktopLinks::Dev] {
+            let url = authorize_url(&pending(), links).unwrap();
+            let params: BTreeMap<_, _> = url.query_pairs().collect();
+            assert_eq!(params.get("redirect_uri").map(|v| v.as_ref()), Some(links.redirect_uri()));
+            assert_eq!(params.get("app").map(|v| v.as_ref()), (links == DesktopLinks::Dev).then_some("dev"));
+            assert!(!params.contains_key("legacy"));
+        }
+    }
+
+    #[test]
     fn recognizes_only_the_expected_account_callback() {
-        assert!(is_auth_callback(
+        assert!(DesktopLinks::Release.is_auth_callback(
             &Url::parse("terminalx://auth/callback?code=secret&state=state").unwrap()
         ));
-        assert!(!is_auth_callback(
+        assert!(!DesktopLinks::Release.is_auth_callback(
             &Url::parse("terminalx://launch?code=secret&state=state").unwrap()
         ));
-        assert!(!is_auth_callback(
+        assert!(!DesktopLinks::Release.is_auth_callback(
             &Url::parse("https://auth/callback?code=secret&state=state").unwrap()
         ));
-        assert!(is_launch_link(&Url::parse("terminalx://launch").unwrap()));
+        assert!(DesktopLinks::Release.is_launch_link(&Url::parse("terminalx://launch").unwrap()));
     }
 
     #[test]
