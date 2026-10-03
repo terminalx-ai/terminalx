@@ -144,6 +144,10 @@ pub struct WorkspaceDisposition {
     pub sessions: usize,
     /// Their titles, so the confirmation can name what goes.
     pub session_titles: Vec<String>,
+    /// Whether the work here is clean and merged into the default branch.
+    /// Filled in by the command layer: it fetches, so it is not part of the
+    /// quick read every listing does.
+    pub landed: Option<crate::landed::Landed>,
 }
 
 pub fn disposition(project: &Path, path: &Path) -> WorkspaceDisposition {
@@ -171,6 +175,7 @@ pub fn disposition(project: &Path, path: &Path) -> WorkspaceDisposition {
         pr_checked: false,
         sessions: 0,
         session_titles: Vec::new(),
+        landed: None,
     };
     if let Some(b) = branch.as_deref() {
         if git::remote_url(&p).is_some() && crate::github::available() {

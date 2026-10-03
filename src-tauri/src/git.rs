@@ -29,6 +29,47 @@ pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Run git with a time limit, for commands that talk to a remote. The child
+/// is killed when the limit passes.
+pub fn run_timeout(cwd: &Path, args: &[&str], timeout: std::time::Duration) -> Result<String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = git()
+        .current_dir(cwd)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("git {}", args.join(" ")))?;
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("git {}: timed out after {}s", args.join(" "), timeout.as_secs());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    let read = |pipe: Option<&mut dyn Read>| {
+        let mut text = String::new();
+        if let Some(pipe) = pipe {
+            let _ = pipe.read_to_string(&mut text);
+        }
+        text
+    };
+    let out = read(child.stdout.as_mut().map(|p| p as &mut dyn Read));
+    let err = read(child.stderr.as_mut().map(|p| p as &mut dyn Read));
+    if !status.success() {
+        let err = err.trim();
+        bail!("git {}: {}", args.join(" "), if err.is_empty() { format!("exit {status}") } else { err.to_string() });
+    }
+    Ok(out)
+}
+
 fn run_ok(cwd: &Path, args: &[&str]) -> bool {
     git().current_dir(cwd).args(args).output().map(|o| o.status.success()).unwrap_or(false)
 }

@@ -70,6 +70,7 @@ mod issues;
 mod installation;
 #[cfg(feature = "desktop")]
 mod keychain;
+mod landed;
 mod memory_baseline;
 mod models;
 mod names;
