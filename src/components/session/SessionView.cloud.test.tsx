@@ -64,6 +64,7 @@ vi.mock("@/components/chat/Composer", () => ({
     settingsNote?: string | null;
     settingsNoteWarning?: boolean;
     canStop?: boolean;
+    commands?: { key: string; load(): Promise<{ commands: { name: string }[]; note: string | null }> } | null;
     cwd?: string;
   }) => (
     <div data-testid="composer" data-cwd={props.cwd ?? ""}>
@@ -74,6 +75,19 @@ vi.mock("@/components/chat/Composer", () => ({
       <button onClick={() => void Promise.resolve(props.onSend(props.draft, [])).then(() => props.onDraftChange(""), () => undefined)}>{props.busy ? "Queue" : "Send"}</button>
       {props.busy && props.canStop !== false && <button onClick={props.onStop}>Stop</button>}
       <button onClick={() => props.onSetModel("opus")}>Use opus</button>
+      {/* What the `/` list would hold: the names the source gives, then its note. */}
+      {props.commands && (
+        <button
+          data-testid="list-commands"
+          data-key={props.commands.key}
+          onClick={(event) => {
+            const button = event.currentTarget;
+            void props.commands!.load().then((list) => (button.dataset.listed = [...list.commands.map((command) => `/${command.name}`), list.note ?? ""].join("|")));
+          }}
+        >
+          Commands
+        </button>
+      )}
       <button onClick={() => props.onSetEffort("high")}>Effort high</button>
       <button onClick={() => props.onSetMode("plan")}>Plan mode</button>
     </div>
@@ -212,9 +226,14 @@ class FakeRuntime implements WorkspaceTransport {
       runtimeGeneration: this.generation,
       runtimeEpoch: this.epoch,
       runtimeVersion: "0.3.0",
-      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1"],
+      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", ...this.composer()],
       authority,
     });
+  }
+  /** PRO-22: what `session.commands` answers; null is a runtime from before `composer/1`. */
+  commands: { commands: { name: string; description: string; source: string }[]; restricted: boolean } | null = null;
+  private composer(): "composer/1"[] {
+    return this.commands ? ["composer/1"] : [];
   }
   /** PRO-30: what `collab.state` answers on a runtime that granted `collab/1`. */
   collab: { you: Record<string, unknown>; participants: unknown[]; leases: unknown[] } | null = null;
@@ -226,7 +245,7 @@ class FakeRuntime implements WorkspaceTransport {
       runtimeGeneration: this.generation,
       runtimeEpoch: this.epoch,
       runtimeVersion: "0.3.0",
-      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "collab/1"],
+      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "collab/1", ...this.composer()],
       authority,
       you: { ...you, listed: true },
     } as WorkspaceConnectionState);
@@ -253,6 +272,8 @@ class FakeRuntime implements WorkspaceTransport {
       case "session.subscribe":
         this.sessionSubscription = `sub-${++this.subscription}`;
         return ok({ subscriptionId: this.sessionSubscription, events: this.events.map((event) => ({ cursor: `${this.generation}:${event.seq}`, event })), cursor: `${this.generation}:${this.events.at(-1)?.seq ?? 0}` });
+      case "session.commands":
+        return ok(this.commands);
       case "session.nudge":
       case "session.markRead":
       case "session.unsubscribe":
@@ -610,6 +631,36 @@ describe("cloud session actions", () => {
     expect(guard.calls.map((call) => call.command)).not.toContain("cloud_workspace_resume");
     expect(getSessionStore().selectedSessionId).toBe(KEY);
     expect(guard.violations).toEqual([]);
+  });
+
+  it("PRO-22: a runtime from before composer/1 offers no command list", async () => {
+    await openConnected();
+    expect(screen.queryByTestId("list-commands")).toBeNull();
+    expect(runtime.methods("session.commands")).toEqual([]);
+  });
+
+  it("PRO-22: a stopped workspace is not woken, or asked, for its command list", async () => {
+    runtime.commands = { commands: [{ name: "compact", description: "", source: "builtin" }], restricted: false };
+    setCatalog(workspaceItem("suspended"));
+    cache["t-1"] = { tab: tabInfo(), events: [ev({ type: "user_message", text: "cached question", queued: false })], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    selectCloudSession(KEY);
+    render(wrap(<CloudSessionHost sessionKey={KEY} sidebarOpen onToggleSidebar={() => undefined} />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.emit({ state: "suspended" }));
+    const button = await screen.findByTestId("list-commands");
+    fireEvent.click(button);
+    await waitFor(() => expect(button.dataset.listed).toBe(""));
+    expect(runtime.methods("session.commands")).toEqual([]);
+    expect(activate).not.toHaveBeenCalled();
+    expect(guard.calls.map((call) => call.command)).not.toContain("cloud_workspace_resume");
+  });
+
+  it("PRO-22: a view-only reader is offered no commands", async () => {
+    runtime.commands = { commands: [{ name: "compact", description: "", source: "builtin" }], restricted: false };
+    setCatalog(workspaceItem("ready", "participate"));
+    await openConnected("participate");
+    expect(screen.queryByTestId("list-commands")).toBeNull();
+    expect(runtime.methods("session.commands")).toEqual([]);
   });
 
   it("gates a view-only attachment and says why", async () => {
@@ -1264,6 +1315,31 @@ describe("a shared cloud workspace in SessionView (PRO-30)", () => {
     await act(async () => runtime.notify("collab.you", { you: { ...ME, canApprove: true } }));
     expect(await screen.findByRole("button", { name: "Take control" })).toBeTruthy();
     expect(runtime.methods("pty.control")).toEqual([]);
+  });
+
+  it("PRO-22: the composer lists the runtime's slash commands, and a plain driver is told why theirs are fewer", async () => {
+    names();
+    setCatalog(shared("driver"));
+    runtime.collab = { you: ME, participants: [], leases: [] };
+    runtime.commands = { commands: [{ name: "compact", description: "Shorten the conversation", source: "builtin" }], restricted: true };
+    await openShared(ME);
+    const listed = async () => {
+      const button = screen.getByTestId("list-commands");
+      delete button.dataset.listed;
+      fireEvent.click(button);
+      await waitFor(() => expect(button.dataset.listed).toBeDefined());
+      return button.dataset.listed;
+    };
+    expect(await listed()).toBe("/compact|Other commands need someone who can approve permissions.");
+    expect(runtime.methods("session.commands").map((frame) => frame.params)).toEqual([{ sessionId: "s-1", tabId: "t-1" }]);
+    const restrictedKey = screen.getByTestId("list-commands").dataset.key;
+    // They may approve now: the list is another one, read again as the runtime gives it to an approver.
+    runtime.commands = { commands: [{ name: "compact", description: "", source: "builtin" }, { name: "review", description: "", source: "builtin" }], restricted: false };
+    await act(async () => runtime.notify("collab.you", { you: { ...ME, canApprove: true } }));
+    await waitFor(() => expect(screen.getByTestId("list-commands").dataset.key).not.toBe(restrictedKey));
+    expect(await listed()).toBe("/compact|/review|");
+    expect(runtime.methods("session.commands")).toHaveLength(2);
+    expect(guard.violations).toEqual([]);
   });
 
   it("hides Stop from a driver while someone else drives the running turn", async () => {

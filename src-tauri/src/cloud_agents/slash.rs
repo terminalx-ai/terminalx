@@ -64,6 +64,13 @@ fn allowed(harness: &str) -> &'static [&'static str] {
     }
 }
 
+/// Whether `/name` is one a plain driver may send to this CLI: what a
+/// composer may offer them (`session.commands`), by the same list `check`
+/// judges a message with.
+pub fn allows(harness: &str, name: &str) -> bool {
+    allowed(harness).contains(&name)
+}
+
 /// Longest text quoted back in a refusal, in characters.
 const MAX_QUOTED: usize = 40;
 

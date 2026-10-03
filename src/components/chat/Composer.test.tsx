@@ -625,6 +625,37 @@ describe("composer history (PRO-85)", () => {
     expect(field().value).toBe("third message");
   });
 
+  it("lists a cloud tab's commands from its source instead of the local CLI, and says why some are missing", async () => {
+    const list = { commands: [{ name: "compact", description: "Shorten", source: "builtin" as const }], note: "Other commands need someone who can approve permissions." };
+    const load = vi.fn(async () => list);
+    function CloudComposer({ sourceKey }: { sourceKey: string }) {
+      const [draft, setDraft] = useState("");
+      return <Composer tab={tab} commands={{ key: sourceKey, known: () => null, load }} busy={false} draft={draft} onDraftChange={setDraft} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    }
+    const view = render(<CloudComposer sourceKey="cloud|restricted|live" />);
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "/", selectionStart: 1 } });
+    expect((await screen.findAllByRole("option")).map((option) => option.textContent)).toEqual(["/compactShorten"]);
+    expect(screen.getByTestId("picker-note").textContent).toBe(list.note);
+    // A command that is not offered: the list stays to say why, with nothing to pick.
+    fireEvent.change(box, { target: { value: "/model", selectionStart: 6 } });
+    expect(screen.queryAllByRole("option")).toEqual([]);
+    expect(screen.getByRole("listbox").textContent).toContain(list.note);
+    // The same source on a later render is not read again; another one is.
+    view.rerender(<CloudComposer sourceKey="cloud|restricted|live" />);
+    expect(load).toHaveBeenCalledTimes(1);
+    view.rerender(<CloudComposer sourceKey="cloud|all|live" />);
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    expect(invoke).not.toHaveBeenCalledWith("list_slash_commands", expect.anything());
+  });
+
+  it("a cloud tab with no source and no directory has no command list", () => {
+    render(<TestComposer onSend={vi.fn()} />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "/", selectionStart: 1 } });
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
   it("an empty menu (no match) takes the arrows too", async () => {
     invoke.mockImplementation(async (command: string) => (command === "list_slash_commands" ? [{ name: "compact", description: "", source: "builtin" }] : []));
     render(<HistoryComposer cwd="/repo-empty" />);

@@ -130,6 +130,10 @@ const notificationListeners = new Set<(notification: { event: string; params: Re
 function makeClient() {
   return {
     connection: { state: "connected" } as WorkspaceConnectionState,
+    hasCapability(capability: string): boolean {
+      const state = this.connection;
+      return state.state === "connected" && (state.capabilities as readonly string[] | undefined ?? []).includes(capability);
+    },
     listAgentTabs: vi.fn(async () => liveTabs),
     onNotification: vi.fn((listener: (notification: { event: string; params: Record<string, unknown> }) => void) => {
       notificationListeners.add(listener);
