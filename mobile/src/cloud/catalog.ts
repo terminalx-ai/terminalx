@@ -1,4 +1,5 @@
 import { CloudApiError, type CloudApi, type CloudOrganization, type CloudWorkspace, type CloudWorkspaceItem } from "./api";
+import { CloudPeople } from "./people";
 import { keyItemName, type SecretStorage } from "./keys";
 import type { CloudLinkOptions } from "./link";
 import type { BlobStorage } from "./transcripts";
@@ -68,7 +69,16 @@ export class CloudCatalog {
   private flight: Promise<void> | null = null;
   private closed = false;
 
-  constructor(private readonly options: CloudCatalogOptions) {}
+  /** Names for the user ids a shared workspace reports. */
+  readonly people: CloudPeople;
+
+  constructor(private readonly options: CloudCatalogOptions) {
+    this.people = new CloudPeople(options.api);
+  }
+
+  get api(): CloudApi {
+    return this.options.api;
+  }
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -101,6 +111,8 @@ export class CloudCatalog {
         listed: () => this.workspace(orgId, workspaceId),
         clientInstallationId: this.options.clientInstallationId,
         appVersion: this.options.appVersion,
+        // A share revoked while this phone was connected: the list says so, and what is kept here goes.
+        onRefused: () => void this.refresh(),
         link: this.options.link,
       });
       this.sessions.set(key, session);

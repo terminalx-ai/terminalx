@@ -1,7 +1,7 @@
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CloudCommand, CloudWorkspace } from "./api";
+import { CloudApiError, type CloudCommand, type CloudWorkspace } from "./api";
 import { b64, checkpointAad, unb64, type CheckpointEnvelope, type CommandEnvelope } from "./crypto";
 import { NOW, pairingCode, Runtime } from "./fake-runtime";
 import { CloudWorkspaceSession } from "./workspace";
@@ -252,5 +252,167 @@ describe("a cloud workspace on the phone", () => {
     expect(h.secrets.size).toBe(0);
     expect(h.blobs.size).toBe(0);
     expect(h.runtimes[0].readyState).toBe(3);
+  });
+
+  describe("sharing: presence, notes and the driver lease", () => {
+    const alice = { userId: "u-alice", role: "driver", canApprove: false, surfaces: 1, tabId: "t1", activity: "typing", since: 1 };
+    const lease = (holderId: string) => ({ tabId: "t1", holderId, acquiredAt: NOW, expiresAt: NOW + 120_000 });
+
+    function shared(options: Parameters<typeof harness>[0] = {}, extra: Record<string, (params: Record<string, unknown>) => unknown> = {}) {
+      const h = harness(options);
+      const calls: { method: string; params: Record<string, unknown> }[] = [];
+      const notes = [{ id: "n1", tabId: "t1", authorId: "u-alice", text: "look at the auth test", createdAt: 5 }];
+      h.each((runtime) => {
+        const record = (method: string, answer: (params: Record<string, unknown>) => unknown) => (params: Record<string, unknown>) => {
+          calls.push({ method, params });
+          return answer(params);
+        };
+        Object.assign(runtime.methods, {
+          "collab.state": record("collab.state", () => ({ you: runtime.you, participants: [{ userId: "u-me", role: "driver", canApprove: false, surfaces: 1, tabId: null, activity: "viewing", since: 1 }, alice], leases: [lease("u-alice")] })),
+          "presence.update": record("presence.update", () => ({})),
+          "notes.list": record("notes.list", () => ({ notes, more: false })),
+          "notes.post": record("notes.post", (params) => ({ note: { id: "n2", tabId: params.tabId, authorId: "u-me", text: params.text, createdAt: 9 } })),
+          "lease.acquire": record("lease.acquire", () => ({ lease: lease("u-me") })),
+          "lease.release": record("lease.release", () => ({})),
+          "lease.takeOver": record("lease.takeOver", () => ({ lease: lease("u-me") })),
+          ...Object.fromEntries(Object.entries(extra).map(([method, answer]) => [method, record(method, answer)])),
+        });
+      });
+      return { ...h, calls };
+    }
+
+    it("shows who is here and who drives, and reports this phone's presence on the tab it shows", async () => {
+      const h = shared();
+      await h.session.start();
+      await connected(h);
+      await vi.waitFor(() => expect(h.session.getSnapshot().collab.participants).toHaveLength(2));
+      expect(h.session.getSnapshot().collab).toMatchObject({ available: true, userId: "u-me", leases: { t1: { holderId: "u-alice" } } });
+      const stop = h.session.view("t1");
+      await vi.waitFor(() => expect(h.calls.some((call) => call.method === "presence.update")).toBe(true));
+      expect(h.calls.find((call) => call.method === "presence.update")!.params).toEqual({ tabId: "t1", activity: "viewing" });
+      // Others' changes arrive as they happen.
+      h.runtimes[0].encrypted({ event: "collab.presence", params: { participants: [alice] } });
+      h.runtimes[0].encrypted({ event: "collab.lease", params: { tabId: "t1", lease: null } });
+      await vi.waitFor(() => expect(h.session.getSnapshot().collab.leases).toEqual({}));
+      expect(h.session.getSnapshot().collab.participants).toEqual([alice]);
+      stop();
+      h.session.close();
+    });
+
+    it("reads a tab's notes, posts one, and takes others' as they come, without repeats", async () => {
+      const h = shared();
+      await h.session.start();
+      await connected(h);
+      const stop = h.session.view("t1");
+      await vi.waitFor(() => expect(h.session.getSnapshot().collab.notes.t1).toHaveLength(1));
+      const note = await h.session.postNote("t1", "  on it  ");
+      expect(note).toMatchObject({ id: "n2", text: "on it", authorId: "u-me" });
+      // A note goes to the runtime, never to the agent's mailbox.
+      expect(h.api.enqueue).not.toHaveBeenCalled();
+      h.runtimes[0].encrypted({ event: "notes.posted", params: { note: { id: "n2", tabId: "t1", authorId: "u-me", text: "on it", createdAt: 9 } } });
+      h.runtimes[0].encrypted({ event: "notes.posted", params: { note: { id: "n3", tabId: "t1", authorId: "u-alice", text: "thanks", createdAt: 12 } } });
+      await vi.waitFor(() => expect(h.session.getSnapshot().collab.notes.t1.map((entry) => entry.id)).toEqual(["n1", "n2", "n3"]));
+      stop();
+      h.session.close();
+    });
+
+    it("takes, releases and takes over the wheel through the runtime", async () => {
+      const h = shared({ role: "manager", canApprove: true });
+      await h.session.start();
+      await connected(h);
+      await h.session.takeOverWheel("t1");
+      expect(h.session.getSnapshot().collab.leases.t1.holderId).toBe("u-me");
+      await h.session.releaseWheel("t1");
+      expect(h.session.getSnapshot().collab.leases).toEqual({});
+      await h.session.takeWheel("t1");
+      expect(h.calls.filter((call) => call.method.startsWith("lease.")).map((call) => [call.method, call.params])).toEqual([["lease.takeOver", { tabId: "t1" }], ["lease.release", { tabId: "t1" }], ["lease.acquire", { tabId: "t1" }]]);
+      h.session.close();
+    });
+
+    it("says it is typing at most every ten seconds and goes back to viewing after a pause", async () => {
+      const h = shared();
+      await h.session.start();
+      await connected(h);
+      await vi.waitFor(() => expect(h.session.getSnapshot().collab.available).toBe(true));
+      const real = Date.now;
+      let clock = 1_000_000;
+      Date.now = () => clock;
+      try {
+        const presence = () => h.calls.filter((call) => call.method === "presence.update").map((call) => call.params.activity);
+        h.session.typingIn("t1");
+        clock += 2_000;
+        h.session.typingIn("t1");
+        await vi.waitFor(() => expect(presence()).toEqual(["typing"]));
+        await vi.advanceTimersByTimeAsync(4_100);
+        await vi.waitFor(() => expect(presence()).toEqual(["typing", "viewing"]));
+      } finally {
+        Date.now = real;
+      }
+      h.session.close();
+    });
+
+    it("follows a role change made while connected: a viewer who becomes a driver may send", async () => {
+      const h = shared({ role: "viewer" });
+      await h.session.start();
+      await connected(h);
+      await expect(h.session.send("t1", "hi")).rejects.toMatchObject({ code: "read-only" });
+      h.runtimes[0].you = { userId: "u-me", role: "driver", canApprove: true };
+      h.runtimes[0].encrypted({ event: "collab.you", params: { you: { userId: "u-me", role: "driver", canApprove: true } } });
+      await vi.waitFor(() => expect(h.session.getSnapshot()).toMatchObject({ role: "driver", canApprove: true }));
+      expect(await h.session.send("t1", "hi")).toMatchObject({ kind: "send" });
+      h.session.close();
+    });
+
+    it("asks nothing of a workspace that is not shared with this person, and says so by its role", async () => {
+      const h = shared({ role: "none" });
+      h.each((runtime) => {
+        runtime.methods["collab.state"] = () => undefined;
+        const refuse = vi.fn(() => undefined);
+        runtime.methods["keys.get"] = refuse;
+        runtime.methods["session.tabs"] = refuse;
+        (runtime as unknown as { refuse_: typeof refuse }).refuse_ = refuse;
+      });
+      await h.session.start();
+      await vi.waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("connected"));
+      await vi.waitFor(() => expect(h.session.getSnapshot().role).toBe("none"));
+      const stop = h.session.view("t1");
+      await vi.advanceTimersByTimeAsync(100);
+      expect((h.runtimes[0] as unknown as { refuse_: ReturnType<typeof vi.fn> }).refuse_).not.toHaveBeenCalled();
+      expect(h.session.getSnapshot()).toMatchObject({ tabs: [], hasKey: false, error: null });
+      await expect(h.session.send("t1", "hi")).rejects.toMatchObject({ code: "unavailable" });
+      stop();
+      h.session.close();
+    });
+
+    it("asks for the list again, once, when access is taken away while connected", async () => {
+      const refused = vi.fn();
+      const h = shared();
+      (h.session as unknown as { options: { onRefused: () => void } }).options.onRefused = refused;
+      await h.session.start();
+      await connected(h);
+      // The share was revoked: the runtime closes the connection and the API no longer attaches this person.
+      h.api.open.mockRejectedValue(new CloudApiError("cloud_workspace_not_found", 404));
+      h.runtimes[0].drop(4403);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("stopped"));
+      expect(refused).toHaveBeenCalledTimes(1);
+      // Reading the list again does not start a loop of refusals and refreshes.
+      h.session.listChanged();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(refused).toHaveBeenCalledTimes(1);
+      expect(h.session.getSnapshot().collab).toMatchObject({ available: false, participants: [] });
+      h.session.close();
+    });
+
+    it("forgets who is here when the connection drops", async () => {
+      const h = shared();
+      await h.session.start();
+      await connected(h);
+      await vi.waitFor(() => expect(h.session.getSnapshot().collab.participants).toHaveLength(2));
+      h.runtimes[0].drop(1006);
+      expect(h.session.getSnapshot().collab).toMatchObject({ available: false, participants: [], leases: {} });
+      await expect(h.session.postNote("t1", "x")).rejects.toMatchObject({ code: "unavailable" });
+      h.session.close();
+    });
   });
 });

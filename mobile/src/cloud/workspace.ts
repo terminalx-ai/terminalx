@@ -1,5 +1,6 @@
 import { mergeAgentEvents, type AgentEvent } from "@terminalx/portable/events";
-import { WorkspaceRpcClient, type AgentTabInfo, type WorkspaceConnectionState } from "@terminalx/portable/workspace";
+import { WorkspaceRpcClient, type AgentTabInfo, type WorkspaceConnectionState, type WorkspaceYou } from "@terminalx/portable/workspace";
+import { collabGranted, WorkspaceCollab, type Participant, type TabLease, type WorkspaceNote } from "@terminalx/portable/workspaceCollab";
 import { CloudApiError, type CloudApi, type CloudRole, type CloudWorkspace } from "./api";
 import type { CommandKind, CommandScope } from "./crypto";
 import { WorkspaceKeys, type SecretStorage } from "./keys";
@@ -35,8 +36,22 @@ export interface CloudTab {
   noKey: boolean;
 }
 
+/** Who else is here, who drives each tab, and the notes people left (`collab/1`, docs/CLOUD-SHARING.md). */
+export interface CloudCollabSnapshot {
+  /** False while not connected or on a runtime without `collab/1`: presence, notes and leases stay hidden. */
+  available: boolean;
+  /** This person's id as the runtime knows it; null until it said. */
+  userId: string | null;
+  participants: Participant[];
+  /** The driver lease of each tab that has one. */
+  leases: Record<string, TabLease>;
+  /** Notes per tab, oldest first; a tab is absent until its notes were read. */
+  notes: Record<string, WorkspaceNote[]>;
+}
+
 export interface CloudWorkspaceSnapshot {
   connection: WorkspaceConnectionState;
+  collab: CloudCollabSnapshot;
   problem: CloudLinkProblem;
   /** This person's role: the runtime's word while connected, else the list's. */
   role: CloudRole | null;
@@ -56,6 +71,10 @@ export class CloudSendError extends Error {
   }
 }
 
+/** While typing, presence says so at most this often, and goes back to viewing this long after the last keystroke. */
+export const TYPING_REPORT_MS = 10_000;
+export const TYPING_IDLE_MS = 4_000;
+export const REFUSAL_REFRESH_MS = 30_000;
 export const OUTBOX_POLL_FIRST_MS = 1_000;
 export const OUTBOX_POLL_MAX_MS = 15_000;
 
@@ -68,6 +87,12 @@ export interface CloudWorkspaceSessionOptions {
   listed: () => CloudWorkspace | null;
   clientInstallationId: string;
   appVersion: string;
+  /**
+   * The API refused an attachment the list said was possible (access taken
+   * away, or the workspace stopped meanwhile): the list is out of date.
+   * Called at most once in `REFUSAL_REFRESH_MS`.
+   */
+  onRefused?: () => void;
   link?: Partial<Pick<CloudLinkOptions, "createSocket" | "random" | "now">>;
 }
 
@@ -78,6 +103,14 @@ export class CloudWorkspaceSession {
   readonly outbox: CloudOutbox;
   readonly transcripts: CloudTranscripts;
   readonly client: WorkspaceRpcClient;
+  readonly collab: WorkspaceCollab;
+  /** Who this connection is, as the runtime last said (`rpc.hello`, `collab.state`, `collab.you`). */
+  private you: WorkspaceYou | null = null;
+  private participants: Participant[] = [];
+  private readonly leases = new Map<string, TabLease>();
+  private readonly notes = new Map<string, WorkspaceNote[]>();
+  private refusedAt = -Infinity;
+  private typing: { tabId: string; reportedAt: number; idle: ReturnType<typeof setTimeout> | null } | null = null;
   private readonly link: CloudWorkspaceLink;
   private readonly tabs = new Map<string, CloudTab>();
   private readonly listeners = new Set<() => void>();
@@ -103,6 +136,7 @@ export class CloudWorkspaceSession {
       ...options.link,
     });
     this.client = new WorkspaceRpcClient(this.link);
+    this.collab = new WorkspaceCollab(this.client, () => `${(options.link?.now ?? Date.now)().toString(36)}-${Math.random().toString(36).slice(2)}`);
     this.snapshot = this.build();
   }
 
@@ -124,6 +158,20 @@ export class CloudWorkspaceSession {
         if (notification.event !== "session.tabs") return;
         const tabs = (notification.params as { tabs?: AgentTabInfo[] }).tabs;
         if (Array.isArray(tabs)) this.applyLive(tabs);
+      }),
+    );
+    this.stops.push(
+      this.collab.onEvent((event) => {
+        if (event.type === "presence") this.participants = event.participants;
+        else if (event.type === "lease") this.setLease(event.tabId, event.lease);
+        else if (event.type === "note") this.addNotes(event.note.tabId, [event.note]);
+        else if (event.type === "you") {
+          const before = this.you?.role ?? null;
+          this.you = event.you;
+          // Access given, changed or taken away while connected: bring everything in line with the new role.
+          if (before !== event.you.role) void this.reconcile();
+        }
+        this.publish();
       }),
     );
     await Promise.all([this.keys.load(), this.outbox.load()]);
@@ -148,8 +196,11 @@ export class CloudWorkspaceSession {
     entry.count += 1;
     this.viewing.set(tabId, entry);
     if (entry.count === 1) {
-      if (this.client.connection.state === "connected") void this.stream(tabId);
-      else void this.readCheckpoint(tabId);
+      if (this.client.connection.state === "connected") {
+        void this.stream(tabId);
+        this.present(tabId, "viewing");
+        void this.loadNotes(tabId);
+      } else void this.readCheckpoint(tabId);
     }
     let done = false;
     return () => {
@@ -181,6 +232,51 @@ export class CloudWorkspaceSession {
     return this.command(tabId, "permission-decision", decision, {});
   }
 
+  /** The person is typing in this tab's composer: others see it, at most every ten seconds. */
+  typingIn(tabId: string): void {
+    if (!this.collab.available) return;
+    const now = Date.now();
+    if (this.typing?.idle) clearTimeout(this.typing.idle);
+    const reportedAt = this.typing?.tabId === tabId ? this.typing.reportedAt : 0;
+    const report = now - reportedAt >= TYPING_REPORT_MS;
+    this.typing = {
+      tabId,
+      reportedAt: report ? now : reportedAt,
+      idle: setTimeout(() => {
+        this.typing = null;
+        this.present(tabId, "viewing");
+      }, TYPING_IDLE_MS),
+    };
+    if (report) this.present(tabId, "typing");
+  }
+
+  /** A note for the people here. It is never sent to the agent and is kept only by the runtime. */
+  async postNote(tabId: string, text: string): Promise<WorkspaceNote> {
+    if (!this.collab.available) throw new CloudSendError("unavailable");
+    const note = await this.collab.postNote(tabId, text);
+    this.addNotes(tabId, [note]);
+    this.publish();
+    return note;
+  }
+
+  /** Take the tab's input lease ("the wheel"). Refused by the runtime while someone else holds it. */
+  async takeWheel(tabId: string): Promise<void> {
+    this.setLease(tabId, await this.collab.acquireLease(tabId));
+    this.publish();
+  }
+
+  async releaseWheel(tabId: string): Promise<void> {
+    await this.collab.releaseLease(tabId);
+    this.setLease(tabId, null);
+    this.publish();
+  }
+
+  /** Managers only: take the lease from whoever holds it. */
+  async takeOverWheel(tabId: string): Promise<void> {
+    this.setLease(tabId, await this.collab.takeOverLease(tabId));
+    this.publish();
+  }
+
   async cancel(clientCommandId: string): Promise<void> {
     await this.outbox.cancel(clientCommandId);
   }
@@ -190,6 +286,8 @@ export class CloudWorkspaceSession {
     this.closed = true;
     if (this.poll) clearTimeout(this.poll);
     this.poll = null;
+    if (this.typing?.idle) clearTimeout(this.typing.idle);
+    this.typing = null;
     for (const entry of this.viewing.values()) entry.stop?.();
     this.viewing.clear();
     for (const stop of this.stops.splice(0)) stop();
@@ -224,17 +322,57 @@ export class CloudWorkspaceSession {
     if (state.state !== "connected") {
       // What the runtime said of each tab is now the last known state, not the live one.
       for (const tab of this.tabs.values()) tab.source = "checkpoint";
+      // Who is here and who drives is only known while connected.
+      this.you = null;
+      this.participants = [];
+      this.leases.clear();
       this.publish();
+      const problem = this.link.problem;
+      if (state.state === "stopped" && problem?.kind === "api" && !problem.unreachable) {
+        const now = Date.now();
+        if (now - this.refusedAt >= REFUSAL_REFRESH_MS) {
+          this.refusedAt = now;
+          this.options.onRefused?.();
+        }
+      }
       return;
     }
+    this.you = state.you ?? null;
     this.publish();
+    await this.reconcile();
+  }
+
+  /** Bring keys, tabs, presence and the outbox in line with the runtime, for the role this person has now. */
+  private async reconcile(): Promise<void> {
+    if (this.closed || this.client.connection.state !== "connected") return;
     try {
+      if (collabGranted(this.client.connection)) {
+        try {
+          const collab = await this.collab.state();
+          this.you = collab.you;
+          this.participants = collab.participants;
+          this.leases.clear();
+          for (const lease of collab.leases) this.setLease(lease.tabId, lease);
+        } catch {
+          // Refused for someone with no role; `you` from the hello stands.
+        }
+      }
+      // Not shared with this person: the runtime refuses everything, so nothing is asked.
+      if (this.you?.role === "none") {
+        this.error = null;
+        this.publish();
+        return;
+      }
       // The key comes first: without it nothing can be sealed or opened.
       await this.keys.refresh(this.client).catch(() => undefined);
       this.applyLive(await this.client.listAgentTabs());
       // A checkpoint this phone could not open before it was handed the key opens now.
       for (const tab of [...this.tabs.values()]) if (tab.noKey) void this.readCheckpoint(tab.tabId);
-      for (const [tabId, entry] of this.viewing) if (!entry.stop) void this.stream(tabId);
+      for (const [tabId, entry] of this.viewing) {
+        if (!entry.stop) void this.stream(tabId);
+        this.present(tabId, "viewing");
+        void this.loadNotes(tabId);
+      }
       if (await this.outbox.sync().catch(() => false)) this.publish();
       if (this.outbox.pending) this.startPolling();
       this.error = null;
@@ -242,6 +380,33 @@ export class CloudWorkspaceSession {
       this.error = error instanceof Error ? error.message : String(error);
     }
     this.publish();
+  }
+
+  private present(tabId: string, activity: "viewing" | "typing"): void {
+    if (!this.collab.available || this.you?.role === "none") return;
+    void this.collab.updatePresence({ tabId, activity }).catch(() => undefined);
+  }
+
+  private async loadNotes(tabId: string): Promise<void> {
+    if (!this.collab.available || this.you?.role === "none") return;
+    try {
+      const { notes } = await this.collab.listNotes(tabId, { limit: 100 });
+      this.addNotes(tabId, notes);
+      this.publish();
+    } catch {
+      // Notes are an extra: the conversation stands without them.
+    }
+  }
+
+  private addNotes(tabId: string, incoming: WorkspaceNote[]): void {
+    const byId = new Map((this.notes.get(tabId) ?? []).map((note) => [note.id, note]));
+    for (const note of incoming) if (note.tabId === tabId) byId.set(note.id, note);
+    this.notes.set(tabId, [...byId.values()].sort((left, right) => left.createdAt - right.createdAt));
+  }
+
+  private setLease(tabId: string, lease: TabLease | null | undefined): void {
+    if (lease && typeof lease.holderId === "string") this.leases.set(tabId, lease);
+    else this.leases.delete(tabId);
   }
 
   private applyLive(tabs: AgentTabInfo[]): void {
@@ -254,6 +419,7 @@ export class CloudWorkspaceSession {
       tab.status = info.status;
       tab.pendingPermissions = info.pendingPermissions ?? [];
       tab.source = "live";
+      if (info.lease !== undefined) this.setLease(info.tabId, info.lease);
     }
     // The runtime's list is the tabs there are: one it no longer names was closed.
     for (const tabId of [...this.tabs.keys()]) {
@@ -375,9 +541,18 @@ export class CloudWorkspaceSession {
   private build(): CloudWorkspaceSnapshot {
     const connection = this.client?.connection ?? { state: "idle" as const };
     const listed = this.options.listed();
-    const you = connection.state === "connected" && connection.you && connection.you.listed !== false ? connection.you : (listed?.you ?? null);
+    const said = connection.state === "connected" ? (this.you ?? connection.you ?? null) : null;
+    const you = said && said.listed !== false ? said : (listed?.you ?? null);
+    const available = collabGranted(connection);
     return {
       connection,
+      collab: {
+        available,
+        userId: said?.userId ?? null,
+        participants: available ? (this.participants ?? []) : [],
+        leases: available ? Object.fromEntries(this.leases ?? []) : {},
+        notes: Object.fromEntries(this.notes ?? []),
+      },
       problem: this.link?.problem ?? null,
       role: (you?.role as CloudRole | undefined) ?? null,
       canApprove: you?.canApprove === true,

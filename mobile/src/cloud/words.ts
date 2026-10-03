@@ -1,4 +1,5 @@
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
+import { leaseLive, type Participant, type TabLease } from "@terminalx/portable/workspaceCollab";
 import type { CloudRole } from "./api";
 import type { CloudLinkProblem } from "./link";
 import type { OutboxEntry } from "./outbox";
@@ -56,9 +57,47 @@ export function connectionLine(connection: WorkspaceConnectionState, listedState
   return { tone: "idle", text: "Connecting…" };
 }
 
+export const NOT_SHARED_TITLE = "This workspace has not been shared with you";
+export const NOT_SHARED_DETAIL = "Ask an organization admin or its creator to share it.";
+
+type NameOf = (userId: string | null | undefined) => string;
+
+/** Who drives a tab, in words, and what this person may do about it. */
+export function leaseLine(lease: TabLease | null | undefined, selfId: string | null, role: CloudRole | null, now: number, nameOf: NameOf): { text: string; mine: boolean; heldByOther: boolean; canTake: boolean; canRelease: boolean; canTakeOver: boolean } {
+  const live = leaseLive(lease, now) ? lease : null;
+  const mine = !!live && live.holderId === selfId;
+  const heldByOther = !!live && !mine;
+  const drives = role === "manager" || role === "driver";
+  return {
+    text: mine ? "You are driving" : live ? `Driving: ${nameOf(live.holderId)}` : "No one is driving",
+    mine,
+    heldByOther,
+    canTake: drives && !live,
+    canRelease: mine,
+    canTakeOver: heldByOther && role === "manager",
+  };
+}
+
+/** The other people here, each with what they are doing. */
+export function presenceLine(participants: Participant[], selfId: string | null, tabTitle: (tabId: string) => string | null, nameOf: NameOf): string | null {
+  const others = participants.filter((person) => person.userId !== selfId);
+  if (!others.length) return null;
+  return `Also here: ${others
+    .map((person) => {
+      const where = person.tabId ? tabTitle(person.tabId) : null;
+      return `${nameOf(person.userId)}${person.role === "viewer" ? " (viewing only)" : ""}${person.activity === "typing" ? " · typing" : ""}${where ? ` · on ${where}` : ""}`;
+    })
+    .join(", ")}`;
+}
+
 /** What became of something this phone sent; null once there is nothing to say (it was applied). */
-export function outboxLine(entry: OutboxEntry): { tone: "idle" | "warn"; text: string } | null {
+export function outboxLine(entry: OutboxEntry, nameOf: NameOf = () => "Someone else"): { tone: "idle" | "warn"; text: string } | null {
   if (entry.state === "applied") return null;
+  if (entry.state === "rejected" && entry.category === "lease-held") {
+    const holder = entry.receipt?.holderId;
+    return { tone: "warn", text: `${typeof holder === "string" ? nameOf(holder) : "Someone else"} is driving. Your message was not sent.` };
+  }
+  if (entry.state === "rejected" && entry.category === "access-revoked") return { tone: "warn", text: "Not sent: your access changed." };
   if (entry.state === "unsent") return { tone: "warn", text: "Not delivered yet. It is sent when the phone is back online." };
   if (entry.state === "queued") return { tone: "idle", text: entry.wake === "queued" || entry.wake === "in-progress" ? "Starting the workspace…" : entry.wake === "unavailable" ? "Waiting: the workspace could not be started." : "Sent. Waiting for the agent." };
   if (entry.state === "leased") return { tone: "idle", text: "Delivering…" };

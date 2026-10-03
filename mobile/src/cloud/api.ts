@@ -122,6 +122,9 @@ const sharesSchema = z.object({ shares: z.array(shareSchema), you: z.object({ ro
 export type CloudShare = z.infer<typeof shareSchema>;
 export type CloudShares = z.infer<typeof sharesSchema>;
 
+const memberSchema = z.object({ userId: z.string().min(1), email: z.string(), displayName: z.string().nullish(), role: z.string() }).passthrough();
+export type CloudMember = z.infer<typeof memberSchema>;
+
 export interface CloudApiOptions {
   /** `https://login.terminalx.ai`. */
   origin: string;
@@ -203,6 +206,11 @@ export class CloudApi {
       if (error instanceof CloudApiError && error.code === "cloud_workspace_transcript_checkpoint_not_found") return null;
       throw error;
     }
+  }
+
+  /** The organization's members: the names behind user ids, and the people a workspace can be shared with. */
+  async members(orgId: string): Promise<CloudMember[]> {
+    return z.object({ members: z.array(memberSchema) }).passthrough().parse(await this.request("GET", `/v1/desktop/orgs/${id(orgId)}/members`)).members;
   }
 
   shares(orgId: string, workspaceId: string): Promise<CloudShares> {

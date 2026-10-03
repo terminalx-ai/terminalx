@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CloudScreen from "../app/(tabs)/cloud";
 import CloudWorkspaceScreen from "../app/cloud/[workspaceId]";
+import CloudSharesScreen from "../app/cloud/shares";
 
 const mocks = vi.hoisted(() => ({
   params: { workspaceId: "ws-1", orgId: "org-1" } as Record<string, string>,
@@ -28,10 +29,11 @@ vi.mock("react-native", () => {
   return {
     View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box, RefreshControl: () => null,
     Alert: { alert: mocks.alert },
+    Switch: ({ value, onValueChange, disabled, accessibilityLabel }: any) => <input type="checkbox" aria-label={accessibilityLabel} checked={value} disabled={disabled} onChange={(event) => onValueChange(event.currentTarget.checked)} />,
     Platform: { OS: "web", select: ({ default: fallback }: any) => fallback },
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
     Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
-    TextInput: ({ value, onChangeText, placeholder, editable }: any) => <input value={value} disabled={editable === false} onInput={(event) => onChangeText(event.currentTarget.value)} placeholder={placeholder} />,
+    TextInput: ({ value, onChangeText, placeholder, editable }: any) => <input type="text" value={value} disabled={editable === false} onInput={(event) => onChangeText(event.currentTarget.value)} placeholder={placeholder} />,
     FlatList: ({ data, renderItem, ListHeaderComponent, ListEmptyComponent, ListFooterComponent }: any) => <div>{ListHeaderComponent}{data.length ? data.map((item: unknown, index: number) => <div key={index}>{renderItem({ item })}</div>) : ListEmptyComponent}{ListFooterComponent}</div>,
     SectionList: ({ sections, renderItem, renderSectionHeader, renderSectionFooter, ListHeaderComponent, ListEmptyComponent }: any) => <div>{ListHeaderComponent}{sections.length ? sections.map((section: any) => <div key={section.key}>{renderSectionHeader({ section })}{section.data.map((item: any) => <div key={item.workspace.id}>{renderItem({ item })}</div>)}{renderSectionFooter({ section })}</div>) : ListEmptyComponent}</div>,
   };
@@ -40,6 +42,7 @@ vi.mock("@mobile/ui/primitives", () => ({
   Button: ({ label, onPress, disabled }: any) => <button disabled={disabled} onClick={onPress}>{label}</button>,
   Card: ({ children }: any) => <div>{children}</div>,
   EmptyState: ({ title, detail }: any) => <div>{title} {detail}</div>, StatusDot: () => null,
+  Screen: ({ children }: any) => <div>{children}</div>, SectionTitle: ({ children }: any) => <h2>{children}</h2>,
 }));
 
 let root: Root;
@@ -49,11 +52,14 @@ let counter = 0;
 const event = (seq: number, payload: Record<string, unknown>) => ({ id: `e${seq}`, sessionId: "s1", tabId: "t1", harness: "claude", seq, ts: "2026-10-03T00:00:00Z", payload });
 const item = (id: string, fields: Record<string, unknown> = {}) => ({ workspace: { id, orgId: "org-1", name: id, provider: "box", state: "ready", you: { role: "driver", canApprove: false }, ...fields }, latestOperation: null });
 
-function world(options: { state?: string | null; role?: string | null; canApprove?: boolean; hasKey?: boolean; events?: unknown[]; outbox?: unknown[]; connection?: string; noKey?: boolean; tabs?: number } = {}) {
+const NAMES: Record<string, string> = { "u-alice": "Alice", "u-bob": "Bob" };
+
+function world(options: { state?: string | null; role?: string | null; canApprove?: boolean; hasKey?: boolean; events?: unknown[]; outbox?: unknown[]; connection?: string; noKey?: boolean; tabs?: number; collab?: Record<string, unknown> } = {}) {
   const state = options.state === undefined ? "ready" : options.state;
   const snapshot = {
     connection: { state: options.connection ?? (state === "ready" ? "connected" : "suspended") },
     problem: null,
+    collab: { available: false, userId: "u-me", participants: [], leases: {}, notes: {}, ...options.collab },
     role: options.role === undefined ? "driver" : options.role,
     canApprove: options.canApprove ?? false,
     hasKey: options.hasKey ?? true,
@@ -69,6 +75,11 @@ function world(options: { state?: string | null; role?: string | null; canApprov
     stop: vi.fn(async () => ({})),
     decide: vi.fn(async () => ({})),
     cancel: vi.fn(async () => undefined),
+    typingIn: vi.fn(),
+    postNote: vi.fn(async () => ({})),
+    takeWheel: vi.fn(async () => undefined),
+    releaseWheel: vi.fn(async () => undefined),
+    takeOverWheel: vi.fn(async () => undefined),
     outbox: { isDeciding: () => false },
   };
   const release = vi.fn();
@@ -80,6 +91,8 @@ function world(options: { state?: string | null; role?: string | null; canApprov
     workspace: () => listed,
     retain: vi.fn(() => release),
     opened: () => session,
+    people: { subscribe: () => () => undefined, getVersion: () => 1, name: (userId: string | null | undefined) => NAMES[userId ?? ""] ?? "Someone", roster: vi.fn(async () => [{ userId: "u-me", email: "me@example.com", role: "admin" }, { userId: "u-alice", email: "alice@example.com", displayName: "Alice", role: "member" }, { userId: "u-bob", email: "bob@example.com", displayName: "Bob", role: "member" }]), remember: vi.fn() },
+    api: { shares: vi.fn(), putShare: vi.fn(async () => ({})), revokeShare: vi.fn(async () => undefined) },
   };
   return { session, release };
 }
@@ -91,7 +104,7 @@ const button = (label: string) => {
   return found;
 };
 const click = async (label: string) => { await act(async () => { button(label).click(); }); };
-const type = async (value: string) => { await act(async () => { const field = container.querySelector("input")!; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(field, value); field.dispatchEvent(new Event("input", { bubbles: true })); }); };
+const type = async (value: string, placeholder?: string) => { await act(async () => { const field = (placeholder ? container.querySelector(`input[placeholder="${placeholder}"]`) : container.querySelector('input[type="text"]')) as HTMLInputElement; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(field, value); field.dispatchEvent(new Event("input", { bubbles: true })); }); };
 const show = async (node: ReactNode) => { await act(async () => { root.render(node); }); };
 
 beforeEach(() => {
@@ -197,7 +210,7 @@ describe("a cloud workspace screen", () => {
     const ask = [event(1, { type: "user_message", text: "deploy", queued: false }), event(2, { type: "permission_requested", requestId: "r1", toolUseId: "tool", toolName: "shell", input: {}, options: [{ id: "allow", label: "Allow", kind: "allow_once" }] })];
     world({ events: ask, canApprove: false });
     await show(<CloudWorkspaceScreen />);
-    expect(text()).toContain("Only someone allowed to approve can answer this request.");
+    expect(text()).toContain("Waiting for someone who can approve.");
     expect(() => button("Allow")).toThrow();
 
     const { session } = world({ events: ask, canApprove: true });
@@ -254,5 +267,171 @@ describe("a cloud workspace screen", () => {
     await click("Second 1");
     expect(session.view).toHaveBeenLastCalledWith("t2");
     expect(text()).not.toContain("run the tests");
+  });
+});
+
+describe("a shared cloud workspace on the phone", () => {
+  const alice = { userId: "u-alice", role: "driver", canApprove: false, surfaces: 1, tabId: "t1", activity: "typing", since: 1 };
+  const lease = (holderId: string) => ({ tabId: "t1", holderId, acquiredAt: 0, expiresAt: Date.now() + 120_000 });
+
+  it("shows who else is here and who drives, and keeps the composer off while someone else does", async () => {
+    const { session } = world({ collab: { available: true, participants: [{ ...alice, userId: "u-me", activity: "viewing" }, alice], leases: { t1: lease("u-alice") } } });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Also here: Alice · typing · on Fix login");
+    expect(text()).toContain("Driving: Alice");
+    expect(text()).toContain("Alice is driving this tab. You can send when they release it.");
+    expect((container.querySelector('input[placeholder="Message the agent"]') as HTMLInputElement).disabled).toBe(true);
+    expect(button("Send").disabled).toBe(true);
+    // A driver cannot take it from her, and cannot stop her turn.
+    expect(() => button("Take over")).toThrow();
+    expect(() => button("Take the wheel")).toThrow();
+    expect(() => button("Stop the agent")).toThrow();
+    expect(session.send).not.toHaveBeenCalled();
+  });
+
+  it("lets a manager take over, a driver take a free wheel, and the holder release it", async () => {
+    const manager = world({ role: "manager", collab: { available: true, leases: { t1: lease("u-alice") } } });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Take over to send.");
+    await click("Take over");
+    expect(manager.session.takeOverWheel).toHaveBeenCalledWith("t1");
+    expect(button("Stop the agent")).toBeTruthy();
+
+    const free = world({ collab: { available: true } });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("No one is driving");
+    await click("Take the wheel");
+    expect(free.session.takeWheel).toHaveBeenCalledWith("t1");
+
+    const mine = world({ collab: { available: true, leases: { t1: lease("u-me") } } });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("You are driving");
+    expect(button("Send")).toBeTruthy();
+    await click("Release");
+    expect(mine.session.releaseWheel).toHaveBeenCalledWith("t1");
+
+    // A viewer sees who drives and gets no wheel.
+    world({ role: "viewer", collab: { available: true } });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("No one is driving");
+    expect(() => button("Take the wheel")).toThrow();
+  });
+
+  it("keeps notes apart from the composer: a note goes to the people, never to the agent", async () => {
+    const { session } = world({ collab: { available: true, userId: "u-me", notes: { t1: [{ id: "n1", tabId: "t1", authorId: "u-alice", text: "look at the auth test", createdAt: 1 }, { id: "n2", tabId: "t1", authorId: "u-me", text: "on it", createdAt: 2 }] } } });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).not.toContain("look at the auth test");
+    await click("Notes (2)");
+    expect(text()).toContain("Notes are for the people here. They are not sent to the agent.");
+    expect(text()).toContain("Alice  look at the auth test");
+    expect(text()).toContain("You  on it");
+    await type("deploying at 5", "Add a note for people here");
+    await click("Add note");
+    expect(session.postNote).toHaveBeenCalledWith("t1", "deploying at 5");
+    expect(session.send).not.toHaveBeenCalled();
+    // The message draft is its own field.
+    expect((container.querySelector('input[placeholder="Message the agent"]') as HTMLInputElement).value).toBe("");
+    // Typing a message tells the others; typing a note does not.
+    expect(session.typingIn).not.toHaveBeenCalled();
+    await type("hello", "Message the agent");
+    expect(session.typingIn).toHaveBeenCalledWith("t1");
+  });
+
+  it("hides presence, the wheel and notes on a runtime without sharing, and when not connected", async () => {
+    world();
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).not.toContain("driving");
+    expect(() => button("Notes")).toThrow();
+  });
+
+  it("says a workspace has not been shared with this person instead of an empty conversation", async () => {
+    world({ role: "none", collab: { available: true } });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("This workspace has not been shared with you");
+    expect(text()).toContain("Ask an organization admin or its creator to share it.");
+    expect(text()).not.toContain("run the tests");
+    expect(container.querySelector('input[type="text"]')).toBeNull();
+  });
+
+  it("puts a message refused because of sharing in words, and tells a non-approver who must answer", async () => {
+    const entry = (id: string, fields: Record<string, unknown>) => ({ clientCommandId: id, tabId: "t1", kind: "send", text: `message ${id}`, requestId: null, wake: null, receipt: null, createdAt: 1, updatedAt: 1, error: null, state: "rejected", ...fields });
+    world({ outbox: [entry("a", { category: "lease-held", receipt: { outcome: "rejected", holderId: "u-alice" } }), entry("b", { category: "access-revoked" })], events: [event(1, { type: "permission_requested", requestId: "r1", toolUseId: "tool", toolName: "shell", input: {}, options: [{ id: "allow", label: "Allow", kind: "allow_once" }] })] });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Alice is driving. Your message was not sent.");
+    expect(text()).toContain("Not sent: your access changed.");
+    expect(text()).toContain("Waiting for someone who can approve.");
+    expect(() => button("Allow")).toThrow();
+  });
+
+  it("opens the sharing screen from the workspace", async () => {
+    world();
+    await show(<CloudWorkspaceScreen />);
+    await click("Sharing");
+    expect(mocks.push).toHaveBeenCalledWith({ pathname: "/cloud/shares", params: { orgId: "org-1", workspaceId: mocks.params.workspaceId } });
+  });
+});
+
+describe("the sharing screen", () => {
+  const share = (userId: string, fields: Record<string, unknown> = {}) => ({ userId, email: `${userId.slice(2)}@example.com`, name: NAMES[userId], role: "driver", canApprove: false, createdBy: "u-me", createdAt: 1, updatedAt: 1, ...fields });
+
+  it("shows the list read-only to someone who may not manage it", async () => {
+    world();
+    mocks.catalog.api.shares.mockResolvedValue({ shares: [share("u-alice", { canApprove: true }), share("u-bob", { role: "viewer" })], you: { role: "driver", canApprove: false, canManageShares: false } });
+    await show(<CloudSharesScreen />);
+    expect(text()).toContain("Alice");
+    expect(text()).toContain("Can send · can approve permissions");
+    expect(text()).toContain("View only");
+    expect(text()).toContain("Only managers and the workspace's creator can change who it is shared with.");
+    expect(() => button("Remove")).toThrow();
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
+    // The roster is not read for someone who cannot add anyone.
+    expect(mocks.catalog.people.roster).not.toHaveBeenCalled();
+  });
+
+  it("lets a manager change a role, the right to approve, remove someone after confirming, and add a member", async () => {
+    world();
+    mocks.catalog.api.shares.mockResolvedValue({ shares: [share("u-alice")], you: { role: "manager", canApprove: true, canManageShares: true } });
+    await show(<CloudSharesScreen />);
+    // Bob is a member without access; the person themself is not offered.
+    expect(text()).toContain("bob@example.com");
+    expect(text()).not.toContain("me@example.com");
+
+    await click("Alice: View only");
+    expect(mocks.catalog.api.putShare).toHaveBeenLastCalledWith("org-1", mocks.params.workspaceId, "u-alice", { role: "viewer", canApprove: false });
+    await act(async () => { (container.querySelector('input[aria-label="Alice: can approve permissions"]') as HTMLInputElement).click(); });
+    expect(mocks.catalog.api.putShare).toHaveBeenLastCalledWith("org-1", mocks.params.workspaceId, "u-alice", { role: "driver", canApprove: true });
+    // The server's list is read again after each change.
+    expect(mocks.catalog.api.shares).toHaveBeenCalledTimes(3);
+
+    await click("Remove");
+    expect(mocks.catalog.api.revokeShare).not.toHaveBeenCalled();
+    const [title, , buttons] = mocks.alert.mock.calls[0];
+    expect(title).toBe("Remove Alice?");
+    await act(async () => buttons[1].onPress());
+    expect(mocks.catalog.api.revokeShare).toHaveBeenCalledWith("org-1", mocks.params.workspaceId, "u-alice");
+
+    await click("Add: view only");
+    expect(mocks.catalog.api.putShare).toHaveBeenLastCalledWith("org-1", mocks.params.workspaceId, "u-bob", { role: "viewer", canApprove: false });
+  });
+
+  it("does not let a viewer be made an approver, and says why a change was refused", async () => {
+    world();
+    mocks.catalog.api.shares.mockResolvedValue({ shares: [share("u-bob", { role: "viewer" })], you: { role: "manager", canApprove: true, canManageShares: true } });
+    await show(<CloudSharesScreen />);
+    expect((container.querySelector('input[aria-label="Bob: can approve permissions"]') as HTMLInputElement).disabled).toBe(true);
+    expect(text()).toContain("Someone who only views cannot approve.");
+    mocks.catalog.api.putShare.mockRejectedValueOnce(Object.assign(new Error("x"), { code: "cloud_workspace_collaboration_forbidden" }));
+    await click("Bob: Can send");
+    expect(container.querySelector('[role="alert"]')!.textContent).toBe("Your role in this workspace does not allow that.");
+  });
+
+  it("says when the list cannot be read and offers to try again", async () => {
+    world();
+    mocks.catalog.api.shares.mockRejectedValueOnce(Object.assign(new Error("x"), { code: "cloud_workspace_forbidden" }));
+    await show(<CloudSharesScreen />);
+    expect(container.querySelector('[role="alert"]')!.textContent).toBe("You do not have access to this workspace.");
+    mocks.catalog.api.shares.mockResolvedValue({ shares: [], you: { role: "viewer", canApprove: false, canManageShares: false } });
+    await click("Try again");
+    expect(text()).toContain("This workspace is not shared with anyone yet.");
   });
 });

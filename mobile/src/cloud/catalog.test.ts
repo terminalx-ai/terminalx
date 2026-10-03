@@ -147,6 +147,21 @@ describe("the phone's cloud catalog", () => {
     expect(h.api.open).not.toHaveBeenCalled();
   });
 
+  it("reads the list again when an open workspace refuses this person, and then removes what it kept", async () => {
+    const h = harness();
+    h.api.workspaces.mockImplementation(async (orgId: string) => ({ workspaces: orgId === "org-1" ? [item("ws-new", { state: "ready" })] : [], tombstones: [] }));
+    await h.catalog.refresh();
+    h.keep("org-1", "ws-new");
+    // The share was revoked: attaching is refused, and the list no longer has the workspace.
+    h.api.open.mockRejectedValue(new CloudApiError("cloud_workspace_not_found", 404));
+    h.api.workspaces.mockImplementation(async () => ({ workspaces: [], tombstones: [] }));
+    const release = h.catalog.retain("org-1", "ws-new");
+    await vi.waitFor(() => expect(h.catalog.workspace("org-1", "ws-new")).toBeNull());
+    await vi.waitFor(() => expect(h.secrets.size).toBe(0));
+    expect([...h.blobs.keys()].some((name) => name.includes("ws-new"))).toBe(false);
+    release();
+  });
+
   it("makes one read at a time", async () => {
     const h = harness();
     await Promise.all([h.catalog.refresh(), h.catalog.refresh()]);
