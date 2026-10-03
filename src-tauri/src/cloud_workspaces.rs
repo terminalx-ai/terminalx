@@ -613,10 +613,15 @@ pub struct CloudWorkspaceOperation {
     pub detail_code: Option<String>,
     pub progress: Option<OperationProgress>,
     pub events: Option<Vec<OperationEvent>>,
-    /// An archive's final checkpoint: committed, failed, timed-out or skipped
-    /// (§10.3). A string so a newer server's value still reaches the page.
+    /// A stop's or an archive's final checkpoint: committed, failed,
+    /// timed-out or skipped (§10.3). A string so a newer server's value still
+    /// reaches the page.
     #[serde(default)]
     pub checkpoint: Option<String>,
+    /// When the runtime reported that checkpoint. Absent from an older
+    /// server, and for one the runtime never answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_at: Option<i64>,
     /// A delete's cleanup report until the provider confirms (§10.4).
     #[serde(default)]
     pub cleanup: Option<CleanupReport>,
@@ -3334,6 +3339,7 @@ mod tests {
         archived["operation"]["action"] = json!("archive");
         archived["operation"]["state"] = json!("succeeded");
         archived["operation"]["checkpoint"] = json!("committed");
+        archived["operation"]["checkpointAt"] = json!(15);
         let (base, _, request) = serve_once(response("202 Accepted", &archived.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
         let snapshot = service.lifecycle_with(None, "workspace-1", OperationAction::Archive, true).unwrap();
@@ -3345,6 +3351,7 @@ mod tests {
         assert_eq!((snapshot.workspace.archived_at, snapshot.workspace.delete_after), (Some(10), Some(20)));
         assert!(matches!(snapshot.operation.action, Some(OperationAction::Archive)));
         assert_eq!(snapshot.operation.checkpoint.as_deref(), Some("committed"));
+        assert_eq!(snapshot.operation.checkpoint_at, Some(15));
 
         let mut deleting: Value = serde_json::from_str(&snapshot_body(Some("provider_cleanup_pending"))).unwrap();
         deleting["operation"]["action"] = json!("delete");

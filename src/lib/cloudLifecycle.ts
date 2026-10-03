@@ -132,6 +132,30 @@ export function checkpointText(checkpoint: CloudWorkspaceOperation["checkpoint"]
   }
 }
 
+/**
+ * What a stopped workspace's last stop saved, from the stop itself: when its
+ * conversations were saved, or that the save did not finish. Null when the
+ * workspace is not stopped, when something happened to it since, or when the
+ * server said nothing about a save. The disk is kept by a stop either way.
+ */
+export function lastSavedText(item: CloudWorkspaceListItem): string | null {
+  const operation = item.latestOperation;
+  if (item.workspace.state !== "suspended" || operation?.action !== "suspend" || operation.state !== "succeeded") return null;
+  switch (operation.checkpoint) {
+    case "committed":
+      return operation.checkpointAt ? `Last saved ${dateTimeText(operation.checkpointAt)}.` : "Its conversations were saved before it stopped.";
+    case "failed":
+    case "timed-out":
+      return "The save before it stopped did not finish; conversations may end earlier than the work did. The disk was kept as it was.";
+    default:
+      return null;
+  }
+}
+
+export function dateTimeText(at: number): string {
+  return new Date(at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
 const MESSAGES: Record<string, string> = {
   cloud_workspace_concurrency_exceeded: "Your organization is running as many cloud workspaces as its limit allows. Stop one to start another.",
   cloud_workspace_active_work: "An agent is still working in this workspace.",
