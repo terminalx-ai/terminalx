@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, type CloudWorkspaceDisposition, type CloudWorkspaceListItem } from "@/lib/api";
 import type { RuntimeCheck } from "@/lib/cloudLifecycle";
-import { CloudWorkspaceLifecycleDialog, DeletionProgress } from "./CloudWorkspaceLifecycle";
+import { actionsFor, CloudWorkspaceLifecycleDialog, DeletionProgress } from "./CloudWorkspaceLifecycle";
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -373,10 +373,33 @@ describe("DeletionProgress", () => {
       expect(screen.queryByRole("button", { name: /Retry delete/ })).toBeNull();
     });
 
-    it("says who can see the operation id when the server did not send it", () => {
-      const view = show(operation({ state: "failed", errorCode: "cloud_provider_state_conflict", detailCode: "box_deleted_sandbox_present" }));
+    it("says who can see the operation id only once the operation was read without one", async () => {
+      const failed = operation({ state: "failed", errorCode: "cloud_provider_state_conflict", detailCode: "box_deleted_sandbox_present" });
+      let answer: (value: unknown) => void = () => undefined;
+      const row = item("attention-required", { provider: "box" }, failed);
+      mocked.cloudWorkspaceOperation.mockReturnValue(new Promise((resolve) => (answer = resolve)) as never);
+      render(<DeletionProgress item={row} onChanged={() => undefined} onForceNeeded={() => undefined} />);
+      const view = screen.getByTestId("cloud-deletion-progress");
+      // Before the read (what an admin sees for a moment): nothing about who can see it, so the line does not change under them.
+      expect(view.textContent).toContain("Contact Boat support with the deletion operation id.");
+      expect(view.textContent).not.toContain("can see it here");
+      await act(async () => answer({ workspace: row.workspace, operation: failed }));
       expect(view.textContent).toContain("with the deletion operation id; an organization owner or admin can see it here.");
       expect(screen.queryByRole("button", { name: /Retry delete/ })).toBeNull();
+    });
+
+    it("does not offer Delete again, from the menu or the dialog, while only Boat can finish the deletion", () => {
+      const stuck = item("attention-required", { provider: "box" }, operation({ action: "delete", state: "failed", errorCode: "cloud_provider_state_conflict", detailCode: "box_deleted_sandbox_present" }));
+      expect(actionsFor(stuck)).not.toContain("delete");
+      // Any other stopped delete can be deleted again.
+      const refused = item("attention-required", { provider: "box" }, operation({ action: "delete", state: "failed", errorCode: "cloud_provider_permission_denied" }));
+      expect(actionsFor(refused)).toContain("delete");
+    });
+
+    it("never shows the raw state-conflict code, with or without a detail code", () => {
+      const view = show(operation({ state: "failed", errorCode: "cloud_provider_state_conflict" }));
+      expect(view.textContent).toContain("The delete stopped: The provider reports this resource in a state that does not allow the action yet.");
+      expect(view.textContent).not.toMatch(/cloud_provider_state_conflict|The action failed/);
     });
 
     it("keeps the general wording for another provider's refusal and for an older server's state conflict", () => {
