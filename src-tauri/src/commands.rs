@@ -424,15 +424,26 @@ impl ProviderPromptError {
 
 #[cfg(target_os = "macos")]
 fn secure_provider_prompt(provider: crate::cloud_workspaces::CloudWorkspaceProviderId, organization_id: &str) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
+    secure_prompt(
+        "Provider connection",
+        &format!("Enter the {} provider key for organization {}. The key is sent to the account service only for validation and secure storage.", provider.as_str(), organization_id),
+        "Provider key",
+    )
+}
+
+/// A key typed into a native secure field: it never passes through the
+/// webview, and the field is emptied whichever way the dialog ends.
+#[cfg(target_os = "macos")]
+fn secure_prompt(title: &str, text: &str, placeholder: &str) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
     use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{NSAlert, NSSecureTextField, NSAlertFirstButtonReturn};
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
     let mtm = MainThreadMarker::new().ok_or(ProviderPromptError::Unavailable)?;
     let alert = NSAlert::new(mtm);
-    alert.setMessageText(&NSString::from_str("Provider connection"));
-    alert.setInformativeText(&NSString::from_str(&format!("Enter the {} provider key for organization {}. The key is sent to the account service only for validation and secure storage.", provider.as_str(), organization_id)));
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(text));
     let field = NSSecureTextField::initWithFrame(NSSecureTextField::alloc(mtm), NSRect::new(NSPoint::new(0., 0.), NSSize::new(360., 24.)));
-    field.setPlaceholderString(Some(&NSString::from_str("Provider key")));
+    field.setPlaceholderString(Some(&NSString::from_str(placeholder)));
     alert.setAccessoryView(Some(&field));
     alert.addButtonWithTitle(&NSString::from_str("Validate"));
     alert.addButtonWithTitle(&NSString::from_str("Cancel"));
@@ -479,6 +490,105 @@ pub async fn cloud_provider_connect(
     tauri::async_runtime::spawn_blocking(move || service.connect_authorized(authorization, input, credential))
         .await
         .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::task_failed(crate::cloud_workspaces::RequestRisk::Mutation))?
+}
+
+#[cfg(not(target_os = "macos"))]
+fn secure_prompt(_title: &str, _text: &str, _placeholder: &str) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
+    Err(ProviderPromptError::Unavailable)
+}
+
+// ------------------------------------------------- agent logins (PRO-79)
+
+/// Where a login to store comes from. Either way it is collected here, in
+/// Rust: the webview names the source and never holds the login.
+#[derive(Clone, Copy, Debug, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentLoginSource {
+    /// An API key typed into a native secure dialog.
+    ApiKey,
+    /// The agent's own login already on this computer.
+    LocalLogin,
+}
+
+fn agent_label(provider: crate::cloud_workspaces::AgentLoginProvider) -> &'static str {
+    use crate::cloud_workspaces::AgentLoginProvider::*;
+    match provider {
+        Codex => "Codex",
+        Claude => "Claude Code",
+        Cursor => "Cursor",
+    }
+}
+
+#[tauri::command]
+pub async fn cloud_agent_logins(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::AgentLoginList, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.agent_logins())
+}
+
+/// Store an agent's login for the organization's cloud workspaces. The
+/// order matters: consent and the owner-or-admin check first, and only then
+/// is a key asked for or this computer's login read.
+#[tauri::command]
+pub async fn cloud_agent_login_connect(
+    app: AppHandle,
+    provider: crate::cloud_workspaces::AgentLoginProvider,
+    source: AgentLoginSource,
+    consent: crate::cloud_workspaces::AgentLoginConsent,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::AgentLogin, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    use crate::cloud_workspaces::{AgentLoginKind, AgentLoginProvider, CloudWorkspaceClientError, RequestRisk};
+    if source == AgentLoginSource::LocalLogin && provider == AgentLoginProvider::Cursor {
+        return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+    }
+    static GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = GUARD.try_lock().map_err(|_| CloudWorkspaceClientError::local("cloud_provider_operation_in_progress", true))?;
+    let service = state.cloud_workspaces.clone();
+    let authorization = tauri::async_runtime::spawn_blocking(move || service.authorize_agent_login(&consent))
+        .await
+        .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Read))??;
+    let (kind, secret) = match source {
+        AgentLoginSource::ApiKey => {
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            let title = format!("{} API key", agent_label(provider));
+            let text = format!(
+                "Enter the {} API key for organization {}. It is sent to the account service only for validation and encrypted storage, and is not shown again.",
+                agent_label(provider),
+                authorization.organization_id()
+            );
+            app.run_on_main_thread(move || {
+                let _ = sender.send(secure_prompt(&title, &text, "API key"));
+            })
+            .map_err(|_| CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?;
+            let entered = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+                .await
+                .map_err(|_| CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?
+                .map_err(|_| CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?;
+            (AgentLoginKind::ApiKey, entered.map_err(ProviderPromptError::client_error)?)
+        }
+        AgentLoginSource::LocalLogin => {
+            let read = tauri::async_runtime::spawn_blocking(move || match provider {
+                AgentLoginProvider::Claude => crate::agent_local_login::claude(),
+                _ => crate::agent_local_login::codex(),
+            })
+            .await
+            .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Read))?;
+            (AgentLoginKind::LoginDocument, read.map_err(|error| CloudWorkspaceClientError::local(error.code(), false))?)
+        }
+    };
+    let service = state.cloud_workspaces.clone();
+    tauri::async_runtime::spawn_blocking(move || service.save_agent_login(authorization, provider, kind, secret))
+        .await
+        .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Mutation))?
+}
+
+#[tauri::command]
+pub async fn cloud_agent_login_remove(
+    provider: crate::cloud_workspaces::AgentLoginProvider,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.remove_agent_login(provider, context_revision))
 }
 
 #[tauri::command]
