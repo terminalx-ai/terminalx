@@ -65,6 +65,69 @@ for (const { name, fixture, last } of fixtures) {
   if (Object.values(checks).some((ok) => !ok)) console.log(JSON.stringify(layout));
   await page.close();
 }
+// The organization header at the sidebar's width (268 px) holds the name, the
+// role chip and the running-slots chip (PRO-59). With a long name: nothing
+// overlaps or leaves the sidebar, the name keeps a readable start, and with
+// the pointer on the row the chip stays beside the actions, so its tooltip
+// can be opened; it also takes the keyboard focus.
+{
+  const page = await open(browser, server.url, { cloud: true, localProjects: 1, orgName: "Northwind Research and Development" }, { width: 1360, height: 700 });
+  const header = page.getByTestId("cloud-org-header").first();
+  await header.waitFor();
+  await page.getByTestId("cloud-org-quota").waitFor();
+  const measure = () =>
+    header.evaluate((row) => {
+      const rect = (element) => {
+        const box = element?.getBoundingClientRect();
+        return box && box.width > 1 ? { left: box.left, right: box.right, width: box.width } : null;
+      };
+      const tree = document.querySelector('[role="tree"]').getBoundingClientRect();
+      const name = row.querySelector("button.truncate");
+      const style = getComputedStyle(name);
+      const canvas = document.createElement("canvas").getContext("2d");
+      canvas.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+      const letterSpacing = parseFloat(style.letterSpacing) || 0;
+      const shown = name.textContent.toUpperCase().slice(0, 8);
+      return {
+        tree: { left: tree.left, right: tree.right },
+        row: rect(row),
+        name: rect(name),
+        // What the first 8 characters of the name need, as drawn (upper case, tracked).
+        eight: canvas.measureText(shown).width + letterSpacing * shown.length,
+        role: rect(row.querySelector('[data-testid="cloud-org-role"]')),
+        quota: rect(row.querySelector('[data-testid="cloud-org-quota"]')),
+        actions: [...row.querySelectorAll("button[aria-label^='Add project'], button[aria-label^='Menu for']")].map(rect).filter(Boolean),
+      };
+    });
+  const apart = (parts) => {
+    const sorted = parts.filter(Boolean).sort((a, b) => a.left - b.left);
+    return sorted.every((part, index) => index === 0 || part.left >= sorted[index - 1].right - 1);
+  };
+  const within = (layout) => [layout.name, layout.role, layout.quota, ...layout.actions].filter(Boolean).every((part) => part.left >= layout.tree.left - 1 && part.right <= layout.tree.right + 1);
+  const idle = await measure();
+  await header.hover();
+  await page.waitForTimeout(150);
+  const hovered = await measure();
+  await page.getByTestId("cloud-org-quota").hover();
+  const tooltip = await page.getByRole("tooltip").first().textContent({ timeout: 3000 }).catch(() => null);
+  await page.mouse.move(700, 400);
+  await page.getByTestId("cloud-org-quota").focus();
+  const focused = await page.evaluate(() => document.activeElement?.getAttribute("data-testid"));
+  const checks = {
+    "name, role chip and quota chip do not overlap": apart([idle.name, idle.role, idle.quota]) && !!idle.role && !!idle.quota,
+    "nothing leaves the sidebar": within(idle),
+    "a long name keeps at least its first 8 characters": idle.name.width >= idle.eight - 1,
+    "with the pointer on the row, the quota chip stays beside the actions": !!hovered.quota && hovered.actions.length === 2 && apart([hovered.name, hovered.quota, ...hovered.actions]) && within(hovered),
+    "hovering the chip opens its tooltip": !!tooltip && tooltip.includes("cloud workspaces running"),
+    "the chip takes the keyboard focus": focused === "cloud-org-quota",
+  };
+  for (const [check, ok] of Object.entries(checks)) {
+    console.log(`${ok ? "ok  " : "FAIL"} organization header: ${check}`);
+    if (!ok) failed++;
+  }
+  if (Object.values(checks).some((ok) => !ok)) console.log(JSON.stringify({ idle, hovered, tooltip, focused }));
+  await page.close();
+}
 await browser.close();
 server.close();
 process.exit(failed ? 1 : 0);

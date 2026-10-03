@@ -6,6 +6,7 @@ import {
   createWorkspace,
   failureMessage,
   launchLatency,
+  launchLatencyText,
   phaseOf,
   RUNTIME_PICKUP_MS,
   runtimeNotPickedUp,
@@ -224,6 +225,15 @@ describe("phases", () => {
     expect(failureMessage(snapshot({ operation: { state: "failed", errorCode: "provider_retry_exhausted" } }))).toMatch(/provider_retry_exhausted/);
     const running = snapshot({ workspace: { launch: launch("running", { timings: { ...launch("running").timings, runningAt: 7400 } }) } });
     expect(launchLatency(running)).toBe(6400);
+    expect(launchLatencyText(running)).toBe("Ready in 6s.");
+  });
+
+  // PRO-84: a launch that failed and was retried read "Ready in 1032.4 s".
+  it("words the launch time for people, and leaves out one that spans a failed attempt and its retry", () => {
+    const after = (ms: number) => snapshot({ workspace: { launch: launch("running", { timings: { ...launch("running").timings, runningAt: launch("running").timings.requestedAt + ms } }) } });
+    expect(launchLatencyText(after(95_000))).toBe("Ready in 1m 35s.");
+    expect(launchLatencyText(after(1_032_400))).toBeNull();
+    expect(launchLatencyText(snapshot({}))).toBeNull();
   });
 });
 

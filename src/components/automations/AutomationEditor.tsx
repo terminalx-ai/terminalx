@@ -6,7 +6,7 @@ import { Segmented, Switch } from "@/components/ui/controls";
 import { IssueListItem } from "@/components/issues/IssueListItem";
 import { automationsApi, errorMessage, issues as issuesApi, type Issue } from "@/lib/api";
 import { createAutomation, updateAutomation } from "@/lib/automations";
-import { BYPASS_MODE, DEFAULT_AUTOMATION_MODE, EFFORT_LABEL, PERMISSION_MODES, bypassEffect, useModels } from "@/lib/models";
+import { BYPASS_MODE, DEFAULT_AUTOMATION_MODE, EFFORT_LABEL, PERMISSION_MODES, bypassEffect, modelOptionText, useModels } from "@/lib/models";
 import { usePrefs } from "@/lib/prefs";
 import { useSessionStore } from "@/lib/sessions";
 import type { Automation, AutomationInput, AutomationIssueReport, AutomationIssueTrigger, AutomationSchedule, AutomationWorkspace, ScheduleKind, SchedulePreset } from "@/types/automations";
@@ -309,7 +309,7 @@ export function AutomationEditor({
             Model
             <select value={input.model} onChange={(event) => patch({ model: event.target.value, effort: models.find((model) => model.id === event.target.value)?.defaultEffort ?? null })} className={INPUT}>
               {models.length === 0 && <option value="">Agent default</option>}
-              {models.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
+              {models.map((model) => <option key={model.id} value={model.id}>{modelOptionText(model, models)}</option>)}
             </select>
           </label>
           <label className={LABEL}>

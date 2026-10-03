@@ -606,6 +606,11 @@ pub struct CloudWorkspaceOperation {
     /// Only a short token passes; anything else (a message, a body) is dropped.
     #[serde(default, deserialize_with = "safe_provider_error_code")]
     pub provider_error_code: Option<String>,
+    /// The server's own detail for a failed operation, beside the error
+    /// code (`box_deleted_sandbox_present`). Absent from an older server;
+    /// only a short token passes.
+    #[serde(default, deserialize_with = "safe_detail_code", skip_serializing_if = "Option::is_none")]
+    pub detail_code: Option<String>,
     pub progress: Option<OperationProgress>,
     pub events: Option<Vec<OperationEvent>>,
     /// An archive's final checkpoint: committed, failed, timed-out or skipped
@@ -635,6 +640,11 @@ pub struct CleanupItem {
     pub provider_stage: Option<String>,
     #[serde(default)]
     pub expected_by: Option<i64>,
+    /// The provider's id for the deletion it accepted, which its support
+    /// asks for (admins only; absent from an older server). Only an id-like
+    /// token passes.
+    #[serde(default, deserialize_with = "safe_provider_operation_id", skip_serializing_if = "Option::is_none")]
+    pub provider_operation_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1353,6 +1363,62 @@ impl CloudWorkspaceService {
         ensure_connection(result, provider)
     }
 
+    /// Whether new machines may be created on a provider (PRO-79). An owner's
+    /// or admin's switch, as in the console: the saved key, its resources and
+    /// every running workspace are untouched either way.
+    pub fn set_provider_creation_enabled(
+        &self,
+        provider: CloudWorkspaceProviderId,
+        context_revision: String,
+        enabled: bool,
+    ) -> Result<CloudProviderSummary, CloudWorkspaceClientError> {
+        let authorization = self.authorize_connect(provider)?;
+        if context_revision != AccountManager::context_revision(&authorization.context)
+            || !self.account.is_current(&authorization.context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        let result: CloudProviderSummary = self.client.request(
+            &authorization.context,
+            &["cloud-providers", provider.as_str(), "settings"],
+            None,
+            // The settings contract of today: version 1 carries no provider configuration.
+            Some(json!({ "enabledForCreate": enabled, "configurationVersion": 1, "configuration": {} })),
+            None,
+            RequestRisk::Mutation,
+        )?;
+        if !self.account.is_current(&authorization.context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        if result.id != provider {
+            return Err(invalid_response());
+        }
+        Ok(result)
+    }
+
+    /// Check the saved key against the provider again, without entering it
+    /// (PRO-79). The key never leaves the server; the answer is the same
+    /// safe connection metadata a read gives.
+    pub fn revalidate_provider(
+        &self,
+        provider: CloudWorkspaceProviderId,
+        context_revision: String,
+    ) -> Result<CloudProviderConnectionResponse, CloudWorkspaceClientError> {
+        let authorization = self.authorize_connect(provider)?;
+        if context_revision != AccountManager::context_revision(&authorization.context)
+            || !self.account.is_current(&authorization.context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        let result = self.client.request(
+            &authorization.context,
+            &["cloud-providers", provider.as_str(), "revalidate"],
+            None, Some(json!({})), None, RequestRisk::Mutation,
+        )?;
+        if !self.account.is_current(&authorization.context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        ensure_connection(result, provider)
+    }
+
     pub fn setup(
         &self,
         org: Option<&str>,
@@ -2040,6 +2106,40 @@ where
     })
 }
 
+/// A detail code as the server stores it: `^[a-z0-9][a-z0-9_-]{0,79}$`.
+fn safe_detail_code<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::String(code))
+            if (1..=80).contains(&code.len())
+                && !matches!(code.as_bytes()[0], b'_' | b'-')
+                && code.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')) =>
+        {
+            Some(code)
+        }
+        _ => None,
+    })
+}
+
+fn safe_provider_operation_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::String(id))
+            if (1..=128).contains(&id.len())
+                && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-')) =>
+        {
+            Some(id)
+        }
+        _ => None,
+    })
+}
+
 /// A provider error code as the server normalizes it: lowercase letters,
 /// digits and `_ . : -`, at most 64 bytes.
 fn safe_provider_code(code: &str) -> bool {
@@ -2382,6 +2482,30 @@ mod tests {
         assert_eq!(projected["operation"]["providerErrorCode"], Value::Null);
     }
 
+    // PRO-52: the detail code and the deletion's provider operation id reach the page, as tokens only.
+    #[test]
+    fn a_failed_delete_carries_its_detail_code_and_the_providers_operation_id() {
+        let parse = |detail: Value, operation_id: Value| {
+            let mut value: Value = serde_json::from_str(&snapshot_body(Some("cloud_provider_state_conflict"))).unwrap();
+            value["operation"]["detailCode"] = detail;
+            value["operation"]["cleanup"] = json!({ "complete": false, "items": [{ "kind": "provider-compute", "state": "unconfirmed", "providerOperationId": operation_id }] });
+            let operation = serde_json::from_value::<CloudWorkspaceSnapshot>(value).unwrap().operation;
+            (operation.detail_code, operation.cleanup.unwrap().items[0].provider_operation_id.clone())
+        };
+        assert_eq!(
+            parse(json!("box_deleted_sandbox_present"), json!("op_01HZX-9f2c")),
+            (Some("box_deleted_sandbox_present".into()), Some("op_01HZX-9f2c".into()))
+        );
+        assert_eq!(parse(json!("Boat said: sandbox still there"), json!("an id with spaces")), (None, None));
+        assert_eq!(parse(json!("a".repeat(80)), json!("bdop_01HZX")).0, Some("a".repeat(80)));
+        assert_eq!(parse(json!("a".repeat(81)), json!("bdop_01HZX")), (None, Some("bdop_01HZX".into())));
+        assert_eq!(parse(json!("-leading"), json!("")), (None, None));
+        assert_eq!(parse(Value::Null, json!({ "raw": "body" })), (None, None));
+        // An older server sends neither, and nothing is invented for it.
+        let old: CloudWorkspaceSnapshot = serde_json::from_str(&snapshot_body(Some("cloud_provider_permission_denied"))).unwrap();
+        assert_eq!(old.operation.detail_code, None);
+    }
+
     #[test]
     fn sends_provider_contract_and_encodes_native_organization() {
         let body = r#"{"providers":[]}"#;
@@ -2440,6 +2564,58 @@ mod tests {
         assert_eq!(projected["providerAccount"], "Original account");
         assert!(!projected.to_string().contains("must-not-cross"));
         assert!(!captured.extra_request);
+    }
+
+    // PRO-79: the "new machines" switch and the key re-check, from the desktop.
+    #[test]
+    fn provider_creation_switch_and_recheck_use_their_endpoints_and_project_safe_metadata() {
+        let summary = r#"{"id":"box","displayName":"Boat","availability":"disabled-for-create","canManage":true,"connection":null,"capabilities":{"suspend":true,"resume":true,"releaseDisposition":"archived","locationSelection":"automatic","sourceSelection":"optional","pricing":"provider-rate"},"credential":"must-not-cross"}"#;
+        let (base, _, request) = serve_once(response("200 OK", summary, ""), Duration::ZERO);
+        let client = Client::for_test(&base, Duration::from_secs(2));
+        let result: CloudProviderSummary = client
+            .request(&context(), &["cloud-providers", "box", "settings"], None, Some(json!({ "enabledForCreate": false, "configurationVersion": 1, "configuration": {} })), None, RequestRisk::Mutation)
+            .unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-providers/box/settings HTTP/1.1"));
+        assert_eq!(
+            serde_json::from_str::<Value>(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap(),
+            json!({ "enabledForCreate": false, "configurationVersion": 1, "configuration": {} })
+        );
+        let projected = serde_json::to_value(result).unwrap();
+        assert_eq!(projected["availability"], "disabled-for-create");
+        assert!(!projected.to_string().contains("must-not-cross"));
+
+        let body = r#"{"provider":"box","state":"connected","canManage":true,"credentialVersion":4,"lastValidatedAt":1790000000000,"credential":"must-not-cross"}"#;
+        let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
+        let client = Client::for_test(&base, Duration::from_secs(2));
+        let result: CloudProviderConnectionResponse = client.request(&context(), &["cloud-providers", "box", "revalidate"], None, Some(json!({})), None, RequestRisk::Mutation).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-providers/box/revalidate HTTP/1.1"));
+        assert_eq!(serde_json::from_str::<Value>(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap(), json!({}));
+        assert!(!serde_json::to_value(result).unwrap().to_string().contains("must-not-cross"));
+    }
+
+    #[test]
+    fn provider_creation_switch_and_recheck_deny_members_and_stale_organizations_before_any_mutation() {
+        type Call = fn(&CloudWorkspaceService, String) -> Option<CloudWorkspaceClientError>;
+        let calls: [Call; 2] = [
+            |service, revision| service.set_provider_creation_enabled(CloudWorkspaceProviderId::Box, revision, false).err(),
+            |service, revision| service.revalidate_provider(CloudWorkspaceProviderId::Box, revision).err(),
+        ];
+        for call in calls {
+            // A member: the read says so, and nothing is posted.
+            let (base, _, request) = serve_once(response("200 OK", r#"{"provider":"box","state":"connected","canManage":false}"#, ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            assert_eq!(call(&service, AccountManager::context_revision(&context())).unwrap().code, "organization_admin_required");
+            let captured = request.join().unwrap();
+            assert!(captured.text.starts_with("GET ") && !captured.extra_request);
+
+            // Asked for another organization than the one now active.
+            let (base, _, request) = serve_once(response("200 OK", r#"{"provider":"box","state":"connected","canManage":true}"#, ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            assert_eq!(call(&service, "old-context".into()).unwrap().code, "account_context_changed");
+            assert!(!request.join().unwrap().extra_request);
+        }
     }
 
     #[test]

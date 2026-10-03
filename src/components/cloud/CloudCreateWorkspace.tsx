@@ -17,7 +17,7 @@ import {
   createWorkspace,
   failureMessage,
   isClientError,
-  launchLatency,
+  launchLatencyText,
   loadPending,
   phaseOf,
   runtimeNotPickedUp,
@@ -33,7 +33,7 @@ import {
 } from "@/lib/cloudCreate";
 import { cloudOrgArg, rememberCreatedWorkspace } from "@/lib/cloudCatalog";
 import { errorCode } from "@/lib/cloudTerminals";
-import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, useModels } from "@/lib/models";
+import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, modelOptionText, offeredOn, useModels } from "@/lib/models";
 
 const AGENTS = [
   { id: "claude", label: "Claude Code" },
@@ -93,7 +93,8 @@ export function CloudCreateWorkspace({
     setTrackedState(snapshot);
     if (snapshot) progress.current?.(snapshot);
   }, []);
-  const models = useModels(form.agent);
+  // Aliases only: this list is the desktop's, and the new workspace's CLI may not run a version pinned from it.
+  const models = offeredOn(useModels(form.agent), false);
   const model = models.find((item) => item.id === form.model) ?? null;
 
   const [repositoriesError, setRepositoriesError] = useState<string | null>(null);
@@ -318,7 +319,7 @@ export function CloudCreateWorkspace({
             <option value="">Default</option>
             {models.map((item) => (
               <option key={item.id} value={item.id}>
-                {item.label}
+                {modelOptionText(item, models, false)}
               </option>
             ))}
           </select>
@@ -452,7 +453,7 @@ export function CreationProgress({
 
   const reached = PHASES.findIndex((item) => item.id === phase);
   const failedAt = phase === "failed" || phase === "canceled" ? lastReached(snapshot) : -1;
-  const latency = launchLatency(snapshot);
+  const latency = launchLatencyText(snapshot);
   const launch = snapshot.workspace.launch;
   const retryable = phase === "failed" && snapshot.workspace.state === "attention-required";
   const notPickedUp = runtimeNotPickedUp(snapshot, now) !== null;
@@ -494,7 +495,7 @@ export function CreationProgress({
       {phase === "running" && (
         <p className="text-xs text-muted-foreground">
           {launch?.hasPrompt ? "The agent is working on the first task." : "The agent is ready."}
-          {latency !== null && ` Ready in ${(latency / 1000).toFixed(1)} s.`}
+          {latency !== null && ` ${latency}`}
         </p>
       )}
       {notPickedUp && (

@@ -137,7 +137,21 @@ export async function bootSessions() {
 
 export async function refreshSessions() {
   const sessions = await api.listSessions();
+  const before = state.sessions;
   set({ sessions });
+  // The list was replaced wholesale: what is no longer in it has no row to be closed from.
+  const kept = new Map(sessions.map((session) => [session.id, session]));
+  const gone = before.filter((session) => !kept.has(session.id)).map((session) => session.id);
+  const closed = before.flatMap((session) => {
+    const now = kept.get(session.id);
+    return now ? session.tabs.filter((tab) => !now.tabs.some((other) => other.id === tab.id)).map((tab) => tab.id) : [];
+  });
+  if (gone.length || closed.length) {
+    queueMicrotask(() => {
+      dropSessionTerminals(gone);
+      dropTabTerminals(closed);
+    });
+  }
 }
 
 export function upsertSession(s: SessionEntry) {
@@ -369,12 +383,13 @@ export async function setProjectLogo(path: string, source: string | null) {
 
 /** Delete a workspace; the sessions that ran in it are removed with it. */
 export async function deleteWorkspace(projectPath: string, path: string, deleteBranch: boolean) {
-  const removed = await api.deleteWorkspace(projectPath, path, deleteBranch);
+  const report = await api.deleteWorkspace(projectPath, path, deleteBranch);
   if (state.newSessionPreset?.projectPath === projectPath && state.newSessionPreset.cwd === path) {
     set({ newSessionPreset: { projectPath, cwd: projectPath } });
   }
-  removeSessions(removed.map((s) => s.id));
+  removeSessions(report.sessions.map((s) => s.id));
   await refreshWorkspaces(projectPath);
+  return report;
 }
 
 export async function refreshHarnesses() {
@@ -435,15 +450,16 @@ export async function renameSession(id: string, title: string) {
 }
 
 export async function deleteSession(id: string, removeWorktree: boolean) {
-  await api.deleteSession(id, removeWorktree);
+  const report = await api.deleteSession(id, removeWorktree);
   // Siblings taken along with a removed worktree arrive as session_deleted events.
   removeSessions([id]);
+  return report;
 }
 
 export async function settleSession(id: string, action: "delete" | "relocate") {
-  const s = await api.settleSession(id, action);
-  upsertSession(s);
-  return s;
+  const report = await api.settleSession(id, action);
+  upsertSession(report.session);
+  return report;
 }
 
 export async function forkSession(id: string, tabId: string) {

@@ -14,6 +14,7 @@ import type {
 } from "@/lib/api";
 import { roleRefusedMessage } from "@/lib/accountRoles";
 import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
+import { formatDuration } from "@/lib/time";
 
 /**
  * Creating a cloud workspace from repositories and a first prompt (PRO-21,
@@ -364,6 +365,21 @@ export function launchLatency(item: CloudWorkspaceListItem | CloudWorkspaceSnaps
   const timings = item.workspace.launch?.timings;
   if (!timings?.requestedAt || !timings.runningAt) return null;
   return timings.runningAt - timings.requestedAt;
+}
+
+/** Past this, the time since the request is not how long one start took. */
+const LAUNCH_LATENCY_SHOWN_MS = 10 * 60 * 1000;
+
+/**
+ * "Ready in 6s", for a launch that started in one go. The server only keeps
+ * when the launch was first asked for, so a launch that failed and was
+ * retried measures the failed attempt and the wait before the retry too
+ * ("Ready in 1032.4 s"); a figure that long says nothing true and is left out.
+ */
+export function launchLatencyText(item: CloudWorkspaceListItem | CloudWorkspaceSnapshot): string | null {
+  const latency = launchLatency(item);
+  if (latency === null || latency < 0 || latency > LAUNCH_LATENCY_SHOWN_MS) return null;
+  return `Ready in ${formatDuration(latency)}.`;
 }
 
 // ---- Words -----------------------------------------------------------------

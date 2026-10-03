@@ -31,6 +31,7 @@ const mergedPr: PullRequest = {
 
 const cleanMerged: WorkspaceDisposition = {
   exists: true,
+  checked: true,
   isMain: false,
   branch: mergedPr.head,
   uncommitted: 0,
@@ -45,6 +46,7 @@ const cleanMerged: WorkspaceDisposition = {
   },
   prChecked: true,
   sessions: 0,
+  sessionTitles: [],
 };
 
 function mockBackend(disposition: WorkspaceDisposition, shouldFailDisposition: () => boolean = () => false) {

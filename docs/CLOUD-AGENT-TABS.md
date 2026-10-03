@@ -203,7 +203,7 @@ the next `send` (the harness resumes the provider session).
   `outcome-unknown`. `text` and `requestId` come from the local plaintext, so
   the UI can show them.
 
-### UI (`CloudSessionPage` agent view, `src/lib/cloudAgents.ts`)
+### UI (the agent view of `CloudWorkspaceView`, `src/lib/cloudAgents.ts`)
 
 - Tabs are listed from the local cache first, then from checkpoint metadata,
   then from `session.tabs` when connected.

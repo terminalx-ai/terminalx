@@ -100,6 +100,8 @@ pub fn parse(result: &Value) -> Vec<Model> {
                 // A named replacement is how the CLI says "this one is going away".
                 upgrade: m["upgrade"].as_str().filter(|s| !s.is_empty()).map(String::from),
                 description: m["description"].as_str().filter(|s| !s.is_empty()).map(String::from),
+                alias: false,
+                resolved: None,
                 id,
             })
         })
@@ -146,6 +148,8 @@ pub fn fallback() -> Vec<Model> {
         is_default,
         upgrade: None,
         description: None,
+        alias: false,
+        resolved: None,
     };
     vec![
         m("gpt-5.6-sol", "GPT-5.6 Sol", &full, "low", true),

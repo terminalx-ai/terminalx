@@ -74,7 +74,11 @@ impl AgentOps for FakeOps {
         (session_id == "s1").then(|| super::super::SessionSummary { title: "Fix the login".into(), branch: Some("terminalx/fix-login".into()) })
     }
     fn events(&self, _: &str, _: &str) -> anyhow::Result<Vec<Value>> {
-        Ok((1..=3).map(|seq| json!({ "seq": seq, "payload": { "type": "assistant_text", "text": format!("line {seq}") } })).collect())
+        let mut events: Vec<Value> =
+            (1..=3).map(|seq| json!({ "seq": seq, "payload": { "type": "assistant_text", "text": format!("line {seq}") } })).collect();
+        let notes = self.notes.lock().unwrap();
+        events.extend(notes.iter().enumerate().map(|(at, text)| json!({ "seq": 4 + at, "payload": { "type": "status", "text": text } })));
+        Ok(events)
     }
 }
 
@@ -257,6 +261,21 @@ fn stop_drops_queued_follow_ups_and_lists_them_in_its_receipt() {
     assert_eq!(open_receipt(&h.agents, &stop, &receipt)["droppedFollowUps"], json!(["c1"]));
     assert!(h.agents.tab("tab-1").unwrap().follow_ups.is_empty());
     assert_eq!(h.ops.notes.lock().unwrap().len(), 1);
+}
+
+// PRO-84: a transcript showed the restart notice three times.
+#[test]
+fn a_turn_interrupted_by_a_restart_is_noted_once_until_something_else_is_said() {
+    let h = harness();
+    let tabs = [("s1".to_string(), "tab-1".to_string())];
+    h.agents.mark_interrupted_turns(&tabs);
+    h.agents.mark_interrupted_turns(&tabs);
+    assert_eq!(h.ops.notes.lock().unwrap().len(), 1);
+    assert!(h.ops.notes.lock().unwrap()[0].contains("workspace runtime restarted"));
+    // A later turn that is interrupted too gets its own notice.
+    h.ops.note("s1", "tab-1", "something else");
+    h.agents.mark_interrupted_turns(&tabs);
+    assert_eq!(h.ops.notes.lock().unwrap().len(), 3);
 }
 
 #[test]

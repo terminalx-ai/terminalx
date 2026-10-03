@@ -1,4 +1,4 @@
-import { invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
+import { Channel, invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   WorkspaceRpcClient,
@@ -20,6 +20,9 @@ import type {
   TabEntry,
   WorkStatus,
   WorktreeDisposition,
+  DeleteSessionReport,
+  SettleReport,
+  WorkspaceDeleteReport,
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
@@ -172,6 +175,12 @@ export const api = {
   cloudProvider: (provider: CloudWorkspaceProviderId) => invoke<CloudProviderConnection>("cloud_provider", { provider }),
   cloudProviderDisconnect: (provider: CloudWorkspaceProviderId, contextRevision: string, disposition: "retain" | "destroy") =>
     invoke<CloudProviderConnection>("cloud_provider_disconnect", { provider, contextRevision, disposition }),
+  /** Allow or stop new machines on a provider (owners and admins); saved keys and running workspaces are untouched. */
+  cloudProviderSetCreationEnabled: (provider: CloudWorkspaceProviderId, contextRevision: string, enabled: boolean) =>
+    invoke<CloudProviderSummary>("cloud_provider_set_creation_enabled", { provider, contextRevision, enabled }),
+  /** Check the saved key against the provider again, without entering it. */
+  cloudProviderRevalidate: (provider: CloudWorkspaceProviderId, contextRevision: string) =>
+    invoke<CloudProviderConnection>("cloud_provider_revalidate", { provider, contextRevision }),
   cloudProviderConnect: (provider: CloudWorkspaceProviderId, input: CloudProviderConnectInput) =>
     invoke<CloudProviderConnection>("cloud_provider_connect", { provider, input }),
   // Cloud workspace routes take the Organization they act in (CS-18). None
@@ -269,7 +278,7 @@ export const api = {
     invoke<WorkspaceRename>("rename_workspace", { projectPath, path, name }),
   workspaceDisposition: (projectPath: string, path: string) => invoke<WorkspaceDisposition>("workspace_disposition", { projectPath, path }),
   deleteWorkspace: (projectPath: string, path: string, deleteBranch: boolean) =>
-    invoke<SessionEntry[]>("delete_workspace", { projectPath, path, deleteBranch }),
+    invoke<WorkspaceDeleteReport>("delete_workspace", { projectPath, path, deleteBranch }),
 
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
@@ -287,10 +296,11 @@ export const api = {
   setSessionPinned: (sessionId: string, pinned: boolean) => invoke<void>("set_session_pinned", { sessionId, pinned }),
   setActiveTab: (sessionId: string, tabId: string) => invoke<void>("set_active_tab", { sessionId, tabId }),
   deleteSession: (sessionId: string, removeWorktree: boolean) =>
-    invoke<void>("delete_session", { sessionId, removeWorktree }),
+    invoke<DeleteSessionReport>("delete_session", { sessionId, removeWorktree }),
   worktreeDisposition: (sessionId: string) => invoke<WorktreeDisposition>("worktree_disposition", { sessionId }),
+  sessionsSharingWorktree: (sessionId: string) => invoke<string[]>("sessions_sharing_worktree", { sessionId }),
   removeSessionWorktree: (sessionId: string) => invoke<SessionEntry>("remove_session_worktree", { sessionId }),
-  settleSession: (sessionId: string, action: "delete" | "relocate") => invoke<SessionEntry>("settle_session", { sessionId, action }),
+  settleSession: (sessionId: string, action: "delete" | "relocate") => invoke<SettleReport>("settle_session", { sessionId, action }),
   forkSession: (sessionId: string, tabId: string) => invoke<SessionEntry>("fork_session", { sessionId, tabId }),
 
   // harnesses
@@ -528,6 +538,8 @@ export interface CloudWorkspaceCleanup {
     state: "removed" | "pending" | "retained-by-provider" | "unconfirmed" | (string & {});
     providerStage: string | null;
     expectedBy: number | null;
+    /** The provider's id for the deletion it accepted (admins only; absent from an older server). */
+    providerOperationId?: string;
   }[];
 }
 
@@ -628,6 +640,8 @@ export interface CloudWorkspaceOperation {
   errorCode: CloudWorkspaceOperationErrorCode | null;
   /** The provider's own normalized error code for a failed operation, when the server reports one; never a message or body. */
   providerErrorCode?: string | null;
+  /** The server's own detail for a failed operation, beside its error code (`box_deleted_sandbox_present`); absent from an older server. */
+  detailCode?: string | null;
   progress: { phase: "allocating" | "starting" | "installing-runtime" | "connecting-relay" | "suspending" | "releasing"; retryAt: number | null } | null;
   events: {
     code: "operation-queued" | "provider-preflight-started" | "machine-allocation-started" | "runtime-installation-started" | "credentials-installing" | "credentials-ready" | "repository-cloning" | "repository-ready" | "repository-clone-failed" | "relay-connection-started" | "provider-cleanup-started" | "workspace-ready" | "operation-failed" | "operation-canceled";
@@ -1017,6 +1031,10 @@ export interface ModelInfo {
   /** The model that replaces this one when the provider is retiring it. */
   upgrade: string | null;
   description: string | null;
+  /** A family alias (`opus`): it follows the latest release rather than staying on one version. */
+  alias?: boolean;
+  /** The full model id an alias runs now, per the CLI on the machine that listed it. */
+  resolved?: string | null;
 }
 
 export interface HandoffInfo {
@@ -1181,6 +1199,22 @@ export const browser = {
 export const pty = {
   spawn: (id: string, cwd: string, cols: number, rows: number, command?: string) => invoke<void>("pty_spawn", { id, cwd, cols, rows, command: command ?? null }),
   write: (id: string, data: string) => invoke<void>("pty_write", { id, data }),
+  /**
+   * Receive pane `id`'s output as raw bytes, starting with what it has
+   * printed so far. One attachment per pane: a later one replaces it.
+   * `token` names this attachment; its acknowledgements and its detach carry
+   * it, so they cannot act on an attachment that has replaced it.
+   */
+  attach: (id: string, token: string, onData: (bytes: Uint8Array) => void) => {
+    const channel = new Channel<ArrayBuffer>();
+    channel.onmessage = (message) => onData(new Uint8Array(message));
+    return invoke<void>("pty_attach", { id, token, channel });
+  },
+  /** This window has drawn `drawn` bytes of the pane's output since it attached; the backend holds a pane that gets too far ahead. */
+  ack: (id: string, token: string, drawn: number) => invoke<void>("pty_ack", { id, token, drawn }),
+  detach: (id: string, token: string) => invoke<void>("pty_detach", { id, token }),
+  /** This page has attached nothing yet: drop what a page loaded before it in this window had attached. */
+  detachAll: () => invoke<void>("pty_detach_all"),
   resize: (id: string, cols: number, rows: number) => invoke<void>("pty_resize", { id, cols, rows }),
   kill: (id: string) => invoke<void>("pty_kill", { id }),
 };

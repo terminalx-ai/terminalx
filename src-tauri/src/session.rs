@@ -1554,7 +1554,10 @@ impl SessionManager {
         if let Some(id) = launch.minted {
             index::update_tab(&rt.session_id, &rt.tab_id, |t| {
                 t.provider_session_id = Some(id.clone());
-                t.fork_from = None;
+                // `fork_from` stays: the CLI has only just started, and until
+                // it has written the fork's own transcript the parent's is
+                // the only copy of the conversation. A tab with an id of its
+                // own resumes that id, so the field no longer drives launch.
                 Ok(())
             })?;
         }

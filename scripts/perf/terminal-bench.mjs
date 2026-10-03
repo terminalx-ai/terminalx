@@ -7,16 +7,17 @@
 // writes the workload files, builds the commands and prints the results.
 //
 //   node scripts/perf/terminal-bench.mjs --home ~/.txperf --pid 12345 \
-//     [--scenarios yes,cat,tui,echo,interrupt,soak,churn,covered] [--terminals 1,8,20] [--out results.json]
+//     [--scenarios yes,cat,tui,echo,interrupt,soak,churn,covered,background] [--terminals 1,8,20] [--out results.json]
 //     [--interrupt-after 2000] [--soak sessions,tabs,switches,agents] [--work dir] [--label text]
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { cpus, homedir, totalmem } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 
-const SCENARIOS = ["yes", "cat", "tui", "echo", "interrupt", "soak", "churn", "covered"];
+const SCENARIOS = ["yes", "cat", "tui", "echo", "interrupt", "soak", "churn", "covered", "background"];
 const LOG_BYTES = 50 * 1024 * 1024;
 const TUI_FRAMES = 4000;
 const YES_LINES = 2_000_000;
@@ -162,9 +163,19 @@ const DONE = 'printf "\\033]7777;done\\007"';
 /** The command a pane runs: no single quotes inside, it is itself single-quoted. */
 const sh = (script) => `sh -c '${script}'`;
 
+/** How often xterm has thrown output away for want of flow control, as the app logged it. */
+function discards(home) {
+  try {
+    return readFileSync(join(home, "app.log"), "utf8").split("write data discarded").length - 1;
+  } catch {
+    return null;
+  }
+}
+
 /** Run one request in the app, reading the processes' memory before, while it runs and after. */
 async function run(options, pid, request, timeoutMs = 900_000) {
   const before = memory(pid);
+  const discarded = discards(options.home);
   const peak = { ...before };
   const { requestId } = await control(options.home, "perf.terminal.start", request);
   const deadline = Date.now() + timeoutMs;
@@ -177,7 +188,7 @@ async function run(options, pid, request, timeoutMs = 900_000) {
     if (answer.result?.error) throw new Error(`${request.scenario}: ${answer.result.error}`);
     // Let the window drop what it is going to drop before the "after" reading.
     await sleep(5000);
-    return { result: answer.result, memory: { before, peak, after: memory(pid) } };
+    return { result: answer.result, memory: { before, peak, after: memory(pid) }, discarded: discarded === null ? null : discards(options.home) - discarded };
   }
   throw new Error(`${request.scenario}: no result in ${timeoutMs} ms`);
 }
@@ -228,25 +239,33 @@ function markdown(results) {
   const lines = [];
   const drains = results.filter((r) => r.result.scenario === "drain");
   if (drains.length) {
-    lines.push("| Workload | Terminals | Drain (s) | MB/s | Long tasks | Blocked (ms) | Longest block (ms) | Frames/s | WebContent + GPU memory before → peak → after (MB) | Renderer on screen | WebGL / DOM |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
-    for (const { name, bytes, result: r, memory: m } of drains) {
+    lines.push("| Workload | Terminals | Drain (s) | MB/s | Long tasks | Blocked (ms) | Longest block (ms) | Frames/s | WebContent + GPU memory before → peak → after (MB) | Renderer on screen | WebGL / DOM | Writes discarded |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    for (const { name, bytes, result: r, memory: m, discarded } of drains) {
       const rate = bytes && r.drainMs ? (bytes / 1024 / 1024 / (r.drainMs / 1000)).toFixed(1) : "n/a";
-      lines.push(`| ${name.replaceAll("|", "\\|")} | ${r.terminals} | ${seconds(r.drainMs)} | ${rate} | ${r.mainThread.longTasks} | ${r.mainThread.blockedMs} | ${r.mainThread.longestMs} | ${r.mainThread.framesPerSecond} | ${web(m.before)} → ${web(m.peak)} → ${web(m.after)} | ${r.renderer} | ${r.loaded.webgl} / ${r.loaded.dom} |`);
+      lines.push(`| ${name.replaceAll("|", "\\|")} | ${r.terminals} | ${seconds(r.drainMs)} | ${rate} | ${r.mainThread.longTasks} | ${r.mainThread.blockedMs} | ${r.mainThread.longestMs} | ${r.mainThread.framesPerSecond} | ${web(m.before)} → ${web(m.peak)} → ${web(m.after)} | ${r.renderer} | ${r.loaded.webgl} / ${r.loaded.dom} | ${discarded ?? "n/a"} |`);
     }
     lines.push("");
   }
   const echoes = results.filter((r) => r.result.scenario === "echo");
   if (echoes.length) {
-    lines.push("| Terminals | Renderer on screen | Producers | Load (MB/s) | Echo p50 (ms) | Echo p95 (ms) | Echo max (ms) | To frame p50 (ms) | To frame p95 (ms) | Lost | Long tasks | Longest block (ms) | WebContent + GPU memory before → peak → after (MB) |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
-    for (const { result: r, memory: m } of echoes) {
-      lines.push(`| ${r.terminals} | ${r.renderer} | ${r.producers} | ${(r.load.bytesPerSecond / 1024 / 1024).toFixed(1)} | ${r.echoMs.p50} | ${r.echoMs.p95} | ${r.echoMs.max} | ${r.echoFrameMs.p50} | ${r.echoFrameMs.p95} | ${r.lost} | ${r.mainThread.longTasks} | ${r.mainThread.longestMs} | ${web(m.before)} → ${web(m.peak)} → ${web(m.after)} |`);
+    lines.push("| Terminals | Renderer on screen | Producers | Load (MB/s) | Echo p50 (ms) | Echo p95 (ms) | Echo max (ms) | To frame p50 (ms) | To frame p95 (ms) | Lost | Long tasks | Longest block (ms) | WebContent + GPU memory before → peak → after (MB) | Writes discarded |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    for (const { result: r, memory: m, discarded } of echoes) {
+      lines.push(`| ${r.terminals} | ${r.renderer} | ${r.producers} | ${(r.load.bytesPerSecond / 1024 / 1024).toFixed(1)} | ${r.echoMs.p50} | ${r.echoMs.p95} | ${r.echoMs.max} | ${r.echoFrameMs.p50} | ${r.echoFrameMs.p95} | ${r.lost} | ${r.mainThread.longTasks} | ${r.mainThread.longestMs} | ${web(m.before)} → ${web(m.peak)} → ${web(m.after)} | ${discarded ?? "n/a"} |`);
     }
     lines.push("");
   }
   const interrupts = results.filter((r) => r.result.scenario === "interrupt");
   if (interrupts.length) {
-    lines.push("| Terminals | Renderer on screen | Flood before Ctrl+C (s) | Ctrl+C → process exit (ms) | Ctrl+C → output stops (ms) | Output after Ctrl+C (MB) | Long tasks | Longest block (ms) | Frames/s | WebContent + GPU memory before → peak → after (MB) |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
-    for (const { request, result: r, memory: m } of interrupts) lines.push(`| ${r.terminals} | ${r.renderer} | ${request.afterMs / 1000} | ${r.exitMs} | ${r.outputStoppedMs} | ${(r.bytesAfter / 1024 / 1024).toFixed(1)} | ${r.mainThread.longTasks} | ${r.mainThread.longestMs} | ${r.mainThread.framesPerSecond} | ${web(m.before)} → ${web(m.peak)} → ${web(m.after)} |`);
+    lines.push("| Terminals | Renderer on screen | Flood before Ctrl+C (s) | Ctrl+C → process exit (ms) | Ctrl+C → output stops (ms) | Output after Ctrl+C (MB) | Long tasks | Longest block (ms) | Frames/s | WebContent + GPU memory before → peak → after (MB) | Writes discarded |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    for (const { request, result: r, memory: m, discarded } of interrupts) lines.push(`| ${r.terminals} | ${r.renderer} | ${request.afterMs / 1000} | ${r.exitMs} | ${r.outputStoppedMs} | ${(r.bytesAfter / 1024 / 1024).toFixed(1)} | ${r.mainThread.longTasks} | ${r.mainThread.longestMs} | ${r.mainThread.framesPerSecond} | ${web(m.before)} → ${web(m.peak)} → ${web(m.after)} | ${discarded ?? "n/a"} |`);
+    lines.push("");
+  }
+  const backgrounds = results.filter((r) => r.result.scenario === "background");
+  if (backgrounds.length) {
+    lines.push("| Workload | document.hidden | A 100 ms timer took (ms) | Program exited after (s) |", "| --- | --- | --- | --- |");
+    for (const { name, result: r } of backgrounds) {
+      lines.push(`| ${name} | ${r.hidden ?? "no answer"} | ${r.timerMs ?? "no answer"} | ${r.exitMs ? seconds(r.exitMs) : "not within 180"} |`);
+    }
     lines.push("");
   }
   const covers = results.filter((r) => r.result.scenario === "covered");
@@ -267,10 +286,10 @@ function markdown(results) {
   }
   const soak = results.filter((r) => r.result.scenario === "soak");
   if (soak.length) {
-    lines.push("| After | WebContent (MB) | GPU (MB) | Main (MB) | xterm instances | WebGL / DOM | On screen (on DOM) | Contexts created / lost | Buffer lines | Replay buffers (bytes) | Panes | Closed terminals collected |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    lines.push("| After | WebContent (MB) | GPU (MB) | Main (MB) | xterm instances | WebGL / DOM | On screen (on DOM) | Contexts created / lost | Buffer lines | Panes | Closed terminals collected |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
     for (const { name, result: r, memory: m } of soak) {
       const c = r.counters;
-      lines.push(`| ${name} | ${mb(m.after?.WebContent)} | ${mb(m.after?.GPU)} | ${mb(m.after?.main)} | ${c.instances} | ${c.webgl} / ${c.dom} | ${c.onScreen} (${c.domOnScreen}) | ${c.webglContexts.created} / ${c.webglContexts.lost} | ${c.bufferLines} | ${c.replayBuffers} (${c.replayBytes}) | ${c.panes} | ${r.closed.collected} of ${r.closed.tracked}${r.stepClosed ? ` (this step: ${r.stepClosed.collected} of ${r.stepClosed.tracked})` : ""} |`);
+      lines.push(`| ${name} | ${mb(m.after?.WebContent)} | ${mb(m.after?.GPU)} | ${mb(m.after?.main)} | ${c.instances} | ${c.webgl} / ${c.dom} | ${c.onScreen} (${c.domOnScreen}) | ${c.webglContexts.created} / ${c.webglContexts.lost} | ${c.bufferLines} | ${c.panes} | ${r.closed.collected} of ${r.closed.tracked}${r.stepClosed ? ` (this step: ${r.stepClosed.collected} of ${r.stepClosed.tracked})` : ""} |`);
     }
     const left = soak.find((r) => r.result.leftAfterDelete)?.result.leftAfterDelete;
     if (left) lines.push("", `Right after deleting the sessions, ${left.panes} of their panes and ${left.counters.instances} xterm instances were still held.`);
@@ -315,6 +334,48 @@ function soakProject() {
 }
 
 for (const scenario of options.scenarios) {
+  if (scenario === "background") {
+    // The window is not being looked at, as when the person works in another
+    // app: hidden outright, and covered by another window. WebKit then runs
+    // the page's timers about once a second. What matters is that the program
+    // is not slowed, so the time taken is until it has exited, whatever the
+    // page has drawn by then.
+    const { name, bytes, command } = drainWorkloads.cat;
+    const hide = (hidden) => execFileSync("/usr/bin/osascript", ["-e", `tell application "System Events" to set visible of (first process whose unix id is ${status.pid}) to ${!hidden}`], { stdio: "ignore" });
+    const cases = async (how) => {
+      for (const agent of [false, true]) {
+        const label = `${name}, window ${how}, ${agent ? "an agent's pane" : "a shell"}`;
+        console.error(`terminal-bench: ${label} ...`);
+        try {
+          results.push({ name: label, bytes, how, ...(await run(options, status.pid, { scenario: "background", cwd: options.work, command, agent }, 180_000)) });
+        } catch (error) {
+          results.push({ name: label, bytes, how, result: { scenario: "background", error: error.message } });
+          // The run may still be going in the app: nothing more can be asked of it.
+          return;
+        }
+      }
+    };
+    // Covered: another window in front of it, nothing else changed.
+    const cover = spawn("/usr/bin/swift", [join(dirname(fileURLToPath(import.meta.url)), "cover-window.swift"), String(status.pid), "200"], { stdio: ["ignore", "pipe", "inherit"] });
+    const covering = await Promise.race([once(cover.stdout, "data").then(() => true), once(cover, "exit").then(() => false)]);
+    if (covering) {
+      await sleep(3000);
+      await cases("covered by another window");
+    } else {
+      console.error("terminal-bench: could not cover the window; skipping that case");
+    }
+    cover.kill();
+    await sleep(2000);
+    try {
+      hide(true);
+      await sleep(3000);
+      await cases("hidden");
+      hide(false);
+    } catch {
+      console.error("terminal-bench: could not hide the window (System Events needs permission); skipping that case");
+    }
+    continue;
+  }
   if (scenario === "covered") {
     await record("agent-style stream in a covered terminal, 10 s", null, { scenario: "covered", projectPath: soakProject(), stream: background, seconds: 10 });
     continue;

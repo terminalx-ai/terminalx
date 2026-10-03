@@ -163,7 +163,7 @@ describe("CloudCreateWorkspace", () => {
     expect(screen.getByText("Syncing repository").closest("li")?.dataset.state).toBe("current");
     await act(async () => void (await vi.advanceTimersByTimeAsync(2100)));
     await waitFor(() => expect(progress.dataset.phase).toBe("running"));
-    expect(screen.getByText(/Ready in 6.4 s/)).toBeTruthy();
+    expect(screen.getByText(/Ready in 6s\./)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Open session" }));
     expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ workspace: expect.objectContaining({ id: "ws-1" }) }));
     // Settled: polling stops.
