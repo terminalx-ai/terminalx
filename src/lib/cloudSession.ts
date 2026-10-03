@@ -34,7 +34,7 @@ import { isOpen, machineRunning, stopping } from "@/lib/cloudLifecycle";
 import {
   accessLoss,
   accessLostReason,
-  canDrive,
+  canTypeInTerminals,
   clearCollabAccess,
   ACCESS_GRACE_MS,
   forgetCollabAccess,
@@ -764,7 +764,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     collab: { key: workspaceKey, you, live: collabLive, notShared: !!locked },
     locked,
     recheckAccess,
-    mayControlTerminals: manage || (collabLive && canDrive(you)),
+    mayControlTerminals: manage || (collabLive && canTypeInTerminals(you)),
     canWakeForTerminal,
     asleep,
     terminals: locked ? NO_TERMINALS : terminals,

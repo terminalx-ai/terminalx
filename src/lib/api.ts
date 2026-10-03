@@ -674,8 +674,10 @@ export interface CloudWorkspaceOperation {
     code: "operation-queued" | "provider-preflight-started" | "machine-allocation-started" | "runtime-installation-started" | "credentials-installing" | "credentials-ready" | "repository-cloning" | "repository-ready" | "repository-clone-failed" | "relay-connection-started" | "provider-cleanup-started" | "workspace-ready" | "operation-failed" | "operation-canceled";
     occurredAt: number;
   }[] | null;
-  /** An archive's final checkpoint (§10.3). */
+  /** A stop's or an archive's final checkpoint (§10.3). */
   checkpoint?: "committed" | "failed" | "timed-out" | "skipped" | (string & {}) | null;
+  /** When the runtime reported it; absent when it never answered. */
+  checkpointAt?: number | null;
   cleanup?: CloudWorkspaceCleanup | null;
 }
 

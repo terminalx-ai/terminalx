@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use super::api::{Ack, AckOutcome, CallError, Lease};
 use super::receipts::{FollowUp, Known, Receipt};
-use super::{crypto, now_ms, CloudAgents, DecisionError, Settings};
+use super::{crypto, now_ms, slash, CloudAgents, DecisionError, Settings};
 use crate::remote::collab::Role;
 
 const LEASE_LIMIT: u32 = 16;
@@ -153,6 +153,24 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
             return finish(agents, lease, "rejected", Some("lease-held"), json!({ "holderId": held.holder_id }));
         }
     }
+    // The CLI runs a slash command, a `!` shell command or an `@/path`
+    // mention by itself, and each can change or get around the same
+    // settings: from a plain driver only the harmless ones go through
+    // (PRO-88). Refused before the applying mark: nothing reached the agent.
+    if matches!(lease.kind.as_str(), "send" | "steer") {
+        let text = plaintext.get("text").and_then(Value::as_str).unwrap_or("");
+        if let Some(refusal) = agents.slash_refusal(access, &tab.session_id, &tab.harness, text) {
+            return finish(agents, lease, "rejected", Some(refusal.category()), json!({ "command": refusal.command, "message": refusal.message() }));
+        }
+    }
+    // A steer goes into the running turn, where the session's own queue
+    // holds it until the turn ends; nothing re-checks that queue, so a slash
+    // or `!` command would still run after its sender lost the right to send
+    // it. It is not queued at all, whoever sends it (a `send` waits in the
+    // follow-up queue, which is re-checked).
+    if lease.kind == "steer" && busy_before && slash::is_command(plaintext.get("text").and_then(Value::as_str).unwrap_or("")) {
+        return finish(agents, lease, "rejected", Some(slash::NOT_QUEUED_CATEGORY), json!({ "message": slash::NOT_QUEUED_MESSAGE }));
+    }
     if let Err(error) = agents.receipts.applying(id) {
         // Without the durable mark the outcome could not be proven later,
         // so the agent is not touched: definitely not applied.
@@ -163,7 +181,7 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
     // own: only a manager or someone who may approve permissions sets them
     // (the live `session.configure` needs manage). A driver's send still
     // goes through, without them.
-    let may_configure = access.role == Role::Manager || access.can_approve;
+    let may_configure = access.can_configure();
     let (outcome, category, extra) = apply(agents, lease, &tab.session_id, &plaintext, may_configure);
     // Only input that reached the agent (or its queue) claims the tab.
     if let (Some(collab), "applied", "send" | "steer") = (agents.collab(), outcome, lease.kind.as_str()) {
