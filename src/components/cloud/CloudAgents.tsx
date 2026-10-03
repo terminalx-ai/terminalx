@@ -57,7 +57,6 @@ export function CloudAgentsView({
   workspaceState,
   wakeWorkspace,
   waking = false,
-  onResume,
   collabKey,
   active: shown = true,
 }: {
@@ -70,8 +69,6 @@ export function CloudAgentsView({
   wakeWorkspace?: () => void;
   /** This window asked for the workspace to be woken (it was opened with a resume, or a command went out). */
   waking?: boolean;
-  /** Resume a stopped workspace; only for someone who may (an owner or admin). */
-  onResume?: () => void;
   /** Where this workspace's presence, notes and leases are kept (cloudCollab); defaults to its target key. */
   collabKey?: string;
   /** The agent view is the one on screen (presence reports its tab). */
@@ -138,7 +135,7 @@ export function CloudAgentsView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="cloud-agents">
-      <StatusBar state={state} tab={active} snapshot={snapshot} workspaceState={workspaceState} orgId={scope.organizationId} waking={waking} onResume={onResume} />
+      <StatusBar state={state} tab={active} snapshot={snapshot} workspaceState={workspaceState} orgId={scope.organizationId} waking={waking} />
       <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-hairline px-3 py-1" role="tablist" aria-label="Agent tabs">
         {tabs.map((tab, index) => (
           <div key={tab.tabId} className="flex items-center" data-testid="cloud-agent-tab">
@@ -227,7 +224,6 @@ function StatusBar({
   workspaceState,
   orgId,
   waking,
-  onResume,
 }: {
   state: WorkspaceConnectionState;
   tab: CloudAgentTab | null;
@@ -235,25 +231,19 @@ function StatusBar({
   workspaceState: string | null;
   orgId: string;
   waking: boolean;
-  onResume?: () => void;
 }) {
-  // Somebody is waking it: this window, or a command the server woke it for.
-  const wakingNow = waking || snapshot.wake === "queued" || snapshot.wake === "in-progress";
+  // Somebody is waking it: this window, or a command the server woke it for. A wake the server refused is not one.
+  const wakingNow = snapshot.wake !== "unavailable" && (waking || snapshot.wake === "queued" || snapshot.wake === "in-progress");
   const asleep = stoppedAndStaying(state, workspaceState, wakingNow);
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline px-3 py-1 text-[11px] text-muted-foreground">
-      <Chip label="Connection" value={connectionLabel(state, asleep)} testId="cloud-agent-connection" />
+      <Chip label="Connection" value={connectionLabel(state, asleep ? (workspaceState === "archived" ? "archived" : "asleep") : false)} testId="cloud-agent-connection" />
       <Chip label="Agent" value={tab ? turnLabel(tab) : "No tab"} testId="cloud-agent-turn" />
       <Chip
         label="Workspace"
-        value={provisioningLabel(workspaceState, snapshot.wake, state, snapshot.wake === "unavailable" && runningLimitReached(orgId), waking)}
+        value={provisioningLabel(workspaceState, snapshot.wake, state, snapshot.wake === "unavailable" && runningLimitReached(orgId), wakingNow)}
         testId="cloud-agent-provisioning"
       />
-      {asleep && onResume && (
-        <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={onResume} data-testid="cloud-agent-resume">
-          Resume
-        </Button>
-      )}
     </div>
   );
 }
@@ -267,11 +257,13 @@ function attaching(state: WorkspaceConnectionState): boolean {
  * The workspace is stopped and nothing is waking it. The connection keeps
  * trying in the background, which used to flip both chips every few seconds
  * ("Asleep"/"Starting", "Checking"/"Waiting for runtime"); a stopped
- * workspace reads one way until someone resumes it.
+ * workspace reads one way until someone resumes it. An archived workspace
+ * opened to read is stopped the same way.
  */
 export function stoppedAndStaying(state: WorkspaceConnectionState, workspaceState: string | null, waking: boolean): boolean {
   if (waking || state.state === "connected") return false;
-  return state.state === "suspended" || (workspaceState === "suspended" && (attaching(state) || state.state === "idle"));
+  const stopped = workspaceState === "suspended" || workspaceState === "archived";
+  return state.state === "suspended" || (stopped && (attaching(state) || state.state === "idle"));
 }
 
 function Chip({ label, value, testId }: { label: string; value: string; testId: string }) {
@@ -282,8 +274,8 @@ function Chip({ label, value, testId }: { label: string; value: string; testId: 
   );
 }
 
-export function connectionLabel(state: WorkspaceConnectionState, asleep = false): string {
-  if (asleep) return "Offline (workspace asleep)";
+export function connectionLabel(state: WorkspaceConnectionState, stopped: false | "asleep" | "archived" = false): string {
+  if (stopped) return stopped === "archived" ? "Offline (workspace archived)" : "Offline (workspace asleep)";
   switch (state.state) {
     case "connected":
       return "Live";

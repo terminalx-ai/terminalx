@@ -14,6 +14,9 @@ export interface ToolCall {
   subagent?: { id: string; label?: string };
 }
 
+/** How the cloud runtime's "this turn ended with the restart" notice begins (src-tauri `cloud_agents`). */
+const RUNTIME_RESTARTED_NOTICE = "The workspace runtime restarted";
+
 export type WorkItem =
   | { kind: "tool"; call: ToolCall; key: string }
   | { kind: "tool_group"; name: string; calls: ToolCall[]; key: string }
@@ -285,10 +288,11 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
           }
         } else if (!payload.text.startsWith("tool_pending:")) {
           const turn = ensureTurn(event);
-          // A notice repeated back to back (a runtime that restarted several
-          // times says so each time) is shown once.
+          // A cloud runtime that restarted several times says so each time;
+          // back to back, that notice is shown once. Every other notice,
+          // local sessions' included, is shown as often as it was said.
           const last = turn.work[turn.work.length - 1];
-          if (last?.kind === "status" && last.text === payload.text) break;
+          if (payload.text.startsWith(RUNTIME_RESTARTED_NOTICE) && last?.kind === "status" && last.text === payload.text) break;
           turn.work.push({ kind: "status", text: payload.text, key: `st${event.seq}`, seq: event.seq });
         }
         break;

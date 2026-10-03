@@ -1217,10 +1217,6 @@ impl WorkspaceRpc {
             "exitCode": pty.exit.flatten(),
             "control": pty.control_for(peer),
             "controllerId": pty.controller_user.as_ref().and_then(|(user, _)| user.clone()),
-            // Whether the controlling device is still watching. A controller
-            // that went away (its window closed, or it re-attached as a new
-            // device) is not typing, so its own person may take over unasked.
-            "controllerPresent": pty.controller.as_ref().is_some_and(|device| pty.subscribers.values().any(|peer| peer.device_id == *device)),
         });
         if let Some(agent) = &pty.agent {
             // The tab whose CLI this is, and whether one runs in it now.

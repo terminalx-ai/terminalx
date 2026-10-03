@@ -88,7 +88,12 @@ describe("buildTranscript", () => {
   });
 
   // PRO-84: a runtime that restarted three times left the same notice three times in one turn.
-  it("shows a notice repeated back to back once, and again after something else happened", () => {
+  it("leaves every other repeated notice alone, as in a local session", () => {
+    const events = [ev({ type: "user_message", text: "go", queued: false }), ev({ type: "status", text: "Retrying" }), ev({ type: "status", text: "Retrying" })];
+    expect(buildTranscript(events, false).turns[0].work.map((item) => item.kind)).toEqual(["status", "status"]);
+  });
+
+  it("shows the restart notice repeated back to back once, and again after something else happened", () => {
     const notice = "The workspace runtime restarted and the agent process running this turn ended.";
     const events = [
       ev({ type: "user_message", text: "go", queued: false }),

@@ -731,13 +731,6 @@ async fn roles_decide_what_a_participant_reads_types_and_holds() {
     let created = call(&f.rpc, &admin, "pty.create", json!({ "clientRequestId": "request-share-1" })).await.unwrap();
     let pty_id = created["ptyId"].as_str().unwrap().to_string();
     assert_eq!(created["controllerId"], "admin");
-    assert_eq!(created["controllerPresent"], false, "the creator is not watching yet");
-    let attached = call(&f.rpc, &admin, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
-    assert_eq!(attached["controllerPresent"], true);
-    // PRO-84: a controller that stopped watching is reported, so its own person re-attaching can take over.
-    call(&f.rpc, &admin, "pty.detach", json!({ "subscriptionId": attached["subscriptionId"] })).await.unwrap();
-    let listed = call(&f.rpc, &alice, "pty.list", json!({})).await.unwrap();
-    assert_eq!((listed["terminals"][0]["control"].as_str(), listed["terminals"][0]["controllerPresent"].as_bool()), (Some("other"), Some(false)));
     call(&f.rpc, &admin, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
     assert_eq!(code(call(&f.rpc, &bob, "pty.control", json!({ "ptyId": pty_id })).await), "forbidden", "viewers watch");
     let taken = call(&f.rpc, &alice, "pty.control", json!({ "ptyId": pty_id })).await.unwrap();

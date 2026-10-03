@@ -7,11 +7,11 @@ import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { workspaceRowState } from "@/components/layout/cloud/rowState";
 import { useCloudSections } from "@/components/layout/cloud/CloudSections";
 import { DeletionProgress } from "./CloudWorkspaceLifecycle";
-import { ExecutionLocation, WorkspaceView, describe, describeWorkspace, type OpenedWorkspace } from "./CloudSessionPage";
+import { ExecutionLocation, WorkspaceView, describe, describeWorkspace, type OpenedWorkspace } from "./CloudWorkspaceView";
 import { workspaceTargetKey, type CloudWorkspaceListItem } from "@/lib/api";
 import { retainCloudConnection, setSelectedCloudConnection, subscribeCloudConnections, type CloudLease } from "@/lib/cloudConnections";
 import { findCloudWorkspace, refreshCloudCatalog, resumeCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
-import { archiving, deletion, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
+import { archiving, deletion, isOpen, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 import { errorCode } from "@/lib/cloudTerminals";
 import { selectSession } from "@/lib/sessions";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
@@ -30,8 +30,7 @@ function openable(item: CloudWorkspaceListItem): boolean {
  * shows its workspace here. The connection is a lease from the connection
  * manager, so the sidebar's session list follows it live.
  *
- * the existing workspace view (terminals, agent, files, git) of the
- * full-window cloud page. Selecting only looks: it connects with `connect`,
+ * The workspace view (terminals, agent, files, git). Selecting only looks: it connects with `connect`,
  * never `wake`, so a stopped workspace shows its saved agent conversations
  * and stays stopped until Resume is pressed.
  */
@@ -54,9 +53,12 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   const [resuming, setResuming] = useState(false);
   // The list's state of now, so the view's chips follow a stop or a resume instead of what was true when it was opened.
   const listState = item?.workspace.state ?? null;
+  // A resume is under way while this window's request is out, or while the list shows one running.
+  // A refused one (the running limit) ends both, and the chips read stopped again.
+  const waking = resuming || (!!item?.latestOperation && isOpen(item.latestOperation) && item.latestOperation.action === "resume");
   const opened = useMemo<OpenedWorkspace | null>(
-    () => (held && connection ? { connection, name: held.name, provider: held.provider, workspaceState: listState ?? held.workspaceState, waking: resuming } : null),
-    [held, connection, listState, resuming],
+    () => (held && connection ? { connection, name: held.name, provider: held.provider, workspaceState: listState ?? held.workspaceState, waking } : null),
+    [held, connection, listState, waking],
   );
 
   useEffect(() => {

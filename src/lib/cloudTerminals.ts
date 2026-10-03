@@ -33,8 +33,6 @@ export interface CloudTerminal {
   control: PtyControl;
   /** The person controlling it on a shared workspace (PRO-30); null when nobody or unknown. */
   controllerId: string | null;
-  /** Whether the controlling device is still attached; null when the runtime does not say. */
-  controllerPresent: boolean | null;
   /** The controller's size, which a viewer shows. */
   cols: number;
   rows: number;
@@ -140,7 +138,6 @@ function fromInfo(workspace: string, info: PtyInfo): CloudTerminal {
     exitCode: info.exitCode,
     control: info.control,
     controllerId: info.controllerId ?? null,
-    controllerPresent: info.controllerPresent ?? null,
     cols: info.cols,
     rows: info.rows,
     gone: null,
@@ -332,8 +329,8 @@ async function attach(workspace: string, client: WorkspaceRpcClient, terminal: C
       const current = terminalOf(workspace, terminal.id);
       if (current && !current.exited) patch(workspace, terminal.id, { exited: true, exitCode: code });
     },
-    onControl: (control, controllerId, controllerPresent) => {
-      patch(workspace, terminal.id, { control, ...(controllerId !== undefined ? { controllerId } : {}), ...(controllerPresent !== undefined ? { controllerPresent } : {}) });
+    onControl: (control, controllerId) => {
+      patch(workspace, terminal.id, { control, ...(controllerId !== undefined ? { controllerId } : {}) });
       // A viewer shows the program at the controller's size.
       const current = terminalOf(workspace, terminal.id);
       if (control !== "you" && current && (instance.term.cols !== current.cols || instance.term.rows !== current.rows)) {
@@ -455,7 +452,8 @@ function named(terminal: CloudTerminal, shown: readonly CloudTerminal[]): CloudT
   if (!taken.has(terminal.title)) return terminal;
   let number = terminal.number;
   while (taken.has(`Terminal ${number}`)) number++;
-  return { ...terminal, title: `Terminal ${number}` };
+  // The number orders the tabs and labels presence, so it follows the name.
+  return { ...terminal, number, title: `Terminal ${number}` };
 }
 
 /** `next` when it says something new about the terminal, else the object the views already hold. */
@@ -480,7 +478,7 @@ export async function syncCloudTerminals(
     const known = new Set(current.terminals.map((terminal) => terminal.ptyId));
     const terminals = current.terminals.map((terminal): CloudTerminal => {
       const info = byPty.get(terminal.ptyId);
-      if (info) return unchanged(terminal, { ...fromInfo(workspace, info), title: terminal.title, inputError: terminal.inputError, live: terminal.live });
+      if (info) return unchanged(terminal, { ...fromInfo(workspace, info), number: terminal.number, title: terminal.title, inputError: terminal.inputError, live: terminal.live });
       // Gone already, or opened here after this list was asked for.
       if (terminal.gone || (openedAt.get(terminal.id) ?? 0) > asked) return terminal;
       return { ...terminal, gone: terminal.epoch === listed.epoch ? "closed" : "runtime-restarted" };

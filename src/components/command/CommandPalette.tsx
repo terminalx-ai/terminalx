@@ -68,6 +68,10 @@ import {
 } from "@/lib/sessions";
 import { SHORTCUT_ACTIONS, keycaps, useKeymap, type ShortcutAction } from "@/lib/shortcuts";
 import { openCloudSession, useCloudDashboard } from "@/lib/cloudDashboard";
+import { openNewCloudWorkspace } from "@/components/cloud/NewCloudWorkspaceDialog";
+import { useAccount } from "@/lib/account";
+import { defaultOrgId, liveCloudOrgIds } from "@/lib/cloudCatalog";
+import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { setStatusSettings, useStatus } from "@/lib/status";
 import { THEMES, setMode, setTheme, useTheme } from "@/lib/theme";
 import { relativeTime } from "@/lib/time";
@@ -90,6 +94,8 @@ interface CommandEntry extends PaletteEntityBase {
   shortcut?: boolean;
   /** The action's current keys, when it has any. */
   chord?: string;
+  /** The entry narrows the palette instead of leaving it. */
+  keepOpen?: boolean;
   run: () => void | Promise<void>;
 }
 
@@ -238,13 +244,11 @@ export function CommandPalette({
   open,
   onOpenChange,
   onOpenSettings,
-  onOpenCloudSession,
   onCreated,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onOpenSettings: (tab?: SettingsTab) => void;
-  onOpenCloudSession?: () => void;
   onCreated: (sessionId: string, tabId: string, text: string) => void;
 }) {
   const store = useSessionStore();
@@ -401,6 +405,17 @@ export function CommandPalette({
     [],
   );
   const keymap = useKeymap();
+  // What of the cloud this account is offered from here: its live organizations' sessions, and a new workspace in the default one.
+  const { status: account } = useAccount();
+  const cloud = useMemo(() => {
+    const live = liveCloudOrgIds(account);
+    const defaultOrg = defaultOrgId(account);
+    return {
+      live: live.length > 0,
+      mayCreate: !!defaultOrg && live.includes(defaultOrg) && mayStartCloudSessions(account, defaultOrg) === true,
+      orgName: account.identity?.organization ?? "your default organization",
+    };
+  }, [account]);
 
   const commandEntries = useMemo<CommandEntry[]>(() => {
     const shortcutEntries = SHORTCUT_ACTIONS.map((shortcut, index) =>
@@ -459,12 +474,17 @@ export function CommandPalette({
       indexPaletteItem({ id: "command:mode:light", group: "commands" as const, primary: "Appearance: Light", secondary: theme.mode === "light" ? "Current appearance" : "Use the light appearance", recentAt: 4, icon: Sun, run: () => setMode("light") }),
       indexPaletteItem({ id: "command:mode:dark", group: "commands" as const, primary: "Appearance: Dark", secondary: theme.mode === "dark" ? "Current appearance" : "Use the dark appearance", recentAt: 3, icon: Moon, run: () => setMode("dark") }),
       indexPaletteItem({ id: "command:settings:appearance", group: "commands" as const, primary: "Open Appearance settings", secondary: "Themes, type and transcript layout", recentAt: 2, icon: Settings, run: () => onOpenSettings("appearance") }),
-      ...(onOpenCloudSession
-        ? [indexPaletteItem({ id: "command:cloud-session", group: "commands" as const, primary: "Open a cloud workspace session", secondary: "Terminal and agent tab in a cloud workspace", recentAt: 1, icon: Cloud, run: onOpenCloudSession })]
+      // Cloud sessions are among the sessions (their line says "<organization> cloud"): this narrows the list to them. Choosing one only selects it.
+      ...(cloud.live
+        ? [indexPaletteItem({ id: "command:cloud-go", group: "commands" as const, primary: "Go to cloud session…", secondary: "List the sessions in your organizations' cloud workspaces", recentAt: 1, icon: Cloud, keepOpen: true, run: () => setQuery("cloud ") }, ["cloud workspace session open"])]
+        : []),
+      // Creating a workspace is an owner's or admin's; nobody else is offered it.
+      ...(cloud.mayCreate
+        ? [indexPaletteItem({ id: "command:cloud-new-workspace", group: "commands" as const, primary: "New cloud workspace…", secondary: `A new machine in ${cloud.orgName}: repositories, first prompt and price`, recentAt: 1, icon: Cloud, run: () => openNewCloudWorkspace() }, ["cloud workspace create vm"])]
         : []),
     ];
     return [...shortcutEntries, ...extras];
-  }, [onOpenCloudSession, onOpenSettings, runAction, keymap, status.settings.percent, status.settings.visible, theme.mode, theme.theme]);
+  }, [cloud.live, cloud.mayCreate, cloud.orgName, onOpenSettings, runAction, keymap, status.settings.percent, status.settings.visible, theme.mode, theme.theme]);
 
   const fileEntries = useMemo<FileEntry[]>(
     () => fileHits.map((hit, index) => indexPaletteItem({
@@ -601,6 +621,7 @@ export function CommandPalette({
     }, { project: match.item.project }));
     const fileRows = rankedFiles.map((match) => entityRow(match, "file", () => void openFileHit(match.item.hit)));
     const commandRows = commandMatches.map((match) => entityRow(match, "command", match.item.run, {
+      ...(match.item.keepOpen ? { closeBefore: false } : {}),
       chord: match.item.chord,
       icon: match.item.icon,
       restoreFocus: !!match.item.shortcut,

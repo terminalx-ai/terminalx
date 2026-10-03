@@ -76,15 +76,8 @@ describe("terminals of a runtime that restarted", () => {
     // The name holds through later reads of the list.
     await syncCloudTerminals(WS, client, xterm);
     expect(cloudTerminalsOf(WS).terminals.map((terminal) => terminal.title)).toEqual(["Terminal 1", "Terminal 2", "Terminal 3"]);
-  });
-
-  it("carries whether the controlling device is still attached, when the runtime says", async () => {
-    const { state, client } = runtime([{ ...pty("p1", 1), controllerPresent: false }, pty("p2", 2)]);
-    await syncCloudTerminals(WS, client, xterm);
-    expect(cloudTerminalsOf(WS).terminals.map((terminal) => terminal.controllerPresent)).toEqual([false, null]);
-    state.listed = [{ ...pty("p1", 1), controllerPresent: true }, pty("p2", 2)];
-    await syncCloudTerminals(WS, client, xterm);
-    expect(cloudTerminalsOf(WS).terminals[0]!.controllerPresent).toBe(true);
+    // The number that orders the tabs and labels presence matches the name.
+    expect(cloudTerminalsOf(WS).terminals.map((terminal) => terminal.number)).toEqual([1, 2, 3]);
   });
 });
 

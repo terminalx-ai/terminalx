@@ -611,7 +611,7 @@ describe("wake refused at the running limit (saas PRO-76)", () => {
     const tries = ["opening", "waitingForRuntime", "opening", "suspended"].map((state) => ({ state }) as WorkspaceConnectionState);
     for (const state of tries) {
       expect(stoppedAndStaying(state, "suspended", false)).toBe(true);
-      expect(connectionLabel(state, true)).toBe("Offline (workspace asleep)");
+      expect(connectionLabel(state, "asleep")).toBe("Offline (workspace asleep)");
       expect(provisioningLabel("suspended", null, state)).toBe("Asleep");
     }
     // Being woken: one wait, not "Checking" and "Waiting for runtime" in turn.
@@ -620,21 +620,29 @@ describe("wake refused at the running limit (saas PRO-76)", () => {
     expect(new Set(tries.slice(0, 3).map((state) => provisioningLabel("suspended", null, state, false, true)))).toEqual(new Set(["Starting"]));
   });
 
-  it("offers Resume on a stopped workspace only to someone who may resume it", async () => {
-    const resume = vi.fn();
-    const at = (onResume?: () => void, waking = false) => (
+  // Review of #272: a Resume refused at the running limit left "Starting" / "Waiting for runtime" on a stopped workspace.
+  it("reads stopped again when the wake stops or is refused", async () => {
+    const at = (waking: boolean) => (
       <TooltipProvider>
-        <CloudAgentsView scope={scope} client={client as unknown as WorkspaceRpcClient} state={{ state: "waitingForRuntime" } as WorkspaceConnectionState} workspaceState="suspended" waking={waking} onResume={onResume} />
+        <CloudAgentsView scope={scope} client={client as unknown as WorkspaceRpcClient} state={{ state: "waitingForRuntime" } as WorkspaceConnectionState} workspaceState="suspended" waking={waking} />
       </TooltipProvider>
     );
-    const { rerender } = render(at());
-    expect(screen.getByTestId("cloud-agent-provisioning").textContent).toContain("Asleep");
-    expect(screen.queryByTestId("cloud-agent-resume")).toBeNull();
-    rerender(at(resume));
-    fireEvent.click(screen.getByTestId("cloud-agent-resume"));
-    expect(resume).toHaveBeenCalledTimes(1);
-    rerender(at(resume, true));
-    expect(screen.queryByTestId("cloud-agent-resume")).toBeNull();
+    const { rerender } = render(at(true));
     expect(screen.getByTestId("cloud-agent-provisioning").textContent).toContain("Starting");
+    expect(screen.getByTestId("cloud-agent-connection").textContent).toContain("Waiting for runtime");
+    rerender(at(false));
+    expect(screen.getByTestId("cloud-agent-provisioning").textContent).toContain("Asleep");
+    expect(screen.getByTestId("cloud-agent-connection").textContent).toContain("Offline (workspace asleep)");
+    // No Resume control here: the workspace header has the one Resume button.
+    expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
+  });
+
+  it("reads an archived workspace opened to read as offline, not as waiting for its runtime", () => {
+    const tries = ["opening", "waitingForRuntime", "idle"].map((state) => ({ state }) as WorkspaceConnectionState);
+    for (const state of tries) {
+      expect(stoppedAndStaying(state, "archived", false)).toBe(true);
+      expect(provisioningLabel("archived", null, state)).toBe("Archived (unarchive it to resume)");
+    }
+    expect(connectionLabel(tries[1]!, "archived")).toBe("Offline (workspace archived)");
   });
 });
