@@ -477,6 +477,26 @@ pub fn is_own_worktree(path: &Path) -> bool {
     }
 }
 
+/// A repository's shared git directory, resolved.
+fn common_dir(cwd: &Path) -> Option<PathBuf> {
+    let out = run(cwd, &["rev-parse", "--git-common-dir"]).ok()?;
+    let dir = out.trim();
+    let dir = if Path::new(dir).is_absolute() { PathBuf::from(dir) } else { cwd.join(dir) };
+    std::fs::canonicalize(dir).ok()
+}
+
+/// Whether `path` is the top of a working tree of `project`'s repository.
+/// A clone, or another repository's worktree, sitting at that path is a
+/// working tree too, but its counts say nothing about this project and git
+/// will refuse to remove it as one of ours.
+pub fn is_worktree_of(project: &Path, path: &Path) -> bool {
+    is_own_worktree(path) && common_dir(path).is_some_and(|theirs| Some(theirs) == common_dir(project))
+}
+
+fn branch_exists(project: &Path, branch: &str) -> bool {
+    run_ok(project, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+}
+
 pub fn worktree_disposition(project: &Path, name: &str) -> WorktreeDisposition {
     let path = worktree_path(project, name);
     if std::fs::symlink_metadata(&path).is_err() {
@@ -484,16 +504,20 @@ pub fn worktree_disposition(project: &Path, name: &str) -> WorktreeDisposition {
     }
     let branch = worktree_branch(name);
     let unchecked = WorktreeDisposition { exists: true, checked: false, uncommitted: 0, unpushed: 0, branch: Some(branch.clone()) };
-    if !is_own_worktree(&path) {
+    if !is_worktree_of(project, &path) {
         return unchecked;
     }
     let uncommitted = run(&path, &["status", "--porcelain", "--"]).map(|s| s.lines().count() as u32);
-    let unpushed = run(
-        &path,
-        &["rev-list", "--count", "HEAD", "--not", &format!("--exclude={branch}"), "--branches", "--remotes", "--tags"],
-    )
-    .ok()
-    .and_then(|s| s.trim().parse::<u32>().ok());
+    // What deleting loses: commits only HEAD holds, and commits only the
+    // worktree's branch holds. They differ when HEAD was moved off the
+    // branch (`git checkout --detach`), and the branch is deleted either way.
+    let exclude = format!("--exclude={branch}");
+    let mut args = vec!["rev-list", "--count", "HEAD"];
+    if branch_exists(project, &branch) {
+        args.push(&branch);
+    }
+    args.extend(["--not", exclude.as_str(), "--branches", "--remotes", "--tags"]);
+    let unpushed = run(&path, &args).ok().and_then(|s| s.trim().parse::<u32>().ok());
     match (uncommitted, unpushed) {
         (Ok(uncommitted), Some(unpushed)) => WorktreeDisposition { exists: true, checked: true, uncommitted, unpushed, branch: Some(branch) },
         _ => unchecked,
@@ -527,9 +551,9 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
-/// Whether deleting a worktree's directory directly, when git cannot remove
-/// it, is allowed. Only a caller that showed the person what would be lost
-/// and got a confirmation may allow it.
+/// Whether the caller showed the person what a removal would lose and got a
+/// confirmation. Only then may a directory git cannot remove be deleted
+/// directly, and a branch that holds commits nothing else has be deleted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirectDelete {
     Allowed,
@@ -542,6 +566,9 @@ pub struct WorktreeRemoval {
     /// The worktree's branch, when it was kept because it holds commits no
     /// other branch, remote or tag has.
     pub kept_branch: Option<String>,
+    /// A branch made to keep a detached HEAD's commits reachable, when the
+    /// directory was deleted directly and nothing else held them.
+    pub rescued_branch: Option<String>,
 }
 
 /// Where the managed worktree `name` lives. The guard keys on shape: a direct
@@ -632,6 +659,37 @@ pub fn unique_commits(project: &Path, branch: &str) -> Option<u32> {
         .and_then(|s| s.trim().parse().ok())
 }
 
+/// The commit a worktree's HEAD is detached at, read from the repository's
+/// record of the worktree (`.git/worktrees/<id>/HEAD`), which is still there
+/// when the directory itself is broken. `None` when HEAD is on a branch or
+/// there is no record.
+pub fn detached_head(project: &Path, path: &Path) -> Option<String> {
+    let admin = std::fs::read_to_string(path.join(".git"))
+        .ok()
+        .and_then(|text| text.lines().next().and_then(|line| line.strip_prefix("gitdir:")).map(|link| link.trim().to_string()))
+        .map(|link| if Path::new(&link).is_absolute() { PathBuf::from(link) } else { path.join(link) })
+        .or_else(|| Some(common_dir(project)?.join("worktrees").join(path.file_name()?)))?;
+    // Only a record in this project's own git directory is read.
+    if std::fs::canonicalize(admin.parent()?).ok()? != common_dir(project)?.join("worktrees") {
+        return None;
+    }
+    let head = std::fs::read_to_string(admin.join("HEAD")).ok()?;
+    let head = head.trim();
+    (head.len() >= 40 && head.chars().all(|c| c.is_ascii_hexdigit())).then(|| head.to_string())
+}
+
+/// Keep a detached commit reachable when no branch, remote or tag holds it:
+/// a branch `raccoon/rescued/<name>-<short sha>` is made for it. Returns the
+/// branch made.
+pub fn rescue_detached(project: &Path, name: &str, commit: &str) -> Option<String> {
+    let unheld: u32 = run(project, &["rev-list", "--count", commit, "--not", "--branches", "--remotes", "--tags"]).ok()?.trim().parse().ok()?;
+    if unheld == 0 {
+        return None;
+    }
+    let branch = format!("{}rescued/{name}-{}", crate::store::settings::load().branch_prefix, &commit[..8]);
+    run(project, &["branch", "--", &branch, commit]).ok().map(|_| branch)
+}
+
 /// What a removal that failed left behind, in words for the person.
 fn leftover_state(path: &Path) -> String {
     if std::fs::symlink_metadata(path).is_err() {
@@ -653,18 +711,25 @@ fn leftover_state(path: &Path) -> String {
 /// the directory was left in, and leaves the branch alone so the removal can
 /// be tried again.
 ///
-/// The branch goes with a worktree git removed itself. On any other path the
-/// directory could not be checked for unpushed commits (git answers for the
-/// enclosing project there), so the branch is deleted only when nothing else
-/// would be lost with it, and is otherwise kept and named in the result.
+/// Commits are not lost quietly. The branch is deleted when nothing else
+/// would go with it. A branch that holds commits of its own is deleted only
+/// when git removed the worktree itself for a caller that showed those
+/// commits and got a confirmation ([`DirectDelete::Allowed`]; the
+/// disposition counts them). After a direct delete the directory could not
+/// be checked, so such a branch is kept and named in the result, and a
+/// detached HEAD nothing else holds is given a branch of its own.
 pub fn remove_worktree(project: &Path, name: &str, direct: DirectDelete) -> Result<WorktreeRemoval> {
     let path = managed_worktree_path(project, name)?;
+    let mut removal = WorktreeRemoval::default();
     let mut removed_by_git = false;
     // `symlink_metadata` so a dangling link still counts as something there.
     if let Ok(meta) = std::fs::symlink_metadata(&path) {
         if meta.file_type().is_symlink() {
             bail!("refusing to remove: {} is a symbolic link", path.display());
         }
+        // Read before git touches anything: it drops its record of the
+        // worktree before it fails on the directory.
+        let detached = detached_head(project, &path);
         let target = arg(&path)?;
         let _ = run(project, &["worktree", "unlock", target]);
         match run(project, &["worktree", "remove", "--force", target]) {
@@ -673,6 +738,9 @@ pub fn remove_worktree(project: &Path, name: &str, direct: DirectDelete) -> Resu
                 bail!("Could not remove the worktree at {}: {git_error:#}. {}", path.display(), leftover_state(&path));
             }
             Err(git_error) => {
+                if let Some(commit) = &detached {
+                    removal.rescued_branch = rescue_detached(project, name, commit);
+                }
                 if let Err(direct_error) = remove_managed_worktree_dir(project, &path) {
                     bail!("Could not remove the worktree at {}: {direct_error:#} ({git_error:#}). {}", path.display(), leftover_state(&path));
                 }
@@ -681,14 +749,16 @@ pub fn remove_worktree(project: &Path, name: &str, direct: DirectDelete) -> Resu
     }
     let _ = run(project, &["worktree", "prune"]);
     let branch = worktree_branch(name);
-    if !run_ok(project, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]) {
-        return Ok(WorktreeRemoval::default());
+    if !branch_exists(project, &branch) {
+        return Ok(removal);
     }
-    if !removed_by_git && unique_commits(project, &branch) != Some(0) {
-        return Ok(WorktreeRemoval { kept_branch: Some(branch) });
+    let confirmed = removed_by_git && direct == DirectDelete::Allowed;
+    if !confirmed && unique_commits(project, &branch) != Some(0) {
+        removal.kept_branch = Some(branch);
+        return Ok(removal);
     }
     let _ = run(project, &["branch", "-D", &branch]);
-    Ok(WorktreeRemoval::default())
+    Ok(removal)
 }
 
 pub fn list_worktrees(project: &Path) -> Result<Vec<(String, Option<String>)>> {
@@ -1042,6 +1112,96 @@ mod tests {
         assert_eq!(removal.kept_branch.as_deref(), Some("raccoon/quiet-amber-fox"));
         assert!(!wt.exists());
         assert_eq!(run(p, &["rev-parse", "raccoon/quiet-amber-fox"]).unwrap().trim(), commit);
+    }
+
+    #[test]
+    fn a_clone_or_another_repositorys_worktree_at_a_managed_path_cannot_be_checked() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        std::fs::create_dir_all(worktree_root(p)).unwrap();
+        // A clone with a commit only it has.
+        let clone = worktree_path(p, "a-clone");
+        std::fs::create_dir_all(&clone).unwrap();
+        run(&clone, &["init", "-q", "-b", "main"]).unwrap();
+        run(&clone, &["config", "user.email", "t@example.com"]).unwrap();
+        run(&clone, &["config", "user.name", "T"]).unwrap();
+        std::fs::write(clone.join("only-here.txt"), "x").unwrap();
+        run(&clone, &["add", "."]).unwrap();
+        run(&clone, &["commit", "-q", "-m", "local only"]).unwrap();
+        assert!(is_own_worktree(&clone) && !is_worktree_of(p, &clone));
+        let d = worktree_disposition(p, "a-clone");
+        assert!(d.exists && !d.checked, "{d:?}");
+
+        // Another repository's worktree.
+        let other = repo();
+        let foreign = worktree_path(p, "foreign");
+        run(other.path(), &["worktree", "add", "-q", "-b", "theirs", foreign.to_str().unwrap()]).unwrap();
+        assert!(!is_worktree_of(p, &foreign));
+        assert!(!worktree_disposition(p, "foreign").checked);
+
+        // Our own still is.
+        create_worktree(p, "quiet-amber-fox", None).unwrap();
+        assert!(worktree_disposition(p, "quiet-amber-fox").checked);
+    }
+
+    #[test]
+    fn commits_on_the_branch_count_even_when_head_was_moved_off_it() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        let wt = PathBuf::from(create_worktree(p, "quiet-amber-fox", None).unwrap().path);
+        std::fs::write(wt.join("work.txt"), "work\n").unwrap();
+        run(&wt, &["add", "."]).unwrap();
+        run(&wt, &["commit", "-q", "-m", "on the branch"]).unwrap();
+        let commit = run(&wt, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        run(&wt, &["checkout", "-q", "--detach", "main"]).unwrap();
+
+        let d = worktree_disposition(p, "quiet-amber-fox");
+        assert!(d.checked && d.unpushed == 1, "the branch's commit is what deleting loses: {d:?}");
+
+        // A caller that showed nothing keeps the branch.
+        let removal = remove_worktree(p, "quiet-amber-fox", DirectDelete::Never).unwrap();
+        assert!(!wt.exists());
+        assert_eq!(removal.kept_branch.as_deref(), Some("raccoon/quiet-amber-fox"));
+        assert_eq!(run(p, &["rev-parse", "raccoon/quiet-amber-fox"]).unwrap().trim(), commit);
+
+        // One that showed the count and was confirmed deletes it, as asked.
+        let again = worktree_path(p, "quiet-amber-fox");
+        run(p, &["worktree", "add", "-q", again.to_str().unwrap(), "raccoon/quiet-amber-fox"]).unwrap();
+        assert_eq!(worktree_disposition(p, "quiet-amber-fox").unpushed, 1);
+        let removal = remove_worktree(p, "quiet-amber-fox", DirectDelete::Allowed).unwrap();
+        assert!(!again.exists());
+        assert_eq!(removal, WorktreeRemoval::default());
+    }
+
+    #[test]
+    fn a_detached_head_nothing_else_holds_is_rescued_before_a_direct_delete() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        let wt = PathBuf::from(create_worktree(p, "quiet-amber-fox", None).unwrap().path);
+        run(&wt, &["checkout", "-q", "--detach"]).unwrap();
+        std::fs::write(wt.join("work.txt"), "work\n").unwrap();
+        run(&wt, &["add", "."]).unwrap();
+        run(&wt, &["commit", "-q", "-m", "detached"]).unwrap();
+        let commit = run(&wt, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        assert_eq!(detached_head(p, &wt).as_deref(), Some(commit.as_str()));
+
+        // The directory breaks; the repository's record still knows HEAD.
+        std::fs::remove_file(wt.join(".git")).unwrap();
+        assert_eq!(detached_head(p, &wt).as_deref(), Some(commit.as_str()));
+        let removal = remove_worktree(p, "quiet-amber-fox", DirectDelete::Allowed).unwrap();
+        assert!(!wt.exists());
+        let rescued = removal.rescued_branch.expect("the commit is given a branch");
+        assert_eq!(rescued, format!("raccoon/rescued/quiet-amber-fox-{}", &commit[..8]));
+        assert_eq!(run(p, &["rev-parse", &rescued]).unwrap().trim(), commit);
+
+        // A detached HEAD on a commit something else holds needs no rescue.
+        let wt = PathBuf::from(create_worktree(p, "calm-teal-bee", None).unwrap().path);
+        run(&wt, &["checkout", "-q", "--detach"]).unwrap();
+        std::fs::remove_file(wt.join(".git")).unwrap();
+        assert_eq!(remove_worktree(p, "calm-teal-bee", DirectDelete::Allowed).unwrap().rescued_branch, None);
     }
 
     #[test]

@@ -660,7 +660,7 @@ impl ControlService {
         let browser_key = crate::browser::control::canonical(&worktree.path);
         // The CLI showed nothing of what the directory holds, so a worktree
         // git cannot remove is reported rather than deleted directly.
-        let entries = crate::session_ops::delete_workspace_entries(
+        let (entries, removal) = crate::session_ops::delete_workspace_entries(
             &project.path,
             &worktree.path,
             false,
@@ -674,7 +674,7 @@ impl ControlService {
         }
         crate::session_ops::notify_workspace_deleted(&*self.sink, &project.path, &entries);
         let removed: Vec<_> = entries.into_iter().map(|entry| entry.id).collect();
-        Ok(json!({"deleted": worktree.path, "project": project.path, "removedSessions": removed}))
+        Ok(json!({"deleted": worktree.path, "project": project.path, "removedSessions": removed, "keptBranch": removal.kept_branch}))
     }
 
     fn issues_list(&self, params: Value) -> Result<Value, ControlError> {

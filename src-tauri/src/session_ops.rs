@@ -211,13 +211,13 @@ pub(crate) fn sessions_in_workspace(path: &Path) -> Result<Vec<SessionEntry>> {
 /// Delete a workspace together with every session that ran in it: index
 /// entries, transcript logs and attachments. Returns the removed sessions so
 /// callers can announce them. Tabs must already be stopped.
-pub(crate) fn delete_workspace_entries(project_path: &str, path: &str, delete_branch: bool, direct: git::DirectDelete) -> Result<Vec<SessionEntry>> {
+pub(crate) fn delete_workspace_entries(project_path: &str, path: &str, delete_branch: bool, direct: git::DirectDelete) -> Result<(Vec<SessionEntry>, git::WorktreeRemoval)> {
     let project = std::fs::canonicalize(project_path).unwrap_or_else(|_| PathBuf::from(project_path));
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
     let affected = sessions_in_workspace(&target)?;
-    crate::workspaces::delete(&project, &target, delete_branch, direct).map_err(err)?;
+    let removal = crate::workspaces::delete(&project, &target, delete_branch, direct).map_err(err)?;
     remove_session_entries(&affected)?;
-    Ok(affected)
+    Ok((affected, removal))
 }
 
 /// Drop sessions from the index along with their transcript logs and
@@ -297,9 +297,50 @@ pub(crate) fn add_tab_entry(session_id: &str, tab: &NewTab) -> Result<TabEntry> 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Deleted {
     pub sessions: Vec<SessionEntry>,
-    /// The worktree's branch, when it was kept because it holds commits
-    /// nothing else has (see [`git::remove_worktree`]).
-    pub kept_branch: Option<String>,
+    /// What became of the worktree's branch and HEAD (see
+    /// [`git::remove_worktree`]).
+    pub removal: git::WorktreeRemoval,
+}
+
+/// Where a session's worktree is, against where removing it by name would
+/// look. A worktree is removed by name under the project's worktree folder
+/// as it is set now; when the session's checkout is somewhere else (the
+/// setting changed since it was made), the name could match a different
+/// directory, so it is never removed by name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorktreeTarget {
+    /// The session's checkout is the managed path for this name.
+    Managed(String),
+    /// The checkout is elsewhere and still on disk.
+    ElsewhereOnDisk,
+    /// The checkout is elsewhere and already gone: nothing to remove.
+    ElsewhereGone,
+}
+
+pub(crate) fn worktree_target(entry: &SessionEntry, name: &str) -> Result<WorktreeTarget> {
+    let managed = git::managed_worktree_path(Path::new(&entry.project_path), name).map_err(err)?;
+    let cwd = Path::new(&entry.cwd);
+    let same = match (std::fs::canonicalize(cwd), std::fs::canonicalize(&managed)) {
+        (Ok(a), Ok(b)) => a == b,
+        // Gone, or not resolvable: fall back to the paths as recorded.
+        _ => cwd == managed,
+    };
+    Ok(if same {
+        WorktreeTarget::Managed(name.to_string())
+    } else if std::fs::symlink_metadata(cwd).is_ok() {
+        WorktreeTarget::ElsewhereOnDisk
+    } else {
+        WorktreeTarget::ElsewhereGone
+    })
+}
+
+/// The error for a worktree that is not where removing by name would look.
+pub(crate) fn elsewhere_error(entry: &SessionEntry) -> String {
+    format!(
+        "The worktree at {} is not in this project's worktree folder ({}), so it was not removed and the session was kept. Delete the workspace from the sidebar instead.",
+        entry.cwd,
+        git::worktree_root(Path::new(&entry.project_path)).display()
+    )
 }
 
 /// Delete a session, its logs, attachments and, when asked, its worktree.
@@ -313,9 +354,8 @@ pub(crate) struct Deleted {
 /// stays in the index, so the directory is never left on disk with nothing
 /// pointing at it and the delete can be tried again.
 ///
-/// `direct` says whether a directory git cannot remove may be deleted
-/// directly. Callers that did not show the person what would be lost pass
-/// [`git::DirectDelete::Never`].
+/// `direct` says whether the caller showed the person what would be lost;
+/// see [`git::DirectDelete`].
 pub(crate) fn delete_session_blocking(
     sink: &dyn EventSink,
     session_id: &str,
@@ -325,29 +365,21 @@ pub(crate) fn delete_session_blocking(
 ) -> Result<Deleted> {
     let entry = index::get(session_id).map_err(err)?;
     let worktree = remove_worktree.then(|| entry.worktree_name.clone()).flatten().filter(|_| !entry.worktree_removed);
-    if let Some(name) = worktree.as_deref() {
-        // The worktree is removed by name, under the worktree folder as it is
-        // set now. If the session's checkout is somewhere else (the setting
-        // changed since), removing by name would find nothing, report
-        // success and orphan the real directory.
-        let managed = git::managed_worktree_path(Path::new(&entry.project_path), name).map_err(err)?;
-        let cwd = Path::new(&entry.cwd);
-        let same = std::fs::canonicalize(cwd).ok().zip(std::fs::canonicalize(&managed).ok()).map(|(a, b)| a == b).unwrap_or(cwd == managed);
-        if !same && std::fs::symlink_metadata(cwd).is_ok() {
-            return Err(format!(
-                "The worktree at {} is not in this project's worktree folder ({}), so it was not removed and the session was kept. Delete the workspace from the sidebar instead.",
-                entry.cwd,
-                git::worktree_root(Path::new(&entry.project_path)).display()
-            ));
-        }
-    }
+    let worktree = match worktree.as_deref().map(|name| worktree_target(&entry, name)).transpose()? {
+        Some(WorktreeTarget::Managed(name)) => Some(name),
+        Some(WorktreeTarget::ElsewhereOnDisk) => return Err(elsewhere_error(&entry)),
+        // Its checkout is already gone, and a directory of the same name
+        // under the current worktree folder is not this session's: only the
+        // session is deleted.
+        Some(WorktreeTarget::ElsewhereGone) | None => None,
+    };
     let doomed = if worktree.is_some() { sessions_in_workspace(Path::new(&entry.cwd))? } else { vec![entry.clone()] };
     for session in &doomed {
         stop(session);
     }
-    let mut kept_branch = None;
+    let mut removal = git::WorktreeRemoval::default();
     if let Some(name) = worktree.as_deref() {
-        kept_branch = git::remove_worktree(Path::new(&entry.project_path), name, direct).map_err(err)?.kept_branch;
+        removal = git::remove_worktree(Path::new(&entry.project_path), name, direct).map_err(err)?;
     }
     remove_session_entries(&doomed)?;
     if worktree.is_some() {
@@ -355,7 +387,7 @@ pub(crate) fn delete_session_blocking(
     } else {
         notify_sessions_deleted(sink, &doomed);
     }
-    Ok(Deleted { sessions: doomed, kept_branch })
+    Ok(Deleted { sessions: doomed, removal })
 }
 
 #[cfg(all(test, unix))]
@@ -425,6 +457,31 @@ mod tests {
     }
 
     #[test]
+    fn a_same_named_directory_is_never_removed_for_a_session_whose_checkout_is_elsewhere_and_gone() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let sink = crate::sink::BroadcastSink::new(16);
+        let session = worktree_session(dir.path());
+        let name = session.worktree_name.clone().unwrap();
+        // The session's own checkout goes away, and the worktree folder
+        // setting changes to a place that holds a directory of the same name.
+        git::run(dir.path(), &["worktree", "remove", "--force", &session.cwd]).unwrap();
+        let settings = crate::store::settings::Settings { worktree_dir: ".elsewhere".into(), ..Default::default() };
+        crate::store::settings::save(&settings).unwrap();
+        let look_alike = git::worktree_path(dir.path(), &name);
+        std::fs::create_dir_all(&look_alike).unwrap();
+        std::fs::write(look_alike.join("not-the-sessions.txt"), "keep").unwrap();
+        assert_eq!(worktree_target(&session, &name).unwrap(), WorktreeTarget::ElsewhereGone);
+
+        let stopped = std::cell::Cell::new(0);
+        let deleted = delete_session_blocking(&sink, &session.id, true, git::DirectDelete::Allowed, &|_| stopped.set(stopped.get() + 1)).unwrap();
+        assert_eq!(deleted.sessions.len(), 1);
+        assert!(index::get(&session.id).is_err(), "only the session is deleted");
+        assert!(look_alike.join("not-the-sessions.txt").exists(), "the same-named directory is not the session's");
+        assert!(git::worktree_branch_names(dir.path()).contains(&name), "nor is the branch removed by name");
+    }
+
+    #[test]
     fn a_caller_that_showed_nothing_never_deletes_a_broken_worktree_directly() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -477,7 +534,7 @@ mod tests {
         drop(locked);
         let removed = delete_session_blocking(&sink, &session.id, true, git::DirectDelete::Allowed, &stop).unwrap();
         assert_eq!(removed.sessions.len(), 2);
-        assert_eq!(removed.kept_branch, None);
+        assert_eq!(removed.removal, git::WorktreeRemoval::default());
         assert!(!worktree.exists());
         assert!(index::load().unwrap().is_empty());
     }

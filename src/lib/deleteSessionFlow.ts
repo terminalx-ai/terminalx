@@ -1,9 +1,13 @@
 import { ask, message } from "@tauri-apps/plugin-dialog";
 import { api, errorMessage } from "@/lib/api";
 import { deleteSession } from "@/lib/sessions";
+import { confirmUncheckedDelete, reportBranchOutcome } from "@/lib/worktreeConfirm";
 import type { SessionEntry } from "@/types/session";
 
 const NOT_TRASH = "This deletes the directory; it is not moved to the Trash.";
+const RETRY = "Retry";
+const SESSION_ONLY = "Delete session only";
+const CLOSE = "Close";
 
 /**
  * What deleting the session's worktree would lose, read fresh. `confirmTwice`
@@ -16,7 +20,7 @@ async function worktreeDetail(session: SessionEntry): Promise<{ detail: string; 
     if (!disposition.exists) return { detail: "Its worktree is already gone; its transcript and attachments are removed.", confirmTwice: false };
     if (!disposition.checked) {
       return {
-        detail: `Its worktree is no longer a working git checkout, so it cannot be checked for uncommitted or unpushed work. ${NOT_TRASH}`,
+        detail: `Its worktree is not a working git checkout of this project, so it cannot be checked for uncommitted or unpushed work. ${NOT_TRASH}`,
         confirmTwice: true,
       };
     }
@@ -35,10 +39,11 @@ async function worktreeDetail(session: SessionEntry): Promise<{ detail: string; 
 
 /**
  * Ask before deleting a session, then delete it. A delete that fails (most
- * often a worktree something still holds) is shown with its reason and the
- * state the directory was left in, and can be retried. Every attempt reads
- * the worktree's state again and asks again, so work that appeared since the
- * first confirmation is never deleted on the strength of the old answer.
+ * often a worktree something still holds, or a directory that is not this
+ * project's to remove) is shown with its reason and the state the directory
+ * was left in. From there the person can retry, which reads the worktree's
+ * state again and asks again, or delete the session alone and leave the
+ * directory, so a session is never stuck behind a directory that cannot go.
  */
 export async function confirmDeleteSession(session: SessionEntry) {
   const hasWorktree = !!session.worktreeName && !session.worktreeRemoved;
@@ -51,28 +56,24 @@ export async function confirmDeleteSession(session: SessionEntry) {
       cancelLabel: "Cancel",
     }).catch(() => false);
     if (!yes) return;
-    if (confirmTwice) {
-      const sure = await ask(
-        `Nothing can confirm that "${session.title}" has no unsaved work. Any files in its worktree that are not saved elsewhere will be lost for good. Its branch is kept if it holds commits nothing else has.`,
-        { title: "Delete without checking?", kind: "warning", okLabel: "Delete anyway", cancelLabel: "Cancel" },
-      ).catch(() => false);
-      if (!sure) return;
-    }
+    if (confirmTwice && !(await confirmUncheckedDelete(session.cwd))) return;
     try {
-      const report = await deleteSession(session.id, true);
-      if (report?.keptBranch) {
-        await message(`The branch ${report.keptBranch} was kept: it holds commits that no other branch, remote or tag has.`, {
-          title: "Branch kept",
-          kind: "info",
-        }).catch(() => undefined);
-      }
+      await reportBranchOutcome(await deleteSession(session.id, true));
       return;
     } catch (error) {
-      const retry = await ask(
-        `${errorMessage(error)}\n\n"${session.title}" is still in the list, so what remains of its worktree is not left without an owner. Close whatever is still using the directory, then retry; its state is checked again first.`,
-        { title: "Could not delete session", kind: "error", okLabel: "Retry", cancelLabel: "Close" },
-      ).catch(() => false);
-      if (!retry) return;
+      const choice = await message(
+        `${errorMessage(error)}\n\n"${session.title}" is still in the list, so what remains of its worktree is not left without an owner.\n\n• ${RETRY}: close whatever is using the directory first; its state is checked again.\n• ${SESSION_ONLY}: removes this session and its transcript, and leaves the directory at ${session.cwd} on disk.`,
+        { title: "Could not delete session", kind: "error", buttons: { yes: RETRY, no: SESSION_ONLY, cancel: CLOSE } },
+      ).catch(() => CLOSE);
+      if (choice === SESSION_ONLY) {
+        try {
+          await deleteSession(session.id, false);
+        } catch (onlyError) {
+          await message(errorMessage(onlyError), { title: "Could not delete session", kind: "error" }).catch(() => undefined);
+        }
+        return;
+      }
+      if (choice !== RETRY) return;
     }
   }
 }

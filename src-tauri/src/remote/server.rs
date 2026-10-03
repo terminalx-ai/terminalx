@@ -1780,7 +1780,7 @@ impl WorkspaceRpc {
         // directory git cannot remove is reported, never deleted directly.
         let deleted = crate::session_ops::delete_session_blocking(&*self.sink, &session.id, remove_worktree, crate::git::DirectDelete::Never, &stop)
             .map_err(RpcError::internal)?;
-        let kept_branch = deleted.kept_branch;
+        let kept_branch = deleted.removal.kept_branch;
         let removed = deleted.sessions;
         let removed_ids: HashSet<String> = removed.iter().map(|session| session.id.clone()).collect();
         if let Some(agents) = self.agents.get() {

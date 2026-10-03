@@ -18,7 +18,7 @@ vi.mock("@/lib/api", () => ({
 
 import { confirmDeleteSession } from "./deleteSessionFlow";
 
-const session = { id: "s1", title: "Fix login", worktreeName: "quiet-amber-fox", worktreeRemoved: false } as SessionEntry;
+const session = { id: "s1", title: "Fix login", cwd: "/p/.raccoon/worktrees/quiet-amber-fox", worktreeName: "quiet-amber-fox", worktreeRemoved: false } as SessionEntry;
 const clean = { exists: true, checked: true, uncommitted: 0, unpushed: 0, branch: "raccoon/quiet-amber-fox" };
 
 describe("confirmDeleteSession", () => {
@@ -43,12 +43,13 @@ describe("confirmDeleteSession", () => {
     expect(ask.mock.calls[0][0]).toContain("1 unpushed commit and 2 uncommitted files");
   });
 
-  it("never calls a worktree it could not check clean, and asks twice", async () => {
+  it("never calls a worktree it could not check clean, and asks twice with the full path", async () => {
     worktreeDisposition.mockResolvedValue({ ...clean, checked: false });
     ask.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
     await confirmDeleteSession(session);
     expect(ask.mock.calls[0][0]).toContain("cannot be checked for uncommitted or unpushed work");
     expect(ask.mock.calls[0][0]).not.toContain("Its worktree, transcript and attachments are removed.");
+    expect(ask.mock.calls[1][0]).toContain("/p/.raccoon/worktrees/quiet-amber-fox");
     expect(ask.mock.calls[1][1]).toMatchObject({ okLabel: "Delete anyway" });
     expect(deleteSession).not.toHaveBeenCalled();
 
@@ -67,13 +68,14 @@ describe("confirmDeleteSession", () => {
   });
 
   it("shows why a delete failed without claiming nothing was deleted", async () => {
-    ask.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    ask.mockResolvedValueOnce(true);
+    message.mockResolvedValueOnce("Close");
     deleteSession.mockRejectedValueOnce(new Error("Could not remove the worktree at /p/.raccoon/worktrees/quiet-amber-fox: Permission denied. It was partly removed: 12 MB remain on disk and it is no longer a usable checkout."));
     await confirmDeleteSession(session);
-    const [text, options] = ask.mock.calls[1];
+    const [text, options] = message.mock.calls[0];
     expect(text).toContain("It was partly removed: 12 MB remain on disk");
     expect(text).not.toContain("Nothing was deleted");
-    expect(options).toMatchObject({ okLabel: "Retry", cancelLabel: "Close" });
+    expect(options).toMatchObject({ buttons: { yes: "Retry", no: "Delete session only", cancel: "Close" } });
     expect(deleteSession).toHaveBeenCalledTimes(1);
   });
 
@@ -81,24 +83,38 @@ describe("confirmDeleteSession", () => {
     deleteSession.mockRejectedValueOnce(new Error("Permission denied")).mockResolvedValueOnce({ keptBranch: null });
     worktreeDisposition.mockResolvedValueOnce(clean).mockResolvedValueOnce({ ...clean, uncommitted: 3 });
     // Confirm, retry, then decline once the new work is shown.
-    ask.mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    ask.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    message.mockResolvedValueOnce("Retry");
     await confirmDeleteSession(session);
     expect(worktreeDisposition).toHaveBeenCalledTimes(2);
-    expect(ask.mock.calls[2][0]).toContain("3 uncommitted files");
+    expect(ask.mock.calls[1][0]).toContain("3 uncommitted files");
     expect(deleteSession).toHaveBeenCalledTimes(1);
   });
 
   it("retries when confirmed again", async () => {
     deleteSession.mockRejectedValueOnce(new Error("Permission denied")).mockResolvedValueOnce({ keptBranch: null });
     ask.mockResolvedValue(true);
+    message.mockResolvedValueOnce("Retry");
     await confirmDeleteSession(session);
     expect(deleteSession).toHaveBeenCalledTimes(2);
+    expect(deleteSession).toHaveBeenLastCalledWith("s1", true);
   });
 
-  it("says when the branch was kept", async () => {
+  it("can delete the session alone when its directory cannot be removed", async () => {
+    deleteSession.mockRejectedValueOnce(new Error("refusing to remove: /p/.raccoon/worktrees/quiet-amber-fox is a repository of its own")).mockResolvedValueOnce({ keptBranch: null });
+    ask.mockResolvedValueOnce(true);
+    message.mockResolvedValueOnce("Delete session only");
+    await confirmDeleteSession(session);
+    expect(message.mock.calls[0][0]).toContain("leaves the directory at /p/.raccoon/worktrees/quiet-amber-fox on disk");
+    expect(deleteSession).toHaveBeenNthCalledWith(1, "s1", true);
+    expect(deleteSession).toHaveBeenNthCalledWith(2, "s1", false);
+  });
+
+  it("says when the branch was kept or a detached HEAD was saved", async () => {
     ask.mockResolvedValue(true);
-    deleteSession.mockResolvedValue({ keptBranch: "raccoon/quiet-amber-fox" });
+    deleteSession.mockResolvedValue({ keptBranch: "raccoon/quiet-amber-fox", rescuedBranch: "raccoon/rescued/quiet-amber-fox-0123abcd" });
     await confirmDeleteSession(session);
     expect(message.mock.calls[0][0]).toContain("raccoon/quiet-amber-fox was kept");
+    expect(message.mock.calls[0][0]).toContain("raccoon/rescued/quiet-amber-fox-0123abcd");
   });
 });
