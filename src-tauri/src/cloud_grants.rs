@@ -1398,11 +1398,26 @@ pub fn agent_env_for_launch(harness: &str, launch: &str) -> Vec<(String, Option<
 /// stored login, and whenever it is not known for certain.
 pub fn sign_in_required(harness: &str) -> Option<SignInRequired> {
     let (store, provider) = (installed()?, provider_of_harness(harness)?);
-    // Someone signed Claude Code in by hand in the workspace's terminal.
-    if provider == Provider::Claude && dirs::home_dir().is_some_and(|home| home.join(".claude").join(".credentials.json").is_file()) {
+    if signed_in_by_hand(provider, dirs::home_dir().as_deref()) != Some(false) {
         return None;
     }
     store.sign_in_required(provider, &crate::cloud_config::configured_env_names(), Instant::now())
+}
+
+/// Whether someone signed the agent in themselves in the workspace's
+/// terminal, which needs no grant. `None` where the runtime cannot tell:
+/// "needs sign-in" is then never claimed for that agent.
+/// - Claude Code keeps a hand sign-in in `~/.claude/.credentials.json`.
+/// - Codex runs with a managed home that never holds a credential of its
+///   own (`link_codex_auth`), so it cannot be signed in by hand.
+/// - Cursor: where its CLI keeps a sign-in is not something this runtime
+///   knows, so it cannot be ruled out.
+fn signed_in_by_hand(provider: Provider, home: Option<&Path>) -> Option<bool> {
+    match provider {
+        Provider::Claude => Some(home.is_some_and(|home| home.join(".claude").join(".credentials.json").is_file())),
+        Provider::Codex => Some(false),
+        Provider::Cursor => None,
+    }
 }
 
 /// [`sign_in_required`] for the session running under `launch`: one that
@@ -2222,6 +2237,20 @@ mod tests {
         *server.reject.borrow_mut() = true;
         assert!(store.sync(&server, t0, NOW).is_err());
         assert_eq!(store.sign_in_required(Provider::Claude, &none, t0), None);
+    }
+
+    #[test]
+    fn a_hand_sign_in_is_never_called_missing() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(signed_in_by_hand(Provider::Claude, Some(home.path())), Some(false));
+        assert_eq!(signed_in_by_hand(Provider::Claude, None), Some(false));
+        fs::create_dir_all(home.path().join(".claude")).unwrap();
+        fs::write(home.path().join(".claude").join(".credentials.json"), "{}").unwrap();
+        assert_eq!(signed_in_by_hand(Provider::Claude, Some(home.path())), Some(true));
+        // Codex cannot be signed in by hand here; for Cursor the runtime
+        // cannot tell, so it never claims a Cursor agent needs sign-in.
+        assert_eq!(signed_in_by_hand(Provider::Codex, Some(home.path())), Some(false));
+        assert_eq!(signed_in_by_hand(Provider::Cursor, Some(home.path())), None);
     }
 
     #[test]
