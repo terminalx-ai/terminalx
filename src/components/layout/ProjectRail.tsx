@@ -300,13 +300,16 @@ export function ProjectRail({
         <DevelopmentSection />
       </div>
 
-      <div className="shrink-0 border-t border-hairline p-2">
-        <AccountSidebarEntry onOpenAccount={onOpenAccount} />
-        <Button variant="ghost" className="w-full justify-start gap-2 px-2" onClick={() => onOpenSettings()}>
-          <Settings />
-          Settings
-          <Keys shortcut="app.settings" />
-        </Button>
+      {/* One row: the account (which opens Account) takes the width and truncates; the gear is its own target at the right end. */}
+      <div className="flex shrink-0 items-center gap-1 border-t border-hairline p-2" data-testid="sidebar-account-row">
+        <div className="min-w-0 flex-1">
+          <AccountSidebarEntry onOpenAccount={onOpenAccount} />
+        </div>
+        <WithTooltip label="Settings" shortcut="app.settings" side="top">
+          <Button variant="ghost" size="icon-sm" className="shrink-0" aria-label="Settings" onClick={() => onOpenSettings()}>
+            <Settings />
+          </Button>
+        </WithTooltip>
       </div>
     </div>
   );

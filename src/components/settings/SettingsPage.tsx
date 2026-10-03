@@ -25,6 +25,8 @@ import { ShortcutsTab } from "./ShortcutsTab";
 
 const TABS = ["account", "devices", "general", "appearance", "agents", "transcription", "integrations", "shortcuts", "about"] as const;
 export type SettingsTab = (typeof TABS)[number];
+/** The section Settings opens on when nothing asks for a particular one (PRO-81). */
+export const DEFAULT_SETTINGS_TAB: SettingsTab = "account";
 type Tab = SettingsTab;
 const TAB_LABEL: Record<Tab, string> = {
   account: "Account",
@@ -40,13 +42,13 @@ const TAB_LABEL: Record<Tab, string> = {
 
 export function SettingsPage({
   onBack,
-  initialTab = "general",
+  initialTab = DEFAULT_SETTINGS_TAB,
 }: {
   onBack: () => void;
   initialTab?: SettingsTab;
 }) {
   // Settings always opens on a section: a value that names none is the default one.
-  const initial: Tab = TABS.includes(initialTab) ? initialTab : "general";
+  const initial: Tab = TABS.includes(initialTab) ? initialTab : DEFAULT_SETTINGS_TAB;
   const [tab, setTab] = useState<Tab>(initial);
   useEffect(() => {
     setTab(initial);
