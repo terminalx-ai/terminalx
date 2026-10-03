@@ -62,6 +62,12 @@ export interface Prefs {
    * Kept per machine. An action not listed uses its defaults.
    */
   shortcuts: Record<string, string[]>;
+  /**
+   * The sidebar's session filter per person, by account email (`local` while
+   * signed out). Only a filter that is on is kept; someone not listed sees
+   * every session. One person's choice never carries over to another.
+   */
+  sidebarFilters: Record<string, "unread" | "needs">;
 }
 
 const DEFAULTS: Prefs = {
@@ -93,6 +99,7 @@ const DEFAULTS: Prefs = {
   cloudPinned: {},
   cloudCollapsed: {},
   shortcuts: {},
+  sidebarFilters: {},
 };
 
 const KEY = "raccoon.prefs";

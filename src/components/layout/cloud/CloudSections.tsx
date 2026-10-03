@@ -665,8 +665,8 @@ function WorkspaceGroupNode({ node, expanded: projectExpanded, onLifecycle }: { 
   const shown = projectExpanded && open;
   const { sessions, known } = useCloudWorkspaceSessions(node, { load: shown, showArchived: store.showArchived, selectedKey: store.selectedSessionId });
   const activity = useWorkspaceActivity(node, sessions, !known || sessions.every((row) => row.source !== "live"));
-  // Filtered: a workspace with no such session has no row.
-  const filteredOut = filter.active && !sessions.some((row) => filter.shows(row.key));
+  // Filtered: a workspace with no such session has no row, unless the server's list alone says it waits for a person.
+  const filteredOut = filter.active && !sessions.some((row) => filter.shows(row.key)) && !filter.showsWorkspace(node.key);
   const run = async (work: () => Promise<void>) => {
     setError(null);
     try {
@@ -722,7 +722,13 @@ function WorkspaceSessions({ node, shown, showLocation }: { node: CloudWorkspace
   const store = useSessionStore();
   const { sessions: every, capabilities, manage: manages, known } = useCloudWorkspaceSessions(node, { load: shown, showArchived: store.showArchived, selectedKey: store.selectedSessionId });
   const filter = useSidebarFilter();
-  const sessions = useMemo(() => (filter.active ? every.filter((row) => filter.shows(row.key)) : every), [every, filter]);
+  const sessions = useMemo(() => {
+    if (!filter.active) return every;
+    const found = every.filter((row) => filter.shows(row.key));
+    // The list says this workspace waits for a person, and no session known here says which: all of them show
+    // (or, for one never opened on this desktop, the line that opens it).
+    return !found.length && filter.showsWorkspace(node.key) ? every : found;
+  }, [every, filter, node.key]);
   const activity = useWorkspaceActivity(node, every, every.every((row) => row.source !== "live"));
   const card = workspaceCard(node.item, activity);
   const connection = useCloudConnection(node.key);
@@ -737,7 +743,7 @@ function WorkspaceSessions({ node, shown, showLocation }: { node: CloudWorkspace
   const manage = manages && !!capabilities?.includes("session/2") && (authority === null || authority === "manage");
   const { state } = node.item.workspace;
   // Filtered: only the sessions found; no placeholder line and no workspace terminals.
-  if (filter.active && !sessions.length) return null;
+  if (filter.active && !sessions.length && !filter.showsWorkspace(node.key)) return null;
   if (!sessions.length) {
     const openable = (state === "ready" || state === "suspended") && activity.tone !== "changing" && activity.tone !== "attention";
     return (

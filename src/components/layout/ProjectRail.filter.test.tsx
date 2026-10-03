@@ -18,6 +18,8 @@ vi.mock("@/lib/tabViews", () => ({ useTabViews: () => ({ views: {} }) }));
 const { ProjectRail } = await import("./ProjectRail");
 const sessions = await import("@/lib/sessions");
 const account = await import("@/lib/account");
+const sidebarFilter = await import("@/lib/sidebarFilter");
+const prefs = await import("@/lib/prefs");
 
 const workspaceOf = (path: string, name: string): Workspace => ({ path, name, branch: "main", head: "abc1234", isMain: true, managed: false, uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0 });
 const projects: Project[] = [
@@ -69,7 +71,7 @@ beforeAll(async () => {
 afterEach(() => {
   cleanup();
   act(() => {
-    sessions.setSidebarFilter("all");
+    sidebarFilter.setSidebarFilter("all");
     sessions.selectSession(null);
   });
 });
@@ -104,7 +106,7 @@ describe("the sidebar's session filter (local)", () => {
   it("Needs you shows only the sessions waiting for a person, with their projects opened", async () => {
     mount();
     await choose("Needs you");
-    expect(sessions.getSessionStore().sidebarFilter).toBe("needs");
+    expect(sidebarFilter.getSidebarFilter()).toBe("needs");
     expect(projectNames()).toEqual(["Api"]);
     expect(shown("Approve the migration")).toBe(true);
     // Not one that is only working, and never an archived one.
@@ -132,9 +134,46 @@ describe("the sidebar's session filter (local)", () => {
     expect(shown("Landing page copy")).toBe(false);
   });
 
+  it("keeps the choice per person across a relaunch, and never applies one account's filter to another", async () => {
+    mount();
+    await choose("Unread");
+    // Kept in prefs under this computer's own sidebar (nobody is signed in).
+    expect(prefs.getPrefs().sidebarFilters).toEqual({ local: "unread" });
+    cleanup();
+    // "Relaunch": the sidebar mounts filtered.
+    mount();
+    expect(screen.getByTestId("sidebar-filter").getAttribute("data-filter")).toBe("unread");
+    expect(projectNames()).toEqual(["Web"]);
+    cleanup();
+
+    // Someone signs in: their sidebar is unfiltered, and the signed-out choice is still there afterwards.
+    const original = mocks.invoke.getMockImplementation()!;
+    const signedIn: AccountStatus = { state: "signed-in", identity: { name: "Ada", email: "ada@example.com", organization: "Acme", organizationId: "org-a" }, expiresAt: null, lastError: null, context: { scope: "s", revision: "s:1" }, organizations: [] };
+    mocks.invoke.mockImplementation(async (command: string, args: { projectPath?: string } = {}) => (command === "account_status" ? signedIn : original(command, args)));
+    try {
+      await act(async () => {
+        await account.refreshAccount();
+      });
+      mount();
+      expect(screen.getByTestId("sidebar-filter").getAttribute("data-filter")).toBe("all");
+      expect(projectNames()).toEqual(["Api", "Quiet", "Web"]);
+      await choose("Needs you");
+      expect(prefs.getPrefs().sidebarFilters).toEqual({ local: "unread", "ada@example.com": "needs" });
+      act(() => sidebarFilter.setSidebarFilter("all"));
+      expect(prefs.getPrefs().sidebarFilters).toEqual({ local: "unread" });
+    } finally {
+      mocks.invoke.mockImplementation(original);
+      cleanup();
+      await act(async () => {
+        await account.refreshAccount();
+      });
+    }
+    expect(sidebarFilter.getSidebarFilter()).toBe("unread");
+  });
+
   it("says when nothing matches and offers the way back", async () => {
     mount();
-    act(() => sessions.setSidebarFilter("needs"));
+    act(() => sidebarFilter.setSidebarFilter("needs"));
     // The waiting session is answered.
     const answered = sessionList.map((entry) => (entry.id === "needs" ? { ...entry, tabs: entry.tabs.map((tab) => ({ ...tab, status: "idle" as const })) } : entry));
     const original = mocks.invoke.getMockImplementation()!;
@@ -147,7 +186,7 @@ describe("the sidebar's session filter (local)", () => {
       expect(empty.textContent).toContain("Nothing needs you.");
       expect(projectNames()).toEqual([]);
       fireEvent.click(within(empty).getByRole("button", { name: "Show all sessions" }));
-      expect(sessions.getSessionStore().sidebarFilter).toBe("all");
+      expect(sidebarFilter.getSidebarFilter()).toBe("all");
       expect(projectNames()).toEqual(["Api", "Quiet", "Web"]);
     } finally {
       mocks.invoke.mockImplementation(original);

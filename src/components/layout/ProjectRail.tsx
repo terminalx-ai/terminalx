@@ -18,14 +18,13 @@ import {
   removeProject,
   selectProjectInSidebar,
   setShowArchived as setSessionsArchived,
-  setSidebarFilter,
   setProjectLogo,
   startSessionIn,
   updateProject,
   useSessionStore,
 } from "@/lib/sessions";
 import { bucketSessions, COLUMNS, type ColumnId } from "@/lib/dashboard";
-import { SIDEBAR_FILTERS, useSidebarFilter } from "@/lib/sidebarFilter";
+import { SIDEBAR_FILTERS, setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
 import { useCloudDashboard } from "@/lib/cloudDashboard";
 import type { Project } from "@/types/session";
 import { MASCOTS, PROJECT_COLORS, PixelMascot, colorCss } from "./PixelMascot";

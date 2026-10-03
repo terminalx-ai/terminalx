@@ -296,7 +296,7 @@ describe("sessions under the project", () => {
     };
     const titles = () => screen.queryAllByTestId("cloud-session-node").map((node) => node.getAttribute("data-session"));
     const filterTo = async (filter: "all" | "unread" | "needs") => {
-      const { setSidebarFilter } = await sessionsStore();
+      const { setSidebarFilter } = await import("@/lib/sidebarFilter");
       await act(async () => {
         setSidebarFilter(filter);
         // The dashboard's projection, which the filter reads, settles a microtask later.
@@ -353,6 +353,34 @@ describe("sessions under the project", () => {
       } finally {
         act(() => prefs.setPrefs({ cloudCollapsed: {} }));
       }
+    });
+
+    it("Needs you shows a workspace the list says is waiting although this desktop has never opened it", async () => {
+      // No session of it is known here: only the server's count of pending approvals.
+      await load([item("never-opened", { repositories: [acmeApi], runtimeActivity: pending }), item("quiet", { repositories: [acmeWeb] })], {
+        quiet: { sessions: [session("q1", "Nothing new")], capabilities: ["session/2"] },
+      });
+      mount();
+      await filterTo("needs");
+      await waitFor(() => expect(projectRow(`cloud:${ORG}:github.com/acme/api`)).toBeTruthy());
+      expect(screen.queryByTestId("cloud-org-filtered-empty")).toBeNull();
+      // Its line offers to open it (which connects, never wakes); the other project is not listed.
+      const line = screen.getByTestId("cloud-workspace-empty");
+      expect(line.getAttribute("data-workspace")).toBe("never-opened");
+      expect(line.textContent).toContain("Open to load sessions");
+      expect(projectRow(`cloud:${ORG}:github.com/acme/web`)).toBeUndefined();
+      expectNoAttachOrResume();
+    });
+
+    it("does not count a stopped workspace, one that is offline, or one not shared with this person as needing them", async () => {
+      await load([
+        item("stopped", { state: "suspended", repositories: [acmeApi], runtimeActivity: pending }),
+        item("offline", { repositories: [acmeApi], runtimeActivity: { ...pending, online: false } }),
+        item("unshared", { repositories: [acmeWeb], runtimeActivity: pending, you: { role: "none", canApprove: false, canManageShares: false } }),
+      ]);
+      mount();
+      await filterTo("needs");
+      await waitFor(() => expect(screen.getByTestId("cloud-org-filtered-empty").textContent).toBe("Nothing needs you."));
     });
 
     it("keeps the selected cloud session in view under a filter it does not match", async () => {

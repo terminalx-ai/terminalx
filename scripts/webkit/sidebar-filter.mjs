@@ -14,11 +14,13 @@ const server = await serve();
 const browser = await launch();
 let failed = 0;
 
-for (const { name, fixture } of [
-  { name: "signed out", fixture: { cloud: false, localProjects: 3 } },
-  { name: "with organizations", fixture: { cloud: true, localProjects: 3 } },
+// Also at the narrowest window the app supports (960 px), where the sidebar keeps its width and the rest gives way.
+for (const { name, fixture, viewport } of [
+  { name: "signed out", fixture: { cloud: false, localProjects: 3 }, viewport: { width: 1100, height: 600 } },
+  { name: "with organizations", fixture: { cloud: true, localProjects: 3 }, viewport: { width: 1100, height: 600 } },
+  { name: "with organizations, 960 px", fixture: { cloud: true, localProjects: 3 }, viewport: { width: 960, height: 700 } },
 ]) {
-  const page = await open(browser, server.url, fixture, { width: 1100, height: 600 });
+  const page = await open(browser, server.url, fixture, viewport);
   const filter = page.getByTestId("sidebar-filter");
   await filter.waitFor();
   const layout = await filter.evaluate((button) => {
