@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { searchPanelOpen } from "@codemirror/search";
 import { EditorView } from "@codemirror/view";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { closeAllEditors, getEditors, openFile } from "@/lib/editors";
+import { setPrefs } from "@/lib/prefs";
 import { registerFileSource, type FileSource, type FileState } from "@/lib/workspaceFiles";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { EditorPane } from "./EditorPane";
 
 vi.mock("@/lib/api", () => ({ api: { headTree: vi.fn(), fileContentsAt: vi.fn() }, fs: {} }));
@@ -175,6 +178,44 @@ describe("a cloud workspace file in the editor", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await screen.findByTestId("editor-conflict");
     expect(cloud.files.get("src/main.rs")!.text).toBe("fn main() { agent(); }\n");
+  });
+
+  it("saves and finds on the reader's shortcuts, in the editor that has the focus", async () => {
+    // `mod` is Ctrl in jsdom, which is not a Mac. The find bar has tooltips, so they get their provider.
+    const { container } = render(
+      <TooltipProvider>
+        <EditorPane entry={open()} visible />
+      </TooltipProvider>,
+    );
+    await ready(container);
+    const content = view(container).contentDOM;
+    type(container, "// mine\n");
+
+    // Not this editor's keys while the focus is elsewhere.
+    expect(fireEvent.keyDown(document.body, { key: "s", code: "KeyS", ctrlKey: true })).toBe(true);
+    expect(cloud.writes).toHaveLength(0);
+
+    act(() => content.focus());
+    expect(fireEvent.keyDown(content, { key: "s", code: "KeyS", ctrlKey: true })).toBe(false);
+    await waitFor(() => expect(cloud.files.get("src/main.rs")!.text).toBe("fn main() {}\n// mine\n"));
+
+    // Moved in Settings: the old key no longer saves, the new one does.
+    act(() => setPrefs({ shortcuts: { "files.save": ["mod+alt+s"], "files.find": ["mod+shift+y"] } }));
+    expect(screen.getByRole("button", { name: "Save" }).textContent).toContain("CtrlAltS");
+    type(container, "// more\n");
+    act(() => content.focus());
+    fireEvent.keyDown(content, { key: "s", code: "KeyS", ctrlKey: true });
+    fireEvent.keyDown(content, { key: "f", code: "KeyF", ctrlKey: true });
+    await act(async () => {});
+    expect(cloud.writes).toHaveLength(1);
+    expect(searchPanelOpen(view(container).state)).toBe(false);
+
+    fireEvent.keyDown(content, { key: "ß", code: "KeyS", ctrlKey: true, altKey: true });
+    await waitFor(() => expect(cloud.writes).toHaveLength(2));
+    act(() => content.focus());
+    act(() => void fireEvent.keyDown(content, { key: "Y", code: "KeyY", ctrlKey: true, shiftKey: true }));
+    expect(searchPanelOpen(view(container).state)).toBe(true);
+    act(() => setPrefs({ shortcuts: {} }));
   });
 
   it("is read-only for a participant", async () => {

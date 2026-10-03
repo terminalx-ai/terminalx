@@ -4,7 +4,7 @@ import { ExternalLink, Mic } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
-import { keycaps } from "@/lib/hotkeys";
+import { useHeldShortcut, useShortcut, useShortcutKeys } from "@/lib/hotkeys";
 import { clearDictationError, dictationAvailable, startDictation, stopDictation, useDictation, type DictationState } from "@/lib/dictation";
 import { anchorAt, insertSpoken, type DictationAnchor } from "@/lib/dictationText";
 import { useTranscriptionInput } from "@/lib/transcriptionInput";
@@ -31,6 +31,11 @@ export interface Dictation {
   /** null until the check comes back; false hides the mic. */
   available: boolean | null;
   toggle: () => void;
+  /** Open the mic for this composer; false when a dictation is already going. `held` is a key being held to talk. */
+  start: (opts?: { held?: boolean }) => boolean;
+  stop: () => void;
+  /** This dictation runs while a key is held, and stops when it is released. */
+  held: boolean;
 }
 
 /**
@@ -161,19 +166,52 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
     field?.current?.focus();
   }, [done, field]);
 
+  const [held, setHeld] = useState(false);
+  const start = useCallback(
+    (opts?: { held?: boolean }) => {
+      const id = startDictation(target);
+      if (id == null) return false;
+      session.current = id;
+      setHeld(!!opts?.held);
+      reanchor("");
+      return true;
+    },
+    [target, reanchor],
+  );
+  const stop = useCallback(() => void stopDictation(), []);
   const toggle = useCallback(() => {
-    if (dictating) {
-      void stopDictation();
-      return;
-    }
-    if (state.phase !== "idle") return;
-    const id = startDictation(target);
-    if (id == null) return;
-    session.current = id;
-    reanchor("");
-  }, [dictating, state.phase, target, reanchor]);
+    if (dictating) stop();
+    else start();
+  }, [dictating, start, stop]);
 
-  return { state, dictating, available, toggle };
+  return { state, dictating, available, toggle, start, stop, held: held && dictating };
+}
+
+/**
+ * The keys for dictation: its chord toggles the mic, and its held modifier
+ * (Right Option by default on macOS) is hold-to-talk: the mic opens while the
+ * key is down and closes when it is released. Pressing another key while it is
+ * held makes it an ordinary combination, and a dictation it started stops.
+ */
+export function useDictationShortcuts(dictation: Dictation, enabled = true) {
+  useShortcut("composer.dictate", dictation.toggle, { enabled });
+  // Only a dictation this hold opened is closed by its release; one toggled on stays on.
+  const holding = useRef(false);
+  useHeldShortcut(
+    "composer.dictate",
+    {
+      onStart: () => {
+        // Where dictation is not available there is no mic to open, and no error to show for a key held by habit.
+        holding.current = dictation.available !== false && dictation.start({ held: true });
+      },
+      onEnd: () => {
+        if (!holding.current) return;
+        holding.current = false;
+        dictation.stop();
+      },
+    },
+    { enabled },
+  );
 }
 
 /** The error row and the listening row, above the composer box. */
@@ -202,7 +240,7 @@ export function DictationStatus({ dictation }: { dictation: Dictation }) {
       {dictating && (
         <div className="mb-2 flex items-center gap-2 px-1 text-xs text-muted-foreground">
           <span className={cn("size-2 rounded-full", state.phase === "listening" ? "bg-destructive animate-pulse-soft" : "bg-faint")} />
-          {state.phase === "starting" ? "Opening the microphone…" : state.phase === "finishing" ? "Finishing…" : "Listening. Speak, then press the mic again."}
+          {state.phase === "starting" ? "Opening the microphone…" : state.phase === "finishing" ? "Finishing…" : dictation.held ? "Listening. Speak, then release the key." : "Listening. Speak, then press the mic again."}
         </div>
       )}
     </>
@@ -213,11 +251,12 @@ export function DictationStatus({ dictation }: { dictation: Dictation }) {
 export function MicButton({ dictation, disabled = false }: { dictation: Dictation; disabled?: boolean }) {
   const { state, dictating, available, toggle } = dictation;
   const input = useTranscriptionInput();
+  const keys = useShortcutKeys("composer.dictate");
   if (available === false) return null;
   return (
     // In a narrow composer the input picker gives way first, down to its chevron (`min-w-14`: the mic and that chevron), and never past it.
     <div className="flex min-w-14 shrink-[8] items-center">
-      <WithTooltip label={dictating ? "Stop dictating" : `Dictate · ${state.engine}`} keys={keycaps("mod+shift+d")}>
+      <WithTooltip label={dictating ? "Stop dictating" : `Dictate · ${state.engine}`} keys={keys}>
         <Button
           variant="ghost"
           size="icon-sm"

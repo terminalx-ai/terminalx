@@ -56,6 +56,12 @@ export interface Prefs {
   cloudPinned: Record<string, string[]>;
   /** Cloud projects the reader collapsed, by project key (`cloud:<orgId>:<identity>`); expanded by default. */
   cloudCollapsed: Record<string, true>;
+  /**
+   * Keyboard shortcuts the reader changed, by action id (see `@/lib/shortcuts`):
+   * the bindings that replace the action's defaults, an empty list for none.
+   * Kept per machine. An action not listed uses its defaults.
+   */
+  shortcuts: Record<string, string[]>;
 }
 
 const DEFAULTS: Prefs = {
@@ -86,6 +92,7 @@ const DEFAULTS: Prefs = {
   cloudBlankProjects: {},
   cloudPinned: {},
   cloudCollapsed: {},
+  shortcuts: {},
 };
 
 const KEY = "raccoon.prefs";
@@ -126,6 +133,17 @@ function applyFontScale() {
 }
 
 applyFontScale();
+
+// Another window of the app changed the preferences: take them here too, so a
+// shortcut changed in one window is the shortcut in every window at once.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (e.key !== KEY || e.storageArea !== localStorage) return;
+    state = load();
+    applyFontScale();
+    for (const l of listeners) l();
+  });
+}
 
 export function subscribePrefs(listener: () => void): () => void {
   listeners.add(listener);

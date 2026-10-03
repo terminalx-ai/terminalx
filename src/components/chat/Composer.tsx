@@ -14,18 +14,29 @@ import {
 } from "@/components/ui/menu";
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
-import { keycaps, useHotkey } from "@/lib/hotkeys";
+import { useShortcutKeycaps } from "@/lib/hotkeys";
+import { matchesShortcut } from "@/lib/shortcuts";
 import { EFFORT_LABEL, PERMISSION_MODES, modeLabel, refreshModels, upgradeHint, useModels } from "@/lib/models";
 import { chooseMode } from "@/lib/dialogs";
 import { files as filesApi, type FileHit, type ImageInput, type SlashCommand } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
-import { DictationStatus, MicButton, useDictationInto } from "./Dictation";
+import { DictationStatus, MicButton, useDictationInto, useDictationShortcuts } from "./Dictation";
 import { PickerMenu, type PickerItem } from "./PickerMenu";
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "./useImageAttachments";
 import { useComposerHistory } from "./useComposerHistory";
 import { tokenAtCaret } from "@/lib/pickers";
 
 const commandCache = new Map<string, SlashCommand[]>();
+
+/** Break the line at the caret, through the input event the draft is read from. */
+export function insertNewLine(el: HTMLTextAreaElement) {
+  const start = el.selectionStart ?? el.value.length;
+  const end = el.selectionEnd ?? start;
+  const next = el.value.slice(0, start) + "\n" + el.value.slice(end);
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(el, next);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.setSelectionRange(start + 1, start + 1);
+}
 // Matches the textarea's max-h-60: about ten lines before it scrolls.
 const MAX_HEIGHT = 240;
 const NO_HISTORY: string[] = [];
@@ -180,7 +191,8 @@ export function Composer({
   }, [cwd, tab.harness]);
 
   const dictation = useDictationInto(tab.id, draft, onDraftChange, ref);
-  useHotkey("mod+shift+d", dictation.toggle, { enabled: autoFocus });
+  useDictationShortcuts(dictation, !!autoFocus);
+  const keysOf = useShortcutKeycaps();
 
   const token = useMemo(() => tokenAtCaret(draft, caret), [draft, caret]);
   const tokenKey = token ? `${token.kind}:${token.start}` : null;
@@ -294,9 +306,16 @@ export function Composer({
     }
     // An open menu owns the arrows (the pickers above, the model and permission menus); dictation owns the draft.
     if (!pickerOpen && !modelMenu.open && !modeMenu.open && !dictation.dictating && recall.onKeyDown(e)) return;
-    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+    if (e.nativeEvent.isComposing) return;
+    if (matchesShortcut(e.nativeEvent, "composer.send")) {
       e.preventDefault();
       void send();
+      return;
+    }
+    // Enter that is not Send already breaks the line; any other key for New line has to do it itself.
+    if (matchesShortcut(e.nativeEvent, "composer.newLine") && e.key !== "Enter") {
+      e.preventDefault();
+      insertNewLine(e.currentTarget);
     }
   };
 
@@ -489,13 +508,13 @@ export function Composer({
               </WithTooltip>
             )}
             {busy && canStop ? (
-              <WithTooltip label="Stop" keys={["Esc"]}>
+              <WithTooltip label="Stop" keys={keysOf("session.stop")}>
                 <Button size="icon-sm" variant="secondary" aria-label="Stop" onClick={onStop}>
                   <Square className="size-3 fill-current" />
                 </Button>
               </WithTooltip>
             ) : null}
-            <WithTooltip label={busy ? "Queue" : "Send"} keys={keycaps("enter")}>
+            <WithTooltip label={busy ? "Queue" : "Send"} keys={keysOf("composer.send")}>
               <Button
                 size="icon-sm"
                 variant={draft.trim() || attachments.length ? "accent" : "secondary"}
