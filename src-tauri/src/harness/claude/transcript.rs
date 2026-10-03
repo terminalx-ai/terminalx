@@ -38,33 +38,44 @@ use crate::harness::tui::TurnMark;
 /// anywhere — a conversation that has yet to be written — it is the derived
 /// path.
 pub fn locate(cwd: &str, session_id: &str) -> Option<PathBuf> {
-    Some(locate_under(&dirs::home_dir()?, cwd, session_id))
+    Some(locate_in(&projects_dir()?, cwd, session_id))
 }
 
-/// [`locate`] without the home lookup.
-pub fn locate_under(home: &Path, cwd: &str, session_id: &str) -> PathBuf {
-    let derived = transcript_under(home, cwd, session_id);
+/// [`locate`] within a given projects folder.
+pub fn locate_in(projects: &Path, cwd: &str, session_id: &str) -> PathBuf {
+    let derived = transcript_in(projects, cwd, session_id);
     // An id is a file name here, never a path.
     if derived.exists() || session_id.is_empty() || session_id.contains(['/', '\\']) || session_id.starts_with('.') {
         return derived;
     }
     let name = format!("{session_id}.jsonl");
     let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-    std::fs::read_dir(projects_under(home))
+    std::fs::read_dir(projects)
         .into_iter()
         .flatten()
         .flatten()
         .map(|folder| folder.path().join(&name))
-        .filter(|candidate| candidate.is_file())
+        // A regular file: a link of that name is somebody else's file.
+        .filter(|candidate| std::fs::symlink_metadata(candidate).is_ok_and(|m| m.file_type().is_file()))
         // The same conversation in two folders is one the CLI moved on from;
         // the copy it is still writing is the newer.
         .max_by_key(|candidate| modified(candidate))
         .unwrap_or(derived)
 }
 
-/// The folder that holds every checkout's transcripts.
-pub fn projects_under(home: &Path) -> PathBuf {
-    home.join(".claude").join("projects")
+/// The folder that holds every checkout's transcripts: `projects` under the
+/// CLI's config directory, which `CLAUDE_CONFIG_DIR` moves and which is
+/// `~/.claude` otherwise. The tab's CLI inherits this process's environment,
+/// so what is set here is what it writes under.
+pub fn projects_dir() -> Option<PathBuf> {
+    projects_from(std::env::var("CLAUDE_CONFIG_DIR").ok(), dirs::home_dir())
+}
+
+fn projects_from(config_dir: Option<String>, home: Option<PathBuf>) -> Option<PathBuf> {
+    match config_dir.filter(|dir| !dir.is_empty()) {
+        Some(dir) => Some(PathBuf::from(dir).join("projects")),
+        None => home.map(|home| home.join(".claude").join("projects")),
+    }
 }
 
 /// Every record uuid in a session's transcript. A fork copies those records
@@ -85,9 +96,9 @@ fn uuids_in(text: &str) -> HashSet<String> {
 /// Where the CLI files the transcript of a session started in `cwd`. Every
 /// character outside `[A-Za-z0-9-]` becomes `-`, which is why a dot-folder
 /// yields a double dash.
-pub fn transcript_under(home: &Path, cwd: &str, session_id: &str) -> PathBuf {
+pub fn transcript_in(projects: &Path, cwd: &str, session_id: &str) -> PathBuf {
     let encoded: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
-    projects_under(home).join(encoded).join(format!("{session_id}.jsonl"))
+    projects.join(encoded).join(format!("{session_id}.jsonl"))
 }
 
 fn text_of(content: &Value) -> String {
@@ -115,6 +126,39 @@ fn interruption(text: &str) -> bool {
 fn command_output(text: &str) -> bool {
     let text = text.trim_start();
     ["<local-command-stdout>", "<local-command-stderr>", "<local-command-caveat>"].iter().any(|tag| text.starts_with(tag))
+}
+
+/// The text of a prompt without the wrapper the CLI puts round a large
+/// paste: `<pasted_content id="7">`, the text, `</pasted_content id="7">`.
+/// The wrapper is the CLI's note to the model; the reader pasted the text.
+fn without_paste_wrappers(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = ["<pasted_content id=\"", "</pasted_content"].iter().filter_map(|tag| rest.find(tag)).min() {
+        let Some(len) = rest[at..].find('>') else { break };
+        let tag = &rest[at..=at + len];
+        // Only the CLI's own tag: a short one, on one line.
+        if tag.len() > 64 || tag.contains('\n') {
+            out.push_str(&rest[..=at]);
+            rest = &rest[at + 1..];
+            continue;
+        }
+        let closing = tag.starts_with("</");
+        let before = &rest[..at];
+        out.push_str(if closing { before.strip_suffix('\n').unwrap_or(before) } else { before });
+        rest = &rest[at + len + 1..];
+        if !closing {
+            rest = rest.strip_prefix('\n').unwrap_or(rest);
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A prompt as the reader typed it: a slash command by its name, anything
+/// else without the CLI's paste wrappers.
+fn as_typed(prompt: String) -> String {
+    slash_command(&prompt).unwrap_or_else(|| if prompt.contains("pasted_content") { without_paste_wrappers(&prompt) } else { prompt })
 }
 
 fn tagged<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
@@ -237,7 +281,7 @@ fn decode_user(v: &Value, out: &mut Vec<Payload>) {
     if command_output(&prompt) {
         return;
     }
-    let text = slash_command(&prompt).unwrap_or(prompt);
+    let text = as_typed(prompt);
     out.push(Payload::UserMessage { text, images: Vec::new(), baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
 }
 
@@ -262,7 +306,7 @@ fn decode_queued_prompt(v: &Value, out: &mut Vec<Payload>) {
     if prompt.trim().is_empty() || command_output(&prompt) {
         return;
     }
-    let text = slash_command(&prompt).unwrap_or(prompt);
+    let text = as_typed(prompt);
     out.push(Payload::UserMessage { text, images: Vec::new(), baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
 }
 
@@ -512,35 +556,74 @@ mod tests {
     /// the reader's own prompts included — reached the chat.
     #[test]
     fn a_resumed_conversation_is_followed_where_the_cli_keeps_it() {
-        let home = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let home = &config.path().join("projects");
         let (began, now) = ("/Users/dev/repo/.raccoon/worktrees/eager-moss-panda", "/Users/dev/repo/.raccoon/worktrees/cloud-vm");
 
         // Nothing written yet: a new conversation goes where the CLI will put it.
-        let derived = transcript_under(home.path(), now, "abc");
-        assert_eq!(locate_under(home.path(), now, "abc"), derived);
+        let derived = transcript_in(home, now, "abc");
+        assert_eq!(locate_in(home, now, "abc"), derived);
 
-        let kept = transcript_under(home.path(), began, "abc");
+        let kept = transcript_in(home, began, "abc");
         std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
         std::fs::write(&kept, "{}\n").unwrap();
         std::fs::write(kept.with_file_name("other.jsonl"), "{}\n").unwrap();
-        assert_eq!(locate_under(home.path(), now, "abc"), kept, "the file that exists, not the one the folder's name derives");
-        assert_eq!(locate_under(home.path(), began, "abc"), kept);
-        assert_eq!(locate_under(home.path(), now, "missing"), transcript_under(home.path(), now, "missing"));
+        assert_eq!(locate_in(home, now, "abc"), kept, "the file that exists, not the one the folder's name derives");
+        assert_eq!(locate_in(home, began, "abc"), kept);
+        assert_eq!(locate_in(home, now, "missing"), transcript_in(home, now, "missing"));
 
         // Once the CLI does write under the new folder, that is the one.
         std::fs::create_dir_all(derived.parent().unwrap()).unwrap();
         std::fs::write(&derived, "{}\n").unwrap();
-        assert_eq!(locate_under(home.path(), now, "abc"), derived);
+        assert_eq!(locate_in(home, now, "abc"), derived);
+
+        // A link of the conversation's name is not the conversation.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&kept, kept.with_file_name("linked.jsonl")).unwrap();
+            assert_eq!(locate_in(home, now, "linked"), transcript_in(home, now, "linked"));
+        }
 
         // An id is a file name; it is never used to walk somewhere else.
         for id in ["../other", "a/b", "", ".."] {
-            assert_eq!(locate_under(home.path(), now, id), transcript_under(home.path(), now, id));
+            assert_eq!(locate_in(home, now, id), transcript_in(home, now, id));
         }
+    }
+
+    /// The CLI wraps a large paste in a tag of its own. The reader pasted
+    /// the text, and a composer send of the same text has to match it.
+    #[test]
+    fn a_pasted_prompt_reads_without_the_cli_s_wrapper() {
+        let user = |content: &str| format!(r#"{{"type":"user","uuid":"p1","cwd":"/tmp/x","message":{{"role":"user","content":"{content}"}}}}"#);
+        let typed = |line: String| {
+            let mut out = Vec::new();
+            decode_line(&line, &HashSet::new(), &mut out);
+            match out.as_slice() {
+                [Payload::UserMessage { text, .. }] => text.clone(),
+                other => panic!("{other:?}"),
+            }
+        };
+        // The shape Claude Code 2.1.285 writes: the closing tag repeats the id.
+        assert_eq!(typed(user(r#"<pasted_content id=\"6997\">\nYou are reviewing\na long paste\n</pasted_content id=\"6997\">"#)), "You are reviewing\na long paste");
+        assert_eq!(typed(user(r#"see this:\n<pasted_content id=\"1\">\nfirst\n</pasted_content>\nand this:\n<pasted_content id=\"2\">\nsecond\n</pasted_content id=\"2\">\nthanks"#)), "see this:\nfirst\nand this:\nsecond\nthanks");
+        // Prose about the tag, and a tag that never closes, are left alone.
+        assert_eq!(typed(user("what is pasted_content for?")), "what is pasted_content for?");
+        assert_eq!(typed(user(r#"a <pasted_content id=\"3 that never ends"#)), r#"a <pasted_content id="3 that never ends"#);
+    }
+
+    #[test]
+    fn the_projects_folder_follows_the_cli_s_config_directory() {
+        let home = Some(PathBuf::from("/h"));
+        assert_eq!(projects_from(None, home.clone()), Some(PathBuf::from("/h/.claude/projects")));
+        assert_eq!(projects_from(Some(String::new()), home.clone()), Some(PathBuf::from("/h/.claude/projects")));
+        assert_eq!(projects_from(Some("/elsewhere/claude".into()), home), Some(PathBuf::from("/elsewhere/claude/projects")));
+        assert_eq!(projects_from(Some("/elsewhere".into()), None), Some(PathBuf::from("/elsewhere/projects")));
+        assert_eq!(projects_from(None, None), None);
     }
 
     #[test]
     fn encodes_the_project_folder_like_the_cli() {
-        let p = transcript_under(Path::new("/h"), "/Users/dev/code/ai/raccoon-e2e/.raccoon/worktrees/sly-ochre-hare", "abc");
+        let p = transcript_in(Path::new("/h/.claude/projects"), "/Users/dev/code/ai/raccoon-e2e/.raccoon/worktrees/sly-ochre-hare", "abc");
         assert_eq!(p, Path::new("/h/.claude/projects/-Users-dev-code-ai-raccoon-e2e--raccoon-worktrees-sly-ochre-hare/abc.jsonl"));
     }
 }

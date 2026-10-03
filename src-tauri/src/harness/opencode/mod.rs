@@ -111,7 +111,7 @@ impl OpenCode {
         self.seen.clear();
         self.committed.clear();
         vec![
-            Action::Emit(Payload::TurnStarted { model: self.model.clone(), provider_session_id: self.session_id.clone() }),
+            Action::Emit(Payload::TurnStarted { model: self.model.clone(), provider_session_id: self.session_id.clone(), prompt_seq: None }),
             Action::Emit(Payload::ModelRequestStarted),
             self.http("prompt", "POST", &format!("/session/{sid}/message"), Some(body)),
         ]

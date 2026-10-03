@@ -117,6 +117,35 @@ impl Rig {
     }
 }
 
+impl Rig {
+    /// The queued messages the log says a later turn was started by.
+    fn taken_as_prompts(&self) -> Vec<String> {
+        let events = self.events();
+        let text_at = |seq: u64| events.iter().find(|e| e.seq == seq).and_then(|e| match &e.payload {
+            Payload::UserMessage { text, queued: true, .. } => Some(text.clone()),
+            _ => None,
+        });
+        events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                Payload::TurnStarted { prompt_seq: Some(seq), .. } => Some(text_at(*seq).unwrap_or_else(|| format!("no queued message at {seq}"))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The reader stops the turn: Escape in the CLI.
+    fn interrupt(&self) {
+        match self.cli().0 {
+            CliKind::Claude => self.append(
+                r#"{"parentUuid":"u","isSidechain":false,"type":"user","uuid":"int","cwd":"/w","sessionId":"s","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}
+"#,
+            ),
+            CliKind::Codex => self.hook("Interrupt", json!({})),
+        }
+    }
+}
+
 /// The report: the reader types into the agent's own prompt in the terminal
 /// view. The composer never sees it, so nothing was published when it was
 /// sent, and the CLI's record is all there is.
@@ -219,29 +248,82 @@ fn a_queued_composer_prompt_the_cli_takes_mid_turn_is_one_message() {
         rig.append(&rig.cli().steer("while you are at it"));
         rig.cli_replies("both");
         assert_eq!(rig.told(), ["user: start", "queued: while you are at it", "reply: both", "end"], "{kind:?}");
+        assert!(rig.taken_as_prompts().is_empty(), "{kind:?}: taken within the turn, it starts no turn of its own");
     }
 }
 
 /// The CLI can also hold a queued prompt until the turn is over and take it
-/// as the next turn's. Still one message — and the turn it starts is open,
-/// though nothing but the dropped record said so, and closes like any other.
+/// as the next turn's. Still one message, and the turn it starts closes like
+/// any other — whether the `UserPromptSubmit` hook or the record of the
+/// prompt is heard first. The hook opens the turn but not the latch that
+/// lets `Stop` close it; with the record dropped as an echo, nothing did, and
+/// the turn stayed "Working" with its reply outside any turn.
 #[test]
 fn a_queued_composer_prompt_the_cli_takes_after_the_turn_starts_the_next_one() {
+    for kind in BOTH {
+        for hook_first in [true, false] {
+            let case = format!("{kind:?}, {}", if hook_first { "the hook and then the record" } else { "the record alone" });
+            let rig = Rig::of(kind, "");
+            rig.compose("start", 0);
+            rig.cli_takes("start");
+            assert!(rig.compose("then this", 0));
+            rig.cli_replies("one");
+            assert!(!rig.turn_open(), "{case}");
+            assert!(rig.taken_as_prompts().is_empty(), "{case}: still only queued");
+
+            if hook_first {
+                rig.cli_takes("then this");
+            } else {
+                rig.append(&rig.cli().prompt("then this"));
+            }
+            assert!(rig.turn_open(), "{case}");
+            assert_eq!(rig.status(), TabStatus::InProgress, "{case}");
+            assert_eq!(rig.taken_as_prompts(), ["then this"], "{case}: the log says which message the new turn answers");
+
+            rig.cli_replies("two");
+            assert_eq!(rig.told(), ["user: start", "queued: then this", "reply: one", "end", "reply: two", "end"], "{case}");
+            assert_eq!(rig.completed_turns(), 2, "{case}");
+            assert!(!rig.turn_open(), "{case}");
+            assert_eq!(rig.status(), TabStatus::Completed, "{case}: finished and unread, as after any turn");
+        }
+    }
+}
+
+/// The reader queues a prompt from the composer, stops the turn, and then
+/// types the same words into the terminal. The CLI never sent what was
+/// queued, so its echo must not be left to swallow what was typed.
+#[test]
+fn a_queued_prompt_the_cli_never_sent_does_not_swallow_the_same_words_typed_later() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
         rig.compose("start", 0);
         rig.cli_takes("start");
-        assert!(rig.compose("then this", 0));
-        rig.cli_replies("one");
-        assert!(!rig.turn_open());
+        assert!(rig.compose("continue", 0));
+        rig.interrupt();
+        assert!(!rig.turn_open(), "{kind:?}");
 
-        // No `UserPromptSubmit` here: the record alone has to open the turn.
-        rig.append(&rig.cli().prompt("then this"));
-        assert!(rig.turn_open(), "{kind:?}");
-        assert_eq!(rig.status(), TabStatus::InProgress);
-        rig.cli_replies("two");
-        assert_eq!(rig.told(), ["user: start", "queued: then this", "reply: one", "end", "reply: two", "end"], "{kind:?}");
-        assert_eq!(rig.status(), TabStatus::Completed);
+        rig.cli_takes("continue");
+        rig.cli_replies("continuing");
+        assert_eq!(rig.told(), ["user: start", "queued: continue", "end", "user: continue", "reply: continuing", "end"], "{kind:?}");
+    }
+}
+
+/// A composer prompt the CLI is slow to record — a long start, a busy
+/// machine — is still that prompt when the record lands, however late.
+#[test]
+fn a_composer_prompt_recorded_long_after_it_was_sent_is_still_one_message() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        rig.compose("slow to land", 0);
+        // Sent longer ago than any echo is kept once no turn is running.
+        if let Engine::Cli(p) = &mut rig.rt.lock().unwrap().engine {
+            for prompt in p.echoed.iter_mut() {
+                prompt.sent_at = Instant::now().checked_sub(COMPOSER_ECHO_TTL * 2).unwrap_or(prompt.sent_at);
+            }
+        }
+        rig.cli_takes("slow to land");
+        rig.cli_replies("got it");
+        assert_eq!(rig.told(), ["user: slow to land", "reply: got it", "end"], "{kind:?}");
     }
 }
 
@@ -291,7 +373,7 @@ fn a_conversation_the_cli_keeps_in_another_folder_is_still_heard() {
         use std::io::Write;
         std::fs::OpenOptions::new().append(true).open(&transcript).unwrap().write_all(records.as_bytes()).unwrap();
     };
-    let named = json!({ "transcript_path": transcript.to_str().unwrap() });
+    let named = |path: &Path| json!({ "transcript_path": path.to_str().unwrap() });
     let follow = |own: Option<crate::hooks::ConversationFile>| {
         if let Engine::Cli(p) = &mut rig.rt.lock().unwrap().engine {
             p.origin.transcript_root = derived.clone();
@@ -302,37 +384,88 @@ fn a_conversation_the_cli_keeps_in_another_folder_is_still_heard() {
 
     // As it was: the file the hooks name is not one this tab may follow.
     follow(None);
-    rig.hook("SessionStart", named.clone());
-    rig.hook("UserPromptSubmit", named.clone());
+    rig.hook("SessionStart", named(&transcript));
+    rig.hook("UserPromptSubmit", named(&transcript));
     write(&cli.prompt("typed in the terminal"));
     write(&cli.reply("the reply"));
     rig.hook("Stop", json!({ "transcript_path": transcript.to_str().unwrap(), "last_assistant_message": "the reply" }));
     assert_eq!(rig.told(), ["reply: the reply"], "the reply with no question, and a turn that never ends");
     assert!(rig.turn_open());
 
-    // The tab knows its own conversation by name, whichever folder it is in.
-    follow(Some(crate::hooks::ConversationFile { projects: projects.clone(), name: "conversation.jsonl".into() }));
-    rig.hook("SessionStart", named.clone());
+    // The tab knows its own conversation by name, in the folder it is in.
+    follow(Some(crate::hooks::ConversationFile::new(projects.clone(), "conversation.jsonl".into())));
+    rig.hook("SessionStart", named(&transcript));
     assert_eq!(rig.tail.path(), transcript);
     assert_eq!(rig.told(), ["reply: the reply"], "what the file already held is history, not news");
 
-    rig.hook("UserPromptSubmit", named.clone());
+    rig.hook("UserPromptSubmit", named(&transcript));
     write(&cli.prompt("typed after the fix"));
     write(&cli.reply("heard"));
     rig.hook("Stop", json!({ "transcript_path": transcript.to_str().unwrap(), "last_assistant_message": "heard" }));
     assert_eq!(rig.told()[1..], ["user: typed after the fix", "reply: heard", "end"]);
     assert!(!rig.turn_open());
 
-    // A `/clear` starts a new file beside it, which is this tab's too; a
-    // neighbour's conversation in some third folder is not.
-    let cleared = kept.join("after-clear.jsonl");
-    std::fs::write(&cleared, "").unwrap();
-    rig.hook("SessionStart", json!({ "transcript_path": cleared.to_str().unwrap() }));
-    assert_eq!(rig.tail.path(), cleared);
-    let other = projects.join("-w-other");
-    std::fs::create_dir_all(&other).unwrap();
-    rig.hook("SessionStart", json!({ "transcript_path": other.join("theirs.jsonl").to_str().unwrap() }));
-    assert_eq!(rig.tail.path(), cleared);
+    // Another checkout's conversations are not this tab's, in two frames or
+    // in one: naming this conversation's id in their folder, where no such
+    // file is, hands nothing over.
+    let victim = projects.join("-w-victim");
+    std::fs::create_dir_all(&victim).unwrap();
+    let theirs = victim.join("their-conversation.jsonl");
+    std::fs::write(&theirs, format!("{}{}", cli.prompt("their private prompt"), cli.reply("their private reply"))).unwrap();
+    rig.hook("SessionStart", named(&victim.join("conversation.jsonl")));
+    rig.hook("SessionStart", named(&theirs));
+    rig.hook("Stop", named(&theirs));
+    assert_eq!(rig.tail.path(), transcript);
+    // Nor is a neighbour of this conversation in the folder it is kept in,
+    // unless the CLI announces it as the file it has just opened.
+    let neighbour = kept.join("neighbour.jsonl");
+    std::fs::write(&neighbour, cli.prompt("a neighbour's prompt")).unwrap();
+    rig.hook("UserPromptSubmit", named(&neighbour));
+    assert_eq!(rig.tail.path(), transcript);
+    assert_eq!(rig.told().len(), 4, "nothing of anyone else's was read out: {:?}", rig.told());
+
+    // A `/clear` starts a new file. Whichever of the two folders the CLI
+    // opens it in — beside the old file, or under the checkout as it is
+    // named now — it is this tab's, and the other folder stays so too.
+    for cleared in [kept.join("after-clear.jsonl"), derived.join("after-another-clear.jsonl")] {
+        std::fs::write(&cleared, "").unwrap();
+        rig.hook("SessionStart", named(&cleared));
+        assert_eq!(rig.tail.path(), cleared);
+        rig.hook("UserPromptSubmit", named(&cleared));
+        std::fs::write(&cleared, cli.prompt("after a clear")).unwrap();
+        rig.manager.pump(&rig.rt, &rig.tail);
+        rig.hook("Stop", named(&cleared));
+    }
+    assert_eq!(rig.told()[4..], ["user: after a clear", "end", "user: after a clear", "end"]);
+    rig.hook("Stop", named(&transcript));
+    assert_eq!(rig.tail.path(), transcript, "and the conversation it began with still is");
+}
+
+/// A launch that finds the conversation's file under another folder follows
+/// it from the start, with the folder derived from the checkout still
+/// allowed beside it.
+#[test]
+fn a_launch_adopts_the_folder_its_conversation_is_found_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let projects = dir.path().join("projects");
+    let (began, now) = ("/w/original", "/w/renamed");
+    let kept = claude::transcript::transcript_in(&projects, began, "abc");
+    std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+    std::fs::write(&kept, "{}\n").unwrap();
+    let derived = claude::transcript::transcript_in(&projects, now, "abc");
+    std::fs::create_dir_all(derived.parent().unwrap()).unwrap();
+
+    let path = claude::transcript::locate_in(&projects, now, "abc");
+    assert_eq!(path, kept);
+    let mut conversation = crate::hooks::ConversationFile::new(projects.clone(), "abc.jsonl".into());
+    assert!(conversation.adopt(&path));
+    let mut origin = Origin { token: crate::hooks::mint_token(), transcript_root: derived.parent().unwrap().to_path_buf(), conversation: Some(conversation) };
+    let frame = |event: &str, path: &Path| HookFrame { tab: TAB.into(), session: SESSION.into(), token: String::new(), event: event.into(), payload: json!({ "transcript_path": path.to_str().unwrap() }) };
+
+    assert_eq!(origin.transcript(&frame("Stop", &kept)), Some(kept.as_path()));
+    for cleared in [kept.with_file_name("new.jsonl"), derived.with_file_name("new.jsonl")] {
+        assert_eq!(origin.transcript(&frame("SessionStart", &cleared)), Some(cleared.as_path()), "{}", cleared.display());
+    }
 }
 
 /// A slash command typed in the terminal reads as it was typed, once; what

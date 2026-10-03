@@ -112,36 +112,46 @@ describe("buildTranscript", () => {
     expect(t.turns[1].completed?.status).toBe("ok");
   });
 
-  it("makes a queued message the prompt of the turn it starts once the turn before it is over", () => {
+  it("makes a queued message the prompt of the turn it starts when the event says so", () => {
+    const queued = [ev({ type: "user_message", text: "then this", queued: true }), ev({ type: "user_message", text: "and after that", queued: true })];
     const events = [
       ev({ type: "user_message", text: "go", queued: false }),
-      toolStart("a", "Bash"),
-      toolDone("a"),
-      ev({ type: "user_message", text: "then this", queued: true }),
+      queued[0],
+      queued[1],
       ev({ type: "assistant_text", text: "done" }),
       ev({ type: "turn_completed", status: "ok", authFailed: false }),
     ];
-    // Still waiting: it is a note in the turn it is queued behind.
+    // Still waiting: notes in the turn they are queued behind.
     let t = buildTranscript(events, true);
     expect(t.turns).toHaveLength(1);
-    expect(t.turns[0].work.some((w) => w.kind === "queued")).toBe(true);
+    expect(t.turns[0].work.filter((w) => w.kind === "queued")).toHaveLength(2);
 
-    // The agent took it as its next prompt; no second `user_message` says so.
-    events.push(ev({ type: "assistant_text", text: "on it" }));
+    // The agent took the first as its next prompt. No second `user_message`
+    // says so; a `turn_started` naming it does.
+    events.push(ev({ type: "turn_started", promptSeq: queued[0].seq }), ev({ type: "assistant_text", text: "on it" }), ev({ type: "turn_completed", status: "ok", authFailed: false }));
     t = buildTranscript(events, true);
     expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["go", "then this"]);
-    expect(t.turns[0].work.some((w) => w.kind === "queued")).toBe(false);
+    expect(t.turns[0].work.filter((w) => w.kind === "queued").map((w) => w.kind === "queued" && w.text)).toEqual(["and after that"]);
     expect(t.turns[1].work.map((w) => w.kind)).toEqual(["text"]);
+    expect(t.turns[1].prompt?.seq).toBe(queued[0].seq);
+
+    // And then the second: each is moved by its own event, not by position.
+    events.push(ev({ type: "turn_started", promptSeq: queued[1].seq }), ev({ type: "assistant_text", text: "that too" }));
+    t = buildTranscript(events, true);
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["go", "then this", "and after that"]);
+    expect(t.turns[0].work.some((w) => w.kind === "queued")).toBe(false);
   });
 
-  it("leaves a queued message the agent took mid-turn in the turn it was taken in", () => {
+  it("leaves a queued message where it is without that event, and ignores one that names nothing", () => {
     const t = buildTranscript(
       [
         ev({ type: "user_message", text: "go", queued: false }),
-        ev({ type: "user_message", text: "steer", queued: true }),
-        toolStart("a", "Bash"),
-        toolDone("a"),
+        ev({ type: "user_message", text: "taken mid-turn", queued: true }),
+        ev({ type: "assistant_text", text: "both" }),
         ev({ type: "turn_completed", status: "ok", authFailed: false }),
+        // An older log's `turn_started`, and one whose message is not there.
+        ev({ type: "turn_started" }),
+        ev({ type: "turn_started", promptSeq: 99_999 }),
         ev({ type: "assistant_text", text: "a stray reply" }),
       ],
       false,

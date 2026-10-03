@@ -87,27 +87,23 @@ function visibleUserText(text: string): string {
   return text;
 }
 
-const WORK_STARTS = new Set(["assistant_text", "reasoning", "tool_call_started", "subagent_started"]);
-
 /**
- * A message queued behind a turn that the agent only took once that turn was
- * over: it is the prompt of the turn that follows, not a note left in the one
- * before. The agent's own record of taking it is not a second event (one
- * message is one `user_message`), so the turn it starts arrives with no
- * prompt of its own. A queued message with a tool call after it was taken
- * during that turn and stays where it is.
+ * Take a queued message out of the turn it was a note in. The agent held it
+ * until that turn was over and then took it as its next prompt; a
+ * `turn_started` naming its seq says so (the message itself is published
+ * once, when it is sent). One the agent took mid-turn has no such event and
+ * stays where it is.
  */
-function takeHeldPrompt(previous: Turn | undefined): Turn["prompt"] {
-  if (!previous?.completed) return undefined;
-  let lastTool = -1;
-  previous.work.forEach((item, index) => {
-    if (item.kind === "tool" || item.kind === "tool_group" || item.kind === "subagent") lastTool = index;
-  });
-  const at = previous.work.findIndex((item, index) => index > lastTool && item.kind === "queued");
-  if (at < 0) return undefined;
-  const [held] = previous.work.splice(at, 1);
-  if (held.kind !== "queued") return undefined;
-  return { text: held.text, images: held.images, ts: held.ts ?? previous.completed.ts, seq: held.seq };
+function takeQueued(turns: Turn[], seq: number): Turn["prompt"] {
+  for (let index = turns.length - 1; index >= 0; index--) {
+    const work = turns[index].work;
+    const at = work.findIndex((item) => item.kind === "queued" && item.seq === seq);
+    if (at < 0) continue;
+    const [held] = work.splice(at, 1);
+    if (held.kind !== "queued") return undefined;
+    return { text: held.text, images: held.images, ts: held.ts ?? turns[index].completed?.ts ?? "", seq: held.seq };
+  }
+  return undefined;
 }
 
 export function buildTranscript(events: AgentEvent[], live: boolean): Transcript {
@@ -130,13 +126,6 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
   const ensureTurn = (event: AgentEvent) => {
     if (!current) {
       current = { key: `t${event.seq}`, seq: event.seq, work: [], toolCount: 0, editedFiles: 0, live: false };
-      if (WORK_STARTS.has(event.payload.type)) {
-        const prompt = takeHeldPrompt(turns[turns.length - 1]);
-        if (prompt) {
-          current.prompt = prompt;
-          workingSince = Date.parse(event.ts);
-        }
-      }
       turns.push(current);
     }
     return current;
@@ -166,8 +155,21 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
         workingSince = Date.parse(event.ts);
         break;
       }
-      case "turn_started":
+      case "turn_started": {
+        if (payload.promptSeq == null) break;
+        const prompt = takeQueued(turns, payload.promptSeq);
+        if (!prompt) break;
+        if (current && !current.completed && !current.prompt) {
+          current.prompt = prompt;
+        } else {
+          for (const call of calls.values()) if (!call.result) call.abandoned = true;
+          current = { key: `t${event.seq}`, seq: event.seq, prompt, work: [], toolCount: 0, editedFiles: 0, live: false };
+          turns.push(current);
+        }
+        modelRequestOpen = false;
+        workingSince = Date.parse(event.ts);
         break;
+      }
       case "assistant_text": {
         const turn = ensureTurn(event);
         if (payload.text.trim()) turn.work.push({ kind: "text", text: payload.text, key: `a${event.seq}`, seq: event.seq });

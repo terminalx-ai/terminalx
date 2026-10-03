@@ -133,15 +133,29 @@ struct ComposerEcho {
     /// never published. The CLI records the name with or without what
     /// followed it; either is this command, and neither is the reader's.
     command: bool,
+    /// The `seq` the composer's own `user_message` was published under.
+    seq: u64,
 }
 
-/// How long a composer prompt waits for its echo before the next send drops
-/// it. Longer than the ready wait, so a slow start is not mistaken for a miss.
+/// A composer prompt the CLI's record was matched to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Echoed {
+    queued: bool,
+    seq: u64,
+}
+
+/// How long a composer prompt waits for its echo once no turn is running.
+/// Longer than the ready wait, so a slow start is not mistaken for a miss.
 const COMPOSER_ECHO_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+/// How long a queued prompt waits once the turn it was queued behind is
+/// over. A CLI that held it that long takes it at once, so this is short: a
+/// queue the CLI discarded must not go on swallowing the same words typed
+/// into the terminal.
+const QUEUED_ECHO_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl ComposerEcho {
     fn new(text: String, image_count: usize) -> Self {
-        Self { text, image_count, sent_at: Instant::now(), receipt: None, queued: false, command: false }
+        Self { text, image_count, sent_at: Instant::now(), receipt: None, queued: false, command: false, seq: 0 }
     }
 
     fn matches(&self, echoed: &str) -> bool {
@@ -151,7 +165,7 @@ impl ComposerEcho {
     }
 
     fn expired(&self, now: Instant) -> bool {
-        now.duration_since(self.sent_at) > COMPOSER_ECHO_TTL
+        now.duration_since(self.sent_at) > if self.queued { QUEUED_ECHO_GRACE } else { COMPOSER_ECHO_TTL }
     }
 }
 
@@ -193,7 +207,7 @@ fn cli_composer_message(prompt: &PromptText, images: Vec<ImageRef>, baseline: Op
 /// `Some` is a match, and says whether the prompt had been queued. A user
 /// message with no match is one the composer never sent: it was typed into
 /// the terminal, and the transcript's record is the only one there is.
-fn consume_composer_echo(pending: &mut std::collections::VecDeque<ComposerEcho>, payload: &Payload) -> Option<bool> {
+fn consume_composer_echo(pending: &mut std::collections::VecDeque<ComposerEcho>, payload: &Payload) -> Option<Echoed> {
     let Payload::UserMessage { text, .. } = payload else { return None };
     let at = pending.iter().position(|prompt| prompt.matches(text))?;
     if at > 0 {
@@ -202,20 +216,22 @@ fn consume_composer_echo(pending: &mut std::collections::VecDeque<ComposerEcho>,
     if let Some(receipt) = &pending[at].receipt {
         let _ = receipt.send(Ok(()));
     }
-    let queued = pending[at].queued;
+    let echoed = Echoed { queued: pending[at].queued, seq: pending[at].seq };
     pending.drain(..=at);
-    Some(queued)
+    Some(echoed)
 }
 
-/// Forget prompts that have waited past the TTL. A prompt the transcript never
+/// Forget prompts that have waited too long. A prompt the transcript never
 /// echoes would otherwise sit at the head of the queue for the life of the
 /// tab, and swallow the same words typed into the terminal later.
 ///
-/// A queued prompt is not waiting on the transcript while the turn it is
-/// behind is still running, so its clock only starts once that turn is over.
+/// Nothing ages while a turn is running. The CLI may record a prompt long
+/// after it was sent — a slow start, a queued prompt behind a long turn —
+/// and dropping its echo early would draw that record as a second message.
+/// The wait is counted from when the turn was last seen running.
 fn expire_composer_echoes(pending: &mut std::collections::VecDeque<ComposerEcho>, turn_open: bool, now: Instant) {
     if turn_open {
-        for prompt in pending.iter_mut().filter(|prompt| prompt.queued) {
+        for prompt in pending.iter_mut() {
             prompt.sent_at = now;
         }
     }
@@ -1609,13 +1625,19 @@ impl SessionManager {
         // Where the conversation's file is, not where a conversation started
         // in this folder would be: a resumed one is still written where it
         // began, which a renamed workspace no longer derives (#250).
-        let home = dirs::home_dir().ok_or_else(|| anyhow!("no home directory"))?;
-        let path = claude::transcript::locate_under(&home, &entry.cwd, &provider_id);
-        // The CLI keeps every transcript for this checkout here, and the file
-        // it reports at `SessionStart` has to be one of them — or this
-        // conversation's own, in whichever folder the CLI filed it.
-        let transcript_root = path.parent().context("the transcript path has no directory")?.to_path_buf();
-        let conversation = crate::hooks::ConversationFile { projects: claude::transcript::projects_under(&home), name: format!("{provider_id}.jsonl") };
+        let projects = claude::transcript::projects_dir().ok_or_else(|| anyhow!("no home directory"))?;
+        let derived = claude::transcript::transcript_in(&projects, &entry.cwd, &provider_id);
+        let path = claude::transcript::locate_in(&projects, &entry.cwd, &provider_id);
+        // The folder derived from the checkout is where the CLI files what
+        // it starts here, and a file it reports has to be in it — or be this
+        // conversation's own, in the folder it was found in. Both stay
+        // allowed: which of the two a `/clear` opens its new file in is the
+        // CLI's business.
+        let transcript_root = derived.parent().context("the transcript path has no directory")?.to_path_buf();
+        let mut conversation = crate::hooks::ConversationFile::new(projects, format!("{provider_id}.jsonl"));
+        if path != derived {
+            conversation.adopt(&path);
+        }
         // A fork is handed a copy of the whole parent conversation, written
         // into its new file when the first turn lands. The app already has all
         // of it, and the copy keeps each record's original uuid, so those are
@@ -1797,15 +1819,23 @@ impl SessionManager {
                 Engine::Cli(p) => consume_composer_echo(&mut p.echoed, &payload),
                 _ => None,
             };
-            if let Some(queued) = echoed {
+            if let Some(echo) = echoed {
                 // A queued prompt the CLI held until its turn was over is the
-                // start of the next one, which nothing else has opened.
-                if queued && !rt.turn_open {
-                    rt.open_turn();
-                    rt.turn_started_at = Some(Instant::now());
+                // start of the next one. The `UserPromptSubmit` hook may have
+                // opened that turn already, but only a prompt resets the latch
+                // that lets `Stop` close it, and this record is that prompt.
+                let held = echo.queued && (!rt.turn_open || matches!(&rt.engine, Engine::Cli(p) if p.turn_tail.is_closed()));
+                if held {
+                    if !rt.turn_open {
+                        rt.open_turn();
+                        rt.turn_started_at = Some(Instant::now());
+                    }
                     if let Engine::Cli(p) = &mut rt.engine {
                         p.turn_tail.opened();
                     }
+                    // The message itself is not published again; this says
+                    // which one the new turn is the answer to.
+                    self.publish(&mut rt, Payload::TurnStarted { model: None, provider_session_id: None, prompt_seq: Some(echo.seq) }, None);
                     self.set_status(&mut rt, TabStatus::InProgress);
                 }
                 continue;
@@ -1940,15 +1970,16 @@ impl SessionManager {
         let queued = rt.turn_open;
         let baseline = if queued { None } else { git::snapshot_tree(Path::new(cwd)).ok() };
         let (message, mut echo) = cli_composer_message(prompt, images, baseline, queued, cwd);
+        let ev = self.publish(rt, message, None);
         if let Engine::Cli(p) = &mut rt.engine {
             echo.receipt = receipt;
+            echo.seq = ev.seq;
             expire_composer_echoes(&mut p.echoed, queued, Instant::now());
             p.echoed.push_back(echo);
             if !queued {
                 p.turn_tail.opened();
             }
         }
-        let ev = self.publish(rt, message, None);
         if !queued {
             rt.open_turn();
             rt.turn_started_at = Some(Instant::now());
@@ -2144,20 +2175,16 @@ impl SessionManager {
         // carries the file it actually opened — but only a file this CLI
         // could have opened, so a frame cannot aim the tail at, say, the
         // reader's private notes and have the chat read them out.
-        match (frame.payload["transcript_path"].as_str(), origin.transcript(&frame)) {
-            (_, Some(path)) => {
-                tail.retarget(path);
-                // The conversation turned out to live in another folder. That
-                // is where the CLI will open its next file too (a `/clear`
-                // starts one), so that folder is this launch's from here on.
-                if let Some(folder) = path.parent().filter(|_| origin.conversation.is_some() && !crate::hooks::under_root(&origin.transcript_root, path)) {
-                    if let Engine::Cli(p) = &mut rt_arc.lock().unwrap().engine {
-                        if p.origin.accepts(&frame) {
-                            p.origin.transcript_root = folder.to_path_buf();
-                        }
-                    }
-                }
-            }
+        //
+        // Judged on the tab's own copy, under its lock: what a frame is
+        // allowed to name can grow (a folder the conversation is found in, a
+        // file the CLI announces), and has to still be so for the next one.
+        let named = match &mut rt_arc.lock().unwrap().engine {
+            Engine::Cli(p) if p.origin.accepts(&frame) => p.origin.transcript(&frame),
+            _ => None,
+        };
+        match (frame.payload["transcript_path"].as_str(), named) {
+            (_, Some(path)) => tail.retarget(path),
             (Some(named), None) => log::warn!(
                 "hook {} for {}/{} named a transcript outside {}: {named}",
                 frame.event,
@@ -2521,6 +2548,13 @@ impl SessionManager {
             rt.turn_open = false;
             if let Engine::Cli(p) = &mut rt.engine {
                 p.transcript_end_owed = p.transcript_turn.take() != Some(tui::TurnMark::Ended);
+                // An interrupted CLI hands what was queued back to its own
+                // input rather than sending it. If it does send one after
+                // all, that is a second message — which is better than the
+                // same words typed into the terminal next going missing.
+                if aborted {
+                    p.echoed.retain(|prompt| !prompt.queued);
+                }
             }
             if !aborted && rt.recovery.is_none() && !rt.queued.is_empty() {
                 let q = rt.queued.remove(0);
@@ -2648,7 +2682,7 @@ mod tests {
             projected.push(composer);
 
             let rollout = Payload::UserMessage { text: "[Image #1] describe this".into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
-            assert_eq!(consume_composer_echo(&mut pending, &rollout), Some(false));
+            assert_eq!(consume_composer_echo(&mut pending, &rollout), Some(Echoed { queued: false, seq: 0 }));
         }
 
         assert_eq!(projected.len(), 2, "one projected record per real submission");
@@ -2722,14 +2756,21 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert!(consume_composer_echo(&mut pending, &user("fresh")).is_some());
 
-        // A queued prompt waits for as long as the turn it is behind runs,
-        // and only then for the transcript.
+        // Nothing ages while a turn runs: the CLI may record a prompt long
+        // after it was sent, and an echo dropped early would let that record
+        // through as a second message.
+        pending.push_back(ComposerEcho { sent_at: sent, ..ComposerEcho::new("recorded late".into(), 0) });
         pending.push_back(ComposerEcho { sent_at: sent, queued: true, ..ComposerEcho::new("held".into(), 0) });
         expire_composer_echoes(&mut pending, true, later);
-        assert_eq!(pending.len(), 1, "the turn is still running");
-        expire_composer_echoes(&mut pending, false, later + COMPOSER_ECHO_TTL);
+        assert_eq!(pending.len(), 2, "the turn is still running");
+        assert!(consume_composer_echo(&mut pending, &user("recorded late")).is_some());
+
+        // Once the turn is over a held prompt is taken at once or not at
+        // all, so its echo does not linger to swallow the same words typed
+        // into the terminal.
+        expire_composer_echoes(&mut pending, false, later + QUEUED_ECHO_GRACE);
         assert_eq!(pending.len(), 1, "the wait is counted from when the turn was last seen running");
-        expire_composer_echoes(&mut pending, false, later + COMPOSER_ECHO_TTL + std::time::Duration::from_secs(1));
+        expire_composer_echoes(&mut pending, false, later + QUEUED_ECHO_GRACE + std::time::Duration::from_secs(1));
         assert!(pending.is_empty());
     }
 
