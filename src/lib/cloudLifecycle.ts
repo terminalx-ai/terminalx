@@ -166,6 +166,46 @@ export function operationFailureText(operation: Pick<CloudWorkspaceOperation, "e
   return operation.providerErrorCode ? `${message} (Provider code: ${operation.providerErrorCode})` : message;
 }
 
+/** Boat's provider id. */
+const BOAT = "box";
+/** Boat accepted a deletion but still reports the sandbox: only Boat can finish it. */
+const DELETED_SANDBOX_PRESENT = "box_deleted_sandbox_present";
+/** What a scoped Boat key needs before TerminalX can delete a sandbox. */
+const BOAT_DELETE_SCOPES = "sandbox.read and sandbox.delete";
+
+/**
+ * Why a permanent delete stopped, and whether deleting again can help
+ * (PRO-52). The sentence names only what the row shows: `retryLabel` is the
+ * one button under it, and it is named only when it is offered.
+ *
+ * - Boat accepted the deletion but still reports the sandbox
+ *   (`box_deleted_sandbox_present`): neither a retry nor a broader key helps,
+ *   so neither is advised and no retry is offered. The deletion's operation
+ *   id is what Boat's support asks for; the server gives it to admins only.
+ * - Boat refused the delete (or the read of its sandbox): the connected key's
+ *   scope is what is missing.
+ */
+export function deleteFailure(
+  operation: Pick<CloudWorkspaceOperation, "errorCode" | "providerErrorCode" | "detailCode" | "cleanup">,
+  provider: string,
+  retryLabel: string,
+): { text: string; retry: boolean } {
+  if (operation.detailCode === DELETED_SANDBOX_PRESENT) {
+    const id = operation.cleanup?.items.find((entry) => entry.providerOperationId)?.providerOperationId;
+    return {
+      text: `Boat accepted the deletion but still reports the sandbox. Contact Boat support with the deletion operation id${id ? `: ${id}` : "; an organization owner or admin can see it here"}.`,
+      retry: false,
+    };
+  }
+  if (provider === BOAT && operation.errorCode === "cloud_provider_permission_denied") {
+    return {
+      text: `Boat refused to delete this workspace (${operation.providerErrorCode ?? "permission_denied"}): the connected key is not allowed to read or delete it. An owner or admin can connect a key with ${BOAT_DELETE_SCOPES} that covers all sandboxes in Settings, then press ${retryLabel}.`,
+      retry: true,
+    };
+  }
+  return { text: operationFailureText(operation), retry: true };
+}
+
 // ---- what a destructive action would put at risk
 
 export type RuntimeCheck =

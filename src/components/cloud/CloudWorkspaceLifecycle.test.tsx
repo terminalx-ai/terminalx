@@ -336,9 +336,65 @@ describe("DeletionProgress", () => {
 
   it("explains an action the provider refused while its credential stays valid", async () => {
     const failed = operation({ state: "failed", errorCode: "cloud_provider_permission_denied", providerErrorCode: "permission_denied" });
-    mocked.cloudWorkspaceOperation.mockResolvedValue({ workspace: item("ready").workspace, operation: failed } as never);
-    render(<DeletionProgress item={item("ready", {}, failed)} onChanged={() => undefined} onForceNeeded={() => undefined} />);
+    // Another provider's refusal; Boat's own names the key scopes it needs (below).
+    const other = item("ready", { provider: "machine0" }, failed);
+    mocked.cloudWorkspaceOperation.mockResolvedValue({ workspace: other.workspace, operation: failed } as never);
+    render(<DeletionProgress item={other} onChanged={() => undefined} onForceNeeded={() => undefined} />);
     expect(screen.getByTestId("cloud-deletion-progress").textContent).toMatch(/refused this action, though its credential is still valid.*\(Provider code: permission_denied\)/);
+  });
+
+  // PRO-52: the two Boat delete failures, worded for the one button the row shows.
+  describe("a Boat delete that stopped", () => {
+    const show = (failed: ReturnType<typeof operation>) => {
+      const row = item("attention-required", { provider: "box" }, failed);
+      mocked.cloudWorkspaceOperation.mockResolvedValue({ workspace: row.workspace, operation: failed } as never);
+      render(<DeletionProgress item={row} onChanged={() => undefined} onForceNeeded={() => undefined} />);
+      return screen.getByTestId("cloud-deletion-progress");
+    };
+
+    it("says which key scopes are missing when Boat refuses, and names the Retry delete button it shows", () => {
+      const view = show(operation({ state: "failed", errorCode: "cloud_provider_permission_denied", providerErrorCode: "forbidden" }));
+      expect(view.textContent).toContain("Boat refused to delete this workspace (forbidden)");
+      expect(view.textContent).toContain("a key with sandbox.read and sandbox.delete that covers all sandboxes");
+      expect(view.textContent).toContain("then press Retry delete.");
+      expect(screen.getByRole("button", { name: /Retry delete/ })).toBeTruthy();
+    });
+
+    it("sends the admin to Boat support with the deletion's operation id, without a retry or a broader key", () => {
+      const failed = operation({
+        state: "failed",
+        errorCode: "cloud_provider_state_conflict",
+        detailCode: "box_deleted_sandbox_present",
+        cleanup: { complete: false, items: [{ kind: "provider-compute", state: "unconfirmed", providerStage: null, expectedBy: null, providerOperationId: "op_01HZX-9f2c" }] },
+      });
+      const view = show(failed);
+      expect(view.textContent).toContain("Boat accepted the deletion but still reports the sandbox. Contact Boat support with the deletion operation id: op_01HZX-9f2c.");
+      expect(view.textContent).not.toMatch(/sandbox\.delete|key|Retry/);
+      expect(screen.queryByRole("button", { name: /Retry delete/ })).toBeNull();
+    });
+
+    it("says who can see the operation id when the server did not send it", () => {
+      const view = show(operation({ state: "failed", errorCode: "cloud_provider_state_conflict", detailCode: "box_deleted_sandbox_present" }));
+      expect(view.textContent).toContain("with the deletion operation id; an organization owner or admin can see it here.");
+      expect(screen.queryByRole("button", { name: /Retry delete/ })).toBeNull();
+    });
+
+    it("keeps the general wording for another provider's refusal and for an older server's state conflict", () => {
+      // Not Boat: no Boat scopes are advised.
+      const failed = operation({ state: "failed", errorCode: "cloud_provider_permission_denied", providerErrorCode: "permission_denied" });
+      const other = item("ready", { provider: "machine0" }, failed);
+      mocked.cloudWorkspaceOperation.mockResolvedValue({ workspace: other.workspace, operation: failed } as never);
+      const first = render(<DeletionProgress item={other} onChanged={() => undefined} onForceNeeded={() => undefined} />);
+      expect(screen.getByTestId("cloud-deletion-progress").textContent).not.toContain("sandbox.delete");
+      expect(screen.getByRole("button", { name: /Retry delete/ })).toBeTruthy();
+      first.unmount();
+
+      // Boat's state conflict from a server that sends no detail code: the plain failure, still retryable.
+      const conflict = operation({ state: "failed", errorCode: "cloud_provider_state_conflict" });
+      const view = show(conflict);
+      expect(view.textContent).not.toContain("Contact Boat support");
+      expect(screen.getByRole("button", { name: /Retry delete/ })).toBeTruthy();
+    });
   });
 
   it("a retry refused for running agent work goes to the confirmation dialog", async () => {

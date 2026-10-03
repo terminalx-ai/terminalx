@@ -527,6 +527,8 @@ export interface CloudWorkspaceCleanup {
     state: "removed" | "pending" | "retained-by-provider" | "unconfirmed" | (string & {});
     providerStage: string | null;
     expectedBy: number | null;
+    /** The provider's id for the deletion it accepted (admins only; absent from an older server). */
+    providerOperationId?: string;
   }[];
 }
 
@@ -627,6 +629,8 @@ export interface CloudWorkspaceOperation {
   errorCode: CloudWorkspaceOperationErrorCode | null;
   /** The provider's own normalized error code for a failed operation, when the server reports one; never a message or body. */
   providerErrorCode?: string | null;
+  /** The server's own detail for a failed operation, beside its error code (`box_deleted_sandbox_present`); absent from an older server. */
+  detailCode?: string | null;
   progress: { phase: "allocating" | "starting" | "installing-runtime" | "connecting-relay" | "suspending" | "releasing"; retryAt: number | null } | null;
   events: {
     code: "operation-queued" | "provider-preflight-started" | "machine-allocation-started" | "runtime-installation-started" | "credentials-installing" | "credentials-ready" | "repository-cloning" | "repository-ready" | "repository-clone-failed" | "relay-connection-started" | "provider-cleanup-started" | "workspace-ready" | "operation-failed" | "operation-canceled";

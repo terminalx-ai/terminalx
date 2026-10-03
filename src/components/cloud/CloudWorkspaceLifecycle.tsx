@@ -13,7 +13,7 @@ import {
   deadlineText,
   isOpen,
   lifecycleErrorMessage,
-  operationFailureText,
+  deleteFailure,
   remaining,
   repositoryLabel,
   repositoryRiskLines,
@@ -301,6 +301,9 @@ function Ok({ text }: { text: string }) {
   );
 }
 
+/** The one button under a stopped delete; its failure text names it by this label. */
+const RETRY_DELETE = "Retry delete";
+
 /**
  * A permanent delete's cleanup, from its operation until the provider
  * confirms everything is gone: what is removed, what remains, and why. A
@@ -372,6 +375,7 @@ export function DeletionProgress({
 
   const items = operation.cleanup?.items ?? [];
   const left = operation.cleanup ? remaining(operation.cleanup) : [];
+  const failure = operation.state === "failed" ? deleteFailure(operation, item.workspace.provider, RETRY_DELETE) : null;
   return (
     <div className="flex flex-col gap-1 text-xs" data-testid="cloud-deletion-progress" data-state={operation.state}>
       <span className={running ? "text-muted-foreground" : "text-destructive"}>
@@ -379,8 +383,8 @@ export function DeletionProgress({
           ? items.length
             ? `Deleting: ${items.length - left.length} of ${items.length} removed.`
             : "Deleting…"
-          : operation.state === "failed"
-            ? `The delete stopped: ${operationFailureText(operation)}`
+          : failure
+            ? `The delete stopped: ${failure.text}`
             : "Deleted."}
       </span>
       {left.length > 0 && (
@@ -395,10 +399,10 @@ export function DeletionProgress({
           ))}
         </ul>
       )}
-      {operation.state === "failed" && (
+      {failure?.retry && (
         <div className="flex items-center gap-2">
           <Button size="xs" variant="outline" disabled={busy} onClick={() => void retry()}>
-            {busy && <Loader2 className="animate-spin" />} Retry delete
+            {busy && <Loader2 className="animate-spin" />} {RETRY_DELETE}
           </Button>
           <span className="text-muted-foreground">Resumes the same cleanup; nothing is created again.</span>
         </div>

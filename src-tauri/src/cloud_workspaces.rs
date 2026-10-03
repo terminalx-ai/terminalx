@@ -606,6 +606,11 @@ pub struct CloudWorkspaceOperation {
     /// Only a short token passes; anything else (a message, a body) is dropped.
     #[serde(default, deserialize_with = "safe_provider_error_code")]
     pub provider_error_code: Option<String>,
+    /// The server's own detail for a failed operation, beside the error
+    /// code (`box_deleted_sandbox_present`). Absent from an older server;
+    /// only a short token passes.
+    #[serde(default, deserialize_with = "safe_provider_error_code")]
+    pub detail_code: Option<String>,
     pub progress: Option<OperationProgress>,
     pub events: Option<Vec<OperationEvent>>,
     /// An archive's final checkpoint: committed, failed, timed-out or skipped
@@ -635,6 +640,11 @@ pub struct CleanupItem {
     pub provider_stage: Option<String>,
     #[serde(default)]
     pub expected_by: Option<i64>,
+    /// The provider's id for the deletion it accepted, which its support
+    /// asks for (admins only; absent from an older server). Only an id-like
+    /// token passes.
+    #[serde(default, deserialize_with = "safe_provider_operation_id", skip_serializing_if = "Option::is_none")]
+    pub provider_operation_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2028,6 +2038,22 @@ where
     })
 }
 
+fn safe_provider_operation_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::String(id))
+            if (1..=128).contains(&id.len())
+                && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-')) =>
+        {
+            Some(id)
+        }
+        _ => None,
+    })
+}
+
 /// A provider error code as the server normalizes it: lowercase letters,
 /// digits and `_ . : -`, at most 64 bytes.
 fn safe_provider_code(code: &str) -> bool {
@@ -2368,6 +2394,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(projected["operation"]["providerErrorCode"], Value::Null);
+    }
+
+    // PRO-52: the detail code and the deletion's provider operation id reach the page, as tokens only.
+    #[test]
+    fn a_failed_delete_carries_its_detail_code_and_the_providers_operation_id() {
+        let parse = |detail: Value, operation_id: Value| {
+            let mut value: Value = serde_json::from_str(&snapshot_body(Some("cloud_provider_state_conflict"))).unwrap();
+            value["operation"]["detailCode"] = detail;
+            value["operation"]["cleanup"] = json!({ "complete": false, "items": [{ "kind": "provider-compute", "state": "unconfirmed", "providerOperationId": operation_id }] });
+            let operation = serde_json::from_value::<CloudWorkspaceSnapshot>(value).unwrap().operation;
+            (operation.detail_code, operation.cleanup.unwrap().items[0].provider_operation_id.clone())
+        };
+        assert_eq!(
+            parse(json!("box_deleted_sandbox_present"), json!("op_01HZX-9f2c")),
+            (Some("box_deleted_sandbox_present".into()), Some("op_01HZX-9f2c".into()))
+        );
+        assert_eq!(parse(json!("Boat said: sandbox still there"), json!("an id with spaces")), (None, None));
+        assert_eq!(parse(Value::Null, json!({ "raw": "body" })), (None, None));
+        // An older server sends neither, and nothing is invented for it.
+        let old: CloudWorkspaceSnapshot = serde_json::from_str(&snapshot_body(Some("cloud_provider_permission_denied"))).unwrap();
+        assert_eq!(old.operation.detail_code, None);
     }
 
     #[test]
