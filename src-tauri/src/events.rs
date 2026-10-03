@@ -116,6 +116,10 @@ pub struct Usage {
     pub context_max: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// The full id of the model that produced this reading, when the agent
+    /// says: what a family alias actually ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

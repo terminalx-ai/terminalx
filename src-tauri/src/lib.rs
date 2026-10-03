@@ -7,6 +7,7 @@
 
 #[cfg(feature = "desktop")]
 mod account;
+mod agent_data;
 #[cfg(feature = "desktop")]
 mod automations;
 mod binpath;
@@ -396,6 +397,7 @@ pub fn run() {
             commands::work_status,
             commands::list_branches,
             commands::worktree_disposition,
+            commands::sessions_sharing_worktree,
             commands::remove_session_worktree,
             commands::snapshot_tree,
             commands::head_tree,

@@ -18,11 +18,24 @@
 export interface AccountRoleHandlers {
   /** Read the organizations and roles again; `force` skips the once-a-minute throttle. */
   refresh: (force: boolean) => Promise<void>;
-  /** A workspace list, asked for at `askedAt`, says whether this person manages the organization. */
+  /** A workspace list, asked for at `askedAt` (a `roleAskStamp()`), says whether this person manages the organization. */
   listed: (orgId: string, manages: boolean | null, askedAt: number) => void;
 }
 
 let handlers: AccountRoleHandlers | null = null;
+
+let asks = 0;
+
+/**
+ * A stamp for a question about the roles (a read of the account's roles, or a
+ * workspace list), taken when it is asked. Each is greater than every one
+ * before it, so which of two questions was asked later is never in doubt.
+ * The wall clock cannot say: two asked in the same millisecond read the same
+ * `Date.now()`, and the clock can be set back.
+ */
+export function roleAskStamp(): number {
+  return ++asks;
+}
 
 /** The account store registers itself; null unregisters (tests). */
 export function registerAccountRoles(next: AccountRoleHandlers | null) {
@@ -38,7 +51,8 @@ export function refreshAccountRoles(force = false): Promise<void> {
  * is an organization owner's or admin's) and is read every 30 seconds, so it
  * is usually the freshest word on the role. When it contradicts the role the
  * account holds, the menus follow the list at once and the account's roles
- * are read again.
+ * are read again. `askedAt` is the `roleAskStamp()` taken when the list was
+ * asked for.
  */
 export function noteListedOrgRole(orgId: string, manages: boolean | null, askedAt: number) {
   handlers?.listed(orgId, manages, askedAt);
