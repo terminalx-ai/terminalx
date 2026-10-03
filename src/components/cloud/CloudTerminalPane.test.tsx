@@ -28,6 +28,8 @@ const terminal = (fields: Partial<CloudTerminal> = {}): CloudTerminal => ({
   gone: null,
   inputError: null,
   sessionId: null,
+  tabId: null,
+  live: false,
   ...fields,
 });
 
