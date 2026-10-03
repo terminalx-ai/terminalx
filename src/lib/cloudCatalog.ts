@@ -344,6 +344,8 @@ export async function ingestCloudList(
     const current = state.orgs[org] ?? emptyOrg(org);
     const createMemory = { ...state.createMemory };
     for (const tombstone of tombstones) delete createMemory[memoryKey(tombstone.orgId, tombstone.id)];
+    // The server now says where these workspaces belong (S1 `repositories`), so what this desktop remembered of them is never read again.
+    for (const item of workspaces) if (Array.isArray(item.workspace.repositories)) delete createMemory[memoryKey(item.workspace.orgId, item.workspace.id)];
     const sessions = { ...current.sessions };
     for (const tombstone of tombstones) delete sessions[tombstone.id];
     // Session lists kept for a workspace this person can no longer open (not

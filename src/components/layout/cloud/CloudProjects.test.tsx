@@ -203,6 +203,76 @@ describe("sessions under the project", () => {
     expect(within(sessionNode(`cloud:${ORG}:sleepy:s1`)).getByTestId("cloud-location-chip").getAttribute("title")).toContain("State: Stopped");
   });
 
+  describe("S1 chips (PRO-59)", () => {
+    const webExtra = { ...acmeWeb, primary: false };
+    const docsExtra = { identity: "github.com/acme/docs", fullName: null, cloneUrl: "https://github.com/acme/docs.git", primary: false };
+
+    it("marks a workspace with extra repositories +N repo, on the project row when it is the only workspace", async () => {
+      await load([item("multi", { repositories: [acmeApi, webExtra, docsExtra] }), item("single", { repositories: [acmeWeb] })], {
+        multi: { sessions: [session("a", "A")], capabilities: null },
+        single: { sessions: [session("b", "B")], capabilities: null },
+      });
+      mount();
+      const api = projectTree(`cloud:${ORG}:github.com/acme/api`);
+      const chip = within(api).getByTestId("cloud-extra-repositories");
+      expect(chip.textContent).toBe("+2 repos");
+      // The tooltip names them; an unselected repository shows by its identity.
+      expect(chip.getAttribute("title")).toBe("multi also checks out acme/web, github.com/acme/docs");
+      expect(within(api).getByTestId("cloud-project-row").contains(chip)).toBe(true);
+      // The extra repository is not a second place for the workspace.
+      expect(within(projectTree(`cloud:${ORG}:github.com/acme/web`)).queryByTestId("cloud-extra-repositories")).toBeNull();
+      expect(within(projectTree(`cloud:${ORG}:github.com/acme/web`)).getAllByTestId("cloud-session-node")).toHaveLength(1);
+    });
+
+    it("puts the chip on the workspace's own row when the project has several", async () => {
+      await load([item("multi", { repositories: [acmeApi, webExtra], lastActivityAt: 50 }), item("plain", { repositories: [acmeApi], lastActivityAt: 40 })], {
+        multi: { sessions: [session("a", "A")], capabilities: null },
+        plain: { sessions: [session("b", "B")], capabilities: null },
+      });
+      mount();
+      const api = projectTree(`cloud:${ORG}:github.com/acme/api`);
+      const [multi, plain] = within(api).getAllByTestId("cloud-workspace-node");
+      expect(within(multi).getByTestId("cloud-extra-repositories").textContent).toBe("+1 repo");
+      expect(within(plain).queryByTestId("cloud-extra-repositories")).toBeNull();
+      expect(within(api).getByTestId("cloud-project-row").querySelector('[data-testid="cloud-extra-repositories"]')).toBeNull();
+    });
+
+    it("shows the organization's running slots in its header, and says when it is full", async () => {
+      await catalog.ingestCloudList({ workspaces: [item("one", { repositories: [acmeApi] })], quota: { used: 1, limit: 2, running: { used: 1, limit: 2 }, total: { used: 5, limit: 20 } } } as never, ORG);
+      const view = mount();
+      const chip = screen.getByTestId("cloud-org-quota");
+      expect(chip.textContent).toBe("1 of 2 running");
+      expect(chip.getAttribute("title")).toBe("1 of 2 cloud workspaces running\n5 of 20 workspaces in all, stopped ones included");
+      expect(chip.getAttribute("data-at-limit")).toBeNull();
+      view.unmount();
+
+      await catalog.ingestCloudList({ workspaces: [item("one", { repositories: [acmeApi] })], quota: { used: 2, limit: 2 } }, ORG);
+      mount();
+      const full = screen.getByTestId("cloud-org-quota");
+      expect(full.textContent).toBe("2 of 2 running");
+      expect(full.getAttribute("data-at-limit")).toBe("true");
+      expect(full.getAttribute("title")).toContain("Stop one to start another.");
+    });
+
+    it("draws neither chip for a server that sends neither field (CS-5 behaviour)", async () => {
+      await catalog.ingestCloudList({ workspaces: [item("old", {})] }, ORG);
+      catalog.cacheCloudSessions(ORG, "old", [session("a", "A")] as never, null);
+      mount();
+      expect(screen.queryByTestId("cloud-org-quota")).toBeNull();
+      expect(screen.queryByTestId("cloud-extra-repositories")).toBeNull();
+      expect(screen.getAllByTestId("cloud-session-node")).toHaveLength(1);
+    });
+
+    it("renders both chips without attaching or resuming anything", async () => {
+      await load([item("multi", { state: "suspended", repositories: [acmeApi, webExtra] })], { multi: { sessions: [session("a", "A")], capabilities: null } });
+      mount();
+      expect(screen.getByTestId("cloud-extra-repositories")).toBeTruthy();
+      expect(screen.getByTestId("cloud-org-quota")).toBeTruthy();
+      expect(mocks.api.cloudRemoteAttach).not.toHaveBeenCalled();
+      expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    });
+  });
+
   it("groups by VM only when a project has more than one workspace", async () => {
     await load(
       [item("fix-login", { repositories: [acmeApi], lastActivityAt: 50 }), item("perf", { repositories: [acmeApi], state: "suspended", lastActivityAt: 40 }), item("web-1", { repositories: [acmeWeb] })],

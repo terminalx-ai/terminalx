@@ -427,6 +427,10 @@ type ArchivedImages = (Vec<ImageRef>, Vec<(String, String)>);
 
 /// How long a restart waits for the outgoing CLI to let go of its conversation.
 const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(6);
+/// Columns and rows every agent CLI starts at. A view that controls the
+/// pane's size (the desktop's terminal view, a cloud tab's controller)
+/// resizes it from here.
+pub const CLI_PANE_SIZE: (u16, u16) = (120, 30);
 
 fn key_of(session_id: &str, tab_id: &str) -> String {
     format!("{session_id}/{tab_id}")
@@ -1560,7 +1564,7 @@ impl SessionManager {
         let spawned = crate::cloud_grants::unset_prefix(&format!("{}{}", launch.command, config.args), &unset);
         let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);
-        let spec = pty::PaneSpec { cwd: &entry.cwd, cols: 120, rows: 30, command: Some(&spawned), env: &env };
+        let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: Some(&spawned), env: &env };
         self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI")?;
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         rt.engine = Engine::Cli(CliTab {
