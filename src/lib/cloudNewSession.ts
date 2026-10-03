@@ -82,7 +82,12 @@ function worktreeRefused(error: unknown): boolean {
  * A new session in an existing workspace: connect (or wake it once), then
  * `session.create`. Returns the new session's key, which is selected.
  */
-export async function startInWorkspace(plan: Extract<CloudStartPlan, { kind: "reuse" | "wake" }>, request: CloudSessionRequest): Promise<string> {
+export async function startInWorkspace(
+  plan: Extract<CloudStartPlan, { kind: "reuse" | "wake" }>,
+  request: CloudSessionRequest,
+  /** `select: false` leaves the window where it is (the CLI starts sessions without moving the reader). */
+  options: { select?: boolean } = {},
+): Promise<string> {
   bootCloudSessions();
   const { orgId, id: workspaceId } = plan.node.item.workspace;
   const target = { orgId, workspaceId };
@@ -122,7 +127,7 @@ export async function startInWorkspace(plan: Extract<CloudStartPlan, { kind: "re
     // The list follows `session.sessions` on session/2 runtimes; read it now either way so the row is there.
     void refreshCloudSessions(target, client).catch(() => undefined);
     const key = cloudSessionKey(orgId, workspaceId, sessionId);
-    selectCloudSession(key);
+    if (options.select !== false) selectCloudSession(key);
     return key;
   } finally {
     lease.release();
@@ -240,14 +245,15 @@ export async function prepareCloudCreate(project: CloudProject, request: CloudSe
  * Create the confirmed workspace (the same request and key on a retry), then
  * select its first session once its runtime names it.
  */
-export async function confirmCloudCreate(prepared: PreparedCreate): Promise<CloudWorkspaceSnapshot> {
+export async function confirmCloudCreate(prepared: PreparedCreate, options: { follow?: boolean } = {}): Promise<CloudWorkspaceSnapshot> {
   const snapshot = await createWorkspace(api, prepared.form, {
     orgId: cloudOrgArg(prepared.orgId),
     pending: prepared.pending,
     onPending: (pending) => savePending(prepared.orgId, pending),
     onCreated: (created, request) => rememberCreatedWorkspace(created, request.repositories),
   });
-  followLaunch(prepared.orgId, snapshot.workspace.id, prepared.project.key);
+  // `follow: false` (the CLI) leaves the window's selection alone.
+  if (options.follow !== false) followLaunch(prepared.orgId, snapshot.workspace.id, prepared.project.key);
   return snapshot;
 }
 

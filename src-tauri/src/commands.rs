@@ -1685,6 +1685,12 @@ pub fn terminal_perf_reply(id: String, result: serde_json::Value) {
     crate::terminal_perf::reply(&id, result);
 }
 
+/// The window's answer to a `cloud_control_request` event (PRO-40).
+#[tauri::command]
+pub fn cloud_control_reply(id: String, result: serde_json::Value) {
+    crate::cloud_control::reply(&id, result);
+}
+
 // ------------------------------------------------------------------ files & editor
 
 #[tauri::command]
