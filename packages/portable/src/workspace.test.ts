@@ -6,6 +6,7 @@ import {
   WORKSPACE_CAPABILITIES,
   WorkspaceRpcClient,
   WorkspaceRpcError,
+  agentPtyId,
   type RuntimeSession,
   type WorkspaceConnectionState,
   type WorkspaceTransport,
@@ -543,6 +544,30 @@ describe("workspace RPC client", () => {
       expect(runtime.sent.find((frame) => frame.method === "pty.create")!.params).toMatchObject({ sessionId: "s1" });
       const listed = await client.listPtys();
       expect(listed.terminals.map((terminal) => terminal.sessionId)).toEqual(["s1", undefined]);
+      client.close();
+    });
+  });
+
+  describe("PRO-86: agent-pty/1", () => {
+    it("addresses an agent tab's terminal by its tab, and asks for a start only when told to", async () => {
+      expect(agentPtyId("t1")).toBe("tab:t1");
+      const runtime = new FakeRuntime();
+      const client = new WorkspaceRpcClient(runtime, ids);
+      runtime.connect(["pty/1", "session/1"]);
+      // An older runtime: the capability says so before anything is sent.
+      expect(client.hasCapability("agent-pty/1")).toBe(false);
+      runtime.drop();
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      expect(client.hasCapability("agent-pty/1")).toBe(true);
+      await client.controlPty(agentPtyId("t1"), 100, 40).catch(() => undefined);
+      await client.controlPty(agentPtyId("t1"), 100, 40, { start: true }).catch(() => undefined);
+      const controls = runtime.sent.filter((frame) => frame.method === "pty.control").map((frame) => frame.params);
+      expect(controls).toEqual([
+        { ptyId: "tab:t1", cols: 100, rows: 40 },
+        { ptyId: "tab:t1", cols: 100, rows: 40, start: true },
+      ]);
+      // It adds no method: the terminal calls are the shells'.
+      expect(protocolSource).not.toMatch(/method\("[^"]+", "agent-pty\/1"/);
       client.close();
     });
   });
