@@ -2,6 +2,8 @@ import { useLayoutEffect, useRef, type HTMLAttributes, type ReactNode, type Ref 
 import { Archive, ArrowUp, ChevronDown, Globe, Lock, Pin, Terminal, X } from "lucide-react";
 import { AgentMark, agentName } from "@/components/AgentMark";
 import { actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
+import { formatSize } from "@/lib/workspaceSizes";
+import type { WorkspaceState } from "@/types/session";
 import { cn } from "@/lib/cn";
 import { relativeTime } from "@/lib/time";
 import { TAB_STATUS_LABEL, type TabStatus } from "@/types/session";
@@ -96,10 +98,45 @@ export function StatusStripe({ status, size }: { status: TabStatus; size: "row" 
 }
 
 /** Small tag after a row's label, such as a workspace kind; `mono` draws a truncated branch name. */
-export function RowChip({ mono, children }: { mono?: boolean; children: ReactNode }) {
+export function RowChip({ mono, title, children }: { mono?: boolean; title?: string; children: ReactNode }) {
   return (
-    <span className={mono ? "max-w-20 shrink-0 truncate rounded-sm bg-veil-raised px-1 font-mono text-[9px] text-faint" : "shrink-0 rounded-sm bg-veil-raised px-1 text-[9px] text-faint"}>
+    <span title={title} className={mono ? "max-w-20 shrink-0 truncate rounded-sm bg-veil-raised px-1 font-mono text-[9px] text-faint" : "shrink-0 rounded-sm bg-veil-raised px-1 text-[9px] text-faint"}>
       {children}
+    </span>
+  );
+}
+
+const STATE_TONE: Record<WorkspaceState, string> = {
+  clean: "text-faint",
+  merged: "text-merged",
+  uncommitted: "text-warning",
+  unmerged: "text-warning",
+  unknown: "text-faint",
+};
+
+const STATE_MEANING: Record<WorkspaceState, string> = {
+  clean: "Nothing uncommitted and nothing of its own to merge",
+  merged: "Its commits are in the default branch",
+  uncommitted: "Has uncommitted or stashed work",
+  unmerged: "Has commits that are not in the default branch, as far as is known without fetching",
+  unknown: "Could not be read",
+};
+
+/** A workspace's state in one word, and what it takes on disk once that is known. */
+export function WorkspaceFacts({ state, bytes }: { state?: WorkspaceState; bytes?: number }) {
+  if (!state && typeof bytes !== "number") return null;
+  return (
+    <span className={cn("flex shrink-0 items-center gap-1 text-[10px]", yieldsToRowActions)}>
+      {state ? (
+        <span className={STATE_TONE[state]} title={STATE_MEANING[state]}>
+          {state}
+        </span>
+      ) : null}
+      {typeof bytes === "number" ? (
+        <span className="tabular-nums text-faint" title="Size on disk">
+          {formatSize(bytes)}
+        </span>
+      ) : null}
     </span>
   );
 }

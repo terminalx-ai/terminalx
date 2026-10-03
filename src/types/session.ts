@@ -93,7 +93,12 @@ export interface Workspace {
   ahead: number;
   /** Commits behind this checkout's configured upstream. */
   behind: number;
+  /** As known locally, without a fetch. */
+  state?: WorkspaceState;
 }
+
+/** A workspace's state in one word. */
+export type WorkspaceState = "clean" | "uncommitted" | "unmerged" | "merged" | "unknown";
 
 export interface WorkspacePr {
   number: number;

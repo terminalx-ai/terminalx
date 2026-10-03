@@ -2760,6 +2760,13 @@ pub async fn list_workspaces(project_path: String) -> CmdResult<Vec<crate::works
     tauri::async_runtime::spawn_blocking(move || crate::workspaces::list(Path::new(&project_path)).map_err(err)).await.map_err(err)?
 }
 
+/// What a workspace takes on disk. Asked for one workspace at a time, after
+/// the list is shown, because walking a large checkout takes a while.
+#[tauri::command]
+pub async fn workspace_size(project_path: String, path: String) -> CmdResult<u64> {
+    tauri::async_runtime::spawn_blocking(move || crate::workspaces::size(Path::new(&project_path), Path::new(&path)).map_err(err)).await.map_err(err)?
+}
+
 /// Resolve the name shown before a new worktree-backed session is created.
 /// Supplying a requested name applies the same sanitising and collision rules
 /// as creation, so the preview is normally the name that lands on disk.

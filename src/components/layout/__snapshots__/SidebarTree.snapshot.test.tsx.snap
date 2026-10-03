@@ -1631,6 +1631,7 @@ exports[`sidebar tree DOM > draws an empty and a collapsed project 2`] = `
         </button>
         <span
           class="shrink-0 rounded-sm bg-veil-raised px-1 text-[9px] text-faint"
+          title="A worktree not created by TerminalX"
         >
           external
         </span>
@@ -3892,6 +3893,7 @@ exports[`sidebar tree DOM > draws archived sessions when archived sessions are s
         </button>
         <span
           class="shrink-0 rounded-sm bg-veil-raised px-1 text-[9px] text-faint"
+          title="A worktree not created by TerminalX"
         >
           external
         </span>
@@ -5633,6 +5635,7 @@ exports[`sidebar tree DOM > draws every workspace, session and tab row kind 1`] 
         </button>
         <span
           class="shrink-0 rounded-sm bg-veil-raised px-1 text-[9px] text-faint"
+          title="A worktree not created by TerminalX"
         >
           external
         </span>
