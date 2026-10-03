@@ -79,6 +79,33 @@ many tabs, or clock skew against the request's `deadline`, the upload may not
 finish and the archive records `failed` or `timed-out` (the disk is kept
 either way). Refreshing sooner while an archive is pending is a follow-up.
 
+## A full disk (PRO-33)
+
+A workspace whose disk fills up fails in ways that look like something else:
+a save that is refused, a commit that stops, an agent that ends mid-turn. The
+runtime reports what is left and the desktop says so.
+
+- Runtime: `lifecycle.resources` (`src-tauri/src/cloud_resources.rs`, in
+  `lifecycle/1`, for anyone who may look) answers
+  `{ v, memory: { totalBytes, availableBytes } | null, storage: { totalBytes,
+  availableBytes, totalInodes, availableInodes } | null, observedAt }`. Storage
+  is one `statvfs` of the workspace root, counting what an unprivileged
+  process may still write; memory is `MemTotal`/`MemAvailable` from
+  `/proc/meminfo`. It holds no state and decides nothing: the thresholds are
+  the client's. A runtime from before it answers `method_not_found`.
+- Desktop: `src/lib/cloudResources.ts` reads it over the connection a session
+  already holds, on connect and every 60 s, and never connects or wakes for
+  it; a workspace that is not connected is not asked and nothing is shown for
+  it. `CloudResourceNotice` (in a cloud session and in the workspace view)
+  says **full** below 128 MB free or with no inodes left ("Saves, commits and
+  agent work fail until space is freed … Nothing already on the disk is
+  lost"), and **almost full** below both 5% and 2 GB, or below 1% of inodes.
+  It clears by itself once space is freed.
+
+Not done: the server is not told, so the workspace list and an admin's
+diagnostics do not show a full disk to someone who is not connected to it,
+and a stopped workspace's disk is not known.
+
 ## Tests
 
 - `src/components/cloud/CloudWorkspaceLifecycle.test.tsx`: dirty files,
@@ -88,6 +115,10 @@ either way). Refreshing sooner while an archive is pending is a follow-up.
   provider failure.
 - `src/components/layout/cloud/CloudSections.test.tsx`: the archive list,
   unarchive without compute, a failed archive, a tombstone's notice.
+- `src/lib/cloudResources.test.tsx`, `src-tauri/src/cloud_resources.rs`,
+  `src-tauri/src/remote/server_tests.rs`: the disk levels and their wording;
+  only a connected workspace is asked; the notice follows the disk and goes
+  with the connection; a runtime that does not report is asked once.
 - `src/lib/cloudLifecycle.test.ts`: purging a deleted workspace and only it;
   an already-purged tombstone; a failed native purge retried.
 - `src-tauri/src/cloud_workspaces.rs`: the header, force, the archive
