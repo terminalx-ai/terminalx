@@ -35,6 +35,8 @@ const BACKOFF_FIRST_MS = 250;
 const BACKOFF_MAX_MS = 60_000;
 /** Failed attempts in a row before the link stops by itself and waits to be asked (`reconnect`). */
 export const MAX_ATTEMPTS = 8;
+/** How long a connection has to stay up before the failures before it are forgotten. */
+export const STABLE_AFTER_MS = 30_000;
 const WAITING_POLL_MS = 1_500;
 const WAITING_POLL_MAX_MS = 15_000;
 /** Polls for a runtime that is not ready before giving up (about four minutes). */
@@ -86,6 +88,7 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
   private actedOn: string | null | undefined = undefined;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
+  private stableTimer: ReturnType<typeof setTimeout> | null = null;
   /** The offer of the attachment in use: the relay and the runtime's pinned key. */
   private offer: PairingOffer | null = null;
   /** Installed after an invite connect, in memory only: reconnects use it instead of a new pairing. */
@@ -340,7 +343,15 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
     if (hello.authority !== undefined && hello.authority !== "participate") throw new Error("The workspace granted a phone more than it may hold.");
     if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
     this.handshakeTimer = null;
-    this.attempt = 0;
+    // Connecting is not yet success: a connection that authenticates and then
+    // drops, again and again, must back off and give up like any other
+    // failure (every reconnect is an `open`, which counts as activity on the
+    // server). The count starts over only once it has stayed up for a while.
+    const socket = this.socket;
+    this.stableTimer = setTimeout(() => {
+      this.stableTimer = null;
+      if (this.socket === socket && this.current.state === "connected") this.attempt = 0;
+    }, STABLE_AFTER_MS);
     this.issue = null;
     const you = hello.you && typeof hello.you === "object" ? (hello.you as WorkspaceYou) : undefined;
     this.setState({
@@ -434,6 +445,8 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
 
   private dropSocket(): void {
     this.generation += 1;
+    if (this.stableTimer) clearTimeout(this.stableTimer);
+    this.stableTimer = null;
     if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
     this.handshakeTimer = null;
     const socket = this.socket;
