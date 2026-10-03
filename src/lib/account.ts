@@ -7,6 +7,7 @@ import { dropCloudAgentsIn } from "@/lib/cloudAgents";
 import { closeCloudConnectionsIn, resetCloudConnections } from "@/lib/cloudConnections";
 import { dropCloudTerminalsIn, resetCloudTerminals } from "@/lib/cloudTerminals";
 import { forgetPendingCreates, setPendingCreateUser } from "@/lib/cloudCreate";
+import { forgetSetups } from "@/lib/organizationSetup";
 import { dropCollabIn, resetCollab } from "@/lib/cloudCollab";
 import { resetPeople } from "@/lib/cloudPeople";
 import { dropEditors } from "@/lib/editors";
@@ -61,7 +62,7 @@ function applyStatus(status: AccountStatus) {
     // its connections and what they cached.
     for (const orgId of change.left) dropCloudOrg(orgId);
   }
-  for (const orgId of leftMemberships(state.status, status)) forgetCloudOrg(orgId);
+  for (const orgId of leftMemberships(state.status, status)) forgetCloudOrg(orgId, status.state === "signed-in" ? (status.identity?.email ?? null) : null);
   followUser(status);
   set({ status, ready: true });
   scheduleRefresh(status);
@@ -94,8 +95,9 @@ function pruneCloudPrefs(keep: (orgId: string) => boolean) {
 }
 
 /** What is left of an organization the user left: its pending creates (with their prompts) and its sidebar prefs. */
-function forgetCloudOrg(orgId: string) {
+function forgetCloudOrg(orgId: string, user: string | null) {
   forgetPendingCreates((_user, organizationId) => organizationId === orgId);
+  if (user) forgetSetups(user, (organizationId) => organizationId === orgId);
   pruneCloudPrefs((id) => id !== orgId);
 }
 
