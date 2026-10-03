@@ -492,6 +492,25 @@ pub async fn cloud_provider_disconnect(
 }
 
 #[tauri::command]
+pub async fn cloud_provider_set_creation_enabled(
+    provider: crate::cloud_workspaces::CloudWorkspaceProviderId,
+    context_revision: String,
+    enabled: bool,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudProviderSummary, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.set_provider_creation_enabled(provider, context_revision, enabled))
+}
+
+#[tauri::command]
+pub async fn cloud_provider_revalidate(
+    provider: crate::cloud_workspaces::CloudWorkspaceProviderId,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudProviderConnectionResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.revalidate_provider(provider, context_revision))
+}
+
+#[tauri::command]
 pub async fn cloud_workspace_setup(
     provider: crate::cloud_workspaces::CloudWorkspaceProviderId,
     state: tauri::State<'_, crate::AppState>,

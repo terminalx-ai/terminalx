@@ -1348,6 +1348,62 @@ impl CloudWorkspaceService {
         ensure_connection(result, provider)
     }
 
+    /// Whether new machines may be created on a provider (PRO-79). An owner's
+    /// or admin's switch, as in the console: the saved key, its resources and
+    /// every running workspace are untouched either way.
+    pub fn set_provider_creation_enabled(
+        &self,
+        provider: CloudWorkspaceProviderId,
+        context_revision: String,
+        enabled: bool,
+    ) -> Result<CloudProviderSummary, CloudWorkspaceClientError> {
+        let authorization = self.authorize_connect(provider)?;
+        if context_revision != AccountManager::context_revision(&authorization.context)
+            || !self.account.is_current(&authorization.context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        let result: CloudProviderSummary = self.client.request(
+            &authorization.context,
+            &["cloud-providers", provider.as_str(), "settings"],
+            None,
+            // The settings contract of today: version 1 carries no provider configuration.
+            Some(json!({ "enabledForCreate": enabled, "configurationVersion": 1, "configuration": {} })),
+            None,
+            RequestRisk::Mutation,
+        )?;
+        if !self.account.is_current(&authorization.context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        if result.id != provider {
+            return Err(invalid_response());
+        }
+        Ok(result)
+    }
+
+    /// Check the saved key against the provider again, without entering it
+    /// (PRO-79). The key never leaves the server; the answer is the same
+    /// safe connection metadata a read gives.
+    pub fn revalidate_provider(
+        &self,
+        provider: CloudWorkspaceProviderId,
+        context_revision: String,
+    ) -> Result<CloudProviderConnectionResponse, CloudWorkspaceClientError> {
+        let authorization = self.authorize_connect(provider)?;
+        if context_revision != AccountManager::context_revision(&authorization.context)
+            || !self.account.is_current(&authorization.context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        let result = self.client.request(
+            &authorization.context,
+            &["cloud-providers", provider.as_str(), "revalidate"],
+            None, Some(json!({})), None, RequestRisk::Mutation,
+        )?;
+        if !self.account.is_current(&authorization.context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        ensure_connection(result, provider)
+    }
+
     pub fn setup(
         &self,
         org: Option<&str>,
@@ -2428,6 +2484,58 @@ mod tests {
         assert_eq!(projected["providerAccount"], "Original account");
         assert!(!projected.to_string().contains("must-not-cross"));
         assert!(!captured.extra_request);
+    }
+
+    // PRO-79: the "new machines" switch and the key re-check, from the desktop.
+    #[test]
+    fn provider_creation_switch_and_recheck_use_their_endpoints_and_project_safe_metadata() {
+        let summary = r#"{"id":"box","displayName":"Boat","availability":"disabled-for-create","canManage":true,"connection":null,"capabilities":{"suspend":true,"resume":true,"releaseDisposition":"archived","locationSelection":"automatic","sourceSelection":"optional","pricing":"provider-rate"},"credential":"must-not-cross"}"#;
+        let (base, _, request) = serve_once(response("200 OK", summary, ""), Duration::ZERO);
+        let client = Client::for_test(&base, Duration::from_secs(2));
+        let result: CloudProviderSummary = client
+            .request(&context(), &["cloud-providers", "box", "settings"], None, Some(json!({ "enabledForCreate": false, "configurationVersion": 1, "configuration": {} })), None, RequestRisk::Mutation)
+            .unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-providers/box/settings HTTP/1.1"));
+        assert_eq!(
+            serde_json::from_str::<Value>(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap(),
+            json!({ "enabledForCreate": false, "configurationVersion": 1, "configuration": {} })
+        );
+        let projected = serde_json::to_value(result).unwrap();
+        assert_eq!(projected["availability"], "disabled-for-create");
+        assert!(!projected.to_string().contains("must-not-cross"));
+
+        let body = r#"{"provider":"box","state":"connected","canManage":true,"credentialVersion":4,"lastValidatedAt":1790000000000,"credential":"must-not-cross"}"#;
+        let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
+        let client = Client::for_test(&base, Duration::from_secs(2));
+        let result: CloudProviderConnectionResponse = client.request(&context(), &["cloud-providers", "box", "revalidate"], None, Some(json!({})), None, RequestRisk::Mutation).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-providers/box/revalidate HTTP/1.1"));
+        assert_eq!(serde_json::from_str::<Value>(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap(), json!({}));
+        assert!(!serde_json::to_value(result).unwrap().to_string().contains("must-not-cross"));
+    }
+
+    #[test]
+    fn provider_creation_switch_and_recheck_deny_members_and_stale_organizations_before_any_mutation() {
+        type Call = fn(&CloudWorkspaceService, String) -> Option<CloudWorkspaceClientError>;
+        let calls: [Call; 2] = [
+            |service, revision| service.set_provider_creation_enabled(CloudWorkspaceProviderId::Box, revision, false).err(),
+            |service, revision| service.revalidate_provider(CloudWorkspaceProviderId::Box, revision).err(),
+        ];
+        for call in calls {
+            // A member: the read says so, and nothing is posted.
+            let (base, _, request) = serve_once(response("200 OK", r#"{"provider":"box","state":"connected","canManage":false}"#, ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            assert_eq!(call(&service, AccountManager::context_revision(&context())).unwrap().code, "organization_admin_required");
+            let captured = request.join().unwrap();
+            assert!(captured.text.starts_with("GET ") && !captured.extra_request);
+
+            // Asked for another organization than the one now active.
+            let (base, _, request) = serve_once(response("200 OK", r#"{"provider":"box","state":"connected","canManage":true}"#, ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            assert_eq!(call(&service, "old-context".into()).unwrap().code, "account_context_changed");
+            assert!(!request.join().unwrap().extra_request);
+        }
     }
 
     #[test]
