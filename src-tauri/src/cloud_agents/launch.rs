@@ -432,7 +432,13 @@ fn valid_repository_path(path: &str) -> bool {
     path.is_absolute() && path.components().all(|part| matches!(part, std::path::Component::RootDir | std::path::Component::Normal(_)))
 }
 
+/// The session's title. From a prompt it is derived as the first tab's title
+/// will be, so the two read the same; the server's title is the prompt's
+/// first line as typed, and stands only when there is no prompt to derive from.
 fn title_of(claim: &Claim) -> String {
+    if let Some(title) = claim.prompt.as_deref().and_then(crate::store::conversation_titles::request_title) {
+        return title;
+    }
     let line = claim.title.as_deref().or(claim.prompt.as_deref()).unwrap_or("").lines().next().unwrap_or("").trim();
     if line.chars().count() > 80 {
         format!("{}…", line.chars().take(79).collect::<String>())

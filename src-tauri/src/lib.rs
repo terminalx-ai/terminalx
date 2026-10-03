@@ -368,6 +368,7 @@ pub fn run() {
             commands::remove_project,
             commands::select_project,
             commands::list_sessions,
+            commands::conversation_title,
             commands::automations_list,
             commands::automation_runs,
             commands::automation_issue_states,

@@ -66,9 +66,20 @@ export function planCloudStart(project: CloudProject): CloudStartPlan {
   return { kind: "create" };
 }
 
-/** The session's title: the prompt's first line, as local sessions do. */
-export function titleOf(prompt: string): string {
-  return prompt.trim().split("\n")[0].slice(0, 60);
+/**
+ * The session's title: the one its first tab takes from the same prompt
+ * (`request_title`, asked of the app so the rule lives in one place), so the
+ * session and its tab read the same. A prompt that rule finds no words in,
+ * and so leaves the tab unnamed, goes by its first line.
+ */
+export async function titleOf(prompt: string): Promise<string> {
+  const firstLine = prompt.trim().split("\n")[0].slice(0, 60);
+  if (!firstLine) return "";
+  try {
+    return (await api.conversationTitle(prompt))?.trim() || firstLine;
+  } catch {
+    return firstLine;
+  }
 }
 
 const WAKE_WITHIN_MS = 5 * 60 * 1000;
@@ -105,7 +116,7 @@ export async function startInWorkspace(plan: Extract<CloudStartPlan, { kind: "re
       model: request.model || undefined,
       effort: request.effort,
       mode: request.mode || undefined,
-      title: titleOf(request.prompt) || undefined,
+      title: (await titleOf(request.prompt)) || undefined,
       prompt: request.prompt.trim() ? request.prompt : undefined,
       useWorktree: request.useWorktree,
     };
@@ -197,7 +208,7 @@ export async function prepareCloudCreate(project: CloudProject, request: CloudSe
   if (quota && quota.used >= quota.limit) throw new CreateRefused("cloud_workspace_quota_exceeded");
   const provider = await providerFor(orgId);
   const org = cloudOrgArg(orgId);
-  const name = project.blank ? project.fullName : titleOf(request.prompt) || project.fullName.split("/").pop() || project.fullName;
+  const name = project.blank ? project.fullName : (await titleOf(request.prompt)) || project.fullName.split("/").pop() || project.fullName;
   const form: CreateForm = {
     name: [...name].slice(0, 80).join(""),
     provider: provider.id,

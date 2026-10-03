@@ -759,6 +759,12 @@ pub fn list_sessions() -> CmdResult<Vec<SessionEntry>> {
     store::conversation_titles::backfill().map_err(err)
 }
 
+/// The title a conversation takes from its first request, as its tab is named.
+#[tauri::command]
+pub fn conversation_title(request: String) -> Option<String> {
+    store::conversation_titles::request_title(&request)
+}
+
 // ---------------------------------------------------------------- automations
 
 #[tauri::command]

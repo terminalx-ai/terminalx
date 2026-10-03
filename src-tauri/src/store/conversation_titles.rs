@@ -22,7 +22,10 @@ fn unnamed(tab: &TabEntry) -> bool {
 }
 
 /// A short excerpt, not an extra model request. Keep the user's own task words.
-fn request_title(request: &str) -> Option<String> {
+///
+/// A cloud session is titled with this too (by the desktop that starts it and
+/// by the runtime's launch), so the session and its first tab read the same.
+pub(crate) fn request_title(request: &str) -> Option<String> {
     let mut request = request.trim();
     if let Some(attributed) = request.strip_prefix("[TerminalX Effective User v1] ") {
         if let Some((envelope, text)) = attributed.split_once('\n') {

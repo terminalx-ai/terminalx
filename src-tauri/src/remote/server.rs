@@ -1591,7 +1591,11 @@ impl WorkspaceRpc {
             &*self.sink,
             crate::session_ops::NewSession {
                 project_path: self.root.to_string_lossy().into_owned(),
-                title: p.title,
+                // A caller that names no title gets the one the first tab will take from the prompt.
+                title: p
+                    .title
+                    .filter(|title| !title.trim().is_empty())
+                    .or_else(|| p.prompt.as_deref().and_then(crate::store::conversation_titles::request_title)),
                 use_worktree: p.use_worktree,
                 on_main: !p.use_worktree,
                 base_ref: None,

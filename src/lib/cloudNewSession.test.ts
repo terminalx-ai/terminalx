@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
     cloudAgentPurgeWorkspace: vi.fn(),
     cloudCatalogLoad: vi.fn(),
     cloudCatalogSave: vi.fn(),
+    conversationTitle: vi.fn(),
   },
   workspaceConnection: vi.fn(),
   invoke: vi.fn(),
@@ -216,6 +217,40 @@ describe("new session in a cloud project", () => {
     });
   });
 
+  it("titles the session as its first tab will be titled, by asking the same rule", async () => {
+    await place([item("recent", { repositories: [api] })]);
+    const node = project("github.com/acme/api");
+    // What `request_title` answers for each prompt (its own cases are tested in Rust).
+    const derived: Record<string, string | null> = {
+      "echo:hello one": "Echo:hello one",
+      "can you please fix the login redirect? Then add tests.": "Fix the login redirect",
+      "refactor the workspace catalog so that every organization is loaded lazily and cached between launches": "Refactor the workspace catalog so that every",
+      "42 is the answer, check it": "42 is the answer, check it",
+      // No words to take: the tab stays unnamed and goes by the session's title, the line as typed.
+      "???": null,
+    };
+    mocks.api.conversationTitle.mockImplementation(async (prompt: string) => derived[prompt]);
+    for (const prompt of Object.keys(derived)) await flow.startInWorkspace(flow.planCloudStart(node) as never, { ...request, prompt });
+    expect(mocks.api.conversationTitle.mock.calls.map(([prompt]) => prompt)).toEqual(Object.keys(derived));
+    expect(runtimes.get("recent")!.created.map((params) => params.title)).toEqual(Object.entries(derived).map(([prompt, title]) => title ?? prompt));
+  });
+
+  it("names a new workspace by the same title, so the session does not change its name when the runtime reports it", async () => {
+    await place([], { used: 1, limit: 2 });
+    const target = { key: `cloud:${ORG}:github.com/acme/web` as const, orgId: ORG, identity: "github.com/acme/web", fullName: "acme/web", selected: true, pinned: false, blank: false, workspaces: [] };
+    mocks.api.conversationTitle.mockResolvedValue("Echo:hello one");
+    const prepared = await flow.prepareCloudCreate(target, { ...request, prompt: "echo:hello one" });
+    expect(prepared.form.name).toBe("Echo:hello one");
+    expect(prepared.pending.request.launch).toMatchObject({ prompt: "echo:hello one" });
+  });
+
+  it("still starts the session when the title cannot be asked for", async () => {
+    await place([item("recent", { repositories: [api] })]);
+    mocks.api.conversationTitle.mockRejectedValue(new Error("no such command"));
+    await flow.startInWorkspace(flow.planCloudStart(project("github.com/acme/api")) as never, { ...request, prompt: "echo:hello one" });
+    expect(runtimes.get("recent")!.created[0]).toMatchObject({ title: "echo:hello one" });
+  });
+
   it("a create needs the cost confirmation: nothing is created until it is confirmed, and the quota is shown", async () => {
     await place([], { used: 1, limit: 2 });
     const target = catalog.placeCloudProjects(catalog.getCloudCatalog().orgs[ORG], {}, { added: [] }).projects[0] ?? {
@@ -249,7 +284,7 @@ describe("new session in a cloud project", () => {
 
   it("at the limit, sends no quote and no create", async () => {
     await place([], { used: 2, limit: 2 });
-    const target = { key: `cloud:${ORG}:github.com/acme/web`, orgId: ORG, identity: "github.com/acme/web", fullName: "acme/web", selected: true, pinned: false, blank: false, workspaces: [] } as never;
+    const target = { key: `cloud:${ORG}:github.com/acme/web` as const, orgId: ORG, identity: "github.com/acme/web", fullName: "acme/web", selected: true, pinned: false, blank: false, workspaces: [] } as never;
     await expect(flow.prepareCloudCreate(target, request)).rejects.toMatchObject({ code: "cloud_workspace_quota_exceeded" });
     expect(mocks.api.cloudWorkspaceQuote).not.toHaveBeenCalled();
     expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();

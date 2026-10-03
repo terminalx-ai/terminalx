@@ -272,6 +272,8 @@ export const api = {
 
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
+  /** The title a conversation takes from its first request, as its tab is named; null when the request has no words. */
+  conversationTitle: (request: string) => invoke<string | null>("conversation_title", { request }),
   /** Card snippets for the agent dashboard; every session when no ids are given. */
   sessionSummaries: (sessionIds?: string[]) => invoke<SessionSummary[]>("session_summaries", { sessionIds: sessionIds ?? null }),
   statsUsageSnapshot: () => invoke<StatsUsageState>("stats_usage_snapshot"),

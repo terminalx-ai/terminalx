@@ -437,3 +437,73 @@ fn a_folder_that_already_holds_repositories_is_never_initialised() {
     assert!(!init_blank_repository(&blank, "main").unwrap());
     assert_eq!(git(&blank, &["rev-list", "--count", "HEAD"]), "1");
 }
+
+/// A session titled by `title_of`, with one unnamed tab whose log holds the prompt.
+fn titled_session(id: &str, title: &str, prompt: &str) {
+    let session: crate::store::index::SessionEntry = serde_json::from_value(json!({
+        "id": id, "projectPath": "/project", "cwd": "/project", "title": title,
+        "created": "before", "modified": "before",
+        "tabs": [{ "id": "tab", "harness": "claude", "created": "before", "modified": "before" }]
+    }))
+    .unwrap();
+    crate::store::index::update(|sessions| {
+        sessions.push(session);
+        Ok(())
+    })
+    .unwrap();
+    let log = crate::store::log_path(id, "tab").unwrap();
+    crate::store::append_line(&log, &json!({ "payload": { "type": "user_message", "text": prompt } }).to_string()).unwrap();
+}
+
+#[test]
+fn a_launched_session_and_its_first_tab_get_the_same_title() {
+    let _home = crate::store::temp_home();
+    let long = "refactor the workspace catalog so that every organization is loaded lazily and cached between launches";
+    let cases = [
+        ("echo:hello one", "Echo:hello one"),
+        ("can you please fix the login redirect? Then add tests.", "Fix the login redirect"),
+        (long, "Refactor the workspace catalog so that every"),
+        ("42 is the answer, check it", "42 is the answer, check it"),
+        ("# tidy the readme\nand nothing else", "Tidy the readme"),
+    ];
+    for (index, (prompt, expected)) in cases.into_iter().enumerate() {
+        // The server's title is the prompt's first line, as typed.
+        let claim = Claim { title: prompt.lines().next().map(str::to_string), prompt: Some(prompt.into()), ..claim(Vec::new()) };
+        let title = title_of(&claim);
+        assert_eq!(title, expected, "{prompt}");
+        let id = format!("session-{index}");
+        titled_session(&id, &title, prompt);
+        let named = crate::store::conversation_titles::name_tab(&id, "tab").unwrap().unwrap();
+        assert_eq!(named.tab("tab").unwrap().title.as_deref(), Some(named.title.as_str()), "{prompt}");
+    }
+}
+
+#[test]
+fn a_launch_without_a_usable_prompt_keeps_the_servers_title() {
+    let named = Claim { title: Some("my workspace".into()), prompt: None, ..claim(Vec::new()) };
+    assert_eq!(title_of(&named), "my workspace");
+    // Nothing to derive from: the tab stays unnamed and goes by this title.
+    let wordless = Claim { title: Some("???".into()), prompt: Some("???".into()), ..claim(Vec::new()) };
+    assert_eq!(title_of(&wordless), "???");
+    let untitled = Claim { title: None, prompt: None, ..claim(Vec::new()) };
+    assert_eq!(title_of(&untitled), untitled.work_branch);
+}
+
+#[test]
+fn naming_the_tab_leaves_a_renamed_session_alone() {
+    let _home = crate::store::temp_home();
+    let prompt = "echo:hello one";
+    titled_session("renamed", "echo:hello one", prompt);
+    crate::store::index::update(|sessions| {
+        sessions[0].title = "My own name".into();
+        Ok(())
+    })
+    .unwrap();
+    let named = crate::store::conversation_titles::name_tab("renamed", "tab").unwrap().unwrap();
+    assert_eq!(named.title, "My own name");
+    assert_eq!(named.tab("tab").unwrap().title.as_deref(), Some("Echo:hello one"));
+    // A session stored before this change keeps its title as typed, too.
+    titled_session("older", "echo:hello two", "echo:hello two");
+    let older = crate::store::conversation_titles::name_tab("older", "tab").unwrap().unwrap();
+    assert_eq!(older.title, "echo:hello two");
+}
