@@ -22,8 +22,19 @@ an archive's `checkpoint`, a delete's `cleanup` report and the list's
   (`lifecycle.dispositionFacts`: uncommitted files, unpushed and local-only
   commits, open pull requests, running terminals). The runtime is asked only
   when the workspace is running; a suspended one is reported as not
-  checkable rather than woken. "Open workspace" opens it to push or copy
-  files out first (the server has no export of its own).
+  checkable rather than woken.
+- Export before an archive or delete (the server has no export of its own,
+  so these are the choices): **Push**, beside each repository with unpushed
+  or local-only commits, pushes its current branch from the dialog
+  (`pushRepository`: a `connect`, never a wake, and the facts are read again
+  afterwards); **Open workspace** opens it to commit uncommitted files or
+  copy files out, which a push cannot do for them; and on Delete, **Archive
+  instead** switches to keeping everything for the retention period.
+- Retention: the Archive tab offers the periods the server lists
+  (`archiveRetentionChoices`: 7, 30 or 90 days), with the workspace's own
+  preselected. A chosen period is sent as `retentionDays`; the workspace's
+  own is not sent. A server that lists none takes no choice (it would refuse
+  the field), and the picker is absent.
 - Running agent work: archive, and a lifecycle client's delete, are refused
   with `409 cloud_workspace_active_work`. The dialog sends `force` only after
   "Stop the running agent work" is ticked, and a refusal for work that
@@ -81,7 +92,9 @@ either way). Refreshing sooner while an archive is pending is a follow-up.
 
 ## Tests
 
-- `src/components/cloud/CloudWorkspaceLifecycle.test.tsx`: dirty files,
+- `src/components/cloud/CloudWorkspaceLifecycle.test.tsx`: the retention
+  periods and which is sent; a push from the dialog and its refusal; archive
+  instead of delete; dirty files,
   unpushed commits, an open PR and a running turn before an archive; force
   only once confirmed; a refusal for new work; an offline workspace; a
   provider without permanent delete; cleanup progress; retry after a

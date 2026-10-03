@@ -25,6 +25,8 @@ const RESPONSE_LIMIT_BYTES: u64 = 512 * 1024;
 /// The catalog feed carries every member Organization's list in one answer.
 const CATALOG_RESPONSE_LIMIT_BYTES: u64 = 4 * RESPONSE_LIMIT_BYTES;
 const MAX_RETRY_AFTER_SECONDS: u64 = 60 * 60;
+/// Longer than any period the server offers; a bound, not the list.
+const MAX_ARCHIVE_RETENTION_DAYS: u32 = 365;
 /// Diagnostics carry up to a few hundred operations with their history.
 const DIAGNOSTICS_RESPONSE_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -782,6 +784,10 @@ pub struct CloudWorkspaceDisposition {
     pub attached_clients: u32,
     pub provider_capabilities: DispositionCapabilities,
     pub archive_retention_days: u32,
+    /// The periods an archive may ask for instead; empty from a server that
+    /// takes no choice.
+    #[serde(default)]
+    pub archive_retention_choices: Vec<u32>,
     #[serde(default)]
     pub blockers: Vec<String>,
     #[serde(default)]
@@ -1735,6 +1741,40 @@ impl CloudWorkspaceService {
         } else {
             json!({})
         };
+        self.lifecycle_request(org, workspace_id, action_path, body)
+    }
+
+    /// Archive, keeping the workspace for `retention_days` instead of its
+    /// own retention (§10.1). The period is sent only when given: a server
+    /// from before the choice refuses a body that carries it, and the page
+    /// offers the choice only when the disposition facts list the periods.
+    pub fn archive(
+        &self,
+        org: Option<&str>,
+        workspace_id: &str,
+        force: bool,
+        retention_days: Option<u32>,
+    ) -> Result<CloudWorkspaceSnapshot, CloudWorkspaceClientError> {
+        let Some(days) = retention_days else {
+            return self.lifecycle_with(org, workspace_id, OperationAction::Archive, force);
+        };
+        if !valid_resource_id(workspace_id) || days == 0 || days > MAX_ARCHIVE_RETENTION_DAYS {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        let mut body = json!({ "retentionDays": days });
+        if force {
+            body["force"] = json!(true);
+        }
+        self.lifecycle_request(org, workspace_id, "archive", body)
+    }
+
+    fn lifecycle_request(
+        &self,
+        org: Option<&str>,
+        workspace_id: &str,
+        action_path: &str,
+        body: Value,
+    ) -> Result<CloudWorkspaceSnapshot, CloudWorkspaceClientError> {
         self.run_in(org, RequestRisk::Mutation, |client, context| {
             let result = client.request(
                 context,
@@ -3606,6 +3646,20 @@ mod tests {
         assert!(matches!(snapshot.operation.action, Some(OperationAction::Archive)));
         assert_eq!(snapshot.operation.checkpoint.as_deref(), Some("committed"));
 
+        // A chosen retention period rides on the archive; none is sent unless chosen.
+        for (force, days, body) in [(false, Some(90), r#"{"retentionDays":90}"#), (true, Some(7), r#"{"force":true,"retentionDays":7}"#), (false, None, "{}")] {
+            let (base, _, request) = serve_once(response("202 Accepted", &archived.to_string(), ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            service.archive(None, "workspace-1", force, days).unwrap();
+            let captured = request.join().unwrap();
+            assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/archive HTTP/1.1"));
+            assert!(captured.text.ends_with(body), "{}", captured.text);
+        }
+        let (_, service) = test_service("http://127.0.0.1:9");
+        for days in [0, 366] {
+            assert_eq!(service.archive(None, "workspace-1", false, Some(days)).unwrap_err().code, "cloud_workspace_request_invalid");
+        }
+
         let mut deleting: Value = serde_json::from_str(&snapshot_body(Some("provider_cleanup_pending"))).unwrap();
         deleting["operation"]["action"] = json!("delete");
         deleting["operation"]["state"] = json!("running");
@@ -3757,6 +3811,7 @@ mod tests {
             "attachedClients": 1,
             "providerCapabilities": { "permanentDelete": true, "releaseDisposition": "destroyed" },
             "archiveRetentionDays": 30,
+            "archiveRetentionChoices": [7, 30, 90],
             "blockers": ["active-turns", "pending-approvals"],
             "removedOnDelete": ["runtime-credentials", "provider-storage"],
             "runtimeFacts": { "namespace": "lifecycle/1", "method": "lifecycle.dispositionFacts", "available": true }
@@ -3768,6 +3823,7 @@ mod tests {
         assert_eq!(disposition.runtime.active_turns, 1);
         assert_eq!(disposition.blockers, ["active-turns", "pending-approvals"]);
         assert!(disposition.runtime_facts.available);
+        assert_eq!(disposition.archive_retention_choices, [7, 30, 90]);
 
         let (base, _, request) = serve_once(response("200 OK", &facts.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);

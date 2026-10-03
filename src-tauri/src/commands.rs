@@ -633,9 +633,10 @@ pub async fn cloud_workspace_archive(
     force: bool,
     state: tauri::State<'_, crate::AppState>,
     org_id: Option<String>,
+    retention_days: Option<u32>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
-        .lifecycle_with(org_id.as_deref(), &workspace_id, crate::cloud_workspaces::OperationAction::Archive, force))
+        .archive(org_id.as_deref(), &workspace_id, force, retention_days))
 }
 
 #[tauri::command]

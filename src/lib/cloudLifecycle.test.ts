@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentTabInfo, WorkspaceConnectionState } from "@terminalx/portable/workspace";
+import { WorkspaceRpcError, type AgentTabInfo, type WorkspaceConnectionState } from "@terminalx/portable/workspace";
 
 const mocks = vi.hoisted(() => ({ purge: vi.fn(), close: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -24,6 +24,7 @@ import {
   deadlineText,
   purgeNoticeText,
   purgeTombstones,
+  pushRepository,
   repositoryLabel,
   repositoryRiskLines,
   resetPurged,
@@ -214,6 +215,25 @@ describe("checkRuntime", () => {
     expect(cloudConnectionInfo("cloud:org-1:ws-1")).toMatchObject({ state: "connected", refs: 0 });
     expect(client.close).not.toHaveBeenCalled();
     expect(mocks.close).not.toHaveBeenCalled();
+  });
+
+  it("pushes a repository over a connect that cannot wake, and gives the connection back (PRO-34)", async () => {
+    const client = Object.assign(connectWith("connected"), { mutate: vi.fn(async () => ({ pushed: true })) });
+    await pushRepository(workspace("ready"), "site");
+    expect(workspaceConnection).toHaveBeenCalledWith({ kind: "cloud", organizationId: "org-1", workspaceId: "ws-1" }, "connect");
+    expect(client.mutate).toHaveBeenCalledWith("git.push", { repo: "site" });
+    expect(cloudConnectionInfo("cloud:org-1:ws-1")).toMatchObject({ state: "connected", refs: 0 });
+    expect(client.close).not.toHaveBeenCalled();
+
+    // A refusal is said in the Git view's words, and the lease is still given back.
+    client.mutate.mockRejectedValueOnce(new WorkspaceRpcError("auth_failed", "auth_failed", "git.push"));
+    await expect(pushRepository(workspace("ready"), "site")).rejects.toThrow(/GitHub refused/);
+    expect(cloudConnectionInfo("cloud:org-1:ws-1")).toMatchObject({ refs: 0 });
+  });
+
+  it("does not push to a workspace it cannot reach", async () => {
+    connectWith("opening", [{ state: "suspended" } as WorkspaceConnectionState]);
+    await expect(pushRepository(workspace("ready"), "site", 50)).rejects.toThrow(/Couldn't reach the workspace to push/);
   });
 
   it("shares the connection an open session holds, and leaves it connected", async () => {

@@ -7,6 +7,7 @@ import { api, type CloudWorkspaceDisposition, type CloudWorkspaceListItem, type 
 import {
   checkRuntime,
   cleanupKindText,
+  daysText,
   cleanupStateText,
   dateText,
   DAY_MS,
@@ -14,6 +15,8 @@ import {
   deletion,
   isOpen,
   lifecycleErrorMessage,
+  pushable,
+  pushRepository,
   deleteAwaitsProvider,
   deleteFailure,
   RETRY_DELETE,
@@ -60,6 +63,7 @@ export function CloudWorkspaceLifecycleDialog({
   onDone,
   onExport,
   check = checkRuntime,
+  push = pushRepository,
 }: {
   item: CloudWorkspaceListItem;
   initial: LifecycleAction;
@@ -73,6 +77,8 @@ export function CloudWorkspaceLifecycleDialog({
   /** Open the workspace (its Git view) to push or copy files out first. */
   onExport: () => void;
   check?: typeof checkRuntime;
+  /** Push a repository's commits from the dialog, before the action. */
+  push?: typeof pushRepository;
 }) {
   const { workspace } = item;
   const actions = actionsFor(item);
@@ -86,6 +92,10 @@ export function CloudWorkspaceLifecycleDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [again, setAgain] = useState(0);
+  // The retention period chosen for an archive; null keeps the workspace's own.
+  const [chosenDays, setChosenDays] = useState<number | null>(null);
+  const [pushing, setPushing] = useState<string | null>(null);
+  const [pushError, setPushError] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -115,7 +125,10 @@ export function CloudWorkspaceLifecycleDialog({
   const destructive = action !== "stop";
   const needsForce = destructive && (risks.needsForce || forceAsked);
   const permanentDelete = server?.providerCapabilities.permanentDelete ?? true;
-  const retentionDays = server?.archiveRetentionDays ?? 30;
+  const defaultDays = server?.archiveRetentionDays ?? 30;
+  // Only a server that lists the periods takes one; an older one refuses the field.
+  const choices = [...new Set(server?.archiveRetentionChoices ?? [])].filter((days) => Number.isInteger(days) && days > 0).sort((a, b) => a - b);
+  const retentionDays = chosenDays !== null && choices.includes(chosenDays) ? chosenDays : defaultDays;
   const unverified = destructive && runtime !== null && runtime.kind !== "checked";
   const ready =
     !busy &&
@@ -133,7 +146,7 @@ export function CloudWorkspaceLifecycleDialog({
         action === "stop"
           ? await api.cloudWorkspaceSuspend(workspace.id, cloudOrgArg(workspace.orgId))
           : action === "archive"
-            ? await api.cloudWorkspaceArchive(workspace.id, needsForce && force, cloudOrgArg(workspace.orgId))
+            ? await api.cloudWorkspaceArchive(workspace.id, needsForce && force, cloudOrgArg(workspace.orgId), retentionDays === defaultDays ? null : retentionDays)
             : await api.cloudWorkspaceDelete(workspace.id, needsForce && force, cloudOrgArg(workspace.orgId));
       onDone(snapshot, { action, requestedAt });
     } catch (e) {
@@ -147,6 +160,20 @@ export function CloudWorkspaceLifecycleDialog({
       setError(lifecycleErrorMessage(code));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const pushNow = async (repo: string) => {
+    setPushing(repo);
+    setPushError(null);
+    try {
+      await push(workspace, repo);
+      // Read the facts again: what was pushed is no longer at risk.
+      setAgain((value) => value + 1);
+    } catch (e) {
+      setPushError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPushing(null);
     }
   };
 
@@ -171,6 +198,13 @@ export function CloudWorkspaceLifecycleDialog({
         )}
         <ActionSummary action={action} retentionDays={retentionDays} removedOnDelete={server?.removedOnDelete ?? []} />
 
+        {action === "archive" && choices.length > 1 && (
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs" data-testid="cloud-lifecycle-retention">
+            <span className="text-muted-foreground">Keep it for</span>
+            <Segmented aria-label="Keep it for" value={String(retentionDays)} onChange={(next) => setChosenDays(Number(next))} options={choices.map((days) => ({ value: String(days), label: daysText(days) }))} />
+          </div>
+        )}
+
         {destructive && (
           <section className="mt-3 flex flex-col gap-1.5 rounded-lg bg-well px-3 py-2 text-xs" aria-label="Before this action" data-testid="cloud-lifecycle-facts">
             {(server === undefined || (runtime === null && server !== undefined)) && (
@@ -184,15 +218,20 @@ export function CloudWorkspaceLifecycleDialog({
             {risks.runningProcesses > 0 && <Warn text={`${risks.runningProcesses} terminal${risks.runningProcesses === 1 ? " is" : "s are"} running a program.`} />}
             {risks.operationInProgress && <Warn text="Another action on this workspace is still running." />}
             {risks.repositories.map((repo) => (
-              <div key={repo.path} className="flex items-start gap-2" data-testid="cloud-lifecycle-repo">
+              <div key={repo.path} className="flex items-start gap-2">
                 <GitBranch className="mt-0.5 size-3.5 shrink-0 text-warning" />
-                <span className="min-w-0">
+                <span className="min-w-0 flex-1" data-testid="cloud-lifecycle-repo">
                   <span className="font-mono">
                     {repositoryLabel(repo, workspace.name)}
                     {repo.branch ? ` · ${repo.branch}` : ""}
                   </span>
                   : {repositoryRiskLines(repo).join(", ")}
                 </span>
+                {pushable(repo) && (
+                  <Button size="xs" variant="outline" className="shrink-0" disabled={busy || pushing !== null} onClick={() => void pushNow(repo.path)} aria-label={`Push ${repositoryLabel(repo, workspace.name)}`}>
+                    {pushing === repo.path && <Loader2 className="animate-spin" />} Push
+                  </Button>
+                )}
               </div>
             ))}
             {runtime?.kind === "checked" && risks.repositories.length === 0 && runtime.facts.repositories.length > 0 && (
@@ -213,12 +252,24 @@ export function CloudWorkspaceLifecycleDialog({
             )}
             {runtime?.kind === "unsupported" && <span className="text-muted-foreground">This workspace's runtime does not report unpublished work.</span>}
             {runtime?.kind === "error" && <span className="text-muted-foreground">The runtime could not be asked about unpublished work ({runtime.message}).</span>}
+            {pushError && (
+              <span className="text-destructive" role="alert">
+                {pushError}
+              </span>
+            )}
             {(risks.repositories.length > 0 || unverified) && (
-              <div className="mt-1 flex items-center gap-2">
-                <span className="text-muted-foreground">Push or copy files out first:</span>
+              <div className="mt-1 flex flex-wrap items-center gap-2" data-testid="cloud-lifecycle-export">
+                <span className="text-muted-foreground">
+                  {risks.repositories.some((repo) => repo.dirtyFiles) ? "Uncommitted files need a commit, or a copy, before they can leave:" : "Push or copy files out first:"}
+                </span>
                 <Button size="xs" variant="outline" onClick={onExport}>
                   Open workspace
                 </Button>
+                {action === "delete" && actions.includes("archive") && (
+                  <Button size="xs" variant="outline" onClick={() => setAction("archive")}>
+                    Archive instead (kept {daysText(retentionDays)})
+                  </Button>
+                )}
               </div>
             )}
           </section>
