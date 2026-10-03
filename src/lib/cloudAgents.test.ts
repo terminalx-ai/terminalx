@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent, Payload } from "@/types/events";
-import type { AgentTabInfo, WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { WorkspaceRpcError, type AgentTabInfo, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import type { CachedTab, Checkpoint, OutboxEntry } from "@/lib/cloudAgentApi";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -16,6 +16,7 @@ import {
   decideCloudAgent,
   DEV_SCOPE_NOTICE,
   discardPendingConfig,
+  errorText,
   flushCloudAgentCache,
   getCloudAgents,
   loadCloudAgents,
@@ -434,6 +435,19 @@ describe("cloud agent tabs store", () => {
     const entry = await sendToCloudAgent(dev, "t-1", "hello", client);
     expect(client.mutate).toHaveBeenCalledWith("session.send", { sessionId: "s-1", tabId: "t-1", text: "hello" });
     expect(entry.state).toBe("applied");
+    // What the runtime refused to type or to queue is said in its own words, not as a bare code (PRO-88).
+    const refusals = [
+      new WorkspaceRpcError("conflict", "A turn is running: send this command when it has ended.", "session.send", { reason: "command-not-queued" }),
+      new WorkspaceRpcError("forbidden", "Not sent: a message that starts with ! runs as a shell command.", "session.send", { reason: "shell-command-forbidden", command: "!" }),
+    ];
+    for (const refusal of refusals) {
+      client.mutate.mockRejectedValueOnce(refusal);
+      const shown = await sendToCloudAgent(dev, "t-1", "/model opus", client).catch((error: unknown) => errorText(error));
+      expect(shown).toBe(refusal.message);
+    }
+    // Any other failure keeps its code.
+    client.mutate.mockRejectedValueOnce(new WorkspaceRpcError("lease_held", "someone else is driving this tab", "session.send", {}));
+    expect(await sendToCloudAgent(dev, "t-1", "hello", client).catch((error: unknown) => errorText(error))).toBe("lease_held");
     await expect(steerCloudAgent(dev, "t-1", "x", client)).rejects.toThrow(DEV_SCOPE_NOTICE);
     await expect(stopCloudAgent(dev, "t-1", client)).rejects.toThrow(DEV_SCOPE_NOTICE);
     await expect(decideCloudAgent(dev, "t-1", { requestId: "r", optionId: "allow" }, client)).rejects.toThrow(DEV_SCOPE_NOTICE);

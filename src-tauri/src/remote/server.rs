@@ -27,7 +27,7 @@ use super::files::WorkspaceFiles;
 use super::git::WorkspaceGit;
 use super::collab::{self, Access, Change, Collaboration, LeaseRefusal, Role};
 use super::protocol::{self, Authority, IdempotencyCache, RpcError, PROTOCOL};
-use crate::cloud_agents::CloudAgents;
+use crate::cloud_agents::{slash, CloudAgents};
 use crate::events::AgentEvent;
 use crate::pty::{PaneSpec, PtyData, PtyExit, Terminals};
 use crate::session::SessionManager;
@@ -584,17 +584,17 @@ impl WorkspaceRpc {
         self.tabs_changed.notify_one();
     }
 
-    /// A participant who may no longer drive loses the terminals they
-    /// control; everyone watching is told.
+    /// A participant who may no longer type into terminals (no longer a
+    /// driver, or no longer an approver) loses the ones they control;
+    /// everyone watching is told.
     fn revalidate_terminal_control(&self) {
         let mut released = Vec::new();
         let mut ptys = self.ptys.lock().unwrap();
         for (pty_id, pty) in ptys.iter_mut() {
             let Some((user, authority)) = pty.controller_user.clone() else { continue };
-            let access = self.collab.access_for(authority, user.as_deref());
-            // An agent's terminal also needs the right to approve (`agent_input_refusal`).
-            let may_type = access.can_drive() && (pty.agent.is_none() || access.role == Role::Manager || access.can_approve);
-            if may_type {
+            // One rule for a shell and for an agent's own terminal, the same
+            // as `authorize_participant` and `agent_input_refusal`.
+            if self.collab.access_for(authority, user.as_deref()).can_configure() {
                 continue;
             }
             pty.controller = None;
@@ -784,6 +784,14 @@ impl WorkspaceRpc {
             _ => Role::Viewer,
         };
         let access = self.access(peer);
+        // A shell is arbitrary code as the workspace's user: it can edit the
+        // agent's settings, read its tokens or start an agent with other
+        // flags. So typing into one needs what changing those settings
+        // needs (PRO-88): a manager, or a driver who may approve permissions.
+        if matches!(method, "pty.write" | "pty.resize" | "pty.control") && access.can_drive() && !access.can_configure() {
+            return Err(RpcError::forbidden(format!("{method} needs the right to approve permissions: a terminal runs anything as the workspace's user"))
+                .with_data(json!({ "role": access.role, "needs": "canApprove", "reason": "approval-required" })));
+        }
         if access.role >= needed {
             return Ok(());
         }
@@ -1154,7 +1162,7 @@ impl WorkspaceRpc {
         if self.authority(peer) == Authority::Participate && !access.can_drive() {
             return Some(RpcError::forbidden("typing needs driver access to the workspace"));
         }
-        if access.role != Role::Manager && !access.can_approve {
+        if !access.can_configure() {
             return Some(
                 RpcError::forbidden("typing into an agent's terminal can approve its permission requests: it needs approval rights")
                     .with_data(json!({ "role": access.role, "needs": "canApprove" })),
@@ -2222,6 +2230,20 @@ impl WorkspaceRpc {
             return Err(RpcError::forbidden("sending needs driver access to the workspace"));
         }
         let busy = agents_busy(&self.agents, &session.id, &tab.id);
+        // And the same rule for what the CLI runs by itself (PRO-88): a
+        // slash command, a `!` shell command, an `@/path` mention.
+        if !self.access(peer).can_configure() {
+            if let Err(refusal) = slash::check(text, &tab.harness, Some(Path::new(&session.cwd))) {
+                return Err(RpcError::forbidden(refusal.message()).with_data(json!({ "reason": refusal.category(), "command": refusal.command })));
+            }
+        }
+        // A slash or `!` command never waits in the session's own queue,
+        // whoever sends it: nothing re-checks that queue if they lose the
+        // right before the running turn ends (the mailbox's follow-up queue
+        // is re-checked). Prose queues as before, mentions included.
+        if slash::is_command(text) && (busy || self.sessions.as_ref().is_some_and(|sessions| sessions.turn_open(&session.id, &tab.id))) {
+            return Err(RpcError::new("conflict", slash::NOT_QUEUED_MESSAGE).with_data(json!({ "reason": slash::NOT_QUEUED_CATEGORY })));
+        }
         let now = crate::cloud_agents::now_ms();
         match peer.user_id.as_deref() {
             Some(user) => {
