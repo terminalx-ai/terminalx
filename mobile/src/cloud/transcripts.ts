@@ -60,6 +60,8 @@ function projectionOf(value: Record<string, unknown>, tabId: string): TabProject
 }
 
 export class CloudTranscripts {
+  private disposed = false;
+
   constructor(
     private readonly scope: CommandScope,
     private readonly api: Pick<CloudApi, "checkpoint">,
@@ -102,6 +104,11 @@ export class CloudTranscripts {
     return read.kind === "no-key" && held.kind === "transcript" ? held : read;
   }
 
+  /** Nothing more is written from here on (the workspace's data is being removed, or its screen closed). */
+  dispose(): void {
+    this.disposed = true;
+  }
+
   async forget(tabId: string): Promise<void> {
     await this.storage.removeItem(cacheName(this.scope, tabId)).catch(() => undefined);
   }
@@ -111,7 +118,11 @@ export class CloudTranscripts {
     const held = this.keys.get(envelope.keyId);
     if (!held) return { kind: "no-key" };
     const projection = projectionOf(openCheckpoint(this.scope, { ...envelope, tabId: envelope.tabId }, held.key), tabId);
-    if (store) await this.storage.setItem(cacheName(this.scope, tabId), JSON.stringify(envelope)).catch(() => undefined);
+    if (store && !this.disposed) {
+      await this.storage.setItem(cacheName(this.scope, tabId), JSON.stringify(envelope)).catch(() => undefined);
+      // Removed while this write was on its way: it does not come back.
+      if (this.disposed) await this.forget(tabId);
+    }
     return { kind: "transcript", projection, epoch: envelope.epoch, version: envelope.version };
   }
 }

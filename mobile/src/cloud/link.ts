@@ -32,8 +32,13 @@ export const PHONE_CAPABILITIES = ["session/1", "session/2", "keys/1", "collab/1
 
 const HANDSHAKE_TIMEOUT_MS = 15_000;
 const BACKOFF_FIRST_MS = 250;
-const BACKOFF_MAX_MS = 10_000;
+const BACKOFF_MAX_MS = 60_000;
+/** Failed attempts in a row before the link stops by itself and waits to be asked (`reconnect`). */
+export const MAX_ATTEMPTS = 8;
 const WAITING_POLL_MS = 1_500;
+const WAITING_POLL_MAX_MS = 15_000;
+/** Polls for a runtime that is not ready before giving up (about four minutes). */
+export const MAX_WAITS = 20;
 /** A ticket this close to its expiry is not used for a new connection. */
 const TICKET_MARGIN_MS = 10_000;
 
@@ -47,7 +52,7 @@ type SocketLike = Pick<WebSocket, "send" | "close" | "readyState"> & {
 };
 
 export interface CloudLinkOptions {
-  api: Pick<CloudApi, "open">;
+  api: Pick<CloudApi, "open"> & { serverNow?: () => number };
   target: { orgId: string; workspaceId: string };
   clientInstallationId: string;
   /** The workspace's state as the list last said it (`ready`, `suspended`, `provisioning`, `archived`, …); null when it is not listed. */
@@ -59,7 +64,13 @@ export interface CloudLinkOptions {
 }
 
 /** Why the connection is not up, beside its state: the API's or the relay's own word, for the screen to put in words. */
-export type CloudLinkProblem = { kind: "api"; code: string; unreachable: boolean } | { kind: "relay"; code: number | null } | { kind: "protocol"; message: string } | null;
+export type CloudLinkProblem =
+  | { kind: "api"; code: string; unreachable: boolean }
+  | { kind: "relay"; code: number | null }
+  | { kind: "protocol"; message: string }
+  /** Tried long enough: nothing more is attempted until the person asks (`reconnect`). */
+  | { kind: "gave-up" }
+  | null;
 
 export class CloudWorkspaceLink implements WorkspaceTransport {
   private readonly messages = new Set<(message: unknown) => void>();
@@ -70,6 +81,9 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
   private session: MobileE2EESession | null = null;
   private running = false;
   private attempt = 0;
+  private waits = 0;
+  /** The listed state this link last acted on: a list read that says the same changes nothing. */
+  private actedOn: string | null | undefined = undefined;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
   /** The offer of the attachment in use: the relay and the runtime's pinned key. */
@@ -98,15 +112,34 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
     if (this.running) return;
     this.running = true;
     this.attempt = 0;
+    this.waits = 0;
     void this.attach();
   }
 
-  /** The workspace list was read again: a parked link looks at the new state. */
+  /** The person asked to try again (after the link gave up, or was refused). */
+  reconnect(): void {
+    if (!this.running) return this.start();
+    if (this.current.state === "connected" || this.socket) return;
+    this.clearTimer();
+    this.attempt = 0;
+    this.waits = 0;
+    void this.attach();
+  }
+
+  /**
+   * The workspace list was read again. Only a state that differs from the
+   * one this link last acted on makes it look again: a list that says the
+   * same never causes another request, however often it is read.
+   */
   listChanged(): void {
     if (!this.running) return;
+    const listed = this.options.workspaceState();
+    if (listed === this.actedOn) return;
     const parked = this.current.state === "suspended" || this.current.state === "stopped" || this.current.state === "waitingForRuntime";
     if (parked && !this.socket) {
       this.clearTimer();
+      this.attempt = 0;
+      this.waits = 0;
       void this.attach();
     }
   }
@@ -132,6 +165,8 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
     this.running = false;
     this.clearTimer();
     this.dropSocket();
+    // The invite of the offer held was used: the next start needs a new one.
+    if (this.offer) this.refreshPairing = true;
     this.resumeToken = null;
     this.offer = null;
     this.setState({ state: "idle" });
@@ -143,13 +178,14 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
     if (!this.running) return;
     const generation = ++this.generation;
     const listed = this.options.workspaceState();
+    this.actedOn = listed;
     // Never asked of a workspace that is not running: asking is how a desktop
     // wakes one, and a phone only looks.
     if (listed !== "ready") {
       this.issue = null;
-      if (listed === "provisioning") {
+      if (listed === "provisioning" || listed === "resuming") {
+        // Nothing to ask yet; the list says when it runs (`listChanged`).
         this.setState({ state: "waitingForRuntime" });
-        this.later(WAITING_POLL_MS, () => void this.attach());
       } else if (listed === "suspended" || listed === "archived") {
         this.setState({ state: "suspended" });
       } else {
@@ -166,6 +202,8 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
       if (generation !== this.generation || !this.running) return;
       const api = error instanceof CloudApiError ? error : new CloudApiError("cloud_workspace_unavailable", null);
       this.issue = { kind: "api", code: api.code, unreachable: api.unreachable };
+      // An answer this app cannot read will not become readable by asking again.
+      if (api.code === "cloud_workspace_invalid_response") return this.setState({ state: "updateRequired" });
       // The service or the network: try again. A refusal (no access, stopped
       // meanwhile, signed out) is an answer: wait for the list to say otherwise.
       if (api.unreachable) this.retry(`api:${api.code}`);
@@ -174,15 +212,19 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
     }
     if (generation !== this.generation || !this.running) return;
     if (attachment.state !== "ready" || !attachment.pairingCode) {
+      // Each ask counts as activity on the server, so they grow apart and end.
+      this.waits += 1;
+      if (this.waits > MAX_WAITS) return this.giveUp();
       this.issue = null;
       this.setState({ state: "waitingForRuntime" });
-      this.later(WAITING_POLL_MS, () => void this.attach());
+      this.later(Math.min(WAITING_POLL_MAX_MS, Math.round(WAITING_POLL_MS * 1.5 ** (this.waits - 1))), () => void this.attach());
       return;
     }
+    this.waits = 0;
     const ticket = attachment.attachTicket ?? null;
     let offer: PairingOffer;
     try {
-      offer = parsePairingCodeOrThrow(attachment.pairingCode, this.options.now);
+      offer = parsePairingCodeOrThrow(attachment.pairingCode, () => this.now());
       // A phone attaches with session scope and proves who it is; anything else is not this API's offer.
       if (!offer.relay || offer.scope !== "session" || offer.identityMode !== "authenticate") throw new Error("offer");
     } catch {
@@ -195,9 +237,10 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
       }
       offer = this.offer;
     }
-    if (ticket && ticket.expiresAt - (this.options.now?.() ?? Date.now()) < TICKET_MARGIN_MS) {
-      // Too close to its expiry to finish a handshake with: ask again.
-      this.later(0, () => void this.attach());
+    if (ticket && ticket.expiresAt - this.now() < TICKET_MARGIN_MS) {
+      // Too close to its expiry (by the server's clock) to finish a handshake with: ask again, after a pause like any other failure.
+      this.issue = { kind: "protocol", message: "The workspace's attach ticket had expired." };
+      this.retry("ticket");
       return;
     }
     this.refreshPairing = false;
@@ -293,8 +336,8 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
     const runtimeGeneration = typeof hello.runtime?.runtimeGeneration === "number" ? hello.runtime.runtimeGeneration : 0;
     // Defence in depth behind the relay's own fence: an older runtime's answer is not this attachment's.
     if (ticket && runtimeGeneration !== ticket.runtimeGeneration) throw new GenerationMismatch();
-    // The API never gives a phone runtime scope; a runtime that says otherwise is not believed.
-    if (hello.authority !== "participate") throw new Error("The workspace granted a phone more than it may hold.");
+    // The API never gives a phone runtime scope; a runtime that says otherwise is not believed. One too old to say is taken at the API's word.
+    if (hello.authority !== undefined && hello.authority !== "participate") throw new Error("The workspace granted a phone more than it may hold.");
     if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
     this.handshakeTimer = null;
     this.attempt = 0;
@@ -352,9 +395,22 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
     this.retry(code === null ? "closed" : `relay:${code}`);
   }
 
+  /** The server's clock where the API knows it, so a phone whose clock is off still judges expiry right. */
+  private now(): number {
+    return this.options.now?.() ?? this.options.api.serverNow?.() ?? Date.now();
+  }
+
+  private giveUp(): void {
+    this.clearTimer();
+    this.issue = { kind: "gave-up" };
+    this.setState({ state: "stopped" });
+  }
+
   private retry(reason: string): void {
     if (!this.running) return;
     this.attempt += 1;
+    // A phone left on this screen must not ask forever: every ask is activity that keeps the workspace from idling.
+    if (this.attempt > MAX_ATTEMPTS) return this.giveUp();
     const ceiling = Math.min(BACKOFF_MAX_MS, BACKOFF_FIRST_MS * 2 ** Math.min(this.attempt - 1, 10));
     // Jitter, so many phones do not return at the same instant.
     const jitter = (this.options.random ?? secureRandom).bytes(1)[0]! / 255;

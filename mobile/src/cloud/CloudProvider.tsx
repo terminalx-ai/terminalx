@@ -5,7 +5,9 @@ import { AppState } from "react-native";
 import { createContext, useContext, useEffect, useState, useSyncExternalStore, type PropsWithChildren } from "react";
 import { readSession, refreshStoredSession } from "../auth/native";
 import { AUTH_CONFIG } from "../auth/protocol";
+import packageJson from "../../package.json";
 import { useApp } from "../state/AppProvider";
+import { forgetConversationState } from "../state/conversation-state";
 import { CloudApi } from "./api";
 import { CloudCatalog, type CatalogSnapshot, type CatalogStorage } from "./catalog";
 import type { SecretStorage } from "./keys";
@@ -41,7 +43,7 @@ async function installationId(): Promise<string> {
   return created;
 }
 
-const APP_VERSION = "0.1.0";
+const APP_VERSION: string = packageJson.version;
 const EMPTY: CatalogSnapshot = { organizations: [], loading: false, error: null, refreshedAt: null };
 const CloudContext = createContext<CloudCatalog | null>(null);
 
@@ -73,6 +75,8 @@ export function CloudProvider({ children }: PropsWithChildren) {
       const owner = await AsyncStorage.getItem(OWNER).catch(() => null);
       if (owner !== userId) {
         await create().signOut();
+        // Drafts written by the person before are not shown to the next.
+        forgetConversationState("cloud:");
         if (userId) await AsyncStorage.setItem(OWNER, userId).catch(() => undefined);
         else await AsyncStorage.removeItem(OWNER).catch(() => undefined);
       }
@@ -91,9 +95,15 @@ export function CloudProvider({ children }: PropsWithChildren) {
 
   useEffect(() => {
     if (!catalog) return;
-    // Coming back to the app reads the list again; a read never starts compute.
+    // In the background nothing stays attached: an attached phone counts as
+    // activity and would keep a workspace from idling in someone's pocket.
+    // Coming back connects again and reads the list; a read never starts compute.
     const subscription = AppState.addEventListener("change", (state) => {
-      if (state === "active") void catalog.refresh();
+      if (state === "background") catalog.pause();
+      else if (state === "active") {
+        catalog.resume();
+        void catalog.refresh();
+      }
     });
     return () => subscription.remove();
   }, [catalog]);

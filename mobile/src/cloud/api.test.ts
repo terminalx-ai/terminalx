@@ -112,6 +112,26 @@ describe("the phone's cloud API client", () => {
     await expect(odd.client.workspaces("org-1")).rejects.toMatchObject({ code: "cloud_workspace_unavailable" });
   });
 
+  it("reads the server's clock from its answers, for judging expiry on a phone whose clock is off", async () => {
+    const calls: unknown[] = [];
+    const serverTime = Date.now() - 90_000;
+    const fetcher = vi.fn(async () => {
+      calls.push(1);
+      return { ok: true, status: 200, headers: { get: (name: string) => (name.toLowerCase() === "date" ? new Date(serverTime).toUTCString() : null) }, text: async () => JSON.stringify({ workspaces: [] }) } as unknown as Response;
+    });
+    const client = new CloudApi({ origin: "https://login.terminalx.ai", accessToken: async () => "t", fetch: fetcher as never });
+    expect(Math.abs(client.serverNow() - Date.now())).toBeLessThan(50);
+    await client.workspaces("org-1");
+    expect(Math.abs(client.serverNow() - serverTime)).toBeLessThan(1_500);
+  });
+
+  it("reports an answer in an unknown shape as one code, whatever the call", async () => {
+    const { client } = api(() => ({ status: 202, body: { id: "a1", state: "brand-new-state" } }));
+    await expect(client.open("org-1", "ws-1", "i")).rejects.toMatchObject({ code: "cloud_workspace_invalid_response", unreachable: false });
+    const list = api(() => ({ body: { workspaces: "no" } }));
+    await expect(list.client.workspaces("org-1")).rejects.toBeInstanceOf(CloudApiError);
+  });
+
   it("sends nothing while signed out", async () => {
     const { client, calls } = api(() => ({ body: {} }), null);
     await expect(client.workspaces("org-1")).rejects.toMatchObject({ code: "account_signed_out" });

@@ -16,8 +16,12 @@ import { CloudTranscripts, type BlobStorage } from "./transcripts";
  * transcripts make only read requests, and the connection is attempted only
  * while the list says the workspace is running. A stopped workspace is
  * started by one thing: a command the person chose to send after being told
- * it starts the workspace (`allowWake`). Whether they may is the server's
- * decision (their role), not this file's.
+ * it starts the workspace (`allowWake`). That covers a message written
+ * earlier and still on the phone too: it is held, not delivered, until the
+ * workspace is seen running or the person agrees to start it. The server
+ * resumes a workspace for any command it receives, so "seen running" means
+ * connected to it, or listed as running by a list read just now. Whether the
+ * person may start it is the server's decision (their role), not this file's.
  */
 
 export interface CloudTab {
@@ -66,6 +70,11 @@ export interface CloudWorkspaceSessionOptions {
   storage: BlobStorage;
   /** The workspace as the list last had it; null when it is not listed. */
   listed: () => CloudWorkspace | null;
+  /**
+   * Read the list again now. True when this workspace's organization was
+   * read, so `listed()` is current; false when it could not be.
+   */
+  refreshList?: () => Promise<boolean>;
   clientInstallationId: string;
   appVersion: string;
   link?: Partial<Pick<CloudLinkOptions, "createSocket" | "random" | "now">>;
@@ -130,13 +139,56 @@ export class CloudWorkspaceSession {
     this.publish();
     this.link.start();
     await this.readCheckpoints();
-    if (this.outbox.pending) this.startPolling();
+    // Only what the server already has is followed. What never left the phone
+    // waits: delivering it could start a workspace that has stopped since.
+    if (this.followable()) this.startPolling();
   }
 
   /** The list was read again (the workspace may have started, stopped, or been taken away). */
   listChanged(): void {
     this.link.listChanged();
+    if (this.followable()) this.startPolling();
     this.publish();
+  }
+
+  /** Whether the list should be read again soon: the workspace is changing state, or was asked to start. */
+  get changing(): boolean {
+    const state = this.options.listed()?.state ?? null;
+    if (state === "provisioning" || state === "resuming" || state === "suspending") return true;
+    // A command the server took for a stopped workspace starts it: the list says when it runs.
+    return state === "suspended" && this.outbox.awaiting;
+  }
+
+  /** The app left the foreground: let go of the connection. Nothing is forgotten. */
+  pause(): void {
+    if (this.closed) return;
+    if (this.poll) clearTimeout(this.poll);
+    this.poll = null;
+    this.link.close();
+  }
+
+  /** Back in the foreground. */
+  resume(): void {
+    if (this.closed || !this.started) return;
+    this.link.start();
+    if (this.followable()) this.startPolling();
+  }
+
+  /** The person asked to connect again after the link stopped trying. */
+  reconnect(): void {
+    if (this.closed) return;
+    this.link.reconnect();
+  }
+
+  /**
+   * Deliver what is still on the phone. To a stopped workspace only with
+   * `allowWake`: delivering starts it.
+   */
+  async deliverHeld(options: { allowWake?: boolean } = {}): Promise<void> {
+    const verdict = await this.mayPost(!!options.allowWake);
+    if (verdict === "would-wake" || verdict === "unavailable") throw new CloudSendError(verdict);
+    if (verdict === "post") await this.outbox.sync({ deliver: true });
+    if (this.followable()) this.startPolling();
   }
 
   /**
@@ -175,7 +227,11 @@ export class CloudWorkspaceSession {
     return this.command(tabId, "stop", {}, {});
   }
 
-  /** Answer a permission request. Only someone allowed to approve; one decision per request. */
+  /**
+   * Answer a permission request. The right to approve is its own right
+   * (contract §21.4): a viewer who has it may answer, a driver who lacks it
+   * may not. One decision per request.
+   */
   decide(tabId: string, decision: { requestId: string; optionId: string }): Promise<OutboxEntry> {
     if (!this.snapshot.canApprove) return Promise.reject(new CloudSendError("cannot-approve"));
     return this.command(tabId, "permission-decision", decision, {});
@@ -193,6 +249,7 @@ export class CloudWorkspaceSession {
     for (const entry of this.viewing.values()) entry.stop?.();
     this.viewing.clear();
     for (const stop of this.stops.splice(0)) stop();
+    this.transcripts.dispose();
     this.client.close();
   }
 
@@ -208,15 +265,49 @@ export class CloudWorkspaceSession {
   private async command(tabId: string, kind: CommandKind, payload: OutboxPayload, options: { allowWake?: boolean }): Promise<OutboxEntry> {
     const { role } = this.snapshot;
     // A viewer reads. The server and the runtime refuse too; this saves the round trip and says why.
-    if (role !== "manager" && role !== "driver") throw new CloudSendError(role === "viewer" ? "read-only" : "unavailable");
-    const state = this.options.listed()?.state ?? null;
-    if (state === null || state === "archived") throw new CloudSendError("unavailable");
-    // Queueing a command for a stopped workspace starts it: only when the person said so.
-    if (state === "suspended" && !options.allowWake) throw new CloudSendError("would-wake");
-    const entry = await this.outbox.enqueue(tabId, kind, payload);
+    // A decision needs the right to approve (checked by the caller), not a role that may send.
+    if (kind !== "permission-decision" && role !== "manager" && role !== "driver") throw new CloudSendError(role === "viewer" ? "read-only" : "unavailable");
+    if (role === null || role === "none") throw new CloudSendError("unavailable");
+    const verdict = await this.mayPost(!!options.allowWake);
+    if (verdict === "would-wake" || verdict === "unavailable") throw new CloudSendError(verdict);
+    // "hold": whether the workspace runs is not known just now, so the command is kept and not posted.
+    const entry = await this.outbox.enqueue(tabId, kind, payload, { post: verdict === "post" });
     if (this.client.connection.state === "connected") void this.client.nudgeMailbox().catch(() => undefined);
-    if (this.outbox.pending) this.startPolling();
+    if (this.followable()) this.startPolling();
     return entry;
+  }
+
+  /**
+   * Whether a command may be posted now. The server starts a stopped
+   * workspace for any command, so without the person's agreement one is
+   * posted only to a workspace seen running: connected to, or listed as
+   * running by a list read for this question (what was read earlier may be
+   * stale: it can have been stopped from elsewhere since).
+   */
+  private async mayPost(allowWake: boolean): Promise<"post" | "hold" | "would-wake" | "unavailable"> {
+    const stateNow = () => this.options.listed()?.state ?? null;
+    if (stateNow() === null || stateNow() === "archived") return "unavailable";
+    if (this.client.connection.state === "connected") return "post";
+    if (allowWake) return "post";
+    const fresh = this.options.refreshList ? await this.options.refreshList().catch(() => false) : true;
+    const state = stateNow();
+    if (state === null || state === "archived") return "unavailable";
+    if (state === "suspended" || state === "suspending") return "would-wake";
+    return fresh ? "post" : "hold";
+  }
+
+  /** Whether the outbox has anything to follow or deliver without asking the person. */
+  private followable(): boolean {
+    if (this.closed) return false;
+    if (this.outbox.awaiting) return true;
+    const state = this.options.listed()?.state ?? null;
+    return this.outbox.unsent && state !== null && state !== "archived" && state !== "suspended" && state !== "suspending";
+  }
+
+  /** Read command states, and deliver what is unsent only when that starts nothing. */
+  private async syncOutbox(): Promise<boolean> {
+    const deliver = this.outbox.unsent && (await this.mayPost(false)) === "post";
+    return this.outbox.sync({ deliver });
   }
 
   private async connectionChanged(state: WorkspaceConnectionState): Promise<void> {
@@ -235,8 +326,8 @@ export class CloudWorkspaceSession {
       // A checkpoint this phone could not open before it was handed the key opens now.
       for (const tab of [...this.tabs.values()]) if (tab.noKey) void this.readCheckpoint(tab.tabId);
       for (const [tabId, entry] of this.viewing) if (!entry.stop) void this.stream(tabId);
-      if (await this.outbox.sync().catch(() => false)) this.publish();
-      if (this.outbox.pending) this.startPolling();
+      if (await this.syncOutbox().catch(() => false)) this.publish();
+      if (this.followable()) this.startPolling();
       this.error = null;
     } catch (error) {
       this.error = error instanceof Error ? error.message : String(error);
@@ -364,8 +455,8 @@ export class CloudWorkspaceSession {
     if (this.poll || this.closed) return;
     const tick = async () => {
       this.poll = null;
-      const changed = await this.outbox.sync().catch(() => false);
-      if (this.closed || !this.outbox.pending) return;
+      const changed = await this.syncOutbox().catch(() => false);
+      if (this.closed || !this.followable()) return;
       this.pollDelay = changed ? OUTBOX_POLL_FIRST_MS : Math.min(OUTBOX_POLL_MAX_MS, this.pollDelay * 2);
       this.poll = setTimeout(() => void tick(), this.pollDelay);
     };

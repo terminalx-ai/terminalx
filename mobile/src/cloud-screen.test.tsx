@@ -31,7 +31,7 @@ vi.mock("react-native", () => {
     Platform: { OS: "web", select: ({ default: fallback }: any) => fallback },
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
     Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
-    TextInput: ({ value, onChangeText, placeholder, editable }: any) => <input value={value} disabled={editable === false} onInput={(event) => onChangeText(event.currentTarget.value)} placeholder={placeholder} />,
+    TextInput: ({ value, onChangeText, placeholder, editable, accessibilityLabel }: any) => <input aria-label={accessibilityLabel} value={value} disabled={editable === false} onInput={(event) => onChangeText(event.currentTarget.value)} placeholder={placeholder} />,
     FlatList: ({ data, renderItem, ListHeaderComponent, ListEmptyComponent, ListFooterComponent }: any) => <div>{ListHeaderComponent}{data.length ? data.map((item: unknown, index: number) => <div key={index}>{renderItem({ item })}</div>) : ListEmptyComponent}{ListFooterComponent}</div>,
     SectionList: ({ sections, renderItem, renderSectionHeader, renderSectionFooter, ListHeaderComponent, ListEmptyComponent }: any) => <div>{ListHeaderComponent}{sections.length ? sections.map((section: any) => <div key={section.key}>{renderSectionHeader({ section })}{section.data.map((item: any) => <div key={item.workspace.id}>{renderItem({ item })}</div>)}{renderSectionFooter({ section })}</div>) : ListEmptyComponent}</div>,
   };
@@ -49,11 +49,11 @@ let counter = 0;
 const event = (seq: number, payload: Record<string, unknown>) => ({ id: `e${seq}`, sessionId: "s1", tabId: "t1", harness: "claude", seq, ts: "2026-10-03T00:00:00Z", payload });
 const item = (id: string, fields: Record<string, unknown> = {}) => ({ workspace: { id, orgId: "org-1", name: id, provider: "box", state: "ready", you: { role: "driver", canApprove: false }, ...fields }, latestOperation: null });
 
-function world(options: { state?: string | null; role?: string | null; canApprove?: boolean; hasKey?: boolean; events?: unknown[]; outbox?: unknown[]; connection?: string; noKey?: boolean; tabs?: number } = {}) {
+function world(options: { state?: string | null; role?: string | null; canApprove?: boolean; hasKey?: boolean; events?: unknown[]; outbox?: unknown[]; connection?: string; noKey?: boolean; tabs?: number; access?: string; problem?: unknown } = {}) {
   const state = options.state === undefined ? "ready" : options.state;
   const snapshot = {
     connection: { state: options.connection ?? (state === "ready" ? "connected" : "suspended") },
-    problem: null,
+    problem: options.problem ?? null,
     role: options.role === undefined ? "driver" : options.role,
     canApprove: options.canApprove ?? false,
     hasKey: options.hasKey ?? true,
@@ -69,6 +69,8 @@ function world(options: { state?: string | null; role?: string | null; canApprov
     stop: vi.fn(async () => ({})),
     decide: vi.fn(async () => ({})),
     cancel: vi.fn(async () => undefined),
+    deliverHeld: vi.fn(async () => undefined),
+    reconnect: vi.fn(),
     outbox: { isDeciding: () => false },
   };
   const release = vi.fn();
@@ -78,6 +80,7 @@ function world(options: { state?: string | null; role?: string | null; canApprov
     getSnapshot: () => ({ organizations, loading: false, error: null, refreshedAt: 1 }),
     refresh: vi.fn(async () => undefined),
     workspace: () => listed,
+    access: () => options.access ?? (listed ? (options.role === "none" ? "not-shared" : "ok") : "gone"),
     retain: vi.fn(() => release),
     opened: () => session,
   };
@@ -176,6 +179,7 @@ describe("a cloud workspace screen", () => {
     expect(title).toBe("Start this workspace?");
     expect(message).toContain("billed");
     expect(buttons.map((entry: { text: string }) => entry.text)).toEqual(["Cancel", "Start and send"]);
+    expect(container.querySelector("input")!.getAttribute("aria-label")).toBe("Message for the agent. Sending starts the workspace.");
     // Cancel does nothing.
     buttons[0].onPress?.();
     expect(session.send).not.toHaveBeenCalled();
@@ -215,7 +219,7 @@ describe("a cloud workspace screen", () => {
     expect(text()).toContain("Not delivered yet. It is sent when the phone is back online.");
     expect(text()).toContain("Starting the workspace…");
     expect(text()).toContain("Your role in this workspace does not allow that.");
-    await act(async () => { [...container.querySelectorAll("button")].find((found) => found.textContent === "Cancel")!.click(); });
+    await click("Cancel the message: message b");
     expect(session.cancel).toHaveBeenCalledWith("b");
   });
 
@@ -241,10 +245,96 @@ describe("a cloud workspace screen", () => {
     expect(text()).toContain("This workspace is archived. Its conversation can be read.");
     expect(container.querySelector("input")).toBeNull();
 
-    world({ state: null, connection: "stopped" });
+  });
+
+  it("says why a workspace cannot be shown, opens nothing for it, and clears the conversation when access ends while open", async () => {
+    const first = world();
     await show(<CloudWorkspaceScreen />);
-    expect(text()).toContain("This workspace is no longer available to you.");
+    expect(text()).toContain("run the tests");
+    // The list now says access was taken away: the same screen, re-rendered.
+    mocks.catalog.access = () => "gone";
+    mocks.catalog.opened = () => null;
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("This workspace is no longer shared with you");
+    expect(text()).not.toContain("run the tests");
+    expect(text()).not.toContain("Sign in");
     expect(container.querySelector("input")).toBeNull();
+    expect(first.release).toHaveBeenCalled();
+
+    for (const [access, words] of [["not-shared", "This workspace has not been shared with you"], ["deleted", "This workspace was deleted"], ["gone", "This workspace is no longer shared with you"]] as const) {
+      world({ access });
+      mocks.params = { workspaceId: `ws-${++counter}`, orgId: "org-1" };
+      await show(<CloudWorkspaceScreen />);
+      expect(text()).toContain(words);
+      // Nothing is opened for a workspace this person may not open: no session, no connection.
+      expect(mocks.catalog.retain).not.toHaveBeenCalled();
+      expect(text()).not.toContain("Fix login");
+    }
+
+    world({ access: "unknown" });
+    mocks.catalog.opened = () => null;
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Checking access…");
+  });
+
+  it("holds a message that never left the phone for a workspace that is stopped now, and sends it only after the person confirms", async () => {
+    const entry = { clientCommandId: "a", tabId: "t1", kind: "send", text: "written offline", requestId: null, wake: null, category: null, receipt: null, createdAt: 1, updatedAt: 1, error: null, state: "unsent" };
+    const { session } = world({ state: "suspended", outbox: [entry] });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("written offline");
+    expect(text()).toContain("Not sent. This workspace is stopped, and sending starts it.");
+    expect(session.deliverHeld).not.toHaveBeenCalled();
+    await click("Send it and start the workspace");
+    expect(session.deliverHeld).not.toHaveBeenCalled();
+    const [title, message, buttons] = mocks.alert.mock.calls[0];
+    expect(title).toBe("Start this workspace?");
+    expect(message).toContain("billed");
+    await act(async () => buttons[1].onPress());
+    expect(session.deliverHeld).toHaveBeenCalledWith({ allowWake: true });
+    // It can also just be dropped.
+    await click("Cancel the message: written offline");
+    expect(session.cancel).toHaveBeenCalledWith("a");
+  });
+
+  it("asks before starting when the workspace turns out to have stopped since the screen last heard", async () => {
+    const { session } = world();
+    session.send.mockRejectedValueOnce(Object.assign(new Error("would-wake"), { code: "would-wake" }));
+    await show(<CloudWorkspaceScreen />);
+    await type("still there?");
+    await click("Send");
+    expect(session.send).toHaveBeenCalledTimes(1);
+    expect(session.send).toHaveBeenLastCalledWith("t1", "still there?");
+    const [title, , buttons] = mocks.alert.mock.calls[0];
+    expect(title).toBe("Start this workspace?");
+    // The draft waits for the answer.
+    expect(container.querySelector("input")!.value).toBe("still there?");
+    await act(async () => buttons[1].onPress());
+    expect(session.send).toHaveBeenLastCalledWith("t1", "still there?", { allowWake: true });
+  });
+
+  it("says a workspace is starting once it was asked to, offers Reconnect when the link stopped trying, and never shows a raw code", async () => {
+    const entry = { clientCommandId: "a", tabId: "t1", kind: "send", text: "go", requestId: null, wake: "queued", category: null, receipt: null, createdAt: 1, updatedAt: 1, error: null, state: "queued" };
+    world({ state: "suspended", outbox: [entry] });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Starting the workspace…");
+    expect(text()).not.toContain("Stopped. Showing");
+
+    const stuck = world({ connection: "stopped", problem: { kind: "gave-up" } });
+    mocks.params = { workspaceId: `ws-${++counter}`, orgId: "org-1" };
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Could not connect to this workspace.");
+    await click("Reconnect");
+    expect(stuck.session.reconnect).toHaveBeenCalled();
+    expect(mocks.catalog.refresh).toHaveBeenCalled();
+
+    const odd = world({ outbox: [{ ...entry, state: "rejected", wake: null, category: "some_new_refusal_code" }], connection: "updateRequired" });
+    mocks.params = { workspaceId: `ws-${++counter}`, orgId: "org-1" };
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Update the app to connect to this workspace.");
+    expect(text()).toContain("That did not work. Try again in a moment.");
+    expect(text()).not.toContain("some_new_refusal_code");
+    expect(text()).not.toContain("some new refusal code");
+    expect(odd.session.reconnect).not.toHaveBeenCalled();
   });
 
   it("switches between a workspace's agent tabs", async () => {

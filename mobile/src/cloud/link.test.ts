@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceRpcClient, type WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { CloudApiError } from "./api";
 import { NOW, pairingCode, relayHostId, Runtime } from "./fake-runtime";
-import { CloudWorkspaceLink, PHONE_CAPABILITIES } from "./link";
+import { CloudWorkspaceLink, MAX_ATTEMPTS, MAX_WAITS, PHONE_CAPABILITIES } from "./link";
 
 // The real link against a runtime that speaks the real handshake and frames
 // (as `relay-client.test.ts` does for a paired Mac): nothing of the encrypted
@@ -11,17 +11,17 @@ import { CloudWorkspaceLink, PHONE_CAPABILITIES } from "./link";
 const ticket = (runtimeGeneration = 3) => ({ v: 1 as const, token: "attach-jwt", expiresAt: NOW + 60_000, runtimeGeneration, protocol: "terminalx-workspace-rpc/1" as const });
 const ready = (fields: Record<string, unknown> = {}) => ({ id: "a1", workspaceId: "ws-1", state: "ready" as const, authority: "participate" as const, expiresAt: NOW + 600_000, pairingCode: pairingCode(), attachTicket: ticket(), ...fields });
 
-function harness(listed: string | null = "ready") {
+function harness(listed: string | null = "ready", clock: { now?: () => number; serverNow?: () => number } = { now: () => NOW }) {
   const runtimes: Runtime[] = [];
   const open = vi.fn(async (..._args: unknown[]) => ready() as never);
   let state = listed;
   const link = new CloudWorkspaceLink({
-    api: { open: open as never },
+    api: { open: open as never, ...(clock.serverNow ? { serverNow: clock.serverNow } : {}) },
     target: { orgId: "org-1", workspaceId: "ws-1" },
     clientInstallationId: "install-1",
     workspaceState: () => state,
     appVersion: "0.1.0",
-    now: () => NOW,
+    ...(clock.now ? { now: clock.now } : {}),
     random: { bytes: (length) => new Uint8Array(length).fill(9) },
     createSocket: (url) => {
       const runtime = new Runtime();
@@ -140,9 +140,14 @@ describe("the phone's connection to a cloud workspace", () => {
     expect(refused.link.problem).toEqual({ kind: "api", code: "cloud_workspace_not_found", unreachable: false });
     await vi.advanceTimersByTimeAsync(120_000);
     expect(refused.open).toHaveBeenCalledTimes(1);
-    // Shared again: the list says so and the link asks once more.
-    refused.open.mockResolvedValue(ready() as never);
+    // A list that says the same as before causes no further request, however often it is read.
     refused.link.listChanged();
+    refused.link.listChanged();
+    await settle();
+    expect(refused.open).toHaveBeenCalledTimes(1);
+    // The person asks (or the listed state changes): it tries again.
+    refused.open.mockResolvedValue(ready() as never);
+    refused.link.reconnect();
     await connected(refused);
   });
 
@@ -233,5 +238,113 @@ describe("the phone's connection to a cloud workspace", () => {
     await vi.advanceTimersByTimeAsync(120_000);
     expect(h.open).toHaveBeenCalledTimes(1);
     expect(h.states.at(-1)).toEqual({ state: "idle" });
+  });
+
+  describe("a phone whose clock is wrong", () => {
+    const real = Date.now;
+    afterEach(() => {
+      Date.now = real;
+    });
+
+    it("judges a ticket's expiry by the server's clock, so a phone 55 s ahead still connects", async () => {
+      // By the phone's own clock the 60 s ticket has 5 s left, under the margin.
+      Date.now = () => NOW + 55_000;
+      const h = harness("ready", { serverNow: () => NOW });
+      h.link.start();
+      await connected(h);
+      expect(h.open).toHaveBeenCalledTimes(1);
+    });
+
+    it("never asks again without a pause when a ticket is too old, and stops after a few tries", async () => {
+      // No server time known, and the phone is far ahead: every ticket looks expired.
+      Date.now = () => NOW + 120_000;
+      const h = harness("ready", {});
+      h.open.mockImplementation(async () => ready({ pairingCode: pairingCode({ relay: { v: 1, directorUrl: "https://relay.example.test", cellUrl: "https://cell.example.test", assignmentEpoch: 1, relayHostId, inviteToken: "i".repeat(43), inviteExpiresAt: NOW + 120_000 + 5 * 60_000, e2eeFraming: 2 } }) }) as never);
+      h.link.start();
+      await settle();
+      expect(h.link.state).toMatchObject({ state: "reconnecting", attempt: 1, reason: "ticket" });
+      expect((h.link.state as { retryInMs: number }).retryInMs).toBeGreaterThanOrEqual(125);
+      // No tight loop: one request so far, and none without time passing.
+      await settle();
+      expect(h.open).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(30 * 60_000);
+      expect(h.link.state.state).toBe("stopped");
+      expect(h.link.problem).toEqual({ kind: "gave-up" });
+      expect(h.open).toHaveBeenCalledTimes(MAX_ATTEMPTS + 1);
+      expect(h.runtimes).toEqual([]);
+    });
+  });
+
+  it("stops trying after a number of failures in a row, and tries again only when asked", async () => {
+    const h = harness();
+    h.open.mockRejectedValue(new CloudApiError("cloud_provider_unavailable", 503));
+    h.link.start();
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(h.link.state.state).toBe("stopped");
+    expect(h.link.problem).toEqual({ kind: "gave-up" });
+    expect(h.open).toHaveBeenCalledTimes(MAX_ATTEMPTS + 1);
+    // Left alone, and with the list read again and again, it asks nothing more.
+    h.link.listChanged();
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(h.open).toHaveBeenCalledTimes(MAX_ATTEMPTS + 1);
+    h.open.mockResolvedValue(ready() as never);
+    h.link.reconnect();
+    await connected(h);
+  });
+
+  it("asks less and less often for a runtime that is not ready, and stops", async () => {
+    const h = harness();
+    h.open.mockResolvedValue({ id: "a1", workspaceId: "ws-1", state: "waiting-for-runtime", authority: "participate", expiresAt: NOW } as never);
+    h.link.start();
+    await settle();
+    await vi.advanceTimersByTimeAsync(1_600);
+    expect(h.open).toHaveBeenCalledTimes(2);
+    // The second wait is longer than the first.
+    await vi.advanceTimersByTimeAsync(1_600);
+    expect(h.open).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(h.open).toHaveBeenCalledTimes(MAX_WAITS + 1);
+    expect(h.link.state.state).toBe("stopped");
+    expect(h.link.problem).toEqual({ kind: "gave-up" });
+  });
+
+  it("waits for the list, without asking, while a workspace is starting", async () => {
+    const h = harness("resuming");
+    h.link.start();
+    await settle();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(h.link.state.state).toBe("waitingForRuntime");
+    expect(h.open).not.toHaveBeenCalled();
+    h.list("ready");
+    h.link.listChanged();
+    await connected(h);
+  });
+
+  it("says an update is needed when the API answers in a shape this app does not know, and does not retry", async () => {
+    const h = harness();
+    h.open.mockRejectedValue(new CloudApiError("cloud_workspace_invalid_response", 200));
+    h.link.start();
+    await settle();
+    expect(h.link.state.state).toBe("updateRequired");
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(h.open).toHaveBeenCalledTimes(1);
+  });
+
+  it("takes an older runtime that does not state an authority at the API's word", async () => {
+    const h = harness();
+    h.each((runtime) => (runtime.authority = undefined as never));
+    h.link.start();
+    await connected(h);
+    expect(h.link.state).toMatchObject({ authority: "participate" });
+  });
+
+  it("asks for a new pairing after it was closed and started again (the app came back)", async () => {
+    const h = harness();
+    h.link.start();
+    await connected(h);
+    h.link.close();
+    h.link.start();
+    await connected(h);
+    expect(h.open.mock.calls[1][3]).toEqual({ refreshPairing: true });
   });
 });

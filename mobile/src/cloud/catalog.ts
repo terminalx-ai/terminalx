@@ -13,9 +13,15 @@ import { CloudWorkspaceSession } from "./workspace";
  * workspace not shared with them is simply not here.
  *
  * The list also decides what this phone may keep. A workspace the server
- * says is deleted, or no longer lists for this person (access removed), has
- * its key, its cached transcripts and its outbox removed from the phone. A
- * list that could not be read removes nothing.
+ * says is deleted, no longer lists for this person, or lists with role
+ * `none` (a share was revoked on a workspace the organization can still
+ * see) has its key, its cached transcripts and its outbox removed from the
+ * phone, and its open session closed, at once. A list that could not be read
+ * removes nothing.
+ *
+ * While an open workspace is changing state (starting, stopping, or asked to
+ * start by a message) the list is read every few seconds until it settles,
+ * so the screen goes live by itself. Reading the list starts nothing.
  */
 
 export interface CatalogOrganization {
@@ -51,7 +57,13 @@ export interface CloudCatalogOptions {
   now?: () => number;
 }
 
-const HELD = "terminalx:cloud-held:v1";
+/** Which workspaces have data on this phone. Kept beside the keys, so that it survives exactly what they survive (a reinstall). */
+const HELD = "terminalx.cloud.held.v1";
+/** How often the list is read while an open workspace is changing, and for how long at most. */
+export const CHANGING_POLL_MS = 3_000;
+export const CHANGING_POLL_LIMIT_MS = 10 * 60_000;
+/** Why a workspace that was open is not available any more. */
+export type CloudAccess = "ok" | "not-shared" | "deleted" | "gone" | "unknown";
 const sessionKey = (orgId: string, workspaceId: string) => `${orgId}\0${workspaceId}`;
 /** Everything this phone keeps for a workspace in plain storage starts with one of these. */
 const blobPrefixes = (orgId: string, workspaceId: string) => [`terminalx:cloud-checkpoint:${orgId}:${workspaceId}:`, `terminalx:cloud-outbox:${orgId}:${workspaceId}`];
@@ -67,6 +79,12 @@ export class CloudCatalog {
   private readonly retained = new Map<string, number>();
   private flight: Promise<void> | null = null;
   private closed = false;
+  private paused = false;
+  private readonly deleted = new Set<string>();
+  private changingTimer: ReturnType<typeof setTimeout> | null = null;
+  private changingSince: number | null = null;
+  /** One change to the held list at a time. */
+  private heldChain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: CloudCatalogOptions) {}
 
@@ -79,6 +97,42 @@ export class CloudCatalog {
 
   workspace(orgId: string, workspaceId: string): CloudWorkspace | null {
     return this.organizations.find((entry) => entry.organization.orgId === orgId)?.workspaces.find((item) => item.workspace.id === workspaceId)?.workspace ?? null;
+  }
+
+  /**
+   * Whether this person may open the workspace, by the last list: `ok`,
+   * `not-shared` (listed, role `none`), `deleted`, `gone` (no longer listed:
+   * access was taken away), or `unknown` while its organization has not been read.
+   */
+  access(orgId: string, workspaceId: string): CloudAccess {
+    const organization = this.organizations.find((entry) => entry.organization.orgId === orgId);
+    const workspace = organization?.workspaces.find((item) => item.workspace.id === workspaceId)?.workspace;
+    if (workspace) return notShared(workspace) ? "not-shared" : "ok";
+    if (this.deleted.has(sessionKey(orgId, workspaceId))) return "deleted";
+    if (organization ? organization.loaded : this.refreshedAt !== null) return "gone";
+    return "unknown";
+  }
+
+  /** Read the list now; true when `orgId`'s workspaces were read, so what `workspace()` says is current. */
+  async fresh(orgId: string): Promise<boolean> {
+    await this.refresh();
+    const organization = this.organizations.find((entry) => entry.organization.orgId === orgId);
+    return this.error === null && !!organization && organization.loaded && organization.error === null;
+  }
+
+  /** The app left the foreground: every connection is let go, and nothing is read until it is back. */
+  pause(): void {
+    this.paused = true;
+    if (this.changingTimer) clearTimeout(this.changingTimer);
+    this.changingTimer = null;
+    for (const session of this.sessions.values()) session.pause();
+  }
+
+  resume(): void {
+    if (!this.paused || this.closed) return;
+    this.paused = false;
+    for (const session of this.sessions.values()) session.resume();
+    void this.refresh();
   }
 
   /** Read the organizations and each one's workspaces. One read at a time. */
@@ -99,12 +153,15 @@ export class CloudCatalog {
         secrets: this.options.secrets,
         storage: this.options.storage,
         listed: () => this.workspace(orgId, workspaceId),
+        refreshList: () => this.fresh(orgId),
         clientInstallationId: this.options.clientInstallationId,
         appVersion: this.options.appVersion,
         link: this.options.link,
       });
       this.sessions.set(key, session);
       void this.remember(orgId, workspaceId);
+      // A message sent, or a state learned, may mean the list should be followed for a while.
+      session.subscribe(() => this.followChanges());
       void session.start();
     }
     return session;
@@ -146,10 +203,12 @@ export class CloudCatalog {
   /** Signed out: close everything and remove every key, transcript and outbox from the phone. */
   async signOut(): Promise<void> {
     this.closed = true;
+    if (this.changingTimer) clearTimeout(this.changingTimer);
+    this.changingTimer = null;
     for (const session of this.sessions.values()) session.close();
     this.sessions.clear();
     for (const [orgId, workspaceId] of await this.held()) await this.forget(orgId, workspaceId);
-    await this.options.storage.removeItem(HELD).catch(() => undefined);
+    await this.options.secrets.delete(HELD).catch(() => undefined);
     this.organizations = [];
     this.publish();
   }
@@ -157,6 +216,8 @@ export class CloudCatalog {
   /** The app went away for now: connections are closed, nothing is forgotten. */
   close(): void {
     this.closed = true;
+    if (this.changingTimer) clearTimeout(this.changingTimer);
+    this.changingTimer = null;
     for (const session of this.sessions.values()) session.close();
     this.sessions.clear();
   }
@@ -180,6 +241,8 @@ export class CloudCatalog {
         try {
           const list = await this.options.api.workspaces(organization.orgId);
           const workspaces = list.workspaces.filter((item) => !item.workspace.deletedAt).sort((left, right) => (right.workspace.lastActivityAt ?? 0) - (left.workspace.lastActivityAt ?? 0));
+          for (const tombstone of list.tombstones) this.deleted.add(sessionKey(organization.orgId, tombstone.id));
+          for (const item of list.workspaces) if (item.workspace.deletedAt) this.deleted.add(sessionKey(organization.orgId, item.workspace.id));
           return { organization, workspaces, error: null, loaded: true, gone: list.tombstones.map((tombstone) => tombstone.id) };
         } catch (error) {
           // Not read: what was shown stays, and nothing is concluded from the silence.
@@ -194,26 +257,54 @@ export class CloudCatalog {
     this.refreshedAt = (this.options.now ?? Date.now)();
     this.publish();
 
-    // What this phone keeps for workspaces it may no longer see goes away:
-    // deleted ones, ones no longer listed for this person, and organizations
-    // the account left. Only where the list was actually read.
-    const read = new Map(results.filter((entry) => entry.gone !== null).map((entry) => [entry.organization.orgId, new Set(entry.workspaces.map((item) => item.workspace.id))]));
+    // What this phone keeps for workspaces it may no longer open goes away:
+    // deleted ones, ones no longer listed for this person, ones listed with
+    // role `none`, and organizations the account left. Only where the list
+    // was actually read.
+    const read = new Map(results.filter((entry) => entry.gone !== null).map((entry) => [entry.organization.orgId, new Map(entry.workspaces.map((item) => [item.workspace.id, item.workspace]))]));
     const member = new Set(organizations.map((organization) => organization.orgId));
-    for (const [orgId, workspaceId] of await this.held()) {
+    const mayKeep = (orgId: string, workspaceId: string) => {
+      if (!member.has(orgId)) return false;
       const listed = read.get(orgId);
-      if (member.has(orgId) && (!listed || listed.has(workspaceId))) continue;
-      const key = sessionKey(orgId, workspaceId);
-      const session = this.sessions.get(key);
+      if (!listed) return true;
+      const workspace = listed.get(workspaceId);
+      return !!workspace && !notShared(workspace);
+    };
+    // Open sessions first, whether or not anything was kept for them: the screen is cleared before the storage is.
+    for (const [key, session] of [...this.sessions]) {
+      const [orgId, workspaceId] = key.split("\0") as [string, string];
+      if (mayKeep(orgId, workspaceId)) continue;
       this.sessions.delete(key);
-      if (session) await session.purge();
-      await this.forget(orgId, workspaceId);
+      await session.purge();
     }
+    this.publish();
+    for (const [orgId, workspaceId] of await this.held()) if (!mayKeep(orgId, workspaceId)) await this.forget(orgId, workspaceId);
     for (const session of this.sessions.values()) session.listChanged();
+    this.followChanges();
+  }
+
+  /** Read the list again shortly while an open workspace is changing; stop when all have settled, or after the limit. */
+  private followChanges(): void {
+    if (this.closed || this.paused) return;
+    const changing = [...this.sessions.values()].some((session) => session.changing);
+    if (!changing) {
+      this.changingSince = null;
+      if (this.changingTimer) clearTimeout(this.changingTimer);
+      this.changingTimer = null;
+      return;
+    }
+    const now = (this.options.now ?? Date.now)();
+    this.changingSince ??= now;
+    if (this.changingTimer || now - this.changingSince > CHANGING_POLL_LIMIT_MS) return;
+    this.changingTimer = setTimeout(() => {
+      this.changingTimer = null;
+      void this.refresh();
+    }, CHANGING_POLL_MS);
   }
 
   private async held(): Promise<[string, string][]> {
     try {
-      const raw = await this.options.storage.getItem(HELD);
+      const raw = await this.options.secrets.get(HELD);
       const parsed: unknown = raw ? JSON.parse(raw) : [];
       return Array.isArray(parsed) ? parsed.filter((entry): entry is [string, string] => Array.isArray(entry) && typeof entry[0] === "string" && typeof entry[1] === "string") : [];
     } catch {
@@ -221,10 +312,18 @@ export class CloudCatalog {
     }
   }
 
-  private async remember(orgId: string, workspaceId: string): Promise<void> {
-    const held = await this.held();
-    if (held.some(([org, workspace]) => org === orgId && workspace === workspaceId)) return;
-    await this.options.storage.setItem(HELD, JSON.stringify([...held, [orgId, workspaceId]])).catch(() => undefined);
+  /** Read, change and write the held list as one step, so two changes never lose one another. */
+  private changeHeld(change: (held: [string, string][]) => [string, string][] | null): Promise<void> {
+    const next = this.heldChain.then(async () => {
+      const changed = change(await this.held());
+      if (changed) await this.options.secrets.set(HELD, JSON.stringify(changed)).catch(() => undefined);
+    });
+    this.heldChain = next.catch(() => undefined);
+    return next;
+  }
+
+  private remember(orgId: string, workspaceId: string): Promise<void> {
+    return this.changeHeld((held) => (held.some(([org, workspace]) => org === orgId && workspace === workspaceId) ? null : [...held, [orgId, workspaceId]]));
   }
 
   private async forget(orgId: string, workspaceId: string): Promise<void> {
@@ -232,12 +331,17 @@ export class CloudCatalog {
     const prefixes = blobPrefixes(orgId, workspaceId);
     const names = await this.options.storage.getAllKeys().catch(() => [] as readonly string[]);
     await Promise.all(names.filter((name) => prefixes.some((prefix) => name.startsWith(prefix))).map((name) => this.options.storage.removeItem(name).catch(() => undefined)));
-    const held = (await this.held()).filter(([org, workspace]) => !(org === orgId && workspace === workspaceId));
-    await this.options.storage.setItem(HELD, JSON.stringify(held)).catch(() => undefined);
+    await this.changeHeld((held) => held.filter(([org, workspace]) => !(org === orgId && workspace === workspaceId)));
   }
 
   private publish(): void {
     this.snapshot = { organizations: this.organizations, loading: this.loading, error: this.error, refreshedAt: this.refreshedAt };
     for (const listener of [...this.listeners]) listener();
   }
+}
+
+/** Listed, but not shared with this person: role `none` from a server that keeps a member list (`listed` is not false). */
+function notShared(workspace: CloudWorkspace): boolean {
+  const you = workspace.you as ({ role?: string; listed?: boolean } & Record<string, unknown>) | null | undefined;
+  return you?.role === "none" && you.listed !== false;
 }

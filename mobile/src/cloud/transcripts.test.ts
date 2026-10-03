@@ -106,4 +106,15 @@ describe("a cloud tab's transcript without a connection", () => {
     await h.transcripts.forget("tab-1");
     expect(h.blobs.size).toBe(0);
   });
+
+  it("writes nothing after the workspace's data was removed, even for a fetch already on its way", async () => {
+    const h = await harness();
+    let release!: (value: CheckpointEnvelope) => void;
+    h.fetchCheckpoint.mockReturnValueOnce(new Promise<CheckpointEnvelope>((resolve) => (release = resolve)));
+    const reading = h.transcripts.refresh("tab-1");
+    h.transcripts.dispose();
+    release(checkpoint(4));
+    expect(await reading).toMatchObject({ kind: "transcript", version: 4 });
+    expect(h.blobs.size).toBe(0);
+  });
 });

@@ -17,10 +17,12 @@ import type { BlobStorage } from "./transcripts";
  *   clear, and neither is the runtime's receipt.
  * - A permission request gets one decision, ever.
  *
- * Queueing a command is the one thing here that can start a stopped
- * workspace (the server decides, by the sender's role, and answers `wake`).
- * Nothing else in this file writes: `sync` resends what the person already
- * sent and reads states.
+ * Posting a command is the one thing here that can start a stopped workspace
+ * (the server resumes it for a command, by the sender's role, and answers
+ * `wake`). That holds for a first post and for a resend alike, so both are
+ * the caller's decision: `enqueue` posts only with `post`, and `sync`
+ * delivers what is unsent only with `deliver`. Without them an entry is
+ * held on the phone, and `sync` only reads states.
  */
 
 export type OutboxState = "unsent" | "queued" | "leased" | "applied" | "rejected" | "cancelled" | "outcome-unknown";
@@ -127,6 +129,16 @@ export class CloudOutbox {
     return this.items.some((item) => !TERMINAL_OUTBOX_STATES.has(item.state));
   }
 
+  /** Whether the server has commands whose outcome is not known yet. */
+  get awaiting(): boolean {
+    return this.items.some((item) => item.state === "queued" || item.state === "leased");
+  }
+
+  /** Whether anything has not left the phone. */
+  get unsent(): boolean {
+    return this.items.some((item) => item.state === "unsent");
+  }
+
   /** A decision for this request that is, or may be, on its way: never queue another. */
   decisionFor(requestId: string): OutboxEntry | null {
     return (
@@ -138,8 +150,11 @@ export class CloudOutbox {
     return this.deciding.has(requestId) || !!this.decisionFor(requestId);
   }
 
-  /** Seal, keep, then post. Offline, the entry stays `unsent` and `sync` delivers it. */
-  async enqueue(tabId: string, kind: CommandKind, payload: OutboxPayload): Promise<OutboxEntry> {
+  /**
+   * Seal and keep, then post if `post`. An entry that was not posted, or
+   * could not be (offline), stays `unsent` until a `sync` that may deliver.
+   */
+  async enqueue(tabId: string, kind: CommandKind, payload: OutboxPayload, options: { post?: boolean } = {}): Promise<OutboxEntry> {
     await this.load();
     const requestId = kind === "permission-decision" && "requestId" in payload ? payload.requestId : null;
     if (requestId) {
@@ -160,20 +175,27 @@ export class CloudOutbox {
       // On the phone before it is on the wire.
       await this.save();
       this.publish();
-      await this.post(item);
-      await this.save();
-      this.publish();
+      if (options.post !== false) {
+        await this.post(item);
+        await this.save();
+        this.publish();
+      }
       return this.view(item);
     } finally {
       if (requestId) this.deciding.delete(requestId);
     }
   }
 
-  /** Deliver what is unsent and read the state of what is on its way. Returns whether anything changed. */
-  async sync(): Promise<boolean> {
+  /**
+   * Read the state of what is on its way and, only with `deliver`, post what
+   * is unsent. Posting to a stopped workspace starts it, so the caller says
+   * `deliver` only while the workspace runs or the person agreed to start it.
+   * Returns whether anything changed.
+   */
+  async sync(options: { deliver?: boolean } = {}): Promise<boolean> {
     await this.load();
     const before = this.fingerprint();
-    for (const item of this.items.filter((entry) => entry.state === "unsent")) await this.post(item);
+    if (options.deliver) for (const item of this.items.filter((entry) => entry.state === "unsent")) await this.post(item);
     const open_ = this.items.filter((entry) => entry.state === "queued" || entry.state === "leased");
     if (open_.length) {
       const commands = await this.options.api.commandStatuses(this.options.scope.organizationId, this.options.scope.workspaceId, open_.map((entry) => entry.envelope.clientCommandId));
