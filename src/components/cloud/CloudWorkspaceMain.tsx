@@ -7,7 +7,7 @@ import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { workspaceRowState } from "@/components/layout/cloud/rowState";
 import { useCloudSections } from "@/components/layout/cloud/CloudSections";
 import { DeletionProgress } from "./CloudWorkspaceLifecycle";
-import { ExecutionLocation, WorkspaceView, describe, describeWorkspace, type OpenedWorkspace } from "./CloudSessionPage";
+import { ExecutionLocation, WorkspaceView, describe, describeWorkspace, type OpenedWorkspace } from "./CloudWorkspaceView";
 import { workspaceTargetKey, type CloudWorkspaceListItem } from "@/lib/api";
 import { retainCloudConnection, setSelectedCloudConnection, subscribeCloudConnections, type CloudLease } from "@/lib/cloudConnections";
 import { findCloudWorkspace, refreshCloudCatalog, resumeCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
@@ -30,8 +30,7 @@ function openable(item: CloudWorkspaceListItem): boolean {
  * shows its workspace here. The connection is a lease from the connection
  * manager, so the sidebar's session list follows it live.
  *
- * the existing workspace view (terminals, agent, files, git) of the
- * full-window cloud page. Selecting only looks: it connects with `connect`,
+ * The workspace view (terminals, agent, files, git). Selecting only looks: it connects with `connect`,
  * never `wake`, so a stopped workspace shows its saved agent conversations
  * and stays stopped until Resume is pressed.
  */
