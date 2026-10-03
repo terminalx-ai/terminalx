@@ -112,7 +112,7 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "3.7", optional = true }
 objc2 = { version = "0.6", optional = true }
-objc2-app-kit = { version = "0.3", features = ["NSAlert", "NSApplication", "NSButton", "NSControl", "NSDockTile", "NSSecureTextField", "NSTextField", "NSWindow", "NSResponder", "NSView", "NSColor"], optional = true }
+objc2-app-kit = { version = "0.3", features = ["NSAlert", "NSApplication", "NSButton", "NSControl", "NSDockTile", "NSSecureTextField", "NSTextField", "NSWindow", "NSResponder", "NSView", "NSColor", "NSPasteboard"], optional = true }
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "block2"], optional = true }
 objc2-avf-audio = { version = "0.3", features = ["AVAudioEngine", "AVAudioNode", "AVAudioIONode", "AVAudioBuffer", "AVAudioFormat", "AVAudioTime", "AVAudioTypes", "block2"], optional = true }
 block2 = { version = "0.6", optional = true }

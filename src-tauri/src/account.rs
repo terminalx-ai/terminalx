@@ -19,6 +19,7 @@ use url::Url;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::desktop_links::DesktopLinks;
 use crate::keychain::{Keychain, SecretStore};
 
 pub const STATUS_EVENT: &str = "account_status";
@@ -27,6 +28,11 @@ pub const STATUS_EVENT: &str = "account_status";
 /// Organization rather than by the active one (PRO-70, CS-17). Without it a
 /// desktop reaches only its active Organization, as before.
 pub const MULTI_ORG_CAPABILITY: &str = "cloud.desktop.multi-org.v1";
+
+/// The server lists every member Organization's cloud workspaces in one
+/// request (`GET /v1/desktop/cloud-catalog`, PRO-74). Without it the desktop
+/// lists each Organization on its own.
+pub const CATALOG_FEED_CAPABILITY: &str = "cloud.desktop.catalog-feed.v1";
 
 const API_BASE_URL: &str = "https://login.terminalx.ai";
 /// Debug builds only: point the account service (and everything built on it,
@@ -67,7 +73,6 @@ const ORGANIZATIONS_PATH: &str = "/v1/desktop/orgs";
 const ACTIVE_ORGANIZATION_PATH: &str = "/v1/desktop/auth/org";
 const CLIENT_ID: &str = "terminalx-desktop";
 const SCOPE: &str = "openid profile email offline_access";
-const REDIRECT_URI: &str = "terminalx://auth/callback";
 const LOCAL_PROFILE_ID: &str = "local-default";
 const KEYCHAIN_ACCOUNT: &str = "desktop-session";
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -93,6 +98,8 @@ pub struct AccountStatus {
     organizations: Vec<OrganizationSummary>,
     /// The server lets this desktop work in every member Organization at once (CS-18).
     multi_org: bool,
+    /// The server lists every member Organization in one request (PRO-74).
+    catalog_feed: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -117,6 +124,17 @@ pub struct OrganizationSummary {
     /// What the cloud offers in this organization (PRO-69); absent from older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud: Option<OrganizationCloud>,
+}
+
+/// What creating an organization did (PRO-16): the organization, and whether
+/// it is now the selected one. `selected: false` is "created, not selected":
+/// the organization exists and must only be selected, never created again.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationCreated {
+    #[serde(flatten)]
+    pub organization: OrganizationSummary,
+    pub selected: bool,
 }
 
 /// Per-organization cloud capabilities, as the desktop session reports them.
@@ -403,6 +421,13 @@ impl AccountManager {
         session.capabilities.flags.insert(MULTI_ORG_CAPABILITY.into(), multi_org);
     }
 
+    /// Tests: whether the server advertises the catalog feed.
+    #[cfg(test)]
+    pub(crate) fn set_catalog_feed_for_test(&self, offered: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.session.as_mut().expect("signed in").capabilities.flags.insert(CATALOG_FEED_CAPABILITY.into(), offered);
+    }
+
     /// Tests: another client changed the default (active) Organization.
     #[cfg(test)]
     pub(crate) fn set_active_org_for_test(&self, organization_id: &str) {
@@ -628,6 +653,23 @@ impl AccountManager {
         }
     }
 
+    /// Whether the server offers the cross-organization catalog feed (PRO-74).
+    pub(crate) fn catalog_feed(&self) -> bool {
+        self.inner.lock().unwrap().session.as_ref().is_some_and(catalog_feed)
+    }
+
+    /// For an answer that spans Organizations (the catalog feed): the scope of
+    /// now, if the account that asked is still the one signed in. The caller
+    /// keeps only the Organizations this scope allows.
+    pub(crate) fn scope_if_same_account(&self, context: &AccountContext) -> Option<CloudScope> {
+        let inner = self.inner.lock().unwrap();
+        if inner.generation != context.generation {
+            return None;
+        }
+        let scope = cloud_scope(inner.session.as_ref()?);
+        (scope.user_id == context.user_id && scope.profile_id == context.profile_id).then_some(scope)
+    }
+
     /// Fence native service responses against sign-out or account replacement.
     /// A request may finish after either event, but its Organization data must
     /// never be returned to the webview in the new account generation.
@@ -660,11 +702,14 @@ impl AccountManager {
     /// Create an organization with a caller-owned idempotency key, then select
     /// it through the server-authoritative profile endpoint. The key is never
     /// persisted in the account session and is safe to reuse after a timeout.
+    /// A create whose selection failed is still a create: it is returned with
+    /// `selected: false`, so the caller keeps the organization's id and only
+    /// selects it next time (PRO-16).
     pub(crate) fn create_organization(
         &self,
         name: &str,
         idempotency_key: &str,
-    ) -> Result<OrganizationSummary> {
+    ) -> Result<OrganizationCreated> {
         let context = self
             .context()
             .ok_or_else(|| anyhow!("account is signed out"))?;
@@ -678,8 +723,15 @@ impl AccountManager {
             Some(&context.access_token),
             Some(idempotency_key),
         )?;
-        self.select_organization(&organization.id, &context)?;
-        Ok(organization)
+        // Why it failed stays in the log: the interface says what to do next.
+        let selected = match self.select_organization(&organization.id, &context) {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("created organization {} but could not select it: {error:#}", organization.id);
+                false
+            }
+        };
+        Ok(OrganizationCreated { organization, selected })
     }
 
     fn select_organization(&self, organization_id: &str, context: &AccountContext) -> Result<()> {
@@ -742,7 +794,8 @@ impl AccountManager {
             state: random_url_token(),
             started_at: Instant::now(),
         };
-        let authorize_url = authorize_url(&pending)?;
+        let links = DesktopLinks::for_identifier(&app.config().identifier);
+        let authorize_url = authorize_url(&pending, links)?;
         let generation = {
             let mut inner = self.inner.lock().unwrap();
             inner.generation = inner.generation.wrapping_add(1);
@@ -844,7 +897,8 @@ impl AccountManager {
     }
 
     pub fn handle_deep_link(self: &Arc<Self>, app: &AppHandle, url: &Url) -> bool {
-        if !is_auth_callback(url) {
+        let links = DesktopLinks::for_identifier(&app.config().identifier);
+        if !links.is_auth_callback(url) {
             return false;
         }
         let action = self.claim_callback(url);
@@ -855,7 +909,7 @@ impl AccountManager {
                 let manager = self.clone();
                 let app = app.clone();
                 tauri::async_runtime::spawn_blocking(move || {
-                    let outcome = exchange_code(&pending, &code);
+                    let outcome = exchange_code(&pending, &code, links);
                     manager.finish_exchange(&app, pending.generation, outcome);
                 });
             }
@@ -1173,18 +1227,6 @@ pub fn focus_main_window(app: &AppHandle) {
     }
 }
 
-pub fn is_launch_link(url: &Url) -> bool {
-    matches!(url.scheme(), "terminalx" | "terminalx-next")
-        && url.host_str() == Some("launch")
-        && matches!(url.path(), "" | "/")
-}
-
-fn is_auth_callback(url: &Url) -> bool {
-    matches!(url.scheme(), "terminalx" | "terminalx-next")
-        && url.host_str() == Some("auth")
-        && url.path() == "/callback"
-}
-
 fn snapshot(inner: &Inner) -> AccountStatus {
     let (state, identity, expires_at) = if let Some(session) = inner.session.as_ref() {
         (
@@ -1214,7 +1256,14 @@ fn snapshot(inner: &Inner) -> AccountStatus {
         }),
         organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone(), is_personal: org.is_personal, cloud: org.cloud.clone() }).collect()).unwrap_or_default(),
         multi_org: inner.session.as_ref().is_some_and(multi_org),
+        catalog_feed: inner.session.as_ref().is_some_and(catalog_feed),
     }
+}
+
+/// The feed spans Organizations, so it is only used where the server also
+/// authorizes by membership.
+fn catalog_feed(session: &DesktopSession) -> bool {
+    multi_org(session) && session.capabilities.flags.get(CATALOG_FEED_CAPABILITY) == Some(&true)
 }
 
 fn multi_org(session: &DesktopSession) -> bool {
@@ -1248,18 +1297,21 @@ fn code_challenge(verifier: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
-fn authorize_url(pending: &PendingAuth) -> Result<Url> {
+fn authorize_url(pending: &PendingAuth, links: DesktopLinks) -> Result<Url> {
     let mut url = Url::parse(&format!("{}{AUTHORIZE_PATH}", api_base_url()))?;
     url.query_pairs_mut()
         .append_pair("client_id", CLIENT_ID)
         .append_pair("response_type", "code")
-        .append_pair("redirect_uri", REDIRECT_URI)
+        .append_pair("redirect_uri", links.redirect_uri())
         .append_pair("scope", SCOPE)
         .append_pair("nonce", &pending.nonce)
         .append_pair("state", &pending.state)
         .append_pair("code_challenge", &code_challenge(&pending.code_verifier))
         .append_pair("code_challenge_method", "S256")
         .append_pair("local_profile_id", LOCAL_PROFILE_ID);
+    if links == DesktopLinks::Dev {
+        url.query_pairs_mut().append_pair("app", "dev");
+    }
     Ok(url)
 }
 
@@ -1267,14 +1319,14 @@ fn endpoint(path: &str) -> String {
     format!("{}{path}", api_base_url())
 }
 
-fn exchange_code(pending: &PendingAuth, code: &str) -> Result<DesktopSession, CloudError> {
+fn exchange_code(pending: &PendingAuth, code: &str, links: DesktopLinks) -> Result<DesktopSession, CloudError> {
     post_json(
         SESSION_PATH,
         json!({
             "code": code,
             "codeVerifier": pending.code_verifier,
             "nonce": pending.nonce,
-            "redirectUri": REDIRECT_URI,
+            "redirectUri": links.redirect_uri(),
             "state": pending.state,
             "localProfileId": LOCAL_PROFILE_ID,
         }),
@@ -1446,6 +1498,18 @@ fn should_refresh(expires_at: i64, now: i64) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_created_organization_says_whether_it_was_selected() {
+        let organization = OrganizationSummary { id: "org-1".into(), name: "Team".into(), role: "owner".into(), is_personal: false, cloud: None };
+        let unselected = OrganizationCreated { organization: organization.clone(), selected: false };
+        assert_eq!(
+            serde_json::to_value(&unselected).unwrap(),
+            serde_json::json!({ "id": "org-1", "name": "Team", "role": "owner", "isPersonal": false, "selected": false })
+        );
+        let selected = OrganizationCreated { organization, selected: true };
+        assert_eq!(serde_json::to_value(&selected).unwrap()["selected"], true);
+    }
+
     fn pending() -> PendingAuth {
         PendingAuth {
             generation: 7,
@@ -1459,7 +1523,7 @@ mod tests {
     #[test]
     fn authorize_url_matches_the_deployed_desktop_contract() {
         let pending = pending();
-        let url = authorize_url(&pending).unwrap();
+        let url = authorize_url(&pending, DesktopLinks::Release).unwrap();
         let params: BTreeMap<_, _> = url
             .query_pairs()
             .map(|(key, value)| (key.into_owned(), value.into_owned()))
@@ -1493,17 +1557,28 @@ mod tests {
     }
 
     #[test]
+    fn authorize_url_selects_the_build_redirect_and_only_requests_dev_for_dev() {
+        for links in [DesktopLinks::Release, DesktopLinks::Dev] {
+            let url = authorize_url(&pending(), links).unwrap();
+            let params: BTreeMap<_, _> = url.query_pairs().collect();
+            assert_eq!(params.get("redirect_uri").map(|v| v.as_ref()), Some(links.redirect_uri()));
+            assert_eq!(params.get("app").map(|v| v.as_ref()), (links == DesktopLinks::Dev).then_some("dev"));
+            assert!(!params.contains_key("legacy"));
+        }
+    }
+
+    #[test]
     fn recognizes_only_the_expected_account_callback() {
-        assert!(is_auth_callback(
+        assert!(DesktopLinks::Release.is_auth_callback(
             &Url::parse("terminalx://auth/callback?code=secret&state=state").unwrap()
         ));
-        assert!(!is_auth_callback(
+        assert!(!DesktopLinks::Release.is_auth_callback(
             &Url::parse("terminalx://launch?code=secret&state=state").unwrap()
         ));
-        assert!(!is_auth_callback(
+        assert!(!DesktopLinks::Release.is_auth_callback(
             &Url::parse("https://auth/callback?code=secret&state=state").unwrap()
         ));
-        assert!(is_launch_link(&Url::parse("terminalx://launch").unwrap()));
+        assert!(DesktopLinks::Release.is_launch_link(&Url::parse("terminalx://launch").unwrap()));
     }
 
     #[test]

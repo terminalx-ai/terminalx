@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Archive, BarChart3, CalendarClock, ChevronDown, CircleDot, Ellipsis, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
+import { Archive, BarChart3, Check, ListFilter, CalendarClock, ChevronDown, CircleDot, Ellipsis, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -24,6 +24,7 @@ import {
   useSessionStore,
 } from "@/lib/sessions";
 import { bucketSessions, COLUMNS, type ColumnId } from "@/lib/dashboard";
+import { SIDEBAR_FILTERS, setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
 import { useCloudDashboard } from "@/lib/cloudDashboard";
 import type { Project } from "@/types/session";
 import { MASCOTS, PROJECT_COLORS, PixelMascot, colorCss } from "./PixelMascot";
@@ -75,8 +76,11 @@ export function ProjectRail({
   const [spinning, setSpinning] = useState(false);
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
 
+  const filter = useSidebarFilter();
   const projects = [...store.projects]
     .filter((p) => !!p.archived === showArchived || store.sessions.some((s) => s.id === store.selectedSessionId && s.projectPath === p.path))
+    // Unread or Needs you: only the projects with such a session.
+    .filter((p) => !filter.active || filter.showsProject(p.path))
     .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || a.name.localeCompare(b.name));
   const archivedCount = store.projects.filter((p) => p.archived).length;
   // The dashboard's totals count cloud sessions too (PRO-23 CS-19), like the dashboard itself.
@@ -125,8 +129,33 @@ export function ProjectRail({
     }
   };
 
+  const filterLabel = SIDEBAR_FILTERS.find((entry) => entry.id === filter.filter)!.label;
   const headerActions = (
     <div className="flex items-center">
+      <DropdownMenu>
+        <WithTooltip label={filter.active ? `Showing: ${filterLabel}` : "Filter sessions"}>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label={filter.active ? `Filter sessions: ${filterLabel}` : "Filter sessions"}
+              className={filter.active ? "bg-veil-strong text-foreground" : undefined}
+              data-testid="sidebar-filter"
+              data-filter={filter.filter}
+            >
+              <ListFilter />
+            </Button>
+          </DropdownMenuTrigger>
+        </WithTooltip>
+        <DropdownMenuContent align="end">
+          {SIDEBAR_FILTERS.map((entry) => (
+            <DropdownMenuItem key={entry.id} onSelect={() => setSidebarFilter(entry.id)} aria-checked={filter.filter === entry.id} role="menuitemradio">
+              {filter.filter === entry.id ? <Check /> : <span aria-hidden className="size-4" />}
+              {entry.label}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
       <WithTooltip label={store.showArchived ? "Show active sessions" : "Show archived sessions"}>
         <Button
           variant="ghost"
@@ -155,12 +184,24 @@ export function ProjectRail({
   const localRows = (
     <>
       {!localCollapsed && projects.length === 0 && (
-        <div className="px-2 py-6 text-center text-xs text-muted-foreground">
-          {showArchived ? "Nothing archived." : "Add a project to start."}
+        <div className="px-2 py-6 text-center text-xs text-muted-foreground" data-testid={filter.active ? "sidebar-filter-empty" : undefined}>
+          {filter.active ? (
+            <>
+              {filter.empty}{" "}
+              <button type="button" className="underline underline-offset-2 hover:text-foreground" onClick={() => setSidebarFilter("all")}>
+                Show all sessions
+              </button>
+            </>
+          ) : showArchived ? (
+            "Nothing archived."
+          ) : (
+            "Add a project to start."
+          )}
         </div>
       )}
       {!localCollapsed && projects.map((project) => {
-        const expanded = expandedProjects.has(project.path);
+        // A filter shows what it found: its projects are open while it is on.
+        const expanded = filter.active || expandedProjects.has(project.path);
         return (
           <ProjectRow
             key={project.path}

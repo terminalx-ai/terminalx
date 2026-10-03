@@ -64,7 +64,8 @@ The Rust desktop client uses the shipped desktop exchange contract with the
 scheme the app already owns:
 
 1. Generate fresh `state`, `nonce`, and a PKCE S256 challenge, and use the
-   registered `terminalx://auth/callback` redirect.
+   registered `terminalx://auth/callback` redirect for release, or
+   `terminalx-dev://auth/callback` for the Dev bundle.
 2. Open `/v1/desktop/auth/authorize` in the system browser with client id
    `terminalx-desktop`, response type `code`, scope
    `openid profile email offline_access`, a fresh `state`, `nonce`, and PKCE
@@ -74,6 +75,14 @@ scheme the app already owns:
    minutes.
 4. Exchange the code at `/v1/desktop/auth/session` using the original verifier,
    nonce, redirect URI, state, and local profile id.
+
+Dev authorize URLs include `app=dev`; this app does not request Legacy buttons.
+The console preserves the flag through login and offers the Dev callback
+alongside the main app button. `legacy=1` independently requests a Legacy
+hand-off button. The flags affect visibility only, not the redirect allowlist.
+The server must accept the Dev callback before the app update ships. The
+bundle identity selects the scheme, independently of Cargo's build profile;
+each app rejects the other app's callback scheme.
 
 The client stores the full returned desktop session: access token, rotating
 refresh token, expiry, user, cloud/local profile ids, active organization, and

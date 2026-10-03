@@ -167,14 +167,17 @@ it("cancels a waiting attempt", async () => {
   api.attempt.mockResolvedValue({ attemptId: "att_1", state: "waiting", browserOpened: false });
   api.cancelAttempt.mockResolvedValue({ attemptId: "att_1", state: "canceled", browserOpened: false });
   await renderPanel();
-  fireEvent.click(screen.getByRole("button", { name: "Connect another installation" }));
+  // The button takes this name only once the installations have loaded, and
+  // is back only once the cancel has settled: wait for it both times rather
+  // than reading it in the same tick as the text around it.
+  fireEvent.click(await screen.findByRole("button", { name: "Connect another installation" }));
   await screen.findByText(/Your browser did not open/);
   fireEvent.click(screen.getByRole("button", { name: "Open install page" }));
   expect(api.open).toHaveBeenCalledWith("https://github.com/apps/terminalx/installations/new?state=s");
-  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
   await screen.findByText("Connection canceled.");
   expect(api.cancelAttempt).toHaveBeenCalledWith("att_1", "rev-1");
-  expect(screen.getByRole("button", { name: "Connect another installation" })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: "Connect another installation" })).toBeTruthy();
 });
 
 it("searches and refreshes the live repository list", async () => {
