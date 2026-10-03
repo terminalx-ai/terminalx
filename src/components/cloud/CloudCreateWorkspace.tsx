@@ -17,7 +17,7 @@ import {
   createWorkspace,
   failureMessage,
   isClientError,
-  launchLatency,
+  launchLatencyText,
   loadPending,
   phaseOf,
   runtimeNotPickedUp,
@@ -452,7 +452,7 @@ export function CreationProgress({
 
   const reached = PHASES.findIndex((item) => item.id === phase);
   const failedAt = phase === "failed" || phase === "canceled" ? lastReached(snapshot) : -1;
-  const latency = launchLatency(snapshot);
+  const latency = launchLatencyText(snapshot);
   const launch = snapshot.workspace.launch;
   const retryable = phase === "failed" && snapshot.workspace.state === "attention-required";
   const notPickedUp = runtimeNotPickedUp(snapshot, now) !== null;
@@ -494,7 +494,7 @@ export function CreationProgress({
       {phase === "running" && (
         <p className="text-xs text-muted-foreground">
           {launch?.hasPrompt ? "The agent is working on the first task." : "The agent is ready."}
-          {latency !== null && ` Ready in ${(latency / 1000).toFixed(1)} s.`}
+          {latency !== null && ` ${latency}`}
         </p>
       )}
       {notPickedUp && (

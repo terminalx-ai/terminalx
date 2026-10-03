@@ -431,3 +431,45 @@ describe("shared cloud workspaces (PRO-30)", () => {
     await waitFor(() => expect(api.cloudWorkspaceShares).toHaveBeenCalledWith("ws-ready", expect.anything()));
   });
 });
+
+// Review of #272: a wake that failed left the Agent pane reading "Starting" on a stopped workspace.
+describe("what the view tells the agent pane about a wake", () => {
+  const handed = () => agentViews[agentViews.length - 1] as { waking: boolean; wakeWorkspace: () => void };
+  function Stopped({ connection, waking }: { connection: CloudWorkspaceConnection; waking?: boolean }) {
+    const [state, setState] = useState<WorkspaceConnectionState>({ state: "waitingForRuntime" } as WorkspaceConnectionState);
+    useEffect(() => connection.client.onState(setState), [connection]);
+    return <WorkspaceView opened={{ connection, name: "Stopped", provider: "box", workspaceState: "suspended", waking }} state={state} />;
+  }
+
+  it("is waking only while a wake it asked for is out: a refused one reads stopped again", async () => {
+    const connection = fakeConnection("ws-stopped");
+    let refuse: (reason: unknown) => void = () => undefined;
+    vi.mocked(connection.activate).mockReturnValue(new Promise((_, reject) => (refuse = reject)) as never);
+    render(<Stopped connection={connection} />);
+    await screen.findByTestId("cloud-agents-stub");
+    expect(handed().waking).toBe(false);
+    act(() => handed().wakeWorkspace());
+    expect(connection.activate).toHaveBeenCalledWith("wake");
+    expect(handed().waking).toBe(true);
+    // The running limit, say: the wake is refused.
+    await act(async () => refuse({ code: "cloud_workspace_concurrency_exceeded" }));
+    expect(handed().waking).toBe(false);
+  });
+
+  it("stops being waking once connected, and follows the header's Resume without latching it", async () => {
+    const connection = fakeConnection("ws-stopped-2");
+    vi.mocked(connection.activate).mockResolvedValue(undefined as never);
+    const { rerender } = render(<Stopped connection={connection} />);
+    await screen.findByTestId("cloud-agents-stub");
+    act(() => handed().wakeWorkspace());
+    expect(handed().waking).toBe(true);
+    act(() => emit(connectedState()));
+    expect(handed().waking).toBe(false);
+
+    // The header's Resume is under way, then fails: nothing here remembers it.
+    rerender(<Stopped connection={connection} waking />);
+    expect(handed().waking).toBe(true);
+    rerender(<Stopped connection={connection} waking={false} />);
+    expect(handed().waking).toBe(false);
+  });
+});

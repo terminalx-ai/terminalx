@@ -42,6 +42,8 @@ export interface OpenedWorkspace {
   provider: string | null;
   /** The API state when it was opened (ready, suspended, provisioning); null for a development runtime. */
   workspaceState: string | null;
+  /** A resume of it is under way (asked for, or running by the list): its stopped state is on its way out. */
+  waking?: boolean;
 }
 
 /** A cloud provider's display name. */
@@ -111,6 +113,18 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
   const agentScope = connection.target.kind === "cloud" ? connection.target : { organizationId: "", workspaceId: key };
   const { terminals, selected, reveal } = useCloudTerminals(key);
   const [view, setView] = useState<View>({ kind: "terminal" });
+  // This window asked for a wake (a command went out) and it has neither connected nor failed yet.
+  // Not latched: a wake that fails, like a Resume refused at the running limit, reads stopped again.
+  const [woke, setWoke] = useState(false);
+  const wake = useCallback(() => {
+    setWoke(true);
+    void connection.activate("wake").catch(() => setWoke(false));
+  }, [connection]);
+  useEffect(() => {
+    if (state.state === "connected") setWoke(false);
+  }, [state.state]);
+  useEffect(() => setWoke(false), [connection]);
+  const waking = woke || !!opened.waking;
   // A terminal row chosen in the sidebar shows that terminal, whatever view was up.
   useEffect(() => {
     if (reveal) setView({ kind: "terminal" });
@@ -354,7 +368,8 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
           client={client}
           state={state}
           workspaceState={opened.workspaceState}
-          wakeWorkspace={() => void connection.activate("wake").catch(() => undefined)}
+          wakeWorkspace={wake}
+          waking={waking}
           collabKey={key}
           active={view.kind === "agent"}
         />

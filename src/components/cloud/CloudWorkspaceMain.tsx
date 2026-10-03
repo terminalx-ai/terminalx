@@ -12,7 +12,7 @@ import { ExecutionLocation, WorkspaceView, describe, describeWorkspace, type Ope
 import { workspaceTargetKey, type CloudWorkspaceListItem } from "@/lib/api";
 import { retainCloudConnection, setSelectedCloudConnection, subscribeCloudConnections, type CloudLease } from "@/lib/cloudConnections";
 import { findCloudWorkspace, refreshCloudCatalog, resumeCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
-import { archiving, deletion, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
+import { archiving, deletion, isOpen, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 import { errorCode } from "@/lib/cloudTerminals";
 import { selectSession } from "@/lib/sessions";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
@@ -50,12 +50,17 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   const [held, setHeld] = useState<{ lease: CloudLease; name: string; provider: OpenedWorkspace["provider"]; workspaceState: OpenedWorkspace["workspaceState"] } | null>(null);
   const connection = useSyncExternalStore(subscribeCloudConnections, () => held?.lease.current() ?? null, () => null);
   const state = useSyncExternalStore<WorkspaceConnectionState>(subscribeCloudConnections, () => held?.lease.state() ?? NOT_CONNECTED, () => NOT_CONNECTED);
-  const opened = useMemo<OpenedWorkspace | null>(
-    () => (held && connection ? { connection, name: held.name, provider: held.provider, workspaceState: held.workspaceState } : null),
-    [held, connection],
-  );
   const [error, setError] = useState<string | null>(null);
   const [resuming, setResuming] = useState(false);
+  // The list's state of now, so the view's chips follow a stop or a resume instead of what was true when it was opened.
+  const listState = item?.workspace.state ?? null;
+  // A resume is under way while this window's request is out, or while the list shows one running.
+  // A refused one (the running limit) ends both, and the chips read stopped again.
+  const waking = resuming || (!!item?.latestOperation && isOpen(item.latestOperation) && item.latestOperation.action === "resume");
+  const opened = useMemo<OpenedWorkspace | null>(
+    () => (held && connection ? { connection, name: held.name, provider: held.provider, workspaceState: listState ?? held.workspaceState, waking } : null),
+    [held, connection, listState, waking],
+  );
   // A retried delete the server refuses because work is still running: the delete dialog says what would be lost and asks.
   const [forcing, setForcing] = useState(false);
 
