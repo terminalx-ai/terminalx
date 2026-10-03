@@ -2549,6 +2549,9 @@ pub async fn rename_workspace(app: AppHandle, project_path: String, path: String
 pub async fn workspace_disposition(project_path: String, path: String) -> CmdResult<crate::workspaces::WorkspaceDisposition> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut disposition = crate::workspaces::disposition(Path::new(&project_path), Path::new(&path));
+        if disposition.exists && !disposition.is_main {
+            disposition.landed = Some(crate::landed::check(Path::new(&project_path), Path::new(&path), crate::landed::Fetch::Fresh));
+        }
         let sessions = sessions_in_workspace(Path::new(&path))?;
         disposition.sessions = sessions.len();
         disposition.session_titles = sessions.into_iter().map(|session| session.title).collect();
