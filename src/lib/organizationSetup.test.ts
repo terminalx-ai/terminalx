@@ -71,6 +71,7 @@ describe("reconciling against the server", () => {
     expect(step(withWorkspace(), facts({ workspaces: [workspace({ state: "provisioning" })] }))).toBe("runtime");
     expect(step(withWorkspace(), facts({ workspaces: [workspace({ runtimeActivity: { online: false } })] }))).toBe("runtime");
     expect(step(withWorkspace(), facts({ workspaces: [workspace({ launch: { category: "repository-sync-failed", sessionId: null } })] }))).toBe("runtime");
+    expect(step(withWorkspace(), facts({ workspaces: [workspace({ launch: { category: "repository-clone-failed", sessionId: null } })] }))).toBe("runtime");
     expect(step(withWorkspace(), facts({ workspaces: [workspace({ launch: { category: "agent-start-failed", sessionId: null } })] }))).toBe("agent");
     expect(step(withWorkspace(), facts({ workspaces: [workspace({ launch: { category: null, sessionId: null } })] }))).toBe("agent");
     const done = reconcileSetup(withWorkspace(), facts({ workspaces: [workspace()] }), 99);
