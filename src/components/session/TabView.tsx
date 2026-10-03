@@ -276,6 +276,7 @@ export function TabView({
         <Composer
           tab={tab}
           cwd={local ? session.cwd : undefined}
+          commands={backend.commands?.(tab)}
           busy={live}
           draft={draft}
           onDraftChange={(v) => {

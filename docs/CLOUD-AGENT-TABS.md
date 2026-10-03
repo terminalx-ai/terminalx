@@ -221,6 +221,36 @@ the next `send` (the harness resumes the provider session).
   been sent" (`outcome-unknown`, never resent automatically).
 - Ordered events, the cursor, unread and completed state persist in the cache.
 
+### The composer (`composer/1`)
+
+A cloud tab's composer offers what a local tab's does, from the runtime
+instead of from this computer.
+
+- **Slash commands** (`session.commands { sessionId, tabId }`, read-only,
+  `src/lib/cloudComposer.ts`): what the tab's CLI lists in the session's
+  directory, exactly as `list_slash_commands` does for a local tab (Claude
+  Code is asked; the app's own commands are withheld). The answer is
+  `{ commands, restricted }`:
+  - a manager, or a driver who may approve permissions, gets the whole list;
+  - a driver without that right gets only the commands the runtime accepts
+    from them (PRO-88, `cloud_agents::slash::allows`, the list
+    `slash::check` judges a message with), and `restricted: true`. The
+    composer then says under the list that other commands need someone who
+    can approve permissions, and keeps the list open to say so when what
+    they typed is not offered;
+  - someone who cannot send (a viewer) gets none.
+
+  The desktop asks once per session, agent and right while connected. It
+  never wakes a stopped workspace for the list: a stopped workspace shows
+  what was last listed in this run of the app, or no list. A list read with
+  the right to approve is never shown to the same person without it. A
+  runtime from before `composer/1` gets no list (the message is still sent
+  as typed and judged by the runtime).
+
+  What is typed is still judged by the runtime when it is sent: the list is
+  what is offered, not what is allowed. A refusal shows the runtime's own
+  sentence on the outbox entry above the composer (docs/CLOUD-SHARING.md).
+
 Mobile is out of scope for PRO-22. It can reuse the same keys, outbox and
 checkpoint formats.
 

@@ -29,6 +29,7 @@ use super::collab::{self, Access, Change, Collaboration, LeaseRefusal, Role};
 use super::protocol::{self, Authority, IdempotencyCache, RpcError, PROTOCOL};
 use crate::cloud_agents::{slash, CloudAgents};
 use crate::events::AgentEvent;
+use crate::harness::claude::commands::SlashCommand;
 use crate::pty::{PaneSpec, PtyData, PtyExit, Terminals};
 use crate::session::SessionManager;
 use crate::sink::EventSink;
@@ -287,6 +288,8 @@ pub struct WorkspaceRpc {
     /// Stands in for `harness::offered` in tests, which cannot install agents.
     #[cfg(test)]
     offered_for_tests: Mutex<Option<Vec<crate::harness::HarnessInfo>>>,
+    #[cfg(test)]
+    commands_for_tests: Mutex<Option<Vec<SlashCommand>>>,
     /// Terminal input this runtime counted as use of the workspace (the
     /// process-wide activity flag is shared by every test).
     #[cfg(test)]
@@ -328,6 +331,8 @@ impl WorkspaceRpc {
             sessions_changed: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
             offered_for_tests: Mutex::new(None),
+            #[cfg(test)]
+            commands_for_tests: Mutex::new(None),
             #[cfg(test)]
             input_activity: AtomicUsize::new(0),
         });
@@ -846,6 +851,7 @@ impl WorkspaceRpc {
             "session.send" => self.session_send(peer, params),
             "session.subscribe" => self.session_subscribe(peer, params),
             "session.tabs" => self.session_tabs(peer),
+            "session.commands" => self.session_commands(peer, params),
             "session.configure" => self.session_configure(peer, params),
             "session.markRead" => self.session_mark_read(peer, params),
             "session.update" => self.session_update(peer, params),
@@ -2333,6 +2339,51 @@ impl WorkspaceRpc {
     fn session_tabs(&self, peer: &Peer) -> Result<Value, RpcError> {
         let tabs = if self.access(peer).can_view() { self.agents()?.tabs() } else { Vec::new() };
         Ok(json!({ "tabs": tabs }))
+    }
+
+    /// The slash commands the composer of an agent tab offers the caller
+    /// (`composer/1`, PRO-22): what the tab's CLI lists in the session's
+    /// directory, as a local tab's composer shows them. Someone who may not
+    /// decide what the agent does on its own is offered only the commands
+    /// they may send (PRO-88, `slash::allows`), and `restricted` says so;
+    /// someone who may not send at all is offered none. Reading it starts
+    /// no agent and no turn.
+    fn session_commands(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
+        let tab_id = required_str(&params, "tabId")?;
+        let tab = session.tabs.iter().find(|tab| tab.id == tab_id).ok_or_else(|| RpcError::not_found("no such tab"))?;
+        let access = self.access(peer);
+        let may_send = self.authority(peer) == Authority::Manage || access.can_drive();
+        let restricted = !access.can_configure();
+        let commands: Vec<SlashCommand> = if may_send {
+            let listed = self.listed_commands(&tab.harness, Path::new(&session.cwd));
+            listed.into_iter().filter(|command| !restricted || slash::allows(&tab.harness, &command.name)).collect()
+        } else {
+            Vec::new()
+        };
+        Ok(json!({ "commands": commands, "restricted": restricted }))
+    }
+
+    /// What the CLI of `harness` lists in `cwd`, as `list_slash_commands`
+    /// does for a local tab: only Claude Code is asked. A CLI that is not
+    /// installed or does not answer lists nothing.
+    fn listed_commands(&self, harness: &str, cwd: &Path) -> Vec<SlashCommand> {
+        #[cfg(test)]
+        if let Some(commands) = self.commands_for_tests.lock().unwrap().clone() {
+            return commands;
+        }
+        if harness != "claude" {
+            return Vec::new();
+        }
+        crate::harness::claude::commands::list(cwd).unwrap_or_else(|error| {
+            log::warn!("list slash commands: {error:#}");
+            Vec::new()
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_commands_for_tests(&self, commands: Vec<SlashCommand>) {
+        *self.commands_for_tests.lock().unwrap() = Some(commands);
     }
 
     /// The agent tab `(sessionId, tabId)` names, if the caller may see it.

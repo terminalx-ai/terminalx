@@ -25,8 +25,26 @@ import { PickerMenu, type PickerItem } from "./PickerMenu";
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "./useImageAttachments";
 import { useComposerHistory } from "./useComposerHistory";
 import { tokenAtCaret } from "@/lib/pickers";
+import type { ComposerCommandList, ComposerCommands } from "@/lib/cloudComposer";
 
-const commandCache = new Map<string, SlashCommand[]>();
+const commandCache = new Map<string, ComposerCommandList>();
+const NO_COMMANDS: ComposerCommandList = { commands: [], note: null };
+
+/** A local tab's commands: asked of the harness once per directory. */
+function localCommands(cwd: string, harness: string): ComposerCommands {
+  const key = `${cwd}|${harness}`;
+  return {
+    key,
+    known: () => commandCache.get(key) ?? null,
+    load: async () => {
+      const known = commandCache.get(key);
+      if (known) return known;
+      const list = { commands: await filesApi.slashCommands(cwd, harness), note: null };
+      commandCache.set(key, list);
+      return list;
+    },
+  };
+}
 
 /** Break the line at the caret, through the input event the draft is read from. */
 export function insertNewLine(el: HTMLTextAreaElement) {
@@ -53,6 +71,7 @@ const PERMISSION_LABEL_MIN_CHARS = 9;
 export function Composer({
   tab,
   cwd,
+  commands: givenCommands,
   busy,
   draft,
   onDraftChange,
@@ -77,6 +96,8 @@ export function Composer({
 }: {
   tab: TabEntry;
   cwd?: string;
+  /** Where the `/` list comes from when the tab does not run in `cwd` on this computer (a cloud tab: its runtime). */
+  commands?: ComposerCommands | null;
   busy: boolean;
   draft: string;
   onDraftChange: (v: string) => void;
@@ -116,7 +137,9 @@ export function Composer({
     return model && !offered.some((m) => m.id === model.id) ? [...offered, model] : offered;
   }, [listed, modelsAreLocal, model?.id]);
   const [caret, setCaret] = useState(0);
-  const [commands, setCommands] = useState<SlashCommand[]>(() => commandCache.get(`${cwd}|${tab.harness}`) ?? []);
+  const commandSource = useMemo(() => givenCommands ?? (cwd ? localCommands(cwd, tab.harness) : null), [givenCommands?.key, cwd, tab.harness]);
+  const [commandList, setCommandList] = useState<ComposerCommandList>(() => commandSource?.known() ?? NO_COMMANDS);
+  const commands: SlashCommand[] = commandList.commands;
   const [fileHits, setFileHits] = useState<FileHit[]>([]);
   const [highlighted, setHighlighted] = useState(0);
   const [dismissedToken, setDismissedToken] = useState<string | null>(null);
@@ -180,26 +203,25 @@ export function Composer({
     if (autoFocus) ref.current?.focus({ preventScroll: true });
   }, [autoFocus, tab.id]);
 
-  // Slash commands come from the harness once per directory.
+  // Slash commands come from the harness once per directory (a cloud tab's, from its runtime).
   useEffect(() => {
-    if (!cwd) return;
-    const key = `${cwd}|${tab.harness}`;
-    if (commandCache.has(key)) {
-      setCommands(commandCache.get(key)!);
+    if (!commandSource) {
+      setCommandList(NO_COMMANDS);
       return;
     }
+    const known = commandSource.known();
+    setCommandList(known ?? NO_COMMANDS);
     let cancelled = false;
-    filesApi
-      .slashCommands(cwd, tab.harness)
-      .then((c) => {
-        commandCache.set(key, c);
-        if (!cancelled) setCommands(c);
+    commandSource
+      .load()
+      .then((list) => {
+        if (!cancelled) setCommandList(list);
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [cwd, tab.harness]);
+  }, [commandSource]);
 
   const dictation = useDictationInto(tab.id, draft, onDraftChange, ref);
   useDictationShortcuts(dictation, !!autoFocus);
@@ -220,7 +242,7 @@ export function Composer({
       setDismissedToken(recalled ? `${recalled.kind}:${recalled.start}` : null);
     },
   });
-  const pickerOpen = !!token && dismissedToken !== tokenKey && (token.kind === "mention" ? !!cwd : commands.length > 0);
+  const pickerOpen = !!token && dismissedToken !== tokenKey && (token.kind === "mention" ? !!cwd : commands.length > 0 || !!commandList.note);
 
   // File hits follow the query, lightly debounced.
   useEffect(() => {
@@ -359,6 +381,7 @@ export function Composer({
             onHover={setHighlighted}
             title={token?.kind === "slash" ? "Commands" : "Files"}
             empty={token?.kind === "slash" ? "No matching command" : "No matching file"}
+            note={token?.kind === "slash" ? commandList.note : null}
           />
         )}
         <DropHint dragging={attach.dragging} />
