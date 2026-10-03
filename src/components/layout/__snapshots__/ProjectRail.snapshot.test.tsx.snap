@@ -586,7 +586,7 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
               aria-label="Project menu for Raccoon"
               class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
               data-state="closed"
-              id="radix-_r_u_"
+              id="radix-_r_v_"
               type="button"
             >
               <svg
@@ -751,7 +751,7 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
                   aria-label="Workspace menu for main"
                   class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
                   data-state="closed"
-                  id="radix-_r_12_"
+                  id="radix-_r_13_"
                   type="button"
                 >
                   <svg
@@ -854,7 +854,7 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
                       aria-label="New tab in Fix scroll snapping"
                       class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
                       data-state="closed"
-                      id="radix-_r_16_"
+                      id="radix-_r_17_"
                       type="button"
                     >
                       <svg
@@ -884,7 +884,7 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
                       aria-label="Session menu for Fix scroll snapping"
                       class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
                       data-state="closed"
-                      id="radix-_r_14_"
+                      id="radix-_r_15_"
                       type="button"
                     >
                       <svg
@@ -1114,7 +1114,7 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
               aria-label="Project menu for Notes"
               class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
               data-state="closed"
-              id="radix-_r_18_"
+              id="radix-_r_19_"
               type="button"
             >
               <svg
@@ -1270,7 +1270,7 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
                   aria-label="Workspace menu for main"
                   class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-6 rounded-md [&_svg]:size-3.5"
                   data-state="closed"
-                  id="radix-_r_1c_"
+                  id="radix-_r_1d_"
                   type="button"
                 >
                   <svg
@@ -1321,39 +1321,50 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
       </div>
     </div>
     <div
-      class="shrink-0 border-t border-hairline p-2"
+      class="flex shrink-0 items-center gap-1 border-t border-hairline p-2"
+      data-testid="sidebar-account-row"
     >
-      <button
-        class="inline-flex items-center whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground rounded-lg text-[13px] [&_svg]:size-4 h-auto w-full justify-start gap-2 px-2 py-1.5"
-        title="ada@example.com · Acme"
-        type="button"
+      <div
+        class="min-w-0 flex-1"
       >
-        <span
-          aria-hidden="true"
-          class="flex size-6 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[10px] font-semibold text-accent"
-        >
-          A
-        </span>
-        <span
-          class="min-w-0 flex-1 text-left"
+        <button
+          class="inline-flex items-center whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground rounded-lg text-[13px] [&_svg]:size-4 h-auto w-full min-w-0 justify-start gap-2 overflow-hidden px-2 py-1.5"
+          title="ada@example.com · Acme"
+          type="button"
         >
           <span
-            class="block truncate"
+            aria-hidden="true"
+            class="flex size-6 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[10px] font-semibold text-accent"
           >
-            Ada
+            A
           </span>
           <span
-            class="mt-0.5 flex items-center gap-1 text-[10px] font-normal text-faint"
+            class="min-w-0 flex-1 text-left"
           >
             <span
-              class="size-1.5 rounded-full bg-faint"
-            />
-            Relay not configured
+              class="block truncate"
+            >
+              Ada
+            </span>
+            <span
+              class="mt-0.5 flex items-center gap-1 text-[10px] font-normal text-faint"
+            >
+              <span
+                class="size-1.5 shrink-0 rounded-full bg-faint"
+              />
+              <span
+                class="min-w-0 truncate"
+              >
+                Relay not configured
+              </span>
+            </span>
           </span>
-        </span>
-      </button>
+        </button>
+      </div>
       <button
-        class="inline-flex items-center whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground h-8 rounded-lg text-[13px] [&_svg]:size-4 w-full justify-start gap-2 px-2"
+        aria-label="Settings"
+        class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-7 rounded-md [&_svg]:size-3.5 shrink-0"
+        data-state="closed"
         type="button"
       >
         <svg
@@ -1378,21 +1389,6 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
             r="3"
           />
         </svg>
-        Settings
-        <span
-          class="ml-auto flex gap-0.5 text-[10px] text-faint"
-        >
-          <kbd
-            class="rounded-sm bg-veil-raised px-1 font-sans"
-          >
-            Ctrl
-          </kbd>
-          <kbd
-            class="rounded-sm bg-veil-raised px-1 font-sans"
-          >
-            ,
-          </kbd>
-        </span>
       </button>
     </div>
   </div>
@@ -2720,38 +2716,45 @@ exports[`sidebar rail DOM > signed out 1`] = `
       </div>
     </div>
     <div
-      class="shrink-0 border-t border-hairline p-2"
+      class="flex shrink-0 items-center gap-1 border-t border-hairline p-2"
+      data-testid="sidebar-account-row"
     >
-      <button
-        class="inline-flex items-center whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground h-8 rounded-lg text-[13px] [&_svg]:size-4 w-full justify-start gap-2 px-2"
-        type="button"
+      <div
+        class="min-w-0 flex-1"
       >
-        <svg
-          aria-hidden="true"
-          class="lucide lucide-user-round"
-          fill="none"
-          height="24"
-          stroke="currentColor"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          stroke-width="2"
-          viewBox="0 0 24 24"
-          width="24"
-          xmlns="http://www.w3.org/2000/svg"
+        <button
+          class="inline-flex items-center whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground h-8 rounded-lg text-[13px] [&_svg]:size-4 w-full min-w-0 justify-start gap-2 overflow-hidden px-2"
+          type="button"
         >
-          <circle
-            cx="12"
-            cy="8"
-            r="5"
-          />
-          <path
-            d="M20 21a8 8 0 0 0-16 0"
-          />
-        </svg>
-        Sign in
-      </button>
+          <svg
+            aria-hidden="true"
+            class="lucide lucide-user-round"
+            fill="none"
+            height="24"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            viewBox="0 0 24 24"
+            width="24"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <circle
+              cx="12"
+              cy="8"
+              r="5"
+            />
+            <path
+              d="M20 21a8 8 0 0 0-16 0"
+            />
+          </svg>
+          Sign in
+        </button>
+      </div>
       <button
-        class="inline-flex items-center whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground h-8 rounded-lg text-[13px] [&_svg]:size-4 w-full justify-start gap-2 px-2"
+        aria-label="Settings"
+        class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[background-color,color,box-shadow,opacity] duration-100 outline-none select-none border border-transparent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 text-muted-foreground hover:bg-veil-raised hover:text-foreground size-7 rounded-md [&_svg]:size-3.5 shrink-0"
+        data-state="closed"
         type="button"
       >
         <svg
@@ -2776,21 +2779,6 @@ exports[`sidebar rail DOM > signed out 1`] = `
             r="3"
           />
         </svg>
-        Settings
-        <span
-          class="ml-auto flex gap-0.5 text-[10px] text-faint"
-        >
-          <kbd
-            class="rounded-sm bg-veil-raised px-1 font-sans"
-          >
-            Ctrl
-          </kbd>
-          <kbd
-            class="rounded-sm bg-veil-raised px-1 font-sans"
-          >
-            ,
-          </kbd>
-        </span>
       </button>
     </div>
   </div>
