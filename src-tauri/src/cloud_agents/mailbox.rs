@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use super::api::{Ack, AckOutcome, CallError, Lease};
 use super::receipts::{FollowUp, Known, Receipt};
-use super::{crypto, now_ms, CloudAgents, DecisionError, Settings};
+use super::{crypto, now_ms, slash, CloudAgents, DecisionError, Settings};
 use crate::remote::collab::Role;
 
 const LEASE_LIMIT: u32 = 16;
@@ -162,6 +162,14 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
         if let Some(refusal) = agents.slash_refusal(access, &tab.session_id, &tab.harness, text) {
             return finish(agents, lease, "rejected", Some(refusal.category()), json!({ "command": refusal.command, "message": refusal.message() }));
         }
+    }
+    // A steer goes into the running turn, where the session's own queue
+    // holds it until the turn ends; nothing re-checks that queue, so a slash
+    // or `!` command would still run after its sender lost the right to send
+    // it. It is not queued at all, whoever sends it (a `send` waits in the
+    // follow-up queue, which is re-checked).
+    if lease.kind == "steer" && busy_before && slash::is_command(plaintext.get("text").and_then(Value::as_str).unwrap_or("")) {
+        return finish(agents, lease, "rejected", Some(slash::NOT_QUEUED_CATEGORY), json!({ "message": slash::NOT_QUEUED_MESSAGE }));
     }
     if let Err(error) = agents.receipts.applying(id) {
         // Without the durable mark the outcome could not be proven later,

@@ -430,6 +430,8 @@ const INPUT_REFUSALS: Record<string, string> = {
   "slash-command-forbidden": "Not sent: that command needs someone who can approve permissions.",
   "shell-command-forbidden": "Not sent: a message that starts with ! runs as a shell command, which needs someone who can approve permissions.",
   "file-mention-forbidden": "Not sent: attaching a file from outside the project needs someone who can approve permissions.",
+  // For everyone: a slash or `!` command is not queued behind a running turn.
+  "command-not-queued": "Not sent: a turn is running. Send this command when it has ended.",
 };
 
 /**
