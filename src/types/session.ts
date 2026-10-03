@@ -103,6 +103,28 @@ export interface WorkspacePr {
   isDraft: boolean;
 }
 
+/** The clean-and-merged check made before a workspace is deleted. */
+export interface Landed {
+  /** The directory is a working tree of this project, so it could be read. */
+  checked: boolean;
+  branch: string | null;
+  /** What the branch was compared with, e.g. `origin/main`. */
+  base: string | null;
+  uncommitted: number;
+  /** Stash entries made on this branch. */
+  stashes: number;
+  clean: boolean;
+  merged: "ancestor" | "rebase" | "squash" | "noChanges" | null;
+  unmergedCommits: number;
+  pushed: boolean;
+  /** Why "merged" could not be established for certain; null when it was. */
+  notVerified: string | null;
+  /** Clean, merged and verified: one confirmation is enough. */
+  safe: boolean;
+  /** What deleting would lose, in plain words; empty when it is safe. */
+  losses: string[];
+}
+
 export interface WorkspaceDisposition {
   exists: boolean;
   /** False when the directory could not be checked: the counts are then 0 and mean "unknown". */
@@ -118,6 +140,8 @@ export interface WorkspaceDisposition {
   sessions: number;
   /** Their titles, so the confirmation can name what goes. */
   sessionTitles: string[];
+  /** Whether the work is clean and merged into the default branch; absent for the main checkout. */
+  landed?: Landed | null;
 }
 
 export interface Capabilities {
