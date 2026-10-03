@@ -108,12 +108,33 @@ describe("routing a file drop", () => {
     expect(terminal.onDragChange).toHaveBeenLastCalledWith(true, "files");
   });
 
-  it("reads the position in points on macOS and in device pixels elsewhere", async () => {
+  it("gives a drop on no target to one composer: the focused one, else the newest", async () => {
+    const first = target(true);
+    const second = target(true);
+    under = document.body;
+    await emit({ type: "drop", paths: ["/a"] });
+    expect(second.onDrop).toHaveBeenCalledOnce();
+    expect(first.onDrop).not.toHaveBeenCalled();
+
+    const input = first.el.appendChild(document.createElement("input"));
+    input.focus();
+    await emit({ type: "over" });
+    expect(first.onDragChange).toHaveBeenLastCalledWith(true, "files");
+    expect(second.onDragChange).toHaveBeenLastCalledWith(false, "files");
+    await emit({ type: "drop", paths: ["/b"] });
+    expect(first.onDrop).toHaveBeenCalledExactlyOnceWith(["/b"]);
+    expect(second.onDrop).toHaveBeenCalledOnce();
+  });
+
+  it("reads the position as CSS pixels on macOS and Linux, and as device pixels on Windows", async () => {
     target();
     const at = vi.fn(() => null);
     document.elementFromPoint = at;
     vi.stubGlobal("devicePixelRatio", 2);
     vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+    await emit({ type: "over", position: { x: 100, y: 60 } });
+    expect(at).toHaveBeenLastCalledWith(100, 60);
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux x86_64");
     await emit({ type: "over", position: { x: 100, y: 60 } });
     expect(at).toHaveBeenLastCalledWith(100, 60);
     vi.spyOn(navigator, "platform", "get").mockReturnValue("Win32");

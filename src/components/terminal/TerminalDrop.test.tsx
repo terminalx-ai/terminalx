@@ -17,12 +17,15 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 import { useRef, useState } from "react";
 import { AttachmentThumbs, DropHint, useImageAttachments } from "@/components/chat/useImageAttachments";
 import { TerminalView } from "./TerminalView";
-import { disposeInstance, type TerminalInstance } from "@/lib/terminal";
+import { disposeInstance, peekInstance, type TerminalInstance } from "@/lib/terminal";
 
 type DragEvent = { payload: { type: string; paths?: string[]; position?: { x: number; y: number } } };
 
-/** A real xterm, so the paste goes the way a typed key does and the program's paste mode is the terminal's own. */
-function instance(): TerminalInstance {
+/** The pane's own xterm, a real one: the paste goes the way a typed key does, and the program's paste mode is the terminal's own. */
+const local = () => peekInstance("p1")!;
+
+/** A terminal somebody else wires, as every cloud terminal is. */
+function remote(): TerminalInstance {
   const el = document.createElement("div");
   const term = new Terminal({ allowProposedApi: true });
   term.open(el);
@@ -34,8 +37,8 @@ function instance(): TerminalInstance {
 const output = (inst: TerminalInstance, data: string) => new Promise<void>((done) => inst.term.write(data, done));
 
 async function mount(props: Partial<Parameters<typeof TerminalView>[0]> = {}) {
-  const inst = instance();
-  const view = render(<TerminalView id="p1" visible create={() => inst} {...props} />);
+  const view = render(<TerminalView id="p1" visible {...props} />);
+  const inst = local();
   await waitFor(() => expect(dragDropListener).toHaveBeenCalledOnce());
   const onDrag = dragDropListener.mock.calls[0][0] as (e: DragEvent) => Promise<void>;
   const frame = view.getByTestId("terminal-drop-target");
@@ -59,7 +62,7 @@ afterEach(() => {
 });
 
 /** A composer's drop handling beside a terminal, as an agent tab and a shell tab are in one window. */
-function ComposerBesideTerminal({ create }: { create: () => TerminalInstance }) {
+function ComposerBesideTerminal() {
   const ref = useRef<HTMLTextAreaElement>(null);
   const [draft, setDraft] = useState("");
   const attach = useImageAttachments({ textareaRef: ref, draft, onDraftChange: setDraft });
@@ -70,15 +73,14 @@ function ComposerBesideTerminal({ create }: { create: () => TerminalInstance }) 
         <AttachmentThumbs attach={attach} />
         <textarea ref={ref} value={draft} onChange={(e) => setDraft(e.target.value)} />
       </div>
-      <TerminalView id="p1" visible create={create} />
+      <TerminalView id="p1" visible />
     </>
   );
 }
 
 describe("a window with a composer and a terminal", () => {
   async function mountBoth() {
-    const inst = instance();
-    render(<ComposerBesideTerminal create={() => inst} />);
+    render(<ComposerBesideTerminal />);
     // One subscription for the webview, whoever is listening.
     await waitFor(() => expect(dragDropListener).toHaveBeenCalledOnce());
     const onDrag = dragDropListener.mock.calls[0][0] as (e: DragEvent) => Promise<void>;
@@ -155,13 +157,13 @@ describe("dropping on a terminal", () => {
   });
 
   it("ignores a drop that lands elsewhere, and a hidden terminal takes none", async () => {
-    const { drag, over, view, inst } = await mount();
+    const { drag, over, view } = await mount();
     over(document.body);
     await drag({ type: "drop", paths: ["/tmp/a.png"] });
     expect(write).not.toHaveBeenCalled();
 
     over(view.getByTestId("terminal-drop-target"));
-    view.rerender(<TerminalView id="p1" visible={false} create={() => inst} />);
+    view.rerender(<TerminalView id="p1" visible={false} />);
     await drag({ type: "drop", paths: ["/tmp/a.png"] });
     expect(write).not.toHaveBeenCalled();
   });
@@ -183,6 +185,35 @@ describe("dropping on a terminal", () => {
     await output(inst, "\x1b[?2004h");
     await drag({ type: "drop", paths: [] });
     expect(write).toHaveBeenCalledExactlyOnceWith("p1", "\x1b[200~echo dragged\x1b[201~");
+  });
+
+  it("strips control characters from dragged text, so it cannot leave the bracketed paste", async () => {
+    droppedText.mockResolvedValueOnce("ls\x1b[201~\rwhoami\n");
+    const { drag, inst } = await mount();
+    await output(inst, "\x1b[?2004h");
+    await drag({ type: "drop", paths: [] });
+    // One paste, one end marker, and it is the terminal's own.
+    expect(write).toHaveBeenCalledExactlyOnceWith("p1", "\x1b[200~ls[201~\rwhoami\x1b[201~");
+  });
+
+  it("types multi-line dragged text as one line when the program has no bracketed paste", async () => {
+    droppedText.mockResolvedValueOnce("echo one\r\nrm -rf x\x1b\nlast\n");
+    const { drag } = await mount();
+    await drag({ type: "drop", paths: [] });
+    expect(write).toHaveBeenCalledExactlyOnceWith("p1", "echo one rm -rf x last");
+  });
+
+  it("a terminal that is not on this computer takes neither files nor text unless it says so", async () => {
+    const inst = remote();
+    const { drag } = await mount({ create: () => inst });
+    await drag({ type: "enter", paths: ["/Users/me/a.png"] });
+    expect(screen.getByText(/can't be dropped on a cloud terminal/)).toBeTruthy();
+    await drag({ type: "drop", paths: ["/Users/me/a.png"] });
+    expect(screen.getByRole("status").textContent).toMatch(/can't be dropped on a cloud terminal/);
+    await drag({ type: "drop", paths: [] });
+    expect(screen.getByRole("status").textContent).toBe("Nothing can be dropped on this terminal.");
+    expect(droppedText).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
   });
 
   it("types nothing when a drop carries neither files nor text", async () => {

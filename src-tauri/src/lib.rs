@@ -517,6 +517,9 @@ pub fn run() {
             }
         })
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(drag) = event {
+                drag_text::on_drag_drop(drag);
+            }
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(state) = window.try_state::<AppState>() {
                     state.pairing.stop();

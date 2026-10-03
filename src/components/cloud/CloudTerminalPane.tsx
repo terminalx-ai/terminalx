@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import type { WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
-import type { TerminalDropRefusal } from "@/components/terminal/TerminalDrop";
+import { REMOTE_DROP_REFUSAL, type TerminalDropRefusal } from "@/components/terminal/TerminalDrop";
 import { TerminalView, createTerminal } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
 import { usePeople } from "@/lib/cloudPeople";
@@ -95,7 +95,7 @@ export function dropRefusal(terminal: CloudTerminal, mayControl: boolean): Termi
   if (terminal.gone || terminal.exited) watching = "This terminal has ended. Nothing can be dropped on it.";
   else if (terminal.control !== "you") watching = mayControl ? "You are watching this terminal. Take control to drop into it." : "View only: you cannot drop into this terminal.";
   if (watching) return { files: watching, text: watching };
-  return { files: "Files can't be dropped on a cloud terminal yet: a path on this computer does not exist on the workspace." };
+  return { files: REMOTE_DROP_REFUSAL.files };
 }
 
 /** Why this view only watches the terminal, and who controls it. */

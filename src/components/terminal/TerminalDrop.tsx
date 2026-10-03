@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type HTMLAttributes, type RefObje
 import { files as filesApi } from "@/lib/api";
 import { registerFileDropTarget } from "@/lib/fileDrop";
 import { peekInstance } from "@/lib/terminal";
-import { droppedPathsText } from "@/lib/terminalDrop";
+import { droppedPathsText, droppedText } from "@/lib/terminalDrop";
 
 /**
  * Why this terminal takes no dropped files, or no dropped text: said on the
@@ -14,6 +14,16 @@ export interface TerminalDropRefusal {
   files?: string;
   text?: string;
 }
+
+/**
+ * What a terminal that does not run on this computer takes unless it says
+ * otherwise: nothing. A local path typed into a remote shell names a file
+ * that is not there, so a view has to opt in to anything, not out.
+ */
+export const REMOTE_DROP_REFUSAL: Required<TerminalDropRefusal> = {
+  files: "Files can't be dropped on a cloud terminal yet: a path on this computer does not exist on the workspace.",
+  text: "Nothing can be dropped on this terminal.",
+};
 
 const REFUSAL_MS = 5_000;
 
@@ -65,8 +75,11 @@ export function useTerminalDrop({
       setRefused(null);
       const data = await text();
       const term = peekInstance(id)?.term;
-      if (!term || !data) return;
-      term.paste(data);
+      if (!term) return;
+      // Dragged text is not ours: no control characters, and no Enter outside a bracketed paste.
+      const typed = kind === "text" ? droppedText(data, term.modes.bracketedPasteMode) : data;
+      if (!typed) return;
+      term.paste(typed);
       term.focus();
     },
     [id],

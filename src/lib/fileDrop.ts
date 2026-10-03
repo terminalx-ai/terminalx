@@ -11,8 +11,9 @@ export interface FileDropTarget {
   /** The element a drop has to land on. */
   element: () => Element | null;
   /**
-   * Also take drops that land on no other target, while `element` is shown:
-   * a composer accepts a file dropped anywhere else in the window.
+   * Also take drops that land on no target, while `element` is shown: a
+   * composer accepts a file dropped anywhere else in the window. One of
+   * them gets it, never several.
    */
   anywhere?: boolean;
   /** Something dragged is, or is no longer, headed for this target: files, or (with no paths) text from another app. */
@@ -31,9 +32,9 @@ let kind: "files" | "text" = "files";
 
 function elementAt(position: Position | undefined): Element | null {
   if (!position || typeof document.elementFromPoint !== "function") return null;
-  // Both are labelled physical, but on macOS the position is in points
-  // (which are CSS pixels) and elsewhere in device pixels.
-  const scale = /Mac/i.test(navigator.platform) ? 1 : window.devicePixelRatio || 1;
+  // Labelled physical everywhere, but only Windows reports device pixels:
+  // macOS gives points and GTK logical pixels, which are CSS pixels already.
+  const scale = /Win/i.test(navigator.platform) ? window.devicePixelRatio || 1 : 1;
   return document.elementFromPoint(position.x / scale, position.y / scale);
 }
 
@@ -43,7 +44,10 @@ function shown(target: FileDropTarget): boolean {
   return !el || typeof el.checkVisibility !== "function" || el.checkVisibility();
 }
 
-/** The targets a file at `position` would go to: the one under it, else every shown `anywhere` target. */
+/**
+ * The target a file at `position` would go to: the one under it, else one
+ * shown `anywhere` target — the one holding the focus, or the newest.
+ */
 function targetsAt(position: Position | undefined): FileDropTarget[] {
   const hit = elementAt(position);
   if (hit) {
@@ -51,7 +55,9 @@ function targetsAt(position: Position | undefined): FileDropTarget[] {
     const exact = under.find((target) => !target.anywhere) ?? under[0];
     if (exact) return [exact];
   }
-  return [...targets].filter((target) => target.anywhere && shown(target));
+  const open = [...targets].filter((target) => target.anywhere && shown(target));
+  const one = open.find((target) => target.element()?.contains(document.activeElement)) ?? open.at(-1);
+  return one ? [one] : [];
 }
 
 async function route(payload: DragDropPayload) {

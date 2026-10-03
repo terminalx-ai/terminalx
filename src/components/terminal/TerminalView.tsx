@@ -7,7 +7,7 @@ import { getInstance, peekInstance, type TerminalInstance } from "@/lib/terminal
 import { fitTerminal } from "@/lib/terminalFit";
 import { hideWebgl, showWebgl } from "@/lib/terminalWebgl";
 import { useTheme } from "@/lib/theme";
-import { TerminalDropHint, useTerminalDrop, type TerminalDropRefusal } from "./TerminalDrop";
+import { REMOTE_DROP_REFUSAL, TerminalDropHint, useTerminalDrop, type TerminalDropRefusal } from "./TerminalDrop";
 
 function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -134,8 +134,9 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
  * wires its own input); `fit: false` keeps the size someone else set, for
  * a view that watches a terminal another device controls.
  *
- * A file dropped on the view types its path (`TerminalDrop.tsx`);
- * `dropRefusal` says why this terminal takes none.
+ * A file dropped on a local terminal types its path (`TerminalDrop.tsx`).
+ * A terminal with its own `create` is not on this computer and takes no
+ * drop at all unless `dropRefusal` says what it does take.
  */
 export function TerminalView({
   id,
@@ -152,7 +153,7 @@ export function TerminalView({
 }) {
   const host = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLDivElement>(null);
-  const drop = useTerminalDrop({ id, frame, enabled: visible, refusal: dropRefusal });
+  const drop = useTerminalDrop({ id, frame, enabled: visible, refusal: dropRefusal ?? (create ? REMOTE_DROP_REFUSAL : undefined) });
   const { resolvedMode } = useTheme();
   const make = () => (create ? create(resolvedMode) : createInstance(id, resolvedMode));
   const fitting = useRef(fit);
