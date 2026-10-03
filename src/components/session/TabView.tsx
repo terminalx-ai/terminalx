@@ -7,10 +7,11 @@ import { useSessionStore } from "@/lib/sessions";
 import { hasEscapeOverlay, useShortcut } from "@/lib/hotkeys";
 import { changeRange, useChanges } from "@/lib/changes";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
-import { CLOUD_IMAGES_UNSUPPORTED, localSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
+import { CLOUD_IMAGES_UNSUPPORTED, localSessionBackend, terminalViewOf, type SessionBackend } from "@/lib/sessionBackend";
 import { CloudOutbox, commandError as cloudCommandError } from "@/components/cloud/CloudAgents";
+import { CloudAgentTerminal } from "@/components/cloud/CloudAgentTerminal";
 import { LeaseBar, NotesPanel, useNowUntil } from "@/components/cloud/CloudCollab";
-import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
+import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, TERMINAL_APPROVAL_REASON, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
 import { Chat } from "@/components/chat/Chat";
 import { Composer } from "@/components/chat/Composer";
@@ -69,7 +70,10 @@ export function TabView({
   const draft = useDraft(tab.id);
   const [error, setError] = useState<string | null>(null);
   const views = useTabViews();
-  const terminalMode = views.views[tab.id] === "terminal";
+  // A cloud tab's terminal view (PRO-86) attaches to its CLI on the VM; it is
+  // only there while the runtime serves it, else the tab shows its chat.
+  const remoteTerminal = !local && terminalViewOf(backend, tab).available ? (backend.agentTerminal ?? null) : null;
+  const terminalMode = views.views[tab.id] === "terminal" && (local || !!remoteTerminal);
   const viewError = views.errors[tab.id] ?? null;
   const terms = useTerminals();
   const ptyFirst = local && isPtyFirst(tab.harness);
@@ -194,7 +198,10 @@ export function TabView({
   };
 
   // Editors, dialogs and pickers own Escape before the agent-stop shortcut.
-  useShortcut("session.stop", () => (live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane") ? (stop(), true) : false), { enabled: active && !continuationOpen });
+  // In a cloud tab's terminal view the stop key (Escape, unless remapped) belongs to the agent's own screen, as every other key does.
+  useShortcut("session.stop", () => (live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane") ? (stop(), true) : false), {
+    enabled: active && !continuationOpen && !(remoteTerminal && terminalMode),
+  });
 
   const answerPermission = useCallback(
     async (requestId: string, optionId: string) => {
@@ -340,6 +347,27 @@ export function TabView({
     </div>
   );
 
+  // The same header as a local tab's terminal view; what it attaches to is on the VM.
+  const cloudTerminal = remoteTerminal && (
+    <div className="flex h-full min-h-0 flex-1 flex-col">
+      <div className="flex min-h-8 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground">
+        <span className="shrink-0 text-foreground" data-testid="cloud-terminal-view-title">
+          Terminal view · {remoteTerminal.client ? TAB_STATUS_LABEL[tab.status] : remoteTerminal.asleep ? "Stopped" : "Not connected"}
+        </span>
+        <span className="ml-auto min-w-0 text-faint">The chat is the same conversation.</span>
+      </div>
+      <CloudAgentTerminal
+        target={remoteTerminal}
+        generation={backend.generation}
+        tabId={tab.id}
+        active={active && terminalMode}
+        // Whoever may not send may not type; nor may a driver who cannot approve what the agent asks on its own screen.
+        blocked={gate?.blocked ?? backend.readOnlyReason ?? (gate && !gate.mayConfigure ? TERMINAL_APPROVAL_REASON : null)}
+        you={collabLive ? (shared?.you ?? null) : null}
+      />
+    </div>
+  );
+
   // The body sits in a flex column: the chat (`flex-1`) takes the height left
   // under the bars above and scrolls inside it. In a plain block it grew as
   // tall as its transcript and pushed the composer out of the window.
@@ -402,6 +430,7 @@ export function TabView({
     );
   }
 
+  if (terminalMode && cloudTerminal) return wrap(cloudTerminal);
   if (terminalMode) return wrap(terminal);
   return wrap(chat);
 }

@@ -143,6 +143,13 @@ export const VIEWER_REASON = "You can view this workspace; ask an admin for driv
 export const NOT_SHARED_REASON = "This workspace has not been shared with you. Ask an organization admin or its creator to share it.";
 /** Shown on the model, effort and mode pickers to someone who may not change them (review M1). */
 export const SETTINGS_LOCKED_REASON = "Only a workspace admin or someone who can approve permissions changes the model, effort or permission mode";
+/**
+ * Shown in an agent tab's terminal view (PRO-86) to a driver who may not
+ * approve: the agent's own screen answers its permission prompts and changes
+ * its mode, so typing there needs the same rights as changing its settings.
+ */
+export const TERMINAL_APPROVAL_REASON =
+  "Typing in the agent's terminal can answer its permission requests and change its mode, so it needs approval rights. You can watch here and send messages from the chat.";
 /** Shown on permission requests to someone who may not answer them. */
 export const APPROVE_BLOCKED_REASON = "Waiting for someone who can approve";
 
@@ -414,13 +421,29 @@ export function canTypeInTerminals(you: WorkspaceYou | null): boolean {
 export const TERMINAL_APPROVER_REASON = "typing in a terminal needs the right to approve permissions; ask an admin.";
 
 /**
- * A slash command the runtime refused (category `slash-command-forbidden`):
- * only a manager or an approver sends the ones that change what the agent
- * may do. `receipt.command` is the command as this person typed it.
+ * Receipt categories of a message the runtime refused because the agent's CLI
+ * would run it by itself: a slash command, a `!` shell command, or an `@`
+ * mention of a file outside the project (PRO-88). Only a manager or an
+ * approver sends those.
  */
-export function slashRefusalText(receipt: Record<string, unknown> | null | undefined): string {
-  const command = typeof receipt?.command === "string" && receipt.command ? receipt.command : "That command";
-  return `Not sent: ${command} needs someone who can approve permissions. You can send /clear, /compact, /help and this project's own commands.`;
+const INPUT_REFUSALS: Record<string, string> = {
+  "slash-command-forbidden": "Not sent: that command needs someone who can approve permissions.",
+  "shell-command-forbidden": "Not sent: a message that starts with ! runs as a shell command, which needs someone who can approve permissions.",
+  "file-mention-forbidden": "Not sent: attaching a file from outside the project needs someone who can approve permissions.",
+};
+
+/**
+ * Why the runtime refused a message, or null when the category is not one of
+ * these. The receipt's own `message` names the command and what this agent's
+ * CLI accepts instead; without a readable receipt (its key is gone) the
+ * category's sentence is shown.
+ */
+export function inputRefusalText(category: string | null | undefined, receipt: Record<string, unknown> | null | undefined): string | null {
+  const fallback = category ? INPUT_REFUSALS[category] : undefined;
+  if (!fallback) return null;
+  const message = receipt?.message;
+  if (typeof message !== "string" || !message.trim() || message.length > 400) return fallback;
+  return /^not sent/i.test(message) ? message : `Not sent: ${message.replace(/ was not sent: /, ": ")}`;
 }
 
 /** A participate connection the workspace is not shared with: it sees no content. */
