@@ -14,7 +14,6 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { ask } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AgentMark } from "@/components/AgentMark";
 import { WorkspaceNameEditor } from "@/components/session/WorkspaceNameEditor";
@@ -49,15 +48,15 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { api, errorMessage } from "@/lib/api";
+import { confirmDeleteSession } from "@/lib/deleteSessionFlow";
 import { workspaceName as sessionWorkspaceName } from "@/lib/dashboard";
 import { openSettle, openWorkspaceDelete } from "@/lib/dialogs";
 import { useMobileDrivenTabs } from "@/lib/mobileDriver";
 import { getPrefs } from "@/lib/prefs";
+import { useSidebarFilter } from "@/lib/sidebarFilter";
 import {
   addTab,
   archiveSession,
-  deleteSession,
   forkSession,
   openAutomations,
   openSkills,
@@ -88,8 +87,18 @@ const canon = (path: string) => path.replace(/\/+$/, "");
 const workspaceKey = (projectPath: string, path: string) => `${projectPath}\0${canon(path)}`;
 
 /** Keep live checkouts and historical, missing checkouts in the same hierarchy. */
-export function groupProjectWorkspaces(projectPath: string, workspaces: Workspace[], sessions: SessionEntry[], showArchived: boolean, selectedId?: string | null): WorkspaceGroup[] {
-  const visible = sortSessions(sessions.filter((session) => session.projectPath === projectPath && (session.archived === showArchived || session.id === selectedId)));
+export function groupProjectWorkspaces(
+  projectPath: string,
+  workspaces: Workspace[],
+  sessions: SessionEntry[],
+  showArchived: boolean,
+  selectedId?: string | null,
+  /** The sidebar's filter (unread, needs you): sessions it does not show are left out, and so are checkouts left with none. */
+  shows?: (sessionId: string) => boolean,
+): WorkspaceGroup[] {
+  const visible = sortSessions(
+    sessions.filter((session) => session.projectPath === projectPath && (session.archived === showArchived || session.id === selectedId) && (!shows || shows(session.id))),
+  );
   const byPath = new Map<string, SessionEntry[]>();
   const missing = new Map<string, SessionEntry[]>();
   const removed = new Map<string, SessionEntry[]>();
@@ -115,7 +124,7 @@ export function groupProjectWorkspaces(projectPath: string, workspaces: Workspac
   for (const [path, rows] of removed) {
     groups.push({ workspace: null, path, key: `${workspaceKey(projectPath, path)}\0removed`, sessions: sortSessions(rows), removed: true });
   }
-  return groups;
+  return shows ? groups.filter((group) => group.sessions.length > 0) : groups;
 }
 
 export function ProjectNavigation({ project, expanded }: { project: Project; expanded: boolean }) {
@@ -133,9 +142,10 @@ export function ProjectNavigation({ project, expanded }: { project: Project; exp
   const mobileDriven = useMobileDrivenTabs();
   const harnessNames = useMemo(() => new Map(store.harnesses.map((harness) => [harness.id, harness.name])), [store.harnesses]);
 
+  const filter = useSidebarFilter();
   const groups = useMemo(
-    () => groupProjectWorkspaces(project.path, workspaces, store.sessions, store.showArchived, store.selectedSessionId),
-    [project.path, store.sessions, store.showArchived, store.selectedSessionId, workspaces],
+    () => groupProjectWorkspaces(project.path, workspaces, store.sessions, store.showArchived, store.selectedSessionId, filter.active ? filter.shows : undefined),
+    [project.path, store.sessions, store.showArchived, store.selectedSessionId, workspaces, filter],
   );
   const activeWorkspaceKey = groups.find((group) => selectedSession
     ? group.sessions.some((session) => session.id === selectedSession.id)
@@ -160,7 +170,7 @@ export function ProjectNavigation({ project, expanded }: { project: Project; exp
 
   return (
     <TreeGroup expanded={expanded} className="pb-1 pl-2">
-      {groups.length === 0 ? (
+      {groups.length === 0 && !filter.active ? (
         <div className="px-5 py-2 text-[11px] text-faint">
           {store.workspacesLoading[project.path] ? "Reading workspaces…" : "No workspaces found."}
         </div>
@@ -170,7 +180,8 @@ export function ProjectNavigation({ project, expanded }: { project: Project; exp
           key={group.key}
           project={project}
           group={group}
-          expanded={expandedWorkspaces.has(group.key)}
+          // A filter shows what it found: its checkouts are open.
+          expanded={filter.active || expandedWorkspaces.has(group.key)}
           active={activeWorkspaceKey === group.key}
           onToggle={() => setExpandedWorkspaces((current) => toggleInSet(current, group.key))}
           selectedSessionId={store.selectedSessionId}
@@ -495,7 +506,7 @@ function SessionMenu({ session }: { session: SessionEntry }) {
         </DropdownMenuItem>
       ) : null}
       <DropdownMenuSeparator />
-      <DropdownMenuItem destructive onSelect={() => void confirmDelete(session)}>
+      <DropdownMenuItem destructive onSelect={() => void confirmDeleteSession(session)}>
         <Trash2 /> Delete session…
       </DropdownMenuItem>
     </DropdownMenuContent>
@@ -514,33 +525,4 @@ function toggleInSet(current: Set<string>, value: string) {
   if (next.has(value)) next.delete(value);
   else next.add(value);
   return next;
-}
-
-async function confirmDelete(session: SessionEntry) {
-  let detail = "Its transcript and attachments are removed.";
-  if (session.worktreeName && !session.worktreeRemoved) {
-    try {
-      const disposition = await api.worktreeDisposition(session.id);
-      const parts = [];
-      if (disposition.unpushed > 0) parts.push(`${disposition.unpushed} unpushed commit${disposition.unpushed === 1 ? "" : "s"}`);
-      if (disposition.uncommitted > 0) parts.push(`${disposition.uncommitted} uncommitted file${disposition.uncommitted === 1 ? "" : "s"}`);
-      detail = parts.length
-        ? `Its worktree has ${parts.join(" and ")}; deleting loses them along with the transcript.`
-        : "Its worktree, transcript and attachments are removed.";
-    } catch {
-      // The confirmation still protects the destructive action if status fails.
-    }
-  }
-  const yes = await ask(`Delete "${session.title}"? ${detail}`, {
-    title: "Delete session",
-    kind: "warning",
-    okLabel: "Delete",
-    cancelLabel: "Cancel",
-  }).catch(() => false);
-  if (!yes) return;
-  try {
-    await deleteSession(session.id, true);
-  } catch (error) {
-    console.error(errorMessage(error));
-  }
 }

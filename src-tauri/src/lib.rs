@@ -7,6 +7,7 @@
 
 #[cfg(feature = "desktop")]
 mod account;
+mod agent_data;
 #[cfg(feature = "desktop")]
 mod automations;
 mod binpath;
@@ -49,6 +50,8 @@ mod control;
 mod pipe_transport;
 #[cfg(feature = "desktop")]
 mod dictation;
+#[cfg(feature = "desktop")]
+mod drag_text;
 #[cfg(feature = "desktop")]
 mod transcription;
 mod events;
@@ -329,6 +332,7 @@ pub fn run() {
             commands::cloud_workspace_preflight,
             commands::cloud_workspace_repositories,
             commands::cloud_workspaces,
+            commands::cloud_catalog_feed,
             commands::cloud_workspace_suspend,
             commands::cloud_workspace_resume,
             commands::cloud_workspace_release,
@@ -396,6 +400,7 @@ pub fn run() {
             commands::work_status,
             commands::list_branches,
             commands::worktree_disposition,
+            commands::sessions_sharing_worktree,
             commands::remove_session_worktree,
             commands::snapshot_tree,
             commands::head_tree,
@@ -424,6 +429,7 @@ pub fn run() {
             commands::search_files,
             commands::list_slash_commands,
             commands::read_image_file,
+            drag_text::dropped_text,
             commands::invalidate_file_index,
             commands::git_commit,
             commands::git_identity,
@@ -520,6 +526,9 @@ pub fn run() {
             }
         })
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(drag) = event {
+                drag_text::on_drag_drop(drag);
+            }
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(state) = window.try_state::<AppState>() {
                     state.pairing.stop();

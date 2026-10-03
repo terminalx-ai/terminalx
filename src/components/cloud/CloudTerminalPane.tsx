@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import type { WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
+import { REMOTE_DROP_REFUSAL, type TerminalDropRefusal } from "@/components/terminal/TerminalDrop";
 import { TerminalView, createTerminal } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
 import { TERMINAL_APPROVER_REASON, canDrive } from "@/lib/cloudCollab";
@@ -80,10 +81,23 @@ export function CloudTerminalPane({
       )}
       {error && <p className="px-3 py-1 text-xs text-red-500">{error}</p>}
       <div className="min-h-0 flex-1">
-        <TerminalView id={terminal.id} visible create={create} fit={controlling && !terminal.gone} />
+        <TerminalView id={terminal.id} visible create={create} fit={controlling && !terminal.gone} dropRefusal={dropRefusal(terminal, mayControl)} />
       </div>
     </div>
   );
+}
+
+/**
+ * What a cloud terminal does not take by drag and drop. A dropped file is
+ * never typed: its path is one on this computer, not on the workspace.
+ * Whoever cannot type there cannot drop text there either.
+ */
+export function dropRefusal(terminal: CloudTerminal, mayControl: boolean): TerminalDropRefusal {
+  let watching: string | null = null;
+  if (terminal.gone || terminal.exited) watching = "This terminal has ended. Nothing can be dropped on it.";
+  else if (terminal.control !== "you") watching = mayControl ? "You are watching this terminal. Take control to drop into it." : "View only: you cannot drop into this terminal.";
+  if (watching) return { files: watching, text: watching };
+  return { files: REMOTE_DROP_REFUSAL.files };
 }
 
 /** Why this view only watches the terminal, and who controls it. */

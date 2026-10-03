@@ -20,6 +20,9 @@ import type {
   TabEntry,
   WorkStatus,
   WorktreeDisposition,
+  DeleteSessionReport,
+  SettleReport,
+  WorkspaceDeleteReport,
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
@@ -161,8 +164,9 @@ export const api = {
   accountRefreshRoles: (force: boolean) => invoke<{ status: AccountStatus; fresh: boolean }>("account_refresh_roles", { force }),
   accountSignIn: () => invoke<AccountStatus>("account_sign_in"),
   accountSignOut: () => invoke<AccountStatus>("account_sign_out"),
+  /** `selected: false`: created, but selecting it failed. Select it by id; never create again. */
   organizationCreate: (name: string, idempotencyKey: string) =>
-    invoke<OrganizationSummary>("organization_create", { name, idempotencyKey }),
+    invoke<OrganizationSummary & { selected?: boolean }>("organization_create", { name, idempotencyKey }),
   organizationSelect: (organizationId: string, contextRevision: string) =>
     invoke<AccountStatus>("organization_select", { organizationId, contextRevision }),
 
@@ -194,6 +198,8 @@ export const api = {
     invoke<CloudWorkspacePreflight>("cloud_workspace_preflight", { repositories, orgId: orgId ?? null }),
   cloudWorkspaceRepositories: (orgId?: string | null) => invoke<CloudSelectedRepositories>("cloud_workspace_repositories", { orgId: orgId ?? null }),
   cloudWorkspaces: (orgId?: string | null) => invoke<CloudWorkspaceList>("cloud_workspaces", { orgId: orgId ?? null }),
+  /** Every member organization's list in one request, for a server that offers it; `cursor` is the last answer's. */
+  cloudCatalogFeed: (cursor?: string | null) => invoke<CloudCatalogFeed>("cloud_catalog_feed", { cursor: cursor ?? null }),
   cloudWorkspaceSuspend: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_suspend", { workspaceId, orgId: orgId ?? null }),
   cloudWorkspaceResume: (workspaceId: string, orgId?: string | null) =>
@@ -274,7 +280,7 @@ export const api = {
     invoke<WorkspaceRename>("rename_workspace", { projectPath, path, name }),
   workspaceDisposition: (projectPath: string, path: string) => invoke<WorkspaceDisposition>("workspace_disposition", { projectPath, path }),
   deleteWorkspace: (projectPath: string, path: string, deleteBranch: boolean) =>
-    invoke<SessionEntry[]>("delete_workspace", { projectPath, path, deleteBranch }),
+    invoke<WorkspaceDeleteReport>("delete_workspace", { projectPath, path, deleteBranch }),
 
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
@@ -292,10 +298,11 @@ export const api = {
   setSessionPinned: (sessionId: string, pinned: boolean) => invoke<void>("set_session_pinned", { sessionId, pinned }),
   setActiveTab: (sessionId: string, tabId: string) => invoke<void>("set_active_tab", { sessionId, tabId }),
   deleteSession: (sessionId: string, removeWorktree: boolean) =>
-    invoke<void>("delete_session", { sessionId, removeWorktree }),
+    invoke<DeleteSessionReport>("delete_session", { sessionId, removeWorktree }),
   worktreeDisposition: (sessionId: string) => invoke<WorktreeDisposition>("worktree_disposition", { sessionId }),
+  sessionsSharingWorktree: (sessionId: string) => invoke<string[]>("sessions_sharing_worktree", { sessionId }),
   removeSessionWorktree: (sessionId: string) => invoke<SessionEntry>("remove_session_worktree", { sessionId }),
-  settleSession: (sessionId: string, action: "delete" | "relocate") => invoke<SessionEntry>("settle_session", { sessionId, action }),
+  settleSession: (sessionId: string, action: "delete" | "relocate") => invoke<SettleReport>("settle_session", { sessionId, action }),
   forkSession: (sessionId: string, tabId: string) => invoke<SessionEntry>("fork_session", { sessionId, tabId }),
 
   // harnesses
@@ -364,6 +371,31 @@ export interface AccountStatus {
   organizations?: OrganizationSummary[];
   /** The server authorizes desktop cloud routes by membership (`cloud.desktop.multi-org.v1`, CS-18). */
   multiOrg?: boolean;
+  /** The server lists every member organization's cloud workspaces in one request (`cloud.desktop.catalog-feed.v1`, PRO-74). */
+  catalogFeed?: boolean;
+}
+
+/** One organization of the catalog feed: its list, or why it was not listed (the others are unaffected). */
+export interface CloudCatalogOrganization {
+  orgId: string;
+  workspaces: CloudWorkspaceListItem[];
+  tombstones: CloudWorkspaceTombstone[];
+  quota?: CloudWorkspaceQuota | null;
+  error?: string | null;
+}
+
+/**
+ * `cloud_catalog_feed` (saas contract §23). `changed: false` is the server's
+ * 304: the catalog `cursor` names is still current. `reset` means the answer
+ * is the whole catalog; without it, only the workspaces that changed are
+ * listed and `deletedWorkspaceIds` names the ones to drop.
+ */
+export interface CloudCatalogFeed {
+  changed: boolean;
+  cursor: string | null;
+  reset: boolean;
+  organizations: CloudCatalogOrganization[];
+  deletedWorkspaceIds: string[];
 }
 
 /** `local-docker` is offered by debug builds only (terminalx-saas `cloud:e2e:local --serve`). */
@@ -1024,6 +1056,10 @@ export interface ModelInfo {
   /** The model that replaces this one when the provider is retiring it. */
   upgrade: string | null;
   description: string | null;
+  /** A family alias (`opus`): it follows the latest release rather than staying on one version. */
+  alias?: boolean;
+  /** The full model id an alias runs now, per the CLI on the machine that listed it. */
+  resolved?: string | null;
 }
 
 export interface HandoffInfo {
@@ -1087,6 +1123,8 @@ export const files = {
   search: (cwd: string, query: string, limit = 40) => invoke<FileHit[]>("search_files", { cwd, query, limit }),
   invalidate: (cwd: string) => invoke<void>("invalidate_file_index", { cwd }),
   readImage: (path: string) => invoke<{ mediaType: string; data: string; name: string } | null>("read_image_file", { path }),
+  /** The plain text of the drag that just ended on the window: the drop event itself carries only file paths. */
+  droppedText: () => invoke<string | null>("dropped_text"),
   slashCommands: (cwd: string, harness: string) => invoke<SlashCommand[]>("list_slash_commands", { cwd, harness }),
 };
 

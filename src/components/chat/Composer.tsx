@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowUp, AtSign, ChevronDown, FileText, SlashSquare, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -16,7 +16,7 @@ import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
 import { matchesShortcut } from "@/lib/shortcuts";
-import { EFFORT_LABEL, PERMISSION_MODES, modeLabel, refreshModels, upgradeHint, useModels } from "@/lib/models";
+import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, modeLabel, modelForTab, modelGroups, modelNote, offeredOn, prettyModelId, refreshModels, runningModelName, useModels } from "@/lib/models";
 import { chooseMode } from "@/lib/dialogs";
 import { files as filesApi, type FileHit, type ImageInput, type SlashCommand } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
@@ -63,6 +63,8 @@ export function Composer({
   onSetEffort,
   onSetMode,
   contextUsed,
+  reportedModel,
+  modelsAreLocal = true,
   contextMax,
   handoffs,
   disabledReason,
@@ -86,6 +88,10 @@ export function Composer({
   onSetEffort: (e: string | null) => void;
   onSetMode: (m: string) => void;
   contextUsed?: number;
+  /** The full model id the session last said it ran (an alias like `opus` resolved). */
+  reportedModel?: string | null;
+  /** False when the tab runs on another machine (a cloud workspace): the local CLI's reading of an alias is not claimed for it. */
+  modelsAreLocal?: boolean;
   contextMax?: number;
   /** Next-step prompts offered after a turn lands (commit, PR, run). */
   handoffs?: { label: string; prompt: string }[];
@@ -102,8 +108,13 @@ export function Composer({
   canStop?: boolean;
   autoFocus?: boolean;
 }) {
-  const models = useModels(tab.harness);
-  const model = models.find((m) => m.id === tab.model) ?? models.find((m) => m.isDefault);
+  const listed = useModels(tab.harness);
+  const model = modelForTab(listed, tab.model);
+  // What may be chosen here, plus what the tab is already on if that is not among them.
+  const models = useMemo(() => {
+    const offered = offeredOn(listed, modelsAreLocal);
+    return model && !offered.some((m) => m.id === model.id) ? [...offered, model] : offered;
+  }, [listed, modelsAreLocal, model?.id]);
   const [caret, setCaret] = useState(0);
   const [commands, setCommands] = useState<SlashCommand[]>(() => commandCache.get(`${cwd}|${tab.harness}`) ?? []);
   const [fileHits, setFileHits] = useState<FileHit[]>([]);
@@ -321,9 +332,11 @@ export function Composer({
 
   const placeholder = busy ? "Send a follow-up (it queues until the agent pauses)" : "Ask, build, or describe the next step";
   // The model picker's label, and its tooltip: the whole of it when the button has to truncate.
-  const modelName = model?.label ?? tab.model ?? "Model";
+  // An alias reads as the version it is running, once someone has said which.
+  const modelName = model ? runningModelName(model, reportedModel, modelsAreLocal) : tab.model ? prettyModelId(tab.model) : "Model";
+  const runs = model ? aliasRuns(model, reportedModel, modelsAreLocal) : null;
   const effortName = tab.effort && model?.efforts.length ? (EFFORT_LABEL[tab.effort] ?? tab.effort) : null;
-  const modelTitle = `Model: ${modelName}${effortName ? ` · ${effortName}` : ""}`;
+  const modelTitle = `Model: ${model?.alias ? `${model.label} (latest${runs ? `, running ${prettyModelId(runs)}` : ""})` : modelName}${effortName ? ` · ${effortName}` : ""}`;
   const permissionLabel = modeLabel(tab.permissionMode);
   const pct = contextUsed && contextMax ? Math.min(100, Math.round((contextUsed / contextMax) * 100)) : null;
 
@@ -417,6 +430,8 @@ export function Composer({
               <Button variant="ghost" size="sm" className="min-w-12 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? modelTitle} aria-label={settingsLockedReason ? `Model: ${settingsLockedReason}` : undefined}>
                 <AgentMark id={tab.harness} className="size-3.5 shrink-0" />
                 <span className="min-w-0 truncate text-foreground">{modelName}</span>
+                {/* An alias and the same version pinned read alike otherwise. */}
+                {model?.alias ? <span className="shrink-0 text-faint">latest</span> : null}
                 {effortName ? <span className="min-w-0 truncate text-faint">{effortName}</span> : null}
                 <ChevronDown className="size-3 text-faint" />
               </Button>
@@ -424,15 +439,21 @@ export function Composer({
             <DropdownMenuContent align="start" className="min-w-[14rem]">
               <DropdownMenuLabel>Model</DropdownMenuLabel>
               <DropdownMenuRadioGroup value={model?.id ?? ""} onValueChange={onSetModel}>
-                {models.map((m) => {
-                  const upgrade = upgradeHint(m, models);
-                  return (
-                    <DropdownMenuRadioItem key={m.id} value={m.id}>
-                      {m.label}
-                      {upgrade ? <span className="ml-1.5 text-faint">→ {upgrade}</span> : null}
-                    </DropdownMenuRadioItem>
-                  );
-                })}
+                {modelGroups(models).map((group) => (
+                  <Fragment key={group.title ?? "models"}>
+                    {group.title ? <DropdownMenuLabel className="pt-2">{group.title}</DropdownMenuLabel> : null}
+                    {group.models.map((m) => {
+                      // The ticked alias says what this session reported; the rest, what the CLI listed.
+                      const note = m.id === model?.id && runs ? `latest · ${prettyModelId(runs)}` : modelNote(m, models, modelsAreLocal);
+                      return (
+                        <DropdownMenuRadioItem key={m.id} value={m.id}>
+                          {m.label}
+                          {note ? <span className="ml-1.5 text-faint">{note}</span> : null}
+                        </DropdownMenuRadioItem>
+                      );
+                    })}
+                  </Fragment>
+                ))}
               </DropdownMenuRadioGroup>
               {model?.efforts.length ? (
                 <>

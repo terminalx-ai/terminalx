@@ -86,6 +86,89 @@ pub struct Origin {
     /// Claude: `~/.claude/projects/<encoded cwd>`. Codex: the managed
     /// `$TERMINALX_HOME/codex/sessions`.
     pub transcript_root: PathBuf,
+    /// Claude only: this conversation's own file, wherever the CLI keeps it.
+    pub conversation: Option<ConversationFile>,
+}
+
+/// One conversation's transcript, named without saying which folder it is
+/// in. Claude Code files a transcript under the directory the conversation
+/// was started in and keeps writing there when it is resumed from another:
+/// after a workspace is renamed, the file is not under the folder derived
+/// from where the checkout is now (#250).
+///
+/// The folder it is really in is *adopted* — a second place this tab's
+/// frames may name, beside the derived one — but only on evidence: a file
+/// named for this conversation has to exist there. A frame cannot adopt a
+/// folder by naming a file that is not there, so it cannot walk the tail
+/// into some other checkout's conversations.
+#[derive(Debug, Clone)]
+pub struct ConversationFile {
+    /// `~/.claude/projects`: the file is in a folder directly inside it.
+    projects: PathBuf,
+    /// `<conversation id>.jsonl`.
+    name: String,
+    /// Folders, canonical, in which this conversation's file was found.
+    folders: Vec<PathBuf>,
+    /// Files the CLI opened after this one in an adopted folder: a `/clear`
+    /// starts a new conversation under a new id, and says so at
+    /// `SessionStart`.
+    successors: Vec<String>,
+}
+
+impl ConversationFile {
+    pub fn new(projects: PathBuf, name: String) -> Self {
+        Self { projects, name, folders: Vec::new(), successors: Vec::new() }
+    }
+
+    /// Take `named`'s folder as one of this conversation's, if `named` is
+    /// this conversation's file and is really there: a regular file, not a
+    /// link to somewhere else, directly inside a folder of the projects
+    /// directory. Compared after resolving links, so `..` and a linked
+    /// folder cannot make another place look like that one.
+    pub fn adopt(&mut self, named: &Path) -> bool {
+        if named.file_name().and_then(|n| n.to_str()) != Some(self.name.as_str()) || !regular_file(named) {
+            return false;
+        }
+        let Some(folder) = named.parent().and_then(|f| f.canonicalize().ok()) else { return false };
+        let Ok(projects) = self.projects.canonicalize() else { return false };
+        if folder.parent() != Some(projects.as_path()) {
+            return false;
+        }
+        if !self.folders.contains(&folder) {
+            self.folders.push(folder);
+        }
+        true
+    }
+
+    /// Whether `named` is this tab's to follow: its own conversation in a
+    /// folder that holds it, or a file its CLI opened there afterwards.
+    /// `announcing` is a `SessionStart`, the one frame in which the CLI
+    /// says it has opened a new file.
+    fn holds(&mut self, named: &Path, announcing: bool) -> bool {
+        if !named.is_absolute() || named.components().any(|c| c == Component::ParentDir) {
+            return false;
+        }
+        if self.adopt(named) {
+            return true;
+        }
+        let Some(folder) = named.parent().and_then(|f| f.canonicalize().ok()) else { return false };
+        let Some(file) = named.file_name().and_then(|n| n.to_str()) else { return false };
+        if !self.folders.contains(&folder) || named.is_symlink() || named.is_dir() {
+            return false;
+        }
+        if self.successors.iter().any(|s| s == file) {
+            return true;
+        }
+        if announcing && file.ends_with(".jsonl") && file != self.name {
+            self.successors.push(file.to_string());
+            return true;
+        }
+        false
+    }
+}
+
+fn regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
 }
 
 impl Origin {
@@ -98,9 +181,15 @@ impl Origin {
     /// have opened. Anything else is read as if the frame had named no file
     /// at all: the tail stays where it is rather than following a frame to
     /// some other reader's private notes.
-    pub fn transcript<'f>(&self, frame: &'f HookFrame) -> Option<&'f Path> {
+    ///
+    /// For Claude that is any file in the folder derived from the checkout,
+    /// as it always was, and — in a folder the conversation was found in —
+    /// this conversation's own file or one the CLI announced after it. The
+    /// derived folder stays allowed when another is adopted.
+    pub fn transcript<'f>(&mut self, frame: &'f HookFrame) -> Option<&'f Path> {
         let named = Path::new(frame.payload["transcript_path"].as_str()?);
-        under_root(&self.transcript_root, named).then_some(named)
+        let announcing = frame.event == "SessionStart";
+        (under_root(&self.transcript_root, named) || self.conversation.as_mut().is_some_and(|own| own.holds(named, announcing))).then_some(named)
     }
 }
 
@@ -1215,7 +1304,7 @@ mod tests {
 
     #[test]
     fn only_the_token_this_launch_was_given_is_this_tab_s() {
-        let origin = Origin { token: mint_token(), transcript_root: PathBuf::from("/nowhere") };
+        let origin = Origin { token: mint_token(), transcript_root: PathBuf::from("/nowhere"), conversation: None };
         assert!(origin.accepts(&frame(&origin.token, "")));
         assert!(!origin.accepts(&frame(&mint_token(), "")), "another tab's token is not this tab's");
         assert!(!origin.accepts(&frame("", "")), "a frame from a build with no token is refused");
@@ -1226,7 +1315,7 @@ mod tests {
         assert!(!origin.accepts(&frame(&nearly, "")));
 
         // A tab that never got a token accepts nothing, empty frames included.
-        let unset = Origin { token: String::new(), transcript_root: PathBuf::from("/nowhere") };
+        let unset = Origin { token: String::new(), transcript_root: PathBuf::from("/nowhere"), conversation: None };
         assert!(!unset.accepts(&frame("", "")));
     }
 
@@ -1235,7 +1324,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let root = home.path().join(".claude/projects/-Users-me-work");
         std::fs::create_dir_all(&root).unwrap();
-        let origin = Origin { token: mint_token(), transcript_root: root.clone() };
+        let mut origin = Origin { token: mint_token(), transcript_root: root.clone(), conversation: None };
 
         // The file the CLI opened, which it has yet to create.
         let mine = root.join("2f1c.jsonl");
@@ -1257,6 +1346,122 @@ mod tests {
         assert_eq!(origin.transcript(&HookFrame { payload: json!({}), ..frame("", "") }), None);
     }
 
+    fn named(event: &str, transcript: &Path) -> HookFrame {
+        HookFrame { event: event.into(), ..frame("", transcript.to_str().unwrap()) }
+    }
+
+    /// #250: a workspace was renamed, the tab resumed its conversation from
+    /// the new folder, and the CLI went on writing the transcript where the
+    /// conversation began. Every hook named that file and every one was
+    /// refused, so the chat heard nothing the transcript said.
+    #[test]
+    fn a_frame_may_name_this_tab_s_own_conversation_in_another_checkout_s_folder() {
+        let home = tempfile::tempdir().unwrap();
+        let projects = home.path().join(".claude/projects");
+        let (now, began) = (projects.join("-Users-me-work-renamed"), projects.join("-Users-me-work-original"));
+        std::fs::create_dir_all(&now).unwrap();
+        std::fs::create_dir_all(&began).unwrap();
+        let mine = began.join("2f1c.jsonl");
+        std::fs::write(&mine, "{}\n").unwrap();
+        std::fs::write(began.join("another.jsonl"), "{}\n").unwrap();
+        let own = ConversationFile::new(projects.clone(), "2f1c.jsonl".into());
+        let mut origin = Origin { token: mint_token(), transcript_root: now.clone(), conversation: Some(own) };
+
+        assert_eq!(origin.transcript(&named("Stop", &mine)), Some(mine.as_path()));
+        // Still only this conversation: not its neighbours in that folder,
+        // not a file of the same name deeper down or outside the projects
+        // folder, and not a traversal back in.
+        std::fs::create_dir_all(began.join("nested")).unwrap();
+        std::fs::create_dir_all(home.path().join("notes")).unwrap();
+        for outside in [began.join("nested/2f1c.jsonl"), projects.join("2f1c.jsonl"), home.path().join("notes/2f1c.jsonl")] {
+            std::fs::write(&outside, "{}\n").unwrap();
+        }
+        for outside in [
+            began.join("another.jsonl"),
+            began.join("nested/2f1c.jsonl"),
+            projects.join("2f1c.jsonl"),
+            home.path().join("notes/2f1c.jsonl"),
+            projects.join("-Users-me-work-original/../../../notes/2f1c.jsonl"),
+            projects.join("-Users-me-work-renamed/../-Users-me-work-original/2f1c.jsonl"),
+        ] {
+            assert_eq!(origin.transcript(&named("Stop", &outside)), None, "{}", outside.display());
+        }
+        // The folder derived from the checkout is still this tab's as well:
+        // the CLI may open its next file in either.
+        let fresh = now.join("after-clear.jsonl");
+        assert_eq!(origin.transcript(&named("Stop", &fresh)), Some(fresh.as_path()));
+        // A tab with no conversation of its own (Codex) keeps to its root.
+        let mut rooted = Origin { conversation: None, ..origin.clone() };
+        assert_eq!(rooted.transcript(&named("Stop", &mine)), None);
+    }
+
+    /// Naming a file is not evidence that it is there. A frame that names
+    /// this conversation's id in some other checkout's folder, where no such
+    /// file exists, adopts nothing — it used to hand over the whole folder,
+    /// and a second frame could then name anyone's conversation in it.
+    #[test]
+    fn a_folder_is_adopted_only_for_a_conversation_that_is_really_in_it() {
+        let home = tempfile::tempdir().unwrap();
+        let projects = home.path().join(".claude/projects");
+        let (mine, victim) = (projects.join("-w-mine"), projects.join("-w-victim"));
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::create_dir_all(&victim).unwrap();
+        let theirs = victim.join("their-conversation.jsonl");
+        std::fs::write(&theirs, "{}\n").unwrap();
+        let mut origin = Origin { token: mint_token(), transcript_root: mine.clone(), conversation: Some(ConversationFile::new(projects.clone(), "my-id.jsonl".into())) };
+
+        // Not there: refused, and the folder is not this tab's afterwards.
+        assert_eq!(origin.transcript(&named("SessionStart", &victim.join("my-id.jsonl"))), None);
+        assert_eq!(origin.transcript(&named("SessionStart", &theirs)), None);
+        assert_eq!(origin.transcript(&named("Stop", &theirs)), None);
+
+        // A link of the right name to their file is not this tab's file.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&theirs, victim.join("my-id.jsonl")).unwrap();
+            assert_eq!(origin.transcript(&named("SessionStart", &victim.join("my-id.jsonl"))), None);
+            assert_eq!(origin.transcript(&named("SessionStart", &theirs)), None);
+            std::fs::remove_file(victim.join("my-id.jsonl")).unwrap();
+        }
+        // Nor is a folder of that name.
+        std::fs::create_dir_all(victim.join("my-id.jsonl")).unwrap();
+        assert_eq!(origin.transcript(&named("SessionStart", &victim.join("my-id.jsonl"))), None);
+        assert_eq!(origin.transcript(&named("SessionStart", &theirs)), None);
+    }
+
+    /// In a folder the conversation really is in, the tab follows that
+    /// conversation, and a file the CLI announces after it (`/clear` starts a
+    /// new one). Its neighbours stay out: a later frame cannot name one, and
+    /// only the CLI's `SessionStart` can announce a file at all.
+    #[test]
+    fn an_adopted_folder_holds_this_conversation_and_what_the_cli_announces_after_it() {
+        let home = tempfile::tempdir().unwrap();
+        let projects = home.path().join(".claude/projects");
+        let (derived, began) = (projects.join("-w-renamed"), projects.join("-w-original"));
+        std::fs::create_dir_all(&derived).unwrap();
+        std::fs::create_dir_all(&began).unwrap();
+        let mine = began.join("my-id.jsonl");
+        std::fs::write(&mine, "{}\n").unwrap();
+        let neighbour = began.join("neighbour.jsonl");
+        std::fs::write(&neighbour, "{}\n").unwrap();
+        let mut origin = Origin { token: mint_token(), transcript_root: derived.clone(), conversation: Some(ConversationFile::new(projects.clone(), "my-id.jsonl".into())) };
+
+        assert_eq!(origin.transcript(&named("UserPromptSubmit", &neighbour)), None, "before the folder is adopted");
+        assert_eq!(origin.transcript(&named("UserPromptSubmit", &mine)), Some(mine.as_path()));
+        assert_eq!(origin.transcript(&named("UserPromptSubmit", &neighbour)), None, "and after: a neighbour is not this conversation");
+        assert_eq!(origin.transcript(&named("Stop", &neighbour)), None);
+
+        // The CLI opens a new file and says so; from then on it is the tab's.
+        let cleared = began.join("after-clear.jsonl");
+        assert_eq!(origin.transcript(&named("Stop", &cleared)), None, "not until it is announced");
+        assert_eq!(origin.transcript(&named("SessionStart", &cleared)), Some(cleared.as_path()));
+        assert_eq!(origin.transcript(&named("Stop", &cleared)), Some(cleared.as_path()));
+        assert_eq!(origin.transcript(&named("Stop", &mine)), Some(mine.as_path()));
+        // Not a file elsewhere, and not something that is no transcript.
+        assert_eq!(origin.transcript(&named("SessionStart", &projects.join("-w-other/x.jsonl"))), None);
+        assert_eq!(origin.transcript(&named("SessionStart", &began.join("notes.txt"))), None);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_symlinked_root_still_holds_its_own_transcripts() {
@@ -1268,7 +1473,7 @@ mod tests {
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(dir.path().join("real"), &link).unwrap();
 
-        let origin = Origin { token: mint_token(), transcript_root: link.join("sessions") };
+        let mut origin = Origin { token: mint_token(), transcript_root: link.join("sessions"), conversation: None };
         let named = real.join("2026/09/rollout.jsonl");
         assert_eq!(origin.transcript(&frame("", named.to_str().unwrap())), Some(named.as_path()));
         let elsewhere = dir.path().join("real/elsewhere.jsonl");
