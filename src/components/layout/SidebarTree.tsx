@@ -14,7 +14,6 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { ask } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AgentMark } from "@/components/AgentMark";
 import { WorkspaceNameEditor } from "@/components/session/WorkspaceNameEditor";
@@ -49,7 +48,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { api, errorMessage } from "@/lib/api";
+import { confirmDeleteSession } from "@/lib/deleteSessionFlow";
 import { workspaceName as sessionWorkspaceName } from "@/lib/dashboard";
 import { openSettle, openWorkspaceDelete } from "@/lib/dialogs";
 import { useMobileDrivenTabs } from "@/lib/mobileDriver";
@@ -57,7 +56,6 @@ import { getPrefs } from "@/lib/prefs";
 import {
   addTab,
   archiveSession,
-  deleteSession,
   forkSession,
   openAutomations,
   openSkills,
@@ -495,7 +493,7 @@ function SessionMenu({ session }: { session: SessionEntry }) {
         </DropdownMenuItem>
       ) : null}
       <DropdownMenuSeparator />
-      <DropdownMenuItem destructive onSelect={() => void confirmDelete(session)}>
+      <DropdownMenuItem destructive onSelect={() => void confirmDeleteSession(session)}>
         <Trash2 /> Delete session…
       </DropdownMenuItem>
     </DropdownMenuContent>
@@ -514,33 +512,4 @@ function toggleInSet(current: Set<string>, value: string) {
   if (next.has(value)) next.delete(value);
   else next.add(value);
   return next;
-}
-
-async function confirmDelete(session: SessionEntry) {
-  let detail = "Its transcript and attachments are removed.";
-  if (session.worktreeName && !session.worktreeRemoved) {
-    try {
-      const disposition = await api.worktreeDisposition(session.id);
-      const parts = [];
-      if (disposition.unpushed > 0) parts.push(`${disposition.unpushed} unpushed commit${disposition.unpushed === 1 ? "" : "s"}`);
-      if (disposition.uncommitted > 0) parts.push(`${disposition.uncommitted} uncommitted file${disposition.uncommitted === 1 ? "" : "s"}`);
-      detail = parts.length
-        ? `Its worktree has ${parts.join(" and ")}; deleting loses them along with the transcript.`
-        : "Its worktree, transcript and attachments are removed.";
-    } catch {
-      // The confirmation still protects the destructive action if status fails.
-    }
-  }
-  const yes = await ask(`Delete "${session.title}"? ${detail}`, {
-    title: "Delete session",
-    kind: "warning",
-    okLabel: "Delete",
-    cancelLabel: "Cancel",
-  }).catch(() => false);
-  if (!yes) return;
-  try {
-    await deleteSession(session.id, true);
-  } catch (error) {
-    console.error(errorMessage(error));
-  }
 }

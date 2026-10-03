@@ -20,6 +20,9 @@ import type {
   TabEntry,
   WorkStatus,
   WorktreeDisposition,
+  DeleteSessionReport,
+  SettleReport,
+  WorkspaceDeleteReport,
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
@@ -274,7 +277,7 @@ export const api = {
     invoke<WorkspaceRename>("rename_workspace", { projectPath, path, name }),
   workspaceDisposition: (projectPath: string, path: string) => invoke<WorkspaceDisposition>("workspace_disposition", { projectPath, path }),
   deleteWorkspace: (projectPath: string, path: string, deleteBranch: boolean) =>
-    invoke<SessionEntry[]>("delete_workspace", { projectPath, path, deleteBranch }),
+    invoke<WorkspaceDeleteReport>("delete_workspace", { projectPath, path, deleteBranch }),
 
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
@@ -292,10 +295,11 @@ export const api = {
   setSessionPinned: (sessionId: string, pinned: boolean) => invoke<void>("set_session_pinned", { sessionId, pinned }),
   setActiveTab: (sessionId: string, tabId: string) => invoke<void>("set_active_tab", { sessionId, tabId }),
   deleteSession: (sessionId: string, removeWorktree: boolean) =>
-    invoke<void>("delete_session", { sessionId, removeWorktree }),
+    invoke<DeleteSessionReport>("delete_session", { sessionId, removeWorktree }),
   worktreeDisposition: (sessionId: string) => invoke<WorktreeDisposition>("worktree_disposition", { sessionId }),
+  sessionsSharingWorktree: (sessionId: string) => invoke<string[]>("sessions_sharing_worktree", { sessionId }),
   removeSessionWorktree: (sessionId: string) => invoke<SessionEntry>("remove_session_worktree", { sessionId }),
-  settleSession: (sessionId: string, action: "delete" | "relocate") => invoke<SessionEntry>("settle_session", { sessionId, action }),
+  settleSession: (sessionId: string, action: "delete" | "relocate") => invoke<SettleReport>("settle_session", { sessionId, action }),
   forkSession: (sessionId: string, tabId: string) => invoke<SessionEntry>("fork_session", { sessionId, tabId }),
 
   // harnesses
@@ -1024,6 +1028,10 @@ export interface ModelInfo {
   /** The model that replaces this one when the provider is retiring it. */
   upgrade: string | null;
   description: string | null;
+  /** A family alias (`opus`): it follows the latest release rather than staying on one version. */
+  alias?: boolean;
+  /** The full model id an alias runs now, per the CLI on the machine that listed it. */
+  resolved?: string | null;
 }
 
 export interface HandoffInfo {
