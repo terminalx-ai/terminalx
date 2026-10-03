@@ -330,4 +330,31 @@ describe("leftovers of an organization left or another user (PRO-71 follow-ups)"
     expect(prefs.getPrefs().cloudPinned).toEqual({ "org-c": ["y"] });
     expect(account.getAccount().status.identity?.email).toBe("b@example.com");
   });
+
+  it("forgets organization setup records on sign-out and when another user signs in; a left organization loses only its own (PRO-16)", async () => {
+    const account = await import("./account");
+    const setups = await import("./organizationSetup");
+    const record = (requestId: string, organizationId: string) => ({ ...setups.newSetup("Team", requestId, 1), organizationId, step: "compute" as const });
+    announce(who("a@example.com", ["org-a", "org-b"]));
+    setups.saveSetup("a@example.com", record("r-a", "org-a"));
+    setups.saveSetup("a@example.com", record("r-b", "org-b"));
+    localStorage.setItem("terminalx.organization-setup.v1.a@example.com.name", "Draft");
+
+    // Leaving one organization takes only its record.
+    announce(who("a@example.com", ["org-a"]));
+    expect(setups.loadSetups("a@example.com").map((r) => r.organizationId)).toEqual(["org-a"]);
+
+    // Another user signs in without a sign-out in between: the first user's records go, theirs stay.
+    setups.saveSetup("b@example.com", record("r-c", "org-c"));
+    announce(who("b@example.com", ["org-c"]));
+    expect(setups.loadSetups("a@example.com")).toEqual([]);
+    expect(localStorage.getItem("terminalx.organization-setup.v1.a@example.com.name")).toBeNull();
+    expect(setups.loadSetups("b@example.com")).toHaveLength(1);
+
+    // Signing out forgets them.
+    announce({ state: "signed-out", identity: null, expiresAt: null, lastError: null });
+    expect(setups.loadSetups("b@example.com")).toEqual([]);
+    expect(Object.keys(localStorage).filter((key) => key.startsWith("terminalx.organization-setup"))).toEqual([]);
+    expect(account.getAccount().status.state).toBe("signed-out");
+  });
 });

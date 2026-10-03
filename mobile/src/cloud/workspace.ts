@@ -129,6 +129,7 @@ export class CloudWorkspaceSession {
   private error: string | null = null;
   private started = false;
   private closed = false;
+  private paused = false;
   private poll: ReturnType<typeof setTimeout> | null = null;
   private pollDelay = OUTBOX_POLL_FIRST_MS;
 
@@ -214,6 +215,8 @@ export class CloudWorkspaceSession {
   /** The app left the foreground: let go of the connection. Nothing is forgotten. */
   pause(): void {
     if (this.closed) return;
+    // Nothing is polled or posted from the background, also not by a list read that finishes later.
+    this.paused = true;
     if (this.poll) clearTimeout(this.poll);
     this.poll = null;
     this.link.close();
@@ -222,6 +225,7 @@ export class CloudWorkspaceSession {
   /** Back in the foreground. */
   resume(): void {
     if (this.closed || !this.started) return;
+    this.paused = false;
     this.link.start();
     if (this.followable()) this.startPolling();
   }
@@ -400,7 +404,7 @@ export class CloudWorkspaceSession {
 
   /** Whether the outbox has anything to follow or deliver without asking the person. */
   private followable(): boolean {
-    if (this.closed) return false;
+    if (this.closed || this.paused) return false;
     if (this.outbox.awaiting) return true;
     const state = this.options.listed()?.state ?? null;
     return this.outbox.unsent && state !== null && state !== "archived" && state !== "suspended" && state !== "suspending";
@@ -408,6 +412,7 @@ export class CloudWorkspaceSession {
 
   /** Read command states, and deliver what is unsent only when that starts nothing. */
   private async syncOutbox(): Promise<boolean> {
+    if (this.paused) return false;
     const deliver = this.outbox.unsent && (await this.mayPost(false)) === "post";
     return this.outbox.sync({ deliver });
   }

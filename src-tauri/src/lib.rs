@@ -9,6 +9,8 @@
 mod account;
 mod agent_data;
 #[cfg(feature = "desktop")]
+mod desktop_links;
+#[cfg(feature = "desktop")]
 mod automations;
 mod binpath;
 #[cfg(feature = "desktop")]
@@ -50,6 +52,8 @@ mod control;
 mod pipe_transport;
 #[cfg(feature = "desktop")]
 mod dictation;
+#[cfg(feature = "desktop")]
+mod drag_text;
 #[cfg(feature = "desktop")]
 mod transcription;
 mod events;
@@ -94,14 +98,6 @@ mod workspaces;
 use std::sync::Arc;
 #[cfg(feature = "desktop")]
 use tauri::Manager;
-
-#[cfg(feature = "desktop")]
-const DEEP_LINK_SCHEMES: [&str; 2] = ["terminalx", "terminalx-next"];
-
-#[cfg(feature = "desktop")]
-fn supports_deep_link_scheme(scheme: &str) -> bool {
-    DEEP_LINK_SCHEMES.contains(&scheme)
-}
 
 #[cfg(feature = "desktop")]
 pub struct AppState {
@@ -203,12 +199,13 @@ pub fn run() {
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
                 let app_handle = app.handle().clone();
+                let links = desktop_links::DesktopLinks::for_identifier(&app.config().identifier);
                 let account = account.clone();
                 app.deep_link().on_open_url(move |event| {
                     for url in event.urls() {
-                        if supports_deep_link_scheme(url.scheme()) {
+                        if links.accepts_scheme(url.scheme()) {
                             account::focus_main_window(&app_handle);
-                            if account::is_launch_link(&url) {
+                            if links.is_launch_link(&url) {
                                 log::info!("received TerminalX launch link");
                             } else if account.handle_deep_link(&app_handle, &url) {
                                 log::info!("received TerminalX account callback");
@@ -330,6 +327,7 @@ pub fn run() {
             commands::cloud_workspace_preflight,
             commands::cloud_workspace_repositories,
             commands::cloud_workspaces,
+            commands::cloud_catalog_feed,
             commands::cloud_workspace_suspend,
             commands::cloud_workspace_resume,
             commands::cloud_workspace_release,
@@ -426,6 +424,7 @@ pub fn run() {
             commands::search_files,
             commands::list_slash_commands,
             commands::read_image_file,
+            drag_text::dropped_text,
             commands::invalidate_file_index,
             commands::git_commit,
             commands::git_identity,
@@ -522,6 +521,9 @@ pub fn run() {
             }
         })
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(drag) = event {
+                drag_text::on_drag_drop(drag);
+            }
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(state) = window.try_state::<AppState>() {
                     state.pairing.stop();
@@ -552,16 +554,4 @@ pub fn run() {
                 }
             }
         });
-}
-
-#[cfg(all(test, feature = "desktop"))]
-mod tests {
-    use super::supports_deep_link_scheme;
-
-    #[test]
-    fn accepts_current_and_legacy_deep_link_schemes() {
-        assert!(supports_deep_link_scheme("terminalx"));
-        assert!(supports_deep_link_scheme("terminalx-next"));
-        assert!(!supports_deep_link_scheme("https"));
-    }
 }

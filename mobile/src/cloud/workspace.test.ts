@@ -323,6 +323,29 @@ describe("a cloud workspace on the phone", () => {
     h.session.close();
   });
 
+  it("polls and posts nothing from the background, also when the list is read after pausing", async () => {
+    const h = harness();
+    await h.session.start();
+    await connected(h);
+    await h.session.send("t1", "sent");
+    // One more, written offline: it stays on the phone.
+    h.api.enqueue.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null));
+    await h.session.send("t1", "held");
+    h.session.pause();
+    const polls = h.api.commandStatuses.mock.calls.length;
+    const posts = h.api.enqueue.mock.calls.length;
+    // A list read that was on its way finishes after the app went to the background.
+    h.session.listChanged();
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(h.api.commandStatuses).toHaveBeenCalledTimes(polls);
+    expect(h.api.enqueue).toHaveBeenCalledTimes(posts);
+    // Back in the foreground it carries on.
+    h.session.resume();
+    await connected(h);
+    await vi.waitFor(() => expect(h.api.enqueue.mock.calls.length).toBe(posts + 1));
+    h.session.close();
+  });
+
   it("lets go of the connection in the background and takes it up again in the foreground", async () => {
     const h = harness();
     await h.session.start();

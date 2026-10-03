@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceRpcClient, type WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { CloudApiError } from "./api";
 import { NOW, pairingCode, relayHostId, Runtime } from "./fake-runtime";
-import { CloudWorkspaceLink, MAX_ATTEMPTS, MAX_WAITS, PHONE_CAPABILITIES } from "./link";
+import { CloudWorkspaceLink, MAX_ATTEMPTS, MAX_WAITS, PHONE_CAPABILITIES, STABLE_AFTER_MS } from "./link";
 
 // The real link against a runtime that speaks the real handshake and frames
 // (as `relay-client.test.ts` does for a paired Mac): nothing of the encrypted
@@ -290,6 +290,45 @@ describe("the phone's connection to a cloud workspace", () => {
     h.open.mockResolvedValue(ready() as never);
     h.link.reconnect();
     await connected(h);
+  });
+
+  it("backs off and gives up on a connection that keeps authenticating and then dropping", async () => {
+    const h = harness();
+    h.link.start();
+    const delays: number[] = [];
+    for (let drop = 0; drop < 40 && h.link.problem?.kind !== "gave-up"; drop++) {
+      await connected(h);
+      // Up for a moment only, then gone again.
+      h.runtimes.at(-1)!.drop(1006);
+      if (h.link.state.state !== "reconnecting") break;
+      delays.push(h.link.state.retryInMs);
+      await vi.advanceTimersByTimeAsync(h.link.state.retryInMs + 10);
+    }
+    // Each drop counted: the pauses grew, and it stopped by itself.
+    expect(h.link.state.state).toBe("stopped");
+    expect(h.link.problem).toEqual({ kind: "gave-up" });
+    expect(h.open).toHaveBeenCalledTimes(MAX_ATTEMPTS + 1);
+    expect(delays.at(-1)!).toBeGreaterThan(delays[0]! * 8);
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(h.open).toHaveBeenCalledTimes(MAX_ATTEMPTS + 1);
+  });
+
+  it("forgets earlier failures once a connection has stayed up for a while", async () => {
+    const h = harness();
+    h.link.start();
+    await connected(h);
+    h.runtimes[0].drop(1006);
+    expect(h.link.state).toMatchObject({ attempt: 1 });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await connected(h);
+    // Dropped again before it was stable: the count goes on.
+    h.runtimes[1].drop(1006);
+    expect(h.link.state).toMatchObject({ attempt: 2 });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await connected(h);
+    await vi.advanceTimersByTimeAsync(STABLE_AFTER_MS + 100);
+    h.runtimes[2].drop(1006);
+    expect(h.link.state).toMatchObject({ attempt: 1 });
   });
 
   it("asks less and less often for a runtime that is not ready, and stops", async () => {
