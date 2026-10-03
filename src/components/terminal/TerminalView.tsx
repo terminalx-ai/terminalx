@@ -3,7 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { pty } from "@/lib/api";
-import { getInstance, type TerminalInstance } from "@/lib/terminal";
+import { getInstance, peekInstance, type TerminalInstance } from "@/lib/terminal";
 import { fitTerminal } from "@/lib/terminalFit";
 import { hideWebgl, showWebgl } from "@/lib/terminalWebgl";
 import { useTheme } from "@/lib/theme";
@@ -169,8 +169,8 @@ export function TerminalView({
   }, [id]);
 
   useEffect(() => {
-    const inst = getInstance(id, make);
-    inst.term.options.theme = themeFor(resolvedMode);
+    const inst = peekInstance(id);
+    if (inst) inst.term.options.theme = themeFor(resolvedMode);
   }, [id, resolvedMode]);
 
   // Before paint, so a terminal that is shown is never a blank frame first.
@@ -190,7 +190,9 @@ export function TerminalView({
     const el = host.current;
     if (!visible || !el) return;
     requestAnimationFrame(() => {
-      const inst = getInstance(id, make);
+      // Closed in the meantime (its tab was): nothing to focus, and nothing to make anew.
+      const inst = peekInstance(id);
+      if (!inst) return;
       try {
         if (fitting.current) fitTerminal(inst.term, el);
         inst.term.focus();

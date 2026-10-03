@@ -8,7 +8,7 @@
 //
 //   node scripts/perf/terminal-bench.mjs --home ~/.txperf --pid 12345 \
 //     [--scenarios yes,cat,tui,echo,interrupt,soak,churn,covered] [--terminals 1,8,20] [--out results.json]
-//     [--interrupt-after 2000] [--soak sessions,tabs,switches] [--work dir] [--label text]
+//     [--interrupt-after 2000] [--soak sessions,tabs,switches,agents] [--work dir] [--label text]
 import { execFileSync } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
@@ -22,7 +22,7 @@ const TUI_FRAMES = 4000;
 const YES_LINES = 2_000_000;
 
 function parseArgs(argv) {
-  const options = { scenarios: SCENARIOS, terminals: [1, 8, 20], interruptAfterMs: 2000, soak: { sessions: 4, tabs: 50, switches: 200 } };
+  const options = { scenarios: SCENARIOS, terminals: [1, 8, 20], interruptAfterMs: 2000, soak: { sessions: 4, tabs: 50, switches: 200, agents: 20 } };
   for (let i = 0; i < argv.length; i++) {
     const value = () => argv[++i] ?? fail(`${argv[i - 1]} needs a value`);
     switch (argv[i]) {
@@ -33,8 +33,8 @@ function parseArgs(argv) {
       case "--out": options.out = value(); break;
       case "--work": options.work = value(); break;
       case "--soak": {
-        const [sessions, tabs, switches] = value().split(",").map(Number);
-        options.soak = { sessions, tabs, switches };
+        const [sessions, tabs, switches, agents = 20] = value().split(",").map(Number);
+        options.soak = { sessions, tabs, switches, agents };
         break;
       }
       case "--interrupt-after": options.interruptAfterMs = Number(value()); break;
@@ -282,7 +282,9 @@ function markdown(results) {
 const options = parseArgs(process.argv.slice(2));
 const status = await control(options.home, "status").catch((error) => fail(`no app answers under ${options.home}: ${error.message}`));
 if (options.pid && status.pid !== options.pid) fail(`the app under ${options.home} is pid ${status.pid}, not ${options.pid}`);
-console.error(`terminal-bench: app ${status.appVersion} pid ${status.pid}, workloads in ${options.work}`);
+// Agent tabs are only opened against the stand-in CLI that bench-app.sh puts on the app's path, never a real one.
+status.agent = existsSync(join(options.home, "bin/claude"));
+console.error(`terminal-bench: app ${status.appVersion} pid ${status.pid}, workloads in ${options.work}${status.agent ? "" : "; no stand-in agent CLI, so no agent tabs"}`);
 const files = writeWorkloads(options.work);
 await writeLog(files.log);
 const background = `sh "${files.agent}"`;
@@ -333,6 +335,7 @@ for (const scenario of options.scenarios) {
     const soak = { scenario: "soak", projectPath: project, fill: sh("seq 1 20000; exec cat") };
     await record(`${options.soak.sessions} sessions open (baseline)`, null, { ...soak, step: "open", sessions: options.soak.sessions });
     await record(`${options.soak.tabs} tabs opened and closed`, null, { ...soak, step: "tabs", count: options.soak.tabs });
+    if (status.agent) await record(`${options.soak.agents} agent tabs opened and closed`, null, { ...soak, step: "agents", count: options.soak.agents, harness: "claude" });
     await record(`${options.soak.switches} session switches`, null, { ...soak, step: "switches", count: options.soak.switches });
     await record("sessions deleted, terminals closed", null, { ...soak, step: "cleanup" });
     continue;

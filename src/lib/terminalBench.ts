@@ -1,17 +1,19 @@
 import { listen } from "@tauri-apps/api/event";
 import { api, pty } from "@/lib/api";
 import { createInstance } from "@/components/terminal/TerminalView";
-import { addProject, deleteSession, getSessionStore, selectSession, upsertSession } from "@/lib/sessions";
+import { addProject, addTab, deleteSession, getSessionStore, removeTab, selectSession, upsertSession } from "@/lib/sessions";
 import { rendererOf } from "@/lib/terminalCounters";
 import { fitTerminal } from "@/lib/terminalFit";
 import { showWebgl } from "@/lib/terminalWebgl";
 import {
   adoptPane,
+  agentPaneId,
   closeTerminal,
   disposeInstance,
   getInstance,
   getTerminalState,
   openTerminal,
+  peekInstance,
   terminalCounters,
   type TerminalInstance,
 } from "@/lib/terminal";
@@ -40,7 +42,7 @@ export type BenchRequest =
   | (Field & { scenario: "interrupt"; command: string; afterMs: number })
   | { scenario: "churn"; count: number; lines: number; attach: boolean; webgl: boolean; focus?: boolean; pty?: { cwd: string; command: string } }
   | { scenario: "covered"; projectPath: string; stream: string; seconds: number }
-  | ({ scenario: "soak"; projectPath: string; fill: string } & ({ step: "open"; sessions: number } | { step: "tabs" | "switches"; count: number } | { step: "cleanup" }));
+  | ({ scenario: "soak"; projectPath: string; fill: string } & ({ step: "open"; sessions: number } | { step: "tabs" | "switches"; count: number } | { step: "agents"; count: number; harness: string } | { step: "cleanup" }));
 
 const MARK = 7777;
 const ECHO = 7778;
@@ -394,6 +396,29 @@ async function soak(request: Soak) {
         soakRegistry.register(getInstance(pane.id, () => createInstance(pane.id, mode())).term, step);
         soakClosed.tracked++;
         await closeTerminal(pane.id);
+      }
+      break;
+    }
+    case "agents": {
+      // Agent tabs opened and closed the way a person does it: the tab starts
+      // its CLI in a pane of its own, and the tab strip's close removes it.
+      step = { tracked: 0, collected: 0 };
+      selectSession(soakSessions[0]);
+      await settle();
+      for (let index = 0; index < request.count; index++) {
+        const tab = await addTab(soakSessions[0], request.harness, "", null, "default");
+        const paneId = agentPaneId(tab.id);
+        const deadline = performance.now() + 15_000;
+        while (performance.now() < deadline && !peekInstance(paneId)) await sleep(100);
+        await sleep(500);
+        const inst = peekInstance(paneId);
+        if (inst) {
+          soakRegistry.register(inst.term, step);
+          soakClosed.tracked++;
+          step.tracked++;
+        }
+        await removeTab(soakSessions[0], tab.id);
+        await settle();
       }
       break;
     }

@@ -175,3 +175,30 @@ describe("terminals that are gone", () => {
     expect(terminal.getTerminalState().panes.map((pane) => pane.id)).toEqual(["tab:agent-1"]);
   });
 });
+
+describe("an agent tab that was closed", () => {
+  it("lets go of its pane and its xterm, and of nothing else", async () => {
+    const terminal = await loadTerminalStore();
+    const shell = await terminal.openTerminal("s1", "/repo");
+    await terminal.adoptPane({ id: terminal.agentPaneId("t1"), sessionId: "s1", title: "Agent", hidden: true, owned: true });
+    await terminal.adoptPane({ id: terminal.agentPaneId("t2"), sessionId: "s1", title: "Agent", hidden: true, owned: true });
+    const dispose = vi.fn();
+    terminal.getInstance("tab:t1", () => ({ el: document.createElement("div"), term: { write: vi.fn(), dispose }, fit: {} }) as never);
+    pty.kill.mockClear();
+
+    terminal.dropTabTerminals(["t1"]);
+
+    expect(terminal.getTerminalState().panes.map((pane) => pane.id)).toEqual([shell.id, "tab:t2"]);
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(terminal.peekInstance("tab:t1")).toBeUndefined();
+    // The backend stopped the CLI when it removed the tab: nothing to kill from here.
+    expect(pty.kill).not.toHaveBeenCalled();
+    expect(terminal.getTerminalState().selected.s1).toEqual({ kind: "terminal", id: shell.id });
+  });
+
+  it("is fine for a tab whose pane this window never took over", async () => {
+    const terminal = await loadTerminalStore();
+    terminal.dropTabTerminals(["never-shown"]);
+    expect(terminal.terminalCounters()).toMatchObject({ instances: 0, panes: 0 });
+  });
+});
