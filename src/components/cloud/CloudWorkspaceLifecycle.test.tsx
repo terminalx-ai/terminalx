@@ -396,6 +396,12 @@ describe("DeletionProgress", () => {
       expect(actionsFor(refused)).toContain("delete");
     });
 
+    it("names no code when Boat sent none", () => {
+      const view = show(operation({ state: "failed", errorCode: "cloud_provider_permission_denied" }));
+      expect(view.textContent).toContain("Boat refused to delete this workspace: the connected key is not allowed to read or delete it.");
+      expect(view.textContent).not.toContain("permission_denied");
+    });
+
     it("words the list row's line the same way", () => {
       const line = (fields: Record<string, unknown>, provider: "box" | "machine0" = "box") => deletionLine(item("attention-required", { provider }, operation({ action: "delete", state: "failed", ...fields })));
       expect(line({ errorCode: "cloud_provider_state_conflict", detailCode: "box_deleted_sandbox_present" })).toBe(

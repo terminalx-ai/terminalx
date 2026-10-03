@@ -204,7 +204,8 @@ export function deleteFailure(
   }
   if (provider === BOAT && operation.errorCode === "cloud_provider_permission_denied") {
     return {
-      text: `Boat refused to delete this workspace (${operation.providerErrorCode ?? "permission_denied"}): the connected key is not allowed to read or delete it. An owner or admin can connect a key with ${BOAT_DELETE_SCOPES} that covers all sandboxes in Settings, then press ${RETRY_DELETE}.`,
+      // Boat's own code when it sent one; never a made-up one in its place.
+      text: `Boat refused to delete this workspace${operation.providerErrorCode ? ` (${operation.providerErrorCode})` : ""}: the connected key is not allowed to read or delete it. An owner or admin can connect a key with ${BOAT_DELETE_SCOPES} that covers all sandboxes in Settings, then press ${RETRY_DELETE}.`,
       retry: true,
     };
   }
