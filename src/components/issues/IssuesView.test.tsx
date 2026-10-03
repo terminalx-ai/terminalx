@@ -35,10 +35,11 @@ vi.mock("@/components/chat/Dictation", () => ({
   DictationStatus: () => null,
   MicButton: () => null,
   useDictationInto: () => ({ dictating: false, toggle: vi.fn() }),
+  useDictationShortcuts: vi.fn(),
 }));
 vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonScene: () => null }));
 vi.mock("@/lib/dictation", () => ({ stopDictation: vi.fn() }));
-vi.mock("@/lib/hotkeys", () => ({ useHotkey: vi.fn() }));
+vi.mock("@/lib/hotkeys", () => ({ useHotkey: vi.fn(), useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
 vi.mock("@/lib/models", () => ({
   BYPASS_MODE: "bypassPermissions",
   DEFAULT_AUTOMATION_MODE: "bypassPermissions",

@@ -114,12 +114,17 @@ export function viewerText(
     return mayControl ? `${who} controls this terminal; you are watching.` : `${who} controls this terminal. View only: you can watch; ask an admin for driver access to type.`;
   }
   if (you && !mayControl) return "View only: you can watch this terminal; ask an admin for driver access to type.";
+  // An agent's own terminal starts with no controller at all.
+  if (terminal.tabId && terminal.control === "none") return "Nobody controls this terminal yet; you are watching.";
   if (manage || mayControl) return "Another device controls this terminal's input and size; you are watching.";
   return "View only: this attachment cannot type into or resize terminals.";
 }
 
-function inputErrorText(code: string): string {
+export function inputErrorText(code: string, agent = false): string {
+  if (agent && code === "unavailable") return "the agent is not running.";
   switch (code) {
+    case "lease_held":
+      return "someone else is driving this tab.";
     case "not_controller":
       return "another device controls this terminal. Take control to type.";
     case "forbidden":

@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, type KeyboardEvent, type RefObject } from "react";
 import { TERMINAL_OUTBOX_STATES, type OutboxEntry } from "@/lib/cloudAgentApi";
 import { RECOVERY_PROMPT } from "@/lib/recovery";
+import { matchesShortcut } from "@/lib/shortcuts";
 import type { Transcript } from "@/lib/transcript";
 
 /**
@@ -108,9 +109,9 @@ export function useComposerHistory({
   }, [draft, field]);
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): boolean => {
-    const up = e.key === "ArrowUp";
-    if (!up && e.key !== "ArrowDown") return false;
-    if (e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || e.nativeEvent.isComposing) return false;
+    const up = matchesShortcut(e.nativeEvent, "composer.historyPrevious");
+    if (!up && !matchesShortcut(e.nativeEvent, "composer.historyNext")) return false;
+    if (e.nativeEvent.isComposing) return false;
     const el = e.currentTarget;
     const value = el.value;
     const caret = el.selectionStart ?? value.length;

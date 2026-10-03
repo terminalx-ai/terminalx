@@ -119,7 +119,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # windows-latest is off until a Windows runner is set up: the job never
+        # got a runner and left every run unfinished. Add it back here; the
+        # Windows-only steps below are still in place.
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:

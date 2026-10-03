@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronDown, ExternalLink, FolderGit2, GitBranch, Loader2, RefreshCw, Search, Settings2, UserRound } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
+import { bindingText, useKeymap } from "@/lib/shortcuts";
 import { Segmented, Switch } from "@/components/ui/controls";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -40,6 +41,7 @@ export function IssuesView({
 }) {
   const store = useSessionStore();
   const prefs = usePrefs();
+  const settingsKeys = useKeymap()["app.settings"][0];
   const [provider, setProvider] = useState<Provider>(prefs.issueProvider);
   const [assignedToMe, setAssignedToMe] = useState(false);
   const [teamId, setTeamId] = useState<string | null>(null);
@@ -320,7 +322,7 @@ export function IssuesView({
               <span>{emptyReason}</span>
               {provider === "linear" && linear && !linear.connected && (
                 <span className="flex items-center gap-1 text-xs text-faint">
-                  <Settings2 className="size-3.5" /> Press ⌘, then Integrations.
+                  <Settings2 className="size-3.5" /> {settingsKeys ? `Press ${bindingText(settingsKeys)}, then Integrations.` : "Open Settings, then Integrations."}
                 </span>
               )}
             </div>
