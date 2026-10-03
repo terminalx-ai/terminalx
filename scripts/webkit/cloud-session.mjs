@@ -514,7 +514,7 @@ const headerLayout = (page) =>
     };
   });
 
-function headerChecks(measured, { collapsed }) {
+function headerChecks(measured, { collapsed, terminalSwitch = false }) {
   const overlapping = [];
   const { parts } = measured;
   for (let i = 0; i < parts.length; i++) {
@@ -526,7 +526,10 @@ function headerChecks(measured, { collapsed }) {
   const checks = {
     "the session title shows at least its first 12 characters": measured.title.text.length >= 12 && measured.title.shown >= measured.title.needed,
     "the title is inside the breadcrumb, which stops before the buttons on the right": measured.title.right <= measured.crumb.right + SLACK && measured.crumb.right <= measured.right.left + SLACK,
-    "the location chip is there, and every chip shown keeps its icon and tooltip, wide enough to press": measured.chips.some((chip) => chip.id === "session-location") && measured.chips.every((chip) => chip.tooltip && chip.iconInside && chip.width >= 20),
+    // A working terminal-view switch takes the location chip's place in a header this narrow (the sidebar row has both).
+    [terminalSwitch && collapsed ? "the terminal switch is there, and every chip shown keeps its icon and tooltip, wide enough to press" : "the location chip is there, and every chip shown keeps its icon and tooltip, wide enough to press"]:
+      (terminalSwitch && collapsed ? measured.parts.some((part) => part.name === "Show terminal view") : measured.chips.some((chip) => chip.id === "session-location")) &&
+      measured.chips.every((chip) => chip.tooltip && chip.iconInside && chip.width >= 20),
     "the connection and role chips are whole: Live and Driver, inside the breadcrumb": measured.status.map((chip) => chip.text).join(",") === "Live,Driver" && measured.status.every((chip) => chip.width > 20 && chip.right <= measured.crumb.right + SLACK),
     "nothing in the header overlaps": overlapping.length === 0,
     "the header is inside the window": measured.header.right <= measured.viewport + SLACK && measured.right.right <= measured.viewport + SLACK,
@@ -536,13 +539,18 @@ function headerChecks(measured, { collapsed }) {
   return checks;
 }
 
-for (const { viewport, collapsed } of [
+// Each width without and with a working terminal-view switch (PRO-86): the
+// switch is one more button on the right, and the title keeps its room.
+for (const { viewport, collapsed, terminalSwitch = false } of [
   { viewport: { width: 960, height: 700 }, collapsed: true },
+  { viewport: { width: 960, height: 700 }, collapsed: true, terminalSwitch: true },
   { viewport: { width: 1100, height: 700 }, collapsed: true },
+  { viewport: { width: 1100, height: 700 }, collapsed: true, terminalSwitch: true },
   { viewport: { width: 1680, height: 800 }, collapsed: false },
+  { viewport: { width: 1680, height: 800 }, collapsed: false, terminalSwitch: true },
 ]) {
-  const name = `session header (${viewport.width}x${viewport.height}, side panel open)`;
-  const page = await open(browser, server.url, { cloud: true, localProjects: 0, session: { role: "driver", canApprove: true, lines: 4, branch: "terminalx/share-demo-57f2a9c0" } }, viewport);
+  const name = `session header (${viewport.width}x${viewport.height}, side panel open${terminalSwitch ? ", terminal switch" : ""})`;
+  const page = await open(browser, server.url, { cloud: true, localProjects: 0, session: { role: "driver", canApprove: true, lines: 4, branch: "terminalx/share-demo-57f2a9c0", agentTerminal: terminalSwitch } }, viewport);
   const title = await page.evaluate(() => window.__PW_RUNTIME__.sessionTitle);
   const row = page.locator('[data-testid="cloud-session-node"]');
   await row.waitFor();
@@ -553,8 +561,8 @@ for (const { viewport, collapsed } of [
   await page.locator("main aside").first().waitFor();
   await page.waitForTimeout(300);
   const measured = await headerLayout(page);
-  failed += report(name, { "the side panel is open": measured.panel, ...headerChecks(measured, { collapsed }) }, measured);
-  if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/cloud-header-${viewport.width}.png` });
+  failed += report(name, { "the side panel is open": measured.panel, ...headerChecks(measured, { collapsed, terminalSwitch }) }, measured);
+  if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/cloud-header-${viewport.width}${terminalSwitch ? "-terminal-switch" : ""}.png` });
   await page.close();
 }
 
