@@ -729,8 +729,15 @@ fn session_from_refresh(mut refreshed: Refreshed, relay_host_id: &str) -> Result
         bail!("unsupported refresh version {}", refreshed.v);
     }
     validate_session(&refreshed.workspace_id, &refreshed.organization_id, &refreshed.relay_token, refreshed.relay_token_expires_at, &refreshed.director_url)?;
-    if refreshed.attachments.len() > MAX_LIST || refreshed.revocations.len() > MAX_LIST {
-        bail!("refresh listed too many attachments or revocations");
+    // A list longer than the bound is cut, not refused: refusing would stop
+    // the session from refreshing at all, for everyone (PRO-80). The server
+    // lists what matters most first, and an entry leaves its list once it is
+    // answered or confirmed, so the rest arrive on later refreshes.
+    for (name, list) in [("attachments", &mut refreshed.attachments), ("revocations", &mut refreshed.revocations)] {
+        if list.len() > MAX_LIST {
+            log::warn!("the refresh listed {} {name}; handling the first {MAX_LIST}", list.len());
+            list.truncate(MAX_LIST);
+        }
     }
     let environment = refreshed.setup.as_ref().and_then(crate::cloud_environment::raw);
     if refreshed.setup.as_ref().is_some_and(|setup| !environment_only(setup)) {
@@ -1427,6 +1434,27 @@ mod tests {
         let session = session_from_refresh(serde_json::from_str(refresh).unwrap(), "h").unwrap();
         assert_eq!(session.access_mode, AccessMode::Private, "absent access mode is the closed default");
         assert_eq!(session.quiesce, None);
+    }
+
+    #[test]
+    fn an_overlong_list_is_cut_instead_of_failing_the_refresh() {
+        let list = |name: &str, count: usize| (0..count).map(|index| format!(r#"{{"id":"{name}-{index}"}}"#)).collect::<Vec<_>>().join(",");
+        let refresh = |attachments: usize, revocations: usize| {
+            let body = format!(
+                r#"{{"v":1,"workspaceId":"w","organizationId":"o","relayToken":"t","relayTokenExpiresAt":5,"directorUrl":"http://127.0.0.1:9","attachments":[{}],"revocations":[{}]}}"#,
+                list("a", attachments),
+                list("r", revocations)
+            );
+            session_from_refresh(serde_json::from_str(&body).unwrap(), "h").unwrap()
+        };
+        let session = refresh(MAX_LIST + 1, MAX_LIST + 40);
+        assert_eq!((session.attachments.len(), session.revocations.len()), (MAX_LIST, MAX_LIST));
+        // The first entries are kept, in the server's order.
+        assert_eq!(session.attachments[0]["id"], "a-0");
+        assert_eq!(session.revocations[MAX_LIST - 1]["id"], format!("r-{}", MAX_LIST - 1));
+        assert_eq!(session.relay_token, "t", "the rest of the session is still taken");
+        let within = refresh(MAX_LIST, 3);
+        assert_eq!((within.attachments.len(), within.revocations.len()), (MAX_LIST, 3));
     }
 
     #[test]
