@@ -26,7 +26,22 @@ use crate::harness::tui::TurnMark;
 /// character outside `[A-Za-z0-9-]` becomes `-`, which is why a dot-folder
 /// yields a double dash.
 pub fn cli_transcript_path(cwd: &str, session_id: &str) -> Option<PathBuf> {
-    Some(transcript_under(&dirs::home_dir()?, cwd, session_id))
+    Some(projects_root()?.join(encoded_cwd(cwd)).join(format!("{session_id}.jsonl")))
+}
+
+/// Where the CLI keeps every project's transcripts: `projects` under
+/// `CLAUDE_CONFIG_DIR` when that is set, else under `~/.claude`. Reading a
+/// transcript and deleting one both go through here, so they cannot disagree
+/// about where the CLI wrote.
+pub fn projects_root() -> Option<PathBuf> {
+    projects_root_from(std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(), dirs::home_dir().as_deref())
+}
+
+pub fn projects_root_from(config_dir: Option<&str>, home: Option<&Path>) -> Option<PathBuf> {
+    match config_dir.filter(|dir| !dir.is_empty()) {
+        Some(dir) => Some(PathBuf::from(dir).join("projects")),
+        None => home.map(|home| home.join(".claude").join("projects")),
+    }
 }
 
 /// Every record uuid in a session's transcript. A fork copies those records
@@ -44,10 +59,16 @@ fn uuids_in(text: &str) -> HashSet<String> {
         .collect()
 }
 
-/// Path check without the home lookup, for tests and callers that have one.
+/// The folder name the CLI gives a working directory under `~/.claude/projects`.
+/// The encoding loses information: two different paths can share a name.
+pub fn encoded_cwd(cwd: &str) -> String {
+    cwd.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect()
+}
+
+/// Path check without the home lookup, for tests.
+#[cfg(test)]
 pub fn transcript_under(home: &Path, cwd: &str, session_id: &str) -> PathBuf {
-    let encoded: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
-    home.join(".claude").join("projects").join(encoded).join(format!("{session_id}.jsonl"))
+    home.join(".claude").join("projects").join(encoded_cwd(cwd)).join(format!("{session_id}.jsonl"))
 }
 
 fn text_of(content: &Value) -> String {
@@ -320,6 +341,16 @@ mod tests {
 
         let fresh = "{\"type\":\"user\",\"uuid\":\"u9\",\"message\":{\"content\":\"after the fork\"}}\n";
         assert!(matches!(&s.push(fresh.as_bytes())[0], Payload::UserMessage { text, .. } if text == "after the fork"));
+    }
+
+    #[test]
+    fn the_projects_root_follows_claude_config_dir() {
+        let home = Path::new("/Users/me");
+        assert_eq!(projects_root_from(None, Some(home)), Some(PathBuf::from("/Users/me/.claude/projects")));
+        assert_eq!(projects_root_from(Some(""), Some(home)), Some(PathBuf::from("/Users/me/.claude/projects")));
+        assert_eq!(projects_root_from(Some("/opt/claude"), Some(home)), Some(PathBuf::from("/opt/claude/projects")));
+        assert_eq!(projects_root_from(Some("/opt/claude"), None), Some(PathBuf::from("/opt/claude/projects")));
+        assert_eq!(projects_root_from(None, None), None);
     }
 
     #[test]

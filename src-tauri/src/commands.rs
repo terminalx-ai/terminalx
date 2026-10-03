@@ -1073,6 +1073,17 @@ pub async fn worktree_disposition(session_id: String) -> CmdResult<git::Worktree
     .map_err(err)?
 }
 
+/// The titles of the other sessions that deleting this one with its worktree
+/// would delete too, for the confirmation to name.
+#[tauri::command]
+pub async fn sessions_sharing_worktree(session_id: String) -> CmdResult<Vec<String>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(crate::session_ops::sessions_sharing_worktree(&session_id)?.into_iter().map(|session| session.title).collect())
+    })
+    .await
+    .map_err(err)?
+}
+
 /// Remove a session's worktree, retaining its origin while moving future work
 /// to the project root.
 #[tauri::command]
@@ -2507,7 +2518,9 @@ pub async fn rename_workspace(app: AppHandle, project_path: String, path: String
 pub async fn workspace_disposition(project_path: String, path: String) -> CmdResult<crate::workspaces::WorkspaceDisposition> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut disposition = crate::workspaces::disposition(Path::new(&project_path), Path::new(&path));
-        disposition.sessions = sessions_in_workspace(Path::new(&path))?.len();
+        let sessions = sessions_in_workspace(Path::new(&path))?;
+        disposition.sessions = sessions.len();
+        disposition.session_titles = sessions.into_iter().map(|session| session.title).collect();
         Ok(disposition)
     })
     .await

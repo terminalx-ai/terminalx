@@ -208,6 +208,18 @@ pub(crate) fn sessions_in_workspace(path: &Path) -> Result<Vec<SessionEntry>> {
         .map_err(err)
 }
 
+/// The other sessions that would be deleted along with `session_id` when
+/// its worktree is removed: every session running in the same checkout,
+/// matched the way the delete itself matches them. Empty when the session
+/// has no worktree to remove.
+pub(crate) fn sessions_sharing_worktree(session_id: &str) -> Result<Vec<SessionEntry>> {
+    let entry = index::get(session_id).map_err(err)?;
+    if entry.worktree_name.is_none() || entry.worktree_removed {
+        return Ok(Vec::new());
+    }
+    Ok(sessions_in_workspace(Path::new(&entry.cwd))?.into_iter().filter(|session| session.id != entry.id).collect())
+}
+
 /// Delete a workspace together with every session that ran in it: index
 /// entries, transcript logs and attachments. Returns the removed sessions so
 /// callers can announce them. Tabs must already be stopped.
@@ -220,8 +232,9 @@ pub(crate) fn delete_workspace_entries(project_path: &str, path: &str, delete_br
     Ok((affected, removal))
 }
 
-/// Drop sessions from the index along with their transcript logs and
-/// attachments. Callers stop whatever the tabs were running first.
+/// Drop sessions from the index along with their transcript logs,
+/// attachments and the agent CLIs' own data for them. Callers stop whatever
+/// the tabs were running first.
 pub(crate) fn remove_session_entries(doomed: &[SessionEntry]) -> Result<()> {
     if doomed.is_empty() {
         return Ok(());
@@ -241,6 +254,18 @@ pub(crate) fn remove_session_entries(doomed: &[SessionEntry]) -> Result<()> {
         if let Some(dir) = &attachments_dir {
             let _ = std::fs::remove_dir_all(dir.join(&session.id));
         }
+    }
+    // What the agent CLIs kept for these sessions goes with them. Without
+    // the index there is no telling what another session still uses, so
+    // nothing is removed then.
+    match index::load() {
+        Ok(remaining) => {
+            let freed = crate::agent_data::remove_for_deleted_sessions(doomed, &remaining);
+            if freed > 0 {
+                log::info!("removed {freed} bytes of agent data for {} deleted session(s)", doomed.len());
+            }
+        }
+        Err(error) => log::warn!("agent data kept: the session index could not be read: {error:#}"),
     }
     Ok(())
 }
@@ -440,6 +465,57 @@ mod tests {
         }
     }
 
+    const CONVERSATION: &str = "11111111-1111-4111-8111-111111111111";
+
+    /// Give the session's first tab a conversation and write its Claude
+    /// transcript where the CLI would, under the temporary home.
+    fn claude_transcript(session: &SessionEntry, conversation: &str) -> PathBuf {
+        index::update_tab(&session.id, &session.tabs[0].id, |tab| {
+            tab.provider_session_id = Some(conversation.into());
+            Ok(())
+        })
+        .unwrap();
+        let folder = crate::agent_data::claude_projects_root().unwrap().join(crate::harness::claude::transcript::encoded_cwd(&session.cwd));
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join(format!("{conversation}.jsonl"));
+        std::fs::write(&file, format!("{}\n", serde_json::json!({ "type": "user", "cwd": session.cwd }))).unwrap();
+        file
+    }
+
+    #[test]
+    fn deleting_a_session_removes_its_agent_data_and_removing_only_the_worktree_does_not() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let sink = crate::sink::BroadcastSink::new(16);
+        let stop = |_: &SessionEntry| {};
+
+        // The worktree goes but the session is kept: resume still needs the transcript.
+        let kept = worktree_session(dir.path());
+        let transcript = claude_transcript(&kept, "22222222-2222-4222-8222-222222222222");
+        git::remove_worktree(Path::new(&kept.project_path), kept.worktree_name.as_deref().unwrap(), git::DirectDelete::Allowed).unwrap();
+        assert!(transcript.exists());
+
+        // The session goes: so does the folder for its removed worktree.
+        let doomed = worktree_session(dir.path());
+        let transcript = claude_transcript(&doomed, CONVERSATION);
+        delete_session_blocking(&sink, &doomed.id, true, git::DirectDelete::Allowed, &stop).unwrap();
+        assert!(!Path::new(&doomed.cwd).exists());
+        assert!(!transcript.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn a_failed_delete_leaves_the_agent_data_alone() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let sink = crate::sink::BroadcastSink::new(16);
+        let session = worktree_session(dir.path());
+        let transcript = claude_transcript(&session, CONVERSATION);
+        let locked = ReadOnly::new(Path::new(&session.cwd));
+        assert!(delete_session_blocking(&sink, &session.id, true, git::DirectDelete::Allowed, &|_| {}).is_err());
+        drop(locked);
+        assert!(transcript.exists());
+    }
+
     #[test]
     fn a_worktree_outside_the_current_worktree_folder_is_not_silently_orphaned() {
         let _home = crate::store::temp_home();
@@ -497,6 +573,42 @@ mod tests {
         // The desktop, after its confirmation, may.
         delete_session_blocking(&sink, &session.id, true, git::DirectDelete::Allowed, &|_| {}).unwrap();
         assert!(!Path::new(&session.cwd).exists());
+    }
+
+    #[test]
+    fn the_sessions_sharing_a_worktree_are_the_ones_the_delete_takes() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let sink = crate::sink::BroadcastSink::new(16);
+        let session = worktree_session(dir.path());
+        let in_worktree = |cwd: String| {
+            create_session_entry(NewSession {
+                project_path: dir.path().to_string_lossy().into_owned(),
+                title: Some("Companion".into()),
+                use_worktree: false,
+                base_ref: None,
+                worktree_name: None,
+                on_main: false,
+                issue: None,
+                automation: None,
+                cwd: Some(cwd),
+                tab: None,
+            })
+            .unwrap()
+        };
+        // Recorded through a path that is not the canonical one.
+        let companion = in_worktree(format!("{}/.", session.cwd));
+        let at_root = in_worktree(dir.path().to_string_lossy().into_owned());
+
+        let shared = sessions_sharing_worktree(&session.id).unwrap();
+        assert_eq!(shared.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec![companion.id.as_str()]);
+        assert!(sessions_sharing_worktree(&at_root.id).unwrap().is_empty(), "a session with no worktree takes nothing along");
+
+        let mut deleted: Vec<String> = delete_session_blocking(&sink, &session.id, true, git::DirectDelete::Allowed, &|_| {}).unwrap().sessions.into_iter().map(|s| s.id).collect();
+        deleted.sort();
+        let mut expected = vec![session.id.clone(), companion.id.clone()];
+        expected.sort();
+        assert_eq!(deleted, expected);
     }
 
     #[test]

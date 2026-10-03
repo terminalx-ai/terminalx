@@ -39,7 +39,8 @@ const workspace: WorkspaceDisposition = {
   aheadOfBase: 0,
   pr: null,
   prChecked: true,
-  sessions: 1,
+  sessions: 2,
+  sessionTitles: ["Fix login", "Review the fix"],
 };
 const deleteButton = () => screen.getByRole("button", { name: /Delete (worktree|workspace|anyway)/ }) as HTMLButtonElement;
 
@@ -130,6 +131,10 @@ describe("WorkspaceDeleteDialog", () => {
     render(<WorkspaceDeleteDialog />);
     open();
     await screen.findByText("No uncommitted changes.");
+    // Every session that goes is named, not just counted.
+    expect(screen.getByText("2 sessions and their transcripts will be removed:")).toBeTruthy();
+    expect(screen.getByText("Fix login")).toBeTruthy();
+    expect(screen.getByText("Review the fix")).toBeTruthy();
     fireEvent.click(deleteButton());
     await waitFor(() => expect(mocks.deleteWorkspace).toHaveBeenCalledWith("/p", "/p/.raccoon/worktrees/quiet-amber-fox", true));
     expect(mocks.ask).not.toHaveBeenCalled();

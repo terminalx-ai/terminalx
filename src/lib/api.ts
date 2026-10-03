@@ -291,6 +291,7 @@ export const api = {
   deleteSession: (sessionId: string, removeWorktree: boolean) =>
     invoke<DeleteSessionReport>("delete_session", { sessionId, removeWorktree }),
   worktreeDisposition: (sessionId: string) => invoke<WorktreeDisposition>("worktree_disposition", { sessionId }),
+  sessionsSharingWorktree: (sessionId: string) => invoke<string[]>("sessions_sharing_worktree", { sessionId }),
   removeSessionWorktree: (sessionId: string) => invoke<SessionEntry>("remove_session_worktree", { sessionId }),
   settleSession: (sessionId: string, action: "delete" | "relocate") => invoke<SettleReport>("settle_session", { sessionId, action }),
   forkSession: (sessionId: string, tabId: string) => invoke<SessionEntry>("fork_session", { sessionId, tabId }),
