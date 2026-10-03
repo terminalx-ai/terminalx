@@ -21,7 +21,19 @@ struct CodexPrice {
     long_context: Option<(u64, f64, f64, f64)>,
 }
 
+// Claude rows follow https://platform.claude.com/docs/en/about-claude/pricing
+// (read 2026-10-03). `cache_write` is the 5-minute rate.
 const CLAUDE_PRICES: &[(&str, ClaudePrice)] = &[
+    (
+        "claude-fable-5-1",
+        ClaudePrice {
+            input: 10.0,
+            output: 50.0,
+            cache_read: 0.25,
+            cache_write: 12.5,
+            long_context: None,
+        },
+    ),
     (
         "claude-fable-5",
         ClaudePrice {
@@ -29,6 +41,16 @@ const CLAUDE_PRICES: &[(&str, ClaudePrice)] = &[
             output: 50.0,
             cache_read: 1.0,
             cache_write: 12.5,
+            long_context: None,
+        },
+    ),
+    (
+        "claude-opus-5-5",
+        ClaudePrice {
+            input: 4.0,
+            output: 20.0,
+            cache_read: 0.2,
+            cache_write: 5.0,
             long_context: None,
         },
     ),
@@ -43,12 +65,22 @@ const CLAUDE_PRICES: &[(&str, ClaudePrice)] = &[
         },
     ),
     (
+        "claude-sonnet-5-5",
+        ClaudePrice {
+            input: 2.0,
+            output: 10.0,
+            cache_read: 0.2,
+            cache_write: 2.5,
+            long_context: None,
+        },
+    ),
+    (
         "claude-sonnet-5",
         ClaudePrice {
-            input: 3.0,
-            output: 15.0,
-            cache_read: 0.3,
-            cache_write: 3.75,
+            input: 2.0,
+            output: 10.0,
+            cache_read: 0.2,
+            cache_write: 2.5,
             long_context: None,
         },
     ),
@@ -382,8 +414,15 @@ fn claude_key(model: &str) -> Option<&'static str> {
     if lower == "model_placeholder_m35" {
         return Some("claude-sonnet-4-6");
     }
+    // A point release is matched before its family: `opus-5-5` contains `opus-5`.
+    if lower.contains("fable-5-1") {
+        return Some("claude-fable-5-1");
+    }
     if lower.contains("fable-5") {
         return Some("claude-fable-5");
+    }
+    if lower.contains("opus-5-5") {
+        return Some("claude-opus-5-5");
     }
     if lower.contains("opus-5") {
         return Some("claude-opus-5");
@@ -412,6 +451,9 @@ fn claude_key(model: &str) -> Option<&'static str> {
     }
     if lower.contains("opus-4") {
         return Some("claude-opus-4-8");
+    }
+    if lower.contains("sonnet-5-5") {
+        return Some("claude-sonnet-5-5");
     }
     if lower.contains("sonnet-5") {
         return Some("claude-sonnet-5");
@@ -577,5 +619,30 @@ mod tests {
             Some("claude-opus-4-8")
         );
         assert!(claude_cost(Some("claude-fable-5"), 10, 10, 10, 10).is_some());
+    }
+
+    #[test]
+    fn every_model_the_picker_offers_has_its_own_price() {
+        for (alias, runs) in crate::models::CLAUDE_ALIASES {
+            let key = claude_key(runs).unwrap_or_else(|| panic!("`{alias}` runs {runs}, which has no price"));
+            // Its own row, not the family's: 5.5 is not billed as 5.
+            assert!(runs.starts_with(key), "{runs} is priced as {key}");
+            assert_eq!(crate::models::claude_label(runs), crate::models::claude_label(key));
+        }
+    }
+
+    #[test]
+    fn a_point_release_is_not_priced_as_its_predecessor() {
+        assert_eq!(claude_key("claude-opus-5-5"), Some("claude-opus-5-5"));
+        assert_eq!(claude_key("claude-opus-5"), Some("claude-opus-5"));
+        assert_eq!(claude_key("claude-sonnet-5.5"), Some("claude-sonnet-5-5"));
+        assert_eq!(claude_key("claude-fable-5-1"), Some("claude-fable-5-1"));
+        assert_eq!(claude_key("claude-fable-5"), Some("claude-fable-5"));
+        // One million of each kind of token, at the published rates.
+        let cost = |model| claude_cost(Some(model), 1_000_000, 1_000_000, 1_000_000, 1_000_000).unwrap();
+        assert!((cost("claude-opus-5-5") - 29.2).abs() < 1e-9);
+        assert!((cost("claude-sonnet-5-5") - 14.7).abs() < 1e-9);
+        assert!((cost("claude-fable-5-1") - 72.75).abs() < 1e-9);
+        assert!((cost("claude-haiku-4-5-20251001") - 7.35).abs() < 1e-9);
     }
 }

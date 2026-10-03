@@ -17,9 +17,10 @@ vi.mock("@/components/chat/Dictation", () => ({
   MicButton: () => null,
   NEW_SESSION_TARGET: "new-session",
   useDictationInto: () => ({ dictating: false, toggle: vi.fn() }),
+  useDictationShortcuts: vi.fn(),
 }));
 vi.mock("@/lib/dictation", () => ({ stopDictation: vi.fn() }));
-vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn() }));
+vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn(), useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
 vi.mock("@/lib/models", () => ({
   EFFORT_LABEL: {},
   PERMISSION_MODES: [{ id: "bypassPermissions", label: "Bypass", hint: "" }],
@@ -30,6 +31,7 @@ vi.mock("@/lib/models", () => ({
 vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
 vi.mock("@/lib/prefs", () => ({
   usePrefs: () => ({ useWorktree: true, lastAgent: "claude", lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", lastProject: null }),
+  getPrefs: () => ({}),
   setPrefs: vi.fn(),
 }));
 

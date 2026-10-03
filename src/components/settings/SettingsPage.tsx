@@ -12,8 +12,7 @@ import { cn } from "@/lib/cn";
 import { THEMES, hasLightMode, setMode, setTheme, useTheme, type Mode, type ThemeId } from "@/lib/theme";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { repoFile } from "@/lib/repo";
-import { hasEscapeOverlay, keycaps, useHotkey } from "@/lib/hotkeys";
-import { SHORTCUTS } from "@/lib/shortcuts";
+import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
 import { api, errorMessage, gh, issues, type BrowserRuntimeStatus, type CliToolStatus, type LinearStatus, type SkillInstallStatus } from "@/lib/api";
 import { ComputerUseRows } from "./ComputerUseSettings";
@@ -22,6 +21,7 @@ import { TranscriptionTab } from "./TranscriptionTab";
 import { setStatusSettings, useStatus } from "@/lib/status";
 import { AccountTab } from "./AccountTab";
 import { DevicesTab } from "./DevicesTab";
+import { ShortcutsTab } from "./ShortcutsTab";
 
 const TABS = ["account", "devices", "general", "appearance", "agents", "transcription", "integrations", "shortcuts", "about"] as const;
 export type SettingsTab = (typeof TABS)[number];
@@ -45,10 +45,12 @@ export function SettingsPage({
   onBack: () => void;
   initialTab?: SettingsTab;
 }) {
-  const [tab, setTab] = useState<Tab>(initialTab);
+  // Settings always opens on a section: a value that names none is the default one.
+  const initial: Tab = TABS.includes(initialTab) ? initialTab : "general";
+  const [tab, setTab] = useState<Tab>(initial);
   useEffect(() => {
-    setTab(initialTab);
-  }, [initialTab]);
+    setTab(initial);
+  }, [initial]);
 
   useHotkey("escape", () => {
     if (hasEscapeOverlay()) return false;
@@ -556,33 +558,6 @@ function IntegrationsTab() {
         </div>
         {error && <div className="mt-2 text-xs text-destructive">{error}</div>}
       </div>
-    </div>
-  );
-}
-
-function ShortcutsTab() {
-  const groups = [...new Set(SHORTCUTS.map((s) => s.group))];
-  return (
-    <div className="flex flex-col gap-4">
-      {groups.map((g) => (
-        <div key={g}>
-          <div className="mb-1 text-xs font-medium uppercase tracking-wide text-faint">{g}</div>
-          <ul className="flex flex-col">
-            {SHORTCUTS.filter((s) => s.group === g).map((s) => (
-              <li key={s.chord} className="flex items-center justify-between py-1 text-[13px]">
-                <span>{s.label}</span>
-                <span className="flex gap-0.5">
-                  {keycaps(s.chord).map((k, i) => (
-                    <kbd key={i} className="rounded-md bg-veil-raised px-1.5 py-0.5 font-sans text-[11px] text-muted-foreground hairline">
-                      {k}
-                    </kbd>
-                  ))}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ))}
     </div>
   );
 }

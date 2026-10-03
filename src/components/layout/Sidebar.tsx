@@ -1,7 +1,6 @@
 import { PanelLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { keycaps } from "@/lib/hotkeys";
 import { ProjectRail } from "./ProjectRail";
 
 /**
@@ -46,7 +45,7 @@ export function Sidebar({
         onOpenCloudPage={onOpenCloudPage}
       />
       <div className="absolute right-2 top-1.5 z-10">
-        <WithTooltip label="Hide sidebar" keys={keycaps("mod+b")}>
+        <WithTooltip label="Hide sidebar" shortcut="app.toggleSidebar">
           <Button variant="ghost" size="icon-sm" aria-label="Hide sidebar" onClick={onToggle} className="text-faint hover:text-foreground">
             <PanelLeft />
           </Button>
