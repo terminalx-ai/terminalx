@@ -5,7 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { TITLEBAR_INSET } from "@/components/layout/AppShell";
-import { keycaps, useHotkey } from "@/lib/hotkeys";
+import { useShortcut } from "@/lib/hotkeys";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { openAutomations, renameWorkspace, selectSession, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
@@ -283,7 +283,7 @@ export function SessionView({
   const [continuationSource, setContinuationSource] = useState<TabEntry | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
   const workspace = managedWorkspaceFor(session);
-  useHotkey("mod+shift+t", () => {
+  useShortcut("session.toggleTerminalView", () => {
     if (activeTab && local) void toggleTabView(session, activeTab);
   });
   const ed = useEditors();
@@ -307,7 +307,7 @@ export function SessionView({
     presenceTab(presenceKey, presenceTarget);
   }, [presenceKey, presenceTarget]);
 
-  useHotkey("mod+j", () => {
+  useShortcut("session.latestShell", () => {
     if (local) void activateLatestTerminal(session.id, session.cwd);
     else if (cloudTerminals.length) selectSessionTab(session.id, { kind: "terminal", id: cloudTerminals[cloudTerminals.length - 1].id });
   });
@@ -320,7 +320,7 @@ export function SessionView({
           style={{ paddingLeft: sidebarOpen ? 8 : TITLEBAR_INSET }}
         >
           {!sidebarOpen && (
-            <WithTooltip label="Show sidebar" keys={keycaps("mod+b")}>
+            <WithTooltip label="Show sidebar" shortcut="app.toggleSidebar">
               <Button variant="ghost" size="icon-sm" aria-label="Show sidebar" onClick={onToggleSidebar}>
                 <PanelLeft />
               </Button>
@@ -406,7 +406,7 @@ export function SessionView({
               </WithTooltip>
             )}
             {activeTab && local && (
-              <WithTooltip label={activeInTerminal ? "Back to chat" : "Show terminal view"} keys={keycaps("mod+shift+t")}>
+              <WithTooltip label={activeInTerminal ? "Back to chat" : "Show terminal view"} shortcut="session.toggleTerminalView">
                 <Button
                   variant="ghost"
                   size="icon-sm"
@@ -420,7 +420,7 @@ export function SessionView({
                 </Button>
               </WithTooltip>
             )}
-            <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} keys={keycaps("mod+e")}>
+            <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} shortcut="app.togglePanel">
               <Button
                 variant="ghost"
                 size="icon-sm"

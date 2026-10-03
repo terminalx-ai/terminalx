@@ -12,7 +12,7 @@ import { SessionView } from "@/components/session/SessionView";
 import { CloudSessionHost } from "@/components/session/CloudSessionHost";
 import { isCloudKey } from "@/types/target";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
-import { keycaps, useHotkey } from "@/lib/hotkeys";
+import { useShortcut } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { bootSessions, openAgents, openAutomations, openIssues, openSkills, openStats, selectSession, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
@@ -112,16 +112,16 @@ export function AppShell() {
   const showSkills = useCallback(() => openSkills(), []);
   const showAutomations = useCallback(() => openAutomations(), []);
 
-  useHotkey("mod+b", toggleSidebar);
-  useHotkey("mod+e", togglePanel);
-  useHotkey("mod+,", () => openSettings());
-  useHotkey("mod+n", newSession);
-  useHotkey("mod+i", showIssues);
-  useHotkey("mod+shift+a", showAgents);
-  useHotkey("mod+shift+u", showStats);
-  useHotkey("mod+shift+k", showSkills);
-  useHotkey("mod+shift+r", showAutomations);
-  useHotkey("mod+k", () => setPaletteOpen(true), { global: true });
+  useShortcut("app.toggleSidebar", toggleSidebar);
+  useShortcut("app.togglePanel", togglePanel);
+  useShortcut("app.settings", () => openSettings());
+  useShortcut("app.newSession", newSession);
+  useShortcut("app.issues", showIssues);
+  useShortcut("app.agentDashboard", showAgents);
+  useShortcut("app.stats", showStats);
+  useShortcut("app.skills", showSkills);
+  useShortcut("app.automations", showAutomations);
+  useShortcut("app.commandPalette", () => setPaletteOpen(true), { global: true });
 
   const sidebarOpen = prefs.sidebarOpen;
   const selected = store.sessions.find((s) => s.id === store.selectedSessionId) ?? null;
@@ -250,7 +250,7 @@ function UnselectedWorkspace({
           style={{ paddingLeft: sidebarOpen ? 8 : TITLEBAR_INSET }}
         >
           {!sidebarOpen && (
-            <WithTooltip label="Show sidebar" keys={keycaps("mod+b")}>
+            <WithTooltip label="Show sidebar" shortcut="app.toggleSidebar">
               <Button variant="ghost" size="icon-sm" aria-label="Show sidebar" onClick={onToggleSidebar}>
                 <PanelLeft />
               </Button>
@@ -267,7 +267,7 @@ function UnselectedWorkspace({
                   : "New session"}
           </span>
           {panelAvailable && (
-            <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} keys={keycaps("mod+e")}>
+            <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} shortcut="app.togglePanel">
               <Button variant="ghost" size="icon-sm" aria-label="Toggle panel" onClick={onTogglePanel}>
                 <PanelRight />
               </Button>

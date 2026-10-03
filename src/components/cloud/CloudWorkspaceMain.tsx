@@ -13,7 +13,6 @@ import { retainCloudConnection, setSelectedCloudConnection, subscribeCloudConnec
 import { findCloudWorkspace, refreshCloudCatalog, resumeCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { archiving, deletion, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 import { errorCode } from "@/lib/cloudTerminals";
-import { keycaps } from "@/lib/hotkeys";
 import { selectSession } from "@/lib/sessions";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 
@@ -109,7 +108,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
         style={{ paddingLeft: sidebarOpen ? 8 : TITLEBAR_INSET }}
       >
         {!sidebarOpen && (
-          <WithTooltip label="Show sidebar" keys={keycaps("mod+b")}>
+          <WithTooltip label="Show sidebar" shortcut="app.toggleSidebar">
             <Button variant="ghost" size="icon-sm" aria-label="Show sidebar" onClick={onToggleSidebar}>
               <PanelLeft />
             </Button>
