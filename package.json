@@ -23,7 +23,7 @@
     "tauri": "tauri",
     "clean:build": "node scripts/clean-build.mjs",
     "tauri:dev": "node scripts/clean-build.mjs --quiet && tauri dev --config src-tauri/tauri.dev.conf.json",
-    "test:webkit-layout": "node scripts/webkit/sidebar-scroll.mjs && node scripts/webkit/cloud-session.mjs && node scripts/webkit/shortcuts.mjs && node scripts/webkit/account-row.mjs && node scripts/webkit/sidebar-filter.mjs"
+    "test:webkit-layout": "node scripts/webkit/sidebar-scroll.mjs && node scripts/webkit/cloud-session.mjs && node scripts/webkit/cloud-sidebar.mjs && node scripts/webkit/shortcuts.mjs && node scripts/webkit/account-row.mjs && node scripts/webkit/sidebar-filter.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",

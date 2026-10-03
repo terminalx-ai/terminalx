@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
     cloudWorkspaceResume: vi.fn(),
     cloudWorkspaceUnarchive: vi.fn(),
     cloudWorkspaceOperation: vi.fn(),
+    cloudWorkspaceDelete: vi.fn(),
     cloudRemoteAttach: vi.fn(),
     cloudRemoteActivate: vi.fn(),
     cloudAgentPurgeWorkspace: vi.fn(),
@@ -49,11 +50,14 @@ vi.mock("@/components/cloud/CloudWorkspaceLifecycle", async (importOriginal) => 
     return <div data-testid="lifecycle-dialog">{props.initial}</div>;
   },
 }));
-// The workspace view's terminals and agent tab have their own tests (CloudSessionPage.test.tsx).
-vi.mock("@/components/cloud/CloudSessionPage", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/components/cloud/CloudSessionPage")>()),
+// The workspace view's terminals and agent tab have their own tests (CloudWorkspaceView.test.tsx).
+vi.mock("@/components/cloud/CloudWorkspaceView", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/components/cloud/CloudWorkspaceView")>()),
   WorkspaceView: () => <div data-testid="workspace-view" />,
 }));
+// The new-workspace form has its own tests; here only that the menu opens it.
+const openNewWorkspace = vi.hoisted(() => vi.fn());
+vi.mock("@/components/cloud/NewCloudWorkspaceDialog", () => ({ openNewCloudWorkspace: openNewWorkspace }));
 
 const { CloudSections } = await import("./CloudSections");
 const { CloudWorkspaceMain } = await import("@/components/cloud/CloudWorkspaceMain");
@@ -174,7 +178,8 @@ describe("organization sections", () => {
     const trigger = screen.getByRole("button", { name: "Menu for Acme" });
     mouseClick(trigger);
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Refresh cloud workspaces"]);
+    // An admin of the default organization also gets the full new-workspace form.
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Refresh cloud workspaces", "New cloud workspace…"]);
     // Still open after the whole click sequence.
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(screen.getByRole("menu")).toBe(menu);
@@ -281,6 +286,22 @@ describe("organization sections", () => {
     expect(connection.activate).not.toHaveBeenCalled();
   });
 
+  it("Retry delete that the server refuses for running work opens the delete dialog instead of doing nothing (PRO-68 review)", async () => {
+    const failed = { id: "op-d", workspaceId: "stuck", action: "delete", type: "delete", state: "failed", stage: "failed", errorCode: "cloud_provider_unavailable", cancelable: false, createdAt: 1, updatedAt: 2 };
+    await catalog.ingestCloudList({ workspaces: [{ ...item("stuck", { repositories }), latestOperation: failed } as CloudWorkspaceListItem] }, ORG);
+    mocks.api.cloudWorkspaceOperation.mockResolvedValue({ workspace: item("stuck", { repositories }).workspace, operation: failed });
+    mocks.api.cloudWorkspaceDelete.mockRejectedValue({ code: "cloud_workspace_active_work", status: 409 });
+    render(<CloudWorkspaceMain workspaceKey={`cloud:${ORG}:stuck`} sidebarOpen onToggleSidebar={() => undefined} />);
+    expect((await screen.findByTestId("cloud-deletion-progress")).textContent).toContain("The delete stopped");
+    expect(screen.queryByTestId("lifecycle-dialog")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Retry delete/ }));
+    // The dialog that says what would be lost and asks, opened on Delete for this workspace.
+    expect((await screen.findByTestId("lifecycle-dialog")).textContent).toBe("delete");
+    expect(mocks.lifecycle.at(-1)).toMatchObject({ initial: "delete", item: { workspace: { id: "stuck" } } });
+    expect(mocks.api.cloudWorkspaceDelete).toHaveBeenCalledTimes(1);
+    expect(mocks.api.cloudWorkspaceDelete).toHaveBeenCalledWith("stuck", false, null);
+  });
+
   it("a workspace that is still starting is shown without connecting", async () => {
     await catalog.ingestCloudList({ workspaces: [item("starting", { state: "provisioning", repositories })] }, ORG);
     render(<CloudWorkspaceMain workspaceKey={`cloud:${ORG}:starting`} sidebarOpen onToggleSidebar={() => undefined} />);
@@ -322,10 +343,86 @@ describe("lifecycle menu", () => {
     fireEvent.click(within(screen.getByTestId("cloud-node-archived")).getByRole("button", { name: /Expand Archived/ }));
     openMenu("old");
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Unarchive", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Read conversations", "Unarchive", "Delete…"]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: "Unarchive" }));
     await waitFor(() => expect(mocks.api.cloudWorkspaceUnarchive).toHaveBeenCalledWith("old", null));
     expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+  });
+
+  describe("the archived list, moved here from the full-window cloud page (PRO-68)", () => {
+    const archivedWith = (fields: Record<string, unknown>, latestOperation: unknown) => ({
+      workspaces: [list.workspaces[0], { ...item("old", { state: "archived", archivedAt: 1, deleteAfter: Date.now() + 12.5 * 86_400_000, repositories, ...fields }), latestOperation } as CloudWorkspaceListItem],
+    });
+    const showArchived = async (listed: { workspaces: CloudWorkspaceListItem[] }) => {
+      catalog.resetCloudCatalog();
+      await catalog.ingestCloudList(listed, ORG);
+      mocks.api.cloudWorkspaces.mockResolvedValue(listed);
+      mount();
+      fireEvent.click(within(screen.getByTestId("cloud-node-archived")).getByRole("button", { name: /Expand Archived/ }));
+    };
+
+    it("says when an archived workspace is deleted and what the final save of its conversations did", async () => {
+      await showArchived(archivedWith({}, { id: "op-a", workspaceId: "old", action: "archive", state: "succeeded", checkpoint: "timed-out" }));
+      expect(within(row("old")).getByTestId("cloud-archive-deadline").textContent).toMatch(/^Deleted automatically on .* \(in 12 days\)\.$/);
+      expect(within(row("old")).getByTestId("cloud-archive-saved").textContent).toMatch(/did not finish saving within a minute/);
+    });
+
+    it("reads an archived workspace's conversations by selecting it: nothing is resumed or woken", async () => {
+      await showArchived(archivedWith({}, null));
+      openMenu("old");
+      fireEvent.click(await screen.findByTestId("cloud-read-conversations"));
+      expect(sessions.getSessionStore().selectedCloudWorkspace).toBe(`cloud:${ORG}:old`);
+      expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+      expect(mocks.api.cloudWorkspaceUnarchive).not.toHaveBeenCalled();
+      expect(mocks.api.cloudRemoteAttach).not.toHaveBeenCalled();
+    });
+
+    it("keeps a failed archive in the list, says why, and retries it from the row's menu", async () => {
+      await showArchived(archivedWith({ state: "attention-required" }, { id: "op-a", workspaceId: "old", action: "archive", state: "failed", errorCode: "cloud_provider_unavailable" }));
+      expect(within(row("old")).getByTestId("cloud-archive-deadline").textContent).toMatch(/^The archive did not finish: The provider did not answer/);
+      openMenu("old");
+      const menu = await screen.findByRole("menu");
+      // Not archived yet: there is nothing saved to read, so reading is not offered.
+      expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Retry archive", "Unarchive", "Delete…"]);
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "Retry archive" }));
+      await waitFor(() => expect(mocks.lifecycle.at(-1)).toMatchObject({ initial: "archive", item: { workspace: { id: "old" } } }));
+    });
+
+    it("shows the whole reason of a failed archive (it wraps), and says storage keeps billing until the deadline", async () => {
+      await showArchived(archivedWith({ state: "attention-required" }, { id: "op-a", workspaceId: "old", action: "archive", state: "failed", errorCode: "cloud_provider_unavailable" }));
+      const line = within(row("old")).getByTestId("cloud-archive-deadline");
+      expect(line.className).toContain("whitespace-normal");
+      expect(line.className).not.toContain("truncate");
+      expect(screen.getByTestId("cloud-archived-note").textContent).toBe("Stopped and kept until their deadline, then deleted automatically. Storage keeps billing at the provider until then.");
+    });
+
+    it("says how far a delete of an archived workspace is, in the row", async () => {
+      const cleanup = { items: [{ kind: "machine", state: "removed" }, { kind: "volume", state: "removed" }, { kind: "snapshot", state: "pending" }, { kind: "relay", state: "pending" }, { kind: "keys", state: "pending" }] };
+      await showArchived(archivedWith({}, { id: "op-d", workspaceId: "old", action: "delete", state: "running", cleanup }));
+      expect(within(row("old")).getByTestId("cloud-archive-deadline").textContent).toBe("Deleting: 2 of 5 removed.");
+    });
+
+    it("says an archive is still saving conversations while it runs", async () => {
+      await showArchived(archivedWith({ state: "ready" }, { id: "op-a", workspaceId: "old", action: "archive", state: "running", errorCode: "runtime_checkpoint_pending" }));
+      expect(within(row("old")).getByTestId("cloud-archive-deadline").textContent).toBe("Archiving: waiting for the runtime to save its conversations (up to a minute)…");
+    });
+
+    it("offers someone the workspace is not shared with nothing to read", async () => {
+      await showArchived(archivedWith({ you: { role: "none", canApprove: false, canManageShares: false } }, null));
+      openMenu("old");
+      await screen.findByRole("menu");
+      expect(screen.queryByTestId("cloud-read-conversations")).toBeNull();
+    });
+  });
+
+  it("says once what this Mac dropped of a workspace deleted elsewhere, and the notice can be dismissed", async () => {
+    mocks.api.cloudAgentPurgeWorkspace.mockResolvedValue({ removed: true, unsentCommands: 1, cachedTabs: 1 });
+    await catalog.ingestCloudList({ workspaces: [list.workspaces[0]], tombstones: [{ id: "perf-sweep", orgId: ORG, deletedAt: 5, expiresAt: 6 }] }, ORG);
+    mount();
+    const notice = await screen.findByTestId("cloud-tombstone-notice");
+    expect(notice.textContent).toMatch(/“perf-sweep” was permanently deleted\. .*1 agent message that never reached it/);
+    fireEvent.click(within(notice).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(screen.queryByTestId("cloud-tombstone-notice")).toBeNull());
   });
 });
 
@@ -571,11 +668,10 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
     const asRole = (role: string) => {
       mocks.status = { ...mocks.status, organizations: mocks.status.organizations!.map((org) => (org.id === ORG ? { ...org, role } : org)) };
     };
-    const openCloudPage = vi.fn();
     const tree = () => (
       <TooltipProvider>
         <div role="tree">
-          <CloudSections onOpenCloudPage={openCloudPage} />
+          <CloudSections />
         </div>
       </TooltipProvider>
     );
@@ -603,12 +699,11 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
     const asRole = (role: string | undefined) => {
       mocks.status = { ...mocks.status, organizations: mocks.status.organizations!.map((org) => (org.id === ORG ? ({ ...org, role } as typeof org) : org)) };
     };
-    const openCloudPage = vi.fn();
     const mountWithPage = () =>
       render(
         <TooltipProvider>
           <div role="tree">
-            <CloudSections onOpenCloudPage={openCloudPage} />
+            <CloudSections />
           </div>
         </TooltipProvider>,
       );
@@ -641,7 +736,7 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
     expect(newWorkspace.getAttribute("aria-disabled")).toBe("true");
     expect(newWorkspace.getAttribute("title")).toBe("Only an organization owner or admin can create a cloud workspace");
     fireEvent.click(newWorkspace);
-    expect(openCloudPage).not.toHaveBeenCalled();
+    expect(openNewWorkspace).not.toHaveBeenCalled();
     // Refresh still works for a member: it only lists.
     fireEvent.click(refresh);
     await waitFor(() => expect(mocks.api.cloudWorkspaces).toHaveBeenCalled());

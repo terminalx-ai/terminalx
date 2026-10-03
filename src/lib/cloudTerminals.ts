@@ -441,6 +441,21 @@ export function detachAgentTerminal(workspace: string, tabId: string) {
   if (agentTerminalOf(workspace, tabId)?.live) patch(workspace, id, { live: false });
 }
 
+/**
+ * A restarted runtime numbers its terminals from 1 again, while the tabs of
+ * the one before stay open (ended) until they are closed. A new terminal
+ * whose name another tab still shows takes the next free number, so the strip
+ * never reads "Terminal 1 (ended)" next to "Terminal 1".
+ */
+function named(terminal: CloudTerminal, shown: readonly CloudTerminal[]): CloudTerminal {
+  const taken = new Set(shown.filter((other) => other.id !== terminal.id).map((other) => other.title));
+  if (!taken.has(terminal.title)) return terminal;
+  let number = terminal.number;
+  while (taken.has(`Terminal ${number}`)) number++;
+  // The number orders the tabs and labels presence, so it follows the name.
+  return { ...terminal, number, title: `Terminal ${number}` };
+}
+
 /** `next` when it says something new about the terminal, else the object the views already hold. */
 function unchanged(current: CloudTerminal, next: CloudTerminal): CloudTerminal {
   return (Object.keys(next) as (keyof CloudTerminal)[]).every((field) => current[field] === next[field]) ? current : next;
@@ -463,12 +478,12 @@ export async function syncCloudTerminals(
     const known = new Set(current.terminals.map((terminal) => terminal.ptyId));
     const terminals = current.terminals.map((terminal): CloudTerminal => {
       const info = byPty.get(terminal.ptyId);
-      if (info) return unchanged(terminal, { ...fromInfo(workspace, info), title: terminal.title, inputError: terminal.inputError, live: terminal.live });
+      if (info) return unchanged(terminal, { ...fromInfo(workspace, info), number: terminal.number, title: terminal.title, inputError: terminal.inputError, live: terminal.live });
       // Gone already, or opened here after this list was asked for.
       if (terminal.gone || (openedAt.get(terminal.id) ?? 0) > asked) return terminal;
       return { ...terminal, gone: terminal.epoch === listed.epoch ? "closed" : "runtime-restarted" };
     });
-    for (const info of listed.terminals) if (!known.has(info.ptyId)) terminals.push(fromInfo(workspace, info));
+    for (const info of listed.terminals) if (!known.has(info.ptyId)) terminals.push(named(fromInfo(workspace, info), terminals));
     const selected = current.selected && terminals.some((terminal) => terminal.id === current.selected) ? current.selected : (terminals[0]?.id ?? null);
     if (selected === current.selected && terminals.length === current.terminals.length && terminals.every((terminal, index) => terminal === current.terminals[index])) return current;
     return { ...current, terminals, selected };
@@ -486,7 +501,7 @@ export async function createCloudTerminal(
   options: { sessionId?: string } = {},
 ): Promise<CloudTerminal> {
   const info = await client.createPty(options.sessionId ? { ...size, sessionId: options.sessionId } : size);
-  const terminal = fromInfo(workspace, info);
+  const terminal = named(fromInfo(workspace, info), cloudTerminalsOf(workspace).terminals);
   openedAt.set(terminal.id, ++clock);
   update(workspace, (current) => ({
     ...current,

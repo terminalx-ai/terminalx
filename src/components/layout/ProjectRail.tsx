@@ -37,6 +37,7 @@ import { refreshAccountRoles } from "@/lib/accountRoles";
 import { refreshCloudCatalog } from "@/lib/cloudCatalog";
 import { TreeToggle } from "./SidebarRows";
 import { CloudSections, useCloudSections, useSectionCollapsed } from "./cloud/CloudSections";
+import { DevelopmentSection } from "@/components/cloud/DevRuntime";
 
 /**
  * The unified sidebar: global destinations followed by an expandable project
@@ -51,7 +52,6 @@ export function ProjectRail({
   onOpenAutomations,
   onOpenSkills,
   onSearch,
-  onOpenCloudPage,
 }: {
   onOpenSettings: () => void;
   onOpenAccount: () => void;
@@ -61,7 +61,6 @@ export function ProjectRail({
   onOpenAutomations: () => void;
   onOpenSkills: () => void;
   onSearch: () => void;
-  onOpenCloudPage?: () => void;
 }) {
   const store = useSessionStore();
   // A destination looks active only while it is what the main slot shows: no session and no cloud workspace selected.
@@ -338,7 +337,8 @@ export function ProjectRail({
         ) : (
           localRows
         )}
-        {sectioned && <CloudSections onOpenCloudPage={onOpenCloudPage} onOpenAccount={onOpenAccount} />}
+        {sectioned && <CloudSections onOpenAccount={onOpenAccount} />}
+        <DevelopmentSection />
       </div>
 
       {/* One row: the account (which opens Account) takes the width and truncates; the gear is its own target at the right end. */}
