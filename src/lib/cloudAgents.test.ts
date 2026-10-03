@@ -10,6 +10,7 @@ vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
 
 import {
   applyLiveTabs,
+  settledStatus,
   attachCloudAgentTab,
   configureCloudAgentTab,
   configuresLive,
@@ -199,6 +200,22 @@ describe("cloud agent tabs store", () => {
     const reads = backend.count("cloud_agent_checkpoint");
     expect(await refreshFromCheckpoint(scope, "t-1")).toBe(false);
     expect(backend.count("cloud_agent_checkpoint")).toBe(reads);
+  });
+
+  it("never shows an agent that cannot sign in as working (PRO-78)", async () => {
+    const signIn = { provider: "claude", state: "not-connected" };
+    applyLiveTabs(scope, [tabInfo({ status: "in_progress", signIn })]);
+    expect(getCloudAgents(scope).tabs[0]!.info).toMatchObject({ status: "idle", signIn });
+    // A status event from the stream says "in progress" too: the prompt went to a sign-in screen.
+    const client = fakeClient();
+    await attachCloudAgentTab(scope, "t-1", client);
+    const { onStatus } = client.subscribeSession.mock.calls[0]![3] as { onStatus: (change: { status: string }) => void };
+    onStatus({ status: "in_progress" });
+    expect(getCloudAgents(scope).tabs[0]!.info.status).toBe("idle");
+    // Once the login is connected the same reports mean what they say.
+    applyLiveTabs(scope, [tabInfo({ status: "in_progress" })]);
+    expect(getCloudAgents(scope).tabs[0]!.info.status).toBe("in_progress");
+    expect(settledStatus({ signIn }, "waiting")).toBe("waiting");
   });
 
   it("merges a live replay that overlaps the cache by seq instead of duplicating it", async () => {
