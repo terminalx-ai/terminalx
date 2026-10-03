@@ -107,6 +107,11 @@ describe("PRO-88: what the approval right guards beyond permission requests", ()
     expect(inputRefusalText("file-mention-forbidden", {})).toMatch(/outside the project/);
     // An oversized or empty message is not shown; another category is not this function's.
     expect(inputRefusalText("slash-command-forbidden", { message: "x".repeat(500) })).toBe("Not sent: that command needs someone who can approve permissions.");
+    // A command that would have waited behind a running turn (for everyone, not only plain drivers).
+    expect(inputRefusalText("command-not-queued", { message: "A turn is running: send this command when it has ended." })).toBe(
+      "Not sent: A turn is running: send this command when it has ended.",
+    );
+    expect(inputRefusalText("command-not-queued", null)).toBe("Not sent: a turn is running. Send this command when it has ended.");
     expect(inputRefusalText("lease-held", { message: "anything" })).toBeNull();
     expect(inputRefusalText(null, null)).toBeNull();
   });

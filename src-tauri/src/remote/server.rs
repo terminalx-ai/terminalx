@@ -2242,8 +2242,7 @@ impl WorkspaceRpc {
         // right before the running turn ends (the mailbox's follow-up queue
         // is re-checked). Prose queues as before, mentions included.
         if slash::is_command(text) && (busy || self.sessions.as_ref().is_some_and(|sessions| sessions.turn_open(&session.id, &tab.id))) {
-            return Err(RpcError::new("conflict", "A turn is running: send this command when it has ended. A command is not queued behind a running turn.")
-                .with_data(json!({ "reason": "command-not-queued" })));
+            return Err(RpcError::new("conflict", slash::NOT_QUEUED_MESSAGE).with_data(json!({ "reason": slash::NOT_QUEUED_CATEGORY })));
         }
         let now = crate::cloud_agents::now_ms();
         match peer.user_id.as_deref() {
