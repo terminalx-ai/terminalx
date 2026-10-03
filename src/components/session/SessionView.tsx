@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CalendarClock, CircleDot, Cloud, GitBranch, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Terminal } from "lucide-react";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -259,13 +259,24 @@ export function SessionView({
   }, [local]);
   const requested = terminals.selected[session.id];
   const terminalIds = local ? shellPanes.map((pane) => pane.id) : cloudTerminals.map((terminal) => terminal.id);
+  // A cloud session's active tab is the runtime's, shared by everyone in it: it moves to a new tab
+  // when anyone adds one. It decides what this view opens on, once: from then the view stays on
+  // the tab it shows until this person picks another (or that tab closes), so a tab someone else
+  // adds never takes the view. Until the runtime's active tab is known and listed, the tab shown
+  // is a guess that it may still correct.
+  const shownTab = useRef<{ sessionId: string; tab: SelectedSessionTab } | null>(null);
+  const kept = cloud && shownTab.current?.sessionId === session.id ? shownTab.current.tab : null;
+  const agentIds = session.tabs.map((tab) => tab.id);
   const selected: SelectedSessionTab | null = resolveSessionTab({
     requested,
-    agentIds: session.tabs.map((tab) => tab.id),
+    current: kept,
+    agentIds,
     activeTab: session.activeTab,
     terminalIds,
     browserIds: browserPages.map((page) => page.id),
   });
+  const opened = !!kept || (!!session.activeTab && agentIds.includes(session.activeTab));
+  shownTab.current = cloud && selected && opened ? { sessionId: session.id, tab: selected } : null;
   // The sidebar marks the row of the tab that is on screen.
   const selectedKind = selected?.kind ?? null;
   const selectedId = selected?.id ?? null;
