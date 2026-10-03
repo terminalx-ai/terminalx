@@ -208,6 +208,18 @@ pub(crate) fn sessions_in_workspace(path: &Path) -> Result<Vec<SessionEntry>> {
         .map_err(err)
 }
 
+/// The other sessions that would be deleted along with `session_id` when
+/// its worktree is removed: every session running in the same checkout,
+/// matched the way the delete itself matches them. Empty when the session
+/// has no worktree to remove.
+pub(crate) fn sessions_sharing_worktree(session_id: &str) -> Result<Vec<SessionEntry>> {
+    let entry = index::get(session_id).map_err(err)?;
+    if entry.worktree_name.is_none() || entry.worktree_removed {
+        return Ok(Vec::new());
+    }
+    Ok(sessions_in_workspace(Path::new(&entry.cwd))?.into_iter().filter(|session| session.id != entry.id).collect())
+}
+
 /// Delete a workspace together with every session that ran in it: index
 /// entries, transcript logs and attachments. Returns the removed sessions so
 /// callers can announce them. Tabs must already be stopped.
@@ -561,6 +573,42 @@ mod tests {
         // The desktop, after its confirmation, may.
         delete_session_blocking(&sink, &session.id, true, git::DirectDelete::Allowed, &|_| {}).unwrap();
         assert!(!Path::new(&session.cwd).exists());
+    }
+
+    #[test]
+    fn the_sessions_sharing_a_worktree_are_the_ones_the_delete_takes() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let sink = crate::sink::BroadcastSink::new(16);
+        let session = worktree_session(dir.path());
+        let in_worktree = |cwd: String| {
+            create_session_entry(NewSession {
+                project_path: dir.path().to_string_lossy().into_owned(),
+                title: Some("Companion".into()),
+                use_worktree: false,
+                base_ref: None,
+                worktree_name: None,
+                on_main: false,
+                issue: None,
+                automation: None,
+                cwd: Some(cwd),
+                tab: None,
+            })
+            .unwrap()
+        };
+        // Recorded through a path that is not the canonical one.
+        let companion = in_worktree(format!("{}/.", session.cwd));
+        let at_root = in_worktree(dir.path().to_string_lossy().into_owned());
+
+        let shared = sessions_sharing_worktree(&session.id).unwrap();
+        assert_eq!(shared.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec![companion.id.as_str()]);
+        assert!(sessions_sharing_worktree(&at_root.id).unwrap().is_empty(), "a session with no worktree takes nothing along");
+
+        let mut deleted: Vec<String> = delete_session_blocking(&sink, &session.id, true, git::DirectDelete::Allowed, &|_| {}).unwrap().sessions.into_iter().map(|s| s.id).collect();
+        deleted.sort();
+        let mut expected = vec![session.id.clone(), companion.id.clone()];
+        expected.sort();
+        assert_eq!(deleted, expected);
     }
 
     #[test]

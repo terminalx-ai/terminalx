@@ -116,6 +116,8 @@ export interface WorkspaceDisposition {
   prChecked: boolean;
   /** Sessions that ran here; deleting the workspace removes them and their transcripts. */
   sessions: number;
+  /** Their titles, so the confirmation can name what goes. */
+  sessionTitles: string[];
 }
 
 export interface Capabilities {

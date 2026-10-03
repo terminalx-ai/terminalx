@@ -99,7 +99,7 @@ export function WorkspaceDeleteDialog() {
           )}
           {disp && (
             <>
-              <SessionsRow count={disp.sessions} />
+              <SessionsRow count={disp.sessions} titles={disp.sessionTitles ?? []} />
               {unchecked ? (
                 <Row ok={false} text="This folder is not a working git checkout of this project, so it cannot be checked for uncommitted or unpushed work." />
               ) : (
@@ -154,13 +154,24 @@ export function WorkspaceDeleteDialog() {
   );
 }
 
-/** How many sessions the deletion takes with it. Not a warning: it is what was asked for. */
-function SessionsRow({ count }: { count: number }) {
-  const text = count === 0 ? "No sessions ran here." : `${count} session${count === 1 ? "" : "s"} and ${count === 1 ? "its" : "their"} transcripts will be removed.`;
+/** The sessions the deletion takes with it, by name. Not a warning: it is what was asked for. */
+function SessionsRow({ count, titles }: { count: number; titles: string[] }) {
+  const text = count === 0 ? "No sessions ran here." : `${count} session${count === 1 ? "" : "s"} and ${count === 1 ? "its" : "their"} transcripts will be removed${titles.length ? ":" : "."}`;
   return (
     <div className="flex items-start gap-2">
       <Trash2 className={`mt-0.5 size-3.5 shrink-0 ${count === 0 ? "text-faint" : "text-muted-foreground"}`} />
-      <span>{text}</span>
+      <div className="min-w-0">
+        <div>{text}</div>
+        {titles.length > 0 && (
+          <ul className="mt-0.5 max-h-24 overflow-y-auto scrollbar-thin text-muted-foreground">
+            {titles.map((title, i) => (
+              <li key={`${i}-${title}`} className="truncate">
+                {title}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }

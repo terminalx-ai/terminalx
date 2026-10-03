@@ -10,40 +10,30 @@
 //! These files are what "resume" reads, so they go only when the session
 //! itself is deleted, never when a worktree is removed and the session kept.
 //!
-//! Nothing here follows a symlink or leaves the two roots above. A deleted
-//! session's own conversations are removed by id, except one a remaining
-//! session still holds or is waiting to fork from.
+//! Nothing here follows a symlink or leaves the two roots above. Only a
+//! deleted session's own conversations are removed, by id: the transcript
+//! and its side folder. One a remaining session still holds, or has forked
+//! from without yet having a transcript of its own, is kept.
 //!
-//! The whole Claude folder for a directory goes only when all of this holds:
-//! the directory was the session's managed worktree and is known to be gone
-//! (not merely unreadable); no remaining session uses it; and every
-//! transcript in the folder is a conversation of the sessions being deleted
-//! and says it was written there. The folder name is a lossy encoding, so the
-//! name alone does not prove whose it is, and `~/.claude` is shared with the
+//! Everything else in a Claude folder stays: `~/.claude` is shared with the
 //! person's own `claude` runs and with other installs of this app (a dev
-//! build has its own index), so a conversation this delete does not know is
-//! someone else's and keeps the folder.
+//! build has its own index), and a folder also holds things that are not
+//! conversations at all, such as `memory/`. The folder itself is removed
+//! only when it is left empty, belonged to a managed worktree that is known
+//! to be gone (not merely unreadable), and no remaining session uses it.
 
 use std::collections::HashSet;
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use crate::harness::claude::transcript::encoded_cwd;
 use crate::store::index::SessionEntry;
-
-/// How far into a transcript to look for the directory it was written in.
-const CWD_SCAN_LINES: usize = 64;
 
 /// `~/.claude/projects`, or `$CLAUDE_CONFIG_DIR/projects`. Under test this is never the real home: it resolves
 /// inside the temporary `TERMINALX_HOME`, or nowhere when none is set.
 pub(crate) fn claude_projects_root() -> Option<PathBuf> {
     #[cfg(not(test))]
     {
-        // The CLI keeps everything under `CLAUDE_CONFIG_DIR` when it is set.
-        match std::env::var("CLAUDE_CONFIG_DIR") {
-            Ok(dir) if !dir.is_empty() => Some(PathBuf::from(dir).join("projects")),
-            _ => dirs::home_dir().map(|home| home.join(".claude").join("projects")),
-        }
+        crate::harness::claude::transcript::projects_root()
     }
     #[cfg(test)]
     {
@@ -107,16 +97,24 @@ fn conversation_ids<'a>(sessions: &'a [SessionEntry], harness: &str) -> HashSet<
 }
 
 /// Conversations the remaining sessions need: the ones their tabs hold, and
-/// the ones a forked tab has yet to fork from. A fork has no conversation of
-/// its own until its first send, when the CLI resumes the parent's.
-fn needed_conversation_ids<'a>(remaining: &'a [SessionEntry], harness: &str) -> HashSet<&'a str> {
-    remaining
-        .iter()
-        .flat_map(|session| &session.tabs)
-        .filter(|tab| tab.harness == harness)
-        .flat_map(|tab| [tab.provider_session_id.as_deref(), tab.fork_from.as_deref()])
-        .flatten()
-        .collect()
+/// the parent of a forked tab that has no transcript of its own yet. A fork
+/// gets an id when its CLI starts, but until the CLI has written the fork's
+/// own file the parent's transcript is the only copy of the conversation.
+/// `has_transcript` says whether a session's conversation has a file.
+fn needed_conversation_ids<'a>(remaining: &'a [SessionEntry], harness: &str, has_transcript: &dyn Fn(&SessionEntry, &str) -> bool) -> HashSet<&'a str> {
+    let mut needed = HashSet::new();
+    for session in remaining {
+        for tab in session.tabs.iter().filter(|tab| tab.harness == harness) {
+            let own = tab.provider_session_id.as_deref();
+            needed.extend(own);
+            if let Some(parent) = tab.fork_from.as_deref() {
+                if !own.is_some_and(|own| has_transcript(session, own)) {
+                    needed.insert(parent);
+                }
+            }
+        }
+    }
+    needed
 }
 
 /// How a folder name is compared with what remaining sessions use. Lower
@@ -139,54 +137,6 @@ fn removed_managed_worktree(session: &SessionEntry, dir: &str) -> bool {
     let gone = matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
     // The worktree is gone, and the project it was in can still be read.
     gone && std::fs::symlink_metadata(&session.project_path).is_ok()
-}
-
-/// The directory a Claude transcript says it was written in.
-fn recorded_cwd(transcript: &Path) -> Option<String> {
-    let file = std::fs::File::open(transcript).ok()?;
-    std::io::BufReader::new(file)
-        .lines()
-        .take(CWD_SCAN_LINES)
-        .map_while(|line| line.ok())
-        .find_map(|line| serde_json::from_str::<serde_json::Value>(&line).ok()?.get("cwd")?.as_str().map(String::from))
-}
-
-/// Whether every transcript in a Claude folder was written in `cwd` (or
-/// below it). A transcript naming another directory means the folder name is
-/// shared with some other path; one that names none cannot be placed. Either
-/// way the folder is not known to be ours.
-fn transcripts_belong_to(folder: &Path, cwd: &str) -> bool {
-    let Ok(entries) = std::fs::read_dir(folder) else { return false };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-            continue;
-        }
-        match recorded_cwd(&path) {
-            Some(named) if Path::new(&named).starts_with(cwd) => {}
-            _ => return false,
-        }
-    }
-    true
-}
-
-/// Whether everything conversation-shaped in a Claude folder belongs to
-/// `ours`: every transcript, and every side folder named for a conversation.
-/// One this delete does not know belongs to someone else.
-fn only_conversations_of(folder: &Path, ours: &HashSet<&str>) -> bool {
-    let Ok(entries) = std::fs::read_dir(folder) else { return false };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { return false };
-        let known = match name.strip_suffix(".jsonl") {
-            Some(stem) => ours.contains(stem),
-            None => conversation_id(name).is_none_or(|id| ours.contains(id)),
-        };
-        if !known {
-            return false;
-        }
-    }
-    true
 }
 
 fn remove_file_counted(path: &Path) -> u64 {
@@ -220,28 +170,30 @@ fn remove_dir_counted(path: &Path) -> u64 {
 /// (`~/.claude/projects`). Returns the bytes freed.
 pub(crate) fn remove_claude_data(root: &Path, doomed: &[SessionEntry], remaining: &[SessionEntry]) -> u64 {
     let Ok(root) = std::fs::canonicalize(root) else { return 0 };
-    let needed = needed_conversation_ids(remaining, "claude");
+    let has_transcript = |session: &SessionEntry, id: &str| {
+        conversation_id(id).is_some()
+            && session_dirs(session).iter().any(|dir| {
+                real_child_dir(&root, &encoded_cwd(dir)).is_some_and(|folder| std::fs::symlink_metadata(folder.join(format!("{id}.jsonl"))).is_ok_and(|meta| meta.is_file()))
+            })
+    };
+    let needed = needed_conversation_ids(remaining, "claude", &has_transcript);
     let ours: HashSet<&str> = conversation_ids(doomed, "claude").into_iter().filter(|id| conversation_id(id).is_some() && !needed.contains(id)).collect();
     let kept_folders: HashSet<String> = remaining.iter().flat_map(session_dirs).map(folder_key).collect();
     let mut freed = 0;
     for session in doomed {
         for dir in session_dirs(session) {
-            let name = encoded_cwd(dir);
-            let Some(folder) = real_child_dir(&root, &name) else { continue };
-            let whole = !kept_folders.contains(&folder_key(dir))
-                && removed_managed_worktree(session, dir)
-                && only_conversations_of(&folder, &ours)
-                && transcripts_belong_to(&folder, dir);
-            if whole {
-                freed += remove_dir_counted(&folder);
-                continue;
-            }
+            let Some(folder) = real_child_dir(&root, &encoded_cwd(dir)) else { continue };
             for tab in session.tabs.iter().filter(|tab| tab.harness == "claude") {
                 let Some(id) = tab.provider_session_id.as_deref().filter(|id| ours.contains(id)) else { continue };
                 freed += remove_file_counted(&folder.join(format!("{id}.jsonl")));
                 if let Some(side) = real_child_dir(&folder, id) {
                     freed += remove_dir_counted(&side);
                 }
+            }
+            // The folder goes only when nothing is left in it: `remove_dir`
+            // refuses one that still holds anything.
+            if !kept_folders.contains(&folder_key(dir)) && removed_managed_worktree(session, dir) && std::fs::remove_dir(&folder).is_ok() {
+                log::debug!("removed the empty Claude folder {}", folder.display());
             }
         }
     }
@@ -252,7 +204,8 @@ pub(crate) fn remove_claude_data(root: &Path, doomed: &[SessionEntry], remaining
 /// Returns the bytes freed.
 pub(crate) fn remove_codex_data(home: &Path, doomed: &[SessionEntry], remaining: &[SessionEntry]) -> u64 {
     let Ok(sessions) = std::fs::canonicalize(home.join("sessions")) else { return 0 };
-    let kept_ids = needed_conversation_ids(remaining, "codex");
+    // Codex forks are new threads over a copied log, so none waits on a parent's file.
+    let kept_ids = needed_conversation_ids(remaining, "codex", &|_, _| true);
     let mut freed = 0;
     for tab in doomed.iter().flat_map(|session| &session.tabs).filter(|tab| tab.harness == "codex") {
         let Some(id) = tab.provider_session_id.as_deref().and_then(conversation_id) else { continue };
@@ -376,13 +329,12 @@ mod tests {
     }
 
     #[test]
-    fn a_deleted_sessions_removed_worktree_loses_its_whole_claude_folder() {
+    fn a_deleted_sessions_removed_worktree_loses_its_conversations_and_the_emptied_folder() {
         let f = Fixture::new();
         let gone = f.worktree("gone");
         let mine = f.transcript(&gone, CONV_A);
         let also_mine = f.transcript(&gone, CONV_B);
         let folder = mine.parent().unwrap().to_path_buf();
-        std::fs::create_dir_all(folder.join("memory")).unwrap();
         std::fs::create_dir_all(folder.join(CONV_A).join("subagents")).unwrap();
         let elsewhere = f.transcript(&f.project(), CONV_C);
 
@@ -390,8 +342,8 @@ mod tests {
         let freed = remove_claude_data(&f.root, &[doomed], &[]);
 
         assert!(freed > 0);
-        assert!(!folder.exists(), "the folder for the removed worktree is gone");
         assert!(!also_mine.exists());
+        assert!(!folder.exists(), "nothing was left in it, so the folder for the removed worktree goes too");
         assert!(elsewhere.exists(), "the project's own folder is not the session's to remove");
     }
 
@@ -416,35 +368,49 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_forks_parent_conversation_is_kept() {
+    fn a_forks_parent_conversation_is_kept_until_the_fork_has_its_own_transcript() {
         let f = Fixture::new();
         let gone = f.worktree("gone");
+        let fork_dir = f.worktree("fork");
+        std::fs::create_dir_all(&fork_dir).unwrap();
+        let doomed = session(&f.project(), &gone, vec![tab("claude", Some(CONV_A)), tab("claude", Some(CONV_B))]);
+
+        // Not started yet: the fork has no conversation, and its first send
+        // resumes the parent's.
         let parent = f.transcript(&gone, CONV_A);
         let other = f.transcript(&gone, CONV_B);
-        // A fork lives in a worktree of its own and has no conversation yet:
-        // its first send resumes the parent's.
         let mut fork_tab = tab("claude", None);
         fork_tab.fork_from = Some(CONV_A.into());
-        let fork = session(&f.project(), &f.worktree("fork"), vec![fork_tab]);
-
-        let doomed = session(&f.project(), &gone, vec![tab("claude", Some(CONV_A)), tab("claude", Some(CONV_B))]);
-        remove_claude_data(&f.root, &[doomed], &[fork]);
+        let mut fork = session(&f.project(), &fork_dir, vec![fork_tab]);
+        remove_claude_data(&f.root, std::slice::from_ref(&doomed), std::slice::from_ref(&fork));
         assert!(parent.exists(), "the fork still has to resume from it");
         assert!(!other.exists(), "the session's other conversation goes");
+
+        // Started: it has an id, but the CLI has not written its file yet.
+        fork.tabs[0].provider_session_id = Some(CONV_C.into());
+        remove_claude_data(&f.root, std::slice::from_ref(&doomed), std::slice::from_ref(&fork));
+        assert!(parent.exists(), "the parent's is still the only copy");
+
+        // Once the fork's own transcript exists the parent's can go.
+        f.transcript(&fork_dir, CONV_C);
+        remove_claude_data(&f.root, std::slice::from_ref(&doomed), std::slice::from_ref(&fork));
+        assert!(!parent.exists());
     }
 
     #[test]
-    fn a_transcript_that_names_no_directory_keeps_the_folder() {
+    fn what_is_not_a_conversation_stays_and_so_does_its_folder() {
         let f = Fixture::new();
         let gone = f.worktree("gone");
         let mine = f.transcript(&gone, CONV_A);
-        std::fs::write(&mine, "{\"type\":\"summary\"}\n").unwrap();
         let folder = mine.parent().unwrap().to_path_buf();
         std::fs::create_dir_all(folder.join("memory")).unwrap();
+        std::fs::write(folder.join("memory/MEMORY.md"), "notes").unwrap();
+        std::fs::write(folder.join("notes.txt"), "x").unwrap();
         let doomed = session(&f.project(), &gone, vec![tab("claude", Some(CONV_A))]);
         remove_claude_data(&f.root, &[doomed], &[]);
-        assert!(!mine.exists(), "it is still the session's own conversation, removed by id");
-        assert!(folder.join("memory").exists(), "but where it was written is unknown, so the folder stays");
+        assert!(!mine.exists(), "the session's own conversation goes");
+        assert!(folder.join("memory/MEMORY.md").exists());
+        assert!(folder.join("notes.txt").exists());
     }
 
     #[cfg(unix)]
@@ -455,7 +421,6 @@ mod tests {
         let gone = f.worktree("gone");
         let mine = f.transcript(&gone, CONV_A);
         let folder = mine.parent().unwrap().to_path_buf();
-        std::fs::create_dir_all(folder.join("memory")).unwrap();
         let doomed = session(&f.project(), &gone, vec![tab("claude", Some(CONV_A))]);
 
         // The worktree folder cannot be searched: the stat fails, but not with "not found".
@@ -466,7 +431,7 @@ mod tests {
         remove_claude_data(&f.root, std::slice::from_ref(&doomed), &[]);
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
         if unreadable {
-            assert!(folder.join("memory").exists());
+            assert!(folder.exists(), "emptied, but not removed: the worktree may still be there");
         }
 
         // Nor is it gone when the whole project is out of reach (an unmounted volume).
@@ -474,10 +439,9 @@ mod tests {
         let away = f.dir.path().join("not-mounted/project");
         let elsewhere = crate::git::worktree_path(&away, "gone");
         let theirs = f.transcript(&elsewhere, CONV_B);
-        std::fs::create_dir_all(theirs.parent().unwrap().join("memory")).unwrap();
         let doomed = session(&away, &elsewhere, vec![tab("claude", Some(CONV_B))]);
         remove_claude_data(&f.root, &[doomed], &[]);
-        assert!(theirs.parent().unwrap().join("memory").exists());
+        assert!(theirs.parent().unwrap().exists());
     }
 
     #[test]
@@ -486,13 +450,12 @@ mod tests {
         let gone = f.worktree("gone");
         let mine = f.transcript(&gone, CONV_A);
         let folder = mine.parent().unwrap().to_path_buf();
-        std::fs::create_dir_all(folder.join("memory")).unwrap();
         let doomed = session(&f.project(), &gone, vec![tab("claude", Some(CONV_A))]);
         // The same directory as another session recorded it on a case-insensitive disk.
         let shouted = PathBuf::from(gone.to_string_lossy().to_uppercase());
         let other = session(&f.project(), &shouted, vec![]);
         remove_claude_data(&f.root, &[doomed], &[other]);
-        assert!(folder.join("memory").exists());
+        assert!(folder.exists(), "emptied, but still another session's folder");
     }
 
     #[test]

@@ -38,6 +38,24 @@ async function worktreeDetail(session: SessionEntry): Promise<{ detail: string; 
 }
 
 /**
+ * The other sessions that run in this session's worktree, as the backend
+ * matches them. Removing the worktree deletes them too, with their
+ * transcripts and the agents' own data for them, so the confirmation names
+ * them. `null` when the list could not be read.
+ */
+async function sharedSessionsNote(session: SessionEntry): Promise<string> {
+  let titles: string[];
+  try {
+    titles = await api.sessionsSharingWorktree(session.id);
+  } catch {
+    return "\n\nOther sessions in the same worktree, if there are any, are deleted with it; the list could not be read.";
+  }
+  if (!titles.length) return "";
+  const one = titles.length === 1;
+  return `\n\n${one ? "This session shares" : "These sessions share"} its worktree and ${one ? "is" : "are"} deleted with it, transcripts included:\n${titles.map((title) => `• ${title}`).join("\n")}`;
+}
+
+/**
  * Ask before deleting a session, then delete it. A delete that fails (most
  * often a worktree something still holds, or a directory that is not this
  * project's to remove) is shown with its reason and the state the directory
@@ -49,7 +67,8 @@ export async function confirmDeleteSession(session: SessionEntry) {
   const hasWorktree = !!session.worktreeName && !session.worktreeRemoved;
   for (;;) {
     const { detail, confirmTwice } = hasWorktree ? await worktreeDetail(session) : { detail: "Its transcript and attachments are removed.", confirmTwice: false };
-    const yes = await ask(`Delete "${session.title}"? ${detail}`, {
+    const along = hasWorktree ? await sharedSessionsNote(session) : "";
+    const yes = await ask(`Delete "${session.title}"? ${detail}${along}`, {
       title: "Delete session",
       kind: "warning",
       okLabel: "Delete",

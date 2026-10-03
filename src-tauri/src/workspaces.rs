@@ -142,6 +142,8 @@ pub struct WorkspaceDisposition {
     /// Sessions that ran in this checkout; deleting it removes them and
     /// their transcripts. Filled in by the command layer, which owns the index.
     pub sessions: usize,
+    /// Their titles, so the confirmation can name what goes.
+    pub session_titles: Vec<String>,
 }
 
 pub fn disposition(project: &Path, path: &Path) -> WorkspaceDisposition {
@@ -168,6 +170,7 @@ pub fn disposition(project: &Path, path: &Path) -> WorkspaceDisposition {
         pr: None,
         pr_checked: false,
         sessions: 0,
+        session_titles: Vec::new(),
     };
     if let Some(b) = branch.as_deref() {
         if git::remote_url(&p).is_some() && crate::github::available() {
