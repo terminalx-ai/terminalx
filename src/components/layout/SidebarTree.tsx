@@ -54,6 +54,7 @@ import { workspaceName as sessionWorkspaceName } from "@/lib/dashboard";
 import { openSettle, openWorkspaceDelete } from "@/lib/dialogs";
 import { useMobileDrivenTabs } from "@/lib/mobileDriver";
 import { getPrefs } from "@/lib/prefs";
+import { useSidebarFilter } from "@/lib/sidebarFilter";
 import {
   addTab,
   archiveSession,
@@ -88,8 +89,18 @@ const canon = (path: string) => path.replace(/\/+$/, "");
 const workspaceKey = (projectPath: string, path: string) => `${projectPath}\0${canon(path)}`;
 
 /** Keep live checkouts and historical, missing checkouts in the same hierarchy. */
-export function groupProjectWorkspaces(projectPath: string, workspaces: Workspace[], sessions: SessionEntry[], showArchived: boolean, selectedId?: string | null): WorkspaceGroup[] {
-  const visible = sortSessions(sessions.filter((session) => session.projectPath === projectPath && (session.archived === showArchived || session.id === selectedId)));
+export function groupProjectWorkspaces(
+  projectPath: string,
+  workspaces: Workspace[],
+  sessions: SessionEntry[],
+  showArchived: boolean,
+  selectedId?: string | null,
+  /** The sidebar's filter (unread, needs you): sessions it does not show are left out, and so are checkouts left with none. */
+  shows?: (sessionId: string) => boolean,
+): WorkspaceGroup[] {
+  const visible = sortSessions(
+    sessions.filter((session) => session.projectPath === projectPath && (session.archived === showArchived || session.id === selectedId) && (!shows || shows(session.id))),
+  );
   const byPath = new Map<string, SessionEntry[]>();
   const missing = new Map<string, SessionEntry[]>();
   const removed = new Map<string, SessionEntry[]>();
@@ -115,7 +126,7 @@ export function groupProjectWorkspaces(projectPath: string, workspaces: Workspac
   for (const [path, rows] of removed) {
     groups.push({ workspace: null, path, key: `${workspaceKey(projectPath, path)}\0removed`, sessions: sortSessions(rows), removed: true });
   }
-  return groups;
+  return shows ? groups.filter((group) => group.sessions.length > 0) : groups;
 }
 
 export function ProjectNavigation({ project, expanded }: { project: Project; expanded: boolean }) {
@@ -133,9 +144,10 @@ export function ProjectNavigation({ project, expanded }: { project: Project; exp
   const mobileDriven = useMobileDrivenTabs();
   const harnessNames = useMemo(() => new Map(store.harnesses.map((harness) => [harness.id, harness.name])), [store.harnesses]);
 
+  const filter = useSidebarFilter();
   const groups = useMemo(
-    () => groupProjectWorkspaces(project.path, workspaces, store.sessions, store.showArchived, store.selectedSessionId),
-    [project.path, store.sessions, store.showArchived, store.selectedSessionId, workspaces],
+    () => groupProjectWorkspaces(project.path, workspaces, store.sessions, store.showArchived, store.selectedSessionId, filter.active ? filter.shows : undefined),
+    [project.path, store.sessions, store.showArchived, store.selectedSessionId, workspaces, filter],
   );
   const activeWorkspaceKey = groups.find((group) => selectedSession
     ? group.sessions.some((session) => session.id === selectedSession.id)
@@ -160,7 +172,7 @@ export function ProjectNavigation({ project, expanded }: { project: Project; exp
 
   return (
     <TreeGroup expanded={expanded} className="pb-1 pl-2">
-      {groups.length === 0 ? (
+      {groups.length === 0 && !filter.active ? (
         <div className="px-5 py-2 text-[11px] text-faint">
           {store.workspacesLoading[project.path] ? "Reading workspaces…" : "No workspaces found."}
         </div>
@@ -170,7 +182,8 @@ export function ProjectNavigation({ project, expanded }: { project: Project; exp
           key={group.key}
           project={project}
           group={group}
-          expanded={expandedWorkspaces.has(group.key)}
+          // A filter shows what it found: its checkouts are open.
+          expanded={filter.active || expandedWorkspaces.has(group.key)}
           active={activeWorkspaceKey === group.key}
           onToggle={() => setExpandedWorkspaces((current) => toggleInSet(current, group.key))}
           selectedSessionId={store.selectedSessionId}

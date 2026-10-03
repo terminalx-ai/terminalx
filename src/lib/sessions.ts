@@ -31,6 +31,8 @@ interface State {
   /** A tab menu can open Skills already narrowed to that tab's reach. */
   skillsFilter: { agent: string; projectPath: string } | null;
   showArchived: boolean;
+  /** The sidebar lists every session, only unread ones, or only ones waiting for a person (see `sidebarFilter.ts`). Not saved. */
+  sidebarFilter: "all" | "unread" | "needs";
   /** Which project the sidebar is focused on (its workspaces and sessions). */
   selectedProject: string | null;
   /** Workspaces per project path, refreshed on demand. */
@@ -67,6 +69,7 @@ let state: State = {
   selectedAutomationId: null,
   skillsFilter: null,
   showArchived: false,
+  sidebarFilter: "all",
   selectedProject: null,
   workspaces: {},
   workspacesLoading: {},
@@ -411,6 +414,10 @@ export function debug(message: string) {
 
 export function setShowArchived(v: boolean) {
   set({ showArchived: v });
+}
+
+export function setSidebarFilter(filter: State["sidebarFilter"]) {
+  set({ sidebarFilter: filter });
 }
 
 export async function addProject(path: string) {

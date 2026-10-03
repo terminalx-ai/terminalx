@@ -48,6 +48,7 @@ import { NEW_SESSION_ADMIN_REASON, NEW_WORKSPACE_ADMIN_REASON } from "@/lib/clou
 import { useCloudConnection } from "@/lib/cloudConnections";
 import { lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
+import { useSidebarFilter } from "@/lib/sidebarFilter";
 import { cloudAgentLabel, deriveCloudActivity, type CloudActivity, type RowTone } from "@/lib/cloudRowState";
 import { workspaceUsage } from "@/lib/runningLimit";
 import {
@@ -346,12 +347,31 @@ function OrgTree({ org, orgId, mayCreate, onLifecycle }: { org: OrgCatalog | und
     [org, orgId, catalog.createMemory, prefs.cloudPinned, prefs.cloudProjects, prefs.cloudBlankProjects],
   );
   const [archivedOpen, setArchivedOpen] = useState(false);
+  const filter = useSidebarFilter();
 
   if (!org || (org.fetchedAt === null && !org.workspaces.length && !placed.projects.length)) {
     return (
       <div className="pl-5 text-[11px] text-faint" data-testid="cloud-org-loading">
         {org?.error ? `Cloud workspaces are unavailable (${org.error}).` : "Loading cloud workspaces…"}
       </div>
+    );
+  }
+  // Unread or Needs you: only the projects with such a session, and no archive (nothing archived runs or answers).
+  if (filter.active) {
+    const projects = placed.projects.filter((project) => filter.showsProject(project.key));
+    if (!projects.length) {
+      return (
+        <div className="pl-5 text-[11px] text-faint" data-testid="cloud-org-filtered-empty">
+          {filter.empty}
+        </div>
+      );
+    }
+    return (
+      <>
+        {projects.map((project) => (
+          <CloudProjectNode key={project.key} project={project} onLifecycle={onLifecycle} />
+        ))}
+      </>
     );
   }
   const empty = !placed.projects.length && !placed.archived.length;
@@ -422,7 +442,9 @@ function CloudProjectNode({ project, onLifecycle }: { project: CloudProject; onL
   const { status } = useAccount();
   const [error, setError] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState(false);
-  const expanded = !prefs.cloudCollapsed[project.key];
+  const filter = useSidebarFilter();
+  // A filter shows what it found: the project is open while it is on.
+  const expanded = filter.active || !prefs.cloudCollapsed[project.key];
   const selectedWorkspace = store.selectedSessionId ? parseCloudWorkspaceKey(store.selectedSessionId) : null;
   const holdsSelection = !!selectedWorkspace && project.workspaces.some((node) => node.item.workspace.id === selectedWorkspace.workspaceId && node.item.workspace.orgId === selectedWorkspace.orgId);
   const drafting = store.cloudSessionPreset?.projectKey === project.key;
@@ -637,9 +659,14 @@ function WorkspaceGroupNode({ node, expanded: projectExpanded, onLifecycle }: { 
   const [error, setError] = useState<string | null>(null);
   const { workspace } = node.item;
   const selected = store.selectedCloudWorkspace === node.key;
-  const shown = projectExpanded && expanded;
+  const filter = useSidebarFilter();
+  // A filter shows what it found: the workspace is open while it is on.
+  const open = expanded || filter.active;
+  const shown = projectExpanded && open;
   const { sessions, known } = useCloudWorkspaceSessions(node, { load: shown, showArchived: store.showArchived, selectedKey: store.selectedSessionId });
   const activity = useWorkspaceActivity(node, sessions, !known || sessions.every((row) => row.source !== "live"));
+  // Filtered: a workspace with no such session has no row.
+  const filteredOut = filter.active && !sessions.some((row) => filter.shows(row.key));
   const run = async (work: () => Promise<void>) => {
     setError(null);
     try {
@@ -649,10 +676,11 @@ function WorkspaceGroupNode({ node, expanded: projectExpanded, onLifecycle }: { 
     }
   };
   const branch = workspace.launch?.workBranch ?? null;
+  if (filteredOut) return null;
   return (
-    <div role="treeitem" aria-label={workspace.name} aria-expanded={expanded} aria-selected={selected} className="min-w-0" data-testid="cloud-workspace-node" data-workspace={workspace.id} onClickCapture={focusClicked}>
+    <div role="treeitem" aria-label={workspace.name} aria-expanded={open} aria-selected={selected} className="min-w-0" data-testid="cloud-workspace-node" data-workspace={workspace.id} onClickCapture={focusClicked}>
       <TreeRow level="group" selected={selected} title={workspaceCard(node.item, activity)}>
-        <TreeToggle expanded={expanded} label={workspace.name} onToggle={() => setExpanded((open) => !open)} className="ml-0.5" />
+        <TreeToggle expanded={open} label={workspace.name} onToggle={() => setExpanded((current) => !current)} className="ml-0.5" />
         <Cloud className="size-3 shrink-0" aria-label="Cloud workspace" />
         <button type="button" onClick={() => selectCloudWorkspace(node.key)} className="min-w-0 flex-1 truncate rounded-sm text-left font-mono text-foreground/90 outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
           {workspace.name}
@@ -682,7 +710,7 @@ function WorkspaceGroupNode({ node, expanded: projectExpanded, onLifecycle }: { 
         </RowActions>
       </TreeRow>
       {error && <p className="ml-6 text-[10px] text-destructive">{error}</p>}
-      <TreeGroup expanded={expanded} className="pl-2">
+      <TreeGroup expanded={open} className="pl-2">
         <WorkspaceSessions node={node} shown={shown} showLocation={false} />
       </TreeGroup>
     </div>
@@ -692,8 +720,10 @@ function WorkspaceGroupNode({ node, expanded: projectExpanded, onLifecycle }: { 
 /** A workspace's sessions, straight under the project (or under its group row). */
 function WorkspaceSessions({ node, shown, showLocation }: { node: CloudWorkspaceNode; shown: boolean; showLocation: boolean }) {
   const store = useSessionStore();
-  const { sessions, capabilities, manage: manages, known } = useCloudWorkspaceSessions(node, { load: shown, showArchived: store.showArchived, selectedKey: store.selectedSessionId });
-  const activity = useWorkspaceActivity(node, sessions, sessions.every((row) => row.source !== "live"));
+  const { sessions: every, capabilities, manage: manages, known } = useCloudWorkspaceSessions(node, { load: shown, showArchived: store.showArchived, selectedKey: store.selectedSessionId });
+  const filter = useSidebarFilter();
+  const sessions = useMemo(() => (filter.active ? every.filter((row) => filter.shows(row.key)) : every), [every, filter]);
+  const activity = useWorkspaceActivity(node, every, every.every((row) => row.source !== "live"));
   const card = workspaceCard(node.item, activity);
   const connection = useCloudConnection(node.key);
   // What this desktop may do here: the attach result's authority once it has
@@ -706,6 +736,8 @@ function WorkspaceSessions({ node, shown, showLocation }: { node: CloudWorkspace
   // demoted admin's lingering manage attachment included.
   const manage = manages && !!capabilities?.includes("session/2") && (authority === null || authority === "manage");
   const { state } = node.item.workspace;
+  // Filtered: only the sessions found; no placeholder line and no workspace terminals.
+  if (filter.active && !sessions.length) return null;
   if (!sessions.length) {
     const openable = (state === "ready" || state === "suspended") && activity.tone !== "changing" && activity.tone !== "attention";
     return (
@@ -729,7 +761,7 @@ function WorkspaceSessions({ node, shown, showLocation }: { node: CloudWorkspace
       {sessions.map((row) => (
         <CloudSessionNode key={row.key} row={row} node={node} manage={manage} location={showLocation ? { tone: activity.tone, card } : null} />
       ))}
-      <WorkspaceTerminals node={node} sessionIds={sessions.map((row) => row.sessionId)} />
+      {!filter.active && <WorkspaceTerminals node={node} sessionIds={sessions.map((row) => row.sessionId)} />}
     </>
   );
 }
