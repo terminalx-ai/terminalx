@@ -95,6 +95,12 @@ describe("the phone's cloud API client", () => {
     expect(calls.at(-1)).toMatchObject({ method: "DELETE", url: "https://login.terminalx.ai/v1/mobile/orgs/org-1/cloud-workspaces/ws-1/shares/u-alice" });
   });
 
+  it("reads the organization's members", async () => {
+    const { client, calls } = api(() => ({ body: { members: [{ userId: "u-alice", email: "alice@example.com", displayName: "Alice", role: "member" }, { userId: "u-bob", email: "bob@example.com", role: "admin" }], pendingInvites: [] } }));
+    expect((await client.members("org-1")).map((member) => [member.userId, member.displayName ?? null])).toEqual([["u-alice", "Alice"], ["u-bob", null]]);
+    expect(calls[0]).toMatchObject({ method: "GET", url: "https://login.terminalx.ai/v1/desktop/orgs/org-1/members" });
+  });
+
   it("keeps the server's refusal code, and tells a workspace's answer from an unreachable service", async () => {
     const refused = api(() => ({ status: 404, body: { error: "cloud_workspace_not_found" } }));
     const error = await refused.client.open("org-1", "ws-1", "i").catch((caught: unknown) => caught);
