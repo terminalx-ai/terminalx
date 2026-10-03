@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, Check, GitMerge, GitPullRequest, Loader2, Trash2 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,7 @@ import { Switch } from "@/components/ui/controls";
 import { api, errorMessage } from "@/lib/api";
 import { closeWorkspaceDelete, useDialogs } from "@/lib/dialogs";
 import { deleteWorkspace } from "@/lib/sessions";
+import { confirmUncheckedDelete, reportBranchOutcome } from "@/lib/worktreeConfirm";
 import type { WorkspaceDisposition } from "@/types/session";
 
 /**
@@ -23,35 +24,50 @@ export function WorkspaceDeleteDialog() {
   const [busy, setBusy] = useState(false);
   const [deleteBranch, setDeleteBranch] = useState(true);
 
+  const check = useCallback(async (projectPath: string, path: string, isLive: () => boolean = () => true) => {
+    setDisp(null);
+    try {
+      const d = await api.workspaceDisposition(projectPath, path);
+      if (isLive()) setDisp(d);
+    } catch (e) {
+      if (isLive()) setError(errorMessage(e));
+    }
+  }, []);
+
   useEffect(() => {
     if (!workspaceDelete) return;
-    setDisp(null);
     setError(null);
     setDeleteBranch(true);
     let live = true;
-    api
-      .workspaceDisposition(workspaceDelete.projectPath, workspaceDelete.path)
-      .then((d) => live && setDisp(d))
-      .catch((e) => live && setError(errorMessage(e)));
+    void check(workspaceDelete.projectPath, workspaceDelete.path, () => live);
     return () => {
       live = false;
     };
-  }, [workspaceDelete]);
+  }, [workspaceDelete, check]);
 
   if (!workspaceDelete) return null;
   const pr = disp?.pr ?? null;
   const merged = pr?.state === "MERGED";
-  const clean = !!disp && disp.uncommitted === 0 && disp.unpushed === 0;
+  // A directory that could not be checked is never called clean.
+  const unchecked = !!disp && disp.exists && !disp.checked;
+  const clean = !!disp && !unchecked && disp.uncommitted === 0 && disp.unpushed === 0;
   const safe = !!disp && clean && (merged || (disp.prChecked && !pr && (disp.aheadOfBase ?? 0) === 0));
   const risky = !!disp && !safe;
 
   const run = async () => {
+    // A directory that could not be checked needs the same second, explicit
+    // confirmation as deleting its session from the sidebar.
+    if (unchecked && !(await confirmUncheckedDelete(workspaceDelete.path))) return;
     setBusy(true);
     setError(null);
     try {
-      await deleteWorkspace(workspaceDelete.projectPath, workspaceDelete.path, deleteBranch);
+      const report = await deleteWorkspace(workspaceDelete.projectPath, workspaceDelete.path, deleteBranch);
       closeWorkspaceDelete();
+      await reportBranchOutcome(report);
     } catch (e) {
+      // It may have changed, or been partly removed: read it again before
+      // the next attempt is offered.
+      await check(workspaceDelete.projectPath, workspaceDelete.path);
       setError(errorMessage(e));
     } finally {
       setBusy(false);
@@ -71,7 +87,7 @@ export function WorkspaceDeleteDialog() {
                 on <span className="font-mono text-foreground">{disp.branch}</span>
               </>
             )}
-            . Every session that ran here is stopped and removed, along with its transcripts.
+            . Every session that ran here is stopped and removed, along with its transcripts. This deletes the directory; it is not moved to the Trash.
           </DialogDescription>
         </DialogHeader>
 
@@ -84,8 +100,14 @@ export function WorkspaceDeleteDialog() {
           {disp && (
             <>
               <SessionsRow count={disp.sessions} />
-              <Row ok={disp.uncommitted === 0} text={disp.uncommitted === 0 ? "No uncommitted changes." : `${disp.uncommitted} file${disp.uncommitted === 1 ? "" : "s"} with uncommitted changes.`} />
-              <Row ok={disp.unpushed === 0} text={disp.unpushed === 0 ? "Every commit is pushed." : `${disp.unpushed} commit${disp.unpushed === 1 ? "" : "s"} not pushed anywhere.`} />
+              {unchecked ? (
+                <Row ok={false} text="This folder is not a working git checkout of this project, so it cannot be checked for uncommitted or unpushed work." />
+              ) : (
+                <>
+                  <Row ok={disp.uncommitted === 0} text={disp.uncommitted === 0 ? "No uncommitted changes." : `${disp.uncommitted} file${disp.uncommitted === 1 ? "" : "s"} with uncommitted changes.`} />
+                  <Row ok={disp.unpushed === 0} text={disp.unpushed === 0 ? "Every commit is pushed." : `${disp.unpushed} commit${disp.unpushed === 1 ? "" : "s"} not pushed anywhere.`} />
+                </>
+              )}
               {pr ? (
                 <div className="flex items-start gap-2">
                   {merged ? <GitMerge className="mt-0.5 size-3.5 shrink-0 text-merged" /> : <GitPullRequest className={`mt-0.5 size-3.5 shrink-0 ${pr.state === "OPEN" ? "text-warning" : "text-faint"}`} />}

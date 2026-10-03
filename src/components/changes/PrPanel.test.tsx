@@ -31,6 +31,7 @@ const mergedPr: PullRequest = {
 
 const cleanMerged: WorkspaceDisposition = {
   exists: true,
+  checked: true,
   isMain: false,
   branch: mergedPr.head,
   uncommitted: 0,

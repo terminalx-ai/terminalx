@@ -127,6 +127,9 @@ pub struct WorkspacePr {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceDisposition {
     pub exists: bool,
+    /// Whether the counts could be read. False for a directory that is no
+    /// longer a working tree of its own: they are then 0 and mean "unknown".
+    pub checked: bool,
     pub is_main: bool,
     pub branch: Option<String>,
     pub uncommitted: u32,
@@ -147,10 +150,16 @@ pub fn disposition(project: &Path, path: &Path) -> WorkspaceDisposition {
     }
     let root = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
     let p = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if !git::is_worktree_of(project, &p) {
+        // Git would answer for another repository here: the enclosing
+        // project (and report nothing), or a clone that sits at this path.
+        return WorkspaceDisposition { exists: true, checked: false, is_main: p == root, ..Default::default() };
+    }
     let branch = git::current_branch(&p);
     let status = git::work_status(&p);
     let mut d = WorkspaceDisposition {
         exists: true,
+        checked: true,
         is_main: p == root,
         uncommitted: uncommitted(&p),
         unpushed: unpushed(&p, branch.as_deref()),
@@ -172,22 +181,50 @@ pub fn disposition(project: &Path, path: &Path) -> WorkspaceDisposition {
 }
 
 /// Remove a worktree that is not the project root, and its branch if asked.
-pub fn delete(project: &Path, path: &Path, delete_branch: bool) -> Result<()> {
+///
+/// When git cannot remove it and `direct` allows, a worktree Raccoon made is
+/// deleted directly behind [`git::remove_managed_worktree_dir`]'s guard; one
+/// made by hand elsewhere stays git's to remove. The branch follows the same
+/// rule as [`git::remove_worktree`]: one that holds commits nothing else has
+/// is deleted only when git removed the worktree for a caller that showed
+/// them, and is otherwise kept and named in the result.
+pub fn delete(project: &Path, path: &Path, delete_branch: bool, direct: git::DirectDelete) -> Result<git::WorktreeRemoval> {
     let root = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
     let p = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if p == root {
         anyhow::bail!("the project's own checkout cannot be deleted from here");
     }
-    let branch = git::current_branch(&p);
+    let mut removal = git::WorktreeRemoval::default();
+    // Asked of a directory that is not a working tree of this project, git
+    // would name some other repository's branch.
+    let branch = git::is_worktree_of(project, &p).then(|| git::current_branch(&p)).flatten();
+    let detached = git::detached_head(project, &p);
     let _ = git::run(project, &["worktree", "unlock", p.to_str().unwrap_or_default()]);
-    git::run(project, &["worktree", "remove", "--force", p.to_str().unwrap_or_default()])?;
+    let mut removed_by_git = true;
+    if let Err(git_error) = git::run(project, &["worktree", "remove", "--force", p.to_str().unwrap_or_default()]) {
+        removed_by_git = false;
+        if direct == git::DirectDelete::Never {
+            anyhow::bail!("Could not remove the worktree at {}: {git_error:#}", p.display());
+        }
+        if let (Some(commit), Some(name)) = (&detached, p.file_name().and_then(|name| name.to_str())) {
+            removal.rescued_branch = git::rescue_detached(project, name, commit);
+        }
+        if let Err(direct_error) = git::remove_managed_worktree_dir(project, &p) {
+            anyhow::bail!("Could not remove the worktree at {}: {direct_error:#} ({git_error:#})", p.display());
+        }
+    }
     let _ = git::run(project, &["worktree", "prune"]);
     if delete_branch {
         if let Some(b) = branch {
-            let _ = git::run(project, &["branch", "-D", &b]);
+            let confirmed = removed_by_git && direct == git::DirectDelete::Allowed;
+            if confirmed || git::unique_commits(project, &b) == Some(0) {
+                let _ = git::run(project, &["branch", "-D", &b]);
+            } else {
+                removal.kept_branch = Some(b);
+            }
         }
     }
-    Ok(())
+    Ok(removal)
 }
 
 #[cfg(test)]
@@ -225,8 +262,62 @@ mod tests {
         let d = disposition(p, &wt);
         assert_eq!(d.uncommitted, 1);
         assert!(!d.is_main);
-        delete(p, &wt, true).unwrap();
+        delete(p, &wt, true, git::DirectDelete::Allowed).unwrap();
         assert_eq!(list(p).unwrap().len(), 1);
-        assert!(delete(p, p, false).is_err());
+        assert!(delete(p, p, false, git::DirectDelete::Allowed).is_err());
+    }
+
+    #[test]
+    fn a_branch_with_commits_of_its_own_is_kept_unless_the_person_was_shown_them() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        sh(p, &["init", "-q", "-b", "main"]);
+        sh(p, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        let wt = p.join("wt-feature");
+        for confirmed in [false, true] {
+            sh(p, &["worktree", "add", "-q", "-B", "feature", wt.to_str().unwrap()]);
+            sh(&wt, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "only here"]);
+            let direct = if confirmed { git::DirectDelete::Allowed } else { git::DirectDelete::Never };
+            let removal = delete(p, &wt, true, direct).unwrap();
+            assert!(!wt.exists());
+            if confirmed {
+                assert_eq!(removal.kept_branch, None);
+                assert!(git::run(p, &["rev-parse", "--verify", "--quiet", "refs/heads/feature"]).is_err());
+            } else {
+                assert_eq!(removal.kept_branch.as_deref(), Some("feature"));
+                assert!(git::run(p, &["rev-parse", "--verify", "--quiet", "refs/heads/feature"]).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn a_worktree_git_cannot_remove_is_deleted_directly_only_when_managed() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        sh(p, &["init", "-q", "-b", "main"]);
+        sh(p, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        let managed = git::create_worktree(p, "quiet-amber-fox", None).unwrap();
+        let by_hand = p.join("wt-feature");
+        sh(p, &["worktree", "add", "-q", "-b", "feature", by_hand.to_str().unwrap()]);
+        // Without its `.git` file git no longer accepts a directory as a worktree.
+        std::fs::remove_file(Path::new(&managed.path).join(".git")).unwrap();
+        std::fs::remove_file(by_hand.join(".git")).unwrap();
+
+        // Its state cannot be read any more, and must not read as clean.
+        let d = disposition(p, Path::new(&managed.path));
+        assert!(d.exists && !d.checked && d.branch.is_none(), "{d:?}");
+        // A caller that showed nothing may not delete it directly.
+        assert!(delete(p, Path::new(&managed.path), true, git::DirectDelete::Never).is_err());
+        assert!(Path::new(&managed.path).exists());
+
+        delete(p, Path::new(&managed.path), true, git::DirectDelete::Allowed).unwrap();
+        assert!(!Path::new(&managed.path).exists());
+        assert!(git::run(p, &["rev-parse", "--verify", "main"]).is_ok(), "the project's own branch is never the one deleted");
+
+        let error = format!("{:#}", delete(p, &by_hand, false, git::DirectDelete::Allowed).unwrap_err());
+        assert!(error.contains("wt-feature"), "{error}");
+        assert!(by_hand.exists(), "a directory outside the worktree folder is never deleted directly");
     }
 }
