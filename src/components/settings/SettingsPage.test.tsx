@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { SettingsPage } from "./SettingsPage";
+import { DEFAULT_SETTINGS_TAB, SettingsPage } from "./SettingsPage";
 
 afterEach(cleanup);
 
@@ -54,17 +54,27 @@ describe("Settings dismissal", () => {
 });
 
 describe("the section Settings opens on", () => {
-  it("is General when no section is asked for", () => {
+  // PRO-81: the general way into Settings shows Account.
+  it("is Account when no section is asked for", () => {
     render(<SettingsPage onBack={vi.fn()} />);
-    expect(screen.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
+    expect(DEFAULT_SETTINGS_TAB).toBe("account");
+    expect(screen.getByRole("button", { name: "Account" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Account");
+    expect(screen.getAllByRole("button").filter((button) => button.getAttribute("aria-current") === "page")).toHaveLength(1);
   });
 
-  it("is General, not a blank page, when it is handed something that names no section", () => {
+  it("is the section asked for, with that one selected", () => {
+    render(<SettingsPage initialTab="agents" onBack={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Agents" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("button", { name: "Account" }).getAttribute("aria-current")).toBeNull();
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Agents");
+  });
+
+  it("is Account, not a blank page, when it is handed something that names no section", () => {
     // What a click handler passes along: the click's event (O1 of the live check).
     const event = { type: "click" } as unknown as Parameters<typeof SettingsPage>[0]["initialTab"];
     render(<SettingsPage initialTab={event} onBack={vi.fn()} />);
-    expect(screen.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
+    expect(screen.getByRole("button", { name: "Account" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Account");
   });
 });

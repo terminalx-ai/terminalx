@@ -137,7 +137,21 @@ export async function bootSessions() {
 
 export async function refreshSessions() {
   const sessions = await api.listSessions();
+  const before = state.sessions;
   set({ sessions });
+  // The list was replaced wholesale: what is no longer in it has no row to be closed from.
+  const kept = new Map(sessions.map((session) => [session.id, session]));
+  const gone = before.filter((session) => !kept.has(session.id)).map((session) => session.id);
+  const closed = before.flatMap((session) => {
+    const now = kept.get(session.id);
+    return now ? session.tabs.filter((tab) => !now.tabs.some((other) => other.id === tab.id)).map((tab) => tab.id) : [];
+  });
+  if (gone.length || closed.length) {
+    queueMicrotask(() => {
+      dropSessionTerminals(gone);
+      dropTabTerminals(closed);
+    });
+  }
 }
 
 export function upsertSession(s: SessionEntry) {

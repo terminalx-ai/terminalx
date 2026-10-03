@@ -276,6 +276,25 @@ describe("merging and tombstones", () => {
     expect(getCloudCatalog().notices).toHaveLength(1);
   });
 
+  it("forgets what it remembered of a workspace once the server lists its repositories (PRO-59)", async () => {
+    signIn();
+    bootCloudCatalog();
+    await refreshCloudCatalog(ORG);
+    for (const id of ["covered", "blank", "old"]) rememberCreatedWorkspace({ workspace: item(id).workspace, operation: {} as never }, [{ cloneUrl: "https://github.com/acme/api" }]);
+    await ingestCloudList(
+      { workspaces: [item("covered", { repositories: [{ identity: "github.com/acme/web", fullName: "acme/web", cloneUrl: "https://github.com/acme/web.git", primary: true }] }), item("blank", { repositories: [] }), item("old")] },
+      ORG,
+    );
+    const { createMemory, orgs } = getCloudCatalog();
+    expect(createMemory[`${ORG}:covered`]).toBeUndefined();
+    expect(createMemory[`${ORG}:blank`]).toBeUndefined();
+    // An older server says nothing: the memory still places the workspace.
+    expect(createMemory[`${ORG}:old`]?.repositories).toEqual(["github.com/acme/api"]);
+    const placed = Object.fromEntries(placeCloudProjects(orgs[ORG], createMemory).projects.flatMap((project) => project.workspaces.map((node) => [node.item.workspace.id, [project.identity, node.placedBy]])));
+    expect(placed.covered).toEqual(["github.com/acme/web", "server"]);
+    expect(placed.old).toEqual(["github.com/acme/api", "createMemory"]);
+  });
+
   it("tells the connection manager what each list says, so a held connection follows its workspace back with connect", async () => {
     const { retainCloudConnection, resetCloudConnections } = await import("./cloudConnections");
     const attached: { emit(state: { state: string }): void; close: ReturnType<typeof vi.fn>; activate: ReturnType<typeof vi.fn> }[] = [];
