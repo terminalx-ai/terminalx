@@ -141,13 +141,21 @@ impl HttpMailboxApi {
     }
 
     pub(crate) fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<(u16, Value), CallError> {
+        self.call_with(method, path, body, &[])
+    }
+
+    /// `call` with extra request headers.
+    pub(crate) fn call_with(&self, method: &str, path: &str, body: Option<Value>, headers: &[(&str, &str)]) -> Result<(u16, Value), CallError> {
         let credential = (self.credential)().ok_or(CallError::Rejected)?;
         let bearer = Zeroizing::new(format!("Bearer {}", credential.as_str()));
-        let request = self
+        let mut request = self
             .agent
             .request(method, &format!("{}{path}", self.origin))
             .set("authorization", &bearer)
             .set(crate::cloud_bootstrap::VERSION_HEADER, crate::cloud_bootstrap::VERSION);
+        for (name, value) in headers {
+            request = request.set(name, value);
+        }
         let response = match body {
             Some(body) => request.set("content-type", "application/json").send_json(body),
             None => request.call(),

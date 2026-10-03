@@ -133,7 +133,7 @@ fn make(dir: &Path, api: Arc<FakeApi>, starter: Arc<FakeStarter>, incarnation: &
     Launcher {
         api,
         starter,
-        checkout: Arc::new(GitCheckout),
+        checkout: Arc::new(GitCheckout::default()),
         store: Store::open(dir),
         incarnation: incarnation.into(),
         root: dir.join("workspace"),
@@ -169,7 +169,7 @@ fn repository(root: &Path, name: &str) -> Repository {
     let path = root.join("repos").join(name);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     git(root, &["clone", "-q", "-b", "main", remote.to_str().unwrap(), path.to_str().unwrap()]);
-    Repository { owner: "acme".into(), name: name.into(), path: path.to_string_lossy().into_owned(), base_ref: None }
+    Repository { owner: "acme".into(), name: name.into(), path: path.to_string_lossy().into_owned(), base_ref: None, clone: None }
 }
 
 #[test]
@@ -295,7 +295,7 @@ fn an_existing_work_branch_is_reused_by_the_same_workspace_not_recreated() {
     let app = repository(dir.path(), "app");
     let branch = "terminalx/fix-login-3f9a2c1b7d4e";
     let path = Path::new(&app.path);
-    GitCheckout.prepare(&app, branch).unwrap();
+    GitCheckout::default().prepare(&app, branch).unwrap();
     std::fs::write(path.join("work.txt"), "agent work\n").unwrap();
     git(path, &["add", "."]);
     git(path, &["commit", "-qm", "agent work"]);
@@ -303,7 +303,7 @@ fn an_existing_work_branch_is_reused_by_the_same_workspace_not_recreated() {
     git(path, &["switch", "-q", "main"]);
     // A later attempt (a retried create on the same disk) lands on the same
     // branch with its commits, not a fresh one from the base.
-    let prepared = GitCheckout.prepare(&app, branch).unwrap();
+    let prepared = GitCheckout::default().prepare(&app, branch).unwrap();
     assert_eq!(prepared.head, head);
     assert_eq!(git(path, &["branch", "--show-current"]), branch);
 }
@@ -436,4 +436,285 @@ fn a_folder_that_already_holds_repositories_is_never_initialised() {
     // Once set up, it is a repository: a second call changes nothing.
     assert!(!init_blank_repository(&blank, "main").unwrap());
     assert_eq!(git(&blank, &["rev-list", "--count", "HEAD"]), "1");
+}
+
+/// Bare remotes `acme/<name>.git` (`main` and `feature`) under `remotes`,
+/// nothing checked out: what a workspace with no Environment image starts with.
+fn remotes(root: &Path, names: &[&str]) -> PathBuf {
+    let base = root.join("remotes");
+    for name in names {
+        let remote = base.join("acme").join(format!("{name}.git"));
+        let seed = root.join(format!("{name}-seed"));
+        std::fs::create_dir_all(&seed).unwrap();
+        std::fs::create_dir_all(remote.parent().unwrap()).unwrap();
+        git(root, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+        git(&seed, &["init", "-q"]);
+        std::fs::write(seed.join("README.md"), format!("{name}\n")).unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-qm", "init"]);
+        git(&seed, &["switch", "-qc", "feature"]);
+        std::fs::write(seed.join("FEATURE.md"), "feature\n").unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-qm", "feature"]);
+        git(&seed, &["push", "-q", remote.to_str().unwrap(), "main", "feature"]);
+    }
+    base
+}
+
+fn to_clone(root: &Path, name: &str, base_ref: Option<&str>) -> Repository {
+    Repository {
+        owner: "acme".into(),
+        name: name.into(),
+        path: root.join(name).to_string_lossy().into_owned(),
+        base_ref: base_ref.map(str::to_string),
+        clone: Some(CloneSource { provider: "github".into() }),
+    }
+}
+
+/// A launcher whose project root is `dir/<workspace>` and which clones from `remote`.
+fn cloning(dir: &Path, workspace: &str, remote: &Path, api: Arc<FakeApi>, starter: Arc<FakeStarter>) -> Launcher {
+    let state = dir.join(format!("{workspace}-state"));
+    std::fs::create_dir_all(&state).unwrap();
+    Launcher {
+        api,
+        starter,
+        checkout: Arc::new(GitCheckout::from_remote(remote.to_str().unwrap())),
+        store: Store::open(&state),
+        incarnation: "incarnation-aaaaaaaaaaaa".into(),
+        root: dir.join(workspace),
+    }
+}
+
+const WORK_BRANCH: &str = "terminalx/fix-login-3f9a2c1b7d4e";
+
+#[test]
+fn a_workspace_without_an_image_clones_its_repositories_at_their_base_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = remotes(dir.path(), &["app", "lib"]);
+    let root = dir.path().join("workspace");
+    let (app, lib) = (to_clone(&root, "app", Some("feature")), to_clone(&root, "lib", None));
+    let api = FakeApi::new(Some(claim(vec![app.clone(), lib.clone()])));
+    let starter = Arc::new(FakeStarter::default());
+    let launcher = cloning(dir.path(), "workspace", &remote, api.clone(), starter.clone());
+
+    assert_eq!(launcher.pass().unwrap(), Pass::Settled("started".into()));
+    assert_eq!(*api.phases.lock().unwrap(), ["syncing-repository", "starting-agent"]);
+    let (app_path, lib_path) = (Path::new(&app.path), Path::new(&lib.path));
+    // Its own branch, cut from the chosen base in one and the default branch in the other.
+    assert_eq!(git(app_path, &["branch", "--show-current"]), WORK_BRANCH);
+    assert_eq!(git(app_path, &["rev-parse", "HEAD"]), git(app_path, &["rev-parse", "origin/feature"]));
+    assert!(app_path.join("FEATURE.md").exists());
+    assert_eq!(git(lib_path, &["branch", "--show-current"]), WORK_BRANCH);
+    assert_eq!(git(lib_path, &["rev-parse", "HEAD"]), git(lib_path, &["rev-parse", "origin/main"]));
+    assert!(!lib_path.join("FEATURE.md").exists());
+    // The remote is the plain repository URL: nothing else was ever put in it.
+    assert_eq!(git(app_path, &["remote", "get-url", "origin"]), format!("{}/acme/app.git", remote.display()));
+    // The project root itself was not made a blank repository, and no staging directory is left.
+    assert!(!root.join(".git").exists());
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+    let starts = starter.starts.lock().unwrap().clone();
+    assert_eq!(starts[0].0, PathBuf::from(&app.path), "the agent starts in the primary repository");
+    let completed = api.completions.lock().unwrap().clone();
+    assert_eq!(completed[0].branches.iter().map(|branch| branch.branch.as_str()).collect::<Vec<_>>(), [WORK_BRANCH, WORK_BRANCH]);
+    assert_eq!(completed[0].branches[0].path, app.path);
+}
+
+#[test]
+fn two_workspaces_from_one_repository_edit_the_same_file_independently() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = remotes(dir.path(), &["app"]);
+    let mut paths = Vec::new();
+    for (workspace, branch) in [("one", "terminalx/one-aaaaaaaaaaaa"), ("two", "terminalx/two-bbbbbbbbbbbb")] {
+        let app = to_clone(&dir.path().join(workspace), "app", Some("main"));
+        let mut intent = claim(vec![app.clone()]);
+        intent.work_branch = branch.into();
+        let launcher = cloning(dir.path(), workspace, &remote, FakeApi::new(Some(intent)), Arc::new(FakeStarter::default()));
+        assert_eq!(launcher.pass().unwrap(), Pass::Settled("started".into()));
+        let path = PathBuf::from(&app.path);
+        assert_eq!(git(&path, &["branch", "--show-current"]), branch);
+        std::fs::write(path.join("README.md"), format!("{workspace}\n")).unwrap();
+        git(&path, &["commit", "-qam", workspace]);
+        paths.push(path);
+    }
+    assert_eq!(std::fs::read_to_string(paths[0].join("README.md")).unwrap(), "one\n");
+    assert_eq!(std::fs::read_to_string(paths[1].join("README.md")).unwrap(), "two\n");
+    assert_ne!(git(&paths[0], &["rev-parse", "HEAD"]), git(&paths[1], &["rev-parse", "HEAD"]));
+    assert!(git(&paths[1], &["branch", "--list", "terminalx/one-aaaaaaaaaaaa"]).is_empty());
+}
+
+#[test]
+fn a_retry_keeps_the_clone_it_already_has_and_clears_its_own_leftover() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = remotes(dir.path(), &["app"]);
+    let root = dir.path().join("workspace");
+    let app = to_clone(&root, "app", Some("main"));
+    let checkout = GitCheckout::from_remote(remote.to_str().unwrap());
+    // A clone that died halfway left its staging directory behind.
+    std::fs::create_dir_all(root.join(".terminalx-clone-app").join("junk")).unwrap();
+    checkout.clone_missing(&app, CLONE_BUDGET).unwrap();
+    assert!(!root.join(".terminalx-clone-app").exists());
+    checkout.prepare(&app, WORK_BRANCH).unwrap();
+    std::fs::write(Path::new(&app.path).join("work.txt"), "work\n").unwrap();
+    git(Path::new(&app.path), &["add", "."]);
+    git(Path::new(&app.path), &["commit", "-qm", "work"]);
+    let head = git(Path::new(&app.path), &["rev-parse", "HEAD"]);
+
+    // The next attempt neither clones again nor resets the branch.
+    checkout.clone_missing(&app, CLONE_BUDGET).unwrap();
+    assert_eq!(checkout.prepare(&app, WORK_BRANCH).unwrap().head, head);
+    assert!(Path::new(&app.path).join("work.txt").exists());
+
+    // A checkout of something else at that path is refused, not replaced.
+    let other = Repository { name: "other".into(), ..app.clone() };
+    assert!(checkout.clone_missing(&other, CLONE_BUDGET).unwrap_err().to_string().contains("another repository"));
+    assert!(Path::new(&app.path).join("work.txt").exists());
+}
+
+#[test]
+fn a_clone_that_cannot_be_made_fails_the_launch_and_deletes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = remotes(dir.path(), &["app"]);
+    let failed = |workspace: &str, repository: Repository| {
+        let api = FakeApi::new(Some(claim(vec![repository])));
+        let starter = Arc::new(FakeStarter::default());
+        let launcher = cloning(dir.path(), workspace, &remote, api.clone(), starter.clone());
+        assert_eq!(launcher.pass().unwrap(), Pass::Settled("failed".into()));
+        assert!(starter.starts.lock().unwrap().is_empty(), "the agent never starts without its repository");
+        assert_eq!(*api.phases.lock().unwrap(), ["syncing-repository"]);
+        let category = api.completions.lock().unwrap()[0].category.clone();
+        category.unwrap()
+    };
+
+    // A repository the workspace cannot reach, and a base branch it does not have.
+    for (workspace, name, base) in [("a", "missing", None), ("a2", "app", Some("does-not-exist"))] {
+        let root = dir.path().join(workspace);
+        assert_eq!(failed(workspace, to_clone(&root, name, base)), "repository-clone-failed");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0, "nothing half-cloned is left");
+    }
+
+    // Files already at the path are someone's: the launch fails and they stay.
+    let root = dir.path().join("b");
+    std::fs::create_dir_all(root.join("app")).unwrap();
+    std::fs::write(root.join("app").join("notes.txt"), "mine\n").unwrap();
+    assert_eq!(failed("b", to_clone(&root, "app", None)), "repository-clone-failed");
+    assert_eq!(std::fs::read_to_string(root.join("app").join("notes.txt")).unwrap(), "mine\n");
+}
+
+#[test]
+fn a_clone_that_runs_out_of_time_is_stopped_and_leaves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = remotes(dir.path(), &["app"]);
+    let root = dir.path().join("workspace");
+    let app = to_clone(&root, "app", None);
+    let error = GitCheckout::from_remote(remote.to_str().unwrap()).clone_missing(&app, Duration::ZERO).unwrap_err();
+    assert!(error.to_string().contains("timed out"), "{error:#}");
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0, "no staging directory and no half clone");
+    // With time, the same clone is made.
+    GitCheckout::from_remote(remote.to_str().unwrap()).clone_missing(&app, CLONE_BUDGET).unwrap();
+    assert!(Path::new(&app.path).join("README.md").exists());
+}
+
+#[test]
+fn a_launch_counts_as_work_while_it_runs() {
+    struct Watching(Mutex<Vec<bool>>);
+    impl Checkout for Watching {
+        fn clone_missing(&self, _repository: &Repository, within: Duration) -> Result<()> {
+            // Seen from inside the launch: the activity reporter would report a running turn.
+            self.0.lock().unwrap().push(crate::cloud_activity::launches() >= 1 && within <= CLONE_BUDGET && within > Duration::ZERO);
+            Ok(())
+        }
+        fn prepare(&self, repository: &Repository, work_branch: &str) -> Result<Branch> {
+            Ok(Branch { path: repository.path.clone(), branch: work_branch.into(), head: "0".repeat(40) })
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("workspace");
+    let checkout = Arc::new(Watching(Mutex::new(Vec::new())));
+    let launcher = Launcher {
+        api: FakeApi::new(Some(claim(vec![to_clone(&root, "app", None)]))),
+        starter: Arc::new(FakeStarter::default()),
+        checkout: checkout.clone(),
+        store: Store::open(dir.path()),
+        incarnation: "incarnation-aaaaaaaaaaaa".into(),
+        root,
+    };
+    assert_eq!(launcher.pass().unwrap(), Pass::Settled("started".into()));
+    assert_eq!(*checkout.0.lock().unwrap(), [true]);
+}
+
+#[test]
+fn a_clone_plan_that_leaves_the_project_root_or_names_no_github_repository_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = remotes(dir.path(), &["app"]);
+    let root = dir.path().join("workspace");
+    let good = to_clone(&root, "app", None);
+    let bad = [
+        Repository { path: dir.path().join("elsewhere").join("app").to_string_lossy().into_owned(), ..good.clone() },
+        Repository { path: root.join("nested").join("app").to_string_lossy().into_owned(), ..good.clone() },
+        Repository { path: root.to_string_lossy().into_owned(), ..good.clone() },
+        Repository { owner: "..".into(), ..good.clone() },
+        Repository { owner: "acme/evil".into(), ..good.clone() },
+        Repository { name: "app.git?x=y".into(), ..good.clone() },
+        Repository { name: String::new(), ..good.clone() },
+        Repository { clone: Some(CloneSource { provider: "gitlab".into() }), ..good.clone() },
+    ];
+    for repository in bad {
+        let api = FakeApi::new(Some(claim(vec![repository.clone()])));
+        let launcher = cloning(dir.path(), "workspace", &remote, api.clone(), Arc::new(FakeStarter::default()));
+        assert_eq!(launcher.pass().unwrap(), Pass::Settled("failed".into()), "{repository:?}");
+        assert_eq!(api.completions.lock().unwrap()[0].category.as_deref(), Some("payload-invalid"), "{repository:?}");
+        assert!(api.phases.lock().unwrap().is_empty(), "refused before git runs");
+    }
+    assert!(!root.exists() && !dir.path().join("elsewhere").exists());
+}
+
+#[test]
+fn the_production_clone_url_is_github_with_no_credential_in_it() {
+    let repository = to_clone(Path::new("/var/lib/terminalx/workspace"), "app", None);
+    assert_eq!(GitCheckout::default().clone_url(&repository), "https://github.com/acme/app.git");
+}
+
+#[test]
+fn the_claim_declares_that_this_runtime_clones_and_reads_the_plan() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut head = Vec::new();
+        let mut length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line.trim().is_empty() {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = value.trim().parse().unwrap();
+            }
+            head.push(line.trim().to_ascii_lowercase());
+        }
+        let mut body = vec![0u8; length];
+        reader.read_exact(&mut body).unwrap();
+        let reply = json!({ "v": 1, "launch": {
+            "launchId": "launch_1", "state": "deliver", "redelivery": false, "workBranch": WORK_BRANCH, "title": "t", "agent": "claude",
+            "repositories": [
+                { "owner": "acme", "name": "app", "path": "/var/lib/terminalx/workspace/app", "ref": "main", "clone": { "provider": "github" } },
+                { "owner": "acme", "name": "lib", "path": "/home/repos/acme/lib" }
+            ]
+        } })
+        .to_string();
+        write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}", reply.len()).unwrap();
+        (head, String::from_utf8(body).unwrap())
+    });
+    let api = HttpMailboxApi::new(&origin, Arc::new(|| Some(zeroize::Zeroizing::new("runtime-credential".to_string()))));
+    let claimed = api.claim("incarnation-aaaaaaaaaaaa").unwrap().unwrap();
+    let (head, body) = server.join().unwrap();
+    assert!(head.contains(&"x-terminalx-cloud-workspace-runtime-capabilities: launch-clone-v1".to_string()), "{head:?}");
+    // The body stays exactly what a server from before this accepts.
+    assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), json!({ "v": 1, "storageIncarnationId": "incarnation-aaaaaaaaaaaa" }));
+    assert_eq!(claimed.repositories[0].clone, Some(CloneSource { provider: "github".into() }));
+    assert_eq!(claimed.repositories[0].base_ref.as_deref(), Some("main"));
+    assert_eq!(claimed.repositories[1].clone, None);
 }

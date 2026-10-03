@@ -245,7 +245,7 @@ function stepFrom(record: OrganizationSetupRecord, facts: SetupFacts): SetupStep
   // its runtime reports in. A launch that failed while syncing repositories
   // never had its clone.
   const launch = workspace.launch;
-  const cloneFailed = launch?.category === "repository-sync-failed" || launch?.category === "branch-create-failed";
+  const cloneFailed = launch?.category === "repository-clone-failed" || launch?.category === "repository-sync-failed" || launch?.category === "branch-create-failed";
   if (workspace.state !== "ready" || !workspace.runtimeActivity?.online || cloneFailed) return "runtime";
   if (record.agent === "terminal-only") return "done";
   // A usable agent login: the first prompt reached its agent.

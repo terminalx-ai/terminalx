@@ -186,6 +186,7 @@ describe("phases", () => {
   it("explains failures and measures the launch", () => {
     expect(failureMessage(snapshot({ workspace: { launch: launch("failed", { category: "agent-unavailable" }) } }))).toMatch(/not installed/);
     expect(failureMessage(snapshot({ workspace: { launch: launch("failed", { category: "runtime-interrupted" }) } }))).toMatch(/may not have been sent/);
+    expect(failureMessage(snapshot({ workspace: { launch: launch("failed", { category: "repository-clone-failed" }) } }))).toMatch(/could not be cloned/);
     expect(failureMessage(snapshot({ operation: { state: "failed", errorCode: "provider_retry_exhausted" } }))).toMatch(/provider_retry_exhausted/);
     const running = snapshot({ workspace: { launch: launch("running", { timings: { ...launch("running").timings, runningAt: 7400 } }) } });
     expect(launchLatency(running)).toBe(6400);
