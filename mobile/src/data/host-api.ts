@@ -26,6 +26,20 @@ export class HostApi {
 
   constructor(private readonly connection: HostConnection) {}
 
+  /** What the computer calls itself (PRO-87). Null from a desktop that predates the question, or when it has no name to give. */
+  async describe(): Promise<string | null> {
+    const result = await this.connection.request<unknown>("host.describe");
+    if (!result.ok) return null;
+    const name = (result.value as { name?: unknown } | null)?.name;
+    return typeof name === "string" ? name : null;
+  }
+
+  /** Ask the computer to drop this phone from its paired devices. Best effort: true only when it said it did. */
+  async forgetPairing(): Promise<boolean> {
+    const result = await this.connection.request<unknown>("pairing.forget");
+    return result.ok && (result.value as { forgotten?: unknown } | null)?.forgotten === true;
+  }
+
   async summaries(): Promise<SessionSummary[] | null> {
     const result = await this.connection.request<unknown>("sessions.summaries");
     if (!result.ok) return null;

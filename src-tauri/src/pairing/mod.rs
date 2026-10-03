@@ -233,7 +233,7 @@ impl PairingManager {
             identity_mode: "inherit".into(),
             relay: relay_offer,
         };
-        let pairing_url = match encode_pairing_offer(&offer) {
+        let pairing_url = match encode_pairing_offer(&offer, computer_name().as_deref()) {
             Ok(pairing_url) => pairing_url,
             Err(error) => {
                 if let Some(relay) = relay {
@@ -987,6 +987,16 @@ impl PairingManager {
                 self.get_pairing_endpoints(device, connection, request.get("params"))
                     .await
             }
+            // What the phone calls this computer (PRO-87). Asked on every
+            // connection, so a computer renamed in System Settings, and a
+            // phone paired before names were sent, both catch up.
+            "host.describe" if allowed_method(device.scope, method) => Ok(serde_json::json!({ "name": computer_name() })),
+            // The phone unpairs itself: only ever the device this connection
+            // authenticated as, so it is removed from this computer's paired
+            // devices too instead of lingering after the phone forgot it.
+            "pairing.forget" if allowed_method(device.scope, method) => {
+                self.revoke_device(&device.id).await.map(|_| serde_json::json!({ "forgotten": true }))
+            }
             method if allowed_method(device.scope, method) => {
                 match mobile::dispatch(self, mobile_connection, request, device).await {
                     Some(result) => result,
@@ -1290,6 +1300,43 @@ fn valid_grant(
         && DateTime::parse_from_rfc3339(&grant.expires_at).is_ok_and(|expiry| expiry > Utc::now())
 }
 
+/// The longest computer name sent to a phone.
+const COMPUTER_NAME_MAX_CHARS: usize = 64;
+
+/// A name as it may be shown on another device: no control or formatting
+/// characters, single spaces, at most [`COMPUTER_NAME_MAX_CHARS`]. `None`
+/// when nothing is left.
+fn presentable_name(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|c| !c.is_control() && !matches!(*c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'))
+        .collect();
+    let name: String = cleaned.split(' ').filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ").chars().take(COMPUTER_NAME_MAX_CHARS).collect();
+    let name = name.trim_end().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// This computer's own name: the macOS computer name (System Settings →
+/// General → About → Name), the host name elsewhere. Read each time it is
+/// asked for, so a rename shows on the next connection.
+fn computer_name() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    if let Ok(output) = std::process::Command::new("/usr/sbin/scutil").args(["--get", "ComputerName"]).output() {
+        if output.status.success() {
+            if let Some(name) = String::from_utf8(output.stdout).ok().and_then(|name| presentable_name(&name)) {
+                return Some(name);
+            }
+        }
+    }
+    ["COMPUTERNAME", "HOSTNAME"]
+        .iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .chain(std::fs::read_to_string("/etc/hostname").ok())
+        .filter_map(|name| presentable_name(name.split('.').next().unwrap_or("")))
+        .next()
+}
+
 fn host_display_name() -> String {
     std::env::var("HOSTNAME")
         .ok()
@@ -1496,6 +1543,8 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "notifications.missedSince",
         "notifications.subscribe",
         "notifications.unsubscribe",
+        "host.describe",
+        "pairing.forget",
     ];
     const DRIVER: &[&str] = &[
         "pairing.getEndpoints",
@@ -1523,6 +1572,11 @@ mod tests {
     fn paired_device_scopes_are_deny_by_default() {
         assert!(allowed_method(DeviceScope::Viewer, "terminal.read"));
         assert!(allowed_method(DeviceScope::Viewer, "sessions.summaries"));
+        // PRO-87: any paired device may ask this computer's name and unpair itself.
+        for scope in [DeviceScope::Viewer, DeviceScope::Driver] {
+            assert!(allowed_method(scope, "host.describe"));
+            assert!(allowed_method(scope, "pairing.forget"));
+        }
         assert!(allowed_method(DeviceScope::Viewer, "session.tail"));
         assert!(!allowed_method(DeviceScope::Viewer, "terminal.send"));
         assert!(!allowed_method(DeviceScope::Viewer, "session.send"));
@@ -1571,9 +1625,29 @@ mod tests {
             relay: None,
         };
         assert_eq!(offer.public_key_b64, key.public_key_b64());
-        assert!(encode_pairing_offer(&offer)
+        assert!(encode_pairing_offer(&offer, None)
             .unwrap()
             .starts_with("terminalx://pair?code="));
+        // PRO-87: the computer's name rides beside the offer, where a phone that predates it does not look.
+        let named = encode_pairing_offer(&offer, Some("Paresh\u{2019}s Mac mini & co")).unwrap();
+        let (code, name) = named.split_once("&name=").unwrap();
+        assert_eq!(code, encode_pairing_offer(&offer, None).unwrap());
+        assert_eq!(url::form_urlencoded::parse(format!("name={name}").as_bytes()).next().unwrap().1, "Paresh\u{2019}s Mac mini & co");
+        assert!(!name.contains(' ') && !name.contains('&'));
+        assert_eq!(encode_pairing_offer(&offer, Some("")).unwrap(), code);
+    }
+
+    // PRO-87: a name shown on another device is cleaned and bounded.
+    #[test]
+    fn a_computer_name_is_made_presentable_before_it_is_sent() {
+        assert_eq!(presentable_name("  Paresh\u{2019}s  Mac\tmini \n").as_deref(), Some("Paresh\u{2019}s Mac mini"));
+        assert_eq!(presentable_name("Mac\u{0007}\u{202E}evil\u{200B}").as_deref(), Some("Macevil"));
+        assert_eq!(presentable_name(&"n".repeat(200)).map(|name| name.chars().count()), Some(COMPUTER_NAME_MAX_CHARS));
+        assert_eq!(presentable_name(" \u{0000}\n "), None);
+        // Whatever this machine is called, what is sent obeys the same rules.
+        if let Some(name) = computer_name() {
+            assert!(!name.is_empty() && name.chars().count() <= COMPUTER_NAME_MAX_CHARS && !name.chars().any(char::is_control));
+        }
     }
 
     #[test]

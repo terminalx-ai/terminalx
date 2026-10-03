@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { RpcCallResult } from "@terminalx/portable/rpc";
 import { PairingGetEndpointsResultSchema, RECONNECT_DELAYS_MS, RECONNECT_TRICKLE_MS } from "../pairing/contracts";
 import { updateStoredHost, writeHostCredential, type HostCredential, type StoredHost } from "../store/hosts";
+import { hostDisplayName } from "../store/host-name";
 import { RelayClient, type RelayEvent } from "./relay-client";
 import { loadOrCreateE2EESecretKey } from "./e2ee-keypair";
 import { applyResumeConfirmation } from "./credential-confirmation";
@@ -187,11 +188,11 @@ export class HostConnection {
       if (state === "connected") {
         wasConnected = true;
         this.emitStage("connected", 0);
-        this.log("success", "Connected", `${host.label} · ${winner.path} · ${redactEndpoint(winner.path === "direct" ? host.endpoint : host.relay!.cellUrl)}`);
+        this.log("success", "Connected", `${hostDisplayName(host)} · ${winner.path} · ${redactEndpoint(winner.path === "direct" ? host.endpoint : host.relay!.cellUrl)}`);
       } else if (state === "disconnected" && wasConnected) {
         clearInterval(this.refreshTimer);
         this.client = null;
-        this.log("warning", "Connection lost", host.label);
+        this.log("warning", "Connection lost", hostDisplayName(host));
         void this.connectLoop(generation);
       }
     });

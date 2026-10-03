@@ -39,3 +39,23 @@ describe("mobile chat sends", () => {
     expect(request).toHaveBeenCalledWith("session.send", { tabId: "tab-1", text: "", attachments: [attachment] });
   });
 });
+
+// PRO-87
+describe("the computer's name and unpairing", () => {
+  it("asks the computer what it is called, and takes no answer from an older desktop", async () => {
+    const request = vi.fn().mockResolvedValue({ ok: true, value: { name: "Paresh’s Mac mini" } });
+    await expect(hostApi(request).describe()).resolves.toBe("Paresh’s Mac mini");
+    expect(request).toHaveBeenCalledWith("host.describe");
+    // An older desktop refuses the method; one with no name answers null.
+    await expect(hostApi(vi.fn().mockResolvedValue({ ok: false, refusal: { code: "forbidden", message: "no" } })).describe()).resolves.toBeNull();
+    await expect(hostApi(vi.fn().mockResolvedValue({ ok: true, value: { name: null } })).describe()).resolves.toBeNull();
+    await expect(hostApi(vi.fn().mockResolvedValue({ ok: true, value: { name: { evil: true } } })).describe()).resolves.toBeNull();
+  });
+
+  it("reports whether the computer dropped this phone", async () => {
+    const request = vi.fn().mockResolvedValue({ ok: true, value: { forgotten: true } });
+    await expect(hostApi(request).forgetPairing()).resolves.toBe(true);
+    expect(request).toHaveBeenCalledWith("pairing.forget");
+    await expect(hostApi(vi.fn().mockResolvedValue({ ok: false, refusal: { code: "forbidden", message: "no" } })).forgetPairing()).resolves.toBe(false);
+  });
+});
