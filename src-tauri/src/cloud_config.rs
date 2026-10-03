@@ -714,6 +714,15 @@ pub fn launch_config(harness: &str, launch: &str) -> LaunchConfig {
     STORE.get().map(|store| store.launch_config(harness, launch, Instant::now())).unwrap_or_default()
 }
 
+/// The names of the variables the workspace configuration gives a new agent
+/// session, bound secrets included; empty outside a cloud workspace.
+pub fn configured_env_names() -> Vec<String> {
+    let Some(store) = STORE.get() else { return Vec::new() };
+    let state = store.state();
+    let Some(config) = state.config.as_ref() else { return Vec::new() };
+    config.env.keys().cloned().chain(config.secret_env.iter().map(|(name, _)| name.clone())).collect()
+}
+
 pub fn forget_launch(launch: &str) {
     if let Some(store) = STORE.get() {
         store.forget_launch(launch);

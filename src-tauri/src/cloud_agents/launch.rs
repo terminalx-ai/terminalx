@@ -177,6 +177,10 @@ fn error_code(body: &Value) -> &str {
 pub trait Starter: Send + Sync {
     /// Whether `agent` is offered and installed here.
     fn available(&self, agent: &str) -> bool;
+    /// Whether `agent` would start with no way to sign in (PRO-78).
+    fn sign_in_required(&self, _agent: &str) -> bool {
+        false
+    }
     /// Create the session and tab in `cwd` and send `prompt` (when any).
     /// Returns `(session id, tab id)`.
     fn start(&self, cwd: &Path, claim: &Claim, title: &str) -> Result<(String, String), StartError>;
@@ -344,6 +348,11 @@ impl Launcher {
         }
         if !self.starter.available(&claim.agent) {
             return Ok(self.finish(claim, Outcome::failed("agent-unavailable", branches)));
+        }
+        // A prompt sent to an agent at its sign-in screen is never read: fail
+        // now, with the reason, instead of leaving a tab that looks busy.
+        if claim.prompt.is_some() && self.starter.sign_in_required(&claim.agent) {
+            return Ok(self.finish(claim, Outcome::failed("agent-sign-in-required", branches)));
         }
         let cwd = claim.repositories.first().map(|repository| PathBuf::from(&repository.path)).unwrap_or_else(|| self.root.clone());
         if let Err(error) = self.store.put(&Record::Applying { launch_id: claim.launch_id.clone() }) {
@@ -542,6 +551,10 @@ pub struct ManagerStarter {
 impl Starter for ManagerStarter {
     fn available(&self, agent: &str) -> bool {
         crate::harness::offered().into_iter().any(|harness| harness.id == agent && harness.available)
+    }
+
+    fn sign_in_required(&self, agent: &str) -> bool {
+        crate::cloud_grants::sign_in_required_at_launch(agent).is_some()
     }
 
     fn start(&self, cwd: &Path, claim: &Claim, title: &str) -> Result<(String, String), StartError> {

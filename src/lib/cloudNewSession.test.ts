@@ -263,8 +263,10 @@ describe("blank projects", () => {
     expect(pending).toMatchObject({ blank: true, fullName: "scratch", workspaces: [] });
     expect(flow.planCloudStart(pending)).toEqual({ kind: "create" });
     const prepared = await flow.prepareCloudCreate(pending, request);
-    // No repository to check.
-    expect(mocks.api.cloudWorkspacePreflight).not.toHaveBeenCalled();
+    // No repository to check: only that the prompt's agent has a login (PRO-78).
+    expect(mocks.api.cloudWorkspacePreflight).toHaveBeenCalledTimes(1);
+    const [checked, , agent] = mocks.api.cloudWorkspacePreflight.mock.calls[0]!;
+    expect([checked, agent]).toEqual([[], "claude"]);
     const created = item("scratch-ws", { name: "scratch", repositories: [], state: "ready" });
     mocks.api.cloudWorkspaceCreate.mockResolvedValue({ workspace: created.workspace, operation: { id: "op", state: "succeeded", type: "create", stage: "ready" } });
     await flow.confirmCloudCreate(prepared);
@@ -318,7 +320,7 @@ describe("every organization live (CS-18)", () => {
     expect(mocks.api.cloudProviders).not.toHaveBeenCalled();
     expect(mocks.api.cloudWorkspaceSetup).toHaveBeenCalledTimes(1);
     expect(mocks.api.cloudWorkspaceSetup).toHaveBeenCalledWith("box", ORG_B);
-    expect(mocks.api.cloudWorkspacePreflight).toHaveBeenCalledWith(expect.any(Array), ORG_B);
+    expect(mocks.api.cloudWorkspacePreflight).toHaveBeenCalledWith(expect.any(Array), ORG_B, "claude");
     expect(mocks.api.cloudWorkspaceQuote).toHaveBeenCalledWith(expect.objectContaining({ provider: "box" }), ORG_B);
     expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
 
