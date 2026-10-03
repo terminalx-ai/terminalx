@@ -8,6 +8,15 @@
 //! agent is touched and the outcome after, next to the mailbox receipts whose
 //! `storageIncarnationId` the claim carries. A redelivery with a stored
 //! outcome reports it again; one that died mid-apply is `outcome-unknown`.
+//!
+//! A workspace with no Environment image has nothing checked out, so its
+//! claim marks every repository `clone` (§19.3, `launch-clone-v1`): the
+//! runtime clones `https://github.com/<owner>/<name>.git` into the given
+//! path first. The claim carries no URL and no credential. Git gets a token
+//! from the credential helper `cloud_github` installs at boot, which asks
+//! the API for a short-lived one scoped to this workspace's repositories;
+//! this module never sees a token, and none is put in the URL, the remote,
+//! the Git config, the environment or a log line.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,6 +32,19 @@ const FILE: &str = "launch.json";
 /// Contract §19.1 limits, shared with the desktop's create checks.
 pub const MAX_PROMPT_BYTES: usize = 32 * 1024;
 pub const MAX_REPOSITORIES: usize = 5;
+/// Sent with the claim (the header `cloud_bootstrap` uses on refresh): this
+/// runtime clones the repositories of a workspace that has no Environment
+/// image. A server that does not know it answers as before.
+pub const CLAIM_CAPABILITIES: &str = "launch-clone-v1";
+const CAPABILITIES_HEADER: &str = "x-terminalx-cloud-workspace-runtime-capabilities";
+const GITHUB: &str = "https://github.com";
+const GITHUB_PROVIDER: &str = "github";
+/// Where a clone lands until it is complete, next to its final directory.
+const STAGING_PREFIX: &str = ".terminalx-clone-";
+/// A transfer slower than this many bytes a second for this many seconds is
+/// given up, so a stalled clone fails the launch instead of hanging it.
+const LOW_SPEED_LIMIT: &str = "http.lowSpeedLimit=1000";
+const LOW_SPEED_TIME: &str = "http.lowSpeedTime=60";
 
 /// `[a-z0-9-]{1,32}`, the agent ids a launch may name.
 pub fn valid_agent(agent: &str) -> bool {
@@ -37,6 +59,15 @@ pub struct Repository {
     pub path: String,
     #[serde(default, rename = "ref")]
     pub base_ref: Option<String>,
+    /// Set when `path` is not a checkout yet and the runtime clones it.
+    #[serde(default)]
+    pub clone: Option<CloneSource>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneSource {
+    pub provider: String,
 }
 
 /// The tab a claimed launch starts. A launch that names no mode (or a blank
@@ -124,7 +155,7 @@ pub trait LaunchApi: Send + Sync {
 impl LaunchApi for HttpMailboxApi {
     fn claim(&self, storage_incarnation_id: &str) -> Result<Option<Claim>, CallError> {
         let body = json!({ "v": 1, "storageIncarnationId": storage_incarnation_id });
-        match self.call("POST", "/v1/cloud-workspace-bootstrap/launch-intent/claim", Some(body))? {
+        match self.call_with("POST", "/v1/cloud-workspace-bootstrap/launch-intent/claim", Some(body), &[(CAPABILITIES_HEADER, CLAIM_CAPABILITIES)])? {
             (200, body) => match body.get("launch") {
                 None | Some(Value::Null) => Ok(None),
                 Some(launch) => serde_json::from_value(launch.clone())
@@ -193,6 +224,11 @@ pub enum StartError {
 
 /// Prepares one repository; the real one runs git.
 pub trait Checkout: Send + Sync {
+    /// Clone a repository marked `clone` whose path is not a checkout yet.
+    /// The default does nothing.
+    fn clone_missing(&self, _repository: &Repository) -> Result<()> {
+        Ok(())
+    }
     fn prepare(&self, repository: &Repository, work_branch: &str) -> Result<Branch>;
     /// A launch with no repository (a blank project): make its folder a Git
     /// repository on the work branch, so changes can be tracked. The default
@@ -312,7 +348,7 @@ impl Launcher {
     }
 
     fn launch(&self, claim: &Claim) -> Result<Outcome, CallError> {
-        if let Err(error) = validate(claim) {
+        if let Err(error) = validate(claim, &self.root) {
             log::warn!("launch intent {}: {error:#}", claim.launch_id);
             return Ok(self.finish(claim, Outcome::failed("payload-invalid", Vec::new())));
         }
@@ -328,6 +364,12 @@ impl Launcher {
             }
         }
         let mut branches = Vec::new();
+        for repository in claim.repositories.iter().filter(|repository| repository.clone.is_some()) {
+            if let Err(error) = self.checkout.clone_missing(repository) {
+                log::warn!("clone {}/{}: {error:#}", repository.owner, repository.name);
+                return Ok(self.finish(claim, Outcome::failed("repository-clone-failed", branches)));
+            }
+        }
         for repository in &claim.repositories {
             match self.checkout.prepare(repository, &claim.work_branch) {
                 Ok(branch) => branches.push(branch),
@@ -386,7 +428,7 @@ impl Launcher {
     }
 }
 
-fn validate(claim: &Claim) -> Result<()> {
+fn validate(claim: &Claim, root: &Path) -> Result<()> {
     if !valid_branch(&claim.work_branch) {
         bail!("invalid work branch");
     }
@@ -399,6 +441,15 @@ fn validate(claim: &Claim) -> Result<()> {
         }
         if !valid_repository_path(&repository.path) {
             bail!("invalid repository path");
+        }
+        if let Some(source) = &repository.clone {
+            if source.provider != GITHUB_PROVIDER || !valid_github_name(&repository.owner) || !valid_github_name(&repository.name) {
+                bail!("invalid clone source");
+            }
+            // Only ever a new directory directly in the project root.
+            if Path::new(&repository.path).parent() != Some(root) {
+                bail!("clone path outside the project root");
+            }
         }
     }
     if claim.prompt.as_ref().is_some_and(|prompt| prompt.len() > MAX_PROMPT_BYTES || prompt.contains('\0')) {
@@ -432,6 +483,11 @@ fn valid_repository_path(path: &str) -> bool {
     path.is_absolute() && path.components().all(|part| matches!(part, std::path::Component::RootDir | std::path::Component::Normal(_)))
 }
 
+/// One segment of `owner/name` as it goes into the clone URL.
+fn valid_github_name(name: &str) -> bool {
+    (1..=100).contains(&name.len()) && name != "." && name != ".." && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+}
+
 fn title_of(claim: &Claim) -> String {
     let line = claim.title.as_deref().or(claim.prompt.as_deref()).unwrap_or("").lines().next().unwrap_or("").trim();
     if line.chars().count() > 80 {
@@ -447,9 +503,77 @@ fn title_of(claim: &Claim) -> String {
 /// checkout does not have it), then the workspace's own work branch. A work
 /// branch that already exists here is this workspace's from an earlier
 /// attempt: switched to, never recreated or reset.
-pub struct GitCheckout;
+///
+/// A repository marked `clone` is cloned first, from `<remote>/<owner>/<name>.git`
+/// with no credential in the URL: Git asks its configured credential helper.
+pub struct GitCheckout {
+    remote: String,
+}
+
+impl Default for GitCheckout {
+    fn default() -> Self {
+        Self { remote: GITHUB.into() }
+    }
+}
+
+impl GitCheckout {
+    /// Clones from `remote` instead of github.com, for tests.
+    #[cfg(test)]
+    pub(crate) fn from_remote(remote: &str) -> Self {
+        Self { remote: remote.into() }
+    }
+
+    fn clone_url(&self, repository: &Repository) -> String {
+        format!("{}/{}/{}.git", self.remote, repository.owner, repository.name)
+    }
+}
+
+fn is_empty_dir(path: &Path) -> bool {
+    std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
+}
 
 impl Checkout for GitCheckout {
+    fn clone_missing(&self, repository: &Repository) -> Result<()> {
+        let path = Path::new(&repository.path);
+        let url = self.clone_url(repository);
+        if path.join(".git").exists() {
+            // This workspace's clone from an earlier attempt: kept as it is.
+            let origin = crate::git::run(path, &["remote", "get-url", "origin"])?;
+            if origin.trim() != url {
+                bail!("{} is a checkout of another repository", repository.path);
+            }
+            return Ok(());
+        }
+        if path.exists() && !is_empty_dir(path) {
+            // Never deleted: it may be someone's work.
+            bail!("{} exists and is not a checkout", repository.path);
+        }
+        let parent = path.parent().ok_or_else(|| anyhow!("no parent directory"))?;
+        let name = path.file_name().ok_or_else(|| anyhow!("no directory name"))?;
+        std::fs::create_dir_all(parent)?;
+        // Cloned next to its place and moved in whole, so a clone that died
+        // halfway is never mistaken for a checkout. A leftover is our own.
+        let staging = parent.join(format!("{STAGING_PREFIX}{}", name.to_string_lossy()));
+        if staging.exists() {
+            std::fs::remove_dir_all(&staging)?;
+        }
+        let staging_arg = staging.to_string_lossy().into_owned();
+        let mut args = vec!["-c", LOW_SPEED_LIMIT, "-c", LOW_SPEED_TIME, "clone", "--quiet"];
+        if let Some(base) = repository.base_ref.as_deref() {
+            args.extend(["--branch", base]);
+        }
+        args.extend(["--", &url, &staging_arg]);
+        if let Err(error) = crate::git::run(parent, &args) {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+        if path.exists() {
+            std::fs::remove_dir(path)?;
+        }
+        std::fs::rename(&staging, path)?;
+        Ok(())
+    }
+
     fn prepare(&self, repository: &Repository, work_branch: &str) -> Result<Branch> {
         let path = Path::new(&repository.path);
         if !crate::git::is_repo(path) {

@@ -410,6 +410,7 @@ export function createErrorMessage(code: string, detail: string | null = null): 
 
 const FAILURES: Record<string, string> = {
   "agent-unavailable": "The agent is not installed in the workspace image.",
+  "repository-clone-failed": "A repository could not be cloned. Check that the organization's GitHub access covers it and that the base branch exists.",
   "repository-sync-failed": "A repository could not be switched to its branch.",
   "branch-create-failed": "The work branch could not be created.",
   "agent-start-failed": "The agent could not be started.",
