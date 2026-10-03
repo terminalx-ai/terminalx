@@ -11,6 +11,7 @@ import {
   dateText,
   DAY_MS,
   deadlineText,
+  deletion,
   isOpen,
   lifecycleErrorMessage,
   deleteAwaitsProvider,
@@ -416,6 +417,19 @@ export function DeletionProgress({
 }
 
 /** How long an archived workspace is kept, and what its final save did. */
+/**
+ * A delete in a row's own words: how far the cleanup is while it runs, why it
+ * stopped when it failed. Null when the workspace is not being deleted.
+ */
+export function deletionLine(item: CloudWorkspaceListItem): string | null {
+  const state = deletion(item);
+  const operation = item.latestOperation;
+  if (!state || !operation) return null;
+  if (state !== "running") return `The delete stopped: ${operationFailureText(operation)}`;
+  const items = operation.cleanup?.items ?? [];
+  return items.length ? `Deleting: ${items.length - remaining(operation.cleanup!).length} of ${items.length} removed.` : "Deleting…";
+}
+
 export function archiveLine(item: CloudWorkspaceListItem, now = Date.now()): string {
   const { deleteAfter } = item.workspace;
   if (!deleteAfter) return "Archived.";
