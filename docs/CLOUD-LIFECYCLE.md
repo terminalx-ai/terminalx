@@ -52,6 +52,33 @@ an archive's `checkpoint`, a delete's `cleanup` report and the list's
 - An archived workspace opens read-only from its checkpoints; `wake` on it
   answers `cloud_workspace_archived` (`src-tauri/src/cloud_remote.rs`).
 
+## Organization teardown and provider disconnect (PRO-34)
+
+The server half is saas contract §10.7; both paths run the same inventory and
+cleanup as a single workspace's archive and delete.
+
+- **Provider disconnect** (`src/components/settings/ProviderControls.tsx`)
+  offers three choices: retain the resources, destroy them, or **archive**
+  the workspaces (stopped, kept 30 days with one shared deadline, then
+  deleted). The server reports an archiving disconnect as
+  `disconnectRetention: "archive"` with `retentionDeadline`, apart from
+  `disconnectDisposition` (which an older desktop decodes as retain or
+  destroy only); the section then reads "Disconnect pending — workspaces are
+  archived and deleted on …".
+- **Organization teardown** (`OrganizationCloudTeardown.tsx`, in Settings →
+  Account, for owners and administrators): archive every workspace of the
+  organization with one deadline, or delete them now
+  (`GET`/`POST …/cloud-teardown`, `cloud_teardown_status` and
+  `cloud_teardown_request`). It cannot be cancelled, and while it runs nobody
+  in the organization can create, resume or unarchive a workspace, so nothing
+  is sent before a disposition is chosen and the organization's name is
+  typed. A pending archive can only be escalated to deleting now. The section
+  shows the deadline, what still remains at the providers (with each
+  resource's own deadline and whether its cleanup is unresolved), that
+  session runtimes and build templates are not removed by it, and released
+  workspaces the provider kept. It is not offered when the status could not
+  be read, and it is absent for a member (the server refuses the read).
+
 ## Runtime: the final checkpoint
 
 `terminalx-serve` advertises `quiesce-v1`. While an archive waits, the
@@ -81,6 +108,11 @@ either way). Refreshing sooner while an archive is pending is a follow-up.
 
 ## Tests
 
+- `src/components/settings/OrganizationCloudTeardown.test.tsx`,
+  `ProviderControls.test.tsx`: nothing is sent without a disposition and the
+  typed name; escalation only; what remains; a finished teardown; a member;
+  an unknown outcome; archive on disconnect and its deadline.
+
 - `src/components/cloud/CloudWorkspaceLifecycle.test.tsx`: dirty files,
   unpushed commits, an open PR and a running turn before an archive; force
   only once confirmed; a refusal for new work; an offline workspace; a
@@ -103,8 +135,9 @@ either way). Refreshing sooner while an archive is pending is a follow-up.
 
 - The final checkpoint's latency (above): the runtime learns of the request
   on its 30 s refresh.
-- Organization teardown and the provider disconnect `archive` disposition
-  have no desktop UI yet.
+- There is no endpoint to delete an organization, so nothing yet requires a
+  completed teardown first; a teardown cannot be cancelled; the console has
+  no archive or unarchive.
 - Preview routes do not exist; scoped runtime secrets are revoked by the
   server.
 - The running app has not been checked by hand (computer use is blocked on

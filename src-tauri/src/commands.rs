@@ -510,6 +510,27 @@ pub async fn cloud_provider_disconnect(
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.disconnect_provider(provider, context_revision, disposition))
 }
 
+/// The organization's cloud teardown, or null when none was asked for.
+#[tauri::command]
+pub async fn cloud_teardown_status(
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<Option<crate::cloud_workspaces::CloudTeardown>, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.teardown_status(org_id.as_deref()))
+}
+
+/// Archive or destroy every cloud workspace of the organization. Only after
+/// the person confirmed it: it cannot be undone.
+#[tauri::command]
+pub async fn cloud_teardown_request(
+    disposition: crate::cloud_workspaces::TeardownDisposition,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<crate::cloud_workspaces::CloudTeardown, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
+        .request_teardown(org_id.as_deref(), disposition))
+}
+
 #[tauri::command]
 pub async fn cloud_provider_set_creation_enabled(
     provider: crate::cloud_workspaces::CloudWorkspaceProviderId,

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Check, Loader2, Pencil } from "lucide-react";
 import { OrganizationCompute } from "./OrganizationCompute";
+import { OrganizationCloudTeardown } from "./OrganizationCloudTeardown";
 import { OrganizationDiagnostics } from "./OrganizationDiagnostics";
 import { OrganizationGithubApp } from "./OrganizationGithubApp";
 import { OrganizationMembers } from "./OrganizationMembers";
@@ -58,6 +59,7 @@ export function AccountTab() {
         {identity.organization && <OrganizationGithubApp contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationWorkspaceConfig contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationDiagnostics contextRevision={status.context?.revision ?? ""} member={activeRole === "member"} />}
+        {identity.organization && <OrganizationCloudTeardown contextRevision={status.context?.revision ?? ""} organizationName={identity.organization} member={activeRole === "member"} />}
         {pairing.status.host && (
           <div className="rounded-lg border border-hairline px-3 py-3">
             <div className="text-xs font-medium">What this Mac shares</div>

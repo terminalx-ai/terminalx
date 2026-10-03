@@ -118,12 +118,59 @@ pub struct CloudProviderConnectionResponse {
     pub provider_account: Option<String>,
     pub operations_blocked: Option<bool>,
     pub disconnect_disposition: Option<DisconnectDisposition>,
+    /// `archive` while a disconnect that archives is under way (§10.7): the
+    /// server reports it apart from `disconnectDisposition`, which an older
+    /// desktop reads as retain or destroy only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disconnect_retention: Option<String>,
+    /// When the archived workspaces of that disconnect are deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_deadline: Option<i64>,
     pub resources: Option<Vec<CloudProviderResource>>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum DisconnectDisposition { Retain, Destroy }
+pub enum DisconnectDisposition { Retain, Archive, Destroy }
+
+/// What an organization-wide cloud teardown does with its workspaces (§10.7).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TeardownDisposition { Archive, Destroy }
+
+/// `GET`/`POST …/cloud-teardown` (§10.7): the teardown an owner or admin
+/// asked for, every resource the organization still has at its providers,
+/// and what still blocks completion. `disposition` stays a string so a newer
+/// server's value still reaches the page.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudTeardown {
+    pub organization_id: String,
+    pub disposition: String,
+    pub requested_at: i64,
+    pub retention_deadline: i64,
+    #[serde(default)]
+    pub completed_at: Option<i64>,
+    #[serde(default)]
+    pub resources: Vec<CloudTeardownResource>,
+    #[serde(default)]
+    pub remaining: Vec<CloudTeardownResource>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudTeardownResource {
+    pub provider: String,
+    pub id: String,
+    pub kind: String,
+    pub state: String,
+    #[serde(default)]
+    pub release_disposition: Option<String>,
+    #[serde(default)]
+    pub cleanup_required: bool,
+    #[serde(default)]
+    pub delete_after: Option<i64>,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1437,6 +1484,30 @@ impl CloudWorkspaceService {
         ensure_connection(result, provider)
     }
 
+    /// The organization's cloud teardown, if one was ever asked for (§10.7).
+    /// `None` when there is none; the server decides who may read it.
+    pub fn teardown_status(&self, org: Option<&str>) -> Result<Option<CloudTeardown>, CloudWorkspaceClientError> {
+        self.run_in(org, RequestRisk::Read, |client, context| {
+            let result: Result<CloudTeardown, _> = client.request(context, &["cloud-teardown"], None, None, None, RequestRisk::Read);
+            match result {
+                Ok(teardown) => ensure_teardown(teardown, &context.organization_id, RequestRisk::Read).map(Some),
+                Err(error) if error.status == Some(404) && error.code == "cloud_teardown_not_found" => Ok(None),
+                Err(error) => Err(error),
+            }
+        })
+    }
+
+    /// Shut the organization's cloud down: archive every workspace with one
+    /// shared deadline, or delete them now. It cannot be undone, and an
+    /// archive may only be escalated to a destroy. The page asks for it only
+    /// after an explicit confirmation.
+    pub fn request_teardown(&self, org: Option<&str>, disposition: TeardownDisposition) -> Result<CloudTeardown, CloudWorkspaceClientError> {
+        self.run_in(org, RequestRisk::Mutation, |client, context| {
+            let result = client.request(context, &["cloud-teardown"], None, Some(json!({ "disposition": disposition })), None, RequestRisk::Mutation)?;
+            ensure_teardown(result, &context.organization_id, RequestRisk::Mutation)
+        })
+    }
+
     /// Whether new machines may be created on a provider (PRO-79). An owner's
     /// or admin's switch, as in the console: the saved key, its resources and
     /// every running workspace are untouched either way.
@@ -2098,6 +2169,7 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_active_work"
             | "cloud_workspace_archived"
             | "cloud_teardown_in_progress"
+            | "cloud_teardown_not_found"
             | "cloud_workspace_quota_exceeded"
             | "cloud_workspace_concurrency_exceeded"
             | "idempotency_key_reused"
@@ -2332,6 +2404,13 @@ impl ProviderBound for CloudWorkspaceQuote {
     fn provider_id(&self) -> CloudWorkspaceProviderId {
         self.provider
     }
+}
+
+fn ensure_teardown(value: CloudTeardown, org_id: &str, risk: RequestRisk) -> Result<CloudTeardown, CloudWorkspaceClientError> {
+    if value.organization_id != org_id {
+        return Err(post_send_error(risk));
+    }
+    Ok(value)
 }
 
 fn ensure_snapshot(
@@ -3642,6 +3721,70 @@ mod tests {
             request.join().unwrap();
             assert_eq!((error.code.as_str(), error.status), (code, Some(409)));
         }
+    }
+
+    #[test]
+    fn teardown_is_read_and_requested_for_that_organization_only() {
+        let teardown = json!({
+            "organizationId": "org-1", "disposition": "archive", "requestedAt": 10, "retentionDeadline": 40,
+            "resources": [
+                { "provider": "box", "id": "workspace-1", "kind": "workspace", "state": "archived", "releaseDisposition": "destroyed", "cleanupRequired": false, "deleteAfter": 40 },
+                { "provider": "box", "id": "workspace-2", "kind": "workspace", "state": "destroyed", "releaseDisposition": null, "cleanupRequired": false }
+            ],
+            "remaining": [{ "provider": "box", "id": "workspace-1", "kind": "workspace", "state": "archived", "releaseDisposition": "destroyed", "cleanupRequired": false, "deleteAfter": 40 }]
+        });
+        let (base, _, request) = serve_once(response("200 OK", &teardown.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let status = service.teardown_status(None).unwrap().unwrap();
+        assert!(request.join().unwrap().text.starts_with("GET /v1/desktop/orgs/org-1/cloud-teardown HTTP/1.1"));
+        assert_eq!((status.disposition.as_str(), status.retention_deadline, status.completed_at), ("archive", 40, None));
+        assert_eq!((status.resources.len(), status.remaining.len(), status.remaining[0].delete_after), (2, 1, Some(40)));
+
+        // None was ever asked for: not an error.
+        let (base, _, request) = serve_once(response("404 Not Found", &json!({ "error": "cloud_teardown_not_found" }).to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert!(service.teardown_status(None).unwrap().is_none());
+        request.join().unwrap();
+
+        // A member is refused by the server, and that is said.
+        let (base, _, request) = serve_once(response("403 Forbidden", &json!({ "error": "organization_admin_required" }).to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.teardown_status(None).unwrap_err().code, "organization_admin_required");
+        request.join().unwrap();
+
+        for (disposition, body) in [(TeardownDisposition::Archive, r#"{"disposition":"archive"}"#), (TeardownDisposition::Destroy, r#"{"disposition":"destroy"}"#)] {
+            let (base, _, request) = serve_once(response("202 Accepted", &teardown.to_string(), ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            service.request_teardown(None, disposition).unwrap();
+            let captured = request.join().unwrap();
+            assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-teardown HTTP/1.1"));
+            assert!(captured.text.ends_with(body), "{}", captured.text);
+        }
+
+        // An answer about another organization is never shown as this one's.
+        let mut other = teardown.clone();
+        other["organizationId"] = json!("org-2");
+        let (base, _, request) = serve_once(response("200 OK", &other.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.teardown_status(None).unwrap_err().code, "cloud_workspace_invalid_response");
+        request.join().unwrap();
+        let (base, _, request) = serve_once(response("202 Accepted", &other.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.request_teardown(None, TeardownDisposition::Destroy).unwrap_err().code, "cloud_workspace_request_outcome_unknown");
+        request.join().unwrap();
+    }
+
+    #[test]
+    fn a_disconnect_may_archive_and_its_deadline_is_read() {
+        assert_eq!(json!({ "disposition": DisconnectDisposition::Archive }), json!({ "disposition": "archive" }));
+        let connection: CloudProviderConnectionResponse = serde_json::from_value(json!({
+            "provider": "box", "state": "connected", "canManage": true,
+            "credentialFingerprint": "sha256:0123abcd", "connectedAt": 1, "lastValidatedAt": 2, "credentialVersion": 1,
+            "operationsBlocked": true, "disconnectRetention": "archive", "retentionDeadline": 99, "resources": []
+        }))
+        .unwrap();
+        assert!(connection.disconnect_disposition.is_none());
+        assert_eq!((connection.disconnect_retention.as_deref(), connection.retention_deadline), (Some("archive"), Some(99)));
     }
 
     #[test]
