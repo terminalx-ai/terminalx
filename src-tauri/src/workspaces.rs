@@ -80,6 +80,8 @@ pub fn list(project: &Path) -> Result<Vec<Workspace>> {
     let managed_root = std::fs::canonicalize(&managed_root).unwrap_or(managed_root);
     let mut out = Vec::new();
     let entries = git::list_worktrees(project)?;
+    // Read once for the project, not once per worktree.
+    let context = crate::landed::list_context(&root);
     for (path, branch) in entries {
         let p = PathBuf::from(&path);
         let p = std::fs::canonicalize(&p).unwrap_or(p);
@@ -94,10 +96,11 @@ pub fn list(project: &Path) -> Result<Vec<Workspace>> {
         let changed = uncommitted(&p);
         // The project's own checkout is never removed, so only whether it
         // has uncommitted work is worth a word.
+        let head = git::head_commit(&p);
         let state = if is_main {
             if changed > 0 { crate::landed::State::Uncommitted } else { crate::landed::State::Clean }
         } else {
-            crate::landed::check(&root, &p, crate::landed::Fetch::Skip).state()
+            crate::landed::state_in_list(&context, &p, branch.as_deref(), head.as_deref(), changed)
         };
         out.push(Workspace {
             name: if is_main {
@@ -106,7 +109,7 @@ pub fn list(project: &Path) -> Result<Vec<Workspace>> {
                 p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| path.clone())
             },
             path: p.to_string_lossy().into_owned(),
-            head: git::head_commit(&p),
+            head,
             unpushed: unpushed(&p, branch.as_deref()),
             ahead,
             behind,
