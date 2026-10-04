@@ -155,31 +155,31 @@ export const APPROVE_BLOCKED_REASON = "Waiting for someone who can approve";
 
 /** Shown when a setting change was dropped because this person may no longer change settings (the receipt's `settingsIgnored`). */
 export const SETTINGS_IGNORED_REASON = "Your model, effort or mode change was not applied: you can no longer approve permissions";
-/** Why a creator who is a plain member cannot switch a workspace between private and organization-visible. */
-export const VISIBILITY_ADMIN_REASON = "Only an organization owner or admin can change whether a workspace is private or visible to the organization";
+/** Why someone who does not manage a workspace cannot switch it between private and organization-visible (PRO-73: its creator and owners and admins manage it). */
+export const VISIBILITY_ADMIN_REASON = "Only this workspace's creator or an organization owner or admin can change whether it is private or visible to the organization";
 /** Shown to an approver whose connection cannot change a tab's settings live: they ride with the next message. */
 export const SETTINGS_WITH_NEXT_MESSAGE = "Model, effort and mode changes apply with your next message";
 /** The lock pane of someone whose access ended while they had the session, or who had it before. */
 export const ACCESS_REMOVED_TITLE = "Your access to this workspace was removed.";
-/** Why Stop, Resume, Archive and Delete are not offered: the API keeps them for owners and admins. */
-export const LIFECYCLE_ADMIN_REASON = "Only an organization owner or admin can stop, archive or delete a cloud workspace";
+/** Why Stop, Resume, Archive and Delete are not offered: the API keeps them for whoever manages the workspace, its creator and owners and admins (PRO-73). */
+export const LIFECYCLE_ADMIN_REASON = "Only this workspace's creator or an organization owner or admin can stop, archive or delete it";
 /**
- * Why a member is not offered a new cloud session: creating a workspace,
- * resuming one from the sidebar and adding a session to a running one are an
- * owner's or admin's. (A driver's message still wakes a stopped workspace it
- * is shared on; that is sending, not starting a session.)
+ * Why a member is not offered a new cloud session, against a server from
+ * before PRO-73 only: there, creating a workspace is an owner's or admin's.
+ * (With PRO-73 every member starts sessions, in workspaces of their own.)
  */
 export const NEW_SESSION_ADMIN_REASON = "Only an organization owner or admin can start a new cloud session";
-/** Why a member is not offered "New cloud workspace…": the same rule as a new session, which is what creates one. */
+/** Why a member is not offered "New cloud workspace…" against such a server: the same rule as a new session, which is what creates one. */
 export const NEW_WORKSPACE_ADMIN_REASON = "Only an organization owner or admin can create a cloud workspace";
 
 /**
  * What the API lets this person do to a workspace as a whole, from the
  * workspace list (saas contract §21.2) and what opening it would grant:
  *
- * - `lifecycle`: stop, resume, archive, unarchive and delete are an
- *   organization owner's or admin's (the API's manage check), whoever created
- *   or drives the workspace.
+ * - `lifecycle`: stop, resume, archive, unarchive, delete and the access
+ *   mode are for whoever manages the workspace: the API's `manager` role,
+ *   which is an organization owner or admin and, since PRO-73, the member
+ *   who created it. A share never grants it.
  * - `viewShares`: anyone who sees the workspace may read who it is shared
  *   with (the API allows the list to every member who can see it).
  * - `manageShares`: owners, admins and the creator change it.

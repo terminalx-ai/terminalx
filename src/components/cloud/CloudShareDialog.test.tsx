@@ -465,7 +465,7 @@ describe("when making it visible and sharing do not both succeed", () => {
 // Review D4: the creator of a workspace who is a plain member manages its shares, not its visibility.
 describe("a creator who is not an owner or admin", () => {
   const creator = { role: "driver", canApprove: true, canManageShares: true } as const;
-  const reason = "Only an organization owner or admin can change whether a workspace is private or visible to the organization";
+  const reason = "Only this workspace's creator or an organization owner or admin can change whether it is private or visible to the organization";
 
   it("cannot share a private workspace, and is told who can make it visible", async () => {
     listed = { shares: [], you: creator };

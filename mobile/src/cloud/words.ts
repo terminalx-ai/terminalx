@@ -42,6 +42,10 @@ const CODES: Record<string, string> = {
   cloud_workspace_share_requires_organization_access: "Make the workspace visible to the organization first.",
   cloud_workspace_share_limit: "This workspace is already shared with the maximum number of people (64). Remove someone first.",
   cloud_workspace_share_forbidden: "Only organization admins and the workspace's creator can change who it is shared with.",
+  // PRO-73: a workspace is managed by its creator and by organization owners and admins.
+  cloud_workspace_manager_required: "Only this workspace's creator or an organization owner or admin can do that.",
+  cloud_workspace_member_concurrency_exceeded: "You already have as many cloud workspaces running as your organization allows one person. Stop one of yours first.",
+  cloud_workspace_concurrency_exceeded: "Your organization is running as many cloud workspaces as its limit allows.",
   cloud_workspace_share_not_found: "That share was already removed.",
   organization_member_not_found: "This person is no longer a member of this organization.",
   lease_cooldown: "You drove this tab moments ago; others get the first chance. Try again in two minutes.",

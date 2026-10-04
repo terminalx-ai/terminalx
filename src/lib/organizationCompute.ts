@@ -13,6 +13,13 @@ export interface ComputePolicy {
   version: number;
   maxWorkspaces: number;
   maxRunningWorkspaces: number | null;
+  /**
+   * How many running workspaces one person's own creations may hold (PRO-73).
+   * Null: no cap per person, only the organization's running limit applies.
+   * Undefined: the server does not have the setting, so it is neither shown
+   * nor sent.
+   */
+  maxRunningWorkspacesPerMember?: number | null;
   maxIdleSuspendMinutes: number | null;
   allowedMachineClasses: Record<string, string[]>;
   allowedLocations: Record<string, string[]>;
@@ -47,7 +54,7 @@ export interface ComputePolicyView {
 export type ComputePolicyEdit = Pick<
   ComputePolicy,
   "maxWorkspaces" | "maxRunningWorkspaces" | "maxIdleSuspendMinutes" | "allowedMachineClasses" | "allowedLocations"
-> & { expectedVersion: number };
+> & { expectedVersion: number; maxRunningWorkspacesPerMember?: number | null };
 
 export type ComputeAlertCode =
   | "provisioning-paused"
@@ -155,6 +162,7 @@ export function normalizePolicyView(value: unknown): ComputePolicyView {
       version: policy.version as number,
       maxWorkspaces: number(policy.maxWorkspaces) ?? 1,
       maxRunningWorkspaces: number(policy.maxRunningWorkspaces),
+      ...("maxRunningWorkspacesPerMember" in policy ? { maxRunningWorkspacesPerMember: number(policy.maxRunningWorkspacesPerMember) } : {}),
       maxIdleSuspendMinutes: number(policy.maxIdleSuspendMinutes),
       allowedMachineClasses: allowList(policy.allowedMachineClasses),
       allowedLocations: allowList(policy.allowedLocations),

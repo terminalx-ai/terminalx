@@ -54,9 +54,25 @@ function usable(node: CloudWorkspaceNode): boolean {
   return !deletion(item) && !archiving(item) && item.workspace.state !== "attention-required" && phaseOf(item) !== "failed";
 }
 
-/** Where Start runs a new session of this project. Workspaces are already ordered by last activity. */
+/**
+ * Whether this person manages the workspace, which is what adding a session
+ * to it (and resuming it) takes: an owner or admin for any workspace, a
+ * member for the ones they created (PRO-73). The list's role says so; a
+ * server that reports no role says it by the attachment it would grant.
+ */
+function manages(node: CloudWorkspaceNode): boolean {
+  const { workspace } = node.item;
+  return workspace.you ? workspace.you.role === "manager" : workspace.authority !== "participate";
+}
+
+/**
+ * Where Start runs a new session of this project. Workspaces are already
+ * ordered by last activity. Only one this person manages is reused or woken:
+ * a member's new session never lands in, or starts, someone else's
+ * workspace; with none of their own it creates one.
+ */
 export function planCloudStart(project: CloudProject): CloudStartPlan {
-  const candidates = project.workspaces.filter(usable);
+  const candidates = project.workspaces.filter((node) => usable(node) && manages(node));
   const running = candidates.find((node) => node.item.workspace.state === "ready" && !isChanging(node.item));
   if (running) return { kind: "reuse", node: running };
   // Starting or resuming: waiting on it costs nothing more than it already does.

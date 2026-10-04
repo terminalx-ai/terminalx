@@ -583,7 +583,7 @@ export function SessionView({
                       <>
                         <span>No tabs in this session</span>
                         <span className="text-xs text-faint">
-                          {cloud.manage ? "Add an agent tab or a terminal on the VM." : "A workspace admin can add an agent tab or a terminal."}
+                          {cloud.manage ? "Add an agent tab or a terminal on the VM." : "Only this workspace's creator or an organization owner or admin can add an agent tab or a terminal."}
                         </span>
                       </>
                     )

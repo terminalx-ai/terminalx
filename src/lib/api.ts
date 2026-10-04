@@ -391,6 +391,8 @@ export interface AccountStatus {
   multiOrg?: boolean;
   /** The server lists every member organization's cloud workspaces in one request (`cloud.desktop.catalog-feed.v1`, PRO-74). */
   catalogFeed?: boolean;
+  /** The server lets any member create a cloud workspace and manage the ones they created (`cloud.workspaces.member-managed.v1`, PRO-73). */
+  memberWorkspaces?: boolean;
 }
 
 /** One organization of the catalog feed: its list, or why it was not listed (the others are unaffected). */

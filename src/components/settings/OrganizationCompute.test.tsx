@@ -234,3 +234,41 @@ it("on an older server, a blank running limit means the workspace limit", async 
   expect((await screen.findByLabelText("Compute status")).textContent).toContain("Running 2 of 4");
   expect((screen.getByLabelText("Maximum running workspaces") as HTMLInputElement).placeholder).toBe("4 (default)");
 });
+
+it("sets, clears and validates the running cap per person, where the server has it (PRO-73)", async () => {
+  api.policy.mockResolvedValue(view({}, { maxRunningWorkspacesPerMember: null }));
+  api.updatePolicy.mockResolvedValue(view({}, { version: 4, maxRunningWorkspacesPerMember: 1 }));
+  render(<OrganizationCompute contextRevision="account-1" />);
+  const field = (await screen.findByLabelText("Maximum running workspaces per person")) as HTMLInputElement;
+  // No cap by default: the organization's limit is the only one.
+  expect(field.value).toBe("");
+  expect(field.placeholder).toBe("No cap");
+  // More than the organization keeps in total is refused before sending.
+  fireEvent.change(field, { target: { value: "9" } });
+  expect((screen.getByRole("button", { name: "Save limits" }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.change(field, { target: { value: "1" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save limits" }));
+  await waitFor(() => expect(api.updatePolicy).toHaveBeenCalledWith(expect.objectContaining({ maxRunningWorkspacesPerMember: 1, maxWorkspaces: 4, maxRunningWorkspaces: 2 }), "rev-1"));
+  // Blank again clears it: null, not left out.
+  await waitFor(() => expect((screen.getByLabelText("Maximum running workspaces per person") as HTMLInputElement).value).toBe("1"));
+  fireEvent.change(screen.getByLabelText("Maximum running workspaces per person"), { target: { value: "" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save limits" }));
+  await waitFor(() => expect(api.updatePolicy).toHaveBeenLastCalledWith(expect.objectContaining({ maxRunningWorkspacesPerMember: null }), "rev-1"));
+});
+
+it("neither shows nor sends the cap per person to a server that does not have it", async () => {
+  api.updatePolicy.mockResolvedValue(view({}, { version: 4 }));
+  render(<OrganizationCompute contextRevision="account-1" />);
+  await screen.findByLabelText("Maximum workspaces");
+  expect(screen.queryByLabelText("Maximum running workspaces per person")).toBeNull();
+  fireEvent.change(screen.getByLabelText("Maximum workspaces"), { target: { value: "5" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save limits" }));
+  await waitFor(() => expect(api.updatePolicy).toHaveBeenCalled());
+  expect(api.updatePolicy.mock.calls[0][0]).not.toHaveProperty("maxRunningWorkspacesPerMember");
+});
+
+it("tells a member what the cap per person is", async () => {
+  api.policy.mockResolvedValue(view({ canEdit: false }, { maxRunningWorkspacesPerMember: 1 }));
+  render(<OrganizationCompute contextRevision="account-1" />);
+  expect((await screen.findByLabelText("Compute limits")).textContent).toContain("Each person can have 1 of their own workspace running at once.");
+});
