@@ -22,9 +22,10 @@ import { TranscriptionTab } from "./TranscriptionTab";
 import { setStatusSettings, useStatus } from "@/lib/status";
 import { AccountTab } from "./AccountTab";
 import { DevicesTab } from "./DevicesTab";
+import { StorageTab } from "./StorageTab";
 import { ShortcutsTab } from "./ShortcutsTab";
 
-const TABS = ["account", "devices", "general", "appearance", "agents", "transcription", "integrations", "shortcuts", "about"] as const;
+const TABS = ["account", "devices", "general", "appearance", "agents", "transcription", "integrations", "storage", "shortcuts", "about"] as const;
 export type SettingsTab = (typeof TABS)[number];
 /** The section Settings opens on when nothing asks for a particular one (PRO-81). */
 export const DEFAULT_SETTINGS_TAB: SettingsTab = "account";
@@ -37,6 +38,7 @@ const TAB_LABEL: Record<Tab, string> = {
   agents: "Agents",
   transcription: "Transcription",
   integrations: "Integrations",
+  storage: "Storage",
   shortcuts: "Shortcuts",
   about: "About",
 };
@@ -114,6 +116,7 @@ export function SettingsPage({
             {tab === "agents" && <AgentsTab />}
             {tab === "transcription" && <TranscriptionTab />}
             {tab === "integrations" && <IntegrationsTab />}
+            {tab === "storage" && <StorageTab />}
             {tab === "shortcuts" && <ShortcutsTab />}
             {tab === "about" && <AboutTab />}
           </div>

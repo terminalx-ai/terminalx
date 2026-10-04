@@ -20,6 +20,8 @@ import type {
   TabEntry,
   WorkStatus,
   WorkspaceRemoveReport,
+  Leftover,
+  LeftoverRemoval,
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
@@ -334,6 +336,10 @@ export const api = {
     invoke<string>("preview_workspace_name", { projectPath, requested: requested ?? null }),
   renameWorkspace: (projectPath: string, path: string, name: string) =>
     invoke<WorkspaceRename>("rename_workspace", { projectPath, path, name }),
+  /** What earlier deletes left on disk. Reads only, apart from fetching each project's default branch. */
+  scanLeftovers: () => invoke<Leftover[]>("scan_leftovers"),
+  /** Delete the confirmed leftovers; each is checked again first. */
+  removeLeftovers: (ids: string[]) => invoke<LeftoverRemoval>("remove_leftovers", { ids }),
   workspaceSize: (projectPath: string, path: string) => invoke<number>("workspace_size", { projectPath, path }),
   /**
    * What a workspace holds. With `fetch`, the default branch is fetched and

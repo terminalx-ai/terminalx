@@ -2965,6 +2965,31 @@ pub async fn list_workspaces(project_path: String) -> CmdResult<Vec<crate::works
     tauri::async_runtime::spawn_blocking(move || crate::workspaces::list(Path::new(&project_path)).map_err(err)).await.map_err(err)?
 }
 
+/// What earlier deletes left on disk: worktrees no session uses, agent data
+/// for worktrees that are gone, and `raccoon/*` branches with no worktree.
+/// Reads only, apart from fetching each project's default branch.
+#[tauri::command]
+pub async fn scan_leftovers() -> CmdResult<Vec<crate::cleanup::Leftover>> {
+    tauri::async_runtime::spawn_blocking(|| crate::cleanup::scan().map_err(err)).await.map_err(err)?
+}
+
+/// Delete the leftovers the person confirmed. Each is checked again first;
+/// anything in use, or not clean and merged, is left alone.
+#[tauri::command]
+pub async fn remove_leftovers(app: AppHandle, ids: Vec<String>) -> CmdResult<crate::cleanup::Removal> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let removal = crate::cleanup::remove(&ids).map_err(err)?;
+        let projects: std::collections::BTreeSet<&str> =
+            removal.removed.iter().filter_map(|id| id.strip_prefix("worktree:")).filter_map(|rest| rest.rsplit_once(':')).map(|(project, _)| project).collect();
+        for project in projects {
+            let _ = app.emit(crate::session_ops::WORKSPACES_CHANGED_EVENT, project);
+        }
+        Ok(removal)
+    })
+    .await
+    .map_err(err)?
+}
+
 /// What a workspace takes on disk. Asked for one workspace at a time, after
 /// the list is shown, because walking a large checkout takes a while.
 #[tauri::command]

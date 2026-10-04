@@ -55,7 +55,7 @@ fn plain_component(name: &str) -> bool {
 
 /// `root/<name>` when it is a real directory (not a symlink) that still sits
 /// directly under `root` once both are resolved. `root` must be canonical.
-fn real_child_dir(root: &Path, name: &str) -> Option<PathBuf> {
+pub(crate) fn real_child_dir(root: &Path, name: &str) -> Option<PathBuf> {
     if !plain_component(name) {
         return None;
     }
@@ -70,13 +70,13 @@ fn real_child_dir(root: &Path, name: &str) -> Option<PathBuf> {
 
 /// Both CLIs name conversations with UUIDs. Anything else is not used to
 /// build a path.
-fn conversation_id(id: &str) -> Option<&str> {
+pub(crate) fn conversation_id(id: &str) -> Option<&str> {
     uuid::Uuid::parse_str(id).ok().map(|_| id)
 }
 
 /// Every directory a session's agents may have run in: where it works now
 /// and the worktree it worked in before that was removed.
-fn session_dirs(session: &SessionEntry) -> Vec<&str> {
+pub(crate) fn session_dirs(session: &SessionEntry) -> Vec<&str> {
     let mut dirs = vec![session.cwd.as_str()];
     if let Some(removed) = &session.removed_workspace {
         if removed.path != session.cwd {
@@ -120,7 +120,7 @@ fn needed_conversation_ids<'a>(remaining: &'a [SessionEntry], harness: &str, has
 /// How a folder name is compared with what remaining sessions use. Lower
 /// case, so a session recorded as `/Users/Me/x` still protects the folder of
 /// `/users/me/x` on a case-insensitive disk. Over-keeping is the safe side.
-fn folder_key(dir: &str) -> String {
+pub(crate) fn folder_key(dir: &str) -> String {
     encoded_cwd(dir).to_lowercase()
 }
 
@@ -139,7 +139,7 @@ fn removed_managed_worktree(session: &SessionEntry, dir: &str) -> bool {
     gone && std::fs::symlink_metadata(&session.project_path).is_ok()
 }
 
-fn remove_file_counted(path: &Path) -> u64 {
+pub(crate) fn remove_file_counted(path: &Path) -> u64 {
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.is_file() => {
             let size = size_on_disk(path);
@@ -155,7 +155,7 @@ fn remove_file_counted(path: &Path) -> u64 {
     }
 }
 
-fn remove_dir_counted(path: &Path) -> u64 {
+pub(crate) fn remove_dir_counted(path: &Path) -> u64 {
     let size = size_on_disk(path);
     match std::fs::remove_dir_all(path) {
         Ok(()) => size,
@@ -213,13 +213,23 @@ pub(crate) fn remove_codex_data(home: &Path, doomed: &[SessionEntry], remaining:
             continue;
         }
         let Some(rollout) = crate::harness::codex::home::find_rollout(home, id) else { continue };
-        // The year, month and day folders must be real ones inside the home.
-        let inside = rollout.parent().and_then(|day| std::fs::canonicalize(day).ok()).is_some_and(|day| day.starts_with(&sessions));
-        if inside {
+        if rollout_inside(&sessions, &rollout) {
             freed += remove_file_counted(&rollout);
         }
     }
     freed
+}
+
+/// Every conversation the sessions hold or have forked from, whichever agent
+/// it belongs to: what must not be treated as left behind.
+pub(crate) fn referenced_conversations(sessions: &[SessionEntry]) -> HashSet<&str> {
+    sessions.iter().flat_map(|session| &session.tabs).flat_map(|tab| [tab.provider_session_id.as_deref(), tab.fork_from.as_deref()]).flatten().collect()
+}
+
+/// Whether a rollout's year, month and day folders are real ones inside the
+/// managed home's `sessions` (given resolved), not links leading out of it.
+pub(crate) fn rollout_inside(sessions: &Path, rollout: &Path) -> bool {
+    rollout.parent().and_then(|day| std::fs::canonicalize(day).ok()).is_some_and(|day| day.starts_with(sessions))
 }
 
 /// Remove the agent CLIs' data for sessions that were just deleted.
