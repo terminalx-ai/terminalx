@@ -185,23 +185,9 @@ describe("an agent tab's own terminal in the cloud terminal store", () => {
       expect(runtime.typed.join("")).toBe("ab");
     };
 
-    it("goes on typing where it was on a runtime that kept running: the same writer, the next number, no control call", async () => {
+    it("on a runtime that survived the stop, watches until control is taken, and then every key arrives once", async () => {
       await typedBefore();
-      await stopAndWake("kept");
-      expect(agentTerminalOf(WS, "t-1")).toMatchObject({ live: true, control: "you", inputError: null });
-      xterm.type("c");
-      await settle();
-      expect(runtime.typed.join("")).toBe("abc");
-      const writes = runtime.params("pty.write");
-      expect(writes.map((write) => write.seq)).toEqual([1, 2, 3]);
-      expect(new Set(writes.map((write) => write.writerId)).size).toBe(1);
-      expect(runtime.methods("pty.control")).toHaveLength(1);
-      expect(runtime.conflicts).toBe(0);
-    });
-
-    it("on a runtime that counts per device, watches until control is taken, and then every key arrives once", async () => {
-      await typedBefore();
-      await stopAndWake("per-device");
+      await stopAndWake("frozen");
       // The runtime's word: another device controls it. Nothing is taken or typed by itself.
       expect(agentTerminalOf(WS, "t-1")).toMatchObject({ live: true, control: "other" });
       expect(runtime.methods("pty.control")).toHaveLength(1);
@@ -215,7 +201,7 @@ describe("an agent tab's own terminal in the cloud terminal store", () => {
       expect(agentTerminalOf(WS, "t-1")).toMatchObject({ control: "you", inputError: null });
       expect(runtime.conflicts).toBe(1);
       // It stays that way through another stop and wake.
-      await stopAndWake("per-device");
+      await stopAndWake("frozen");
       await takeControl(WS, client, ID, null);
       xterm.type("e");
       await settle();
@@ -239,7 +225,7 @@ describe("an agent tab's own terminal in the cloud terminal store", () => {
     it("never takes a terminal someone else took meanwhile", async () => {
       await typedBefore();
       runtime.emit({ state: "suspended" });
-      runtime.wokeAsNewDevice("kept");
+      runtime.wokeAsNewDevice("frozen");
       runtime.agent.control = "other";
       runtime.agent.controllerId = "u-bob";
       runtime.connect();

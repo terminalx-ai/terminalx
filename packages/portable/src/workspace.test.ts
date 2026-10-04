@@ -75,9 +75,8 @@ class FakeRuntime implements WorkspaceTransport {
     for (const listener of this.messages) listener(message);
   }
   /**
-   * The workspace stopped and woke: this client is a new device now. A
-   * runtime that counts writes per device (before it kept a writer's count
-   * across devices of one installation) knows none of its writers any more.
+   * The workspace stopped and woke: this client is a new device now, and the
+   * runtime counts writes per device, so it knows none of its writers any more.
    */
   newDevice() {
     this.applied.clear();
@@ -254,7 +253,7 @@ describe("workspace RPC client", () => {
     client.close();
   });
 
-  it("types again after it became a new device to a runtime that counts writes per device", async () => {
+  it("types again after it became a new device to the runtime", async () => {
     const runtime = new FakeRuntime();
     const client = new WorkspaceRpcClient(runtime, ids);
     runtime.connect();

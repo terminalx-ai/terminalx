@@ -692,23 +692,20 @@ Who may do what (checked on every call, against the latest member list):
 - **One controller**: input and size follow one device, as for shells
   (`control`, `controllerId`, `pty.control` and `pty.resized` notifications).
   A second viewer's window never resizes the program.
-- **A stop and a wake keep the controller.** A stop revokes every attachment,
-  and the wake issues each installation a new device under the same
-  attachment id. Where the runtime process survived the stop (a frozen
-  container), the person who controlled a terminal is its controller again
-  on their new device without asking, when all of this holds: the same
-  person, the same attachment (so the same installation), the old device no
-  longer connected, and they may still type. Nothing else moves control
-  without `pty.control`: not another person, not the same person's other
-  installation, not while the old device is connected. A writer's `seq` is
-  counted per person and attachment (per device on a link that names
-  neither), so the open app goes on with the next number, and a write it
-  resends is answered, not typed again. A runtime that restarted knows no
-  controller and no writer: the terminal starts over, as after any restart.
-  A desktop on a runtime older than this is told `conflict` for its first
-  write after the wake; it starts a new writer and types that write under
-  it when it was sent only once (so it cannot have been applied), and
-  reports it otherwise. Shells follow the same rules.
+- **After a stop and a wake** the app that stayed open is a new device to
+  the runtime: a stop revokes every attachment, and the wake issues a new
+  attachment and device. Where the runtime process survived the stop (a
+  frozen container), the terminal's controller is still the old device, so
+  the returning person watches ("You control this terminal from another
+  window or device") until they take control, which is never done for them.
+  The runtime counts a writer's `seq` per device, so the open app's first
+  write is refused with `conflict`; the client then starts a new writer, and
+  types that write under it when it was sent only once (it was refused, so
+  it cannot have been applied) or reports it when it had been resent after a
+  drop. A runtime that restarted knows no controller: the terminal starts
+  over, as after any restart. Shells follow the same rules. Recognising the
+  same installation, so that the banner does not appear, needs a stable
+  installation key from the API (the attachment id changes at every mint).
 - **Revocation** is the shells': a person who lost access has their
   connection closed and their streams ended; one who may no longer drive
   loses control, announced.
@@ -756,10 +753,10 @@ point) beside the shell terminals' but apart from them, and
   view takes control at its own size when it opens. While someone else
   controls it, it shows their size and "<Name> controls this terminal; you
   are watching." with "Take control". The tab's lease bar sits above it as it
-  does above the chat. After a stop and a wake the person's own terminal
-  comes back as theirs (see "A stop and a wake keep the controller"); on a
-  runtime older than that it reads "You control this terminal from another
-  window or device", and "Take control" takes it.
+  does above the chat. After a stop and a wake of a runtime that kept
+  running, the person's own terminal reads "You control this terminal from
+  another window or device", and "Take control" takes it (see "After a stop
+  and a wake").
 - **Read-only** for a viewer, for a driver while someone else drives the tab,
   and for a driver who may not approve; the view says which, and sends no
   input, size or control request.

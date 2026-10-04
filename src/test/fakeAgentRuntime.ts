@@ -79,19 +79,15 @@ export class FakeAgentRuntime implements WorkspaceTransport {
    * desktop is a new device to the runtime, while the app (and its client)
    * stayed open. Call between the `suspended` state and the next `connect`.
    *
-   * - `"kept"`: the runtime kept running underneath (a frozen container) and
-   *   knows the installation behind the new device: the terminal is still
-   *   this person's, and their writer's count goes on.
-   * - `"per-device"`: the same, on a runtime released before that: it counts
-   *   writes and control per device, so the controller is "another device"
-   *   and it knows none of this client's writers.
+   * - `"frozen"`: the runtime process survived the stop (a frozen
+   *   container). It counts writes and control per device, so the controller
+   *   is "another device" and it knows none of this client's writers.
    * - `"restarted"`: the machine booted cold: a new runtime process, a new
    *   CLI and screen, nobody controlling it.
    */
-  wokeAsNewDevice(runtime: "kept" | "per-device" | "restarted") {
-    if (runtime === "kept") return;
+  wokeAsNewDevice(runtime: "frozen" | "restarted") {
     this.applied.clear();
-    if (runtime === "per-device") {
+    if (runtime === "frozen") {
       if (this.agent.control === "you") this.agent.control = "other";
       return;
     }

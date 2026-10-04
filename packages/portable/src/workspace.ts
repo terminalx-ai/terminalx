@@ -495,10 +495,9 @@ export class WorkspaceRpcClient {
         }
         if (error instanceof WorkspaceRpcError && error.code === "conflict" && !this.closed) {
           // The runtime does not know this writer at this number. A workspace
-          // that stopped and woke gives this client a new device, and a
-          // runtime older than the one that keeps a writer's count across
-          // that counts per device. This writer can never be right again, so
-          // later input goes under a new one, from 1.
+          // that stopped and woke gives this client a new device, and the
+          // runtime counts each writer per device. This writer can never be
+          // right again, so later input goes under a new one, from 1.
           input.reset();
           // This write was refused, so it was not applied. Sent once, that is
           // certain and it is typed under the new writer. Resent after a

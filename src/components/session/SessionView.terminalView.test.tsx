@@ -516,26 +516,11 @@ describe("the chat / terminal switch on a cloud agent tab (PRO-86)", () => {
     };
     const notice = () => screen.queryByTestId("cloud-agent-terminal-notice");
 
-    it("is typed into again with no banner and no click when the runtime kept running", async () => {
-      await open();
-      await typeBeforeStop();
-      await stopAndWake("kept");
-      await waitFor(() => expect(screen.queryByTestId("cloud-agent-terminal-status")).toBeNull());
-      expect(screen.queryByRole("button", { name: "Take control" })).toBeNull();
-      act(() => xterm.type("b"));
-      await waitFor(() => expect(runtime.typed).toEqual(["a", "b"]));
-      expect(notice()).toBeNull();
-      // Nothing was taken again, and the wake itself typed nothing.
-      expect(runtime.methods("pty.control")).toHaveLength(1);
-      expect(runtime.reports).toEqual([]);
-      expect(activate).not.toHaveBeenCalled();
-    });
-
-    it("on a runtime that counts per device offers Take control, and it works: what is typed next arrives", async () => {
+    it("says the terminal is theirs from another device and offers Take control, and it works: what is typed next arrives", async () => {
       shared("manager");
       await open();
       await typeBeforeStop();
-      await stopAndWake("per-device");
+      await stopAndWake("frozen");
       await waitFor(() => expect(status()).toBe("You control this terminal from another window or device; you are watching here."));
       // Offered, never taken by itself; a key before the click is not typed anywhere.
       act(() => xterm.type("x"));
@@ -550,7 +535,7 @@ describe("the chat / terminal switch on a cloud agent tab (PRO-86)", () => {
       await waitFor(() => expect(runtime.typed).toEqual(["a", "b", "c"]));
       expect(notice()).toBeNull();
       // And again after another stop and wake: it does not stay broken.
-      await stopAndWake("per-device");
+      await stopAndWake("frozen");
       fireEvent.click(await screen.findByRole("button", { name: "Take control" }));
       await waitFor(() => expect(screen.queryByTestId("cloud-agent-terminal-status")).toBeNull());
       act(() => xterm.type("d"));
@@ -573,7 +558,7 @@ describe("the chat / terminal switch on a cloud agent tab (PRO-86)", () => {
       shared("manager");
       await open();
       await typeBeforeStop();
-      await stopAndWake("kept", () => {
+      await stopAndWake("frozen", () => {
         runtime.agent.control = "other";
         runtime.agent.controllerId = "u-alice";
       });
