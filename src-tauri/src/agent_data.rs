@@ -272,6 +272,7 @@ mod tests {
             worktree_name: cwd.file_name().map(|name| name.to_string_lossy().into_owned()),
             branch: None,
             base_ref: None,
+            worktree_base: None,
             worktree_removed: false,
             removed_workspace: None,
             issue: None,

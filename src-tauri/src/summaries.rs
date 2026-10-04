@@ -493,6 +493,7 @@ mod tests {
             worktree_name: None,
             branch: None,
             base_ref: None,
+            worktree_base: None,
             worktree_removed: false,
             removed_workspace: None,
             issue: None,

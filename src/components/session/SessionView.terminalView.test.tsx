@@ -210,7 +210,11 @@ describe("the chat / terminal switch on a local agent tab", () => {
     };
     upsertSession(local);
     selectSessionTab("local-1", { kind: "agent", id: "lt-1" });
-    render(wrap(<SessionView session={local} sidebarOpen onToggleSidebar={() => undefined} />));
+    local.worktreeBase = { commit: "123456789abcdef", fetched: false, warning: "Fetch timed out. This worktree may be out of date." };
+    const view = render(wrap(<SessionView session={local} sidebarOpen onToggleSidebar={() => undefined} />));
+    expect(screen.getByText("Base may be out of date").getAttribute("title")).toBe(local.worktreeBase.warning);
+    view.rerender(wrap(<SessionView session={{ ...local, worktreeBase: { ...local.worktreeBase, fetched: true, warning: null } }} sidebarOpen onToggleSidebar={() => undefined} />));
+    expect(screen.getByText("Base 1234567 · fetched at creation")).toBeTruthy();
     const toggle = await screen.findByRole("button", { name: "Show terminal view" });
     expect(screen.queryByTestId("terminal-view-unavailable")).toBeNull();
     fireEvent.click(toggle);
