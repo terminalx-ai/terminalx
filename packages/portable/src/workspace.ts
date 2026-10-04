@@ -32,7 +32,8 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * - `composer/3`: `session.attach`, an image uploaded in parts for the
  *   message that then names it;
  * - `ports/1` (PRO-28): streams to TCP ports on the workspace's loopback, for
- *   private previews (docs/CLOUD-PREVIEWS.md). Nothing calls it yet.
+ *   private previews (docs/CLOUD-PREVIEWS.md): `listPorts` here; the streams
+ *   themselves are carried by the desktop's native forwarder.
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
@@ -502,6 +503,17 @@ export class WorkspaceRpcClient {
     const info = await this.mutate<PtyInfo>("pty.create", params);
     this.ptyEpochs.set(info.ptyId, info.epoch);
     return info;
+  }
+
+  /**
+   * The workspace's listening ports and this connection's open streams
+   * (`ports/1`, docs/CLOUD-PREVIEWS.md). `detected: false` where the runtime
+   * cannot tell which ports listen. Refused unless the person may open a
+   * port: a manager, or a driver who may approve.
+   */
+  async listPorts(): Promise<{ detected: boolean; ports: { port: number }[]; streams: { streamId: string; port: number }[] }> {
+    const listed = await this.call<{ detected?: boolean; ports?: { port: number }[]; streams?: { streamId: string; port: number }[] }>("ports.list");
+    return { detected: listed.detected === true, ports: listed.ports ?? [], streams: listed.streams ?? [] };
   }
 
   async listPtys(): Promise<{ epoch: string; terminals: PtyInfo[] }> {

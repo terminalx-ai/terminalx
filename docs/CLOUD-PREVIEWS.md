@@ -221,3 +221,32 @@ One `PortForwarder` per workspace connection. Commands:
 - Limits: 64 local connections per forwarder; a runtime that sends more
   than two windows without waiting for acknowledgements has its stream
   ended rather than buffered.
+
+## The Ports panel (`src/components/cloud/CloudPorts.tsx`)
+
+A "Ports" tab in the cloud workspace view.
+
+- It lists what listens in the workspace (`ports.list`) and the forwards
+  that are open, and refreshes every 5 seconds while it is on screen and the
+  window is visible. It reads nothing while hidden. What the runtime lists
+  is checked before it is shown: whole numbers from 1 to 65535, at most 256.
+- "Open preview" forwards the port to a random free port on this Mac and
+  opens `http://127.0.0.1:<port>` in the system browser. The address is
+  `127.0.0.1`, not `localhost`: the listener is IPv4 only, and `localhost`
+  could reach another program listening on IPv6 loopback at that port. An
+  open forward shows its address and a Stop button.
+- "Same port number as the workspace" asks for the workspace's own port
+  number on this Mac, and refuses when any program has it.
+- A port can be opened by number when the runtime cannot list listeners or
+  the application is not up yet.
+- The panel says what a preview exposes: other programs on this Mac can
+  connect while it is open, and it shares cookies with anything else used
+  at `127.0.0.1`.
+- States: stopped or not connected ("Looking here never starts it", nothing
+  is asked of the workspace, and the forwards shown are cleared because
+  they are closed); a runtime without `ports/1`; someone who may not use a
+  terminal, with the reason, and no call to the runtime.
+
+Previews open in the system browser because the built-in browser is not
+available in cloud sessions today (its pages are grouped by a local working
+directory, which a cloud session does not have).
