@@ -1,6 +1,6 @@
 import { memo, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Brain, Check, ChevronRight, CircleAlert, Clock, RefreshCw, Shrink, Users, X } from "lucide-react";
+import { Brain, Check, ChevronRight, CircleAlert, Clock, Image as ImageIcon, RefreshCw, Shrink, Users, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { formatDuration } from "@/lib/time";
 import type { Turn, WorkItem } from "@/lib/transcript";
@@ -52,9 +52,17 @@ export const TurnBlock = memo(function TurnBlock({
           >
             {turn.prompt.images?.length ? (
               <div className="mb-2 flex flex-wrap gap-2">
-                {turn.prompt.images.map((im, i) => (
-                  <img key={i} src={toAssetUrl(im.url)} alt="" className="size-20 rounded-md object-cover hairline" />
-                ))}
+                {turn.prompt.images.map((im, i) =>
+                  // A cloud tab's image is a file on its workspace, not here: its name, not a broken thumbnail.
+                  cwd || isLoadableUrl(im.url) ? (
+                    <img key={i} src={toAssetUrl(im.url)} alt="" className="size-20 rounded-md object-cover hairline" />
+                  ) : (
+                    <span key={i} className="inline-flex max-w-full items-center gap-1.5 rounded-md bg-veil-raised px-2 py-1 text-xs text-muted-foreground" data-testid="prompt-image-name">
+                      <ImageIcon className="size-3.5 shrink-0" />
+                      <span className="min-w-0 truncate">{im.name || "Image"}</span>
+                    </span>
+                  ),
+                )}
               </div>
             ) : null}
             {turn.prompt.text}
@@ -239,8 +247,13 @@ function ReasoningRow({ text }: { text: string }) {
   );
 }
 
+/** A URL the web view loads as it is, rather than a path on some computer. */
+function isLoadableUrl(p: string): boolean {
+  return p.startsWith("data:") || p.startsWith("http") || p.startsWith("asset:");
+}
+
 export function toAssetUrl(p: string): string {
-  if (p.startsWith("data:") || p.startsWith("http") || p.startsWith("asset:")) return p;
+  if (isLoadableUrl(p)) return p;
   try {
     return convertFileSrc(p);
   } catch {

@@ -197,6 +197,9 @@ pub struct FollowUp {
     /// follow-up queued before sharing existed.
     #[serde(default)]
     pub actor_id: String,
+    /// The uploads it carries (`attachments`), by id, read when it is typed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 /// Follow-ups per tab, in order, rewritten durably on every change so an
@@ -367,7 +370,7 @@ mod tests {
     fn follow_ups_are_ordered_per_tab_and_durable() {
         let dir = tempfile::tempdir().unwrap();
         let queue = FollowUps::open(dir.path()).unwrap();
-        let item = |id: &str| FollowUp { client_command_id: id.into(), session_id: "s".into(), text: id.into(), actor_id: String::new() };
+        let item = |id: &str| FollowUp { client_command_id: id.into(), session_id: "s".into(), text: id.into(), actor_id: String::new(), images: Vec::new() };
         queue.push("t1", item("a")).unwrap();
         queue.push("t1", item("b")).unwrap();
         queue.push("t2", item("c")).unwrap();

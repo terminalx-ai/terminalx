@@ -29,10 +29,13 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   tab's composer offers its reader.
 /// - `composer/2`: `session.files`, the session's files by name, for the
 ///   composer's `@` list.
+/// - `composer/3`: `session.attach`, an image uploaded in parts for a
+///   message that then names it (`images: [{ id }]`, in a mailbox `send` or
+///   the live `session.send`).
 /// - `ports/1` (PRO-28): streams to TCP ports on the workspace's loopback,
 ///   for private previews (`remote/ports.rs`, docs/CLOUD-PREVIEWS.md).
-pub const CAPABILITIES: [&str; 14] =
-    ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "ports/1"];
+pub const CAPABILITIES: [&str; 15] =
+    ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1"];
 
 /// The namespace that lets a connection address an agent tab's own terminal
 /// (spelled out in [`CAPABILITIES`], which the client's tests read).
@@ -104,6 +107,7 @@ pub const METHODS: &[Method] = &[
     // than the caller may send (PRO-88).
     method("session.commands", "composer/1", Participate, false),
     method("session.files", "composer/2", Participate, false),
+    method("session.attach", "composer/3", Participate, true),
     method("pty.create", "pty/1", Manage, true),
     method("pty.list", "pty/1", Participate, false),
     // Input and size belong to the terminal's controller; `pty.control`
@@ -190,6 +194,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         // `composer/N` adds what an agent tab's composer asks of its session.
         "composer/1" => &["session.commands"],
         "composer/2" => &["session.files"],
+        "composer/3" => &["session.attach"],
         "ports/1" => &["ports."],
         _ => &[],
     }

@@ -33,7 +33,7 @@ export type WorkItem =
 export interface Turn {
   key: string;
   seq: number;
-  prompt?: { text: string; images?: { url: string }[]; ts: string; seq: number };
+  prompt?: { text: string; images?: { url: string; name?: string }[]; ts: string; seq: number };
   work: WorkItem[];
   finalText?: string;
   completed?: { status: string; durationMs?: number; ts: string; head?: string };

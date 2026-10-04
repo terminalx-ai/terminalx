@@ -42,9 +42,16 @@ export interface OutboxEntry {
   error?: string | null;
 }
 
+/** An image the runtime already holds (`session.attach`), as a message names it. */
+export interface CloudImageRef {
+  id: string;
+  mediaType: string;
+  name?: string;
+}
+
 /** The plaintext of a command, without its `v`. */
 export type OutboxPayload =
-  | { text: string; model?: string; effort?: string | null; mode?: string }
+  | { text: string; model?: string; effort?: string | null; mode?: string; images?: CloudImageRef[] }
   | { requestId: string; optionId: string }
   | { requestId: string; answers: Record<string, string> }
   | Record<string, never>;

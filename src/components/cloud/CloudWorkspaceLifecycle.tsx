@@ -276,7 +276,7 @@ function ActionSummary({ action, retentionDays, removedOnDelete, resume }: { act
       <dd>{action === "delete" ? "Removed." : "Stops. Nothing runs until it is resumed."}</dd>
       <dt className="text-muted-foreground">Data</dt>
       <dd>
-        {action === "stop" && "Everything is kept: files, repositories, conversations."}
+        {action === "stop" && "Kept: the files in the workspace, its repositories among them, and the saved conversations."}
         {action === "archive" && `Kept for ${retentionDays} days, until ${until}, then deleted automatically. Unarchive any time before.`}
         {action === "delete" &&
           `Removed once the provider confirms${removedOnDelete.length ? `: ${removedOnDelete.map(cleanupKindText).join(", ").toLowerCase()}` : ""}.`}
