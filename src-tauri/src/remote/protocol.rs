@@ -32,8 +32,10 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 /// - `composer/3`: `session.attach`, an image uploaded in parts for a
 ///   message that then names it (`images: [{ id }]`, in a mailbox `send` or
 ///   the live `session.send`).
-pub const CAPABILITIES: [&str; 14] =
-    ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3"];
+/// - `ports/1` (PRO-28): streams to TCP ports on the workspace's loopback,
+///   for private previews (`remote/ports.rs`, docs/CLOUD-PREVIEWS.md).
+pub const CAPABILITIES: [&str; 15] =
+    ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1"];
 
 /// The namespace that lets a connection address an agent tab's own terminal
 /// (spelled out in [`CAPABILITIES`], which the client's tests read).
@@ -166,6 +168,14 @@ pub const METHODS: &[Method] = &[
     method("lease.acquire", "collab/1", Participate, false),
     method("lease.release", "collab/1", Participate, false),
     method("lease.takeOver", "collab/1", Participate, false),
+    // PRO-28: a stream to a port is input to whatever listens there, so a
+    // participant needs driver access, as for typing into a terminal
+    // (checked per call against their role). Listing is reading.
+    method("ports.list", "ports/1", Participate, false),
+    method("ports.open", "ports/1", Participate, false),
+    method("ports.write", "ports/1", Participate, false),
+    method("ports.ack", "ports/1", Participate, false),
+    method("ports.close", "ports/1", Participate, false),
 ];
 
 /// Method prefixes of a namespace: `collab/1` spans presence, notes and
@@ -185,6 +195,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "composer/1" => &["session.commands"],
         "composer/2" => &["session.files"],
         "composer/3" => &["session.attach"],
+        "ports/1" => &["ports."],
         _ => &[],
     }
 }
