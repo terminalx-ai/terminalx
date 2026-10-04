@@ -7,7 +7,8 @@ import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { ChevronUp, FileText, Paperclip, Radio, Send, X } from "lucide-react-native";
 import { buildTranscript, type PendingAsk, type Turn } from "@terminalx/portable/transcript";
 import type { AgentEvent } from "@terminalx/portable/events";
-import { mergeEvents, readTranscriptCache, writeTranscriptCache, type AttachmentInput, type ChatNote } from "@mobile/data/host-api";
+import { mergeEvents, type AttachmentInput, type ChatNote } from "@mobile/data/host-api";
+import { watchTranscript } from "@mobile/data/transcript-sync";
 import { useApp } from "@mobile/state/AppProvider";
 import { Button, Card, EmptyState } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
@@ -79,29 +80,14 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
   const cacheKey = `terminalx:draft:${hostId}:${sessionId}:${tabId}`;
   const transcript = useMemo(() => buildTranscript(events, connected), [connected, events]);
 
-  useEffect(() => {
-    let active = true;
-    void (async () => {
-      const cached = await readTranscriptCache(hostId, sessionId, tabId);
-      if (!active) return;
-      setEvents((existing) => mergeEvents(cached, existing));
-      if (connected) {
-        const page = await app.api.tail(sessionId, tabId);
-        if (!active) return;
-        if (page) {
-          setEvents((existing) => mergeEvents(existing, page.events));
-          setHasMore(page.hasMore);
-        }
-        const notes = await app.api.listNotes(sessionId);
-        if (!active) return;
-        setNotes(notes);
-      }
-      setLoading(false);
-    })();
-    return () => { active = false; };
-    // `epoch`: after a reconnect that was never shown (a short trip to the home screen) the tail is read again,
-    // merged into what is on screen, so nothing that happened meanwhile is missing and nothing jumps.
-  }, [app.api, connected, epoch, hostId, sessionId, tabId, setEvents, setHasMore, setNotes]);
+  useEffect(() => watchTranscript(app.api, hostId, sessionId, tabId, connected, (cache, replace) => {
+    setEvents((existing) => replace ? cache.events : mergeEvents(existing, cache.events));
+    setHasMore(cache.hasEarlier);
+    if (!connected || replace || cache.cursor || cache.events.length) setLoading(false);
+  }, (cause) => {
+    setLoading(false);
+    app.connection.reportError("Transcript sync failed", cause);
+  }), [app.api, app.connection, connected, epoch, hostId, sessionId, tabId, setEvents, setHasMore]);
 
   useEffect(() => {
     let active = true;
@@ -110,20 +96,35 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
     });
     return () => { active = false; };
   }, [cacheKey, setDraft]);
-  useEffect(() => { if (events.length) void writeTranscriptCache(hostId, sessionId, tabId, events); }, [events, hostId, sessionId, tabId]);
   useEffect(() => {
     let active = true;
-    const stream = app.api.subscribeSession(tabId, (event) => { if (active) setEvents((existing) => mergeEvents(existing, [event])); });
-    const events = app.connection.onEvent((message) => {
-    if (!active) return;
-    if (message.method === "session.event") {
-      const event = (message.params as { event?: unknown } | null)?.event;
-      if (isAgentEvent(event) && event.tabId === tabId) setEvents((existing) => mergeEvents(existing, [event]));
-    }
-    if (message.method === "chat.changed") void app.api.listNotes(sessionId).then((notes) => { if (active) setNotes(notes); });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let running = false;
+    let dirty = false;
+    const refresh = async () => {
+      if (!active || !connected) return;
+      dirty = true;
+      if (running) return;
+      running = true;
+      try {
+        while (dirty && active) {
+          dirty = false;
+          const notes = await app.api.listNotes(sessionId);
+          if (active) setNotes(notes);
+        }
+      } catch (cause) { app.connection.reportError("Notes refresh failed", cause); }
+      finally { running = false; }
+    };
+    void refresh();
+    const detach = app.connection.onEvent((message) => {
+      if (message.method !== "chat.changed") return;
+      const worktreeId = (message.params as { worktreeId?: string } | null)?.worktreeId;
+      if (worktreeId && worktreeId !== sessionId) return;
+      clearTimeout(timer);
+      timer = setTimeout(() => void refresh(), 150);
     });
-    return () => { active = false; stream(); events(); };
-  }, [app.api, app.connection, sessionId, tabId, setEvents, setNotes]);
+    return () => { active = false; clearTimeout(timer); detach(); };
+  }, [app.api, app.connection, connected, epoch, sessionId, setNotes]);
 
   const loadEarlier = async () => {
     const before = events[0]?.seq;
@@ -306,7 +307,6 @@ function TerminalPane({ hostId, sessionId, tabId, connected }: { hostId: string;
 }
 
 function itemTime(item: { kind: "turn"; turn: Turn } | { kind: "note"; note: ChatNote }) { return item.kind === "turn" ? Date.parse(item.turn.prompt?.ts ?? item.turn.completed?.ts ?? "") || item.turn.seq : item.note.createdAt; }
-function isAgentEvent(value: unknown): value is AgentEvent { return !!value && typeof value === "object" && Number.isSafeInteger((value as AgentEvent).seq) && typeof (value as AgentEvent).tabId === "string"; }
 
 const styles = StyleSheet.create({
   page: { flex: 1 },

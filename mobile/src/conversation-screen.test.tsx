@@ -75,6 +75,7 @@ beforeEach(() => {
     ] }],
     connection: { onEvent: () => () => {}, reportError: vi.fn() },
     api: {
+      features: async () => ({}),
       tail: vi.fn(async (_session: string, tab: string) => ({ events: [event(tab, `${tab} transcript`)], hasMore: false })),
       listNotes: vi.fn(async () => []),
       subscribeSession: vi.fn((tab, listener) => { mocks.sessionListeners.set(tab, listener); return () => { mocks.sessionListeners.delete(tab); }; }),

@@ -1532,6 +1532,8 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "chat.list",
         "sessions.summaries",
         "session.tail",
+        "session.sync",
+        "sync.capabilities",
         "session.subscribe",
         "session.unsubscribe",
         "session.status",

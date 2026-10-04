@@ -38,7 +38,7 @@ vi.mock("../transport/connection", () => ({
     onEvent() { return () => undefined; }
   },
 }));
-vi.mock("../data/host-api", () => ({ HostApi: class { describe = async () => null; summaries = async () => []; } }));
+vi.mock("../data/host-api", () => ({ HostApi: class { resetConnection() {} describe = async () => null; summaries = async () => []; } }));
 
 const { AppProvider, useApp } = await import("./AppProvider");
 const { savePairedHost } = await import("../store/hosts");
