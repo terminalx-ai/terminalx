@@ -14,19 +14,21 @@ use super::*;
 const BOTH: [CliKind; 2] = [CliKind::Claude, CliKind::Codex];
 
 /// What each CLI writes into its transcript, cut down to what the decoders
-/// read. Text is plain words, so it needs no JSON escaping.
+/// read. Escape prompt text so fixtures can include paste tags and newlines.
 struct Cli(CliKind);
 
 impl Cli {
     /// A prompt the CLI took while idle: the start of a turn.
     fn prompt(&self, text: &str) -> String {
+        let encoded = serde_json::to_string(text).unwrap();
+        let escaped = &encoded[1..encoded.len() - 1];
         match self.0 {
             CliKind::Claude => format!(
-                r#"{{"parentUuid":null,"isSidechain":false,"type":"user","uuid":"u-{text}","userType":"external","cwd":"/w","sessionId":"s","origin":{{"kind":"human"}},"message":{{"role":"user","content":"{text}"}}}}
+                r#"{{"parentUuid":null,"isSidechain":false,"type":"user","uuid":"u-{escaped}","userType":"external","cwd":"/w","sessionId":"s","origin":{{"kind":"human"}},"message":{{"role":"user","content":"{escaped}"}}}}
 "#
             ),
             CliKind::Codex => format!(
-                r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"t-{text}"}}}}
+                r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"t-{escaped}"}}}}
 {}"#,
                 self.steer(text)
             ),
@@ -37,13 +39,15 @@ impl Cli {
     /// item it writes for any prompt; Claude Code writes an attachment and no
     /// `user` record at all.
     fn steer(&self, text: &str) -> String {
+        let encoded = serde_json::to_string(text).unwrap();
+        let escaped = &encoded[1..encoded.len() - 1];
         match self.0 {
             CliKind::Claude => format!(
-                r#"{{"parentUuid":"a","isSidechain":false,"attachment":{{"type":"queued_command","prompt":"{text}","source_uuid":"s-{text}","commandMode":"prompt","origin":{{"kind":"human"}},"humanTurn":true}},"type":"attachment","uuid":"q-{text}","userType":"external","cwd":"/w","sessionId":"s"}}
+                r#"{{"parentUuid":"a","isSidechain":false,"attachment":{{"type":"queued_command","prompt":"{escaped}","source_uuid":"s-{escaped}","commandMode":"prompt","origin":{{"kind":"human"}},"humanTurn":true}},"type":"attachment","uuid":"q-{escaped}","userType":"external","cwd":"/w","sessionId":"s"}}
 "#
             ),
             CliKind::Codex => format!(
-                r#"{{"type":"event_msg","payload":{{"type":"item_completed","item":{{"type":"UserMessage","id":"user-{text}","content":[{{"type":"text","text":"{text}","text_elements":[]}}]}}}}}}
+                r#"{{"type":"event_msg","payload":{{"type":"item_completed","item":{{"type":"UserMessage","id":"user-{escaped}","content":[{{"type":"text","text":"{escaped}","text_elements":[]}}]}}}}}}
 "#
             ),
         }
@@ -72,6 +76,19 @@ impl Cli {
 }
 
 impl Rig {
+    fn compose_confirmed(&self, text: &str) -> std::sync::mpsc::Receiver<std::result::Result<(), String>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let prompt = PromptText { agent: text.into(), display: text.into() };
+        self.manager.record_composer_prompt(&mut self.rt.lock().unwrap(), &prompt, Vec::new(), self._dir.path().to_str().unwrap(), Some(tx));
+        rx
+    }
+
+    fn submitted(&self) {
+        if let Engine::Cli(p) = &mut self.rt.lock().unwrap().engine {
+            p.echoed.back_mut().unwrap().submitted = true;
+        }
+    }
+
     fn cli(&self) -> Cli {
         match &self.rt.lock().unwrap().engine {
             Engine::Cli(p) => Cli(p.harness),
@@ -114,6 +131,77 @@ impl Rig {
                 _ => None,
             })
             .collect()
+    }
+}
+
+#[test]
+fn continuation_submit_hook_confirms_before_the_transcript_and_keeps_echo_deduplication() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let receipt = rig.compose_confirmed("continue work");
+        rig.submitted();
+        // Hooks identify the submission even when the provider rewrites the text.
+        rig.hook("UserPromptSubmit", json!({ "prompt": "provider reformatted the prompt" }));
+        assert_eq!(receipt.try_recv().unwrap(), Ok(()));
+        rig.hook("UserPromptSubmit", json!({}));
+        assert!(receipt.try_recv().is_err(), "confirmation is sent only once");
+        rig.append(&rig.cli().prompt("<pasted_content id=\"1\">\ncontinue   work\n</pasted_content id=\"1\">"));
+        assert_eq!(rig.told(), ["user: continue work"]);
+    }
+}
+
+#[test]
+fn continuation_submit_hook_skips_a_receipt_whose_waiter_timed_out() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let expired = rig.compose_confirmed("old prompt");
+        rig.submitted();
+        drop(expired);
+        rig.hook("Stop", json!({}));
+        let receipt = rig.compose_confirmed("continue work");
+        rig.submitted();
+        rig.hook("UserPromptSubmit", json!({}));
+        assert_eq!(receipt.try_recv().unwrap(), Ok(()));
+    }
+}
+
+#[test]
+fn continuation_echo_confirms_wrapped_and_reflowed_long_prompts_without_hooks() {
+    let text = format!("Continue work {} Keep history unchanged", "historical context ".repeat(1000));
+    for kind in BOTH {
+        for echoed in [
+            format!("<pasted_content id=\"1\">\n{text}\n</pasted_content>"),
+            format!("<pasted_content id=\"1\">\n{text}\n</pasted_content id=\"1\">"),
+            text.replace(' ', " \r\n\t"),
+        ] {
+            let rig = Rig::of(kind, "");
+            let receipt = rig.compose_confirmed(&text);
+            rig.submitted();
+            rig.append(&rig.cli().prompt(&echoed));
+            assert_eq!(receipt.try_recv().unwrap(), Ok(()));
+            assert_eq!(rig.told(), [format!("user: {text}")]);
+        }
+    }
+}
+
+#[test]
+fn continuation_without_submission_or_provider_acceptance_stays_unconfirmed() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let receipt = rig.compose_confirmed("continue work");
+        assert!(rig.turn_open(), "the optimistic app turn is already open");
+        rig.hook("SessionStart", json!({}));
+        rig.hook("UserPromptSubmit", json!({}));
+        assert_eq!(receipt.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+        rig.submitted();
+        rig.manager.on_hook(HookFrame {
+            session: SESSION.into(), tab: TAB.into(), token: "old launch token".into(),
+            event: "UserPromptSubmit".into(), payload: json!({}),
+        });
+        rig.hook("SessionStart", json!({}));
+        rig.append(&rig.cli().prompt("unrelated terminal prompt"));
+        assert_eq!(receipt.recv_timeout(std::time::Duration::ZERO), Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+        assert_eq!(rig.told(), ["user: continue work", "user: unrelated terminal prompt"]);
     }
 }
 
