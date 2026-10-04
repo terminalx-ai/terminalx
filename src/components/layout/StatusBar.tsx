@@ -194,13 +194,14 @@ function ResourceCluster({ narrow }: { narrow: boolean }) {
           </button>
         </PopoverPrimitive.Trigger>
         <PopoverPrimitive.Portal>
+          {/* Keep the dense process list opaque even in macOS glass mode. */}
           <PopoverPrimitive.Content
             side="top"
             align="end"
             sideOffset={5}
             data-status-context-exempt
             onContextMenu={(event) => event.stopPropagation()}
-            className="z-(--z-menu) w-[26rem] rounded-xl bg-popover p-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
+            className="z-(--z-menu) w-[26rem] rounded-xl bg-(--surface-card) p-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
           >
             <div className="mb-2.5 flex items-center gap-2">
               <div>
