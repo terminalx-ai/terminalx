@@ -170,7 +170,7 @@ describe("share dialog", () => {
     expect(yourAccessText(manager, null)).toBe("Owner or admin of the organization (manages this workspace and who it is shared with)");
     // A plain member who created the workspace drives it and manages its shares.
     expect(yourAccessText({ role: "driver", canApprove: true, canManageShares: true }, "member")).toMatch(/^Creator \(you created this workspace/);
-    expect(yourAccessText({ role: "driver", canApprove: false, canManageShares: false }, "member")).toBe("Driver (can send to agents and type in terminals)");
+    expect(yourAccessText({ role: "driver", canApprove: false, canManageShares: false }, "member")).toBe("Driver (can send to agents; typing in terminals also needs the right to approve permissions)");
     expect(yourAccessText({ role: "driver", canApprove: true, canManageShares: false }, "member")).toBe("Driver (can send to agents and type in terminals), can approve permissions");
     expect(yourAccessText({ role: "viewer", canApprove: false, canManageShares: false }, "member")).toBe("Viewer (can read everything, not send)");
     expect(yourAccessText({ role: "none", canApprove: false, canManageShares: false }, "member")).toBe("No access to this workspace's content");
