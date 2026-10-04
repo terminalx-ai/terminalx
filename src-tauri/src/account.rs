@@ -1152,6 +1152,14 @@ impl AccountManager {
         snapshot(&self.inner.lock().unwrap())
     }
 
+    /// The active organization's name, for a native dialog that must say
+    /// which organization something is about to be shared with. `None` when
+    /// `organization_id` is not the active one or its name is not known.
+    pub(crate) fn active_organization_name(&self, organization_id: &str) -> Option<String> {
+        let identity = self.snapshot().identity?;
+        (identity.organization_id.as_deref() == Some(organization_id)).then_some(identity.organization).flatten().filter(|name| !name.trim().is_empty())
+    }
+
     fn emit(&self, app: &AppHandle) {
         let _ = app.emit(STATUS_EVENT, self.snapshot());
     }

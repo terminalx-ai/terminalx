@@ -40,6 +40,8 @@ mod cloud_diagnostics;
 #[cfg(feature = "desktop")]
 mod cloud_remote;
 #[cfg(feature = "desktop")]
+mod agent_local_login;
+#[cfg(feature = "desktop")]
 mod cloud_workspaces;
 #[cfg(feature = "desktop")]
 mod organization_github_app;
@@ -328,6 +330,13 @@ pub fn run() {
             commands::cloud_teardown_request,
             commands::cloud_provider_set_creation_enabled,
             commands::cloud_provider_revalidate,
+            commands::cloud_agent_logins,
+            commands::cloud_agent_login_connect,
+            commands::cloud_agent_login_remove,
+            commands::cloud_agent_claude_login_start,
+            commands::cloud_agent_claude_login_open,
+            commands::cloud_agent_claude_login_complete,
+            commands::cloud_agent_claude_login_cancel,
             commands::cloud_workspace_setup,
             commands::cloud_workspace_quote,
             commands::cloud_workspace_create,
