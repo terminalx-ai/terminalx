@@ -10,7 +10,7 @@ import { ChangesPanel } from "@/components/changes/ChangesPanel";
 import { RepoPanel, type RepoView } from "@/components/changes/RepoPanel";
 import { PrPanel } from "@/components/changes/PrPanel";
 import { FileTree } from "@/components/files/FileTree";
-import { openSettle, openWorkspaceDelete } from "@/lib/dialogs";
+import { openWorkspaceDelete, openWorkspaceRemove } from "@/lib/dialogs";
 import { api } from "@/lib/api";
 import type { GitSource } from "@/lib/gitSource";
 import type { FileSource } from "@/lib/workspaceFiles";
@@ -217,7 +217,11 @@ export function RightPanel({
                 branch={resolvedBranch}
                 active={tab === "pr"}
                 busy={live}
-                onSettle={settleSessionId ? () => openSettle(settleSessionId) : undefined}
+                onSettle={
+                  settleSessionId && workspace
+                    ? () => openWorkspaceRemove({ projectPath: workspace.projectPath, path: cwd, name: workspace.name, mode: "settle", sessionId: settleSessionId })
+                    : undefined
+                }
                 workspace={
                   workspace
                     ? {

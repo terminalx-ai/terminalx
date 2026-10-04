@@ -451,7 +451,7 @@ pub fn create_worktree(project: &Path, name: &str, base: Option<&str>) -> Result
     let path = worktree_path(project, name);
     std::fs::create_dir_all(worktree_root(project))?;
     let branch = worktree_branch(name);
-    run(project, &["worktree", "add", "--no-track", "-B", &branch, arg(&path)?, &base])?;
+    run(project, &["worktree", "add", "--no-track", "-b", &branch, arg(&path)?, &base])?;
     ensure_worktree_dir_ignored(project);
     let base_tree = run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
     Ok(CreatedWorktree { name: name.to_string(), path: path.to_string_lossy().into_owned(), branch, base, base_tree })
@@ -653,6 +653,7 @@ pub struct WorktreeRemoval {
 /// Where the managed worktree `name` lives. The guard keys on shape: a direct
 /// child of the worktree root or nothing, so an empty name can never resolve
 /// to the project itself and a name with a separator can never climb out.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn managed_worktree_path(project: &Path, name: &str) -> Result<PathBuf> {
     if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', '\0']) {
         bail!("refusing to remove: bad worktree name");
@@ -770,7 +771,7 @@ pub fn rescue_detached(project: &Path, name: &str, commit: &str) -> Option<Strin
 }
 
 /// What a removal that failed left behind, in words for the person.
-fn leftover_state(path: &Path) -> String {
+pub fn leftover_state(path: &Path) -> String {
     if std::fs::symlink_metadata(path).is_err() {
         return "The directory is gone.".into();
     }
@@ -797,6 +798,12 @@ fn leftover_state(path: &Path) -> String {
 /// disposition counts them). After a direct delete the directory could not
 /// be checked, so such a branch is kept and named in the result, and a
 /// detached HEAD nothing else holds is given a branch of its own.
+///
+/// Workspaces are removed by path through `workspaces::delete`, which shares
+/// this function's guards and rules. Removing by name is for a managed
+/// worktree no session points at; nothing in the app does that yet, so
+/// outside tests this has no caller.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn remove_worktree(project: &Path, name: &str, direct: DirectDelete) -> Result<WorktreeRemoval> {
     let path = managed_worktree_path(project, name)?;
     let mut removal = WorktreeRemoval::default();

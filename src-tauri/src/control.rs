@@ -377,6 +377,16 @@ impl ControlService {
                     .map_err(ControlError::internal)?)
             }
             "sessions.create" => self.sessions_create(params),
+            "sessions.rename" => {
+                let session = resolve_session(&required_string(&params, "session")?)?;
+                let title = params.get("title").and_then(Value::as_str)
+                    .ok_or_else(|| ControlError::invalid("Missing title."))?.to_string();
+                let patch = crate::session_ops::SessionPatch { title: Some(title), ..Default::default() };
+                let session = crate::session_ops::update_session_meta(&session.id, &patch)
+                    .map_err(ControlError::internal)?;
+                self.sink.emit("session_updated", &session);
+                Ok(json!({"sessionId": session.id, "session": session}))
+            }
             "tabs.list" => {
                 let selector = required_string(&params, "session")?;
                 let session = resolve_session(&selector)?;
@@ -398,6 +408,17 @@ impl ControlService {
             "permissions.list" => Ok(json!({"permissions": self.manager.pending_permissions()})),
             "permissions.allow" | "permissions.deny" => self.decide_permission(command, params),
             "worktrees.list" => self.worktrees_list(params),
+            "worktrees.rename" => {
+                let name = required_string(&params, "name")?;
+                let (project, worktree) = resolve_worktree(&params)?;
+                if !worktree.managed || worktree.is_main {
+                    return Err(ControlError::invalid("Only TerminalX-managed worktrees can be renamed."));
+                }
+                let renamed = crate::session_ops::rename_workspace_entries(&project.path, &worktree.path, &name)
+                    .map_err(workspace_error)?;
+                crate::session_ops::notify_workspace_settled(&*self.sink, &project.path, &renamed.sessions);
+                serde_json::to_value(renamed).map_err(ControlError::internal)
+            }
             "worktrees.delete" => self.worktree_delete(params),
             "issues.list" => self.issues_list(params),
             other => Err(ControlError::invalid(format!(
@@ -440,6 +461,10 @@ impl ControlService {
             project: String,
             agent: String,
             prompt: String,
+            #[serde(default)]
+            title: Option<String>,
+            #[serde(default)]
+            name: Option<String>,
             use_worktree: bool,
             #[serde(default)]
             on_main: bool,
@@ -458,6 +483,9 @@ impl ControlService {
             return Err(ControlError::invalid("--prompt cannot be empty."));
         }
         validate_control_session_target(p.use_worktree, p.on_main)?;
+        if p.name.is_some() && p.on_main {
+            return Err(ControlError::invalid("--name requires a new worktree and cannot be used with --on-main."));
+        }
         let available = crate::harness::offered()
             .into_iter()
             .find(|h| h.id == p.agent)
@@ -480,11 +508,11 @@ impl ControlService {
             }
         }
         let project = resolve_project(&p.project)?;
-        let entry = crate::session_ops::create_session_blocking(
+        let entry = crate::session_ops::create_named_session_blocking(
             &*self.sink,
             NewSession {
                 project_path: project.path,
-                title: None,
+                title: p.title,
                 use_worktree: p.use_worktree,
                 on_main: p.on_main,
                 base_ref: None,
@@ -499,8 +527,9 @@ impl ControlService {
                     permission_mode: p.mode,
                 }),
             },
+            p.name.as_deref(),
         )
-        .map_err(ControlError::internal)?;
+        .map_err(workspace_error)?;
         let tab = entry
             .tabs
             .first()
@@ -510,7 +539,9 @@ impl ControlService {
             .manager
             .send(&entry.id, &tab.id, p.prompt, Vec::new())
             .map_err(ControlError::internal)?;
-        Ok(json!({"sessionId": entry.id, "tabId": tab.id, "session": entry, "outcome": outcome}))
+        Ok(json!({"sessionId": entry.id, "tabId": tab.id, "title": entry.title,
+            "worktreeName": entry.worktree_name, "branch": entry.branch, "path": entry.cwd,
+            "session": entry, "outcome": outcome}))
     }
 
     fn read(&self, params: Value) -> Result<Value, ControlError> {
@@ -615,64 +646,53 @@ impl ControlService {
                 Some("Inspect worktrees list, then repeat with --yes only when deletion is intended.".into()),
             ));
         }
-        let selector = required_string(&params, "worktree")?;
-        let projects = selected_projects(optional_string(&params, "project"))?;
-        let mut candidates = Vec::new();
-        for project in projects {
-            for worktree in
-                crate::workspaces::list(Path::new(&project.path)).map_err(ControlError::internal)?
-            {
-                candidates.push((project.clone(), worktree));
-            }
-        }
-        let exact: Vec<_> = candidates
-            .iter()
-            .filter(|(_, worktree)| worktree.path == selector || worktree.name == selector)
-            .cloned()
-            .collect();
-        let matches = if exact.is_empty() {
-            candidates
-                .into_iter()
-                .filter(|(_, worktree)| worktree.path.contains(&selector))
-                .collect()
-        } else {
-            exact
-        };
-        let (project, worktree) = unique(matches, "worktree", &selector)?;
+        let (project, worktree) = resolve_worktree(&params)?;
         if worktree.is_main {
             return Err(ControlError::invalid(
                 "A project's main checkout cannot be deleted.",
             ));
         }
-        let affected = crate::session_ops::sessions_in_workspace(Path::new(&worktree.path))
-            .map_err(ControlError::internal)?;
-        // Agents, then the sessions' shells, each waited for, so nothing
+        // Agents, then the session's shells, each waited for, so nothing
         // still holds the directory.
-        let mut shells = Vec::new();
-        for session in &affected {
+        let stop = |session: &crate::store::index::SessionEntry| {
             for tab in &session.tabs {
                 let _ = self.manager.stop(&session.id, &tab.id);
             }
-            shells.extend(self.manager.terminals().session_pane_ids(&session.id, &[]));
-        }
-        self.manager.terminals().kill_all_and_wait(&shells, std::time::Duration::from_secs(5));
+            let shells = self.manager.terminals().session_pane_ids(&session.id, &[]);
+            self.manager.terminals().kill_all_and_wait(&shells, std::time::Duration::from_secs(5));
+        };
         #[cfg(feature = "desktop")]
         let browser_key = crate::browser::control::canonical(&worktree.path);
-        // The CLI showed nothing of what the directory holds, so a worktree
-        // git cannot remove is reported rather than deleted directly.
-        let (entries, removal) = crate::session_ops::delete_workspace_entries(
-            &project.path,
-            &worktree.path,
-            false,
-            crate::git::DirectDelete::Never,
-        )
-        .map_err(ControlError::internal)?;
-        // Only once the workspace is really gone: a delete that fails keeps it.
+        // The same check as every other way of removing a workspace. One
+        // that is not clean and merged is removed only with `--force`, which
+        // is the CLI's second confirmation. A directory git cannot remove is
+        // reported, never deleted directly: the CLI showed nothing of it.
+        let force = params.get("force").and_then(Value::as_bool).unwrap_or(false);
+        let request = crate::session_ops::WorkspaceRemoval {
+            project_path: &project.path,
+            path: &worktree.path,
+            sessions: crate::session_ops::SessionsFate::Delete,
+            delete_branch: false,
+            // The CLI shows nothing first, so its `--force` covers whatever
+            // is there, and it names no sessions to compare with.
+            confirmation: if force { crate::session_ops::Confirmation::Forced } else { crate::session_ops::Confirmation::Single },
+            expected_sessions: None,
+            direct: crate::git::DirectDelete::Never,
+            fetch: crate::landed::Fetch::Fresh,
+        };
+        let removed = crate::session_ops::remove_workspace(&*self.sink, &request, &stop).map_err(|error| {
+            if error.starts_with(crate::session_ops::NEEDS_CONFIRMATION) {
+                ControlError::new("needs_force", error, Some("Nothing was removed. Repeat with --force only if losing this work is intended.".into()))
+            } else {
+                ControlError::internal(error)
+            }
+        })?;
+        // Only once the workspace is really gone: a removal that fails keeps it.
         #[cfg(feature = "desktop")]
         if let Some(desktop) = &self.desktop {
             desktop.browser.forget_workspace(&browser_key);
         }
-        crate::session_ops::notify_workspace_deleted(&*self.sink, &project.path, &entries);
+        let (entries, removal) = (removed.sessions, removed.removal);
         let removed: Vec<_> = entries.into_iter().map(|entry| entry.id).collect();
         Ok(json!({"deleted": worktree.path, "project": project.path, "removedSessions": removed, "keptBranch": removal.kept_branch}))
     }
@@ -902,9 +922,98 @@ fn canonical_or_original(path: &str) -> String {
         .into_owned()
 }
 
+fn workspace_error(error: crate::session_ops::WorkspaceError) -> ControlError {
+    match error {
+        crate::session_ops::WorkspaceError::InvalidArguments(message) => ControlError::invalid(message),
+        crate::session_ops::WorkspaceError::Operation(message) => ControlError::internal(message),
+    }
+}
+
+fn resolve_worktree(params: &Value) -> Result<(projects::Project, crate::workspaces::Workspace), ControlError> {
+    let selector = required_string(params, "worktree")?;
+    let projects = selected_projects(optional_string(params, "project"))?;
+    let mut candidates = Vec::new();
+    for project in projects {
+        for worktree in
+            crate::workspaces::list(Path::new(&project.path)).map_err(ControlError::internal)?
+        {
+            candidates.push((project.clone(), worktree));
+        }
+    }
+    let exact: Vec<_> = candidates
+        .iter()
+        .filter(|(_, worktree)| worktree.path == selector || worktree.name == selector)
+        .cloned()
+        .collect();
+    let matches = if exact.is_empty() {
+        candidates
+            .into_iter()
+            .filter(|(_, worktree)| worktree.path.contains(&selector))
+            .collect()
+    } else {
+        exact
+    };
+    let (project, worktree) = unique(matches, "worktree", &selector)?;
+    Ok((project, worktree))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rename_commands_update_persisted_sessions_and_publish_changes() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        crate::git::run(root, &["init", "-q", "-b", "main"]).unwrap();
+        crate::git::run(root, &["config", "user.email", "t@example.com"]).unwrap();
+        crate::git::run(root, &["config", "user.name", "T"]).unwrap();
+        crate::git::run(root, &["commit", "--allow-empty", "-qm", "initial"]).unwrap();
+        let project = projects::add(root.to_str().unwrap()).unwrap();
+        let first = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": true, "worktreeName": "old",
+            "tab": {"harness": "codex"},
+        })).unwrap()).unwrap();
+        let second = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": false, "cwd": first.cwd,
+        })).unwrap()).unwrap();
+        let sink = Arc::new(crate::sink::BroadcastSink::new(16));
+        let mut events = sink.subscribe();
+        let endpoint = crate::hooks::prepare_control().unwrap();
+        let manager = SessionManager::new(
+            sink.clone(), Arc::new(crate::sink::NoObserver),
+            Arc::new(crate::harness::host::Host::new()), Arc::new(crate::pty::Terminals::new()),
+            Arc::new(Default::default()), Arc::new(Default::default()), endpoint.clone(),
+        );
+        let service = ControlService::headless(sink, manager, endpoint, "test".into());
+        let result = service.execute("sessions.rename", json!({"session": first.id, "title": "#203 review"}), "r1").unwrap();
+        assert_eq!(result["session"]["title"], "#203 review");
+        assert_eq!(index::get(&first.id).unwrap().title, "#203 review");
+        assert_eq!(index::get(&second.id).unwrap().title, second.title);
+        assert_eq!(&*events.try_recv().unwrap().event, "session_updated");
+
+        let result = service.execute("worktrees.rename", json!({"worktree": "old", "name": "Fix 203", "project": project.path}), "r2").unwrap();
+        assert_eq!(result["name"], "fix-203");
+        assert_eq!(result["branch"], "raccoon/fix-203");
+        assert_eq!(result["sessions"].as_array().unwrap().len(), 2);
+        for id in [&first.id, &second.id] {
+            let session = index::get(id).unwrap();
+            assert_eq!(session.cwd, result["path"].as_str().unwrap());
+            assert_eq!(session.worktree_name.as_deref(), Some("fix-203"));
+            assert_eq!(&*events.try_recv().unwrap().event, "session_updated");
+        }
+        assert_eq!(&*events.try_recv().unwrap().event, "workspaces_changed");
+        crate::git::run(root, &["branch", "raccoon/taken"]).unwrap();
+        for name in ["!!!", "taken"] {
+            let error = service.execute("worktrees.rename", json!({"worktree": "fix-203", "name": name}), "r3").unwrap_err();
+            assert_eq!(error.code, "invalid_arguments");
+            assert!(events.try_recv().is_err());
+        }
+        let error = service.execute("worktrees.rename", json!({"worktree": project.path, "name": "renamed-main"}), "r4").unwrap_err();
+        assert_eq!(error.code, "invalid_arguments");
+        assert_eq!(index::get(&first.id).unwrap().worktree_name.as_deref(), Some("fix-203"));
+    }
 
     #[test]
     fn control_session_target_requires_explicit_on_main() {
