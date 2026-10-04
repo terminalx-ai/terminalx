@@ -2628,3 +2628,83 @@ pub async fn delete_workspace(app: AppHandle, project_path: String, path: String
     .await
     .map_err(err)?
 }
+
+// ---- The local mirror of a cloud workspace (PRO-25) -------------------------
+//
+// The frontend reads the workspace (`mirror.manifest`, `fs.read`) and hands
+// what it read to these. None of them takes a local path: the mirror's
+// directory is chosen here from the two ids, and only reported back.
+
+fn cloud_mirror(organization_id: &str, workspace_id: &str) -> CmdResult<crate::cloud_mirror::Mirror> {
+    crate::cloud_mirror::Mirror::at(&store::root().map_err(err)?, organization_id, workspace_id).map_err(err)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudMirrorCheck {
+    diverged: Vec<crate::cloud_mirror::Divergence>,
+    diverged_total: usize,
+}
+
+#[tauri::command]
+pub async fn cloud_mirror_status(organization_id: String, workspace_id: String) -> CmdResult<crate::cloud_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.status().map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn cloud_mirror_enable(organization_id: String, workspace_id: String) -> CmdResult<crate::cloud_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.enable().map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn cloud_mirror_disable(organization_id: String, workspace_id: String, remove_files: bool) -> CmdResult<crate::cloud_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.disable(remove_files).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn cloud_mirror_check(organization_id: String, workspace_id: String) -> CmdResult<CloudMirrorCheck> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (diverged, diverged_total) = cloud_mirror(&organization_id, &workspace_id)?.check().map_err(err)?;
+        Ok(CloudMirrorCheck { diverged, diverged_total })
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn cloud_mirror_plan(organization_id: String, workspace_id: String, manifest: crate::cloud_mirror::Manifest) -> CmdResult<crate::cloud_mirror::Plan> {
+    tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.plan(&manifest).map_err(err)).await.map_err(err)?
+}
+
+/// `relative` is workspace-relative; `data_b64` is the file as `fs.read` gave
+/// it; `size` is what the manifest listed for it.
+#[tauri::command]
+pub async fn cloud_mirror_stage(organization_id: String, workspace_id: String, relative: String, data_b64: String, size: u64, etag: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(data_b64.as_bytes()).map_err(err)?;
+        cloud_mirror(&organization_id, &workspace_id)?.stage(&relative, &bytes, size, &etag).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn cloud_mirror_publish(
+    organization_id: String,
+    workspace_id: String,
+    manifest: crate::cloud_mirror::Manifest,
+    etags: BTreeMap<String, String>,
+) -> CmdResult<crate::cloud_mirror::Published> {
+    tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.publish(&manifest, &etags).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn cloud_mirror_resolve(
+    organization_id: String,
+    workspace_id: String,
+    manifest: crate::cloud_mirror::Manifest,
+    resolution: crate::cloud_mirror::Resolution,
+) -> CmdResult<crate::cloud_mirror::Resolved> {
+    tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.resolve(&manifest, resolution).map_err(err)).await.map_err(err)?
+}

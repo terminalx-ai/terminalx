@@ -133,8 +133,22 @@ pub fn list() -> Result<(Vec<Project>, Option<String>)> {
     Ok((f.projects, f.last_selected))
 }
 
+/// A local mirror of a cloud workspace holds files a remote machine chose
+/// (PRO-25). It is for reading: as a project or an agent's working directory
+/// it would have agents and tools act on that content, here. `path` is
+/// canonical.
+pub fn refuse_mirror(path: &str) -> Result<()> {
+    #[cfg(feature = "desktop")]
+    if crate::cloud_mirror::holds(&super::root()?, Path::new(path)) {
+        anyhow::bail!("This folder is a local mirror of a cloud workspace. A mirror is a read-only copy and cannot be opened as a project or used by an agent; work in the cloud workspace, or copy the files somewhere else first.");
+    }
+    let _ = path;
+    Ok(())
+}
+
 pub fn add(path: &str) -> Result<Project> {
     let path = canonical_directory(path)?;
+    refuse_mirror(&path)?;
     let kind = if crate::git::is_repo(Path::new(&path)) { ProjectKind::Git } else { ProjectKind::Folder };
     let mut f = load()?;
     let now = chrono::Utc::now().to_rfc3339();

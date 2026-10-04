@@ -135,6 +135,7 @@ pub(crate) fn create_session_blocking(sink: &dyn EventSink, req: NewSession) -> 
 pub(crate) fn create_session_entry(req: NewSession) -> Result<SessionEntry> {
     validate_session_target(&req)?;
     let project = projects::canonical_directory(&req.project_path).map_err(err)?;
+    projects::refuse_mirror(&project).map_err(err)?;
     let project_path = Path::new(&project);
     let id = uuid::Uuid::now_v7().to_string();
     let now = index::now();
@@ -165,6 +166,7 @@ pub(crate) fn create_session_entry(req: NewSession) -> Result<SessionEntry> {
 
     if let Some(cwd) = req.cwd.as_deref().filter(|c| !c.is_empty()) {
         let cwd = projects::canonical_directory(cwd).map_err(err)?;
+        projects::refuse_mirror(&cwd).map_err(err)?;
         entry.branch = git::current_branch(Path::new(&cwd));
         entry.cwd = cwd;
     } else if has_agent && req.use_worktree && git::is_repo(project_path) {
