@@ -795,6 +795,8 @@ function outboxStateText(entry: OutboxEntry, nameOf: (userId: string | null | un
     return `${typeof holder === "string" ? nameOf(holder) : "Someone else"} is driving — your message was not sent`;
   }
   if (entry.state === "rejected" && entry.category === "access-revoked") return "Not sent: your access changed";
+  // The runtime could not write its record of the command (a full disk, most often), so it did not touch the agent.
+  if (entry.state === "rejected" && entry.category === "receipt-store-failed") return "Not sent: the workspace could not record it (its disk may be full)";
   const refused = entry.state === "rejected" ? inputRefusalText(entry.category, entry.receipt) : null;
   if (refused) return refused;
   const text = STATE_TEXT[entry.state] ?? entry.state;
