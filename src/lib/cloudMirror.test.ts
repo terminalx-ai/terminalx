@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
     cloudMirrorList: vi.fn(),
     cloudMirrorPurge: vi.fn(),
     cloudMirrorClaimOwner: vi.fn(),
+    cloudMirrorNoteUnreadable: vi.fn(),
   },
   listeners: new Set<Listener>(),
   connected: new Map<string, unknown>(),
@@ -302,7 +303,7 @@ describe("the local mirror's sync loop", () => {
     // Another account is reported without a sign-out in between.
     mocks.api.cloudMirrorClaimOwner.mockResolvedValue(1);
     await mirror.claimCloudMirrorOwner("bob@example.com");
-    expect(mocks.api.cloudMirrorClaimOwner).toHaveBeenLastCalledWith("bob@example.com");
+    expect(mocks.api.cloudMirrorClaimOwner).toHaveBeenLastCalledWith("bob@example.com", null);
     // Nobody is signed in at launch: every mirror goes.
     await mirror.claimCloudMirrorOwner(null);
     expect(mocks.api.cloudMirrorPurge.mock.calls).toEqual([["org-1", "ws-1"]]);
@@ -314,6 +315,98 @@ describe("the local mirror's sync loop", () => {
     connect();
     await settle();
     expect(mirror.cloudMirrorState(KEY).skipped?.onDisk).toBe(2);
+  });
+
+  it("does not sync on a connection while the owner is not confirmed, and starts once it is", async () => {
+    mocks.api.cloudMirrorStatus.mockResolvedValue(status(true, "m0"));
+    // A new account is reported and the native claim fails (the disk, a permission).
+    mocks.api.cloudMirrorClaimOwner.mockRejectedValueOnce(new Error("could not read the owner"));
+    await mirror.claimCloudMirrorOwner("account-b");
+    connect();
+    await settle();
+    expect(mocks.readMirrorManifest).not.toHaveBeenCalled();
+    expect(mocks.api.cloudMirrorPlan).not.toHaveBeenCalled();
+    expect(mirror.cloudMirrorState(KEY).phase).toBe("paused");
+    expect(mirror.cloudMirrorState(KEY).error).toMatch(/confirm that this mirror belongs/);
+    await vi.advanceTimersByTimeAsync(mirror.MIRROR_SCAN_MS * 3);
+    expect(mocks.readMirrorManifest).not.toHaveBeenCalled();
+    // Turning one on is refused too.
+    await expect(mirror.setCloudMirrorEnabled(target, true)).rejects.toThrow(/Sign in/);
+
+    // The account is reported again and the claim succeeds: the workspace that is still connected syncs.
+    mocks.api.cloudMirrorClaimOwner.mockResolvedValue(0);
+    await mirror.claimCloudMirrorOwner("account-b");
+    await settle();
+    expect(mocks.readMirrorManifest).toHaveBeenCalledTimes(1);
+    expect(mirror.cloudMirrorState(KEY).phase).toBe("synced");
+  });
+
+  it("a claim superseded by 'not known' cannot confirm an owner when it resolves later", async () => {
+    mocks.api.cloudMirrorStatus.mockResolvedValue(status(true, "m0"));
+    mocks.api.cloudMirrorNoteUnreadable.mockResolvedValue(0);
+    // A claim for a new account is in flight.
+    let answer: (removed: number) => void = () => undefined;
+    mocks.api.cloudMirrorClaimOwner.mockImplementationOnce(() => new Promise<number>((resolve) => (answer = resolve)));
+    const claim = mirror.claimCloudMirrorOwner("account-b");
+    await settle();
+    // Then the account stops being known (the session could not be read).
+    await mirror.claimCloudMirrorOwner(undefined);
+    // The earlier claim resolves: it must not make anything sync.
+    answer(0);
+    await claim;
+    connect();
+    await settle();
+    await vi.advanceTimersByTimeAsync(mirror.MIRROR_SCAN_MS * 2);
+    expect(mocks.readMirrorManifest).not.toHaveBeenCalled();
+    expect(mirror.cloudMirrorState(KEY).phase).toBe("paused");
+    await expect(mirror.setCloudMirrorEnabled(target, true)).rejects.toThrow(/Sign in/);
+  });
+
+  it("tells the native side once per run that the session could not be read, and shows what it removed", async () => {
+    mocks.api.cloudMirrorStatus.mockResolvedValue(status(true));
+    connect();
+    await settle();
+    expect(mirror.cloudMirrorState(KEY).phase).toBe("synced");
+    // First launches in that state: kept.
+    mocks.api.cloudMirrorNoteUnreadable.mockResolvedValue(0);
+    await mirror.claimCloudMirrorOwner(undefined);
+    await mirror.claimCloudMirrorOwner(undefined);
+    expect(mocks.api.cloudMirrorNoteUnreadable).toHaveBeenCalledTimes(1);
+    expect(mirror.cloudMirrorState(KEY).revision?.manifestId).toBe("m1");
+    // The launch at which the bound is reached: the native side removed them.
+    mirror.resetCloudMirrors();
+    mocks.api.cloudMirrorNoteUnreadable.mockResolvedValue(1);
+    await mirror.claimCloudMirrorOwner(undefined);
+    expect(mirror.cloudMirrorState(KEY).phase).toBe("off");
+    expect(mirror.cloudMirrorState(KEY).revision).toBeNull();
+  });
+
+  it("passes the email only as the old key of an owner file, next to the account id", async () => {
+    mocks.api.cloudMirrorClaimOwner.mockResolvedValue(0);
+    await mirror.claimCloudMirrorOwner("account-id-of-ada", "ada@example.com");
+    expect(mocks.api.cloudMirrorClaimOwner).toHaveBeenLastCalledWith("account-id-of-ada", "ada@example.com");
+  });
+
+  it("removes nothing and syncs nothing when it is not known who is signed in", async () => {
+    mocks.api.cloudMirrorStatus.mockResolvedValue(status(true));
+    mocks.api.cloudMirrorList.mockResolvedValue([{ organizationId: "org-1", workspaceId: "ws-1" }]);
+    connect();
+    await settle();
+    expect(mirror.cloudMirrorState(KEY).phase).toBe("synced");
+    const scans = mocks.readMirrorManifest.mock.calls.length;
+    // The saved session could not be read (a Keychain failure): not a sign-out.
+    mocks.api.cloudMirrorNoteUnreadable.mockResolvedValue(0);
+    await mirror.claimCloudMirrorOwner(undefined);
+    expect(mocks.api.cloudMirrorPurge).not.toHaveBeenCalled();
+    expect(mocks.api.cloudMirrorList).not.toHaveBeenCalled();
+    expect(mirror.cloudMirrorState(KEY).phase).toBe("paused");
+    expect(mirror.cloudMirrorState(KEY).revision?.manifestId).toBe("m1");
+    await vi.advanceTimersByTimeAsync(mirror.MIRROR_SCAN_MS * 3);
+    expect(mocks.readMirrorManifest).toHaveBeenCalledTimes(scans);
+    // A real sign-out, known for certain, does remove them.
+    mocks.api.cloudMirrorPurge.mockResolvedValue(1);
+    await mirror.claimCloudMirrorOwner(null);
+    expect(mocks.api.cloudMirrorPurge.mock.calls).toEqual([["org-1", "ws-1"]]);
   });
 
   it("says a runtime from before mirrors cannot be mirrored, and asks it nothing", async () => {

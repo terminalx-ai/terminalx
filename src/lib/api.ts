@@ -407,7 +407,9 @@ export const api = {
     invoke<void>("cloud_mirror_stage", { organizationId, workspaceId, relative, dataB64, size, etag }),
   cloudMirrorList: () => invoke<{ organizationId: string; workspaceId: string }[]>("cloud_mirror_list"),
   /** Says who is using the app; mirrors made under another account are removed. Returns how many. */
-  cloudMirrorClaimOwner: (account: string) => invoke<number>("cloud_mirror_claim_owner", { account }),
+  cloudMirrorClaimOwner: (account: string, legacyEmail: string | null) => invoke<number>("cloud_mirror_claim_owner", { account, legacyEmail }),
+  /** The saved session could not be read at this launch: mirrors are kept for a bounded time, then removed. Returns how many were. */
+  cloudMirrorNoteUnreadable: () => invoke<number>("cloud_mirror_note_unreadable"),
   /** Removes what the mirror wrote; files the person added and their exports stay. */
   cloudMirrorPurge: (organizationId: string, workspaceId: string) => invoke<number>("cloud_mirror_purge", { organizationId, workspaceId }),
   cloudMirrorPublish: (organizationId: string, workspaceId: string, manifest: CloudMirrorManifestInput, etags: Record<string, string>) =>
@@ -450,6 +452,8 @@ export interface AccountStatus {
   identity: AccountIdentity | null;
   expiresAt: number | null;
   lastError: string | null;
+  /** The saved session could not be read: signed-out because nothing loaded, not because anyone signed out. */
+  sessionUnreadable?: boolean;
   /**
    * `scope` and `revision` include the active Organization; `account` is the
    * user and profile alone (CS-18), what cloud state belongs to when every
