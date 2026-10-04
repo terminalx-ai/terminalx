@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api, errorMessage, type CloudWorkspaceQuote } from "@/lib/api";
-import { createErrorMessage, createWorkspace, failureMessage, isClientError, launchInput, repositoriesInput, usableProviders, CreateRefused, type CreateForm, type PendingCreate } from "@/lib/cloudCreate";
+import { createErrorMessage, createWorkspace, failureMessage, isClientError, launchInput, preflightCreate, repositoriesInput, usableProviders, CreateRefused, type CreateForm, type PendingCreate } from "@/lib/cloudCreate";
 import { formatMicros } from "@/lib/organizationCompute";
 import { organizationGithubApp } from "@/lib/organizationGithubApp";
 import {
@@ -10,6 +10,7 @@ import {
   reconcileSetup,
   resendable,
   setupWorkspace,
+  unsettledRequest,
   STEP_LABELS,
   type OrganizationSetupRecord,
   type SetupFacts,
@@ -28,6 +29,10 @@ type Prepared = { form: CreateForm; pending: PendingCreate; quote: CloudWorkspac
 
 /** A form is only read for a new create; a resend uses the kept request. */
 const RESEND_FORM: CreateForm = { name: "", provider: null, repositories: [], prompt: "", agent: "claude", model: "", effort: "", mode: "", accessMode: "private" };
+
+/** An earlier request is too old to resend and the workspace list could not be read to see what it did. */
+const UNSETTLED =
+  "An earlier request for the setup workspace was never answered, and the workspace list could not be read to see whether it made one. Check again when the list loads; a new setup workspace is offered only once that is known.";
 
 function failureText(failure: unknown): string {
   if (failure instanceof CreateRefused) return createErrorMessage(failure.code, failure.detail);
@@ -120,6 +125,10 @@ export function OrganizationSetupSteps({
     setError(null);
     try {
       const found = await check();
+      // The check above settles an expired request when the list could be
+      // read. If it could not, the earlier request may still have made a
+      // workspace: nothing new is prepared until that is known.
+      if (unsettledRequest(current.current)) throw new Error(UNSETTLED);
       const provider = found?.providers?.[0];
       const repository = found?.github?.[0];
       if (!provider || !repository?.cloneUrl) throw new CreateRefused(provider ? "cloud_workspace_repository_credential_required" : "cloud_provider_connection_required");
@@ -134,6 +143,9 @@ export function OrganizationSetupSteps({
         mode: "",
         accessMode: "private",
       };
+      // The same checks as any create: the repository, and with a prompt
+      // that its agent has a login (PRO-78). Refused here, nothing is quoted.
+      await preflightCreate(api, form, null);
       const setup = await api.cloudWorkspaceSetup(provider.id, null);
       const quote = await api.cloudWorkspaceQuote({ provider: provider.id, ...setup.defaults }, null);
       const idempotencyKey = crypto.randomUUID();
@@ -154,6 +166,12 @@ export function OrganizationSetupSteps({
   // (or after quitting the app) resends the same one: one workspace, and its
   // first prompt delivered once.
   const send = async (form: CreateForm, pending: PendingCreate) => {
+    // Never over an earlier request whose outcome is still unknown.
+    if (unsettledRequest(current.current) && current.current.workspace?.pending !== pending) {
+      setPrepared(null);
+      setError(UNSETTLED);
+      return;
+    }
     setBusy(true);
     setError(null);
     const terminalOnly = !pending.request.launch?.prompt;
@@ -185,6 +203,7 @@ export function OrganizationSetupSteps({
   const item = setupWorkspace(record, facts.workspaces);
   // Resent only while the server still answers it as the same create.
   const unsent = resendable(record);
+  const unsettled = unsettledRequest(record);
 
   if (step === "done") {
     return (
@@ -221,7 +240,12 @@ export function OrganizationSetupSteps({
           </Button>
         </div>
       )}
-      {step === "workspace" && !unsent && !prepared && (
+      {step === "workspace" && unsettled && (
+        <p className="mt-2 text-xs text-muted-foreground" data-testid="organization-setup-unsettled">
+          {UNSETTLED}
+        </p>
+      )}
+      {step === "workspace" && !unsent && !unsettled && !prepared && (
         <div className="mt-2 text-xs text-muted-foreground">
           {record.workspace?.id && <p className="mb-1">The setup workspace is no longer in this organization's list. Check again, or create a new one.</p>}
           <p>One small workspace proves the setup works: it clones your first repository and an agent checks the environment. It runs on your provider and costs money while it runs; the price is shown before anything is created.</p>
@@ -245,7 +269,7 @@ export function OrganizationSetupSteps({
           </div>
         </div>
       )}
-      {step === "workspace" && !unsent && prepared && (
+      {step === "workspace" && !unsent && !unsettled && prepared && (
         <div className="mt-2 text-xs text-muted-foreground" data-testid="organization-setup-confirm">
           <p>
             Create “{prepared.form.name}” from {prepared.form.repositories[0]?.fullName}: {formatMicros(prepared.quote.activeHourlyMicros, prepared.quote.currency)} per hour while it runs.

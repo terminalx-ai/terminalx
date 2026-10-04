@@ -8,8 +8,10 @@ import {
   accessLoss,
   accessLostReason,
   applyCollabEvent,
+  canTypeInTerminals,
   clearCollabAccess,
   getCollab,
+  inputRefusalText,
   listedYou,
   mayConfigure,
   onAccessChanged,
@@ -78,6 +80,44 @@ describe("one agent tab's lease and approvals", () => {
   it("never calls a lease someone else's while this person's own id is unknown (the list's role, before a connection)", () => {
     const fromList = listedYou({ role: "driver", canApprove: false })!;
     expect(tabGate(fromList, lease("u-me", now + 1), now, false, nameOf).blocked).toBeNull();
+  });
+});
+
+describe("PRO-88: what the approval right guards beyond permission requests", () => {
+  it("lets only a manager or an approving driver type in a terminal", () => {
+    expect(canTypeInTerminals(you("manager"))).toBe(true);
+    expect(canTypeInTerminals(you("driver", { canApprove: true }))).toBe(true);
+    expect(canTypeInTerminals(you("driver"))).toBe(false);
+    // Approving permission requests does not make a viewer a driver.
+    expect(canTypeInTerminals(you("viewer", { canApprove: true }))).toBe(false);
+    expect(canTypeInTerminals(you("none"))).toBe(false);
+    expect(canTypeInTerminals(null)).toBe(false);
+  });
+
+  it("says what the runtime refused, in the runtime's words when the receipt can be read", () => {
+    const message = "/model was not sent: only someone who can approve permissions may send it. Without that right you can send /clear, /compact.";
+    expect(inputRefusalText("slash-command-forbidden", { command: "/model", message })).toBe(
+      "Not sent: /model: only someone who can approve permissions may send it. Without that right you can send /clear, /compact.",
+    );
+    const shell = "Not sent: a message that starts with ! runs as a shell command in the agent's terminal, which needs someone who can approve permissions.";
+    expect(inputRefusalText("shell-command-forbidden", { command: "!", message: shell })).toBe(shell);
+    // A receipt that could not be read (its key is gone) still gives the reason.
+    expect(inputRefusalText("slash-command-forbidden", null)).toBe("Not sent: that command needs someone who can approve permissions.");
+    expect(inputRefusalText("shell-command-forbidden", null)).toMatch(/starts with ! runs as a shell command/);
+    expect(inputRefusalText("file-mention-forbidden", {})).toMatch(/outside the project/);
+    // An oversized or empty message is not shown; another category is not this function's.
+    expect(inputRefusalText("slash-command-forbidden", { message: "x".repeat(500) })).toBe("Not sent: that command needs someone who can approve permissions.");
+    // A command that would have waited behind a running turn (for everyone, not only plain drivers).
+    expect(inputRefusalText("command-not-queued", { message: "A turn is running: send this command when it has ended." })).toBe(
+      "Not sent: A turn is running: send this command when it has ended.",
+    );
+    expect(inputRefusalText("command-not-queued", null)).toBe("Not sent: a turn is running. Send this command when it has ended.");
+    // An image the runtime does not hold (PRO-22): the receipt's sentence, or this one without a readable receipt.
+    const missing = "Not sent: an image of this message did not reach the workspace. Attach it and send again.";
+    expect(inputRefusalText("attachment-missing", { message: missing })).toBe(missing);
+    expect(inputRefusalText("attachment-missing", null)).toBe(missing);
+    expect(inputRefusalText("lease-held", { message: "anything" })).toBeNull();
+    expect(inputRefusalText(null, null)).toBeNull();
   });
 });
 

@@ -105,7 +105,7 @@ describe("createWorkspace", () => {
     expect(api.cloudWorkspacePreflight).toHaveBeenCalledWith([
       { cloneUrl: "https://github.com/acme/app.git", ref: "main" },
       { cloneUrl: "https://github.com/acme/lib.git", ref: null },
-    ], null);
+    ], null, "claude");
     expect(api.cloudWorkspaceCreate).toHaveBeenCalledWith({
       name: "Fix login",
       quoteId: "quote-1",
@@ -135,6 +135,42 @@ describe("createWorkspace", () => {
     expect((refused as CreateRefused).code).toBe("cloud_workspace_repository_ref_not_found");
     expect(calls).toEqual([]);
     expect(createErrorMessage("cloud_workspace_repository_ref_not_found", "https://github.com/acme/app.git")).toContain("acme/app");
+  });
+
+  it("refuses a first prompt for an agent the organization has not connected, before quoting (PRO-78)", async () => {
+    const notConnected = { kind: "agent-credential", cloneUrl: null, agent: "claude", status: "failed" as const, errorCode: "cloud_workspace_agent_credential_required", retryable: false };
+    const { api, calls } = fakeApi({ cloudWorkspacePreflight: vi.fn(async () => ({ ready: false, checks: [notConnected] })) });
+    const refused = (await createWorkspace(api, form()).catch((e: unknown) => e)) as CreateRefused;
+    expect(refused).toBeInstanceOf(CreateRefused);
+    expect(refused.code).toBe("cloud_workspace_agent_credential_required");
+    expect(calls).toEqual([]);
+    const message = createErrorMessage(refused.code, refused.detail);
+    expect(message).toContain("Claude Code isn't connected for this organization");
+    expect(message).toContain("Compute setup");
+    expect(message).toContain("without a prompt");
+
+    // With no repositories the prompt alone asks the question.
+    await expect(createWorkspace(api, form({ repositories: [] }))).rejects.toMatchObject({ code: "cloud_workspace_agent_credential_required" });
+    expect(api.cloudWorkspacePreflight).toHaveBeenLastCalledWith([], null, "claude");
+  });
+
+  it("creates without a first prompt whatever the agent's login, and asks nothing about it", async () => {
+    const { api, calls } = fakeApi();
+    await createWorkspace(api, form({ prompt: "  " }));
+    expect(api.cloudWorkspacePreflight).toHaveBeenCalledWith(expect.any(Array), null, null);
+    expect(calls).toEqual(["preflight", "setup", "quote", "create"]);
+    // No repositories and no prompt: nothing to check at all.
+    const blank = fakeApi();
+    await createWorkspace(blank.api, form({ prompt: "", repositories: [] }));
+    expect(blank.api.cloudWorkspacePreflight).not.toHaveBeenCalled();
+  });
+
+  it("ignores an agent check that does not name the agent: an older API sends one on every desktop create", async () => {
+    const legacy = { kind: "agent-credential", cloneUrl: null, status: "failed" as const, errorCode: "cloud_workspace_agent_credential_required", retryable: false };
+    const other = { ...legacy, agent: "codex" };
+    const { api, calls } = fakeApi({ cloudWorkspacePreflight: vi.fn(async () => ({ ready: false, checks: [legacy, other] })) });
+    await createWorkspace(api, form());
+    expect(calls).toEqual(["setup", "quote", "create"]);
   });
 
   it("never quotes an invalid form", async () => {
@@ -186,6 +222,18 @@ describe("phases", () => {
   it("explains failures and measures the launch", () => {
     expect(failureMessage(snapshot({ workspace: { launch: launch("failed", { category: "agent-unavailable" }) } }))).toMatch(/not installed/);
     expect(failureMessage(snapshot({ workspace: { launch: launch("failed", { category: "runtime-interrupted" }) } }))).toMatch(/may not have been sent/);
+    expect(failureMessage(snapshot({ workspace: { launch: launch("failed", { category: "repository-clone-failed" }) } }))).toMatch(/could not be cloned/);
+    // Each clone failure says what failed; only a refusal by GitHub points at GitHub access.
+    const cloneText = (category: string) => failureMessage(snapshot({ workspace: { launch: launch("failed", { category }) } }));
+    expect(cloneText("repository-access-denied")).toMatch(/GitHub access/);
+    expect(cloneText("repository-branch-not-found")).toMatch(/base branch does not exist/);
+    expect(cloneText("repository-clone-timed-out")).toMatch(/took too long or stalled/);
+    expect(cloneText("repository-path-occupied")).toMatch(/already in the workspace/);
+    expect(cloneText("repository-empty")).toMatch(/no commits/);
+    expect(cloneText("workspace-disk-full")).toMatch(/disk space/);
+    for (const category of ["repository-clone-failed", "repository-branch-not-found", "repository-clone-timed-out", "repository-path-occupied", "repository-empty", "workspace-disk-full"]) {
+      expect(cloneText(category)).not.toMatch(/GitHub access/);
+    }
     expect(failureMessage(snapshot({ operation: { state: "failed", errorCode: "provider_retry_exhausted" } }))).toMatch(/provider_retry_exhausted/);
     const running = snapshot({ workspace: { launch: launch("running", { timings: { ...launch("running").timings, runningAt: 7400 } }) } });
     expect(launchLatency(running)).toBe(6400);

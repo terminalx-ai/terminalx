@@ -12,13 +12,15 @@ use serde_json::{json, Value};
 
 use super::api::{Ack, AckOutcome, CallError, Lease};
 use super::receipts::{FollowUp, Known, Receipt};
-use super::{crypto, now_ms, CloudAgents, DecisionError, Settings};
+use super::{attachments, crypto, now_ms, slash, CloudAgents, DecisionError, Settings};
 use crate::remote::collab::Role;
 
 const LEASE_LIMIT: u32 = 16;
 const ATTACHED_POLL: Duration = Duration::from_secs(3);
 const IDLE_POLL: Duration = Duration::from_secs(20);
 const MAX_TEXT: usize = 48 * 1024;
+/// Receipt category of a message that names an image the runtime does not hold.
+pub const ATTACHMENT_MISSING: &str = "attachment-missing";
 
 pub fn run(agents: &CloudAgents) {
     let mut failures = 0u32;
@@ -126,6 +128,20 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
         Ok(plaintext) => plaintext,
         Err(category) => return finish(agents, lease, "rejected", Some(category), json!({})),
     };
+    let receipt = judge(agents, lease, id, &plaintext);
+    // A message that was refused is never typed: the images its sender
+    // uploaded for it are done with (PRO-22). Only their own: naming someone
+    // else's upload in a refused message does not remove it.
+    if receipt.outcome == "rejected" && lease.kind == "send" {
+        if let Some(ids) = attachments::named(&plaintext) {
+            agents.attachments.remove_owned(&lease.actor.user_id, &ids);
+        }
+    }
+    receipt
+}
+
+/// Decide and apply a readable command that has no receipt yet.
+fn judge(agents: &CloudAgents, lease: &Lease, id: &str, plaintext: &Value) -> Receipt {
     let Some(tab) = agents.tab(&lease.tab_id) else {
         return finish(agents, lease, "rejected", Some("tab-unknown"), json!({}));
     };
@@ -153,6 +169,24 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
             return finish(agents, lease, "rejected", Some("lease-held"), json!({ "holderId": held.holder_id }));
         }
     }
+    // The CLI runs a slash command, a `!` shell command or an `@/path`
+    // mention by itself, and each can change or get around the same
+    // settings: from a plain driver only the harmless ones go through
+    // (PRO-88). Refused before the applying mark: nothing reached the agent.
+    if matches!(lease.kind.as_str(), "send" | "steer") {
+        let text = plaintext.get("text").and_then(Value::as_str).unwrap_or("");
+        if let Some(refusal) = agents.slash_refusal(access, &tab.session_id, &tab.harness, text) {
+            return finish(agents, lease, "rejected", Some(refusal.category()), json!({ "command": refusal.command, "message": refusal.message() }));
+        }
+    }
+    // A steer goes into the running turn, where the session's own queue
+    // holds it until the turn ends; nothing re-checks that queue, so a slash
+    // or `!` command would still run after its sender lost the right to send
+    // it. It is not queued at all, whoever sends it (a `send` waits in the
+    // follow-up queue, which is re-checked).
+    if lease.kind == "steer" && busy_before && slash::is_command(plaintext.get("text").and_then(Value::as_str).unwrap_or("")) {
+        return finish(agents, lease, "rejected", Some(slash::NOT_QUEUED_CATEGORY), json!({ "message": slash::NOT_QUEUED_MESSAGE }));
+    }
     if let Err(error) = agents.receipts.applying(id) {
         // Without the durable mark the outcome could not be proven later,
         // so the agent is not touched: definitely not applied.
@@ -163,8 +197,8 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
     // own: only a manager or someone who may approve permissions sets them
     // (the live `session.configure` needs manage). A driver's send still
     // goes through, without them.
-    let may_configure = access.role == Role::Manager || access.can_approve;
-    let (outcome, category, extra) = apply(agents, lease, &tab.session_id, &plaintext, may_configure);
+    let may_configure = access.can_configure();
+    let (outcome, category, extra) = apply(agents, lease, &tab.session_id, plaintext, may_configure);
     // Only input that reached the agent (or its queue) claims the tab.
     if let (Some(collab), "applied", "send" | "steer") = (agents.collab(), outcome, lease.kind.as_str()) {
         let _ = collab.claim(&lease.tab_id, &lease.actor.user_id, now_ms(), busy_before, false);
@@ -195,8 +229,10 @@ type Applied = (&'static str, Option<&'static str>, Value);
 fn apply(agents: &CloudAgents, lease: &Lease, session_id: &str, plaintext: &Value, may_configure: bool) -> Applied {
     let tab_id = lease.tab_id.as_str();
     let ops = &agents.ops;
-    let text = || -> Option<String> {
-        plaintext.get("text").and_then(Value::as_str).filter(|text| !text.trim().is_empty() && text.len() <= MAX_TEXT).map(str::to_string)
+    // A message is text, images, or both (as a local tab's composer sends).
+    let text = |with_images: bool| -> Option<String> {
+        let text = plaintext.get("text").and_then(Value::as_str).or(with_images.then_some(""))?;
+        ((with_images || !text.trim().is_empty()) && text.len() <= MAX_TEXT).then(|| text.to_string())
     };
     let failed = |error: anyhow::Error| -> Applied {
         log::warn!("apply {} {}: {error:#}", lease.kind, lease.client_command_id);
@@ -204,7 +240,24 @@ fn apply(agents: &CloudAgents, lease: &Lease, session_id: &str, plaintext: &Valu
     };
     let result = match lease.kind.as_str() {
         "send" | "steer" => {
-            let Some(text) = text() else { return ("rejected", Some("payload-invalid"), json!({})) };
+            // Images ride with a prompt, never with a steer into a running turn.
+            let image_ids = match attachments::named(plaintext) {
+                Some(ids) if ids.is_empty() || lease.kind == "send" => ids,
+                _ => return ("rejected", Some("payload-invalid"), json!({})),
+            };
+            let Some(text) = text(!image_ids.is_empty()) else { return ("rejected", Some("payload-invalid"), json!({})) };
+            // Uploaded by the sender, in full, before the message: checked
+            // before anything about the tab changes.
+            let images = match agents.attachments.load(&lease.actor.user_id, &image_ids) {
+                Ok(images) => images,
+                Err(_) => {
+                    return (
+                        "rejected",
+                        Some(ATTACHMENT_MISSING),
+                        json!({ "message": "Not sent: an image of this message did not reach the workspace. Attach it and send again." }),
+                    )
+                }
+            };
             let settings = match Settings::from_json(plaintext) {
                 Ok(settings) => settings,
                 Err(_) => return ("rejected", Some("payload-invalid"), json!({})),
@@ -230,6 +283,7 @@ fn apply(agents: &CloudAgents, lease: &Lease, session_id: &str, plaintext: &Valu
                     session_id: session_id.to_string(),
                     text,
                     actor_id: lease.actor.user_id.clone(),
+                    images: image_ids,
                 };
                 if let Err(error) = agents.follow_ups.push(tab_id, follow_up) {
                     return failed(error);
@@ -238,7 +292,10 @@ fn apply(agents: &CloudAgents, lease: &Lease, session_id: &str, plaintext: &Valu
                 agents.nudge_follow_ups(tab_id);
                 ("applied", None, mark(json!({ "queued": true })))
             } else {
-                match ops.send(session_id, tab_id, &text) {
+                let sent = ops.send_with_images(session_id, tab_id, &text, images);
+                // Typed or not, this message is settled: its uploads are done with.
+                agents.attachments.remove(&image_ids);
+                match sent {
                     Ok(()) => ("applied", None, mark(json!({ "queued": false }))),
                     Err(error) => failed(error),
                 }
@@ -248,6 +305,7 @@ fn apply(agents: &CloudAgents, lease: &Lease, session_id: &str, plaintext: &Valu
             let dropped = agents.follow_ups.clear(tab_id).unwrap_or_default();
             for follow_up in &dropped {
                 ops.note(session_id, tab_id, &format!("Stopped before sending a queued message: {}", preview(&follow_up.text)));
+                agents.attachments.remove(&follow_up.images);
             }
             match ops.stop(session_id, tab_id) {
                 Ok(()) => (

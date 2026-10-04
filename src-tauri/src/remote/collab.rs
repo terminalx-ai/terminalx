@@ -58,6 +58,13 @@ impl Access {
         self.role >= Role::Driver
     }
 
+    /// May decide what the agent does on its own: its model, effort and
+    /// permission mode, the slash commands that change them, and a shell
+    /// (PRO-88). A manager, or a driver who may approve permissions.
+    pub fn can_configure(self) -> bool {
+        self.role == Role::Manager || (self.can_drive() && self.can_approve)
+    }
+
     /// The narrower of two views of the same person.
     pub fn meet(self, other: Self) -> Self {
         Self { role: self.role.min(other.role), can_approve: self.can_approve && other.can_approve }

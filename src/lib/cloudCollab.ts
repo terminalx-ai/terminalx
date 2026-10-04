@@ -408,6 +408,48 @@ export function canApprove(you: WorkspaceYou | null): boolean {
   return you?.role === "manager" || !!you?.canApprove;
 }
 
+/**
+ * A shell is arbitrary code as the workspace's user, so typing into a
+ * terminal needs what changing an agent's settings needs: a manager, or a
+ * driver who may approve permissions (PRO-88; the runtime refuses the rest).
+ */
+export function canTypeInTerminals(you: WorkspaceYou | null): boolean {
+  return you?.role === "manager" || (canDrive(you) && !!you?.canApprove);
+}
+
+/** Why a driver without the approval right only watches terminals. */
+export const TERMINAL_APPROVER_REASON = "typing in a terminal needs the right to approve permissions; ask an admin.";
+
+/**
+ * Receipt categories of a message the runtime refused because the agent's CLI
+ * would run it by itself: a slash command, a `!` shell command, or an `@`
+ * mention of a file outside the project (PRO-88). Only a manager or an
+ * approver sends those.
+ */
+const INPUT_REFUSALS: Record<string, string> = {
+  "slash-command-forbidden": "Not sent: that command needs someone who can approve permissions.",
+  "shell-command-forbidden": "Not sent: a message that starts with ! runs as a shell command, which needs someone who can approve permissions.",
+  "file-mention-forbidden": "Not sent: attaching a file from outside the project needs someone who can approve permissions.",
+  // For everyone: a slash or `!` command is not queued behind a running turn.
+  "command-not-queued": "Not sent: a turn is running. Send this command when it has ended.",
+  // For everyone (PRO-22): the message names an image the runtime does not hold.
+  "attachment-missing": "Not sent: an image of this message did not reach the workspace. Attach it and send again.",
+};
+
+/**
+ * Why the runtime refused a message, or null when the category is not one of
+ * these. The receipt's own `message` names the command and what this agent's
+ * CLI accepts instead; without a readable receipt (its key is gone) the
+ * category's sentence is shown.
+ */
+export function inputRefusalText(category: string | null | undefined, receipt: Record<string, unknown> | null | undefined): string | null {
+  const fallback = category ? INPUT_REFUSALS[category] : undefined;
+  if (!fallback) return null;
+  const message = receipt?.message;
+  if (typeof message !== "string" || !message.trim() || message.length > 400) return fallback;
+  return /^not sent/i.test(message) ? message : `Not sent: ${message.replace(/ was not sent: /, ": ")}`;
+}
+
 /** A participate connection the workspace is not shared with: it sees no content. */
 export function notShared(state: WorkspaceConnectionState, you: WorkspaceYou | null): boolean {
   // `listed: false`: the runtime has no member list yet and serves what it

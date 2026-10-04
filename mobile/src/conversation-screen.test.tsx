@@ -25,7 +25,7 @@ vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
   setItem: vi.fn(async (key: string, value: string) => { mocks.storage.set(key, value); }),
   removeItem: vi.fn(async (key: string) => { mocks.storage.delete(key); }),
 } }));
-vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Search", "ChevronUp", "FileText", "Paperclip", "Radio", "Send", "Terminal", "X"].map((name) => [name, () => null])));
+vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Search", "ChevronUp", "FileText", "MoreVertical", "Paperclip", "Radio", "Send", "Terminal", "X"].map((name) => [name, () => null])));
 vi.mock("react-native", () => {
   const Box = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
@@ -69,7 +69,7 @@ beforeEach(() => {
   mocks.setParams.mockImplementation((params) => Object.assign(mocks.params, params));
   mocks.app = {
     logs: [],
-    activeHost: { id: mocks.params.hostId, label: "Mac", endpoint: "localhost" }, connectionStage: "connected",
+    hosts: [], activeHost: { id: mocks.params.hostId, label: "Mac", endpoint: "localhost" }, connectionStage: "connected",
     sessions: [{ id: "worktree", title: "Create a new issue", project: "TerminalX", worktree: "issue-132", modified: "today", tabs: [
       { id: "claude", harness: "claude", status: "waiting" }, { id: "codex", harness: "codex", status: "in_progress" },
     ] }],
@@ -183,5 +183,21 @@ describe("mobile conversation navigation", () => {
     expect(container.textContent).toContain("codex transcript");
     await select("claude"); expect(input().value).toBe("");
     expect(container.textContent).toContain("claude transcript");
+  });
+
+  it("reads what it missed after a reconnect that was never shown, keeping what is on screen (PRO-50)", async () => {
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).toContain("claude transcript");
+    expect(mocks.app.api.tail).toHaveBeenCalledTimes(1);
+    // Back from the home screen: the stage never left "connected", only the epoch moved.
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "claude transcript"), event("claude", "written while away", 2)], hasMore: false });
+    mocks.app = { ...mocks.app, connectionEpoch: 1 };
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    expect(mocks.app.api.tail).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("claude transcript");
+    expect(container.textContent).toContain("written while away");
+    expect(container.textContent).not.toContain("Session unavailable");
   });
 });

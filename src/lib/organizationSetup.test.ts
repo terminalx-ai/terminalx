@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { CloudWorkspaceListItem } from "@/lib/api";
-import { forgetSetups, loadSetups, newSetup, reconcileSetup, resendable, saveSetup, setupFor, unfinishedCreation, type OrganizationSetupRecord, type SetupFacts } from "./organizationSetup";
+import { forgetSetups, loadSetups, newSetup, reconcileSetup, resendable, saveSetup, setupFor, unfinishedCreation, unsettledRequest, type OrganizationSetupRecord, type SetupFacts } from "./organizationSetup";
 
 const USER = "owner@example.test";
 const record = (patch: Partial<OrganizationSetupRecord> = {}): OrganizationSetupRecord => ({ ...newSetup("Team", "request-1", 1), organizationId: "org-1", step: "compute", ...patch });
@@ -71,6 +71,9 @@ describe("reconciling against the server", () => {
     expect(step(withWorkspace(), facts({ workspaces: [workspace({ state: "provisioning" })] }))).toBe("runtime");
     expect(step(withWorkspace(), facts({ workspaces: [workspace({ runtimeActivity: { online: false } })] }))).toBe("runtime");
     expect(step(withWorkspace(), facts({ workspaces: [workspace({ launch: { category: "repository-sync-failed", sessionId: null } })] }))).toBe("runtime");
+    for (const category of ["repository-clone-failed", "repository-access-denied", "repository-branch-not-found", "repository-clone-timed-out", "repository-path-occupied", "repository-empty", "workspace-disk-full"]) {
+      expect(step(withWorkspace(), facts({ workspaces: [workspace({ launch: { category, sessionId: null } })] }))).toBe("runtime");
+    }
     expect(step(withWorkspace(), facts({ workspaces: [workspace({ launch: { category: "agent-start-failed", sessionId: null } })] }))).toBe("agent");
     expect(step(withWorkspace(), facts({ workspaces: [workspace({ launch: { category: null, sessionId: null } })] }))).toBe("agent");
     const done = reconcileSetup(withWorkspace(), facts({ workspaces: [workspace()] }), 99);
@@ -121,6 +124,11 @@ describe("reconciling against the server", () => {
     expect(reconcileSetup(unsent, facts({ workspaces: [] }), 1_000_000 + 1)).toBe(unsent);
     // Too old, and the list is not known: kept, but no longer offered for resending.
     expect(reconcileSetup(unsent, facts({ workspaces: null }), 1_000_000 + DAY).workspace).toEqual({ pending, id: null });
+    // ...and it stands in the way of a new request until the list says what it did.
+    expect(unsettledRequest(unsent, 1_000_000 + DAY)).toBe(true);
+    expect(unsettledRequest(unsent, 1_000_000 + 1)).toBe(false);
+    expect(unsettledRequest(withWorkspace(), 1_000_000 + DAY)).toBe(false);
+    expect(unsettledRequest(record(), 1_000_000 + DAY)).toBe(false);
     // Too old, and the workspace it asked for exists after all: that is the setup workspace.
     const made = workspace({ id: "ws-made", name: "Setup check", createdAt: 1_000_500 });
     const older = workspace({ id: "ws-old", name: "Setup check", createdAt: 1 });

@@ -18,6 +18,7 @@ mod cloud_catalog;
 mod cloud_activity;
 mod cloud_bootstrap;
 mod cloud_quiesce;
+mod cloud_resources;
 mod cloud_environment;
 pub mod cloud_agents;
 mod cloud_github;
@@ -320,6 +321,9 @@ pub fn run() {
             commands::cloud_provider,
             commands::cloud_provider_connect,
             commands::cloud_provider_disconnect,
+            commands::cloud_teardown_status,
+            commands::cloud_teardown_preview,
+            commands::cloud_teardown_request,
             commands::cloud_provider_set_creation_enabled,
             commands::cloud_provider_revalidate,
             commands::cloud_workspace_setup,
