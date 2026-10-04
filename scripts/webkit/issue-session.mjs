@@ -14,10 +14,11 @@ const server = await serve();
 const browser = await launch();
 let failed = 0;
 try {
-  for (const provider of ["github", "linear"]) {
+  for (const [mode, provider] of ["light", "dark"].flatMap((mode) => ["github", "linear"].map((provider) => [mode, provider]))) {
     for (const width of [1100, 800]) {
       const page = await browser.newPage({ viewport: { width, height: 700 } });
-      const setup = ({ provider }) => {
+      const setup = ({ mode, provider }) => {
+        localStorage.setItem("raccoon.mode", mode);
         localStorage.setItem("raccoon.prefs", JSON.stringify({ panelOpen: false, lastAgent: "claude", issueProvider: provider }));
         const answers = window.__PW_STUB__.answers;
         const issue = {
@@ -49,7 +50,7 @@ try {
           },
         });
       };
-      await page.addInitScript(`window.__PW_FIXTURE__ = { cloud: false, localProjects: 1 };\n${stub}\n(${setup})(${JSON.stringify({ provider })});`);
+      await page.addInitScript(`window.__PW_FIXTURE__ = { cloud: false, localProjects: 1 };\n${stub}\n(${setup})(${JSON.stringify({ mode, provider })});`);
       await page.goto(server.url);
       await page.getByRole("button", { name: /^Issues/ }).click();
       await page.getByText("Add keyboard navigation to the demo list", { exact: true }).click();
@@ -80,12 +81,12 @@ try {
           scrolls: row.scrollWidth > row.clientWidth,
         };
       });
-      failed += report(`${provider}, ${width}px`, {
+      failed += report(`${mode}, ${provider}, ${width}px`, {
         "agent, model, effort and permission controls fit": layout.count === 4 && layout.inside && !layout.overlaps && !layout.scrolls,
         "the model menu fits within the viewport": !!menu && menu.x >= 0 && menu.x + menu.width <= width,
         ...(width === 800 ? { "controls wrap in the narrow detail pane": layout.rows > 1 } : {}),
       }, layout);
-      if (shots) await page.screenshot({ path: join(shots, `issue-${provider}-${width}.png`) });
+      if (shots) await page.screenshot({ path: join(shots, `issue-${mode}-${provider}-${width}.png`) });
       await page.getByRole("button", { name: "Start session", exact: true }).click();
       await page.getByTitle("Model: GPT-6 Astra · High", { exact: true }).waitFor();
       const req = await page.evaluate(() => window.__ISSUE_REQUEST__);
@@ -93,8 +94,8 @@ try {
       assert.equal(req.issue.provider, provider);
       assert.equal(req.projectPath, "/repos/p0");
       assert.equal(req.useWorktree, true);
-      failed += report(`${provider}, ${width}px`, { "the created session shows the selected model and effort": true });
-      if (shots) await page.screenshot({ path: join(shots, `issue-session-${provider}-${width}.png`) });
+      failed += report(`${mode}, ${provider}, ${width}px`, { "the created session shows the selected model and effort": true });
+      if (shots) await page.screenshot({ path: join(shots, `issue-session-${mode}-${provider}-${width}.png`) });
       await page.close();
     }
   }

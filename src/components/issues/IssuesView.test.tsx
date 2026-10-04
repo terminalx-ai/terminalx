@@ -255,7 +255,7 @@ describe("issue session targets", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start session" }));
     await waitFor(() => expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(true));
     const [, args] = invoke.mock.calls.find(([command]) => command === "create_session") as [string, { req: Record<string, unknown> }];
-    expect(args.req).toMatchObject({ useWorktree: true, onMain: false, worktreeName: "12-repair-session-target" });
+    expect(args.req).toMatchObject({ title: "#12 Repair session target", useWorktree: true, onMain: false, worktreeName: "12-repair-session-target" });
   });
 
   it("uses the Settings default when the issue start surface opens", async () => {
@@ -268,7 +268,7 @@ describe("issue session targets", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start session" }));
     await waitFor(() => expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(true));
     const [, args] = invoke.mock.calls.find(([command]) => command === "create_session") as [string, { req: Record<string, unknown> }];
-    expect(args.req).toMatchObject({ useWorktree: false, onMain: true, worktreeName: "11-fix-login-timeout" });
+    expect(args.req).toMatchObject({ title: "#11 Fix login timeout", useWorktree: false, onMain: true, worktreeName: "11-fix-login-timeout" });
   });
 
   it("opens the shared automation editor from an issue label", async () => {

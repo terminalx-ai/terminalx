@@ -205,6 +205,33 @@ fn open_receipt(agents: &CloudAgents, lease: &Lease, receipt: &Receipt) -> Value
 }
 
 #[test]
+fn unknown_claude_models_are_rejected_before_settings_or_sends_even_when_busy() {
+    crate::harness::claude::models::with_test_models(json!({ "response": { "models": [{ "value": "opus", "resolvedModel": "claude-opus-5" }] } }), || {
+        for busy in [false, true] {
+            let h = harness();
+            *h.ops.busy.lock().unwrap() = busy;
+            let command = lease(&h.agents, "bad-model", "send", json!({ "v": 1, "text": "hello", "model": "claude-opus-9", "effort": "low", "mode": "plan" }));
+            let receipt = handle(&h.agents, &command);
+            assert_eq!(receipt.outcome, "rejected");
+            assert!(open_receipt(&h.agents, &command, &receipt)["message"].as_str().unwrap().contains("Claude model 'claude-opus-9' is not available"));
+            assert!(h.ops.settings.lock().unwrap().is_empty());
+            assert!(h.ops.sent.lock().unwrap().is_empty());
+            assert!(h.agents.tab("tab-1").unwrap().follow_ups.is_empty());
+        }
+        for model in ["opus", "claude-opus-5"] {
+            let h = harness();
+            let command = lease(&h.agents, "good-model", "send", json!({ "v": 1, "text": "hello", "model": model }));
+            assert_eq!(handle(&h.agents, &command).outcome, "applied");
+            assert_eq!(h.ops.settings.lock().unwrap()[0].model.as_deref(), Some(model));
+        }
+    });
+    // No CLI answer: custom ids are left to the agent, as before.
+    let h = harness();
+    let command = lease(&h.agents, "stand-in", "send", json!({ "v": 1, "text": "hello", "model": "claude-opus-9" }));
+    assert_eq!(handle(&h.agents, &command).outcome, "applied");
+}
+
+#[test]
 fn a_send_is_applied_once_and_a_redelivery_answers_from_its_receipt() {
     let h = harness();
     let first = lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "hello", "model": "opus" }));

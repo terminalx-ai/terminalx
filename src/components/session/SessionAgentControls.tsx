@@ -12,12 +12,12 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
-import { EFFORT_LABEL, modelGroups, modelNote, modelOptionText, refreshModels } from "@/lib/models";
+import { EFFORT_LABEL, modelGroups, modelNote, modelOptionText } from "@/lib/models";
 import type { useSessionAgent } from "@/lib/useSessionAgent";
 
 /** Shared by New Session and issue starts; the parent supplies a wrapping row. */
 export function SessionAgentControls({ selection }: { selection: ReturnType<typeof useSessionAgent> }) {
-  const { harnesses, harness, here, models, model, modelId, effort, selectHarness, selectModel, selectEffort } = selection;
+  const { harnesses, harness, here, models, refreshModels, model, modelId, effort, selectHarness, selectModel, selectEffort } = selection;
   const agentMenu = useRowMenu();
   const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
   const effortMenu = useRowMenu();
@@ -49,7 +49,7 @@ export function SessionAgentControls({ selection }: { selection: ReturnType<type
         <DropdownMenu {...modelMenu.root}>
           <DropdownMenuTrigger asChild {...modelMenu.trigger}>
             <Button variant="secondary" size="sm" className={pill} title="Model">
-              <span className="truncate">{modelOptionText(model, models, here)}</span>
+              <span className="truncate">{modelOptionText(model, models)}</span>
               <ChevronDown className="text-faint" />
             </Button>
           </DropdownMenuTrigger>
@@ -60,7 +60,7 @@ export function SessionAgentControls({ selection }: { selection: ReturnType<type
                 <Fragment key={group.title ?? "models"}>
                   {group.title ? <DropdownMenuLabel className="pt-2">{group.title}</DropdownMenuLabel> : null}
                   {group.models.map((m) => {
-                    const note = modelNote(m, models, here);
+                    const note = modelNote(m, models);
                     return (
                       <DropdownMenuRadioItem key={m.id} value={m.id} className="flex-wrap whitespace-normal">
                         {m.label}

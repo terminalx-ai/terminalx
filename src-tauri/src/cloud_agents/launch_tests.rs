@@ -160,6 +160,28 @@ fn make(dir: &Path, api: Arc<FakeApi>, starter: Arc<FakeStarter>, incarnation: &
     }
 }
 
+#[test]
+fn launch_refuses_an_unlisted_claude_model_before_creating_or_sending() {
+    crate::harness::claude::models::with_test_models(json!({ "response": { "models": [{ "value": "sonnet", "resolvedModel": "claude-sonnet-5" }] } }), || {
+        for (model, accepted) in [("claude-sonnet-9", false), ("sonnet", true), ("claude-sonnet-5", true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut intent = claim(Vec::new());
+            intent.model = Some(model.into());
+            let api = FakeApi::new(Some(intent));
+            let starter = Arc::new(FakeStarter::default());
+            let launcher = make(dir.path(), api.clone(), starter.clone(), "incarnation-aaaaaaaaaaaa");
+            launcher.pass().unwrap();
+            let outcomes = api.completions.lock().unwrap();
+            assert_eq!(outcomes[0].outcome, if accepted { "started" } else { "failed" });
+            assert_eq!(starter.starts.lock().unwrap().len(), usize::from(accepted));
+            if !accepted {
+                assert_eq!(outcomes[0].category.as_deref(), Some("agent-model-unavailable"));
+                assert!(!launcher.root.exists(), "no repository or session is created");
+            }
+        }
+    });
+}
+
 fn git(cwd: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(["-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "init.defaultBranch=main"])

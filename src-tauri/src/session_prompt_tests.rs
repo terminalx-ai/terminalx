@@ -14,19 +14,21 @@ use super::*;
 const BOTH: [CliKind; 2] = [CliKind::Claude, CliKind::Codex];
 
 /// What each CLI writes into its transcript, cut down to what the decoders
-/// read. Text is plain words, so it needs no JSON escaping.
+/// read. Escape prompt text so fixtures can include paste tags and newlines.
 struct Cli(CliKind);
 
 impl Cli {
     /// A prompt the CLI took while idle: the start of a turn.
     fn prompt(&self, text: &str) -> String {
+        let encoded = serde_json::to_string(text).unwrap();
+        let escaped = &encoded[1..encoded.len() - 1];
         match self.0 {
             CliKind::Claude => format!(
-                r#"{{"parentUuid":null,"isSidechain":false,"type":"user","uuid":"u-{text}","userType":"external","cwd":"/w","sessionId":"s","origin":{{"kind":"human"}},"message":{{"role":"user","content":"{text}"}}}}
+                r#"{{"parentUuid":null,"isSidechain":false,"type":"user","uuid":"u-{escaped}","userType":"external","cwd":"/w","sessionId":"s","origin":{{"kind":"human"}},"message":{{"role":"user","content":"{escaped}"}}}}
 "#
             ),
             CliKind::Codex => format!(
-                r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"t-{text}"}}}}
+                r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"t-{escaped}"}}}}
 {}"#,
                 self.steer(text)
             ),
@@ -37,13 +39,15 @@ impl Cli {
     /// item it writes for any prompt; Claude Code writes an attachment and no
     /// `user` record at all.
     fn steer(&self, text: &str) -> String {
+        let encoded = serde_json::to_string(text).unwrap();
+        let escaped = &encoded[1..encoded.len() - 1];
         match self.0 {
             CliKind::Claude => format!(
-                r#"{{"parentUuid":"a","isSidechain":false,"attachment":{{"type":"queued_command","prompt":"{text}","source_uuid":"s-{text}","commandMode":"prompt","origin":{{"kind":"human"}},"humanTurn":true}},"type":"attachment","uuid":"q-{text}","userType":"external","cwd":"/w","sessionId":"s"}}
+                r#"{{"parentUuid":"a","isSidechain":false,"attachment":{{"type":"queued_command","prompt":"{escaped}","source_uuid":"s-{escaped}","commandMode":"prompt","origin":{{"kind":"human"}},"humanTurn":true}},"type":"attachment","uuid":"q-{escaped}","userType":"external","cwd":"/w","sessionId":"s"}}
 "#
             ),
             CliKind::Codex => format!(
-                r#"{{"type":"event_msg","payload":{{"type":"item_completed","item":{{"type":"UserMessage","id":"user-{text}","content":[{{"type":"text","text":"{text}","text_elements":[]}}]}}}}}}
+                r#"{{"type":"event_msg","payload":{{"type":"item_completed","item":{{"type":"UserMessage","id":"user-{escaped}","content":[{{"type":"text","text":"{escaped}","text_elements":[]}}]}}}}}}
 "#
             ),
         }
@@ -72,6 +76,30 @@ impl Cli {
 }
 
 impl Rig {
+    fn compose_confirmed(&self, text: &str) -> std::sync::mpsc::Receiver<std::result::Result<(), String>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let prompt = PromptText { agent: text.into(), display: text.into() };
+        self.manager.record_composer_prompt(&mut self.rt.lock().unwrap(), &prompt, Vec::new(), self._dir.path().to_str().unwrap(), Some(tx));
+        rx
+    }
+
+    fn submitted(&self) {
+        if let Engine::Cli(p) = &mut self.rt.lock().unwrap().engine {
+            p.echoed.back_mut().unwrap().submitted = true;
+        }
+    }
+
+    /// The production decision after the readiness wait gives up. No clock
+    /// sleep or real CLI is needed to exercise the timed-out send path.
+    fn readiness_times_out(&self) {
+        assert!(self.manager.prepare_prompt(&mut self.rt.lock().unwrap(), Readiness::TimedOut, None));
+        self.stamp();
+    }
+
+    fn delivery_pending(&self) -> bool {
+        matches!(&self.rt.lock().unwrap().engine, Engine::Cli(p) if p.awaiting_delivery.is_some())
+    }
+
     fn cli(&self) -> Cli {
         match &self.rt.lock().unwrap().engine {
             Engine::Cli(p) => Cli(p.harness),
@@ -114,6 +142,197 @@ impl Rig {
                 _ => None,
             })
             .collect()
+    }
+}
+
+#[test]
+fn timed_out_readiness_then_delivery_never_publishes_a_startup_warning() {
+    for kind in BOTH {
+        for hook_first in [false, true] {
+            let rig = Rig::of(kind, "");
+            rig.compose("implement the change", 0);
+            rig.readiness_times_out();
+            assert!(rig.delivery_pending());
+            assert_eq!(rig.kinds(), ["user_message"]);
+            if hook_first {
+                rig.hook("UserPromptSubmit", json!({ "prompt": "implement the change" }));
+                assert!(!rig.delivery_pending(), "a turn hook confirms delivery without waiting for the file");
+            }
+            let record = match kind {
+                CliKind::Claude => rig.cli().prompt("implement the change"),
+                CliKind::Codex => rig.cli().steer("implement the change"),
+            };
+            rig.append(&record);
+            assert!(!rig.delivery_pending(), "{kind:?}: the matching transcript prompt confirms delivery");
+            rig.append(&rig.cli().reply("working on it"));
+            for _ in 0..6 {
+                rig.advance(PATIENCE.stall / 2);
+                rig.pane_draws();
+                rig.tick();
+            }
+            assert_eq!(rig.status(), TabStatus::InProgress);
+            assert_eq!(rig.banner(), None);
+            assert_eq!(rig.told(), ["user: implement the change", "reply: working on it"]);
+            assert!(!rig.kinds().iter().any(|k| k == "status" || k == "recovery"));
+        }
+    }
+}
+
+#[test]
+fn timed_out_readiness_with_only_live_terminal_activity_never_warns() {
+    let rig = Rig::of(CliKind::Codex, "");
+    rig.compose("a long task", 0);
+    rig.readiness_times_out();
+    // Even with hooks and transcript unavailable, terminal activity is
+    // enough to withhold a delivery doubt or timeout.
+    for _ in 0..6 {
+        rig.advance(PATIENCE.stall / 2);
+        rig.pane_draws();
+        rig.tick();
+    }
+    assert_eq!(rig.status(), TabStatus::InProgress);
+    assert_eq!(rig.kinds(), ["user_message"]);
+}
+
+#[test]
+fn an_unconfirmed_prompt_gets_one_recoverable_warning_and_late_evidence_clears_it() {
+    for evidence in ["echo", "hook", "session", "reply", "task", "reasoning", "terminal"] {
+        let rig = Rig::of(CliKind::Codex, "");
+        rig.compose("a missed prompt", 0);
+        rig.readiness_times_out();
+        rig.advance(PATIENCE.stall - MOMENT);
+        rig.tick();
+        assert_eq!(rig.banner(), None);
+        rig.advance(MOMENT);
+        rig.tick();
+        rig.tick();
+        assert_eq!(rig.banner(), Some(RecoveryKind::DeliveryUnconfirmed));
+        assert_eq!(rig.status(), TabStatus::Waiting);
+        assert_eq!(rig.kinds(), ["user_message", "recovery"], "one message, with no timeout alongside it");
+        match evidence {
+            "echo" => rig.append(&rig.cli().steer("a missed prompt")),
+            "hook" => rig.hook("PostToolUse", json!({})),
+            "session" => rig.hook("SessionStart", json!({})),
+            "reply" => rig.append(&rig.cli().reply("got it")),
+            "task" => rig.append("{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"t\"}}\n"),
+            "reasoning" => rig.append("{\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"Reasoning\",\"id\":\"r\",\"summary_text\":[\"Thinking about the task\"]}}}\n"),
+            "terminal" => {
+                rig.advance(MOMENT);
+                rig.pane_draws();
+                rig.tick();
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(rig.banner(), None, "{evidence}: reload must not resurrect the warning");
+        assert_eq!(rig.status(), TabStatus::InProgress, "{evidence}");
+        if evidence != "terminal" {
+            assert!(!rig.delivery_pending(), "{evidence}: later silence must not become another delivery doubt");
+        }
+    }
+}
+
+#[test]
+fn confirmed_delivery_followed_by_silence_is_a_stall_not_a_delivery_doubt() {
+    let rig = Rig::of(CliKind::Codex, "");
+    rig.compose("accepted then stalled", 0);
+    rig.readiness_times_out();
+    rig.append(&rig.cli().prompt("accepted then stalled"));
+    rig.advance(PATIENCE.stall);
+    rig.tick();
+    assert_eq!(rig.banner(), Some(RecoveryKind::Timeout));
+}
+
+#[test]
+fn a_ready_cli_has_not_yet_confirmed_the_prompt() {
+    let rig = Rig::of(CliKind::Claude, "");
+    rig.compose("not received", 0);
+    rig.hook("SessionStart", json!({}));
+    assert!(rig.delivery_pending());
+    rig.advance(PATIENCE.stall);
+    rig.tick();
+    assert_eq!(rig.banner(), Some(RecoveryKind::DeliveryUnconfirmed));
+}
+
+#[test]
+fn readiness_timeout_still_retains_a_continuation_instead_of_sending_it_blindly() {
+    let rig = Rig::of(CliKind::Codex, "");
+    rig.compose("prepared continuation", 0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    assert!(!rig.manager.prepare_prompt(&mut rig.rt.lock().unwrap(), Readiness::TimedOut, Some(&tx)));
+    assert!(rx.try_recv().unwrap().unwrap_err().contains("Context was not sent"));
+    assert_eq!(rig.status(), TabStatus::Idle);
+    assert!(!rig.turn_open());
+    assert_eq!(rig.kinds(), ["user_message"]);
+}
+
+#[test]
+fn continuation_submit_hook_confirms_before_the_transcript_and_keeps_echo_deduplication() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let receipt = rig.compose_confirmed("continue work");
+        rig.submitted();
+        // Hooks identify the submission even when the provider rewrites the text.
+        rig.hook("UserPromptSubmit", json!({ "prompt": "provider reformatted the prompt" }));
+        assert_eq!(receipt.try_recv().unwrap(), Ok(()));
+        rig.hook("UserPromptSubmit", json!({}));
+        assert!(receipt.try_recv().is_err(), "confirmation is sent only once");
+        rig.append(&rig.cli().prompt("<pasted_content id=\"1\">\ncontinue   work\n</pasted_content id=\"1\">"));
+        assert_eq!(rig.told(), ["user: continue work"]);
+    }
+}
+
+#[test]
+fn continuation_submit_hook_skips_a_receipt_whose_waiter_timed_out() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let expired = rig.compose_confirmed("old prompt");
+        rig.submitted();
+        drop(expired);
+        rig.hook("Stop", json!({}));
+        let receipt = rig.compose_confirmed("continue work");
+        rig.submitted();
+        rig.hook("UserPromptSubmit", json!({}));
+        assert_eq!(receipt.try_recv().unwrap(), Ok(()));
+    }
+}
+
+#[test]
+fn continuation_echo_confirms_wrapped_and_reflowed_long_prompts_without_hooks() {
+    let text = format!("Continue work {} Keep history unchanged", "historical context ".repeat(1000));
+    for kind in BOTH {
+        for echoed in [
+            format!("<pasted_content id=\"1\">\n{text}\n</pasted_content>"),
+            format!("<pasted_content id=\"1\">\n{text}\n</pasted_content id=\"1\">"),
+            text.replace(' ', " \r\n\t"),
+        ] {
+            let rig = Rig::of(kind, "");
+            let receipt = rig.compose_confirmed(&text);
+            rig.submitted();
+            rig.append(&rig.cli().prompt(&echoed));
+            assert_eq!(receipt.try_recv().unwrap(), Ok(()));
+            assert_eq!(rig.told(), [format!("user: {text}")]);
+        }
+    }
+}
+
+#[test]
+fn continuation_without_submission_or_provider_acceptance_stays_unconfirmed() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let receipt = rig.compose_confirmed("continue work");
+        assert!(rig.turn_open(), "the optimistic app turn is already open");
+        rig.hook("SessionStart", json!({}));
+        rig.hook("UserPromptSubmit", json!({}));
+        assert_eq!(receipt.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+        rig.submitted();
+        rig.manager.on_hook(HookFrame {
+            session: SESSION.into(), tab: TAB.into(), token: "old launch token".into(),
+            event: "UserPromptSubmit".into(), payload: json!({}),
+        });
+        rig.hook("SessionStart", json!({}));
+        rig.append(&rig.cli().prompt("unrelated terminal prompt"));
+        assert_eq!(receipt.recv_timeout(std::time::Duration::ZERO), Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+        assert_eq!(rig.told(), ["user: continue work", "user: unrelated terminal prompt"]);
     }
 }
 

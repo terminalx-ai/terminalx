@@ -611,6 +611,10 @@ impl Launcher {
             log::warn!("launch intent {}: {error:#}", claim.launch_id);
             return Ok(self.finish(claim, Outcome::failed("payload-invalid", Vec::new())));
         }
+        if let Err(error) = crate::harness::claude::models::validate(&claim.agent, claim.model.as_deref().unwrap_or_default()) {
+            log::warn!("launch intent {}: {error:#}", claim.launch_id);
+            return Ok(self.finish(claim, Outcome::failed("agent-model-unavailable", Vec::new())));
+        }
         if let Some(state) = self.api.phase(&claim.launch_id, "syncing-repository")? {
             return Err(CallError::Settled(state));
         }

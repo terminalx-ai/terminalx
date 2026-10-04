@@ -174,7 +174,7 @@ export function AgentDashboard() {
                 )}
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-56">
+            <DropdownMenuContent align="end" className="max-h-(--radix-dropdown-menu-content-available-height) w-56 overflow-y-auto scrollbar-thin">
               <DropdownMenuLabel>Project</DropdownMenuLabel>
               {store.projects.map((p) => (
                 <DropdownMenuCheckboxItem
@@ -263,7 +263,7 @@ export function AgentDashboard() {
                 ),
               )}
               {c.id === "done" && buckets.done.length > shown.done.length && (
-                <Button variant="ghost" size="sm" className="w-full" onClick={() => setDoneLimit((n) => n + DONE_PAGE)}>
+                <Button variant="ghost" size="sm" className="w-full shrink-0" onClick={() => setDoneLimit((n) => n + DONE_PAGE)}>
                   Show {Math.min(DONE_PAGE, buckets.done.length - shown.done.length)} more
                 </Button>
               )}

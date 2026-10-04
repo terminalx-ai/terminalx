@@ -22,6 +22,7 @@ import { isRoleRefusal, refreshAccountRoles } from "@/lib/accountRoles";
 import { api, errorMessage, type ImageInput } from "@/lib/api";
 import { addProject, clearNewSessionPreset, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { PERMISSION_MODES } from "@/lib/models";
+import { useCloudModelClient } from "@/lib/cloudModels";
 import { useSessionAgent } from "@/lib/useSessionAgent";
 import { SessionAgentControls } from "./SessionAgentControls";
 import { setPrefs, usePrefs } from "@/lib/prefs";
@@ -80,7 +81,10 @@ export function NewSessionView({
   const project = store.projects.find((p) => p.path === wanted) ?? store.projects[0] ?? null;
   const isGit = cloud ? true : project?.kind !== "folder";
   const useWorktree = isGit && (controlledUseWorktree ?? localUseWorktree);
-  const agentSelection = useSessionAgent(store.harnesses, !cloud);
+  const cloudPlan = cloud?.project && cloud.mayStart ? planCloudStart(cloud.project) : null;
+  const modelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && cloud?.mayStart
+    ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
+  const agentSelection = useSessionAgent(store.harnesses, !cloud, modelClient);
   const { harness, modelId, effort } = agentSelection;
   // A cloud session runs the agent installed on the workspace, not on this computer.
   const available = cloud ? !!harness : (harness?.available ?? false);

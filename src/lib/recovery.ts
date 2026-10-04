@@ -4,6 +4,7 @@ export const RECOVERY_MESSAGES: Record<RecoveryKind, string> = {
   capacity: "The provider is at capacity. Retry or choose another available model.",
   tool: "A tool or command failed. Review its outcome before continuing.",
   timeout: "No progress was confirmed before the timeout. The process outcome is unknown.",
+  delivery_unconfirmed: "Prompt delivery could not be confirmed. Check the terminal. To resend, stop the session, then press Up in the composer to recall your message.",
   disconnected: "The connection was lost. The process outcome is unknown.",
   permission_expired: "The permission request expired. Check the terminal for a new request or stop the session.",
   failed: "The agent encountered an error. Review the conversation before continuing.",

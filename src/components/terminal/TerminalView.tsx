@@ -1,14 +1,20 @@
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { pty } from "@/lib/api";
-import { getInstance, isAgentPane, peekInstance, subscribeTerminals, type TerminalInstance } from "@/lib/terminal";
+import { disposeInstance, getInstance, isAgentPane, peekInstance, subscribeTerminals, trimTerminalInstances, type TerminalInstance } from "@/lib/terminal";
 import { feedLocalPane } from "@/lib/terminalFeed";
 import { fitTerminal } from "@/lib/terminalFit";
 import { hideWebgl, showWebgl } from "@/lib/terminalWebgl";
 import { useTheme } from "@/lib/theme";
 import { REMOTE_DROP_REFUSAL, TerminalDropHint, useTerminalDrop, type TerminalDropRefusal } from "./TerminalDrop";
+
+const subscribeVisibility = (changed: () => void) => {
+  document.addEventListener("visibilitychange", changed);
+  return () => document.removeEventListener("visibilitychange", changed);
+};
+const pageVisible = () => !document.hidden;
 
 function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -122,7 +128,10 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
   // (this one disposed, the next one created) has another, and neither can
   // detach or answer for the other, in whatever order their calls land.
   const token = crypto.randomUUID();
-  const feed = feedLocalPane(id, token, term, { paced: !isAgentPane(id) });
+  const feed = feedLocalPane(id, token, term, {
+    paced: !isAgentPane(id),
+    retire: () => disposeInstance(id),
+  });
   let released = false;
   void subscribeTerminals()
     .then(() => (released ? undefined : pty.attach(id, token, feed.data)))
@@ -136,6 +145,7 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
     el,
     term,
     fit,
+    restorable: true,
     release: () => {
       released = true;
       feed.stop();
@@ -145,9 +155,10 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
 }
 
 /**
- * A view onto one long-lived terminal instance. The instance's element is
+ * A view onto a cached terminal instance. The instance's element is
  * here only while the view is `visible`; hiding or unmounting the view takes
- * it out of the document again, leaving the buffer and the shell untouched.
+ * it out of the document again. The idle cache may then release the local
+ * buffer; the shell continues, and the next view restores its output tail.
  * Out of the document xterm draws nothing, whatever the program prints, and a
  * view that is merely covered (an agent's terminal under its chat, a shell
  * tab behind another) would otherwise redraw on every frame of output.
@@ -180,6 +191,10 @@ export function TerminalView({
   const frame = useRef<HTMLDivElement>(null);
   const drop = useTerminalDrop({ id, frame, enabled: visible, refusal: dropRefusal ?? (create ? REMOTE_DROP_REFUSAL : undefined) });
   const { resolvedMode } = useTheme();
+  // Hidden-window overflow may retire a local parser. Showing the page must
+  // reacquire its instance even when the selected tab has not changed.
+  const pageShown = useSyncExternalStore(subscribeVisibility, pageVisible, () => true);
+  const shown = visible && pageShown;
   const make = () => (create ? create(resolvedMode) : createInstance(id, resolvedMode));
   const fitting = useRef(fit);
   fitting.current = fit;
@@ -187,9 +202,12 @@ export function TerminalView({
   useEffect(() => {
     const el = host.current;
     if (!el) return;
-    const inst = getInstance(id, make);
+    getInstance(id, make);
     const refit = () => {
       if (!fitting.current) return;
+      // A hidden instance may have left the idle cache since this view mounted.
+      const inst = peekInstance(id);
+      if (!inst) return;
       try {
         fitTerminal(inst.term, el);
       } catch {
@@ -198,8 +216,13 @@ export function TerminalView({
     };
     const ro = new ResizeObserver(refit);
     ro.observe(el);
-    requestAnimationFrame(refit);
-    return () => ro.disconnect();
+    const frame = requestAnimationFrame(refit);
+    trimTerminalInstances();
+    return () => {
+      cancelAnimationFrame(frame);
+      ro.disconnect();
+      trimTerminalInstances();
+    };
   }, [id]);
 
   useEffect(() => {
@@ -210,20 +233,21 @@ export function TerminalView({
   // Before paint, so a terminal that is shown is never a blank frame first.
   useLayoutEffect(() => {
     const el = host.current;
-    if (!visible || !el) return;
+    if (!shown || !el) return;
     const inst = getInstance(id, make);
     el.appendChild(inst.el);
     showWebgl(inst.term);
     return () => {
       hideWebgl(inst.term);
       if (inst.el.parentNode === el) el.removeChild(inst.el);
+      trimTerminalInstances();
     };
-  }, [id, visible]);
+  }, [id, shown]);
 
   useEffect(() => {
     const el = host.current;
-    if (!visible || !el) return;
-    requestAnimationFrame(() => {
+    if (!shown || !el) return;
+    const frame = requestAnimationFrame(() => {
       // Closed in the meantime (its tab was): nothing to focus, and nothing to make anew.
       const inst = peekInstance(id);
       if (!inst) return;
@@ -234,7 +258,8 @@ export function TerminalView({
         /* ignore */
       }
     });
-  }, [id, visible, fit]);
+    return () => cancelAnimationFrame(frame);
+  }, [id, shown, fit]);
 
   return (
     <div ref={frame} className="relative h-full w-full" data-testid="terminal-drop-target" {...drop.zoneProps}>
