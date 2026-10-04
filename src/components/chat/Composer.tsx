@@ -25,8 +25,37 @@ import { PickerMenu, type PickerItem } from "./PickerMenu";
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "./useImageAttachments";
 import { useComposerHistory } from "./useComposerHistory";
 import { tokenAtCaret } from "@/lib/pickers";
+import type { ComposerCommandList, ComposerCommands, ComposerFiles } from "@/lib/cloudComposer";
 
-const commandCache = new Map<string, SlashCommand[]>();
+const commandCache = new Map<string, ComposerCommandList>();
+const NO_COMMANDS: ComposerCommandList = { commands: [], note: null };
+
+const commandsAsked = new Map<string, Promise<ComposerCommandList>>();
+
+/** A local tab's commands: asked of the harness once per directory. */
+function localCommands(cwd: string, harness: string): ComposerCommands {
+  const key = `${cwd}|${harness}`;
+  return {
+    key,
+    known: () => commandCache.get(key) ?? null,
+    load: () => {
+      const known = commandCache.get(key);
+      if (known) return Promise.resolve(known);
+      const pending = commandsAsked.get(key);
+      if (pending) return pending;
+      const asked = filesApi
+        .slashCommands(cwd, harness)
+        .then((commands) => {
+          const list = { commands, note: null };
+          commandCache.set(key, list);
+          return list;
+        })
+        .finally(() => commandsAsked.delete(key));
+      commandsAsked.set(key, asked);
+      return asked;
+    },
+  };
+}
 
 /** Break the line at the caret, through the input event the draft is read from. */
 export function insertNewLine(el: HTMLTextAreaElement) {
@@ -53,6 +82,9 @@ const PERMISSION_LABEL_MIN_CHARS = 9;
 export function Composer({
   tab,
   cwd,
+  commands: givenCommands,
+  files: givenFiles,
+  remote = false,
   busy,
   draft,
   onDraftChange,
@@ -77,6 +109,12 @@ export function Composer({
 }: {
   tab: TabEntry;
   cwd?: string;
+  /** Where the `/` list comes from when the tab does not run in `cwd` on this computer (a cloud tab: its runtime). */
+  commands?: ComposerCommands | null;
+  /** Where the `@` list comes from for such a tab. Without it and without `cwd` there is no file list. */
+  files?: ComposerFiles | null;
+  /** The tab runs on another machine (a cloud workspace): a file dropped from this computer is not mentioned to it. */
+  remote?: boolean;
   busy: boolean;
   draft: string;
   onDraftChange: (v: string) => void;
@@ -116,7 +154,14 @@ export function Composer({
     return model && !offered.some((m) => m.id === model.id) ? [...offered, model] : offered;
   }, [listed, modelsAreLocal, model?.id]);
   const [caret, setCaret] = useState(0);
-  const [commands, setCommands] = useState<SlashCommand[]>(() => commandCache.get(`${cwd}|${tab.harness}`) ?? []);
+  const commandSource = useMemo(() => givenCommands ?? (cwd ? localCommands(cwd, tab.harness) : null), [givenCommands?.key, cwd, tab.harness]);
+  const [commandList, setCommandList] = useState<ComposerCommandList>(() => commandSource?.known() ?? NO_COMMANDS);
+  const firstLoad = useRef<ComposerCommands | null>(null);
+  const commands: SlashCommand[] = commandList.commands;
+  const fileSource = useMemo<ComposerFiles | null>(
+    () => givenFiles ?? (cwd ? { key: cwd, search: (query, limit) => filesApi.search(cwd, query, limit) } : null),
+    [givenFiles?.key, cwd],
+  );
   const [fileHits, setFileHits] = useState<FileHit[]>([]);
   const [highlighted, setHighlighted] = useState(0);
   const [dismissedToken, setDismissedToken] = useState<string | null>(null);
@@ -125,7 +170,9 @@ export function Composer({
   const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
   const modeMenu = useRowMenu();
   const ref = useRef<HTMLTextAreaElement>(null);
-  const attach = useImageAttachments({ textareaRef: ref, draft, onDraftChange });
+  // A file dropped from this computer can be mentioned only to an agent that runs here.
+  const mentionDropped = !remote;
+  const attach = useImageAttachments({ textareaRef: ref, draft, onDraftChange, mentionFiles: mentionDropped });
   const { attachments } = attach;
 
   // Grow with content, up to ~10 lines. Tabs that are not selected stay
@@ -180,26 +227,30 @@ export function Composer({
     if (autoFocus) ref.current?.focus({ preventScroll: true });
   }, [autoFocus, tab.id]);
 
-  // Slash commands come from the harness once per directory.
+  // Slash commands come from the harness once per directory (a cloud tab's, from its runtime).
   useEffect(() => {
-    if (!cwd) return;
-    const key = `${cwd}|${tab.harness}`;
-    if (commandCache.has(key)) {
-      setCommands(commandCache.get(key)!);
+    if (!commandSource) {
+      setCommandList(NO_COMMANDS);
       return;
     }
+    const known = commandSource.known();
+    setCommandList(known ?? NO_COMMANDS);
     let cancelled = false;
-    filesApi
-      .slashCommands(cwd, tab.harness)
-      .then((c) => {
-        commandCache.set(key, c);
-        if (!cancelled) setCommands(c);
+    firstLoad.current = commandSource;
+    const settled = () => {
+      if (firstLoad.current === commandSource) firstLoad.current = null;
+    };
+    commandSource
+      .load()
+      .then((list) => {
+        if (!cancelled) setCommandList(list);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(settled);
     return () => {
       cancelled = true;
     };
-  }, [cwd, tab.harness]);
+  }, [commandSource]);
 
   const dictation = useDictationInto(tab.id, draft, onDraftChange, ref);
   useDictationShortcuts(dictation, !!autoFocus);
@@ -207,6 +258,23 @@ export function Composer({
 
   const token = useMemo(() => tokenAtCaret(draft, caret), [draft, caret]);
   const tokenKey = token ? `${token.kind}:${token.start}` : null;
+  // A list that came back empty or failed (a cloud tab's CLI had not answered yet) is asked for
+  // again when the reader starts a command; a source that already has its list answers from it.
+  const startingCommand = token?.kind === "slash" && commands.length === 0;
+  useEffect(() => {
+    // Its first reading is still on its way: that answer is the one to wait for.
+    if (!startingCommand || !commandSource || firstLoad.current === commandSource) return;
+    let cancelled = false;
+    commandSource
+      .load()
+      .then((list) => {
+        if (!cancelled && list.commands.length) setCommandList(list);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [startingCommand, commandSource]);
   const recall = useComposerHistory({
     id: tab.id,
     history,
@@ -220,15 +288,15 @@ export function Composer({
       setDismissedToken(recalled ? `${recalled.kind}:${recalled.start}` : null);
     },
   });
-  const pickerOpen = !!token && dismissedToken !== tokenKey && (token.kind === "mention" ? !!cwd : commands.length > 0);
+  const pickerOpen = !!token && dismissedToken !== tokenKey && (token.kind === "mention" ? !!fileSource : commands.length > 0 || !!commandList.note);
 
   // File hits follow the query, lightly debounced.
   useEffect(() => {
-    if (!token || token.kind !== "mention" || !cwd) return;
+    if (!token || token.kind !== "mention" || !fileSource) return;
     let cancelled = false;
     const id = window.setTimeout(() => {
-      filesApi
-        .search(cwd, token.query, 30)
+      fileSource
+        .search(token.query, 30)
         .then((h) => !cancelled && setFileHits(h))
         .catch(() => {});
     }, 60);
@@ -236,7 +304,7 @@ export function Composer({
       cancelled = true;
       window.clearTimeout(id);
     };
-  }, [token?.kind, token?.query, cwd]);
+  }, [token?.kind, token?.query, fileSource]);
 
   const items: PickerItem[] = useMemo(() => {
     if (!token) return [];
@@ -359,9 +427,10 @@ export function Composer({
             onHover={setHighlighted}
             title={token?.kind === "slash" ? "Commands" : "Files"}
             empty={token?.kind === "slash" ? "No matching command" : "No matching file"}
+            note={token?.kind === "slash" ? commandList.note : null}
           />
         )}
-        <DropHint dragging={attach.dragging} />
+        <DropHint dragging={attach.dragging} mentionFiles={mentionDropped} />
         {!busy && !draft && handoffs && handoffs.length > 0 && (
           <div className="mb-1.5 flex flex-wrap gap-1.5 px-1" aria-label="Next steps">
             {handoffs.map((h) => (
@@ -380,6 +449,11 @@ export function Composer({
           </div>
         )}
         <AttachmentThumbs attach={attach} />
+        {attach.notice && (
+          <div className="mb-1 px-1.5 text-xs text-warning" role="status" data-testid="attach-notice">
+            {attach.notice}
+          </div>
+        )}
         <textarea
           ref={ref}
           data-composer
@@ -400,7 +474,7 @@ export function Composer({
           {/* Nothing can be sent: attaching and dictating into it are off too. */}
           <AttachButton attach={attach} disabled={disabled} />
           <MicButton dictation={dictation} disabled={disabled} />
-          {cwd && (
+          {fileSource && (
             <WithTooltip label="Mention a file">
               <Button
                 variant="ghost"

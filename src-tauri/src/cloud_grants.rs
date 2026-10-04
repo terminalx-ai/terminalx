@@ -164,6 +164,30 @@ impl Provider {
             _ => None,
         }
     }
+
+    /// Variables that sign the agent in by themselves. A workspace whose
+    /// configuration sets one does not need a grant for this provider.
+    fn auth_env(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => &[CLAUDE_API_KEY_ENV, CLAUDE_AUTH_TOKEN_ENV, CLAUDE_OAUTH_ENV, "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"],
+            Self::Codex => &[CODEX_API_KEY_ENV, "OPENAI_API_KEY"],
+            Self::Cursor => &[CURSOR_API_KEY_ENV],
+        }
+    }
+}
+
+/// An agent that has no way to sign in in this cloud workspace (PRO-78). No
+/// secrets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignInRequired {
+    pub provider: &'static str,
+    /// `not-connected` when the organization has no login for the provider,
+    /// else the server's state for the one it has: `revoked`,
+    /// `disconnected` or `unavailable`.
+    pub state: String,
+    /// Why, when the server says (`shared-use-policy`, `token-expired`).
+    pub reason: Option<String>,
 }
 
 /// Everything the AAD binds. Counters are milliseconds or plain integers.
@@ -1220,6 +1244,35 @@ impl GrantStore {
         self.state().active.get(&Provider::Codex).filter(|grant| grant.usable(now)).and_then(|grant| grant.codex_file.clone())
     }
 
+    /// Whether an agent of `provider` has no way to sign in: the server's
+    /// last answer listed no usable login for it, and the workspace
+    /// configuration (`configured`, its variable names) sets none either.
+    /// `None` whenever that is not known for certain: before the first sync,
+    /// after a failed one, or while a connected login's grant is on its way.
+    pub fn sign_in_required(&self, provider: Provider, configured: &[String], now: Instant) -> Option<SignInRequired> {
+        let state = self.state();
+        if state.last_sync.is_none() || state.last_error.is_some() {
+            return None;
+        }
+        if state.active.get(&provider).is_some_and(|grant| grant.usable(now)) {
+            return None;
+        }
+        if provider.auth_env().iter().any(|name| configured.iter().any(|set| set == name)) {
+            return None;
+        }
+        let entry = state.credentials.get(&provider);
+        match entry.map(|entry| entry.state.as_str()) {
+            Some("connected") => None,
+            Some(other) => Some(SignInRequired { provider: provider.as_str(), state: other.to_string(), reason: entry.and_then(|entry| entry.reason.clone()) }),
+            None => Some(SignInRequired { provider: provider.as_str(), state: "not-connected".into(), reason: None }),
+        }
+    }
+
+    /// Whether the session under `launch` started with a cloud credential.
+    fn launched_with_credential(&self, launch: &str) -> bool {
+        self.state().launches.contains_key(launch)
+    }
+
     /// What the runtime knows about its cloud credentials. No secrets.
     pub fn status(&self, now: Instant) -> Value {
         let state = self.state();
@@ -1338,6 +1391,48 @@ pub(crate) fn installed() -> Option<&'static Arc<GrantStore>> {
 pub fn agent_env_for_launch(harness: &str, launch: &str) -> Vec<(String, Option<String>)> {
     let (Some(store), Some(provider)) = (installed(), provider_of_harness(harness)) else { return Vec::new() };
     store.agent_env_for_launch(provider, launch, Instant::now())
+}
+
+/// Whether a new agent session of `harness` would have no way to sign in
+/// (PRO-78). `None` outside a cloud workspace, for an agent that uses no
+/// stored login, and whenever it is not known for certain.
+pub fn sign_in_required(harness: &str) -> Option<SignInRequired> {
+    let (store, provider) = (installed()?, provider_of_harness(harness)?);
+    if signed_in_by_hand(provider, dirs::home_dir().as_deref()) != Some(false) {
+        return None;
+    }
+    store.sign_in_required(provider, &crate::cloud_config::configured_env_names(), Instant::now())
+}
+
+/// Whether someone signed the agent in themselves in the workspace's
+/// terminal, which needs no grant. `None` where the runtime cannot tell:
+/// "needs sign-in" is then never claimed for that agent.
+/// - Claude Code keeps a hand sign-in in `~/.claude/.credentials.json`.
+/// - Codex runs with a managed home that never holds a credential of its
+///   own (`link_codex_auth`), so it cannot be signed in by hand.
+/// - Cursor: where its CLI keeps a sign-in is not something this runtime
+///   knows, so it cannot be ruled out.
+fn signed_in_by_hand(provider: Provider, home: Option<&Path>) -> Option<bool> {
+    match provider {
+        Provider::Claude => Some(home.is_some_and(|home| home.join(".claude").join(".credentials.json").is_file())),
+        Provider::Codex => Some(false),
+        Provider::Cursor => None,
+    }
+}
+
+/// [`sign_in_required`] for the session running under `launch`: one that
+/// started with a credential keeps it for as long as its process lives, so
+/// it is not held to a login that was removed afterwards.
+pub fn sign_in_required_for_launch(harness: &str, launch: &str) -> Option<SignInRequired> {
+    let required = sign_in_required(harness)?;
+    (!installed()?.launched_with_credential(launch)).then_some(required)
+}
+
+/// [`sign_in_required`], waiting briefly for the first sync right after the
+/// runtime starts, as a launch from a first prompt does.
+pub fn sign_in_required_at_launch(harness: &str) -> Option<SignInRequired> {
+    installed()?.wait_first_sync(FIRST_SYNC_WAIT);
+    sign_in_required(harness)
 }
 
 /// A session launched under `launch` has ended.
@@ -2091,6 +2186,88 @@ mod tests {
         server.grants.borrow_mut().clear();
         store.sync(&server, t0, NOW).unwrap();
         assert!(store.agent_env(Provider::Cursor, t0).is_empty());
+    }
+
+    #[test]
+    fn an_agent_with_no_usable_login_needs_sign_in() {
+        let none: [String; 0] = [];
+        let store = store(None);
+        let t0 = Instant::now();
+        // Nothing is claimed before the server has answered.
+        assert_eq!(store.sign_in_required(Provider::Claude, &none, t0), None);
+
+        let server = FakeServer::new();
+        server.credential("codex", "cred_x", "connected", 1, 1);
+        server.grant("codex", "cred_x", 1, codex_chatgpt("fake-codex"));
+        store.sync(&server, t0, NOW).unwrap();
+        // The organization has no Claude login at all.
+        assert_eq!(
+            store.sign_in_required(Provider::Claude, &none, t0),
+            Some(SignInRequired { provider: "claude", state: "not-connected".into(), reason: None })
+        );
+        assert_eq!(store.sign_in_required(Provider::Codex, &none, t0), None, "a usable grant signs the agent in");
+        // A key the workspace configuration sets signs it in too.
+        assert_eq!(store.sign_in_required(Provider::Claude, &["PATH".to_string(), CLAUDE_API_KEY_ENV.to_string()], t0), None);
+        assert!(store.sign_in_required(Provider::Claude, &["PATH".to_string()], t0).is_some());
+
+        // The server's own word for a login it will not hand out.
+        server.credentials.borrow_mut().push(CredentialEntry {
+            provider: "claude".into(),
+            credential_id: "cred_c".into(),
+            state: "unavailable".into(),
+            epoch: 1,
+            version: 1,
+            rotation: None,
+            reason: Some("token-expired".into()),
+        });
+        store.sync(&server, t0, NOW).unwrap();
+        assert_eq!(
+            store.sign_in_required(Provider::Claude, &none, t0),
+            Some(SignInRequired { provider: "claude", state: "unavailable".into(), reason: Some("token-expired".into()) })
+        );
+        // Connected, its grant not here yet: not known, so not claimed.
+        server.credential("claude", "cred_c", "connected", 1, 1);
+        store.sync(&server, t0, NOW).unwrap();
+        assert_eq!(store.sign_in_required(Provider::Claude, &none, t0), None);
+
+        // A sync that failed says nothing about the organization's logins.
+        server.credentials.borrow_mut().retain(|entry| entry.provider != "claude");
+        store.sync(&server, t0, NOW).unwrap();
+        assert!(store.sign_in_required(Provider::Claude, &none, t0).is_some());
+        *server.reject.borrow_mut() = true;
+        assert!(store.sync(&server, t0, NOW).is_err());
+        assert_eq!(store.sign_in_required(Provider::Claude, &none, t0), None);
+    }
+
+    #[test]
+    fn a_hand_sign_in_is_never_called_missing() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(signed_in_by_hand(Provider::Claude, Some(home.path())), Some(false));
+        assert_eq!(signed_in_by_hand(Provider::Claude, None), Some(false));
+        fs::create_dir_all(home.path().join(".claude")).unwrap();
+        fs::write(home.path().join(".claude").join(".credentials.json"), "{}").unwrap();
+        assert_eq!(signed_in_by_hand(Provider::Claude, Some(home.path())), Some(true));
+        // Codex cannot be signed in by hand here; for Cursor the runtime
+        // cannot tell, so it never claims a Cursor agent needs sign-in.
+        assert_eq!(signed_in_by_hand(Provider::Codex, Some(home.path())), Some(false));
+        assert_eq!(signed_in_by_hand(Provider::Cursor, Some(home.path())), None);
+    }
+
+    #[test]
+    fn a_session_that_started_signed_in_is_not_held_to_a_removed_login() {
+        let server = FakeServer::new();
+        server.credential("claude", "cred_c", "connected", 1, 1);
+        server.grant("claude", "cred_c", 1, claude_oauth("fake-oauth-1", 1));
+        let store = store(None);
+        let t0 = Instant::now();
+        store.sync(&server, t0, NOW).unwrap();
+        assert!(!store.agent_env_for_launch(Provider::Claude, "s/t", t0).is_empty());
+        server.credentials.borrow_mut().clear();
+        server.grants.borrow_mut().clear();
+        store.sync(&server, t0, NOW).unwrap();
+        assert!(store.sign_in_required(Provider::Claude, &[], t0).is_some());
+        assert!(store.launched_with_credential("s/t"));
+        assert!(!store.launched_with_credential("s/other"));
     }
 
     #[test]

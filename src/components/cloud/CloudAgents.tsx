@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Bot, Loader2, Plus, X } from "lucide-react";
-import type { WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
+import type { AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { Chat } from "@/components/chat/Chat";
 import { Composer } from "@/components/chat/Composer";
 import { sentMessages } from "@/components/chat/useComposerHistory";
 import { Button } from "@/components/ui/button";
 import { runningLimitReached } from "@/lib/runningLimit";
+import { useAccount } from "@/lib/account";
+import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
+import { AGENT_LOGIN_PLACE } from "@/lib/cloudCreate";
+import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { useTabLog } from "@/lib/agentEvents";
 import { buildTranscript } from "@/lib/transcript";
 import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, modelOptionText, offeredOn, useModels } from "@/lib/models";
@@ -40,8 +44,9 @@ import { TERMINAL_OUTBOX_STATES, type CloudAgentScope, type OutboxEntry, type Wa
 import type { ImageInput } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
 import { cn } from "@/lib/cn";
-import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
+import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, inputRefusalText, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
+import { CLOUD_IMAGES_NEED_RUNNING, CloudImageError, cloudComposerCommands, cloudComposerFiles, cloudImagesBlocked } from "@/lib/cloudComposer";
 import { LeaseBar, NotesPanel, NotSharedNotice, useNowUntil } from "./CloudCollab";
 
 /**
@@ -75,6 +80,8 @@ export function CloudAgentsView({
   active?: boolean;
 }) {
   const snapshot = useCloudAgents(scope);
+  const { status: account } = useAccount();
+  const mayManage = mayStartCloudSessions(account, scope.organizationId);
   const [selected, setSelected] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -147,7 +154,7 @@ export function CloudAgentsView({
               onClick={() => setSelected(tab.tabId)}
             >
               <Bot className="size-3.5" /> {tabTitle(tab, index)}
-              {tab.info.status === "in_progress" && tab.info.process !== "exited" && <Loader2 className="size-3 animate-spin" aria-label="working" />}
+              {tab.info.status === "in_progress" && tab.info.process !== "exited" && !tab.info.signIn && <Loader2 className="size-3 animate-spin" aria-label="working" />}
               {tab.unread && <span className="size-1.5 rounded-full bg-accent" data-testid="cloud-agent-unread" aria-label="unread" />}
             </Button>
             {manage && (
@@ -179,6 +186,11 @@ export function CloudAgentsView({
         />
       )}
       {error && <p className="px-4 py-1 text-xs text-red-500">Agent: {error}</p>}
+      {active?.info.signIn && (
+        <p className="border-b border-hairline px-4 py-1.5 text-xs text-amber-600 dark:text-amber-400" role="status" data-testid="cloud-agent-sign-in">
+          {signInMessage(active.info, mayManage)}
+        </p>
+      )}
       {active ? (
         <CloudAgentPane
           key={active.tabId}
@@ -298,8 +310,44 @@ export function connectionLabel(state: WorkspaceConnectionState, stopped: false 
   }
 }
 
+/**
+ * What to tell someone whose agent has no way to sign in (PRO-78): what is
+ * wrong and who can fix it where. `mayManage` is the viewer's owner-or-admin
+ * role in the organization, null while it is not known.
+ */
+/** The server's words for a login it will not hand out. A word this app does not know is never shown as is. */
+const SIGN_IN_STATES: Record<string, string> = {
+  revoked: "was revoked",
+  disconnected: "was disconnected",
+  unavailable: "is not available",
+};
+
+export function signInMessage(info: Pick<AgentTabInfo, "harness" | "signIn">, mayManage: boolean | null): string | null {
+  const signIn = info.signIn;
+  if (!signIn) return null;
+  const agent = cloudAgentLabel(info.harness);
+  const what =
+    signIn.reason === "token-expired"
+      ? `The organization's ${agent} login has expired`
+      : signIn.reason === "shared-use-policy"
+        ? `The organization's ${agent} login is limited to workspaces its owners and admins create`
+        : signIn.state === "not-connected"
+          ? `${agent} isn't connected for this organization`
+          : `The organization's ${agent} login ${SIGN_IN_STATES[signIn.state] ?? "is not available"}`;
+  const fix =
+    signIn.reason === "shared-use-policy"
+      ? mayManage
+        ? `Allow it for the whole organization in ${AGENT_LOGIN_PLACE}.`
+        : "An owner or admin can allow it for the whole organization."
+      : mayManage
+        ? `Connect it in ${AGENT_LOGIN_PLACE}, then send again.`
+        : "Ask an owner or admin to connect it, then send again.";
+  return `Needs sign-in: ${what}, so it can't take prompts here. ${fix}`;
+}
+
 export function turnLabel(tab: CloudAgentTab): string {
   const { status, process } = tab.info;
+  if (tab.info.signIn) return "Needs sign-in";
   if (process === "exited" && (status === "in_progress" || status === "waiting")) return "Process ended mid-turn";
   if (process === "exited") return "Process ended";
   switch (status) {
@@ -415,6 +463,8 @@ const KEY_MISSING = "cloud_agent_key_missing";
 const KEY_STORE_UNAVAILABLE = "cloud_agent_key_store_unavailable";
 
 export function commandError(e: unknown): string {
+  // Why a message's images did not go, already in words.
+  if (e instanceof CloudImageError) return e.message;
   const code = errorText(e);
   if (code === KEY_MISSING) return "Connect to this workspace once so this device can encrypt commands for it.";
   // The key is there but could not be read: connecting again would not help.
@@ -527,13 +577,16 @@ function CloudAgentPane({
   );
 
   const send = async (text: string, images: ImageInput[]) => {
-    if (images.length) {
-      setError("Images cannot be sent to cloud agent tabs yet.");
-      throw new Error("images unsupported");
+    // Images are uploaded straight to the runtime: a stopped workspace is started for them and the message stays here.
+    const imagesBlocked = images.length ? cloudImagesBlocked(connected ? client : null, sleeping) : null;
+    if (imagesBlocked) {
+      setError(imagesBlocked);
+      if (imagesBlocked === CLOUD_IMAGES_NEED_RUNNING && sleeping) wakeWorkspace?.();
+      throw new CloudImageError(imagesBlocked);
     }
     // Settings chosen while this person could approve are not sent once they cannot.
     if (!mayConfigure) discardPendingConfig(scope, tab.tabId);
-    await interactive(() => sendToCloudAgent(scope, tab.tabId, text, connected ? client : null));
+    await interactive(() => sendToCloudAgent(scope, tab.tabId, text, connected ? client : null, images));
   };
 
   const steer = async () => {
@@ -643,6 +696,13 @@ function CloudAgentPane({
                 )}
                 <Composer
                   tab={entry}
+                  commands={
+                    info.sessionId && !blocked
+                      ? cloudComposerCommands({ workspaceKey: collabKey, sessionId: info.sessionId, tabId: tab.tabId, harness: entry.harness, client: connected ? client : null, you })
+                      : null
+                  }
+                  files={info.sessionId && !blocked ? cloudComposerFiles({ workspaceKey: collabKey, sessionId: info.sessionId, client: connected ? client : null }) : null}
+                  remote
                   busy={live}
                   draft={draft}
                   onDraftChange={changeDraft}
@@ -707,7 +767,8 @@ export function CloudOutbox({
       {followUps.map((f) => (
         <li key={`f-${f.clientCommandId}`} className="flex items-center gap-2" data-testid="cloud-agent-followup">
           <span className="text-muted-foreground">Queued follow-up{f.actorId ? ` from ${nameOf(f.actorId)}` : ""}:</span>
-          <span className="min-w-0 truncate">{f.text}</span>
+          {/* A queued message of images alone has no text to show. */}
+          {f.text ? <span className="min-w-0 truncate">{f.text}</span> : <span className="min-w-0 truncate text-muted-foreground">(images)</span>}
           <span className="ml-auto text-faint">sends when the agent finishes its turn</span>
         </li>
       ))}
@@ -721,7 +782,12 @@ export function CloudOutbox({
             data-state={entry.state}
           >
             <span className="text-muted-foreground">{KIND_TEXT[entry.kind] ?? entry.kind}:</span>
-            {entry.text && <span className="min-w-0 truncate">{entry.text}</span>}
+            {entry.text ? <span className="min-w-0 truncate">{entry.text}</span> : null}
+            {entry.kind === "send" && (entry.images || !entry.text) ? (
+              <span className="shrink-0 text-muted-foreground" data-testid="cloud-agent-command-images">
+                {entry.images ? `(${entry.images} ${entry.images === 1 ? "image" : "images"})` : "(images)"}
+              </span>
+            ) : null}
             <span className="ml-auto shrink-0">{outboxStateText(entry, nameOf)}</span>
             {entry.state === "outcome-unknown" && entry.kind !== "permission-decision" && (
               <Button size="xs" variant="outline" onClick={() => onSendAgain(entry)}>
@@ -741,6 +807,10 @@ function outboxStateText(entry: OutboxEntry, nameOf: (userId: string | null | un
     return `${typeof holder === "string" ? nameOf(holder) : "Someone else"} is driving — your message was not sent`;
   }
   if (entry.state === "rejected" && entry.category === "access-revoked") return "Not sent: your access changed";
+  // The runtime could not write its record of the command (a full disk, most often), so it did not touch the agent.
+  if (entry.state === "rejected" && entry.category === "receipt-store-failed") return "Not sent: the workspace could not record it (its disk may be full)";
+  const refused = entry.state === "rejected" ? inputRefusalText(entry.category, entry.receipt) : null;
+  if (refused) return refused;
   const text = STATE_TEXT[entry.state] ?? entry.state;
   return entry.state === "rejected" && entry.category ? `${text} (${entry.category})` : text;
 }

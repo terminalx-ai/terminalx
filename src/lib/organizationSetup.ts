@@ -165,6 +165,16 @@ export function resendable(record: OrganizationSetupRecord, now = Date.now()): P
 }
 
 /**
+ * An unanswered create request that is too old to resend and has not been
+ * settled against the workspace list yet. It may have made a workspace, so
+ * while it stands no new setup workspace may be prepared.
+ */
+export function unsettledRequest(record: OrganizationSetupRecord, now = Date.now()): boolean {
+  const workspace = record.workspace;
+  return Boolean(workspace && !workspace.id && workspace.pending && !resendable(record, now));
+}
+
+/**
  * An unanswered create request that is too old to resend: if the workspace
  * it asked for is in the list after all (same name, created since), that is
  * the setup workspace; otherwise the request is dropped and a new one may
@@ -216,6 +226,19 @@ export interface SetupFacts {
   workspaces: readonly CloudWorkspaceListItem[] | null;
 }
 
+/** Launch failures that leave the workspace without its repository on its branch. */
+const CHECKOUT_FAILURES = new Set([
+  "repository-clone-failed",
+  "repository-access-denied",
+  "repository-branch-not-found",
+  "repository-clone-timed-out",
+  "repository-path-occupied",
+  "repository-empty",
+  "workspace-disk-full",
+  "repository-sync-failed",
+  "branch-create-failed",
+]);
+
 /** The setup workspace, when the list is known and still has it. */
 export function setupWorkspace(record: OrganizationSetupRecord, workspaces: readonly CloudWorkspaceListItem[] | null): CloudWorkspaceListItem | null {
   const id = record.workspace?.id;
@@ -245,7 +268,7 @@ function stepFrom(record: OrganizationSetupRecord, facts: SetupFacts): SetupStep
   // its runtime reports in. A launch that failed while syncing repositories
   // never had its clone.
   const launch = workspace.launch;
-  const cloneFailed = launch?.category === "repository-sync-failed" || launch?.category === "branch-create-failed";
+  const cloneFailed = CHECKOUT_FAILURES.has(launch?.category ?? "");
   if (workspace.state !== "ready" || !workspace.runtimeActivity?.online || cloneFailed) return "runtime";
   if (record.agent === "terminal-only") return "done";
   // A usable agent login: the first prompt reached its agent.

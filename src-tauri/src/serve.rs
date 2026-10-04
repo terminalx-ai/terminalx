@@ -479,10 +479,11 @@ fn start_launch(
             root: root.to_string(),
             agents: Arc::downgrade(agents),
         }),
-        checkout: Arc::new(GitCheckout),
+        checkout: Arc::new(GitCheckout::default()),
         store: Store::open(&crate::cloud_agents::CloudAgents::state_dir(data_dir)),
         incarnation: agents.receipts.incarnation().to_string(),
         root: std::path::PathBuf::from(root),
+        cancel_poll: crate::cloud_agents::launch::CANCEL_POLL,
     };
     let _ = std::thread::Builder::new().name("cloud-launch".into()).spawn(move || launcher.run());
 }

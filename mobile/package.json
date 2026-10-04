@@ -34,6 +34,7 @@
     "expo-secure-store": "~57.0.3",
     "expo-status-bar": "~57.0.1",
     "expo-web-browser": "~57.0.2",
+    "fflate": "0.8.2",
     "lucide-react-native": "1.40.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
@@ -48,10 +49,10 @@
     "zod": "4.5.4"
   },
   "devDependencies": {
-    "@types/react": "~19.2.2",
-    "@types/react-test-renderer": "19.1.0",
     "@react-native/metro-config": "0.86.3",
     "@types/node": "^26.4.0",
+    "@types/react": "~19.2.2",
+    "@types/react-test-renderer": "19.1.0",
     "eslint": "^9.39.2",
     "eslint-config-expo": "~57.0.2",
     "tsx": "4.22.4",

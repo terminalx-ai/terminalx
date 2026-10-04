@@ -25,3 +25,8 @@ export function useConversationState<T>(key: string, initial: T) {
   const value = useSyncExternalStore(state.subscribe, state.snapshot, state.snapshot);
   return [value, state.update] as const;
 }
+
+/** Drop retained state whose key starts with `prefix` (the person signed out: their drafts do not wait for the next one). */
+export function forgetConversationState(prefix: string): void {
+  for (const key of [...retained.keys()]) if (key.startsWith(prefix)) retained.delete(key);
+}

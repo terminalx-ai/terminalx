@@ -24,11 +24,19 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * - `pty/2`: `pty.create` takes a `sessionId`, and `pty.list` returns it;
  * - `agents/1`: `runtime.agents`;
  * - `agent-pty/1` (PRO-86): the terminal an agent tab's CLI runs in answers
- *   the `pty.*` methods as `agentPtyId(tabId)`. It adds no method.
+ *   the `pty.*` methods as `agentPtyId(tabId)`. It adds no method;
+ * - `composer/1` (PRO-22): `session.commands`, the slash commands an agent
+ *   tab's composer offers this person;
+ * - `composer/2`: `session.files`, the session's files by name, for the
+ *   composer's `@` list;
+ * - `composer/3`: `session.attach`, an image uploaded in parts for the
+ *   message that then names it;
+ * - `ports/1` (PRO-28): streams to TCP ports on the workspace's loopback, for
+ *   private previews (docs/CLOUD-PREVIEWS.md). Nothing calls it yet.
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 
 /**
@@ -40,6 +48,9 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "session.addTab": "session/2",
   "session.delete": "session/2",
   "runtime.agents": "agents/1",
+  "session.commands": "composer/1",
+  "session.files": "composer/2",
+  "session.attach": "composer/3",
   // `collab/1` (PRO-30, docs/CLOUD-SHARING.md) also grants presence, notes
   // and tab leases, which are not named after it.
   "presence.update": "collab/1",
@@ -142,6 +153,13 @@ export interface AgentTabInfo {
   followUps: { clientCommandId: string; text: string; actorId?: string | null }[];
   /** Who holds the tab's input lease, on a runtime with `collab/1`. */
   lease?: { tabId: string; holderId: string; acquiredAt: number; expiresAt: number } | null;
+  /**
+   * Set when the tab's agent has no way to sign in (PRO-78): `state` is
+   * `not-connected` when the organization has no login for `provider`, else
+   * the server's state for the one it has (`revoked`, `disconnected`,
+   * `unavailable`, with a `reason` such as `token-expired`).
+   */
+  signIn?: { provider: string; state: string; reason?: string | null } | null;
   lastSeq: number;
   created: string;
   modified: string;

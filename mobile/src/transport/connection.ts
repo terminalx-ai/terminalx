@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { RpcCallResult } from "@terminalx/portable/rpc";
 import { PairingGetEndpointsResultSchema, RECONNECT_DELAYS_MS, RECONNECT_TRICKLE_MS } from "../pairing/contracts";
 import { updateStoredHost, writeHostCredential, type HostCredential, type StoredHost } from "../store/hosts";
+import { hostDisplayName } from "../store/host-name";
 import { RelayClient, type RelayEvent } from "./relay-client";
 import { loadOrCreateE2EESecretKey } from "./e2ee-keypair";
 import { applyResumeConfirmation } from "./credential-confirmation";
@@ -13,7 +14,43 @@ export interface ConnectionLogEntry { id: string; at: number; level: "info" | "s
 
 const resolvedSchema = z.object({ v: z.literal(1), cellUrl: z.string().url(), assignmentEpoch: z.number().int().nonnegative(), leaseExpiresAt: z.number().int().nonnegative() }).strict();
 
+/** After a return to the foreground, a reconnect is not shown for this long: most finish sooner and nobody needs to see them. */
+export const RESUME_QUIET_MS = 1_000;
+/** How long the connection kept from before the background gets to answer before it is taken for dead. */
+export const RESUME_PROBE_MS = 1_500;
+/** A request made right after returning waits this long for the reconnect instead of failing at once. */
+export const RESUME_REQUEST_WAIT_MS = 5_000;
+
+/**
+ * The connection to a paired Mac.
+ *
+ * Going to the home screen and back (PRO-50). The OS suspends the app in the
+ * background and the socket usually dies there, sometimes without this side
+ * hearing of it. So:
+ *
+ * - `background()`: nothing is torn down (the socket lives for as long as
+ *   the OS lets it), but nothing is attempted either: no address probes, no
+ *   reconnect loop spinning unseen. A connection lost in the background is
+ *   only noted.
+ * - `foreground()`: the connection kept is asked one quick question; if it
+ *   answers, nothing happened. If it does not, or it was lost, one fresh
+ *   connect starts at once, to the same Mac with the same pairing.
+ * - What the app is told (`onStage`) stays "connected" through that for up
+ *   to a second, so a brief absence shows no disconnected screen; after that
+ *   it says "reconnecting" like any other loss. Requests made meanwhile wait
+ *   for the reconnect instead of failing.
+ *
+ * Every cycle closes what it replaces: there is one client and one loop,
+ * however often the app comes and goes.
+ */
 export class HostConnection {
+  private backgrounded = false;
+  private lostWhileAway = false;
+  private shown: ConnectionStage = "idle";
+  private quiet: { timer: ReturnType<typeof setTimeout>; pending: [ConnectionStage, number] | null } | null = null;
+  private resumeDeadline = 0;
+  private connectedWaiters = new Set<() => void>();
+  private connectedListeners = new Set<() => void>();
   private client: RelayClient | null = null;
   private generation = 0;
   private pendingClients = new Set<RelayClient>();
@@ -34,6 +71,9 @@ export class HostConnection {
   }
 
   stop(): void {
+    this.backgrounded = false;
+    this.lostWhileAway = false;
+    this.resumeDeadline = 0;
     this.generation++;
     clearInterval(this.refreshTimer);
     for (const client of this.pendingClients) client.close();
@@ -59,8 +99,95 @@ export class HostConnection {
     void this.connectLoop(generation);
   }
 
-  request<T>(method: string, params?: unknown): Promise<RpcCallResult<T>> {
-    if (!this.client) return Promise.reject(new Error("Host is disconnected"));
+  /** The app left the foreground. See the class comment. */
+  background(): void {
+    if (!this.active || this.backgrounded) return;
+    this.backgrounded = true;
+    clearInterval(this.refreshTimer);
+    this.refreshTimer = undefined;
+    if (!this.client) {
+      // It was already reconnecting: that stops too, and starts fresh on return.
+      this.generation++;
+      for (const client of this.pendingClients) client.close();
+      this.pendingClients.clear();
+      this.lostWhileAway = true;
+    }
+  }
+
+  /**
+   * The app is in the foreground again. False when it had not been told of a
+   * background (nothing to resume; the caller decides what to do).
+   */
+  foreground(): boolean {
+    if (!this.backgrounded) return false;
+    this.backgrounded = false;
+    if (!this.active) return true;
+    // A session that looked live keeps looking live while this sorts itself out.
+    if (this.shown === "connected") this.beginQuiet();
+    const client = this.client;
+    const lost = this.lostWhileAway || !client;
+    this.lostWhileAway = false;
+    if (lost) {
+      this.reconnectNow();
+      return true;
+    }
+    const generation = this.generation;
+    void client.request("pairing.getEndpoints", {}, RESUME_PROBE_MS).then(
+      () => {
+        if (generation !== this.generation || this.client !== client || this.backgrounded) return;
+        // Still there: carry on as if nothing happened, and let what is on screen catch up on what it missed.
+        this.endQuiet(false);
+        clearInterval(this.refreshTimer);
+        this.refreshTimer = setInterval(() => void this.refreshEndpoints(client, generation), 30_000);
+        for (const listener of this.connectedListeners) listener();
+      },
+      () => {
+        if (generation !== this.generation || this.client !== client || this.backgrounded) return;
+        this.reconnectNow();
+      },
+    );
+    return true;
+  }
+
+  /** Each time a connection is up and usable (the first, a reconnect, a return from the background): time to read what was missed. */
+  onConnected(listener: () => void): () => void {
+    this.connectedListeners.add(listener);
+    return () => this.connectedListeners.delete(listener);
+  }
+
+  private reconnectNow(): void {
+    this.resumeDeadline = Date.now() + RESUME_REQUEST_WAIT_MS;
+    this.restart();
+  }
+
+  private beginQuiet(): void {
+    if (this.quiet) clearTimeout(this.quiet.timer);
+    const quiet = { timer: setTimeout(() => this.endQuiet(true), RESUME_QUIET_MS), pending: null as [ConnectionStage, number] | null };
+    this.quiet = quiet;
+  }
+
+  private endQuiet(show: boolean): void {
+    const quiet = this.quiet;
+    if (!quiet) return;
+    clearTimeout(quiet.timer);
+    this.quiet = null;
+    if (show && quiet.pending) this.present(...quiet.pending);
+  }
+
+  async request<T>(method: string, params?: unknown): Promise<RpcCallResult<T>> {
+    // Just back from the background and reconnecting: wait for it rather than fail what the person just did.
+    if (!this.client && this.active && Date.now() < this.resumeDeadline) {
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          this.connectedWaiters.delete(done);
+          resolve();
+        };
+        const timer = setTimeout(done, Math.max(0, this.resumeDeadline - Date.now()));
+        this.connectedWaiters.add(done);
+      });
+    }
+    if (!this.client) throw new Error("Host is disconnected");
     return this.client.request<T>(method, params).then((result) => {
       if (!result.ok && !this.refusedMethods.has(method)) {
         this.refusedMethods.add(method);
@@ -187,11 +314,16 @@ export class HostConnection {
       if (state === "connected") {
         wasConnected = true;
         this.emitStage("connected", 0);
-        this.log("success", "Connected", `${host.label} · ${winner.path} · ${redactEndpoint(winner.path === "direct" ? host.endpoint : host.relay!.cellUrl)}`);
+        this.log("success", "Connected", `${hostDisplayName(host)} · ${winner.path} · ${redactEndpoint(winner.path === "direct" ? host.endpoint : host.relay!.cellUrl)}`);
       } else if (state === "disconnected" && wasConnected) {
         clearInterval(this.refreshTimer);
         this.client = null;
-        this.log("warning", "Connection lost", host.label);
+        if (this.backgrounded) {
+          // Lost while away: noted, and taken up again on return. Nothing is tried, or shown, from the background.
+          this.lostWhileAway = true;
+          return;
+        }
+        this.log("warning", "Connection lost", hostDisplayName(host));
         void this.connectLoop(generation);
       }
     });
@@ -211,7 +343,9 @@ export class HostConnection {
     }
     const refresh = () => this.refreshEndpoints(client, generation);
     void refresh();
-    this.refreshTimer = setInterval(() => void refresh(), 30_000);
+    clearInterval(this.refreshTimer);
+    if (!this.backgrounded) this.refreshTimer = setInterval(() => void refresh(), 30_000);
+    for (const listener of this.connectedListeners) listener();
     if (winner.path === "relay" && connectedHost.relay && confirmedCredential.current) {
       void rotateCredentialIfNeeded({ client, host: connectedHost, credential: confirmedCredential }).then((rotated) => {
         if (generation === this.generation && this.active && this.client === client) this.active.credential = rotated.credential;
@@ -239,6 +373,21 @@ export class HostConnection {
   }
 
   private emitStage(stage: ConnectionStage, attempt: number): void {
+    if (stage === "connected") {
+      this.resumeDeadline = 0;
+      for (const done of [...this.connectedWaiters]) done();
+    }
+    if (stage === "connected" || stage === "idle") this.endQuiet(false);
+    else if (this.quiet) {
+      // Not shown yet: most returns from the background are connected again before anyone could read it.
+      this.quiet.pending = [stage, attempt];
+      return;
+    }
+    this.present(stage, attempt);
+  }
+
+  private present(stage: ConnectionStage, attempt: number): void {
+    this.shown = stage;
     for (const listener of this.stageListeners) listener(stage, attempt);
   }
 

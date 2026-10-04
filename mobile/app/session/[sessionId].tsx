@@ -4,8 +4,8 @@ import { FlatList, Image, KeyboardAvoidingView, Platform, Pressable, StyleSheet,
 import * as DocumentPicker from "expo-document-picker";
 import { File as ExpoFile } from "expo-file-system";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
-import { ChevronUp, FileText, Paperclip, Radio, Send, Terminal as TerminalIcon, X } from "lucide-react-native";
-import { buildTranscript, type PendingAsk, type Turn, type WorkItem } from "@terminalx/portable/transcript";
+import { ChevronUp, FileText, Paperclip, Radio, Send, X } from "lucide-react-native";
+import { buildTranscript, type PendingAsk, type Turn } from "@terminalx/portable/transcript";
 import type { AgentEvent } from "@terminalx/portable/events";
 import { mergeEvents, readTranscriptCache, writeTranscriptCache, type AttachmentInput, type ChatNote } from "@mobile/data/host-api";
 import { useApp } from "@mobile/state/AppProvider";
@@ -14,6 +14,7 @@ import { useTheme } from "@mobile/ui/theme";
 import { conversationKey } from "@mobile/data/conversations";
 import { agentConversations } from "@mobile/data/session-navigation";
 import { ConversationPicker } from "@mobile/ui/ConversationPicker";
+import { PermissionCard, TurnCard } from "@mobile/ui/transcript";
 import { useConversationState } from "@mobile/state/conversation-state";
 
 // Keep the mobile terminal unavailable until its rendering and input are ready.
@@ -49,7 +50,7 @@ export default function SessionScreen() {
     </> : null}
     {!available ? <Text style={{ color: palette.warning, paddingHorizontal: 16 }}>This conversation is no longer available on the Mac.</Text> : null}
     {MOBILE_TERMINAL_ENABLED ? <View style={[styles.segment, { backgroundColor: palette.raised }]}><Segment label="Chat" selected={view === "chat"} onPress={() => setView("chat")} /><Segment label="Terminal" selected={view === "terminal"} onPress={() => setView("terminal")} /></View> : null}
-    {!MOBILE_TERMINAL_ENABLED || view === "chat" ? <ChatPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && app.connectionStage === "connected"} /> : <TerminalPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && app.connectionStage === "connected"} />}
+    {!MOBILE_TERMINAL_ENABLED || view === "chat" ? <ChatPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && app.connectionStage === "connected"} epoch={app.connectionEpoch ?? 0} /> : <TerminalPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && app.connectionStage === "connected"} />}
   </View>;
 }
 
@@ -58,7 +59,7 @@ function Segment({ label, selected, onPress }: { label: string; selected: boolea
   return <Pressable accessibilityRole="button" accessibilityState={{ selected }} onPress={onPress} style={[styles.segmentItem, selected && { backgroundColor: palette.card }]}><Text style={{ color: selected ? palette.ink : palette.muted, fontWeight: selected ? "600" : "500" }}>{label}</Text></Pressable>;
 }
 
-function ChatPane({ hostId, sessionId, tabId, connected }: { hostId: string; sessionId: string; tabId: string; connected: boolean }) {
+function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: string; sessionId: string; tabId: string; connected: boolean; epoch: number }) {
   const app = useApp();
   const { palette } = useTheme();
   const stateKey = conversationKey(hostId, sessionId, tabId);
@@ -98,7 +99,9 @@ function ChatPane({ hostId, sessionId, tabId, connected }: { hostId: string; ses
       setLoading(false);
     })();
     return () => { active = false; };
-  }, [app.api, connected, hostId, sessionId, tabId, setEvents, setHasMore, setNotes]);
+    // `epoch`: after a reconnect that was never shown (a short trip to the home screen) the tail is read again,
+    // merged into what is on screen, so nothing that happened meanwhile is missing and nothing jumps.
+  }, [app.api, connected, epoch, hostId, sessionId, tabId, setEvents, setHasMore, setNotes]);
 
   useEffect(() => {
     let active = true;
@@ -248,32 +251,6 @@ function base64Size(value: string): number {
   return Math.max(0, Math.floor(value.length * 3 / 4) - padding);
 }
 
-function PermissionCard({ ask, connected, answering, error, onRespond }: { ask: PendingAsk; connected: boolean; answering: boolean; error?: string; onRespond(optionId: string): void }) {
-  const { palette } = useTheme();
-  const options = ask.kind === "permission" ? ask.options ?? [] : [];
-  return <Card style={[styles.permission, { borderColor: `${palette.warning}66` }]}><Text style={[styles.permissionLabel, { color: palette.warning }]}>Permission waiting</Text><Text style={[styles.cardTitle, { color: palette.ink }]}>{ask.title ?? ask.toolName ?? "Permission request"}</Text>{ask.description ? <Text style={[styles.body, { color: palette.muted }]}>{ask.description}</Text> : null}{ask.input !== undefined ? <Text selectable style={[styles.monoSmall, { color: palette.muted }]}>{safeJson(ask.input)}</Text> : null}{options.length ? <View style={styles.permissionActions}>{options.map((option) => <Button key={option.id} label={option.label} kind={option.kind === "deny" ? "danger" : option.kind === "allow_once" ? "primary" : "secondary"} disabled={!connected || answering} onPress={() => onRespond(option.id)} style={styles.permissionAction} />)}</View> : <Text style={[styles.body, { color: palette.muted }]}>Answer this request from your Mac.</Text>}{!connected ? <Text style={[styles.permissionHint, { color: palette.warning }]}>Reconnect before answering.</Text> : null}{error ? <Text style={[styles.permissionHint, { color: palette.danger }]}>{error} The request may have lapsed; check your Mac.</Text> : null}</Card>;
-}
-
-function TurnCard({ turn }: { turn: Turn }) {
-  const { palette } = useTheme();
-  return <View style={styles.turn}>{turn.prompt ? <View style={[styles.promptBubble, { backgroundColor: palette.selected }]}><Text selectable style={[styles.body, { color: palette.ink }]}>{turn.prompt.text}</Text></View> : null}<View style={styles.work}>{turn.work.map((item) => <WorkRow key={item.key} item={item} />)}{turn.finalText ? <Text selectable style={[styles.body, { color: palette.ink }]}>{turn.finalText}</Text> : null}</View></View>;
-}
-
-function WorkRow({ item }: { item: WorkItem }) {
-  const { palette } = useTheme();
-  if (item.kind === "text") return <Text selectable style={[styles.body, { color: palette.ink }]}>{item.text}</Text>;
-  if (item.kind === "reasoning") return <Text selectable style={[styles.reasoning, { color: palette.muted }]}>{item.text}</Text>;
-  if (item.kind === "tool") return <View style={[styles.tool, { backgroundColor: palette.raised }]}><TerminalIcon size={14} color={palette.muted} /><Text numberOfLines={2} style={[styles.toolText, { color: palette.muted }]}>{item.call.title ?? item.call.name}{item.call.abandoned ? " · stopped" : ""}</Text></View>;
-  if (item.kind === "tool_group") return <View style={[styles.tool, { backgroundColor: palette.raised }]}><TerminalIcon size={14} color={palette.muted} /><Text style={[styles.toolText, { color: palette.muted }]}>{item.name} · {item.calls.length} calls</Text></View>;
-  if (item.kind === "error") return <Text selectable style={[styles.body, { color: palette.danger }]}>{item.text}</Text>;
-  if (item.kind === "queued") return <Text style={[styles.reasoning, { color: palette.muted }]}>Queued · {item.text}</Text>;
-  if (item.kind === "decision") return <Text style={[styles.reasoning, { color: item.allowed ? palette.success : palette.danger }]}>{item.label}</Text>;
-  if (item.kind === "subagent") return <Text style={[styles.reasoning, { color: palette.muted }]}>{item.label ?? "Background agent"} · {item.done ? "done" : "working"}</Text>;
-  if (item.kind === "compaction") return <Text style={[styles.reasoning, { color: palette.muted }]}>Context compacted</Text>;
-  if (item.kind === "retry") return <Text style={[styles.reasoning, { color: palette.warning }]}>Retrying · {item.attempt}/{item.maxRetries}</Text>;
-  return <Text style={[styles.reasoning, { color: palette.muted }]}>{item.text}</Text>;
-}
-
 function NoteCard({ note }: { note: ChatNote }) {
   const { palette } = useTheme();
   return <Card style={styles.note}><Text style={[styles.noteAuthor, { color: palette.accent }]}>{note.author.displayName ?? "Participant"} · note</Text><Text selectable style={[styles.body, { color: palette.ink }]}>{note.body}</Text></Card>;
@@ -330,7 +307,6 @@ function TerminalPane({ hostId, sessionId, tabId, connected }: { hostId: string;
 
 function itemTime(item: { kind: "turn"; turn: Turn } | { kind: "note"; note: ChatNote }) { return item.kind === "turn" ? Date.parse(item.turn.prompt?.ts ?? item.turn.completed?.ts ?? "") || item.turn.seq : item.note.createdAt; }
 function isAgentEvent(value: unknown): value is AgentEvent { return !!value && typeof value === "object" && Number.isSafeInteger((value as AgentEvent).seq) && typeof (value as AgentEvent).tabId === "string"; }
-function safeJson(value: unknown) { try { return JSON.stringify(value, null, 2).slice(0, 2_000); } catch { return "Input unavailable"; } }
 
 const styles = StyleSheet.create({
   page: { flex: 1 },

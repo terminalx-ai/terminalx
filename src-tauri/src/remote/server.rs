@@ -27,8 +27,9 @@ use super::files::WorkspaceFiles;
 use super::git::WorkspaceGit;
 use super::collab::{self, Access, Change, Collaboration, LeaseRefusal, Role};
 use super::protocol::{self, Authority, IdempotencyCache, RpcError, PROTOCOL};
-use crate::cloud_agents::CloudAgents;
+use crate::cloud_agents::{slash, CloudAgents};
 use crate::events::AgentEvent;
+use crate::harness::claude::commands::SlashCommand;
 use crate::pty::{PaneSpec, PtyData, PtyExit, Terminals};
 use crate::session::SessionManager;
 use crate::sink::EventSink;
@@ -39,6 +40,17 @@ pub const MAX_PTYS: usize = 16;
 const MAX_EXITED_PTYS: usize = 8;
 const PTY_RING_BYTES: usize = 1024 * 1024;
 const PTY_PREFIX: &str = "remote-pty-";
+/// Whose upload an attachment is: the person, as a mailbox command names
+/// its actor; a connection without one (a development link) its device.
+fn attachment_owner(peer: &Peer) -> String {
+    peer.user_id.clone().unwrap_or_else(|| format!("device:{}", peer.device_id))
+}
+
+/// `session.files`: how long a query may be, and how many hits it answers.
+const MAX_FILE_QUERY_BYTES: usize = 400;
+const DEFAULT_FILE_HITS: usize = 30;
+const MAX_FILE_HITS: usize = 50;
+
 /// An agent tab's own terminal (`agent-pty/1`, PRO-86) is the pane its CLI
 /// runs in, `tab:<tabId>` ([`SessionManager::pane_id`]).
 const AGENT_PTY_PREFIX: &str = "tab:";
@@ -61,7 +73,7 @@ const REPLAY_CHUNK: usize = 256 * 1024;
 const MAX_WRITERS: usize = 64;
 /// Methods a `participate` attachment could not call before PRO-30. With no
 /// member list from the API (an older API) they stay closed to it.
-const SHARED_ONLY: &[&str] = &["keys.get", "pty.write", "pty.resize", "pty.control"];
+const SHARED_ONLY: &[&str] = &["keys.get", "pty.write", "pty.resize", "pty.control", "ports.list", "ports.open", "ports.write"];
 /// Longest session title `session.update` accepts, in characters.
 const MAX_TITLE_CHARS: usize = 200;
 /// Launch modes a tab may be given (`src/lib/models.ts` `PERMISSION_MODES`).
@@ -89,6 +101,8 @@ pub struct Peer {
     presence: Mutex<Presence>,
     /// Raised when the runtime closes the connection (access revoked).
     closed: tokio::sync::Notify,
+    /// Set once the connection has been disconnected from the runtime.
+    gone: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone)]
@@ -132,6 +146,7 @@ impl Peer {
             granted: Mutex::new(None),
             presence: Mutex::new(Presence { tab_id: None, activity: "viewing", since: crate::cloud_agents::now_ms() }),
             closed: tokio::sync::Notify::new(),
+            gone: std::sync::atomic::AtomicBool::new(false),
         });
         (peer, Notifications { receiver, queued })
     }
@@ -146,11 +161,26 @@ impl Peer {
         self.granted.lock().unwrap().as_ref().is_some_and(|granted| granted.contains(capability))
     }
 
-    fn notify(&self, event: &str, params: Value) {
+    pub(super) fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// The connection is over: it was disconnected, or nothing reads what is
+    /// sent to it any more.
+    pub(super) fn hung_up(&self) -> bool {
+        self.gone.load(Ordering::SeqCst) || self.outbound.is_closed()
+    }
+
+    /// Send `value` in order with this connection's notifications.
+    fn deliver(&self, value: Value) {
+        let _ = self.outbound.send((value, 0));
+    }
+
+    pub(super) fn notify(&self, event: &str, params: Value) {
         self.notify_sized(event, params, 0);
     }
 
-    fn notify_sized(&self, event: &str, params: Value, size: usize) {
+    pub(super) fn notify_sized(&self, event: &str, params: Value, size: usize) {
         self.queued.fetch_add(size, Ordering::SeqCst);
         if self.outbound.send((json!({ "event": event, "params": params }), size)).is_err() {
             self.queued.fetch_sub(size, Ordering::SeqCst);
@@ -280,6 +310,8 @@ pub struct WorkspaceRpc {
     agents: OnceLock<Arc<CloudAgents>>,
     /// Connections that said hello, for workspace-wide notifications.
     peers: Mutex<HashMap<u64, Weak<Peer>>>,
+    /// Streams to the workspace's own ports (PRO-28).
+    pub(super) ports: Arc<super::ports::Ports>,
     tabs_changed: Arc<tokio::sync::Notify>,
     /// Raised when a session is created, updated or deleted; the list goes
     /// out as `session.sessions` to `session/2` connections.
@@ -287,6 +319,8 @@ pub struct WorkspaceRpc {
     /// Stands in for `harness::offered` in tests, which cannot install agents.
     #[cfg(test)]
     offered_for_tests: Mutex<Option<Vec<crate::harness::HarnessInfo>>>,
+    #[cfg(test)]
+    commands_for_tests: Mutex<Option<Option<Vec<SlashCommand>>>>,
     /// Terminal input this runtime counted as use of the workspace (the
     /// process-wide activity flag is shared by every test).
     #[cfg(test)]
@@ -324,10 +358,13 @@ impl WorkspaceRpc {
             collab: Arc::new(Collaboration::new()),
             agents: OnceLock::new(),
             peers: Mutex::new(HashMap::new()),
+            ports: Arc::new(super::ports::Ports::default()),
             tabs_changed: Arc::new(tokio::sync::Notify::new()),
             sessions_changed: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
             offered_for_tests: Mutex::new(None),
+            #[cfg(test)]
+            commands_for_tests: Mutex::new(None),
             #[cfg(test)]
             input_activity: AtomicUsize::new(0),
         });
@@ -568,6 +605,13 @@ impl WorkspaceRpc {
             }
         }
         self.revalidate_terminal_control();
+        // A participant who may no longer open a port loses their streams.
+        for peer in &self.live_peers() {
+            let access = self.access(peer);
+            if self.authority(peer) == Authority::Participate && !(access.can_drive() && access.can_configure()) {
+                self.ports.revoke(peer);
+            }
+        }
         if let Some(agents) = self.agents.get() {
             agents.revalidate_follow_ups();
             // Also after a restart, when nothing is known about the previous
@@ -584,17 +628,17 @@ impl WorkspaceRpc {
         self.tabs_changed.notify_one();
     }
 
-    /// A participant who may no longer drive loses the terminals they
-    /// control; everyone watching is told.
+    /// A participant who may no longer type into terminals (no longer a
+    /// driver, or no longer an approver) loses the ones they control;
+    /// everyone watching is told.
     fn revalidate_terminal_control(&self) {
         let mut released = Vec::new();
         let mut ptys = self.ptys.lock().unwrap();
         for (pty_id, pty) in ptys.iter_mut() {
             let Some((user, authority)) = pty.controller_user.clone() else { continue };
-            let access = self.collab.access_for(authority, user.as_deref());
-            // An agent's terminal also needs the right to approve (`agent_input_refusal`).
-            let may_type = access.can_drive() && (pty.agent.is_none() || access.role == Role::Manager || access.can_approve);
-            if may_type {
+            // One rule for a shell and for an agent's own terminal, the same
+            // as `authorize_participant` and `agent_input_refusal`.
+            if self.collab.access_for(authority, user.as_deref()).can_configure() {
                 continue;
             }
             pty.controller = None;
@@ -716,6 +760,8 @@ impl WorkspaceRpc {
                     "maxWriteBytes": MAX_WRITE_BYTES,
                     "fsPartBytes": super::files::PART_BYTES,
                     "fsMaxFileBytes": super::files::MAX_FILE_BYTES,
+                    "portStreams": super::ports::MAX_STREAMS_PER_PEER,
+                    "portWindowBytes": super::ports::STREAM_WINDOW,
                 },
             });
             if collab {
@@ -780,10 +826,27 @@ impl WorkspaceRpc {
         }
         let needed = match method {
             "pty.write" | "pty.resize" | "pty.control" | "lease.acquire" | "lease.release" => Role::Driver,
+            // Bytes sent to a port are input to whatever listens there.
+            "ports.list" | "ports.open" | "ports.write" => Role::Driver,
             "lease.takeOver" => Role::Manager,
             _ => Role::Viewer,
         };
         let access = self.access(peer);
+        // A shell is arbitrary code as the workspace's user: it can edit the
+        // agent's settings, read its tokens or start an agent with other
+        // flags. So typing into one needs what changing those settings
+        // needs (PRO-88): a manager, or a driver who may approve permissions.
+        if matches!(method, "pty.write" | "pty.resize" | "pty.control") && access.can_drive() && !access.can_configure() {
+            return Err(RpcError::forbidden(format!("{method} needs the right to approve permissions: a terminal runs anything as the workspace's user"))
+                .with_data(json!({ "role": access.role, "needs": "canApprove", "reason": "approval-required" })));
+        }
+        // A port is held to the terminal's rule (PRO-28): what listens on
+        // the workspace's loopback includes debuggers and notebooks, which
+        // run anything as the workspace's user for whoever connects.
+        if matches!(method, "ports.list" | "ports.open" | "ports.write") && access.can_drive() && !access.can_configure() {
+            return Err(RpcError::forbidden(format!("{method} needs the right to approve permissions: a local port can be a debugger or a notebook that runs anything"))
+                .with_data(json!({ "role": access.role, "needs": "canApprove", "reason": "approval-required" })));
+        }
         if access.role >= needed {
             return Ok(());
         }
@@ -795,7 +858,30 @@ impl WorkspaceRpc {
         Err(RpcError::forbidden(format!("{method} needs {what}")).with_data(json!({ "role": access.role })))
     }
 
+    /// Whether `peer` may open ports now: the dispatcher's checks, read again.
+    fn may_use_ports(&self, peer: &Peer) -> bool {
+        let spec = protocol::find_method("ports.open").expect("ports.open is a method");
+        let authority = self.authority(peer);
+        authority >= spec.authority && (authority != Authority::Participate || self.authorize_participant(peer, spec).is_ok())
+    }
+
+    /// Answer `ports.open` in order with the connection's notifications, and
+    /// only then let the stream's data flow: an application that speaks
+    /// first can never be heard before the client knows the stream's id.
+    pub async fn answer_port_open(self: &Arc<Self>, peer: &Arc<Peer>, request: &Value) {
+        let response = self.handle(peer, request).await;
+        let stream_id = response.pointer("/result/streamId").and_then(Value::as_str).map(str::to_string);
+        peer.deliver(response);
+        if let Some(stream_id) = stream_id {
+            self.ports.start(peer, &stream_id);
+        }
+    }
+
     async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
+        // Sockets, not blocking work: answered on the async runtime.
+        if method.starts_with("ports.") {
+            return self.ports.handle(peer, method, params, &|| self.may_use_ports(peer)).await;
+        }
         let rpc = self.clone();
         let peer = peer.clone();
         let method = method.to_string();
@@ -827,6 +913,7 @@ impl WorkspaceRpc {
             "fs.cancel" => self.files.cancel(peer.id, &params),
             "fs.watch" => self.fs_watch(peer, params),
             "lifecycle.dispositionFacts" => self.disposition_facts(),
+            "lifecycle.resources" => Ok(crate::cloud_resources::observe(&self.root)),
             git if git.starts_with("git.") => self
                 .git
                 .handle(git, &params)
@@ -838,6 +925,9 @@ impl WorkspaceRpc {
             "session.send" => self.session_send(peer, params),
             "session.subscribe" => self.session_subscribe(peer, params),
             "session.tabs" => self.session_tabs(peer),
+            "session.commands" => self.session_commands(peer, params),
+            "session.files" => self.session_files(peer, params),
+            "session.attach" => self.session_attach(peer, params),
             "session.configure" => self.session_configure(peer, params),
             "session.markRead" => self.session_mark_read(peer, params),
             "session.update" => self.session_update(peer, params),
@@ -895,6 +985,7 @@ impl WorkspaceRpc {
     /// End every stream a connection opened, keeping the connection.
     fn drop_peer_subscriptions(&self, peer: &Peer) {
         self.files.disconnect(peer.id);
+        self.ports.revoke(peer);
         let doomed: Vec<(String, Subscription)> = {
             let mut subscriptions = self.subscriptions.lock().unwrap();
             let ids: Vec<String> =
@@ -909,6 +1000,9 @@ impl WorkspaceRpc {
     /// Drop everything a closed connection subscribed to.
     pub fn disconnect(&self, peer: &Peer) {
         self.files.disconnect(peer.id);
+        // Before its streams are ended, so an open still connecting sees it.
+        peer.gone.store(true, Ordering::SeqCst);
+        self.ports.disconnect(peer.id);
         if self.peers.lock().unwrap().remove(&peer.id).is_some() {
             if let Some(agents) = self.agents.get() {
                 agents.client_detached();
@@ -1154,7 +1248,7 @@ impl WorkspaceRpc {
         if self.authority(peer) == Authority::Participate && !access.can_drive() {
             return Some(RpcError::forbidden("typing needs driver access to the workspace"));
         }
-        if access.role != Role::Manager && !access.can_approve {
+        if !access.can_configure() {
             return Some(
                 RpcError::forbidden("typing into an agent's terminal can approve its permission requests: it needs approval rights")
                     .with_data(json!({ "role": access.role, "needs": "canApprove" })),
@@ -2212,8 +2306,14 @@ impl WorkspaceRpc {
         let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
         let tab_id = required_str(&params, "tabId")?;
         let tab = session.tabs.iter().find(|tab| tab.id == tab_id).ok_or_else(|| RpcError::not_found("no such tab"))?;
-        let text = required_str(&params, "text")?;
-        if text.trim().is_empty() {
+        // Images uploaded with `session.attach` ride with the text, or alone.
+        let image_ids = crate::cloud_agents::attachments::named(&params).ok_or_else(|| RpcError::invalid("images is a list of at most 8 uploaded attachments"))?;
+        let text = match params.get("text").and_then(Value::as_str) {
+            Some(text) => text,
+            None if !image_ids.is_empty() => "",
+            None => return Err(RpcError::invalid("text is required")),
+        };
+        if text.trim().is_empty() && image_ids.is_empty() {
             return Err(RpcError::invalid("text is empty"));
         }
         // The same rule as a mailbox send (contract §21.5), for managers
@@ -2222,6 +2322,20 @@ impl WorkspaceRpc {
             return Err(RpcError::forbidden("sending needs driver access to the workspace"));
         }
         let busy = agents_busy(&self.agents, &session.id, &tab.id);
+        // And the same rule for what the CLI runs by itself (PRO-88): a
+        // slash command, a `!` shell command, an `@/path` mention.
+        if !self.access(peer).can_configure() {
+            if let Err(refusal) = slash::check(text, &tab.harness, Some(Path::new(&session.cwd))) {
+                return Err(RpcError::forbidden(refusal.message()).with_data(json!({ "reason": refusal.category(), "command": refusal.command })));
+            }
+        }
+        // A slash or `!` command never waits in the session's own queue,
+        // whoever sends it: nothing re-checks that queue if they lose the
+        // right before the running turn ends (the mailbox's follow-up queue
+        // is re-checked). Prose queues as before, mentions included.
+        if slash::is_command(text) && (busy || self.sessions.as_ref().is_some_and(|sessions| sessions.turn_open(&session.id, &tab.id))) {
+            return Err(RpcError::new("conflict", slash::NOT_QUEUED_MESSAGE).with_data(json!({ "reason": slash::NOT_QUEUED_CATEGORY })));
+        }
         let now = crate::cloud_agents::now_ms();
         match peer.user_id.as_deref() {
             Some(user) => {
@@ -2232,7 +2346,18 @@ impl WorkspaceRpc {
             None if self.authority(peer) == Authority::Participate => return Err(RpcError::forbidden("sending needs a signed-in person")),
             None => {}
         }
-        let outcome = self.manager()?.send(&session.id, &tab.id, text.to_string(), Vec::new()).map_err(RpcError::internal)?;
+        let images = if image_ids.is_empty() {
+            Vec::new()
+        } else {
+            self.agents()?.attachments.load(&attachment_owner(peer), &image_ids).map_err(|_| {
+                RpcError::invalid("Not sent: an image of this message did not reach the workspace. Attach it and send again.").with_data(json!({ "reason": "attachment-missing" }))
+            })?
+        };
+        let sent = self.manager().and_then(|manager| manager.send(&session.id, &tab.id, text.to_string(), images).map_err(RpcError::internal));
+        if !image_ids.is_empty() {
+            self.agents()?.attachments.remove(&image_ids);
+        }
+        let outcome = sent?;
         // Only what reached the agent claims the tab.
         if let Some(user) = peer.user_id.as_deref() {
             // As busy as it was before this send: an expired lease of someone
@@ -2311,6 +2436,99 @@ impl WorkspaceRpc {
     fn session_tabs(&self, peer: &Peer) -> Result<Value, RpcError> {
         let tabs = if self.access(peer).can_view() { self.agents()?.tabs() } else { Vec::new() };
         Ok(json!({ "tabs": tabs }))
+    }
+
+    /// The slash commands the composer of an agent tab offers the caller
+    /// (`composer/1`, PRO-22): what the tab's CLI lists in the session's
+    /// directory, as a local tab's composer shows them. Someone who may not
+    /// decide what the agent does on its own is offered only the commands
+    /// they may send (PRO-88, `slash::allows`), and `restricted` says so;
+    /// someone who may not send at all is offered none. Reading it starts
+    /// no agent and no turn.
+    fn session_commands(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
+        let tab_id = required_str(&params, "tabId")?;
+        let tab = session.tabs.iter().find(|tab| tab.id == tab_id).ok_or_else(|| RpcError::not_found("no such tab"))?;
+        let access = self.access(peer);
+        let may_send = self.authority(peer) == Authority::Manage || access.can_drive();
+        let restricted = !access.can_configure();
+        let commands: Vec<SlashCommand> = if may_send {
+            let listed = self.listed_commands(&tab.harness, Path::new(&session.cwd))?;
+            listed.into_iter().filter(|command| !restricted || slash::allows(&tab.harness, &command.name)).collect()
+        } else {
+            Vec::new()
+        };
+        Ok(json!({ "commands": commands, "restricted": restricted }))
+    }
+
+    /// One part of an image the caller attaches to the message they are
+    /// about to send to an agent tab (`composer/3`, PRO-22). The image waits
+    /// in the runtime's private state until that message names it, and only
+    /// its uploader's message can. Needs what sending needs.
+    fn session_attach(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
+        let tab_id = required_str(&params, "tabId")?;
+        if !session.tabs.iter().any(|tab| tab.id == tab_id) {
+            return Err(RpcError::not_found("no such tab"));
+        }
+        if self.authority(peer) == Authority::Participate && !self.access(peer).can_drive() {
+            return Err(RpcError::forbidden("attaching an image needs driver access to the workspace"));
+        }
+        let id = required_str(&params, "attachmentId")?;
+        let media_type = required_str(&params, "mediaType")?;
+        let offset = params.get("offset").and_then(Value::as_u64).ok_or_else(|| RpcError::invalid("offset is required"))?;
+        let data = STANDARD.decode(required_str(&params, "data")?).map_err(|_| RpcError::invalid("data is not base64"))?;
+        let last = params.get("last").and_then(Value::as_bool).unwrap_or(false);
+        let name = params.get("name").and_then(Value::as_str);
+        use crate::cloud_agents::attachments::AttachError;
+        match self.agents()?.attach_part(&attachment_owner(peer), id, offset, &data, media_type, name, last) {
+            Ok(size) => Ok(json!({ "attachmentId": id, "size": size, "complete": last })),
+            Err(AttachError::Invalid(why)) => Err(RpcError::invalid(why)),
+            Err(AttachError::TooLarge) => Err(RpcError::invalid("the image is larger than 5 MB").with_data(json!({ "reason": "image-too-large" }))),
+            Err(AttachError::Full) => Err(RpcError::new("conflict", "too many images are waiting to be sent in this workspace; try again later").with_data(json!({ "reason": "attachments-full" }))),
+            Err(AttachError::Failed(error)) => Err(RpcError::internal(error)),
+        }
+    }
+
+    /// The files of a session's directory whose path matches `query`, best
+    /// first, for the composer's `@` list (`composer/2`, PRO-22): the same
+    /// index and ranking as a local tab's (`files::search`), so paths are
+    /// relative to the session's directory, ignored files are left out and
+    /// an empty query lists the shallowest files. Names only, never
+    /// contents; anyone who may see the session may ask.
+    fn session_files(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
+        let query = params.get("query").and_then(Value::as_str).unwrap_or("");
+        if query.len() > MAX_FILE_QUERY_BYTES {
+            return Err(RpcError::invalid("the query is too long"));
+        }
+        let limit = params.get("limit").and_then(Value::as_u64).map_or(DEFAULT_FILE_HITS, |limit| limit as usize).clamp(1, MAX_FILE_HITS);
+        let files = crate::files::search(Path::new(&session.cwd), query, limit).map_err(RpcError::internal)?;
+        Ok(json!({ "files": files }))
+    }
+
+    /// What the CLI of `harness` lists in `cwd`, as `list_slash_commands`
+    /// does for a local tab: only Claude Code is asked. A CLI that is not
+    /// installed or did not answer (a just-woken machine can be slow) is an
+    /// error, `unavailable`, never an empty list: the composer would keep
+    /// "no commands" as the answer, and it asks again instead.
+    fn listed_commands(&self, harness: &str, cwd: &Path) -> Result<Vec<SlashCommand>, RpcError> {
+        #[cfg(test)]
+        if let Some(commands) = self.commands_for_tests.lock().unwrap().clone() {
+            return commands.ok_or_else(|| RpcError::new("unavailable", "the agent's command list could not be read"));
+        }
+        if harness != "claude" {
+            return Ok(Vec::new());
+        }
+        crate::harness::claude::commands::list(cwd).map_err(|error| {
+            log::warn!("list slash commands: {error:#}");
+            RpcError::new("unavailable", "the agent's command list could not be read").with_data(json!({ "reason": "commands-unavailable" }))
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_commands_for_tests(&self, commands: Option<Vec<SlashCommand>>) {
+        *self.commands_for_tests.lock().unwrap() = Some(commands);
     }
 
     /// The agent tab `(sessionId, tabId)` names, if the caller may see it.

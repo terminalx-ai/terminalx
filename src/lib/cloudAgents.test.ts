@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent, Payload } from "@/types/events";
-import type { AgentTabInfo, WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { WorkspaceRpcError, type AgentTabInfo, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import type { CachedTab, Checkpoint, OutboxEntry } from "@/lib/cloudAgentApi";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -10,12 +10,14 @@ vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
 
 import {
   applyLiveTabs,
+  settledStatus,
   attachCloudAgentTab,
   configureCloudAgentTab,
   configuresLive,
   decideCloudAgent,
   DEV_SCOPE_NOTICE,
   discardPendingConfig,
+  errorText,
   flushCloudAgentCache,
   getCloudAgents,
   loadCloudAgents,
@@ -24,6 +26,8 @@ import {
   refreshFromCheckpoint,
   resetCloudAgents,
   SAVE_DEBOUNCE_MS,
+  sendAgain,
+  SEND_AGAIN_IMAGES_GONE,
   sendToCloudAgent,
   steerCloudAgent,
   stopCloudAgent,
@@ -99,6 +103,7 @@ class FakeBackend {
           tabId: String(args.tabId),
           kind: args.kind as OutboxEntry["kind"],
           text: (payload.text as string) ?? null,
+          ...(Array.isArray(payload.images) && payload.images.length ? { images: payload.images.length } : {}),
           requestId: (payload.requestId as string) ?? null,
           state: "queued",
           wake: "not-needed",
@@ -200,6 +205,22 @@ describe("cloud agent tabs store", () => {
     expect(backend.count("cloud_agent_checkpoint")).toBe(reads);
   });
 
+  it("never shows an agent that cannot sign in as working (PRO-78)", async () => {
+    const signIn = { provider: "claude", state: "not-connected" };
+    applyLiveTabs(scope, [tabInfo({ status: "in_progress", signIn })]);
+    expect(getCloudAgents(scope).tabs[0]!.info).toMatchObject({ status: "idle", signIn });
+    // A status event from the stream says "in progress" too: the prompt went to a sign-in screen.
+    const client = fakeClient();
+    await attachCloudAgentTab(scope, "t-1", client);
+    const { onStatus } = client.subscribeSession.mock.calls[0]![3] as { onStatus: (change: { status: string }) => void };
+    onStatus({ status: "in_progress" });
+    expect(getCloudAgents(scope).tabs[0]!.info.status).toBe("idle");
+    // Once the login is connected the same reports mean what they say.
+    applyLiveTabs(scope, [tabInfo({ status: "in_progress" })]);
+    expect(getCloudAgents(scope).tabs[0]!.info.status).toBe("in_progress");
+    expect(settledStatus({ signIn }, "waiting")).toBe("waiting");
+  });
+
   it("merges a live replay that overlaps the cache by seq instead of duplicating it", async () => {
     applyLiveTabs(scope, [tabInfo()]);
     const client = fakeClient();
@@ -275,6 +296,84 @@ describe("cloud agent tabs store", () => {
     const client = fakeClient();
     await configureCloudAgentTab(scope, "t-1", { model: "sonnet" }, client);
     expect(client.configureAgentTab).toHaveBeenCalledWith({ sessionId: "s-1", tabId: "t-1", model: "sonnet" });
+  });
+
+  it("PRO-22: uploads a message's images to the runtime first, then names them in the command", async () => {
+    applyLiveTabs(scope, [tabInfo()]);
+    const order: string[] = [];
+    const mutate = vi.fn(async (method: string, _params: Record<string, unknown>) => {
+      order.push(method);
+      return {};
+    });
+    mocks.invoke.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      order.push(cmd);
+      return backend.handle(cmd, args);
+    });
+    const client = Object.assign(fakeClient(), { mutate, hasCapability: (capability: string) => capability === "composer/3" });
+    await sendToCloudAgent(scope, "t-1", "what is this?", client, [{ mediaType: "image/png", data: "YWJj", name: "shot.png" }]);
+    const payload = backend.calls.find((c) => c.cmd === "cloud_agent_enqueue")!.args.payload as { text: string; images: { id: string }[] };
+    expect(payload).toEqual({ text: "what is this?", images: [{ id: expect.stringMatching(/^att-/), mediaType: "image/png", name: "shot.png" }] });
+    expect(mutate).toHaveBeenCalledWith("session.attach", expect.objectContaining({ sessionId: "s-1", tabId: "t-1", attachmentId: payload.images[0]!.id, data: "YWJj", last: true }));
+    expect(order.indexOf("session.attach")).toBeLessThan(order.indexOf("cloud_agent_enqueue"));
+    // The image itself never rides in the command.
+    expect(JSON.stringify(payload)).not.toContain("YWJj");
+  });
+
+  it("PRO-22: Send again sends a message's images again, and never the message without them", async () => {
+    applyLiveTabs(scope, [tabInfo()]);
+    const mutate = vi.fn(async (_method: string, _params: Record<string, unknown>) => ({}));
+    const client = Object.assign(fakeClient(), { mutate, hasCapability: (capability: string) => capability === "composer/3" });
+    const image = { mediaType: "image/png", data: "YWJj", name: "shot.png" };
+    const payloads = () => backend.calls.filter((c) => c.cmd === "cloud_agent_enqueue").map((c) => c.args.payload as { text: string; images?: { id: string }[] });
+
+    // Images alone: the first attempt's fate is unknown, and the second carries the same image.
+    const first = await sendToCloudAgent(scope, "t-1", "", client, [image]);
+    expect(first.images).toBe(1);
+    const again = await sendAgain(scope, { ...first, state: "outcome-unknown" }, client);
+    expect(payloads()[1]).toEqual({ text: "", images: [{ id: payloads()[0]!.images![0]!.id, mediaType: "image/png", name: "shot.png" }] });
+    expect(mutate).toHaveBeenCalledTimes(2);
+    expect(again.images).toBe(1);
+    // The old entry gave its images to the new one; the new one can go again.
+    await sendAgain(scope, { ...again, state: "outcome-unknown" }, client);
+    expect(payloads()[2]!.images).toHaveLength(1);
+
+    // Text with an image, after the app no longer holds the image (a restart): not sent as text alone.
+    const afterRestart = { clientCommandId: "cmd-old", tabId: "t-1", kind: "send" as const, text: "what is this?", images: 2, state: "outcome-unknown" as const, createdAt: 1, updatedAt: 1 };
+    await expect(sendAgain(scope, afterRestart, client)).rejects.toThrow(SEND_AGAIN_IMAGES_GONE);
+    // Nor when the images cannot be uploaded now.
+    const third = await sendToCloudAgent(scope, "t-1", "look", client, [image]);
+    await expect(sendAgain(scope, { ...third, state: "outcome-unknown" }, null)).rejects.toThrow("Not connected to the workspace");
+    expect(payloads()).toHaveLength(4);
+    // A message without images goes again as before.
+    await sendAgain(scope, { ...afterRestart, images: undefined }, null);
+    expect(payloads()[4]).toEqual({ text: "what is this?" });
+  });
+
+  it("PRO-22: lets a settled message's images go", async () => {
+    vi.useFakeTimers();
+    applyLiveTabs(scope, [tabInfo()]);
+    const client = Object.assign(fakeClient(), { mutate: vi.fn(async () => ({})), hasCapability: () => true });
+    const entry = await sendToCloudAgent(scope, "t-1", "look", client, [{ mediaType: "image/png", data: "YWJj" }]);
+    backend.syncs = [[{ ...entry, state: "rejected", category: "attachment-missing" }]];
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(getCloudAgents(scope).outbox[0]!.state).toBe("rejected");
+    await expect(sendAgain(scope, { ...entry, state: "outcome-unknown" }, client)).rejects.toThrow(SEND_AGAIN_IMAGES_GONE);
+  });
+
+  it("PRO-22: sends nothing when the images cannot reach the runtime", async () => {
+    applyLiveTabs(scope, [tabInfo()]);
+    const image = [{ mediaType: "image/png", data: "YWJj" }];
+    await expect(sendToCloudAgent(scope, "t-1", "look", null, image)).rejects.toThrow("Not connected to the workspace");
+    await expect(sendToCloudAgent(scope, "t-1", "look", fakeClient(false), image)).rejects.toThrow("Not connected to the workspace");
+    const old = Object.assign(fakeClient(), { hasCapability: () => false });
+    await expect(sendToCloudAgent(scope, "t-1", "look", old, image)).rejects.toThrow("newer workspace runtime");
+    // The upload was refused: the message does not go without its image.
+    const mutate = vi.fn(async () => {
+      throw new WorkspaceRpcError("forbidden", "attaching an image needs driver access to the workspace", "session.attach");
+    });
+    const refused = Object.assign(fakeClient(), { mutate, hasCapability: () => true });
+    await expect(sendToCloudAgent(scope, "t-1", "look", refused, image)).rejects.toThrow("needs driver access");
+    expect(backend.count("cloud_agent_enqueue")).toBe(0);
   });
 
   it("sends an approver's setting change with their next message instead of a live configure the runtime would refuse", async () => {
@@ -434,6 +533,19 @@ describe("cloud agent tabs store", () => {
     const entry = await sendToCloudAgent(dev, "t-1", "hello", client);
     expect(client.mutate).toHaveBeenCalledWith("session.send", { sessionId: "s-1", tabId: "t-1", text: "hello" });
     expect(entry.state).toBe("applied");
+    // What the runtime refused to type or to queue is said in its own words, not as a bare code (PRO-88).
+    const refusals = [
+      new WorkspaceRpcError("conflict", "A turn is running: send this command when it has ended.", "session.send", { reason: "command-not-queued" }),
+      new WorkspaceRpcError("forbidden", "Not sent: a message that starts with ! runs as a shell command.", "session.send", { reason: "shell-command-forbidden", command: "!" }),
+    ];
+    for (const refusal of refusals) {
+      client.mutate.mockRejectedValueOnce(refusal);
+      const shown = await sendToCloudAgent(dev, "t-1", "/model opus", client).catch((error: unknown) => errorText(error));
+      expect(shown).toBe(refusal.message);
+    }
+    // Any other failure keeps its code.
+    client.mutate.mockRejectedValueOnce(new WorkspaceRpcError("lease_held", "someone else is driving this tab", "session.send", {}));
+    expect(await sendToCloudAgent(dev, "t-1", "hello", client).catch((error: unknown) => errorText(error))).toBe("lease_held");
     await expect(steerCloudAgent(dev, "t-1", "x", client)).rejects.toThrow(DEV_SCOPE_NOTICE);
     await expect(stopCloudAgent(dev, "t-1", client)).rejects.toThrow(DEV_SCOPE_NOTICE);
     await expect(decideCloudAgent(dev, "t-1", { requestId: "r", optionId: "allow" }, client)).rejects.toThrow(DEV_SCOPE_NOTICE);

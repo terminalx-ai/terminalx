@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentTabInfo, WorkspaceConnectionState } from "@terminalx/portable/workspace";
+import { WorkspaceRpcError, type AgentTabInfo, type WorkspaceConnectionState } from "@terminalx/portable/workspace";
 
 const mocks = vi.hoisted(() => ({ purge: vi.fn(), close: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -21,9 +21,12 @@ import { cloudConnectionInfo, resetCloudConnections, retainCloudConnection } fro
 import {
   checkRuntime,
   cleanupStateText,
+  dateTimeText,
   deadlineText,
+  lastSavedText,
   purgeNoticeText,
   purgeTombstones,
+  pushRepository,
   repositoryLabel,
   repositoryRiskLines,
   resetPurged,
@@ -149,6 +152,23 @@ describe("risks and wording", () => {
     expect(repositoryLabel({ path: "./packages/api/" }, "parity-test")).toBe("packages/api");
   });
 
+  it("says when a stopped workspace was last saved, from its stop", () => {
+    const at = Date.UTC(2026, 9, 3, 12, 30);
+    const stopped = (operation: Record<string, unknown> | null, state = "suspended") =>
+      ({ workspace: { id: "ws", state }, ...(operation ? { latestOperation: { action: "suspend", state: "succeeded", ...operation } } : {}) }) as unknown as Parameters<typeof lastSavedText>[0];
+    expect(lastSavedText(stopped({ checkpoint: "committed", checkpointAt: at }))).toBe(`Last saved ${dateTimeText(at)}.`);
+    expect(lastSavedText(stopped({ checkpoint: "committed" }))).toBe("Its conversations were saved before it stopped.");
+    expect(lastSavedText(stopped({ checkpoint: "timed-out" }))).toMatch(/did not finish.*disk was kept/);
+    expect(lastSavedText(stopped({ checkpoint: "failed", checkpointAt: at }))).toMatch(/did not finish/);
+    // Nothing is claimed when the server said nothing, or the stop is not what happened last.
+    expect(lastSavedText(stopped({ checkpoint: "skipped" }))).toBeNull();
+    expect(lastSavedText(stopped({}))).toBeNull();
+    expect(lastSavedText(stopped(null))).toBeNull();
+    expect(lastSavedText(stopped({ action: "resume", state: "failed", checkpoint: "committed" }))).toBeNull();
+    expect(lastSavedText(stopped({ state: "running", checkpoint: "committed" }))).toBeNull();
+    expect(lastSavedText(stopped({ checkpoint: "committed", checkpointAt: at }, "ready"))).toBeNull();
+  });
+
   it("says when the deadline is and what a cleanup item waits for", () => {
     const now = Date.UTC(2026, 8, 29);
     expect(deadlineText(now + 29.5 * 86_400_000, now)).toBe("in 29 days");
@@ -214,6 +234,25 @@ describe("checkRuntime", () => {
     expect(cloudConnectionInfo("cloud:org-1:ws-1")).toMatchObject({ state: "connected", refs: 0 });
     expect(client.close).not.toHaveBeenCalled();
     expect(mocks.close).not.toHaveBeenCalled();
+  });
+
+  it("pushes a repository over a connect that cannot wake, and gives the connection back (PRO-34)", async () => {
+    const client = Object.assign(connectWith("connected"), { mutate: vi.fn(async () => ({ pushed: true })) });
+    await pushRepository(workspace("ready"), "site");
+    expect(workspaceConnection).toHaveBeenCalledWith({ kind: "cloud", organizationId: "org-1", workspaceId: "ws-1" }, "connect");
+    expect(client.mutate).toHaveBeenCalledWith("git.push", { repo: "site" });
+    expect(cloudConnectionInfo("cloud:org-1:ws-1")).toMatchObject({ state: "connected", refs: 0 });
+    expect(client.close).not.toHaveBeenCalled();
+
+    // A refusal is said in the Git view's words, and the lease is still given back.
+    client.mutate.mockRejectedValueOnce(new WorkspaceRpcError("auth_failed", "auth_failed", "git.push"));
+    await expect(pushRepository(workspace("ready"), "site")).rejects.toThrow(/GitHub refused/);
+    expect(cloudConnectionInfo("cloud:org-1:ws-1")).toMatchObject({ refs: 0 });
+  });
+
+  it("does not push to a workspace it cannot reach", async () => {
+    connectWith("opening", [{ state: "suspended" } as WorkspaceConnectionState]);
+    await expect(pushRepository(workspace("ready"), "site", 50)).rejects.toThrow(/Couldn't reach the workspace to push/);
   });
 
   it("shares the connection an open session holds, and leaves it connected", async () => {

@@ -1,5 +1,5 @@
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
-import { dispositionFacts, hasUnpublishedWork, type DispositionFacts, type RepositoryFacts } from "@terminalx/portable/workspaceGit";
+import { dispositionFacts, gitErrorMessage, hasUnpublishedWork, RemoteGit, type DispositionFacts, type RepositoryFacts } from "@terminalx/portable/workspaceGit";
 import {
   api,
   closeWorkspaceConnection,
@@ -130,6 +130,42 @@ export function checkpointText(checkpoint: CloudWorkspaceOperation["checkpoint"]
     default:
       return String(checkpoint);
   }
+}
+
+/**
+ * What a stopped workspace's last stop saved, from the stop itself: when its
+ * conversations were saved, or that the save did not finish. Null when the
+ * workspace is not stopped, when something happened to it since, or when the
+ * server said nothing about a save. The disk is kept by a stop either way.
+ */
+export function lastSavedText(item: CloudWorkspaceListItem): string | null {
+  const operation = item.latestOperation;
+  if (item.workspace.state !== "suspended" || operation?.action !== "suspend" || operation.state !== "succeeded") return null;
+  switch (operation.checkpoint) {
+    case "committed":
+      return operation.checkpointAt ? `Last saved ${dateTimeText(operation.checkpointAt)}.` : "Its conversations were saved before it stopped.";
+    case "failed":
+    case "timed-out":
+      return "The save before it stopped did not finish; conversations may end earlier than the work did. The disk was kept as it was.";
+    default:
+      return null;
+  }
+}
+
+export function dateTimeText(at: number): string {
+  return new Date(at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+/**
+ * What resuming a stopped workspace brings back, in the provider's terms
+ * (PRO-33): the same processes again, or a cold boot from the disk. `name`
+ * is the provider's display name; `null` is a server that does not say.
+ */
+export function resumeBehaviourText(name: string, preservesProcesses: boolean | null | undefined): string {
+  if (preservesProcesses === true) return `Resume at any time. ${name} freezes the machine as it is: programs and terminals that are running continue where they were.`;
+  if (preservesProcesses === false)
+    return `Resume at any time. ${name} starts the machine again (a cold boot): the files in the workspace come back, and its saved conversations are shown as before; programs and terminals that are running now do not, and what was installed or written outside the workspace may not.`;
+  return "Resume at any time. The files in the workspace come back, and its saved conversations are shown as before; programs and terminals that are running now may not.";
 }
 
 const MESSAGES: Record<string, string> = {
@@ -328,6 +364,45 @@ export async function checkRuntime(workspace: CloudWorkspace, server: CloudWorks
   } finally {
     lease?.release();
   }
+}
+
+/**
+ * Push a repository's current branch from a running workspace, so its
+ * commits are on the remote before an archive or delete (PRO-34). Like
+ * `checkRuntime` it only connects, never wakes, and gives its lease back.
+ * Uncommitted files are not touched: they need a commit, which is the
+ * person's to write. Throws the Git view's own words for a refusal.
+ */
+export async function pushRepository(workspace: CloudWorkspace, repo: string, withinMs = 15_000): Promise<void> {
+  const lease = await retainCloudConnection({ orgId: workspace.orgId, workspaceId: workspace.id }, "connect");
+  try {
+    let client: WorkspaceRpcClient;
+    try {
+      client = await waitCloudConnected(lease, withinMs, { stoppedIsError: true });
+    } catch {
+      throw new Error("Couldn't reach the workspace to push. Open it and push from its Git view.");
+    }
+    try {
+      await new RemoteGit(client, repo).push();
+    } catch (error) {
+      throw new Error(gitErrorMessage(error));
+    }
+  } finally {
+    lease.release();
+  }
+}
+
+/**
+ * Whether a repository has commits a push from the dialog would publish. A
+ * detached HEAD has no branch to push: its commits need the workspace opened.
+ */
+export function pushable(repo: RepositoryFacts): boolean {
+  return !!repo.branch && !!(repo.unpushedCommits || repo.localOnlyCommits);
+}
+
+/** "7 days", "1 day". */
+export function daysText(days: number): string {
+  return `${days} day${days === 1 ? "" : "s"}`;
 }
 
 // ---- tombstones
