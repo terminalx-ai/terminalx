@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Cloud, FolderOpen, FolderGit2, GitBranch, Loader2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
@@ -14,7 +14,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
-import { AgentMark } from "@/components/AgentMark";
 import { DictationStatus, MicButton, NEW_SESSION_TARGET, useDictationInto, useDictationShortcuts } from "@/components/chat/Dictation";
 import { insertNewLine } from "@/components/chat/Composer";
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "@/components/chat/useImageAttachments";
@@ -22,7 +21,9 @@ import { RaccoonScene } from "@/components/raccoon/Raccoon";
 import { isRoleRefusal, refreshAccountRoles } from "@/lib/accountRoles";
 import { api, errorMessage, type ImageInput } from "@/lib/api";
 import { addProject, clearNewSessionPreset, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
-import { EFFORT_LABEL, PERMISSION_MODES, modelGroups, modelNote, modelOptionText, offeredOn, prettyModelId, refreshModels, useModels } from "@/lib/models";
+import { PERMISSION_MODES } from "@/lib/models";
+import { useSessionAgent } from "@/lib/useSessionAgent";
+import { SessionAgentControls } from "./SessionAgentControls";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { chooseMode } from "@/lib/dialogs";
 import { keycaps, matchesShortcut, useKeymap } from "@/lib/shortcuts";
@@ -68,10 +69,6 @@ export function NewSessionView({
   const cloudChoices = useCloudProjectChoices();
   // Opens on a click (also one sent through the accessibility tree), not only on pointerdown or Enter.
   const projectMenu = useRowMenu();
-  // Every picker opens on a click and an accessibility press, not only the project one.
-  const agentMenu = useRowMenu();
-  const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
-  const effortMenu = useRowMenu();
   const modeMenu = useRowMenu();
   const [confirm, setConfirm] = useState<PreparedCreate | null>(null);
   const [starting, setStarting] = useState<string | null>(null);
@@ -83,17 +80,10 @@ export function NewSessionView({
   const project = store.projects.find((p) => p.path === wanted) ?? store.projects[0] ?? null;
   const isGit = cloud ? true : project?.kind !== "folder";
   const useWorktree = isGit && (controlledUseWorktree ?? localUseWorktree);
-  const harness = store.harnesses.find((h) => h.id === prefs.lastAgent) ?? store.harnesses[0] ?? null;
+  const agentSelection = useSessionAgent(store.harnesses, !cloud);
+  const { harness, modelId, effort } = agentSelection;
   // A cloud session runs the agent installed on the workspace, not on this computer.
   const available = cloud ? !!harness : (harness?.available ?? false);
-  const listed = useModels(harness?.id);
-  const models = useMemo(() => offeredOn(listed, !cloud), [listed, cloud]);
-  const fallbackModelId = models.find((m) => m.isDefault)?.id ?? models[0]?.id ?? "";
-  const lastModelId = harness ? prefs.lastModel[harness.id] : undefined;
-  // A version pinned for local work is not carried into a cloud workspace, whose CLI may not have it.
-  const modelId = !harness ? "" : cloud && lastModelId != null && !models.some((m) => m.id === lastModelId) ? fallbackModelId : (lastModelId ?? fallbackModelId);
-  const model = models.find((m) => m.id === modelId) ?? null;
-  const effort = harness ? (prefs.lastEffort[harness.id] ?? model?.defaultEffort ?? null) : null;
   const mode = PERMISSION_MODES.find((m) => m.id === prefs.lastMode)
     ?? PERMISSION_MODES.find((m) => m.id === "bypassPermissions")!;
   const workspace = preset?.cwd ? (store.workspaces[preset.projectPath] ?? []).find((w) => w.path === preset.cwd) ?? null : null;
@@ -341,76 +331,7 @@ export function NewSessionView({
               </DropdownMenuContent>
             </DropdownMenu>
 
-            <DropdownMenu {...agentMenu.root}>
-              <DropdownMenuTrigger asChild {...agentMenu.trigger}>
-                <Button variant="secondary" size="sm" className={pill}>
-                  {harness && <AgentMark id={harness.id} className="size-3.5" decorative brand />}
-                  {harness?.name ?? "Agent"}
-                  <ChevronDown className="text-faint" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start">
-                <DropdownMenuLabel>Agent</DropdownMenuLabel>
-                {store.harnesses.map((h) => (
-                  <DropdownMenuItem key={h.id} disabled={!cloud && !h.available} onSelect={() => setPrefs({ lastAgent: h.id })}>
-                    <AgentMark id={h.id} decorative brand />
-                    <span>{h.name}</span>
-                    {!cloud && !h.available && <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span>}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-
-            {harness && models.length > 0 && (
-              <DropdownMenu {...modelMenu.root}>
-                <DropdownMenuTrigger asChild {...modelMenu.trigger}>
-                  <Button variant="secondary" size="sm" className={pill}>
-                    {model ? modelOptionText(model, models, !cloud) : modelId ? prettyModelId(modelId) : "Model"}
-                    <ChevronDown className="text-faint" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="min-w-[12rem]">
-                  <DropdownMenuLabel>Model</DropdownMenuLabel>
-                  <DropdownMenuRadioGroup value={modelId} onValueChange={(v) => setPrefs({ lastModel: { ...prefs.lastModel, [harness.id]: v } })}>
-                    {modelGroups(models).map((group) => (
-                      <Fragment key={group.title ?? "models"}>
-                        {group.title ? <DropdownMenuLabel className="pt-2">{group.title}</DropdownMenuLabel> : null}
-                        {group.models.map((m) => {
-                          const note = modelNote(m, models, !cloud);
-                          return (
-                            <DropdownMenuRadioItem key={m.id} value={m.id}>
-                              {m.label}
-                              {note ? <span className="ml-1.5 text-faint">{note}</span> : null}
-                            </DropdownMenuRadioItem>
-                          );
-                        })}
-                      </Fragment>
-                    ))}
-                  </DropdownMenuRadioGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
-
-            {harness && model && model.efforts.length > 0 && (
-              <DropdownMenu {...effortMenu.root}>
-                <DropdownMenuTrigger asChild {...effortMenu.trigger}>
-                  <Button variant="secondary" size="sm" className={pill}>
-                    {effort ? (EFFORT_LABEL[effort] ?? effort) : "Effort"}
-                    <ChevronDown className="text-faint" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start">
-                  <DropdownMenuLabel>Effort</DropdownMenuLabel>
-                  <DropdownMenuRadioGroup value={effort ?? ""} onValueChange={(v) => setPrefs({ lastEffort: { ...prefs.lastEffort, [harness.id]: v } })}>
-                    {model.efforts.map((e) => (
-                      <DropdownMenuRadioItem key={e} value={e}>
-                        {EFFORT_LABEL[e] ?? e}
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </DropdownMenuRadioGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
+            <SessionAgentControls selection={agentSelection} />
 
             <DropdownMenu {...modeMenu.root}>
               <DropdownMenuTrigger asChild {...modeMenu.trigger}>

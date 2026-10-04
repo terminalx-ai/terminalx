@@ -3,10 +3,13 @@ import { StrictMode, type ReactNode } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "@/lib/prefs";
+import type { ModelInfo } from "@/lib/api";
+import { issuePrompt, issueWorktreeName } from "@/lib/issueSession";
 
-const { invoke, openAutomation, sessionStore } = vi.hoisted(() => ({
+const { invoke, openAutomation, catalog, sessionStore } = vi.hoisted(() => ({
   invoke: vi.fn(),
   openAutomation: vi.fn(),
+  catalog: { models: [] as ModelInfo[] },
   sessionStore: {
     projects: [{ path: "/repo", name: "Raccoon" }],
     harnesses: [
@@ -17,6 +20,7 @@ const { invoke, openAutomation, sessionStore } = vi.hoisted(() => ({
         installHint: "",
         caps: {},
       },
+      { id: "codex", name: "Codex", available: true, installHint: "", caps: {} },
     ],
     selectedProject: "/repo",
     sessions: [],
@@ -45,7 +49,6 @@ vi.mock("@/lib/models", async (original) => ({
   ...(await original<typeof import("@/lib/models")>()),
   BYPASS_MODE: "bypassPermissions",
   DEFAULT_AUTOMATION_MODE: "bypassPermissions",
-  EFFORT_LABEL: {},
   PERMISSION_MODES: [
     { id: "manual", label: "Ask every time", hint: "" },
     { id: "auto", label: "Auto", hint: "" },
@@ -54,7 +57,7 @@ vi.mock("@/lib/models", async (original) => ({
   bypassEffect: () => ({ flag: "--dangerously-skip-permissions", effect: "Claude Code stops asking about anything." }),
   refreshModels: vi.fn(),
   upgradeHint: () => null,
-  useModels: () => [],
+  useModels: (harness: string) => catalog.models.filter((m) => m.harness === harness),
 }));
 vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
 vi.mock("@/lib/sessions", () => ({
@@ -68,7 +71,8 @@ vi.mock("@/lib/sessions", () => ({
 }));
 
 const { NewSessionView } = await import("@/components/session/NewSessionView");
-const { clearNewSessionPreset } = await import("@/lib/sessions");
+const { clearNewSessionPreset, selectSession, upsertSession } = await import("@/lib/sessions");
+const { refreshModels } = await import("@/lib/models");
 const { IssuesView } = await import("./IssuesView");
 
 const issues = [
@@ -100,9 +104,32 @@ const issues = [
   },
 ];
 
+const linearIssues = issues.map((issue, index) => ({
+  ...issue,
+  provider: "linear" as const,
+  id: `linear-${index + 1}`,
+  identifier: `DEMO-${index + 1}`,
+  number: index + 1,
+  url: `https://example.test/linear/DEMO-${index + 1}`,
+}));
+
+const model = (id: string, label: string, harness: string, extra: Partial<ModelInfo> = {}): ModelInfo => ({
+  id, label, harness, efforts: [], defaultEffort: null, acceptsImages: true,
+  isDefault: false, upgrade: null, description: null, ...extra,
+});
+const models = [
+  model("sonnet", "Sonnet", "claude", { alias: true }),
+  model("opus", "Opus", "claude", { alias: true, resolved: "claude-opus-5-5", isDefault: true, efforts: ["low", "high", "max"], defaultEffort: "high" }),
+  model("claude-opus-5", "Opus 5", "claude"),
+  model("gpt-5.6-sol", "GPT-5.6 Sol", "codex", { efforts: ["medium", "high"], defaultEffort: "high" }),
+  model("gpt-6-astra", "GPT-6 Astra", "codex", { isDefault: true, efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "medium" }),
+  model("fixed-model", "Fixed effort model", "codex"),
+];
+
 function mockBackend() {
   invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
-    if (command === "linear_status") return { connected: false };
+    if (command === "linear_status") return { connected: true };
+    if (command === "linear_teams") return [];
     if (command === "gh_available") return true;
     if (command === "github_repo") return "terminalx-ai/raccoon";
     if (command === "work_status") {
@@ -112,7 +139,7 @@ function mockBackend() {
       const requested = String(args?.requested ?? "").trim();
       return requested ? requested.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") : "quiet-amber-fox";
     }
-    if (command === "issues_list") return issues;
+    if (command === "issues_list") return args?.provider === "linear" ? linearIssues : issues;
     if (command === "automation_issue_preview") return issues;
     if (command === "automation_create") {
       return {
@@ -140,7 +167,8 @@ function mockBackend() {
         modified: "2026-09-02T00:00:00Z",
         archived: false,
         pinned: false,
-        tabs: [{ id: "tab-1" }],
+        issue: req.issue,
+        tabs: [{ id: "tab-1", ...(req.tab as object) }],
       };
     }
     return undefined;
@@ -154,6 +182,10 @@ function issueSwitch() {
 beforeEach(() => {
   invoke.mockReset();
   openAutomation.mockReset();
+  vi.mocked(upsertSession).mockClear();
+  vi.mocked(selectSession).mockClear();
+  vi.mocked(refreshModels).mockReset();
+  catalog.models = models;
   mockBackend();
   setPrefs({
     lastProject: "/repo",
@@ -305,5 +337,182 @@ describe("issue session targets", () => {
     await waitFor(() => expect(openAutomation).toHaveBeenCalledWith("automation-99"));
     const [, args] = invoke.mock.calls.find(([command]) => command === "automation_create") as [string, { input: Record<string, unknown> }];
     expect(args.input).toMatchObject({ mode: "manual" });
+  });
+});
+
+function launchRequest() {
+  const call = invoke.mock.calls.find(([command]) => command === "create_session");
+  expect(call).toBeDefined();
+  return call![1].req;
+}
+
+async function pickModel(name: string) {
+  fireEvent.click(screen.getByTitle("Model"));
+  fireEvent.click(await screen.findByRole("menuitemradio", { name }));
+}
+
+async function pickEffort(name: string) {
+  fireEvent.click(screen.getByTitle("Effort"));
+  fireEvent.click(await screen.findByRole("menuitemradio", { name }));
+}
+
+async function openIssue(provider: "github" | "linear", onCreated = vi.fn()) {
+  setPrefs({ issueProvider: provider });
+  const view = render(<IssuesView onCreated={onCreated} />);
+  fireEvent.click(await screen.findByText("Fix login timeout"));
+  await screen.findByText("First issue body.");
+  return view;
+}
+
+async function startIssue() {
+  fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+  await waitFor(() => expect(upsertSession).toHaveBeenCalled());
+  return launchRequest();
+}
+
+describe.each(["github", "linear"] as const)("%s issue agent choices", (provider) => {
+  it.each(["claude", "codex"])("matches New Session defaults and launch choices for %s", async (agent) => {
+    setPrefs({ lastAgent: agent });
+    const composer = render(<NewSessionView useWorktree={false} />);
+    const labels = ["Agent", "Model", "Effort"].map((title) => screen.getByTitle(title).textContent);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Synthetic task" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(upsertSession).toHaveBeenCalled());
+    const tab = launchRequest().tab;
+    expect(tab).toEqual(agent === "codex"
+      ? { harness: "codex", model: "gpt-6-astra", effort: "medium", permissionMode: "auto" }
+      : { harness: "claude", model: "opus", effort: "high", permissionMode: "auto" });
+    composer.unmount();
+    invoke.mockClear();
+    vi.mocked(upsertSession).mockClear();
+
+    await openIssue(provider);
+    expect(["Agent", "Model", "Effort"].map((title) => screen.getByTitle(title).textContent)).toEqual(labels);
+    expect((await startIssue()).tab).toEqual(tab);
+    // Merely showing defaults does not overwrite saved preferences.
+    expect(getPrefs().lastModel).toEqual({});
+    expect(getPrefs().lastEffort).toEqual({});
+  });
+
+  it("persists explicit choices and sends them with the issue context and target", async () => {
+    setPrefs({ lastAgent: "codex", lastModel: { codex: "gpt-5.6-sol", claude: "sonnet" }, lastEffort: { codex: "high", claude: "max" }, lastMode: "manual" });
+    const onCreated = vi.fn();
+    const view = await openIssue(provider, onCreated);
+    expect(screen.getByTitle("Model").textContent).toBe("GPT-5.6 Sol");
+    expect(screen.getByTitle("Effort").textContent).toBe("High");
+    await pickModel("GPT-6 Astra");
+    await pickEffort("Medium");
+    expect(getPrefs().lastModel).toEqual({ codex: "gpt-6-astra", claude: "sonnet" });
+    expect(getPrefs().lastEffort).toEqual({ codex: "medium", claude: "max" });
+    const issue = provider === "github" ? issues[0] : linearIssues[0];
+    const tab = { harness: "codex", model: "gpt-6-astra", effort: "medium", permissionMode: "manual" };
+    expect(await startIssue()).toMatchObject({
+      projectPath: "/repo", title: `${issue.identifier} ${issue.title}`,
+      useWorktree: true, onMain: false, worktreeName: issueWorktreeName(issue.identifier, issue.title),
+      issue: { provider, id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url }, tab,
+    });
+    expect(upsertSession).toHaveBeenCalledWith(expect.objectContaining({ tabs: [{ id: "tab-1", ...tab }] }));
+    expect(selectSession).toHaveBeenCalledWith("session-1");
+    expect(onCreated).toHaveBeenCalledWith("session-1", "tab-1", issuePrompt(issue));
+    view.unmount();
+    render(<NewSessionView />);
+    expect(screen.getByTitle("Agent").textContent).toBe("Codex");
+    expect(screen.getByTitle("Model").textContent).toBe("GPT-6 Astra");
+    expect(screen.getByTitle("Effort").textContent).toBe("Medium");
+  });
+
+  it("switches agents using each provider's saved model and supported efforts", async () => {
+    setPrefs({ lastModel: { claude: "opus", codex: "gpt-5.6-sol" }, lastEffort: { claude: "max", codex: "medium" } });
+    await openIssue(provider);
+    fireEvent.click(screen.getByTitle("Agent"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Codex" }));
+    expect(screen.getByTitle("Model").textContent).toBe("GPT-5.6 Sol");
+    expect(screen.getByTitle("Effort").textContent).toBe("Medium");
+    fireEvent.click(screen.getByTitle("Model"));
+    expect((await screen.findAllByRole("menuitemradio")).map((item) => item.textContent)).toEqual(["GPT-5.6 Sol", "GPT-6 Astra", "Fixed effort model"]);
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    fireEvent.click(screen.getByTitle("Agent"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Claude Code" }));
+    expect(screen.getByTitle("Model").textContent).toBe("Opus (latest · Opus 5.5)");
+    expect(screen.getByTitle("Effort").textContent).toBe("Max");
+    expect(getPrefs().lastAgent).toBe("claude");
+    expect((await startIssue()).tab).toMatchObject({ harness: "claude", model: "opus", effort: "max" });
+  });
+
+  it("retains compatible effort and replaces unsupported effort when models change", async () => {
+    setPrefs({ lastAgent: "codex", lastEffort: { codex: "high" } });
+    await openIssue(provider);
+    await pickModel("GPT-5.6 Sol");
+    expect(screen.getByTitle("Effort").textContent).toBe("High");
+    await pickModel("GPT-6 Astra");
+    await pickEffort("Extra high");
+    await pickModel("GPT-5.6 Sol");
+    expect(screen.getByTitle("Effort").textContent).toBe("High");
+    fireEvent.click(screen.getByTitle("Effort"));
+    expect((await screen.findAllByRole("menuitemradio")).map((item) => item.textContent)).toEqual(["Medium", "High"]);
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    expect((await startIssue()).tab).toMatchObject({ model: "gpt-5.6-sol", effort: "high" });
+  });
+
+  it("hides effort and sends null for a model without configurable effort", async () => {
+    setPrefs({ lastAgent: "codex", lastEffort: { codex: "xhigh" } });
+    await openIssue(provider);
+    await pickModel("Fixed effort model");
+    expect(screen.queryByTitle("Effort")).toBeNull();
+    expect((await startIssue()).tab).toMatchObject({ model: "fixed-model", effort: null });
+  });
+
+  it.each(["retired-model", "opus"])("replaces stale model %s and unsupported saved effort with valid defaults", async (saved) => {
+    setPrefs({ lastAgent: "codex", lastModel: { codex: saved }, lastEffort: { codex: "max" } });
+    await openIssue(provider);
+    expect(screen.getByTitle("Model").textContent).toBe("GPT-6 Astra");
+    expect(screen.getByTitle("Effort").textContent).toBe("Medium");
+    expect((await startIssue()).tab).toMatchObject({ harness: "codex", model: "gpt-6-astra", effort: "medium" });
+  });
+
+  it("opens, navigates, and selects model and effort with the keyboard", async () => {
+    setPrefs({ lastAgent: "codex" });
+    await openIssue(provider);
+    const modelButton = screen.getByTitle("Model");
+    modelButton.focus();
+    fireEvent.keyDown(modelButton, { key: "ArrowDown" });
+    const sol = await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" });
+    await waitFor(() => expect(document.activeElement).toBe(sol));
+    fireEvent.keyDown(sol, { key: "ArrowDown" });
+    const astra = screen.getByRole("menuitemradio", { name: "GPT-6 Astra" });
+    await waitFor(() => expect(document.activeElement).toBe(astra));
+    fireEvent.keyDown(astra, { key: "Enter" });
+    expect(vi.mocked(refreshModels)).toHaveBeenCalled();
+    await waitFor(() => expect(document.activeElement).toBe(modelButton));
+    const effortButton = screen.getByTitle("Effort");
+    effortButton.focus();
+    fireEvent.keyDown(effortButton, { key: " " });
+    const low = await screen.findByRole("menuitemradio", { name: "Low" });
+    await waitFor(() => expect(document.activeElement).toBe(low));
+    fireEvent.keyDown(low, { key: "End" });
+    const extraHigh = screen.getByRole("menuitemradio", { name: "Extra high" });
+    await waitFor(() => expect(document.activeElement).toBe(extraHigh));
+    fireEvent.keyDown(extraHigh, { key: "Enter" });
+    await waitFor(() => expect(document.activeElement).toBe(effortButton));
+    expect((await startIssue()).tab).toMatchObject({ model: "gpt-6-astra", effort: "xhigh" });
+  });
+
+  it("revalidates after the model catalog refreshes", async () => {
+    setPrefs({ lastAgent: "codex", lastModel: { codex: "gpt-6-astra" }, lastEffort: { codex: "xhigh" } });
+    const view = await openIssue(provider);
+    catalog.models = models.filter((m) => m.id !== "gpt-6-astra");
+    view.rerender(<IssuesView />);
+    expect(screen.getByTitle("Model").textContent).toBe("GPT-5.6 Sol");
+    expect(screen.getByTitle("Effort").textContent).toBe("High");
+    expect((await startIssue()).tab).toMatchObject({ model: "gpt-5.6-sol", effort: "high" });
+  });
+
+  it("uses the agent default without leaking stale choices when no models are listed", async () => {
+    catalog.models = [];
+    setPrefs({ lastAgent: "codex", lastModel: { codex: "opus" }, lastEffort: { codex: "max" } });
+    await openIssue(provider);
+    expect(screen.queryByTitle("Model")).toBeNull();
+    expect(screen.queryByTitle("Effort")).toBeNull();
+    expect((await startIssue()).tab).toMatchObject({ harness: "codex", model: "", effort: null });
   });
 });

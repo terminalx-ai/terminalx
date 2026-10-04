@@ -9,7 +9,8 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/menu";
 import { AutomationEditor, type AutomationEditorPrefill } from "@/components/automations/AutomationEditor";
 import { IssueListItem } from "@/components/issues/IssueListItem";
-import { AgentMark } from "@/components/AgentMark";
+import { SessionAgentControls } from "@/components/session/SessionAgentControls";
+import { useSessionAgent } from "@/lib/useSessionAgent";
 import { Markdown } from "@/components/chat/Markdown";
 import { api, errorMessage, gh, issues as issuesApi, type Issue, type IssueTeam, type LinearStatus } from "@/lib/api";
 import { openAutomation, selectProject, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
@@ -66,7 +67,8 @@ export function IssuesView({
   const project = store.projects.find((p) => p.path === prefs.lastProject) ?? store.projects[0] ?? null;
   const isGit = project?.kind !== "folder";
   const useWorktree = isGit && (controlledUseWorktree ?? localUseWorktree);
-  const harness = store.harnesses.find((h) => h.id === prefs.lastAgent) ?? store.harnesses[0] ?? null;
+  const agentSelection = useSessionAgent(store.harnesses);
+  const { harness, modelId, effort } = agentSelection;
   const linkedIssueUrls = useMemo(
     () => new Set(store.sessions.flatMap((session) => session.issue?.url ? [session.issue.url] : [])),
     [store.sessions],
@@ -180,8 +182,8 @@ export function IssuesView({
         issue: { provider: issue.provider, id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url },
         tab: {
           harness: harness.id,
-          model: prefs.lastModel[harness.id] ?? "",
-          effort: prefs.lastEffort[harness.id] ?? null,
+          model: modelId,
+          effort,
           permissionMode: prefs.lastMode,
         },
       });
@@ -193,7 +195,7 @@ export function IssuesView({
     } finally {
       setStarting(false);
     }
-  }, [detail, selected, project, harness, prefs, useWorktree, isGit, onCreated]);
+  }, [detail, selected, project, harness, modelId, effort, prefs.lastMode, useWorktree, isGit, onCreated]);
 
   const emptyReason = useMemo(() => {
     if (!project) return "Add a project to see its issues.";
@@ -386,24 +388,7 @@ export function IssuesView({
                 </button>
               </div>
               <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="secondary" size="sm" className="gap-1.5">
-                      {harness && <AgentMark id={harness.id} className="size-3.5" decorative />}
-                      {harness?.name ?? "Agent"}
-                      <ChevronDown className="text-faint" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start">
-                    {store.harnesses.map((h) => (
-                      <DropdownMenuItem key={h.id} disabled={!h.available} onSelect={() => setPrefs({ lastAgent: h.id })}>
-                        <AgentMark id={h.id} decorative />
-                        <span>{h.name}</span>
-                        {!h.available && <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span>}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                <SessionAgentControls selection={agentSelection} />
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button variant="ghost" size="sm" className="gap-1 text-xs">
