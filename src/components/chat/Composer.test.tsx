@@ -681,6 +681,43 @@ describe("composer history (PRO-85)", () => {
     expect(field().value).toBe("third message");
   });
 
+  // The flake behind four blocked merges: the list's arrival used to queue a "back to the first row" in a
+  // passive effect, and a key that landed after the rows were painted but before that effect ran was
+  // answered first and then undone by it.
+  it("a key pressed in the frame the @ list arrives still moves the highlight", async () => {
+    let deliver: (hits: { path: string; name: string; score: number }[]) => void = () => {};
+    invoke.mockImplementation((command: string) => (command === "search_files" ? new Promise((resolve) => (deliver = resolve)) : Promise.resolve(command === "list_slash_commands" ? [] : null)));
+    render(<HistoryComposer cwd="/repo-race" />);
+    const selected = () => screen.getAllByRole("option").find((option) => option.getAttribute("aria-selected") === "true")?.textContent;
+
+    type("@");
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("search_files", expect.anything()));
+
+    // Outside act, as in the app: React commits the rows, and runs the commit's passive effects in a
+    // later task. The observer's callback is the first thing to run after the commit, before them.
+    const scope = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+    const acting = scope.IS_REACT_ACT_ENVIRONMENT;
+    scope.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      await new Promise<void>((resolve) => {
+        const painted = new MutationObserver(() => {
+          if (!screen.queryByText("b.ts")) return;
+          painted.disconnect();
+          field().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+          resolve();
+        });
+        painted.observe(document.body, { childList: true, subtree: true });
+        deliver([{ path: "src/a.ts", name: "a.ts", score: 1 }, { path: "src/b.ts", name: "b.ts", score: 1 }]);
+      });
+      // Let the commit's passive effects and the key's own render run.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      scope.IS_REACT_ACT_ENVIRONMENT = acting;
+    }
+    await act(async () => {});
+    expect(selected()).toContain("b.ts");
+  });
+
   it("lists a cloud tab's commands from its source instead of the local CLI, and says why some are missing", async () => {
     const list = { commands: [{ name: "compact", description: "Shorten", source: "builtin" as const }], note: "Other commands need someone who can approve permissions." };
     const load = vi.fn(async () => list);
