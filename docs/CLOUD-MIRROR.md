@@ -14,7 +14,7 @@ listed below, and only as of the last successful sync.
 | --- | --- | --- |
 | The file set: `mirror/1`, `mirror.manifest` | `src-tauri/src/remote/mirror.rs`, `src-tauri/src/mirror_rules.rs` | built |
 | Reading the manifest on the client | `packages/portable/src/workspaceMirror.ts` | built |
-| Writing the mirror: staging, verify, publish, divergence | desktop, Rust | next PR |
+| Writing the mirror: staging, verify, publish, divergence, discard and export | `src-tauri/src/cloud_mirror.rs`, the `cloud_mirror_*` commands | built |
 | The sync loop, the opt-in, states and labels in the UI | desktop, TypeScript | next PR |
 
 ## Direction
@@ -81,15 +81,18 @@ parameters are refused.
 - A runtime from before `mirror/1` does not grant the capability. The
   desktop then says the workspace's runtime is too old for a mirror.
 
-## Where the mirror lives (next PR)
+## Where the mirror lives
 
-`<TerminalX home>/cloud-mirrors/<workspace id>/`, created by the app, 0700:
+`<TerminalX home>/cloud-mirrors/<organization id>/<workspace id>/`, created
+by the app, 0700. Both ids are checked to be plain names before they become
+directories:
 
 - `files/`: the mirrored tree.
 - `mirror.json`: the ownership manifest: which workspace this is, every path
   the mirror wrote with the content hash it wrote, and the last successful
   revision.
 - `staging/`, `journal.json`: a sync in progress.
+- `exports/<time>/`: local versions a person asked to keep.
 
 The directory is chosen by the app, never by the person, and never by the
 workspace. **No local path is sent to the workspace.** The only requests a
@@ -111,7 +114,7 @@ mirror's location exists only in the desktop's native side and its UI.
 - On connect it scans once, then every 30 seconds while connected. An
   unchanged workspace answers the same `manifestId` and nothing is read.
 
-## How a sync is applied (next PR)
+## How a sync is applied
 
 1. Read the manifest. Compare with `mirror.json`.
 2. Read each new or changed file with `fs.read` into `staging/`, and check
@@ -123,16 +126,30 @@ mirror's location exists only in the desktop's native side and its UI.
 
 Each file appears whole or not at all. The tree as a whole is not one
 transaction: a crash in step 4 leaves the journal, and the next sync
-finishes or redoes it. Nothing outside `files/` is ever written, a path is
-refused if any parent inside the mirror is a symbolic link, and only paths
-the mirror wrote are ever removed.
+finishes it: the paths in the journal are read again instead of being called
+a local change. Nothing outside `files/` is ever written, a path is refused
+if any parent inside the mirror is a symbolic link, and only paths the
+mirror wrote are ever removed. A local folder is never removed to make room
+for a file: the sync fails and says where.
+
+The native side is eight commands and holds no loop of its own:
+`cloud_mirror_status`, `_enable`, `_disable`, `_check` (local changes only,
+asks the workspace nothing), `_plan`, `_stage`, `_publish`, `_resolve`. None
+takes a local path; the mirror's directory is derived from the two ids and
+only reported back for the UI. A file that was rewritten with the same
+content (an editor's save) is not a change: size and modification time are
+compared first, and the content hash only when they differ.
+
+On a disk that folds case (macOS by default), two names that differ only by
+case cannot both exist. The first in path order is mirrored and the other is
+counted as refused.
 
 States: `off`, `paused`, `queued`, `syncing` (files and bytes so far),
 `synced`, `failed` (with the reason), `diverged`. The last successful
 revision is shown explicitly: the manifest id, each repository's branch and
 commit, and the time.
 
-## Conflicts (next PR)
+## Conflicts
 
 The first version treats any local change as a conflict and resolves
 nothing by itself.
@@ -148,6 +165,10 @@ nothing by itself.
     `exports/<time>/` beside the mirror.
 - Local files the workspace has no file for, at paths it does not use, are
   left alone: never uploaded, never deleted, not a conflict.
+- The answer covers exactly the paths that were divergent when it was given.
+  A change made afterwards is a new divergence.
+- Turning the mirror off keeps the files. Removing the local copy is a
+  separate, explicit choice, and it keeps `exports/`.
 
 ## Labels (next PR)
 
@@ -167,3 +188,10 @@ or that the workspace is backed up.
 - `src-tauri/src/mirror_rules.rs`: the secret names.
 - `packages/portable/src/workspaceMirror.test.ts`: paging, restart, an
   incomplete or escaping manifest refused, a runtime without `mirror/1`.
+- `src-tauri/src/cloud_mirror_tests.rs`: a first sync; remote create, edit
+  and delete with local-only files left alone; content verified before
+  anything moves; an interrupted publish finished by the next sync; local
+  edit, delete and a file in the way stopping the sync; discard and export;
+  a symbolic link as a parent and as a file; secrets, Git metadata and
+  escaping paths refused; another workspace's record; off and removed;
+  names that differ only by case.
