@@ -1,7 +1,7 @@
 # Cloud previews and forwarded ports (PRO-28)
 
 An application started in a cloud workspace (a dev server on port 3000, say)
-is reached from the desktop as `http://localhost:<port>`. The desktop listens
+is reached from the desktop as `http://127.0.0.1:<port>`. The desktop listens
 on its own loopback and carries each connection to the workspace over the
 connection it already holds: the relay tunnel, end-to-end encrypted, attached
 with the person's own device.
@@ -70,8 +70,19 @@ Stated plainly, because "localhost" is not private to one program:
   origin, but with DNS rebinding a page points a hostname of its own at
   `127.0.0.1` and then can. The forwarder refuses that: an HTTP request
   whose `Host` is not `127.0.0.1:<port>` or `localhost:<port>` gets a `403`
-  and never reaches the workspace. A page can still send blind requests
-  (for example a form post) to a preview it can guess the port of.
+  and never reaches the workspace. The client's first bytes are judged
+  before any of them is forwarded, however late they come (a browser may
+  connect first and send its request later), and anything shaped like
+  `<method> <target> HTTP/<version>` is a request, whatever the method. A
+  request with no `Host` is refused too. That includes HTTP/2 with prior
+  knowledge over plain TCP (`PRI * HTTP/2.0`, as plaintext gRPC clients
+  send): it has no `Host` line to judge, so such a client cannot use a
+  forward. HTTP/1.1, an upgrade from it, and TLS are unaffected. Bytes that are not HTTP (a
+  database protocol, TLS) are carried as they are; a page cannot make a
+  browser speak those to a preview and read the answer. A page can still
+  send blind requests (for example a form post) to a preview whose port it
+  can guess: they carry a loopback `Host` and are indistinguishable from
+  the person's own.
 - **Cookies.** Browsers scope cookies by host, not by port. A preview
   served at `127.0.0.1` can read and set cookies of everything else the
   person uses at `127.0.0.1`, and the other way round. A workspace is code
@@ -205,8 +216,11 @@ One `PortForwarder` per workspace connection. Commands:
   `reassigned`, or with `exact` the forward is refused (`cloud_port_in_use`).
 - Forwarding the same port again returns the same forward. A forwarder's
   listeners belong to its connection.
-- Each accepted connection is checked (the `Host` rule above), then sends
-  `ports.open` and becomes one stream. Requests carry ids starting `ports-`;
+- Each accepted connection has its first bytes judged (the `Host` rule
+  above) before `ports.open` is sent. A client that says nothing for 400 ms
+  gets its stream anyway, so a protocol whose server speaks first works;
+  what it sends later is still judged before any of it is forwarded, and a
+  refused request ends the stream. Each connection becomes one stream. Requests carry ids starting `ports-`;
   their answers and every `ports.*` notification are consumed natively and
   never reach the web view. They are sent under the same identity rule as
   the web view's frames: nothing goes out for an identity that is no longer
@@ -218,9 +232,11 @@ One `PortForwarder` per workspace connection. Commands:
   organization changes. Nothing reopens by itself.
 - A refusal by the runtime is a short plain-text page in the forwarder's own
   words, sent with `nosniff`; the runtime's text and codes are not echoed.
-- Limits: 64 local connections per forwarder; a runtime that sends more
-  than two windows without waiting for acknowledgements has its stream
-  ended rather than buffered.
+- Stopping a forward closes the connections it was carrying.
+- Limits: 64 local connections per forwarder; the runtime's window is never
+  taken as larger than 256 KiB; a runtime that sends more than two windows
+  without waiting for acknowledgements has its stream ended rather than
+  buffered.
 
 ## The Ports panel (`src/components/cloud/CloudPorts.tsx`)
 

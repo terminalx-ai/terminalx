@@ -33,11 +33,13 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  *   message that then names it;
  * - `ports/1` (PRO-28): streams to TCP ports on the workspace's loopback, for
  *   private previews (docs/CLOUD-PREVIEWS.md): `listPorts` here; the streams
- *   themselves are carried by the desktop's native forwarder.
+ *   themselves are carried by the desktop's native forwarder;
+ * - `mirror/1` (PRO-25): `mirror.manifest`, the files a desktop may copy
+ *   into its local mirror of the workspace.
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 
 /**

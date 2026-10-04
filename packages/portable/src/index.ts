@@ -5,5 +5,6 @@ export * from "./rpc";
 export * from "./transcript";
 export * from "./workspace";
 export * from "./workspaceFiles";
+export * from "./workspaceMirror";
 export * from "./workspaceGit";
 export * from "./workspaceCollab";
