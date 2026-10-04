@@ -432,6 +432,8 @@ const INPUT_REFUSALS: Record<string, string> = {
   "file-mention-forbidden": "Not sent: attaching a file from outside the project needs someone who can approve permissions.",
   // For everyone: a slash or `!` command is not queued behind a running turn.
   "command-not-queued": "Not sent: a turn is running. Send this command when it has ended.",
+  // For everyone (PRO-22): the message names an image the runtime does not hold.
+  "attachment-missing": "Not sent: an image of this message did not reach the workspace. Attach it and send again.",
 };
 
 /**

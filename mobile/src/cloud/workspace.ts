@@ -79,6 +79,8 @@ export class CloudSendError extends Error {
 export const TYPING_REPORT_MS = 10_000;
 export const TYPING_IDLE_MS = 4_000;
 export const REFUSAL_REFRESH_MS = 30_000;
+/** After a return to the foreground, the reconnect is not shown for this long. */
+export const RESUME_QUIET_MS = 1_000;
 export const OUTBOX_POLL_FIRST_MS = 1_000;
 export const OUTBOX_POLL_MAX_MS = 15_000;
 
@@ -130,6 +132,9 @@ export class CloudWorkspaceSession {
   private started = false;
   private closed = false;
   private paused = false;
+  /** The live connection as it was when the app left the foreground, shown until it is back or a moment has passed. */
+  private held: WorkspaceConnectionState | null = null;
+  private heldTimer: ReturnType<typeof setTimeout> | null = null;
   private poll: ReturnType<typeof setTimeout> | null = null;
   private pollDelay = OUTBOX_POLL_FIRST_MS;
 
@@ -190,7 +195,8 @@ export class CloudWorkspaceSession {
     );
     await Promise.all([this.keys.load(), this.outbox.load()]);
     this.publish();
-    this.link.start();
+    // The app may have gone to the background while the above was read: then nothing connects until it is back (`resume`).
+    if (!this.paused) this.link.start();
     await this.readCheckpoints();
     // Only what the server already has is followed. What never left the phone
     // waits: delivering it could start a workspace that has stopped since.
@@ -219,15 +225,36 @@ export class CloudWorkspaceSession {
     this.paused = true;
     if (this.poll) clearTimeout(this.poll);
     this.poll = null;
+    // What was shown as live stays shown as it was: the phone lets go of the connection (a backgrounded phone
+    // holds none and asks nothing), and on return takes it up again before anyone needs to see a difference.
+    const before = this.client.connection;
+    if (before.state === "connected") this.held = before;
     this.link.close();
   }
 
   /** Back in the foreground. */
   resume(): void {
-    if (this.closed || !this.started) return;
+    if (this.closed) return;
     this.paused = false;
+    // Not started yet: `start` connects by itself when it gets there.
+    if (!this.started) return;
+    if (this.held) {
+      if (this.heldTimer) clearTimeout(this.heldTimer);
+      // Longer than this and it is said: "Connecting…", as for any other reconnect.
+      this.heldTimer = setTimeout(() => this.dropHeld(), RESUME_QUIET_MS);
+    }
     this.link.start();
     if (this.followable()) this.startPolling();
+  }
+
+  /** The quiet moment after a return is over (or the connection is back): what is shown is what is. */
+  private dropHeld(): void {
+    if (this.heldTimer) clearTimeout(this.heldTimer);
+    this.heldTimer = null;
+    if (!this.held) return;
+    this.held = null;
+    if (this.client.connection.state !== "connected") void this.connectionChanged(this.client.connection);
+    else this.publish();
   }
 
   /** The person asked to connect again after the link stopped trying. */
@@ -348,6 +375,8 @@ export class CloudWorkspaceSession {
   /** Stop and let go of the connection. What is kept on the phone stays. */
   close(): void {
     this.closed = true;
+    if (this.heldTimer) clearTimeout(this.heldTimer);
+    this.heldTimer = null;
     if (this.poll) clearTimeout(this.poll);
     this.poll = null;
     if (this.typing?.idle) clearTimeout(this.typing.idle);
@@ -414,11 +443,21 @@ export class CloudWorkspaceSession {
   private async syncOutbox(): Promise<boolean> {
     if (this.paused) return false;
     const deliver = this.outbox.unsent && (await this.mayPost(false)) === "post";
-    return this.outbox.sync({ deliver });
+    // Deciding took a request (the list read). If the app went to the background meanwhile, nothing is
+    // posted or polled now; and the check is made again before each message, so none leaves after that moment.
+    if (this.paused) return false;
+    return this.outbox.sync({ deliver: deliver && (() => !this.paused) });
   }
 
   private async connectionChanged(state: WorkspaceConnectionState): Promise<void> {
     if (this.closed) return;
+    if (state.state === "connected") {
+      this.held = null;
+      if (this.heldTimer) clearTimeout(this.heldTimer);
+      this.heldTimer = null;
+    }
+    // Away, or just back: what was shown stays as it was until the connection is back or the quiet moment ends.
+    if (state.state !== "connected" && this.held) return;
     if (state.state !== "connected") {
       // What the runtime said of each tab is now the last known state, not the live one.
       for (const tab of this.tabs.values()) tab.source = "checkpoint";
@@ -657,7 +696,8 @@ export class CloudWorkspaceSession {
   }
 
   private build(): CloudWorkspaceSnapshot {
-    const connection = this.client?.connection ?? { state: "idle" as const };
+    const actual = this.client?.connection ?? { state: "idle" as const };
+    const connection = this.held && actual.state !== "connected" ? this.held : actual;
     const listed = this.options.listed();
     const said = connection.state === "connected" ? (this.you ?? connection.you ?? null) : null;
     const you = said && said.listed !== false ? said : (listed?.you ?? null);

@@ -162,3 +162,46 @@ it("does not offer to resend a create request older than a day (the server no lo
   expect(screen.getByRole("button", { name: "Prepare setup workspace" })).toBeTruthy();
   expect(api.cloudWorkspaceCreate).not.toHaveBeenCalled();
 });
+
+it("offers no new setup workspace while an expired request is unsettled because the list cannot be read", async () => {
+  const stale = { idempotencyKey: "k", createdAt: Date.now() - 25 * 60 * 60 * 1000, request: { name: "Setup check" } as never };
+  record = { ...record, step: "workspace", workspace: { pending: stale, id: null } };
+  vi.mocked(api.cloudWorkspaces).mockRejectedValue(new Error("offline"));
+  const shown = render(view());
+  await screen.findByTestId("organization-setup-unsettled");
+  await waitFor(() => expect(api.cloudWorkspaces).toHaveBeenCalled());
+  shown.rerender(view());
+  expect(screen.queryByRole("button", { name: "Prepare setup workspace" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Terminal only, no agent" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Resume creating the setup workspace" })).toBeNull();
+  // The old request is kept, not dropped on a guess.
+  expect(record.workspace).toEqual({ pending: stale, id: null });
+
+  // The list loads and has the workspace that request made: it is adopted, and nothing is created.
+  vi.mocked(api.cloudWorkspaces).mockResolvedValue({ workspaces: [{ workspace: { id: "ws-made", name: "Setup check", createdAt: stale.createdAt + 1000, state: "provisioning" }, latestOperation: null }] } as never);
+  fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+  await waitFor(() => expect(record.workspace).toEqual({ pending: null, id: "ws-made" }));
+  expect(api.cloudWorkspaceCreate).not.toHaveBeenCalled();
+  expect(api.cloudWorkspaceQuote).not.toHaveBeenCalled();
+});
+
+it("runs the create preflight before quoting, and a missing agent login stops it there (PRO-78)", async () => {
+  vi.mocked(api.cloudWorkspacePreflight).mockResolvedValue({
+    ready: false,
+    checks: [{ kind: "agent-credential", cloneUrl: null, agent: "claude", status: "failed", errorCode: "cloud_workspace_agent_credential_required", retryable: false }],
+  });
+  const shown = render(view());
+  await waitFor(() => expect(record.step).toBe("workspace"));
+  shown.rerender(view());
+  fireEvent.click(screen.getByRole("button", { name: "Prepare setup workspace" }));
+  await screen.findByText(/Claude Code isn't connected for this organization/);
+  expect(api.cloudWorkspacePreflight).toHaveBeenCalledWith([{ cloneUrl: "https://github.com/acme/app.git", ref: null }], null, "claude");
+  expect(api.cloudWorkspaceQuote).not.toHaveBeenCalled();
+  expect(screen.queryByTestId("organization-setup-confirm")).toBeNull();
+
+  // Terminal only asks for no agent login: the repository is still checked.
+  vi.mocked(api.cloudWorkspacePreflight).mockClear();
+  fireEvent.click(screen.getByRole("button", { name: "Terminal only, no agent" }));
+  await screen.findByTestId("organization-setup-confirm");
+  expect(api.cloudWorkspacePreflight).toHaveBeenCalledWith([{ cloneUrl: "https://github.com/acme/app.git", ref: null }], null, null);
+});

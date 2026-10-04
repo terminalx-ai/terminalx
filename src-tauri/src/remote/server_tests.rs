@@ -2276,3 +2276,282 @@ async fn a_viewer_added_later_is_replayed_what_the_terminal_kept() {
     assert!(attached["replayEnd"].as_u64().unwrap() >= end);
     assert_eq!(attached["offset"], 0);
 }
+
+// ---- port streams (PRO-28) ------------------------------------------------
+
+use base64::engine::general_purpose::STANDARD as B64;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+async fn ports_peer(rpc: &Arc<WorkspaceRpc>, device: &str, authority: Authority, user: Option<&str>) -> (Arc<Peer>, Notifications) {
+    let (peer, events) = Peer::for_user(device.into(), authority, user.map(str::to_string));
+    call(rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["ports/1", "pty/1", "collab/1"] })).await.unwrap();
+    (peer, events)
+}
+
+/// `ports.open` as the host answers it: the answer first, then the stream's data.
+async fn open_port(rpc: &Arc<WorkspaceRpc>, peer: &Arc<Peer>, port: u16) -> Value {
+    let opened = call(rpc, peer, "ports.open", json!({ "port": port })).await.unwrap();
+    rpc.ports.start(peer, opened["streamId"].as_str().unwrap());
+    opened
+}
+
+/// An application in the workspace: a listener on this machine's loopback.
+async fn application() -> (tokio::net::TcpListener, u16) {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    (listener, port)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_port_stream_carries_bytes_both_ways_and_ends_with_the_application() {
+    let f = fixture();
+    let (peer, mut events) = ports_peer(&f.rpc, "d-1", Authority::Manage, None).await;
+    let (listener, port) = application().await;
+    let opened = open_port(&f.rpc, &peer, port).await;
+    let stream = opened["streamId"].as_str().unwrap().to_string();
+    assert_eq!(opened["window"], crate::remote::ports::STREAM_WINDOW);
+    let (mut app, _) = listener.accept().await.unwrap();
+
+    call(&f.rpc, &peer, "ports.write", json!({ "streamId": stream, "data": B64.encode("GET / HTTP/1.1\r\n\r\n") })).await.unwrap();
+    let mut request = [0u8; 18];
+    app.read_exact(&mut request).await.unwrap();
+    assert_eq!(&request, b"GET / HTTP/1.1\r\n\r\n");
+    assert_eq!(next_event(&mut events, "ports.drained").await, json!({ "streamId": stream, "bytes": 18 }));
+
+    app.write_all(b"HTTP/1.1 200 OK\r\n\r\nhello").await.unwrap();
+    let data = next_event(&mut events, "ports.data").await;
+    assert_eq!(data["streamId"], stream);
+    assert_eq!(B64.decode(data["data"].as_str().unwrap()).unwrap(), b"HTTP/1.1 200 OK\r\n\r\nhello");
+    assert_eq!(call(&f.rpc, &peer, "ports.list", json!({})).await.unwrap()["streams"], json!([{ "streamId": stream, "port": port }]));
+
+    // The application hangs up: the client is told, and the stream is gone.
+    drop(app);
+    assert_eq!(next_event(&mut events, "ports.closed").await, json!({ "streamId": stream, "reason": "eof" }));
+    assert_eq!(f.rpc.ports.open_streams(), 0);
+    assert_eq!(code(call(&f.rpc, &peer, "ports.write", json!({ "streamId": stream, "data": B64.encode("x") })).await), "not_found");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_port_stream_reaches_only_the_workspace_loopback_and_only_what_listens() {
+    let f = fixture();
+    let (peer, _events) = ports_peer(&f.rpc, "d-1", Authority::Manage, None).await;
+    // A port nothing listens on.
+    let (listener, port) = application().await;
+    drop(listener);
+    assert_eq!(code(call(&f.rpc, &peer, "ports.open", json!({ "port": port })).await), "port_unreachable");
+    // There is no way to name a host: only a port number is read.
+    for params in [json!({ "port": 0 }), json!({ "port": 70000 }), json!({ "port": "3000" }), json!({ "host": "169.254.169.254", "port": -1 }), json!({})] {
+        assert_eq!(code(call(&f.rpc, &peer, "ports.open", params).await), "invalid_params");
+    }
+    assert_eq!(f.rpc.ports.open_streams(), 0);
+    // Not granted, not callable.
+    let (plain, _events) = peer_for(&f.rpc, "d-plain", Authority::Manage).await;
+    assert_eq!(code(call(&f.rpc, &plain, "ports.list", json!({})).await), "capability_not_granted");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_port_is_opened_by_the_terminals_rule_and_a_stream_is_its_connections_alone() {
+    let f = fixture();
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "u-driver", "role": "driver", "canApprove": true },
+        { "userId": "u-plain", "role": "driver", "canApprove": false },
+        { "userId": "u-viewer", "role": "viewer", "canApprove": true },
+    ])));
+    let (driver, mut driver_events) = ports_peer(&f.rpc, "d-driver", Authority::Participate, Some("u-driver")).await;
+    let (viewer, _viewer_events) = ports_peer(&f.rpc, "d-viewer", Authority::Participate, Some("u-viewer")).await;
+    let (stranger, _stranger_events) = ports_peer(&f.rpc, "d-stranger", Authority::Participate, Some("u-nobody")).await;
+    let (listener, port) = application().await;
+
+    // A viewer neither opens a port nor sees which ones listen (system
+    // services are among them); someone the workspace is not shared with
+    // gets nothing.
+    assert_eq!(code(call(&f.rpc, &viewer, "ports.list", json!({})).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &viewer, "ports.open", json!({ "port": port })).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &stranger, "ports.list", json!({})).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &stranger, "ports.open", json!({ "port": port })).await), "forbidden");
+    // A driver who may not approve permissions is held to the terminal's
+    // rule: what listens locally can run anything.
+    let (plain, _plain_events) = ports_peer(&f.rpc, "d-plain", Authority::Participate, Some("u-plain")).await;
+    let refused = f.rpc.handle(&plain, &json!({ "id": "1", "method": "ports.open", "params": { "port": port } })).await;
+    assert_eq!(refused["error"]["code"], "forbidden");
+    assert_eq!(refused["error"]["data"]["reason"], "approval-required");
+    assert_eq!(code(call(&f.rpc, &plain, "ports.list", json!({})).await), "forbidden");
+
+    let stream = open_port(&f.rpc, &driver, port).await["streamId"].as_str().unwrap().to_string();
+    let (mut app, _) = listener.accept().await.unwrap();
+    // Another connection cannot write to, close or even see the stream.
+    let write = json!({ "streamId": stream, "data": B64.encode("x") });
+    assert_eq!(code(call(&f.rpc, &viewer, "ports.write", write.clone()).await), "forbidden");
+    let (other, _other_events) = ports_peer(&f.rpc, "d-driver-2", Authority::Participate, Some("u-driver")).await;
+    assert_eq!(code(call(&f.rpc, &other, "ports.write", write).await), "not_found");
+    call(&f.rpc, &other, "ports.close", json!({ "streamId": stream })).await.unwrap();
+    assert_eq!(call(&f.rpc, &other, "ports.list", json!({})).await.unwrap()["streams"], json!([]));
+    assert_eq!(f.rpc.ports.open_streams(), 1);
+
+    // The right to approve is taken away while the preview is open: the
+    // stream ends, with the reason, and the application sees its connection close.
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "u-driver", "role": "driver", "canApprove": false },
+        { "userId": "u-viewer", "role": "viewer", "canApprove": true },
+    ])));
+    assert_eq!(next_event(&mut driver_events, "ports.closed").await, json!({ "streamId": stream, "reason": "revoked" }));
+    assert_eq!(f.rpc.ports.open_streams(), 0);
+    let mut rest = Vec::new();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(10), app.read_to_end(&mut rest)).await.unwrap().unwrap(), 0);
+    assert_eq!(code(call(&f.rpc, &driver, "ports.open", json!({ "port": port })).await), "forbidden");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_closed_connection_takes_its_port_streams_with_it() {
+    let f = fixture();
+    let (peer, _events) = ports_peer(&f.rpc, "d-1", Authority::Manage, None).await;
+    let (listener, port) = application().await;
+    open_port(&f.rpc, &peer, port).await;
+    open_port(&f.rpc, &peer, port).await;
+    let (mut first, _) = listener.accept().await.unwrap();
+    assert_eq!(f.rpc.ports.open_streams(), 2);
+    // What a revoked attachment, a suspend or a delete does to a connection.
+    f.rpc.disconnect(&peer);
+    assert_eq!(f.rpc.ports.open_streams(), 0);
+    let mut rest = Vec::new();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(10), first.read_to_end(&mut rest)).await.unwrap().unwrap(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn port_streams_are_bounded_in_both_directions_and_in_number() {
+    use crate::remote::ports::{MAX_STREAMS_PER_PEER, STREAM_WINDOW};
+    let f = fixture();
+    let (peer, mut events) = ports_peer(&f.rpc, "d-1", Authority::Manage, None).await;
+    let (listener, port) = application().await;
+    let stream = open_port(&f.rpc, &peer, port).await["streamId"].as_str().unwrap().to_string();
+    let (mut app, _) = listener.accept().await.unwrap();
+
+    // The application sends far more than a window. Only a window's worth
+    // travels until the client acknowledges it.
+    let sender = tokio::spawn(async move {
+        let _ = app.write_all(&vec![7u8; 4 * STREAM_WINDOW]).await;
+        app
+    });
+    let mut received = 0usize;
+    while let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(1500), events.recv()).await {
+        if event["event"] == "ports.data" {
+            received += B64.decode(event["params"]["data"].as_str().unwrap()).unwrap().len();
+        }
+    }
+    assert!(received > 0 && received <= STREAM_WINDOW, "{received} bytes in flight with nothing acknowledged");
+    // An acknowledgement lets the rest through; one for more than was sent mints nothing.
+    let mut acked = 0usize;
+    while received < 4 * STREAM_WINDOW {
+        call(&f.rpc, &peer, "ports.ack", json!({ "streamId": stream, "bytes": received - acked })).await.unwrap();
+        acked = received;
+        let data = next_event(&mut events, "ports.data").await;
+        received += B64.decode(data["data"].as_str().unwrap()).unwrap().len();
+    }
+    assert_eq!(received, 4 * STREAM_WINDOW);
+    let _app = sender.await.unwrap();
+
+    // Toward the application: writes it has not taken are refused past a window, not buffered.
+    let chunk = json!({ "streamId": stream, "data": B64.encode(vec![1u8; MAX_WRITE_BYTES]) });
+    let mut refused = None;
+    for _ in 0..4096 {
+        if let Err((code, _)) = call(&f.rpc, &peer, "ports.write", chunk.clone()).await {
+            refused = Some(code);
+            break;
+        }
+    }
+    assert_eq!(refused.as_deref(), Some("backpressure"));
+    assert_eq!(code(call(&f.rpc, &peer, "ports.write", json!({ "streamId": stream, "data": B64.encode(vec![1u8; MAX_WRITE_BYTES + 1]) })).await), "invalid_params");
+
+    // And in number, per connection.
+    for _ in 1..MAX_STREAMS_PER_PEER {
+        open_port(&f.rpc, &peer, port).await;
+    }
+    assert_eq!(code(call(&f.rpc, &peer, "ports.open", json!({ "port": port })).await), "backpressure");
+    assert_eq!(f.rpc.ports.open_streams(), MAX_STREAMS_PER_PEER);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_open_that_finishes_after_the_connection_closed_or_lost_the_right_makes_no_stream() {
+    let f = fixture();
+    let (listener, port) = application().await;
+    // Still allowed when it was dispatched, not any more when it would be registered.
+    let (peer, _events) = ports_peer(&f.rpc, "d-1", Authority::Manage, None).await;
+    let refused = f.rpc.ports.handle(&peer, "ports.open", json!({ "port": port }), &|| false).await.unwrap_err();
+    assert_eq!(refused.code, "forbidden");
+    assert_eq!(f.rpc.ports.open_streams(), 0);
+    // The application sees that connection close: nothing holds it.
+    let (mut app, _) = listener.accept().await.unwrap();
+    let mut rest = Vec::new();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(10), app.read_to_end(&mut rest)).await.unwrap().unwrap(), 0);
+
+    // The connection was disconnected while the open was connecting.
+    f.rpc.disconnect(&peer);
+    let closed = f.rpc.ports.handle(&peer, "ports.open", json!({ "port": port }), &|| true).await.unwrap_err();
+    assert_eq!(closed.code, "unavailable");
+    assert_eq!(f.rpc.ports.open_streams(), 0);
+
+    // Nothing reads what is sent to the connection any more: the same.
+    let (deaf, events) = ports_peer(&f.rpc, "d-2", Authority::Manage, None).await;
+    drop(events);
+    assert_eq!(f.rpc.ports.handle(&deaf, "ports.open", json!({ "port": port }), &|| true).await.unwrap_err().code, "unavailable");
+    assert_eq!(f.rpc.ports.open_streams(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_stops_reading_once_nothing_reads_its_connection() {
+    let f = fixture();
+    let (peer, events) = ports_peer(&f.rpc, "d-1", Authority::Manage, None).await;
+    let (listener, port) = application().await;
+    open_port(&f.rpc, &peer, port).await;
+    let (mut app, _) = listener.accept().await.unwrap();
+    // The transport is gone before the runtime was told to disconnect.
+    drop(events);
+    app.write_all(b"data for nobody").await.unwrap();
+    let mut rest = Vec::new();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(20), app.read_to_end(&mut rest)).await.unwrap().unwrap(), 0);
+    assert_eq!(f.rpc.ports.open_streams(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_application_that_speaks_first_is_never_heard_before_the_open_answer() {
+    let f = fixture();
+    let (peer, mut events) = ports_peer(&f.rpc, "d-1", Authority::Manage, None).await;
+    let (listener, port) = application().await;
+    // A server that greets on connect, like SMTP or a database.
+    let greeter = tokio::spawn(async move {
+        let (mut app, _) = listener.accept().await.unwrap();
+        app.write_all(b"220 ready\r\n").await.unwrap();
+        app
+    });
+    // Without the answer on its way, nothing is read from the application.
+    let opened = call(&f.rpc, &peer, "ports.open", json!({ "port": port })).await.unwrap();
+    let _app = greeter.await.unwrap();
+    while let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(700), events.recv()).await {
+        assert_ne!(event["event"], "ports.data", "data before the stream was started");
+    }
+    f.rpc.ports.start(&peer, opened["streamId"].as_str().unwrap());
+    assert_eq!(B64.decode(next_event(&mut events, "ports.data").await["data"].as_str().unwrap()).unwrap(), b"220 ready\r\n");
+
+    // As the host answers it: the answer and the data share one ordered queue.
+    let (listener, port) = application().await;
+    let greeter = tokio::spawn(async move {
+        let (mut app, _) = listener.accept().await.unwrap();
+        app.write_all(b"220 ready\r\n").await.unwrap();
+        app
+    });
+    f.rpc.answer_port_open(&peer, &json!({ "id": "open-1", "method": "ports.open", "params": { "port": port } })).await;
+    let _app = greeter.await.unwrap();
+    // The first thing about this stream is the answer, the next its data.
+    let about_ports = |value: &Value| value["id"] == "open-1" || value["event"].as_str().is_some_and(|event| event.starts_with("ports."));
+    let mut next_about_ports = async || loop {
+        let value = tokio::time::timeout(Duration::from_secs(20), events.recv()).await.unwrap().unwrap();
+        if about_ports(&value) {
+            return value;
+        }
+    };
+    let first = next_about_ports().await;
+    assert_eq!((first["id"].as_str(), first["ok"].as_bool()), (Some("open-1"), Some(true)), "{first}");
+    let second = next_about_ports().await;
+    assert_eq!(second["event"], "ports.data");
+    assert_eq!(second["params"]["streamId"], first["result"]["streamId"]);
+}

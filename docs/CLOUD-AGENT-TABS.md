@@ -327,7 +327,11 @@ instead of from this computer.
 
   In the transcript, an image sent to a cloud tab shows by name: its file
   is on the workspace, not on this computer, so there is no thumbnail.
-  "Send again" on a message whose outcome is unknown resends its text only.
+  "Send again" on a message whose outcome is unknown uploads its images
+  again and sends it with them. The app holds a message's images in memory
+  until the message is applied, rejected or cancelled; the outbox on disk
+  keeps only their count. After a restart the images are gone, and "Send
+  again" then says so instead of sending the text alone (or nothing).
   Nothing strips an image's metadata (EXIF, location). Once sent, the image
   is archived on the workspace under `<store root>/attachments/<sessionId>/`,
   as a local tab's is on this computer, until the session is deleted.
@@ -433,6 +437,41 @@ project root. The runtime then:
 
   A desktop from before these categories shows the category itself in
   "The agent did not start (…)".
+
+### Repositories without a first prompt
+
+A workspace created without a first prompt (the web console's Launch dialog
+sends the repositories and no `launch`) has no intent, so there is nothing to
+deliver. The claim then carries a `checkout` plan: the same repositories and
+the workspace's own work branch. The same plan comes with a launch that has
+already settled, which covers a launch whose clone failed and a machine whose
+disk was replaced.
+
+- Each repository is set up once: cloned as above, then put on the work
+  branch. Its path is then written to `checkout.json` next to `launch.json`.
+- A path in that record is never touched again. A checkout that is already
+  there without a record (made by a launch, or by an older runtime) is
+  adopted as it is and recorded. So a later boot never switches a person's
+  branch back and never clones again a checkout they removed.
+- A replaced disk has neither checkout nor record, so it is cloned again.
+  The first prompt is not: its intent is settled.
+- No agent is started. A repository that fails does not hold up the
+  others.
+- The runtime tells the server what became of each repository it worked on
+  (`POST …/launch-intent/checkout`): its path, `ready` or `failed`, and the
+  failure's category. Git's own output stays in the runtime's log. The
+  server stores it by repository name and shows it with the workspace, so a
+  failed clone reaches the person (the console's machine row).
+- A failure that may pass (access not granted yet, the network, a full
+  disk) is tried again by the runtime itself, after 1, 5, 15 and then every
+  30 minutes: it claims again and works on what is still missing. Nothing
+  runs between tries, so the workspace can still go idle. Files already at
+  the path, an empty repository and a refused plan are not retried: only a
+  person can mend those.
+- The claim declares `launch-checkout-v1` next to `launch-clone-v1`. The
+  server sends the plan only to a runtime that does.
+- It counts as work while it runs, like a launch, so idle suspend does not
+  cut a clone short. The same checks apply to the plan as to a launch.
 
 **The GitHub token.** `launch.rs` never holds one. Git asks the credential
 helper `cloud_github` installs at boot (PRO-14), which gets a short-lived

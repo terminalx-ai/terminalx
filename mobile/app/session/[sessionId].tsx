@@ -50,7 +50,7 @@ export default function SessionScreen() {
     </> : null}
     {!available ? <Text style={{ color: palette.warning, paddingHorizontal: 16 }}>This conversation is no longer available on the Mac.</Text> : null}
     {MOBILE_TERMINAL_ENABLED ? <View style={[styles.segment, { backgroundColor: palette.raised }]}><Segment label="Chat" selected={view === "chat"} onPress={() => setView("chat")} /><Segment label="Terminal" selected={view === "terminal"} onPress={() => setView("terminal")} /></View> : null}
-    {!MOBILE_TERMINAL_ENABLED || view === "chat" ? <ChatPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && app.connectionStage === "connected"} /> : <TerminalPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && app.connectionStage === "connected"} />}
+    {!MOBILE_TERMINAL_ENABLED || view === "chat" ? <ChatPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && app.connectionStage === "connected"} epoch={app.connectionEpoch ?? 0} /> : <TerminalPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && app.connectionStage === "connected"} />}
   </View>;
 }
 
@@ -59,7 +59,7 @@ function Segment({ label, selected, onPress }: { label: string; selected: boolea
   return <Pressable accessibilityRole="button" accessibilityState={{ selected }} onPress={onPress} style={[styles.segmentItem, selected && { backgroundColor: palette.card }]}><Text style={{ color: selected ? palette.ink : palette.muted, fontWeight: selected ? "600" : "500" }}>{label}</Text></Pressable>;
 }
 
-function ChatPane({ hostId, sessionId, tabId, connected }: { hostId: string; sessionId: string; tabId: string; connected: boolean }) {
+function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: string; sessionId: string; tabId: string; connected: boolean; epoch: number }) {
   const app = useApp();
   const { palette } = useTheme();
   const stateKey = conversationKey(hostId, sessionId, tabId);
@@ -99,7 +99,9 @@ function ChatPane({ hostId, sessionId, tabId, connected }: { hostId: string; ses
       setLoading(false);
     })();
     return () => { active = false; };
-  }, [app.api, connected, hostId, sessionId, tabId, setEvents, setHasMore, setNotes]);
+    // `epoch`: after a reconnect that was never shown (a short trip to the home screen) the tail is read again,
+    // merged into what is on screen, so nothing that happened meanwhile is missing and nothing jumps.
+  }, [app.api, connected, epoch, hostId, sessionId, tabId, setEvents, setHasMore, setNotes]);
 
   useEffect(() => {
     let active = true;

@@ -1,5 +1,5 @@
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
-import { dispositionFacts, hasUnpublishedWork, type DispositionFacts, type RepositoryFacts } from "@terminalx/portable/workspaceGit";
+import { dispositionFacts, gitErrorMessage, hasUnpublishedWork, RemoteGit, type DispositionFacts, type RepositoryFacts } from "@terminalx/portable/workspaceGit";
 import {
   api,
   closeWorkspaceConnection,
@@ -364,6 +364,45 @@ export async function checkRuntime(workspace: CloudWorkspace, server: CloudWorks
   } finally {
     lease?.release();
   }
+}
+
+/**
+ * Push a repository's current branch from a running workspace, so its
+ * commits are on the remote before an archive or delete (PRO-34). Like
+ * `checkRuntime` it only connects, never wakes, and gives its lease back.
+ * Uncommitted files are not touched: they need a commit, which is the
+ * person's to write. Throws the Git view's own words for a refusal.
+ */
+export async function pushRepository(workspace: CloudWorkspace, repo: string, withinMs = 15_000): Promise<void> {
+  const lease = await retainCloudConnection({ orgId: workspace.orgId, workspaceId: workspace.id }, "connect");
+  try {
+    let client: WorkspaceRpcClient;
+    try {
+      client = await waitCloudConnected(lease, withinMs, { stoppedIsError: true });
+    } catch {
+      throw new Error("Couldn't reach the workspace to push. Open it and push from its Git view.");
+    }
+    try {
+      await new RemoteGit(client, repo).push();
+    } catch (error) {
+      throw new Error(gitErrorMessage(error));
+    }
+  } finally {
+    lease.release();
+  }
+}
+
+/**
+ * Whether a repository has commits a push from the dialog would publish. A
+ * detached HEAD has no branch to push: its commits need the workspace opened.
+ */
+export function pushable(repo: RepositoryFacts): boolean {
+  return !!repo.branch && !!(repo.unpushedCommits || repo.localOnlyCommits);
+}
+
+/** "7 days", "1 day". */
+export function daysText(days: number): string {
+  return `${days} day${days === 1 ? "" : "s"}`;
 }
 
 // ---- tombstones
